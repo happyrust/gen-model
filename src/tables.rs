@@ -1,11 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
 use aios_core::pdms_types::{AttrMap, AttrVal};
 use parse_pdms_db::db1_dehash;
-use sea_query::{ColumnDef, Expr, Func, Iden, MysqlQueryBuilder, OnConflict, Order, Query, Table};
 use sqlx::{Error, MySqlPool};
 use sqlx::mysql::MySqlQueryResult;
 
-#[derive(Iden)]
+// #[derive(Iden)]
 enum Character {
     Table,
     Id,
@@ -19,7 +18,7 @@ enum Character {
     Created,
 }
 
-pub async fn create_uda_data_tables(connection_str: &str){
+pub async fn create_explicit_data_tables(connection_str: &str){
     let connection = MySqlPool::connect(connection_str)
         .await
         .unwrap();
@@ -34,6 +33,7 @@ pub async fn create_uda_data_tables(connection_str: &str){
     sql.push_str(&format!(r#"{} varchar(8),"#, "type"));
     sql.push_str(&format!(r#"{} bigint,"#, "owner"));
     sql.push_str(&format!(r#"{} blob"#, "data"));
+
     sql.push_str(");");
 
     let result = sqlx::query(&sql).execute(&mut pool).await;
@@ -45,7 +45,7 @@ pub async fn create_uda_data_tables(connection_str: &str){
     }
 }
 
-pub async fn create_explicit_data_tables(connection_str: &str){
+pub async fn create_uda_data_tables(connection_str: &str){
     let connection = MySqlPool::connect(connection_str)
         .await
         .unwrap();
@@ -60,6 +60,28 @@ pub async fn create_explicit_data_tables(connection_str: &str){
     sql.push_str(&format!(r#"{} varchar(8),"#, "type"));
     sql.push_str(&format!(r#"{} bigint,"#, "owner"));
     sql.push_str(&format!(r#"{} blob"#, "data"));
+    sql.push_str(");");
+
+    let result = sqlx::query(&sql).execute(&mut pool).await;
+    match result {
+        Ok(_) => {}
+        Err(_) => {
+            dbg!(sql.as_str());
+        }
+    }
+}
+
+/// 每个dbno对应的filename
+pub async fn create_dbno_filename_tables(connection_str: &str) {
+    let connection = MySqlPool::connect(connection_str)
+        .await
+        .unwrap();
+    let mut pool = connection.try_acquire().unwrap();
+
+    let mut sql = String::new();
+    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "dbno_filename"));
+    sql.push_str(&format!(r#"{} int,"#, "dbno"));
+    sql.push_str(&format!(r#"{} varchar(30)"#, "filename"));
     sql.push_str(");");
 
     let result = sqlx::query(&sql).execute(&mut pool).await;
@@ -86,7 +108,8 @@ pub async fn create_element_tables(connection_str: &str){
     sql.push_str(&format!(r#"{} varchar(8),"#, "type"));
     sql.push_str(&format!(r#"{} bigint,"#, "owner"));
     sql.push_str(&format!(r#"{} varchar(100),"#, "name"));
-    sql.push_str(&format!(r#"{} int"#, "dbno"));
+    sql.push_str(&format!(r#"{} int,"#, "dbno"));
+    sql.push_str(&format!(r#"{} varchar(20)"#, "project"));
     sql.push_str(");");
 
     let result = sqlx::query(&sql).execute(&mut pool).await;

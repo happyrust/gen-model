@@ -13,7 +13,9 @@ use aios_database::tables;
 use parse_pdms_db::{db1_dehash, parse_file};
 use parse_pdms_db::tool::hash_tool::{f32_round_2, f64_round_2, f64_round_3};
 use sqlx::MySqlPool;
-use aios_database::database::init_database;
+use aios_database::consts::URL;
+use aios_database::database::{init_database, init_info_database};
+use aios_database::insert_sql::{gen_pdms_element_insert_sql, gen_refno_infos_insert_sql};
 
 pub const TYPE_HASH: u32 = db1_hash("TYPE");
 
@@ -31,12 +33,13 @@ async fn main() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     dbg!(&db_option);
     let mut time = Instant::now();
+    init_info_database().await;
     // let mut mgr = AiosDBManager::init(&db_option).unwrap();
     // let v = mgr.get_attr(RefI32Tuple((23584, 205)).into())?;
     for project in &db_option.included_projects {
         init_database(project).await;
         println!("初始化数据库时间: {} ms", time.elapsed().as_millis());
-        let connection_string = format!("mysql://root:@127.0.0.1:4000/{project}");
+        let connection_string = format!("{URL}/{project}");
         if let Ok(db_info) = bincode::deserialize::<PdmsDatabaseInfo>(include_bytes!("../all_attr_info.bin")) {
             for (k, v) in db_info.noun_attr_info_map {
                 let mut attr_map = BTreeMap::new();
@@ -64,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
                 tables::create_implicit_tables(connection_string.as_str(), type_name.as_str(), &attr_map).await;
                 tables::create_explicit_data_tables(connection_string.as_str()).await;
                 tables::create_uda_data_tables(connection_string.as_str()).await;
+                tables::create_dbno_filename_tables(connection_string.as_str()).await;
                 // break;
             }
         }
@@ -189,7 +193,6 @@ pub fn gen_implicit_att_insert_sql(refno: RefU64, type_name: &str, owner: RefU64
 
 pub async fn sync_total(db_option: &DbOption, project: &str, need_parsing_files: &Option<Vec<String>>) -> anyhow::Result<()> {
     let mut data_dir = Path::new(&db_option.project_path);
-    // let project = &db_option.project;
     let project_dir = data_dir.join(&project);
     let mut target_dir = fs::read_dir(&project_dir).unwrap().into_iter().map(|entry| {
         let entry = entry.unwrap();
@@ -206,13 +209,15 @@ pub async fn sync_total(db_option: &DbOption, project: &str, need_parsing_files:
     // let versions_map = Arc::new(DashMap::new());
     // children_files.iter().for_each(|path| {
     let mut handles = vec![];
+    let project = Arc::new(project.to_string());
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
         if !file_name.ends_with("com") && !file_name.ends_with("mis") {
             if need_parsing_files.is_none() || need_parsing_files.as_ref().unwrap().contains(&file_name) {
                 println!("path={:?}", &file_name);
+                let project  = project.clone();
                 let project_clone = project.to_string();
-                let connection_string = format!("mysql://root:@127.0.0.1:4000/{project}");
+                let connection_string = format!("{URL}/{project}");
                 let handle = tokio::spawn(async move {
                     //后面再考虑成不同的table，如显示属性和隐藏属性
                     if let Ok(Ok(PdmsDbData {
@@ -230,16 +235,20 @@ pub async fn sync_total(db_option: &DbOption, project: &str, need_parsing_files:
                                   room_code_map,
                                   ..
                               })) = tokio::task::spawn_blocking(move || {
-                        parse_file(&path, &None, file_name.as_str(), project_clone.as_str(), "")
+                        parse_file(&path, &None, file_name.as_str(), &project_clone.as_str(), "")
                     }).await{
                         let connection = MySqlPool::connect(connection_string.as_str())
                             .await
                             .unwrap();
                         let mut pool = connection.try_acquire().unwrap();
+
+                        let info_connection = MySqlPool::connect(&format!("{URL}/refno_infos"))
+                            .await
+                            .unwrap();
+                        let mut info_pool = info_connection.try_acquire().unwrap();
                         for kv in &total_attr_map {
                             let mut columns_sql = None;
                             let i_att = &kv.implicit_attmap;
-                            // dbg!(i_att.to_string_hashmap());
                             let refno = i_att.get_refno().unwrap();
                             let type_name = i_att.get_type();
                             let owner = i_att.get_owner().unwrap();
@@ -266,10 +275,24 @@ pub async fn sync_total(db_option: &DbOption, project: &str, need_parsing_files:
                                     // return Ok(());
                                 }
                             }
-                        }
-                        // dbg!(&whole_sql_str);
+                            let sql = gen_pdms_element_insert_sql(refno,type_name,owner,None,db_no.0,&project.clone()).unwrap_or_default();
+                            let result = sqlx::query(&sql).execute(&mut pool).await;
+                            match result {
+                                Ok(_) => {}
+                                Err(_) => {
+                                    dbg!(sql.as_str());
+                                }
+                            }
 
-                        // return Ok(());
+                            let sql = gen_refno_infos_insert_sql(refno,&project).unwrap_or_default();
+                            let result = sqlx::query(&sql).execute(&mut info_pool).await;
+                            match result {
+                                Ok(_) => {}
+                                Err(_) => {
+                                    dbg!(sql.as_str());
+                                }
+                            }
+                        }
                     }
                 });
                 handles.push(handle);

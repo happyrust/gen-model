@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-sea-query = { path = "/Volumes/DPC/workspace/sea-query" }
+#sea-query = { path = "/Volumes/DPC/workspace/sea-query" }
 sea-orm = { version = "0.8.0", features = ["default", "runtime-tokio"]}
 aios_core = { path =  "../aios_core"}
 config = "0.13.1"

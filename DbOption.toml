@@ -1,6 +1,7 @@
-total_sync = false
+total_sync = true
 incr_sync = false
-project_path = "/Volumes/DPC/12.1SP4Projects"
+#project_path = "E:/AVEVA/Plant/Projects12.1.SP4"
+project_path = "E:/pdms_data_files"
 included_projects = ["Sample"]
 #included_projects = ["SCB","ZNP"]
 mdb_name = "Sample"
