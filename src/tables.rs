@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 use aios_core::pdms_types::{AttrMap, AttrVal};
 use parse_pdms_db::db1_dehash;
-use sqlx::{Error, MySqlPool};
+use sqlx::{Error, MySql, MySqlPool, Pool};
 use sqlx::mysql::MySqlQueryResult;
+use sqlx::pool::PoolConnection;
 
 // #[derive(Iden)]
 enum Character {
@@ -18,11 +20,8 @@ enum Character {
     Created,
 }
 
-pub async fn create_explicit_data_tables(connection_str: &str){
-    let connection = MySqlPool::connect(connection_str)
-        .await
-        .unwrap();
-    let mut pool = connection.try_acquire().unwrap();
+pub async fn create_explicit_data_tables(connection: &mut PoolConnection<MySql>){
+    // let mut connection = pool.try_acquire().unwrap();
 
 
     let mut sql = String::new();
@@ -36,7 +35,7 @@ pub async fn create_explicit_data_tables(connection_str: &str){
 
     sql.push_str(");");
 
-    let result = sqlx::query(&sql).execute(&mut pool).await;
+    let result = sqlx::query(&sql).execute(connection).await;
     match result {
         Ok(_) => {}
         Err(_) => {
@@ -45,13 +44,7 @@ pub async fn create_explicit_data_tables(connection_str: &str){
     }
 }
 
-pub async fn create_uda_data_tables(connection_str: &str){
-    let connection = MySqlPool::connect(connection_str)
-        .await
-        .unwrap();
-    let mut pool = connection.try_acquire().unwrap();
-
-
+pub async fn create_uda_data_tables(connection: &mut PoolConnection<MySql>){
     let mut sql = String::new();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "uda_att"));
@@ -62,7 +55,7 @@ pub async fn create_uda_data_tables(connection_str: &str){
     sql.push_str(&format!(r#"{} blob"#, "data"));
     sql.push_str(");");
 
-    let result = sqlx::query(&sql).execute(&mut pool).await;
+    let result = sqlx::query(&sql).execute(connection).await;
     match result {
         Ok(_) => {}
         Err(_) => {
@@ -72,19 +65,15 @@ pub async fn create_uda_data_tables(connection_str: &str){
 }
 
 /// 每个dbno对应的filename
-pub async fn create_dbno_filename_tables(connection_str: &str) {
-    let connection = MySqlPool::connect(connection_str)
-        .await
-        .unwrap();
-    let mut pool = connection.try_acquire().unwrap();
-
+pub async fn create_dbno_filename_tables(connection: &mut PoolConnection<MySql>) {
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "dbno_filename"));
     sql.push_str(&format!(r#"{} int,"#, "dbno"));
-    sql.push_str(&format!(r#"{} varchar(30)"#, "filename"));
+    sql.push_str(&format!(r#"{} varchar(30),"#, "filename"));
+    sql.push_str(&format!(r#"{} int "#,"version"));
     sql.push_str(");");
 
-    let result = sqlx::query(&sql).execute(&mut pool).await;
+    let result = sqlx::query(&sql).execute(connection).await;
     match result {
         Ok(_) => {}
         Err(_) => {
@@ -93,13 +82,7 @@ pub async fn create_dbno_filename_tables(connection_str: &str) {
     }
 }
 
-pub async fn create_element_tables(connection_str: &str){
-    let connection = MySqlPool::connect(connection_str)
-        .await
-        .unwrap();
-    let mut pool = connection.try_acquire().unwrap();
-
-
+pub async fn create_element_tables(connection: &mut PoolConnection<MySql>){
     let mut sql = String::new();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "pdms_elements"));
@@ -112,7 +95,7 @@ pub async fn create_element_tables(connection_str: &str){
     sql.push_str(&format!(r#"{} varchar(20)"#, "project"));
     sql.push_str(");");
 
-    let result = sqlx::query(&sql).execute(&mut pool).await;
+    let result = sqlx::query(&sql).execute(connection).await;
     match result {
         Ok(_) => {}
         Err(_) => {
@@ -122,15 +105,16 @@ pub async fn create_element_tables(connection_str: &str){
 }
 
 // #[async_std::main]
-pub async fn create_implicit_tables(connection_str: &str, type_name: &str, att_bmap: &BTreeMap<u32, (String, AttrVal)>) {
-    let connection = MySqlPool::connect(connection_str)
-        .await
-        .unwrap();
-    let mut pool = connection.try_acquire().unwrap();
+pub async fn create_implicit_tables(conn: &mut PoolConnection<MySql>, type_name: &str, att_bmap: &BTreeMap<u32, (String, AttrVal)>) {
+    // let connection = MySqlPool::connect(connection_str)
+    //     .await
+    //     .unwrap();
+    // let mut pool = connection.try_acquire().unwrap();
 
 
     let mut sql = String::new();
     let table_name = type_name.to_lowercase().replace("join", "joint");
+    let table_name = table_name.replace("loop","loop_");
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, table_name));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "id"));  //refno 的64位
@@ -188,7 +172,6 @@ pub async fn create_implicit_tables(connection_str: &str, type_name: &str, att_b
             }
             AttrVal::StringHashType(_) => {}
         }
-
         // sql.push_str(&format!(r#""{}" varchar(100) NOT NULL,"#, "name"));   //refno 的值
     }
 
@@ -198,8 +181,8 @@ pub async fn create_implicit_tables(connection_str: &str, type_name: &str, att_b
 
     sql.push_str(");");
     // dbg!(sql.as_str());
-
-    let result = sqlx::query(&sql).execute(&mut pool).await;
+    // let mut conn = pool.try_acquire().unwrap();
+    let result = sqlx::query(&sql).execute(conn).await;
     // println!("Create table character: {:?}\n", result);
     match result {
         Ok(_) => {}

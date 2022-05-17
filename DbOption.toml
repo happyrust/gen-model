@@ -7,3 +7,7 @@ included_projects = ["Sample"]
 mdb_name = "Sample"
 project_name = "Sample"
 main_db_code = 7200
+ip = "127.0.0.1"
+user = "root"
+password = "root"
+port = "3306"
