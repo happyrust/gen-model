@@ -17,7 +17,7 @@ use sqlx::pool::PoolConnection;
 use aios_database::consts::URL;
 use aios_database::database::{get_tidb_pool, init_database, init_info_database, get_connect_url};
 use aios_database::helper::{qualified_column_name, qualified_table_name};
-use aios_database::insert_sql::{gen_dbno_filename_insert_sql, gen_pdms_element_insert_sql, gen_refno_infos_insert_sql};
+use aios_database::insert_sql::{gen_dbno_filename_insert_sql, gen_pdms_element_insert_sql, gen_refno_infos_insert_sql, get_name};
 use aios_database::options::DbOption;
 use sqlx::Executor;
 
@@ -94,7 +94,6 @@ async fn main() -> anyhow::Result<()> {
                 tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
                 tables_sql.push_str(&tables::gen_create_uda_tables_sql());
                 tables_sql.push_str(&tables::gen_create_dbno_filename_tables_sql());
-                // let result = sqlx::query(&sql).execute(&mut conn).await;
             }
         }
         tables_sql.push_str(&tables::gen_create_element_tables_sql());
@@ -354,9 +353,6 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
     let url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port);
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
-        // if !file_name.contains("7200") {
-        //     continue;
-        // }
         let file_name_clone = Arc::new(file_name.clone());
         if !file_name.ends_with("com") && !file_name.ends_with("mis") {
             if need_parsing_files.is_none() || need_parsing_files.as_ref().unwrap().contains(&file_name) {
@@ -367,6 +363,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                 let info_pool_clone = info_pool.clone();
                 let filename_clone = file_name_clone.clone();
                 let handle = tokio::spawn(async move {
+                    let project_clones = project_clone.clone();
                     //后面再考虑成不同的table，如显示属性和隐藏属性
                     if let Ok(Ok(PdmsDbData {
                                      all_attr_map,
@@ -383,29 +380,46 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                      room_code_map,
                                      ..
                                  })) = tokio::task::spawn_blocking(move || {
-                        parse_file(&path, &None, &file_name, &project_clone.as_str(), "")
+                        parse_file(&path, &None, &file_name, &project_clone.clone(), "")
                     }).await {
-
                         for kv in &type_ele_map {
-                            // let type_name = db1_dehash(*kv.key());
-                            // if type_name.as_str() != "BRAN" {
-                            //     continue;
-                            // }
                             let mut conn = pool_clone.acquire().await.unwrap();
+                            let mut info_conn = info_pool_clone.acquire().await.unwrap();
                             let mut implicit_query_data = None;
+                            let mut info_sql = String::new();
                             let mut implicit_values_sql = String::new();
                             let mut explicit_values_sql = String::new();
+                            let mut pdms_elements_sql = String::new();
+                            let mut dbno_filename_sql = String::new();
+
                             for (i, refno) in kv.value().iter().enumerate() {
                                 let att = total_attr_map.get(refno).unwrap();
                                 if implicit_query_data.is_none() {
                                     implicit_query_data = Some(gen_implicit_attr_query_sql(att.value()));
                                 }
                                 let column_hashs = &implicit_query_data.as_ref().unwrap().1;
+                                info_sql.push_str(&gen_refno_infos_insert_sql(*refno, &project_clones.clone()));
                                 implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), column_hashs));
                                 explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
-                                if (i != 0 && i % BATCH_CHUNKS_CNT == 0) || i == (kv.value().len() - 1) {
+                                let name = get_name(&total_attr_map, &children_map, *refno);
+                                pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, &project_clones.clone()));
+                                dbno_filename_sql.push_str(&gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(), version.0));
 
-                                    //执行隐士数据保存
+                                if (i != 0 && i % BATCH_CHUNKS_CNT == 0) || i == (kv.value().len() - 1) {
+                                    let mut sql = "insert ignore into refno_infos (ref0,project) values ".to_string();
+                                    sql.push_str(info_sql.as_str());
+                                    sql.remove(sql.len() - 1);
+                                    let result = info_conn.execute(sql.as_str()).await;
+                                    match result {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            dbg!(&e);
+                                            dbg!(sql.as_str());
+                                        }
+                                    }
+                                    info_sql.clear();
+
+                                    //执行隐式数据保存
                                     let mut sql = String::new();
                                     sql.push_str(implicit_query_data.as_ref().unwrap().0.as_str());
                                     sql.push_str(implicit_values_sql.as_str());
@@ -433,8 +447,33 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                     }
                                     explicit_values_sql.clear();
 
-                                }
+                                    // pdms_elements 保存
+                                    let mut sql = "insert ignore into pdms_elements (id, refno, type, owner, name, dbno,project) values ".to_string();
+                                    sql.push_str(pdms_elements_sql.as_str());
+                                    sql.remove(sql.len() - 1);
+                                    let result = conn.execute(sql.as_str()).await;
+                                    match result {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            dbg!(&e);
+                                            dbg!(sql.as_str());
+                                        }
+                                    }
+                                    pdms_elements_sql.clear();
 
+                                    let mut sql = "insert ignore into dbno_filename ( dbno,filename,version ) values ".to_string();
+                                    sql.push_str(dbno_filename_sql.as_str());
+                                    sql.remove(sql.len() - 1);
+                                    let result = conn.execute(sql.as_str()).await;
+                                    match result {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            dbg!(&e);
+                                            dbg!(sql.as_str());
+                                        }
+                                    }
+                                    dbno_filename_sql.clear();
+                                }
                             }
                         }
                         // for kv in &total_attr_map {

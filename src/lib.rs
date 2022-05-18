@@ -7,4 +7,4 @@ pub mod insert_sql;
 pub mod options;
 pub mod helper;
 
-pub const BATCH_CHUNKS_CNT: usize = 100;
+pub const BATCH_CHUNKS_CNT: usize = 50;

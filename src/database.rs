@@ -58,6 +58,7 @@ pub async fn init_info_database(url: &str) {
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "refno_infos"));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL ,"#, "ref0"));  //refno.get_0() //ref_0 可能会重，先不设 primary key
     sql.push_str(&format!(r#"{} varchar(20)"#, "project"));
+
     sql.push_str(");");
     let result = sqlx::query(&sql).execute(&mut pool).await;
     match result {

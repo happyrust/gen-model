@@ -1,6 +1,6 @@
 total_sync = true
 incr_sync = false
-project_path = "/Volumes/DPC/12.1SP4Projects"
+project_path = "E:/AVEVA/Plant/Projects12.1.SP4"
 included_projects = ["Sample"]
 #included_projects = ["SCB","ZNP"]
 mdb_name = "Sample"
@@ -8,5 +8,5 @@ project_name = "Sample"
 main_db_code = 7200
 ip = "127.0.0.1"
 user = "root"
-password = ""
-port = "4000"
+password = "root"
+port = "3306"
