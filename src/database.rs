@@ -1,9 +1,23 @@
+use aios_core::pdms_types::{AttrMap, AttrVal};
 use parse_pdms_db::local_db::DbOption;
 use sqlx::{MySql, MySqlPool, Pool};
+use sqlx::mysql::MySqlArguments;
 use sqlx::pool::PoolConnection;
 use crate::consts::URL;
 
-pub fn set_connect_url(ip: &str, user: &str, pwd: &str, project: &str, port: &str) -> String {
+pub trait MySqlMethods {
+    fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
+
+    fn get_query(count: usize) -> anyhow::Result<String>;
+
+    fn name() -> String;
+}
+
+
+
+
+#[inline]
+pub fn get_connect_url(ip: &str, user: &str, pwd: &str, project: &str, port: &str) -> String {
     format!("mysql://{user}:{pwd}@{ip}:{port}/{project}")
 }
 
@@ -35,6 +49,7 @@ pub async fn init_info_database(url: &str) {
     let mut pool = connection.try_acquire().unwrap();
     sqlx::query("create database if not exists refno_infos;").execute(&mut pool).await;
 
+    dbg!(url);
     let connection = MySqlPool::connect(&format!("{url}/refno_infos"))
         .await
         .unwrap();

@@ -1,22 +1,17 @@
 use aios_core::pdms_types::RefU64;
+use smol_str::SmolStr;
 
-pub fn gen_pdms_element_insert_sql(refno: RefU64, type_name: &str, owner: RefU64, name: Option<String>, dbno: u32, project: &str) -> Option<String> {
+pub fn gen_pdms_element_insert_sql(refno: RefU64, type_name: &str, owner: RefU64, name: String, dbno: u32, project: &str) -> Option<String> {
     let mut sql = String::new();
     let mut table_columns_sql = String::new();
-    if let Some(_) = name {
-        table_columns_sql.push_str("insert ignore into pdms_elements (id, refno, type, owner, name, dbno,project)");
-    } else {
-        table_columns_sql.push_str("insert ignore into pdms_elements (id, refno, type, owner, dbno,project)");
-    }
+
+    table_columns_sql.push_str("insert ignore into pdms_elements (id, refno, type, owner, name, dbno,project)");
+
 
     let mut table_vals_sql = String::new();
-    if let Some(name) = name {
-        table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' ,{},'{}')"#,
+    table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {},'{}')"#,
                                          refno.0, refno.to_refno_str(), type_name, owner.0, name, dbno, project));
-    } else {
-        table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {},{},'{}')"#,
-                                         refno.0, refno.to_refno_str(), type_name, owner.0, dbno, project));
-    }
+
 
     sql.push_str(&table_columns_sql);
     sql.push_str(" values ");
