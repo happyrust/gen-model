@@ -1,4 +1,4 @@
-use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefU64};
+use aios_core::pdms_types::{AiosStr, AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefU64};
 use anyhow::anyhow;
 use dashmap::DashMap;
 use parse_pdms_db::db1_dehash;
@@ -6,9 +6,9 @@ use parse_pdms_db::db_tool::db1_hash;
 use smol_str::SmolStr;
 use sqlx::{MySql, Pool, Row};
 use crate::database::get_tidb_pool;
-use crate::query_sql::query_refno_infos;
+use crate::query_sql::{query_children, query_refno_infos};
 use crate::REFNO_INFO_MAP;
-use crate::sql::gen_sql::gen_query_implicit_attr_sql;
+use crate::sql::gen_sql::*;
 
 pub async fn query_implicit_attr(refno: RefU64, type_name: &str, pool: Pool<MySql>) -> anyhow::Result<AttrMap> {
     let mut r = AttrMap::default();
@@ -67,6 +67,35 @@ pub async fn query_implicit_attr(refno: RefU64, type_name: &str, pool: Pool<MySq
     Ok(r)
 }
 
+pub async fn query_refno_type(refno:RefU64,pool:Pool<MySql>) -> anyhow::Result<String> {
+    let sql = gen_query_refno_type_sql(refno);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    Ok(result.get::<String,_>(0))
+}
+
+pub async fn query_children_pdms_tree(refno:RefU64,pool:Pool<MySql>) -> anyhow::Result<Vec<(RefU64,AiosStr)>> {
+    let type_name = query_refno_type(refno,pool.clone()).await?;
+    return if type_name == "WORL" {
+        query_world_children(pool.clone()).await
+    } else {
+        query_children(refno, pool.clone()).await
+    }
+}
+
+pub async fn query_world_children(pool:Pool<MySql>) -> anyhow::Result<Vec<(RefU64,AiosStr)>> {
+    let sql = gen_query_type_refnos_sql("WORL");
+    // 找到所有的world
+    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let mut v = vec![];
+    for r in result {
+        let refno = r.get::<i64,_>(0);
+        // 找到所有的world 对应的children
+        let children = query_children(RefU64(refno as u64),pool.clone()).await?;
+        v.push(children);
+    }
+    Ok(v.into_iter().flatten().collect::<Vec<(RefU64,AiosStr)>>())
+}
+
 #[tokio::test]
 async fn test_query_implicit_attr() -> anyhow::Result<()> {
     let url = "mysql://root:root@127.0.0.1:3306";
@@ -76,5 +105,17 @@ async fn test_query_implicit_attr() -> anyhow::Result<()> {
     let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
     let v = query_implicit_attr(refno, "SECT", pool).await.unwrap();
     println!("v={:?}", v.to_string_hashmap());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_world_children() -> anyhow::Result<()> {
+    let url = "mysql://root:root@127.0.0.1:3306";
+    let info_pool = get_tidb_pool(&format!("{}/{}", url, "refno_infos")).await;
+    let refno = RefU64(66108136620032);
+    let project = query_refno_infos(refno, info_pool).await?;
+    let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
+    let v = query_children_pdms_tree( refno,pool).await?;
+    println!("v={:?}", v);
     Ok(())
 }

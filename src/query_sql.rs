@@ -3,6 +3,7 @@ use parse_pdms_db::db_tool::db1_hash;
 use smol_str::SmolStr;
 use sqlx::{MySql, Pool, Row};
 use crate::database::get_tidb_pool;
+use crate::sql::query_sql::query_refno_type;
 
 fn gen_query_refno_infos_sql(refno: RefU64) -> String {
     let mut sql = String::new();
@@ -71,67 +72,69 @@ fn gen_pdms_elements_get_children_count_sql(refno: RefU64) -> String {
     sql
 }
 
-pub async fn query_children_count(refno:RefU64,pool:Pool<MySql>) -> anyhow::Result<usize> {
+pub async fn query_children_count(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<usize> {
     let count_sql = gen_pdms_elements_get_children_count_sql(refno);
     let count_result = sqlx::query(&count_sql).fetch_one(&mut pool.acquire().await?).await?;
-    Ok(count_result.get::<i32,_>(0) as usize)
+    Ok(count_result.get::<i32, _>(0) as usize)
 }
 
-pub async fn query_world(main_db: u32, pool: Pool<MySql>) -> anyhow::Result<EleNodeTIDB> {
+pub async fn query_world(main_db: u32, pool: Pool<MySql>) -> anyhow::Result<(RefU64,AiosStr)> {
     let sql = gen_pdms_elements_dbno_sql(main_db, "WORL");
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     let refno = RefU64(result.get::<i64, _>("id") as u64);
-
-    let count = query_children_count(refno,pool).await?;
-    let world = EleNodeTIDB {
-        refno,
-        owner: RefU64(result.get::<i64, _>("owner") as u64),
-        name: AiosStr(SmolStr::new(result.get::<String, _>("name"))),
-        noun: AiosStr(SmolStr::new("WORL")),
-        version: 0,
-        children_count: count as usize,
-    };
-    Ok(world)
+    let name = AiosStr(SmolStr::new(result.get::<String,_>("name")));
+    // let count = query_children_count(refno, pool).await?;
+    // let world = EleNodeTIDB {
+    //     refno,
+    //     owner: RefU64(result.get::<i64, _>("owner") as u64),
+    //     name: AiosStr(SmolStr::new(result.get::<String, _>("name"))),
+    //     noun: AiosStr(SmolStr::new("WORL")),
+    //     version: 0,
+    //     children_count: count as usize,
+    // };
+    Ok((refno,name))
 }
 
-pub async fn query_children(refno:RefU64,pool:Pool<MySql>) -> anyhow::Result<Vec<EleNodeTIDB>> {
+/// 获取某个refno 的 children 并未合并 world
+pub async fn query_children(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<Vec<(RefU64,AiosStr)>> {
     let mut r = vec![];
     let sql = gen_pdms_elements_get_children_sql(refno);
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     for val in vals {
-        let child_refno = RefU64(val.get::<i64,_>("id") as u64);
-        let name = AiosStr(SmolStr::new(val.get::<String,_>("name")));
-        let type_name = AiosStr(SmolStr::new(val.get::<String,_>("type")));
-        let count = query_children_count(child_refno,pool.clone()).await?;
-        r.push(EleNodeTIDB {
-            refno:child_refno,
-            owner: refno,
-            name,
-            noun: type_name,
-            version: 0,
-            children_count: count,
-        })
+        let child_refno = RefU64(val.get::<i64, _>("id") as u64);
+        let name = AiosStr(SmolStr::new(val.get::<String, _>("name")));
+        r.push((child_refno,name));
+        // let type_name = AiosStr(SmolStr::new(val.get::<String, _>("type")));
+        // let count = query_children_count(child_refno, pool.clone()).await?;
+        // r.push(EleNodeTIDB {
+        //     refno: child_refno,
+        //     owner: refno,
+        //     name,
+        //     noun: type_name,
+        //     version: 0,
+        //     children_count: count,
+        // })
     }
     Ok(r)
 }
 
 #[tokio::test]
-async fn test_get_world() -> anyhow::Result<()>{
-    let url ="mysql://root:root@127.0.0.1:3306";
+async fn test_get_world() -> anyhow::Result<()> {
+    let url = "mysql://root:root@127.0.0.1:3306";
     let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
-    let v = query_world(7600,pool).await?;
-    println!("v={:?}",v);
+    let v = query_world(7600, pool).await?;
+    println!("v={:?}", v);
     Ok(())
 }
 
 #[tokio::test]
-async fn test_get_children() -> anyhow::Result<()>{
-    let url ="mysql://root:root@127.0.0.1:3306";
-    let info_pool = get_tidb_pool(&format!("{}/{}", url,"refno_infos")).await;
-    let refno = RefU64(105548821299203);
-    let project = query_refno_infos(refno,info_pool).await?;
-    let pool = get_tidb_pool(&format!("{}/{}", url,project)).await;
-    let v = query_children(RefU64(105548821299203),pool).await?;
-    println!("v={:?}",v);
+async fn test_get_children() -> anyhow::Result<()> {
+    let url = "mysql://root:root@127.0.0.1:3306";
+    let info_pool = get_tidb_pool(&format!("{}/{}", url, "refno_infos")).await;
+    let refno = RefU64(65287797866496);
+    let project = query_refno_infos(refno, info_pool).await?;
+    let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
+    let v = query_children(refno, pool).await?;
+    println!("v={:?}", v);
     Ok(())
 }
