@@ -19,10 +19,15 @@ use aios_database::database::{get_tidb_pool, init_database, init_info_database, 
 use aios_database::helper::{qualified_column_name, qualified_table_name};
 use aios_database::insert_sql::{gen_dbno_filename_insert_sql, gen_pdms_element_insert_sql, gen_refno_infos_insert_sql, get_name};
 use aios_database::options::DbOption;
+
 use sqlx::Executor;
+
 
 #[macro_use]
 extern crate clap;
+
+
+
 
 pub const TYPE_HASH: u32 = db1_hash("TYPE");
 
