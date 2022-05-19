@@ -7,6 +7,7 @@ mdb_name = "Master"
 project_name = "Master"
 main_db_code = 7200
 sql_batch_insert_chunk = 1000
+batch_insert_handles_chunk = 100
 files_multi_thread = true
 types_multi_thread = true
 ip = "127.0.0.1"
