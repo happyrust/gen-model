@@ -34,4 +34,6 @@ pub struct DbOption {
     pub files_multi_thread: bool,
     #[clap(short)]
     pub types_multi_thread: bool,
+    #[clap(short)]
+    pub batch_insert_handles_chunk: u32,
 }

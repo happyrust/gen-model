@@ -248,6 +248,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
     let batch_chunks_cnt = db_option.sql_batch_insert_chunk as usize;
+    let batch_handles_cnt = db_option.batch_insert_handles_chunk as usize;
     let mut target_dir = fs::read_dir(&project_dir).unwrap().into_iter().map(|entry| {
         let entry = entry.unwrap();
         entry.path()
@@ -395,7 +396,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
 
                                     insert_join_handles.push(insert_handle);
 
-                                    if insert_join_handles.len() == 50 || i == (kv.value().len() - 1){
+                                    if insert_join_handles.len() == batch_handles_cnt || i == (kv.value().len() - 1){
                                         let insert_join_handles = take(&mut insert_join_handles);
                                         futures::future::join_all(insert_join_handles).await;
                                     }
