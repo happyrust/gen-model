@@ -28,4 +28,10 @@ pub struct DbOption {
     pub password: String,
     #[clap(long)]
     pub port: String,
+    #[clap(short)]
+    pub sql_batch_insert_chunk: u32,
+    #[clap(short)]
+    pub files_multi_thread: bool,
+    #[clap(short)]
+    pub types_multi_thread: bool,
 }

@@ -315,9 +315,8 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                 pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order));
                                 dbno_filename_sql.push_str(&gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(), version.0, &project_clones));
 
-                                let mut insert_join_handles = vec![];
                                 if (i != 0 && i % batch_chunks_cnt == 0) || i == (kv.value().len() - 1) {
-                                    // dbg!(i % batch_chunks_cnt );
+                                    dbg!(i % batch_chunks_cnt );
                                     let info_sql= take(&mut info_sql);
                                     let implicit_values_sql= take(&mut implicit_values_sql);
                                     let explicit_values_sql= take(&mut explicit_values_sql);
@@ -326,7 +325,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                     let implicit_query_data = implicit_query_data.clone();
                                     let pool_clone = pool_clone.clone();
                                     let info_pool_clone = info_pool_clone.clone();
-                                    let insert_handle = tokio::spawn(async move {
+                                    tokio::spawn(async move {
                                         let mut conn = pool_clone.acquire().await.unwrap();
                                         let mut info_conn = info_pool_clone.acquire().await.unwrap();
                                         let mut sql = "INSERT IGNORE INTO refno_infos (ref0, project) VALUES ".to_string();
@@ -391,14 +390,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                                 dbg!(sql.as_str());
                                             }
                                         }
-                                    });
-
-                                    insert_join_handles.push(insert_handle);
-
-                                    if insert_join_handles.len() == 50 || i == (kv.value().len() - 1){
-                                        let insert_join_handles = take(&mut insert_join_handles);
-                                        futures::future::join_all(insert_join_handles).await;
-                                    }
+                                    }).await.expect("TODO: panic message");
                                 }
                             }
                         }

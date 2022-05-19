@@ -5,7 +5,7 @@ use parse_pdms_db::db_tool::db1_hash;
 use parse_pdms_db::parse::WholeAttMap;
 use smol_str::SmolStr;
 
-pub fn gen_pdms_element_insert_sql(att: &WholeAttMap,name:&str, dbno: u32, order: usize) -> String {
+pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, order: usize) -> String {
     let implicit = &att.implicit_attmap;
     let refno = implicit.get_refno().unwrap();
     let type_name = implicit.get_type();
@@ -13,7 +13,7 @@ pub fn gen_pdms_element_insert_sql(att: &WholeAttMap,name:&str, dbno: u32, order
 
     let mut sql = String::new();
     sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {} , {} ) ,"#,
-                          refno.0, refno.to_refno_str(), type_name, owner.0, name, dbno,order));
+                          refno.0, refno.to_refno_str(), type_name, owner.0, name, dbno, order));
     sql
 }
 
@@ -23,9 +23,9 @@ pub fn gen_refno_infos_insert_sql(refno: RefU64, project: &str) -> String {
     sql
 }
 
-pub fn gen_dbno_filename_insert_sql(dbno: u32, filename: &str, version: u32,project:&str) -> String {
+pub fn gen_dbno_filename_insert_sql(dbno: u32, filename: &str, version: u32, project: &str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!(r#"({},'{}',{} , '{}' ) ,"#, dbno, filename, version,project));
+    sql.push_str(&format!(r#"({},'{}',{} , '{}' ) ,"#, dbno, filename, version, project));
     sql
 }
 
@@ -47,10 +47,10 @@ pub fn get_name(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashMa
             }).position(|node| node == &refno).unwrap_or_default() + 1;
         }
         format!("{} {}", type_name, idx)
-    }
+    };
 }
 
-pub fn get_order(whole_attr: &DashMap<RefU64, WholeAttMap>,children_map:&HashMap<RefU64,RefU64Vec>,refno:RefU64) -> usize {
+pub fn get_order(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashMap<RefU64, RefU64Vec>, refno: RefU64) -> usize {
     let attr = whole_attr.get(&refno).unwrap();
     let owner = attr.implicit_attmap.get_owner().unwrap();
     if let Some(children) = children_map.get(&owner) {
