@@ -27,8 +27,6 @@ use sqlx::Executor;
 extern crate clap;
 
 
-
-
 pub const TYPE_HASH: u32 = db1_hash("TYPE");
 
 
@@ -408,7 +406,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                 explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
                                 let name = get_name(&total_attr_map, &children_map, *refno);
                                 pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, &project_clones.clone()));
-                                dbno_filename_sql.push_str(&gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(), version.0));
+                                dbno_filename_sql.push_str(&gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(), version.0,&project_clones));
 
                                 if (i != 0 && i % BATCH_CHUNKS_CNT == 0) || i == (kv.value().len() - 1) {
                                     let mut sql = "insert ignore into refno_infos (ref0,project) values ".to_string();
@@ -453,7 +451,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                     explicit_values_sql.clear();
 
                                     // pdms_elements 保存
-                                    let mut sql = "insert ignore into pdms_elements (id, refno, type, owner, name, dbno,project) values ".to_string();
+                                    let mut sql = "insert ignore into pdms_elements (id, refno, type, owner, name, dbno ) values ".to_string();
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = conn.execute(sql.as_str()).await;
@@ -466,7 +464,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                     }
                                     pdms_elements_sql.clear();
 
-                                    let mut sql = "insert ignore into dbno_filename ( dbno,filename,version ) values ".to_string();
+                                    let mut sql = "insert ignore into dbno_filename ( dbno,filename,version,project ) values ".to_string();
                                     sql.push_str(dbno_filename_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = conn.execute(sql.as_str()).await;
@@ -481,59 +479,6 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                 }
                             }
                         }
-                        // for kv in &total_attr_map {
-                        //     let mut columns_sql = None;
-                        //     let i_att = &kv.implicit_attmap;
-                        //     let refno = i_att.get_refno().unwrap();
-                        //     let type_name = i_att.get_type();
-                        //     let owner = i_att.get_owner().unwrap();
-                        //     //改成batch
-                        //     let sql = gen_implicit_att_insert_sql(refno, type_name, owner, i_att, &mut columns_sql).unwrap_or_default();
-                        //     let result = sqlx::query(&sql).execute(&mut conn).await;
-                        //     match result {
-                        //         Ok(_) => {}
-                        //         Err(_) => {
-                        //             dbg!(i_att.to_string_hashmap());
-                        //             dbg!(sql.as_str());
-                        //         }
-                        //     }
-                        //     // let e_att = &kv.explicit_attmap;
-                        //     // let sql = gen_explicit_att_insert_sql(refno, type_name, owner, e_att).unwrap_or_default();
-                        //     // let result = sqlx::query(&sql).execute(&mut conn).await;
-                        //     // match result {
-                        //     //     Ok(_) => {}
-                        //     //     Err(_) => {
-                        //     //         dbg!(e_att.to_string_hashmap());
-                        //     //         dbg!(sql.as_str());
-                        //     //     }
-                        //     // }
-                        //     // let name = e_att.get_string("NAME").map(|x| x.to_string()).unwrap_or_default();
-                        //     // let sql = gen_pdms_element_insert_sql(refno, type_name, owner, name, db_no.0, &project.clone()).unwrap_or_default();
-                        //     // let result = sqlx::query(&sql).execute(&mut pool_clone.clone().acquire().await.unwrap()).await;
-                        //     // match result {
-                        //     //     Ok(_) => {}
-                        //     //     Err(_) => {
-                        //     //         dbg!(sql.as_str());
-                        //     //     }
-                        //     // }
-                        //     //
-                        //     // let sql = gen_refno_infos_insert_sql(refno,&project).unwrap_or_default();
-                        //     // let result = sqlx::query(&sql).execute(&mut info_pool_clone.clone().acquire().await.unwrap()).await;
-                        //     // match result {
-                        //     //     Ok(_) => {}
-                        //     //     Err(_) => {
-                        //     //         dbg!(sql.as_str());
-                        //     //     }
-                        //     // }
-                        // }
-                        // let sql = gen_dbno_filename_insert_sql(db_no.0,&filename_clone,version.0).unwrap_or_default();
-                        // let result = sqlx::query(&sql).execute(&mut pool_clone.clone().acquire().await.unwrap()).await;
-                        // match result {
-                        //     Ok(_) => {}
-                        //     Err(_) => {
-                        //         dbg!(sql.as_str());
-                        //     }
-                        // }
                     }
                 });
                 handles.push(handle);

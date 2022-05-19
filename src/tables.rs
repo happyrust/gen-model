@@ -56,7 +56,8 @@ pub fn gen_create_dbno_filename_tables_sql() -> String {
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "dbno_filename"));
     sql.push_str(&format!(r#"{} int,"#, "dbno"));
     sql.push_str(&format!(r#"{} varchar(30),"#, "filename"));
-    sql.push_str(&format!(r#"{} int "#,"version"));
+    sql.push_str(&format!(r#"{} int, "#,"version"));
+    sql.push_str(&format!(r#"{} varchar(30) "#,"project"));
     sql.push_str(");");
    sql
 }
@@ -71,8 +72,7 @@ pub fn gen_create_element_tables_sql() -> String{
     sql.push_str(&format!(r#"{} varchar(8),"#, "type"));
     sql.push_str(&format!(r#"{} bigint,"#, "owner"));
     sql.push_str(&format!(r#"{} varchar(100),"#, "name"));
-    sql.push_str(&format!(r#"{} int,"#, "dbno"));
-    sql.push_str(&format!(r#"{} varchar(20)"#, "project"));
+    sql.push_str(&format!(r#"{} int "#, "dbno"));
     sql.push_str(");");
 
     sql

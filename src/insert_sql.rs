@@ -12,8 +12,8 @@ pub fn gen_pdms_element_insert_sql(att: &WholeAttMap,name:&str, dbno: u32, proje
     let owner = implicit.get_owner().unwrap();
 
     let mut sql = String::new();
-    sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {},'{}') ,"#,
-                          refno.0, refno.to_refno_str(), type_name, owner.0, name, dbno, project));
+    sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {} ) ,"#,
+                          refno.0, refno.to_refno_str(), type_name, owner.0, name, dbno));
     sql
 }
 
@@ -23,9 +23,9 @@ pub fn gen_refno_infos_insert_sql(refno: RefU64, project: &str) -> String {
     sql
 }
 
-pub fn gen_dbno_filename_insert_sql(dbno: u32, filename: &str, version: u32) -> String {
+pub fn gen_dbno_filename_insert_sql(dbno: u32, filename: &str, version: u32,project:&str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!(r#"({},'{}',{}) ,"#, dbno, filename, version));
+    sql.push_str(&format!(r#"({},'{}',{} , '{}' ) ,"#, dbno, filename, version,project));
     sql
 }
 

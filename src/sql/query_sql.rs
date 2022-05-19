@@ -96,6 +96,13 @@ pub async fn query_world_children(pool:Pool<MySql>) -> anyhow::Result<Vec<(RefU6
     Ok(v.into_iter().flatten().collect::<Vec<(RefU64,AiosStr)>>())
 }
 
+pub async fn query_explicit_attr(refno:RefU64,pool:Pool<MySql>) -> anyhow::Result<AttrMap> {
+    let sql = gen_query_explicit_attr_sql(refno);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let val = result.get::<Vec<u8>,_>("data");
+    Ok(bincode::deserialize::<AttrMap>(&val)?)
+}
+
 #[tokio::test]
 async fn test_query_implicit_attr() -> anyhow::Result<()> {
     let url = "mysql://root:root@127.0.0.1:3306";
@@ -117,5 +124,17 @@ async fn test_get_world_children() -> anyhow::Result<()> {
     let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
     let v = query_children_pdms_tree( refno,pool).await?;
     println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_explicit_attr() -> anyhow::Result<()> {
+    let url = "mysql://root:root@127.0.0.1:3306";
+    let info_pool = get_tidb_pool(&format!("{}/{}", url, "refno_infos")).await;
+    let refno = RefU64(65287797866496);
+    let project = query_refno_infos(refno, info_pool).await?;
+    let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
+    let v = query_explicit_attr( refno,pool).await?;
+    println!("v={:?}", v.to_string_hashmap());
     Ok(())
 }
