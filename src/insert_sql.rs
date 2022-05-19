@@ -1,19 +1,19 @@
 use std::collections::HashMap;
-use aios_core::pdms_types::{NounHash, RefU64, RefU64Vec};
+use aios_core::pdms_types::{AttrMap, NounHash, RefU64, RefU64Vec};
 use dashmap::DashMap;
 use parse_pdms_db::db_tool::db1_hash;
 use parse_pdms_db::parse::WholeAttMap;
 use smol_str::SmolStr;
 
-pub fn gen_pdms_element_insert_sql(att: &WholeAttMap,name:&str, dbno: u32, project: &str) -> String {
+pub fn gen_pdms_element_insert_sql(att: &WholeAttMap,name:&str, dbno: u32, order: usize) -> String {
     let implicit = &att.implicit_attmap;
     let refno = implicit.get_refno().unwrap();
     let type_name = implicit.get_type();
     let owner = implicit.get_owner().unwrap();
 
     let mut sql = String::new();
-    sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {} ) ,"#,
-                          refno.0, refno.to_refno_str(), type_name, owner.0, name, dbno));
+    sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {} , {} ) ,"#,
+                          refno.0, refno.to_refno_str(), type_name, owner.0, name, dbno,order));
     sql
 }
 
@@ -48,4 +48,13 @@ pub fn get_name(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashMa
         }
         format!("{} {}", type_name, idx)
     }
+}
+
+pub fn get_order(whole_attr: &DashMap<RefU64, WholeAttMap>,children_map:&HashMap<RefU64,RefU64Vec>,refno:RefU64) -> usize {
+    let attr = whole_attr.get(&refno).unwrap();
+    let owner = attr.implicit_attmap.get_owner().unwrap();
+    if let Some(children) = children_map.get(&owner) {
+        return children.iter().position(|child| child == &refno).unwrap_or_default();
+    }
+    0
 }

@@ -17,7 +17,7 @@ use sqlx::pool::PoolConnection;
 use aios_database::consts::URL;
 use aios_database::database::{get_tidb_pool, init_database, init_info_database, get_connect_url};
 use aios_database::helper::{qualified_column_name, qualified_table_name};
-use aios_database::insert_sql::{gen_dbno_filename_insert_sql, gen_pdms_element_insert_sql, gen_refno_infos_insert_sql, get_name};
+use aios_database::insert_sql::{gen_dbno_filename_insert_sql, gen_pdms_element_insert_sql, gen_refno_infos_insert_sql, get_name, get_order};
 use aios_database::options::DbOption;
 
 use sqlx::Executor;
@@ -405,7 +405,8 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                 implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), column_hashs));
                                 explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
                                 let name = get_name(&total_attr_map, &children_map, *refno);
-                                pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, &project_clones.clone()));
+                                let order = get_order(&total_attr_map,&children_map,*refno);
+                                pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order));
                                 dbno_filename_sql.push_str(&gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(), version.0,&project_clones));
 
                                 if (i != 0 && i % BATCH_CHUNKS_CNT == 0) || i == (kv.value().len() - 1) {
@@ -451,7 +452,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                     explicit_values_sql.clear();
 
                                     // pdms_elements 保存
-                                    let mut sql = "insert ignore into pdms_elements (id, refno, type, owner, name, dbno ) values ".to_string();
+                                    let mut sql = "insert ignore into pdms_elements (id, refno, type, owner, name, dbno , order_ ) values ".to_string();
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = conn.execute(sql.as_str()).await;

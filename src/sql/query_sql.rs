@@ -6,14 +6,15 @@ use parse_pdms_db::db_tool::db1_hash;
 use smol_str::SmolStr;
 use sqlx::{MySql, Pool, Row};
 use crate::database::get_tidb_pool;
-use crate::query_sql::{query_children, query_refno_infos};
+use crate::query_sql::{query_children, query_pdms_elements_type_name, query_refno_infos};
 use crate::REFNO_INFO_MAP;
 use crate::sql::gen_sql::*;
 
-pub async fn query_implicit_attr(refno: RefU64, type_name: &str, pool: Pool<MySql>) -> anyhow::Result<AttrMap> {
+pub async fn query_implicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<AttrMap> {
     let mut r = AttrMap::default();
-    let type_hash = db1_hash(type_name);
-    let sql = gen_query_implicit_attr_sql(refno, type_name);
+    let type_name = query_pdms_elements_type_name(refno,pool.clone()).await?;
+    let type_hash = db1_hash(&type_name);
+    let sql = gen_query_implicit_attr_sql(refno, &type_name);
     let query_r = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     if let Some(val) = REFNO_INFO_MAP.get(&(type_hash as i32)) {
         for info in val.value() {
@@ -103,6 +104,12 @@ pub async fn query_explicit_attr(refno:RefU64,pool:Pool<MySql>) -> anyhow::Resul
     Ok(bincode::deserialize::<AttrMap>(&val)?)
 }
 
+pub async fn query_all_attr(refno:RefU64,pool:Pool<MySql>) -> anyhow::Result<()> {
+    let implicit_attr = query_implicit_attr(refno,pool.clone());
+    Ok(())
+}
+
+
 #[tokio::test]
 async fn test_query_implicit_attr() -> anyhow::Result<()> {
     let url = "mysql://root:root@127.0.0.1:3306";
@@ -110,7 +117,7 @@ async fn test_query_implicit_attr() -> anyhow::Result<()> {
     let refno = RefU64(103010495627266);
     let project = query_refno_infos(refno, info_pool).await?;
     let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
-    let v = query_implicit_attr(refno, "SECT", pool).await.unwrap();
+    let v = query_implicit_attr(refno,  pool).await.unwrap();
     println!("v={:?}", v.to_string_hashmap());
     Ok(())
 }

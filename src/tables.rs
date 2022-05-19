@@ -72,7 +72,8 @@ pub fn gen_create_element_tables_sql() -> String{
     sql.push_str(&format!(r#"{} varchar(8),"#, "type"));
     sql.push_str(&format!(r#"{} bigint,"#, "owner"));
     sql.push_str(&format!(r#"{} varchar(100),"#, "name"));
-    sql.push_str(&format!(r#"{} int "#, "dbno"));
+    sql.push_str(&format!(r#"{} int ,"#, "dbno"));
+    sql.push_str(&format!(r#"{} int "#,"order_"));
     sql.push_str(");");
 
     sql

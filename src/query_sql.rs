@@ -27,7 +27,7 @@ fn gen_query_pdms_elements_type_name_sql(refno: RefU64) -> String {
 pub async fn query_pdms_elements_type_name(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<String> {
     let sql = gen_query_pdms_elements_type_name_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    Ok(result.get::<String, _>("type_name"))
+    Ok(result.get::<String, _>("type"))
 }
 
 fn gen_query_implicit_attr_sql(refno: RefU64, type_name: &str) -> String {
