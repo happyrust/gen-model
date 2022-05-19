@@ -15,12 +15,13 @@ use parse_pdms_db::tool::hash_tool::{f32_round_2, f64_round_2, f64_round_3};
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolConnection;
 use aios_database::consts::URL;
-use aios_database::database::{get_tidb_pool, init_database, init_info_database, get_connect_url};
+use aios_database::database::{get_connect_url, get_tidb_pool, init_database, init_info_database};
 use aios_database::helper::{qualified_column_name, qualified_table_name};
-use aios_database::insert_sql::{gen_dbno_filename_insert_sql, gen_pdms_element_insert_sql, gen_refno_infos_insert_sql, get_name, get_order};
 use aios_database::options::DbOption;
-
 use sqlx::Executor;
+use aios_database::api::attr::insert_attr_info;
+use aios_database::api::element::{gen_dbno_filename_insert_sql, gen_pdms_element_insert_sql, gen_refno_infos_insert_sql, get_name, get_order};
+use aios_database::tables::gen_create_attr_info_tables_sql;
 
 
 #[macro_use]
@@ -57,8 +58,6 @@ async fn main() -> anyhow::Result<()> {
     let mut time = Instant::now();
 
     let url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port);
-
-    // test_batch_insert(url.as_str()).await;
     init_info_database(&get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port)).await;
     let info_pool = get_tidb_pool(&format!("{}/{}", url, "refno_infos")).await;
     for project in &db_option.included_projects {
@@ -99,17 +98,13 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         tables_sql.push_str(&tables::gen_create_element_tables_sql());
-        let result = conn.execute(tables_sql.as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(&e);
-                dbg!(tables_sql.as_str());
-            }
-        }
         println!("创建表花费时间: {} ms", table_time.elapsed().as_millis());
         sync_total_async(&db_option, project, &None, project_pool, info_pool.clone()).await;
     }
+    // let mut info_conn = info_pool.acquire().await?;
+    // let sql = gen_create_attr_info_tables_sql();
+    // info_conn.execute(sql.as_str()).await;
+    // insert_attr_info(info_pool).await?;
     println!("初始化数据库时间: {} ms", time.elapsed().as_millis());
     Ok(())
 }
@@ -279,6 +274,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                      string_lookup,
                                      refno_info_map,
                                      children_map,
+                                     db_type,
                                      db_no,
                                      field_no,
                                      version,
@@ -287,6 +283,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                  })) = tokio::task::spawn_blocking(move || {
                         parse_file(&path, &None, &file_name, &project_clone.clone(), "")
                     }).await {
+                        let target_dbno = if field_no.0 == 0 { db_no } else { field_no };
                         for kv in &type_ele_map {
                             let mut conn = pool_clone.acquire().await.unwrap();
                             let mut info_conn = info_pool_clone.acquire().await.unwrap();
@@ -307,9 +304,9 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                 implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), column_hashs));
                                 explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
                                 let name = get_name(&total_attr_map, &children_map, *refno);
-                                let order = get_order(&total_attr_map,&children_map,*refno);
-                                pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order));
-                                dbno_filename_sql.push_str(&gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(), version.0,&project_clones));
+                                let order = get_order(&total_attr_map, &children_map, *refno);
+                                pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, target_dbno.0, order));
+                                dbno_filename_sql.push_str(&gen_dbno_filename_insert_sql(target_dbno.0, &filename_clone.clone(), version.0, &project_clones, db_type.clone()));
 
                                 if (i != 0 && i % BATCH_CHUNKS_CNT == 0) || i == (kv.value().len() - 1) {
                                     let mut sql = "INSERT IGNORE INTO refno_infos (ref0,project) VALUES ".to_string();
@@ -367,7 +364,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                     }
                                     pdms_elements_sql.clear();
 
-                                    let mut sql = "INSERT IGNORE INTO dbno_filename ( dbno,filename,version,project ) VALUES ".to_string();
+                                    let mut sql = "INSERT IGNORE INTO dbno_filename ( dbno,filename,version,project,db_type) VALUES ".to_string();
                                     sql.push_str(dbno_filename_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = conn.execute(sql.as_str()).await;

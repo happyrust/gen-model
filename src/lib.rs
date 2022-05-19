@@ -18,7 +18,7 @@ pub mod db_types;
 
 lazy_static! {
     static ref REFNO_INFO_MAP: DashMap<i32, DashMap<i32, AttrInfo>> = {
-        let db_info :PdmsDatabaseInfo = serde_json::from_slice(include_bytes!("../all_attr_info.json")).unwrap();
+        let db_info :PdmsDatabaseInfo = serde_json::from_str(include_str!("../all_attr_info.json")).unwrap();
         db_info.noun_attr_info_map
     };
 }
