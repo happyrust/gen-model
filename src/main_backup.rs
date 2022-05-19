@@ -16,13 +16,12 @@ use parse_pdms_db::tool::hash_tool::{f32_round_2, f64_round_2, f64_round_3};
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolConnection;
 use aios_database::consts::URL;
-use aios_database::database::{get_connect_url, get_tidb_pool, init_database, init_info_database};
+use aios_database::database::{get_tidb_pool, init_database, init_info_database, get_connect_url};
 use aios_database::helper::{qualified_column_name, qualified_table_name};
+use aios_database::insert_sql::{gen_dbno_filename_insert_sql, gen_pdms_element_insert_sql, gen_refno_infos_insert_sql, get_name, get_order};
 use aios_database::options::DbOption;
+
 use sqlx::Executor;
-use aios_database::api::attr::insert_attr_info;
-use aios_database::api::element::{gen_dbno_filename_insert_sql, gen_pdms_element_insert_sql, gen_refno_infos_insert_sql, get_name, get_order};
-use aios_database::tables::gen_create_attr_info_tables_sql;
 
 
 #[macro_use]
@@ -59,6 +58,8 @@ async fn main() -> anyhow::Result<()> {
     let mut time = Instant::now();
 
     let url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port);
+
+    // test_batch_insert(url.as_str()).await;
     init_info_database(&get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port)).await;
     let info_pool = get_tidb_pool(&format!("{}/{}", url, "refno_infos")).await;
     let mut create_tables_elapse = 0;
@@ -283,7 +284,6 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                      string_lookup,
                                      refno_info_map,
                                      children_map,
-                                     db_type,
                                      db_no,
                                      field_no,
                                      version,
@@ -292,7 +292,6 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                  })) = tokio::task::spawn_blocking(move || {
                         parse_file(&path, &None, &file_name, &project_clone.clone(), "")
                     }).await {
-                        let target_dbno = if field_no.0 == 0 { db_no } else { field_no };
                         for kv in &type_ele_map {
                             let mut implicit_query_data = None;
                             let mut info_sql = String::new();
@@ -316,9 +315,8 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                 pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order));
                                 dbno_filename_sql.push_str(&gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(), version.0, &project_clones));
 
-                                let mut insert_join_handles = vec![];
                                 if (i != 0 && i % batch_chunks_cnt == 0) || i == (kv.value().len() - 1) {
-                                    // dbg!(i % batch_chunks_cnt );
+                                    dbg!(i % batch_chunks_cnt );
                                     let info_sql= take(&mut info_sql);
                                     let implicit_values_sql= take(&mut implicit_values_sql);
                                     let explicit_values_sql= take(&mut explicit_values_sql);
@@ -327,7 +325,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                     let implicit_query_data = implicit_query_data.clone();
                                     let pool_clone = pool_clone.clone();
                                     let info_pool_clone = info_pool_clone.clone();
-                                    let insert_handle = tokio::spawn(async move {
+                                    tokio::spawn(async move {
                                         let mut conn = pool_clone.acquire().await.unwrap();
                                         let mut info_conn = info_pool_clone.acquire().await.unwrap();
                                         let mut sql = "INSERT IGNORE INTO refno_infos (ref0, project) VALUES ".to_string();
@@ -392,14 +390,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                                 dbg!(sql.as_str());
                                             }
                                         }
-                                    });
-
-                                    insert_join_handles.push(insert_handle);
-
-                                    if insert_join_handles.len() == 50 || i == (kv.value().len() - 1){
-                                        let insert_join_handles = take(&mut insert_join_handles);
-                                        futures::future::join_all(insert_join_handles).await;
-                                    }
+                                    }).await.expect("TODO: panic message");
                                 }
                             }
                         }
