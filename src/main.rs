@@ -35,7 +35,7 @@ pub async fn test_batch_insert(url: &str) {
         .await
         .unwrap();
     let mut pool = connection.try_acquire().unwrap();
-    let sql = r#"INSERT pdms_elements (id, refno, type, name) values (1, 100, 'test', 'unset'), (2, 100, 'test', 'unset')"#.to_string();
+    let sql = r#"INSERT pdms_elements (id, refno, type, name) VALUES (1, 100, 'test', 'unset'), (2, 100, 'test', 'unset')"#.to_string();
     let result = sqlx::query(&sql).execute(&mut pool).await;
     match result {
         Ok(_) => {}
@@ -239,106 +239,6 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashs: &Vec<NounHas
     table_vals_sql
 }
 
-// pub fn gen_implicit_att_insert_sql(type_name: &str, i_atts: Vec<&WholeAttMap>, columns_sql: &mut Option<String>) -> Option<String> {
-//     let mut sql = String::new();
-//     let i_att = &i_atts[0].implicit_attmap;
-//     let refno = i_att.get_refno().unwrap();
-//     let type_name = i_att.get_type();
-//     let owner = i_att.get_owner().unwrap();
-//     if columns_sql.is_none() {
-//         let mut table_columns_sql = String::new();
-//         let i_att = &i_atts[0].implicit_attmap;
-//         let table_name = i_att.get_type().to_lowercase().replace("join", "joint");
-//         let table_name = table_name.replace("loop", "loop_");
-//         table_columns_sql.push_str(&format!("insert ignore into {} (id, refno, type, owner,", table_name));
-//         for (k, v) in &i_att.map {
-//             let mut att_name_full = db1_dehash(k.0).to_lowercase();
-//             if att_name_full.as_str() == "numbdb" {
-//                 att_name_full = "dbno".to_string();
-//             }
-//             let att_name = att_name_full.replace("desc", "desc_").replace("lock", "lock_").replace("char", "char_");
-//             if att_name.starts_with(":") || att_name.as_str() == "refno" || att_name.as_str() == "type" || att_name.as_str() == "owner" {
-//                 continue;
-//             }
-//             match v {
-//                 AttrVal::InvalidType => {}
-//                 _ => {
-//                     table_columns_sql.push_str(&format!("{},", att_name));
-//                 }
-//             }
-//         }
-//         table_columns_sql.remove(table_columns_sql.len() - 1);
-//         table_columns_sql.push_str(") ");
-//         *columns_sql = Some(table_columns_sql);
-//     }
-//
-//     let mut table_vals_sql = String::new();
-//     let table_name = qualified_table_name(type_name);
-//     for i_att in i_atts {
-//         table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {},"#, refno.0, refno.to_refno_str(), table_name, owner.0));
-//         for (k, v) in &i_att.map {
-//             let att_name = qualified_column_name(db1_dehash(k.0).as_str());
-//             let att_name = att_name.as_str();
-//             if att_name.starts_with(":") || att_name == "refno" || att_name == "type" || att_name == "owner" {
-//                 continue;
-//             }
-//             match v {
-//                 AttrVal::InvalidType => {}
-//                 AttrVal::IntegerType(d) => {
-//                     table_vals_sql.push_str(&format!("{},", d.to_string()));
-//                 }
-//                 AttrVal::StringType(d) => {
-//                     table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-//                 }
-//                 AttrVal::DoubleType(d) => {
-//                     table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
-//                 }
-//                 AttrVal::DoubleArrayType(d) => {
-//                     table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap().as_slice())));
-//                 }
-//                 AttrVal::StringArrayType(d) => {
-//                     table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-//                 }
-//                 AttrVal::BoolArrayType(d) => {
-//                     table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-//                 }
-//                 AttrVal::IntArrayType(d) => {
-//                     table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-//                 }
-//                 AttrVal::BoolType(d) => {
-//                     let b = if *d { 1 } else { 0 };
-//                     table_vals_sql.push_str(&format!("{},", b));
-//                 }
-//                 AttrVal::Vec3Type(d) => {
-//                     table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-//                 }
-//                 AttrVal::ElementType(d) => {
-//                     table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-//                 }
-//                 AttrVal::WordType(d) => {
-//                     table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-//                 }
-//                 AttrVal::RefU64Type(d) => {
-//                     table_vals_sql.push_str(&format!("{},", d.0));
-//                 }
-//                 AttrVal::StringHashType(_) => {}
-//             }
-//         }
-//
-//         table_vals_sql.remove(table_vals_sql.len() - 1);
-//         table_vals_sql.push_str("),");
-//     }
-//
-//     table_vals_sql.remove(table_vals_sql.len() - 1);
-//
-//
-//     sql.push_str(columns_sql.as_ref().unwrap());
-//     sql.push_str(" values ");
-//     sql.push_str(&table_vals_sql);
-//
-//
-//     Some(sql)
-// }
 
 pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_files: &Option<Vec<String>>, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
     let mut data_dir = Path::new(&db_option.project_path);
@@ -412,7 +312,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                 dbno_filename_sql.push_str(&gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(), version.0,&project_clones));
 
                                 if (i != 0 && i % BATCH_CHUNKS_CNT == 0) || i == (kv.value().len() - 1) {
-                                    let mut sql = "insert ignore into refno_infos (ref0,project) values ".to_string();
+                                    let mut sql = "INSERT IGNORE INTO refno_infos (ref0,project) VALUES ".to_string();
                                     sql.push_str(info_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = info_conn.execute(sql.as_str()).await;
@@ -440,7 +340,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                     implicit_values_sql.clear();
 
                                     //执行显示数据保存
-                                    let mut sql = "INSERT IGNORE INTO Explicit_att (id, refno, type, owner, data) values ".to_string();
+                                    let mut sql = "INSERT IGNORE INTO explicit_att (id, refno, type, owner, data) VALUES ".to_string();
                                     sql.push_str(explicit_values_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = conn.execute(sql.as_str()).await;
@@ -454,7 +354,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                     explicit_values_sql.clear();
 
                                     // pdms_elements 保存
-                                    let mut sql = "insert ignore into pdms_elements (id, refno, type, owner, name, dbno , order_num ) values ".to_string();
+                                    let mut sql = "INSERT IGNORE INTO pdms_elements (id, refno, type, owner, name, dbno , order_num ) VALUES ".to_string();
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = conn.execute(sql.as_str()).await;
@@ -467,7 +367,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                     }
                                     pdms_elements_sql.clear();
 
-                                    let mut sql = "insert ignore into dbno_filename ( dbno,filename,version,project ) values ".to_string();
+                                    let mut sql = "INSERT IGNORE INTO dbno_filename ( dbno,filename,version,project ) VALUES ".to_string();
                                     sql.push_str(dbno_filename_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = conn.execute(sql.as_str()).await;
