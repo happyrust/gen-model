@@ -1,9 +1,11 @@
-use aios_core::pdms_types::{AiosStr, AttrMap, EleNode, EleNodeTIDB, RefU64};
+use std::collections::BTreeMap;
+use aios_core::pdms_types::{AiosStr, AttrMap, EleNode,  RefU64};
+use crate::db_types::EleNodeTIDB;
 use parse_pdms_db::db_tool::db1_hash;
 use smol_str::SmolStr;
 use sqlx::{MySql, Pool, Row};
 use crate::database::get_tidb_pool;
-use crate::sql::query_sql::query_refno_type;
+use crate::api::element::query_refno_type;
 
 fn gen_query_refno_infos_sql(refno: RefU64) -> String {
     let mut sql = String::new();
@@ -56,7 +58,7 @@ fn gen_pdms_elements_dbno_sql(dbno: u32, type_name: &str) -> String {
 
 fn gen_pdms_elements_get_children_sql(refno: RefU64) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select id,name,type from pdms_elements where owner = {}", refno.0));
+    sql.push_str(&format!("select id,name,type,order_num from pdms_elements where owner = {}", refno.0));
     sql
 }
 
@@ -98,22 +100,17 @@ pub async fn query_world(main_db: u32, pool: Pool<MySql>) -> anyhow::Result<(Ref
 /// 获取某个refno 的 children 并未合并 world
 pub async fn query_children(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<Vec<(RefU64,AiosStr)>> {
     let mut r = vec![];
+    let mut b_map = BTreeMap::new();
     let sql = gen_pdms_elements_get_children_sql(refno);
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     for val in vals {
         let child_refno = RefU64(val.get::<i64, _>("id") as u64);
         let name = AiosStr(SmolStr::new(val.get::<String, _>("name")));
-        r.push((child_refno,name));
-        // let type_name = AiosStr(SmolStr::new(val.get::<String, _>("type")));
-        // let count = query_children_count(child_refno, pool.clone()).await?;
-        // r.push(EleNodeTIDB {
-        //     refno: child_refno,
-        //     owner: refno,
-        //     name,
-        //     noun: type_name,
-        //     version: 0,
-        //     children_count: count,
-        // })
+        let order = val.get::<i32,_>("order_num");
+        b_map.insert(order,(child_refno,name));
+    }
+    for (_,v) in b_map {
+        r.push(v);
     }
     Ok(r)
 }
@@ -131,7 +128,7 @@ async fn test_get_world() -> anyhow::Result<()> {
 async fn test_get_children() -> anyhow::Result<()> {
     let url = "mysql://root:root@127.0.0.1:3306";
     let info_pool = get_tidb_pool(&format!("{}/{}", url, "refno_infos")).await;
-    let refno = RefU64(65287797866496);
+    let refno = RefU64(65287797866622);
     let project = query_refno_infos(refno, info_pool).await?;
     let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
     let v = query_children(refno, pool).await?;

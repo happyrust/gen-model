@@ -226,6 +226,9 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashs: &Vec<NounHas
             AttrVal::RefU64Type(d) => {
                 table_vals_sql.push_str(&format!("{},", d.0));
             }
+            AttrVal::RefU64Array(d) => {
+                table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+            }
             AttrVal::StringHashType(_) => {}
         }
     }
