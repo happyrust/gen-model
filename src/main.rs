@@ -68,8 +68,7 @@ async fn main() -> anyhow::Result<()> {
         let mut conn = project_pool.acquire().await.unwrap();
         let mut table_time = Instant::now();
         let mut tables_sql = String::new();
-        let connection = project_pool.acquire().await.unwrap();
-        if let Ok(db_info) = bincode::deserialize::<PdmsDatabaseInfo>(include_bytes!("../all_attr_info.bin")) {
+        if let Ok(db_info) = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")) {
             for (k, v) in db_info.noun_attr_info_map {
                 let mut attr_map = BTreeMap::new();
                 let type_name = db1_dehash(k as u32).to_lowercase();
