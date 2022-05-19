@@ -452,7 +452,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_
                                     explicit_values_sql.clear();
 
                                     // pdms_elements 保存
-                                    let mut sql = "insert ignore into pdms_elements (id, refno, type, owner, name, dbno , order_ ) values ".to_string();
+                                    let mut sql = "insert ignore into pdms_elements (id, refno, type, owner, name, dbno , order_num ) values ".to_string();
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = conn.execute(sql.as_str()).await;
