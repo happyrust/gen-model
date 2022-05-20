@@ -1,11 +1,12 @@
-use aios_core::pdms_types::{AttrMap, AttrVal, DbAttributeType, NounHash, RefU64};
+use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefU64};
 use sqlx::{MySql, Pool, Row};
 use parse_pdms_db::db_tool::db1_hash;
 use parse_pdms_db::db1_dehash;
 use smol_str::SmolStr;
-use crate::query_sql::query_pdms_elements_type_name;
+use dashmap::DashMap;
+use sqlx::Executor;
+use crate::api::element::query_pdms_elements_type_name;
 use crate::REFNO_INFO_MAP;
-use crate::sql::gen_sql::gen_query_implicit_attr_sql;
 
 pub async fn query_implicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<AttrMap> {
     let mut r = AttrMap::default();
@@ -63,4 +64,59 @@ pub async fn query_implicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Re
         }
     }
     Ok(r)
+}
+
+pub async fn query_explicit_attr(refno:RefU64, pool:Pool<MySql>) -> anyhow::Result<AttrMap> {
+    let sql = gen_query_explicit_attr_sql(refno);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let val = result.get::<Vec<u8>,_>("data");
+    Ok(bincode::deserialize::<AttrMap>(&val)?)
+}
+
+pub async fn query_full_attr(refno:RefU64, pool:Pool<MySql>) -> anyhow::Result<AttrMap> {
+    let mut implicit_attr = query_implicit_attr(refno, pool.clone()).await?;
+    let explicit_attr = query_explicit_attr(refno, pool.clone()).await?;
+    for (k,v) in explicit_attr.map {
+        implicit_attr.entry(k).or_insert(v);
+    }
+    Ok(implicit_attr)
+}
+
+pub async fn insert_attr_info(pool:Pool<MySql>) -> anyhow::Result<()> {
+    let sql = gen_insert_attr_info_sql(&REFNO_INFO_MAP);
+    let mut conn = pool.acquire().await?;
+    let result = conn.execute(sql.as_str()).await;
+    match result {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(e);
+            dbg!(sql.as_str());
+        }
+    }
+    Ok(())
+}
+
+fn gen_insert_attr_info_sql(attr_info:&DashMap<i32,DashMap<i32,AttrInfo>>) -> String{
+    let mut sql = String::new();
+    sql.push_str("insert ignore into attr_info (type_hash, type,info ) Values ");
+    for info in attr_info {
+        let type_hash = *info.key() as u32;
+        let type_name = db1_dehash(type_hash);
+        let info = hex::encode(bincode::serialize(&info.value()).unwrap());
+        sql.push_str(&format!("( {} , '{}', 0x{} ),",type_hash,type_name,info));
+    }
+    sql.remove(sql.len() -1);
+    sql
+}
+
+pub fn gen_query_implicit_attr_sql(refno: RefU64, type_name: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select * from {} where id = {}", type_name, refno.0));
+    sql
+}
+
+pub fn gen_query_explicit_attr_sql(refno:RefU64) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select * from explicit_att where id = {} ;", refno.0));
+    sql
 }

@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use aios_core::pdms_types::{AttrMap, AttrVal};
+use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal};
+use dashmap::DashMap;
 use parse_pdms_db::db1_dehash;
+use serde_json::from_str;
 use sqlx::{Error, MySql, MySqlPool, Pool};
 use sqlx::mysql::MySqlQueryResult;
 use sqlx::pool::PoolConnection;
@@ -21,7 +23,7 @@ enum Character {
     Created,
 }
 
-pub fn gen_create_explicit_tables_sql() -> String{
+pub fn gen_create_explicit_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "explicit_att"));
@@ -35,7 +37,7 @@ pub fn gen_create_explicit_tables_sql() -> String{
     sql
 }
 
-pub fn gen_create_uda_tables_sql() -> String{
+pub fn gen_create_uda_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "uda_att"));
@@ -56,14 +58,15 @@ pub fn gen_create_dbno_filename_tables_sql() -> String {
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "dbno_filename"));
     sql.push_str(&format!(r#"{} INT PRIMARY KEY ,"#, "dbno"));
     sql.push_str(&format!(r#"{} VARCHAR(30),"#, "filename"));
-    sql.push_str(&format!(r#"{} INT, "#,"version"));
-    sql.push_str(&format!(r#"{} VARCHAR(30) "#,"project"));
+    sql.push_str(&format!(r#"{} INT, "#, "version"));
+    sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "project"));
+    sql.push_str(&format!(r#"{} VARCHAR(10) "#, "db_type"));
     sql.push_str(");");
-   sql
+    sql
 }
 
 #[inline]
-pub fn gen_create_element_tables_sql() -> String{
+pub fn gen_create_element_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "pdms_elements"));
@@ -73,15 +76,34 @@ pub fn gen_create_element_tables_sql() -> String{
     sql.push_str(&format!(r#"{} BIGINT,"#, "owner"));
     sql.push_str(&format!(r#"{} VARCHAR(100),"#, "name"));
     sql.push_str(&format!(r#"{} INT ,"#, "dbno"));
-    sql.push_str(&format!(r#"{} INT "#,"order_num"));
+    sql.push_str(&format!(r#"{} INT "#, "order_num"));
     sql.push_str(");");
 
     sql
 }
 
+pub fn gen_create_attr_info_tables_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "attr_info"));
+    sql.push_str(&format!(r#"{} int primary key ,"#, "type_hash"));
+    sql.push_str(&format!(r#"{} varchar(8) ,"#, "type"));
+    sql.push_str(&format!(r#"{} blob "#, "info"));
+    sql.push_str(");");
+    sql
+}
+
+pub fn gen_create_project_mdb_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "project_mdb"));
+    sql.push_str(&format!(r#"{} varchar(20) ,"#, "mdb_name"));
+    sql.push_str(&format!(r#"{} varchar(10) ,"#, "db_type"));
+    sql.push_str(&format!(r#"{} blob "#,"data"));
+    sql.push_str(");");
+    sql
+}
 
 #[inline]
-pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, (String, AttrVal)>) -> String{
+pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, (String, AttrVal)>) -> String {
     let mut sql = String::new();
     let table_name = qualified_table_name(type_name);
     //后续可以创建一个owner表
@@ -121,7 +143,7 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
             AttrVal::BoolArrayType(_) => {
                 sql.push_str(&format!(r#"{} INT,"#, att_name));
             }
-            AttrVal::IntArrayType(_) | AttrVal::RefU64Array(_)=> {
+            AttrVal::IntArrayType(_) | AttrVal::RefU64Array(_) => {
                 sql.push_str(&format!(r#"{} VARCHAR(50),"#, att_name));
             }
             AttrVal::BoolType(_) => {

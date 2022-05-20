@@ -1,0 +1,27 @@
+use sqlx::{MySql, Pool, Row};
+use sqlx::mysql::MySqlRow;
+
+pub async fn query_dbtype_from_dbno(dbno:i32, pool:Pool<MySql>) -> anyhow::Result<String> {
+    let sql = gen_query_dbtype_from_dbno(dbno);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    // let v:Option<String> = result.get(0);
+    Ok(result.get::<String,_>(0))
+}
+
+fn gen_query_dbtype_from_dbno(dbno:i32) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select db_type from dbno_filename where dbno = {}",dbno));
+    sql
+}
+
+pub async fn query_dbtype_from_dbno_count(dbno:i32,pool:Pool<MySql>) -> anyhow::Result<i32> {
+    let sql = gen_query_dbtype_from_dbno_count(dbno);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    Ok(result.try_get::<i32,_>(0)?)
+}
+
+fn gen_query_dbtype_from_dbno_count(dbno:i32) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select count(*) from dbno_filename where dbno = {}",dbno));
+    sql
+}
