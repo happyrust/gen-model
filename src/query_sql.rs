@@ -13,7 +13,7 @@ use crate::api::element::query_refno_type;
 async fn test_get_world() -> anyhow::Result<()> {
     let url = "mysql://root:root@127.0.0.1:3306";
     let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
-    let v = element::query_world(7600, pool).await?;
+    let v = element::query_world("SAMPLE","DESI", pool).await?;
     println!("v={:?}", v);
     Ok(())
 }

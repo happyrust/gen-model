@@ -7,7 +7,6 @@ use dashmap::DashMap;
 use sqlx::Executor;
 use crate::api::element::query_pdms_elements_type_name;
 use crate::REFNO_INFO_MAP;
-use crate::sql::gen_sql::{gen_query_explicit_attr_sql, gen_query_implicit_attr_sql};
 
 pub async fn query_implicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<AttrMap> {
     let mut r = AttrMap::default();
@@ -107,5 +106,17 @@ fn gen_insert_attr_info_sql(attr_info:&DashMap<i32,DashMap<i32,AttrInfo>>) -> St
         sql.push_str(&format!("( {} , '{}', 0x{} ),",type_hash,type_name,info));
     }
     sql.remove(sql.len() -1);
+    sql
+}
+
+pub fn gen_query_implicit_attr_sql(refno: RefU64, type_name: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select * from {} where id = {}", type_name, refno.0));
+    sql
+}
+
+pub fn gen_query_explicit_attr_sql(refno:RefU64) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select * from explicit_att where id = {} ;", refno.0));
     sql
 }

@@ -1,0 +1,49 @@
+use std::collections::HashMap;
+use aios_core::pdms_types::RefU64;
+use sqlx::{MySql, Pool, Row};
+use sqlx::Executor;
+use anyhow::Result;
+use futures::poll;
+use crate::api::element::query_mdb_module_worlds;
+
+pub async fn insert_project_mdb(pool:Pool<MySql>) -> anyhow::Result<()> {
+    let project_mdb = query_mdb_module_worlds(pool.clone()).await?;
+    let sql = gen_insert_project_mdb_sql(project_mdb);
+    let mut conn = pool.acquire().await?;
+    let result = conn.execute(sql.as_str()).await;
+    match result {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(&e);
+            dbg!(sql.as_str());
+        }
+    }
+    Ok(())
+}
+
+pub async fn query_world_data(mdb:&str,module:&str,pool:Pool<MySql>) -> anyhow::Result<Vec<u8>> {
+    let sql = gen_query_world_sql(mdb,module);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    Ok(result.get::<Vec<u8>,_>(0))
+}
+
+pub fn gen_insert_project_mdb_sql(mdbs:HashMap<String, HashMap<String, Vec<RefU64>>>) -> String {
+    let mut sql = String::new();
+    sql.push_str("insert ignore into project_mdb (mdb_name,db_type,data) values ");
+    for (name,vals) in mdbs {
+        for (db_type,data) in vals {
+            let data = hex::encode(bincode::serialize(&data).unwrap());
+            sql.push_str(&format!("( '{}' , '{}', 0x{} ),",&name,db_type,data));
+        }
+    }
+    sql.remove(sql.len() -1 );
+    sql
+}
+
+
+
+fn gen_query_world_sql(mdb:&str,module:&str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select data from project_mdb where mdb_name = '{}' and db_type = '{}' ;",mdb,module ));
+    sql
+}

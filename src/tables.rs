@@ -3,6 +3,7 @@ use std::sync::Arc;
 use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal};
 use dashmap::DashMap;
 use parse_pdms_db::db1_dehash;
+use serde_json::from_str;
 use sqlx::{Error, MySql, MySqlPool, Pool};
 use sqlx::mysql::MySqlQueryResult;
 use sqlx::pool::PoolConnection;
@@ -91,6 +92,15 @@ pub fn gen_create_attr_info_tables_sql() -> String {
     sql
 }
 
+pub fn gen_create_project_mdb_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "project_mdb"));
+    sql.push_str(&format!(r#"{} varchar(20) ,"#, "mdb_name"));
+    sql.push_str(&format!(r#"{} varchar(10) ,"#, "db_type"));
+    sql.push_str(&format!(r#"{} blob "#,"data"));
+    sql.push_str(");");
+    sql
+}
 
 #[inline]
 pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, (String, AttrVal)>) -> String {
