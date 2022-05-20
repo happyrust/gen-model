@@ -1,12 +1,14 @@
-use sqlx::{MySql, Pool, Row};
+use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
 use crate::consts::*;
 
-pub async fn query_dbtype_from_dbno(dbno:i32, pool:Pool<MySql>) -> anyhow::Result<String> {
+pub async fn query_dbtype_from_dbno(dbno:i32, pool:Pool<MySql>) -> anyhow::Result<Option<String>> {
     let sql = gen_query_dbtype_from_dbno(dbno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    // let v:Option<String> = result.get(0);
-    Ok(result.get::<String,_>(0))
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    return match result {
+        Ok(v) => { Ok(Some(v.get::<String,_>(0)))}
+        Err(_) => { Ok(None) }
+    };
 }
 
 fn gen_query_dbtype_from_dbno(dbno:i32) -> String {

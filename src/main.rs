@@ -400,7 +400,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                         }
                                     }
                                     // {PDMS_ELEMENTS_TABLE} 保存
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (id, refno, type, owner, name, dbno , order_num ) VALUES ");
+                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (id, refno, type, owner, name, dbno , order_num , is_del ) VALUES ");
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
@@ -492,7 +492,7 @@ pub async fn sync_total_async_threading(db_option: &DbOption, project: &str, poo
                                                                                      version.0, &project_clones, db_type.clone());
                             let mut info_conn = info_pool_clone.acquire().await.unwrap();
                             //保存dbno的信息表
-                            let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( dbno,filename,version,project,db_type ) VALUES ");
+                            let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( dbno,filename,version,project,db_type,is_del ) VALUES ");
                             sql.push_str(dbno_filename_sql.as_str());
                             sql.remove(sql.len() - 1);
                             let result = info_conn.execute(sql.as_str()).await;

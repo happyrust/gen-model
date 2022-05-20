@@ -64,7 +64,8 @@ pub fn gen_create_element_tables_sql() -> String {
     sql.push_str(&format!(r#"{} BIGINT,"#, "owner"));
     sql.push_str(&format!(r#"{} VARCHAR(100),"#, "name"));
     sql.push_str(&format!(r#"{} INT ,"#, "dbno"));
-    sql.push_str(&format!(r#"{} INT "#, "order_num"));
+    sql.push_str(&format!(r#"{} INT ,"#, "order_num"));
+    sql.push_str(&format!(r#"{} TINYINT(1) "#,"is_del"));
     sql.push_str(");");
 
     sql
