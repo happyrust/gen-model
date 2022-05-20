@@ -15,7 +15,7 @@ use crate::sql::gen_sql::*;
 #[tokio::test]
 async fn test_query_implicit_attr() -> anyhow::Result<()> {
     let url = "mysql://root:root@127.0.0.1:3306";
-    let info_pool = get_tidb_pool(&format!("{}/{}", url, "refno_infos")).await;
+    let info_pool = get_tidb_pool(&format!("{}/{}", url, "pdms_infos")).await;
     let refno = RefU64(103010495627266);
     let project = query_refno_infos(refno, info_pool).await?;
     let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;

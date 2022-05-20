@@ -15,6 +15,7 @@ pub mod query_sql;
 pub mod sql;
 pub mod api;
 pub mod db_types;
+pub mod data_interface;
 
 lazy_static! {
     static ref REFNO_INFO_MAP: DashMap<i32, DashMap<i32, AttrInfo>> = {

@@ -47,16 +47,16 @@ pub async fn init_info_database(url: &str) {
         .await
         .unwrap();
     let mut pool = connection.try_acquire().unwrap();
-    sqlx::query("create database if not exists refno_infos;").execute(&mut pool).await;
+    sqlx::query("create database if not exists pdms_infos;").execute(&mut pool).await;
 
     dbg!(url);
-    let connection = MySqlPool::connect(&format!("{url}/refno_infos"))
+    let connection = MySqlPool::connect(&format!("{url}/pdms_infos"))
         .await
         .unwrap();
     let mut pool = connection.try_acquire().unwrap();
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "refno_infos"));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL ,"#, "ref0"));  //refno.get_0() //ref_0 可能会重，先不设 primary key
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "ref0"));
     sql.push_str(&format!(r#"{} varchar(20)"#, "project"));
 
     sql.push_str(");");

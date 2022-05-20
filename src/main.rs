@@ -9,6 +9,7 @@ use itertools::Itertools;
 use aios_core::pdms_types::{AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, RefI32Tuple, RefU64};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::db1_hash;
+use dashmap::DashMap;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use aios_database::{BATCH_CHUNKS_CNT, tables};
 use parse_pdms_db::{db1_dehash, parse_file};
@@ -62,7 +63,8 @@ async fn main() -> anyhow::Result<()> {
 
     let url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port);
     init_info_database(&get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port)).await;
-    let info_pool = get_tidb_pool(&format!("{}/{}", url, "refno_infos")).await;
+    let info_pool = get_tidb_pool(&format!("{}/{}", url, "pdms_infos")).await;
+    let mut info_conn = info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
     for project in &db_option.included_projects {
         init_database(project, &url).await;
@@ -98,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
                 tables_sql.push_str(&tables::gen_create_implicit_tables_sql(type_name.as_str(), &attr_map));
                 tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
                 tables_sql.push_str(&tables::gen_create_uda_tables_sql());
-                tables_sql.push_str(&tables::gen_create_dbno_filename_tables_sql());
+                // tables_sql.push_str(&tables::gen_create_dbno_filename_tables_sql());
             }
         }
         tables_sql.push_str(&tables::gen_create_element_tables_sql());
@@ -112,12 +114,20 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         create_tables_elapse += table_time.elapsed().as_millis();
+        let result = info_conn.execute(tables::gen_create_dbno_filename_tables_sql().as_str()).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(&e);
+                dbg!(tables_sql.as_str());
+            }
+        }
         if db_option.types_multi_thread {
             sync_total_async_threading(&db_option, project, project_pool.clone(), info_pool.clone()).await.expect("同步数据失败");
         }else{
             sync_total_async(&db_option, project, project_pool.clone(), info_pool.clone()).await.expect("同步数据失败");
         }
-        insert_project_mdb(project_pool.clone()).await?;
+        insert_project_mdb(project_pool.clone(),info_pool.clone()).await?;
     }
     println!("创建表花费时间: {} ms", create_tables_elapse);
     println!("初始化数据库时间: {} ms", time.elapsed().as_millis() - create_tables_elapse);
@@ -251,7 +261,6 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashs: &Vec<NounHas
 
 ///多线程保存
 pub async fn sync_total_async_threading(db_option: &DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
-    dbg!("多线程插入保存");
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
@@ -270,6 +279,7 @@ pub async fn sync_total_async_threading(db_option: &DbOption, project: &str, poo
     let mut handles = vec![];
     let project = Arc::new(project.to_string());
     let url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port);
+    let db_option = Arc::new(db_option.clone());
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
         let file_name_clone = Arc::new(file_name.clone());
@@ -281,6 +291,7 @@ pub async fn sync_total_async_threading(db_option: &DbOption, project: &str, poo
                 let pool_clone = pool.clone();
                 let info_pool_clone = info_pool.clone();
                 let filename_clone = file_name_clone.clone();
+                let db_option_clone = db_option.clone();
                 let handle = tokio::spawn(async move {
                     let project_clones = project_clone.clone();
                     //后面再考虑成不同的table，如显示属性和隐藏属性
@@ -323,8 +334,8 @@ pub async fn sync_total_async_threading(db_option: &DbOption, project: &str, poo
                                     .replace(r#"""#, r#"\""#);
                                 let order = get_order(&total_attr_map, &children_map, *refno);
                                 pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order));
-                                dbno_filename_sql.push_str(&gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(), version.0, &project_clones,db_type.clone()));
-
+                                dbno_filename_sql.push_str(&gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(), version.0, &project_clones, db_type.clone()));
+                                let db_option = db_option_clone.clone();
                                 let mut conn = info_pool_clone.acquire().await.unwrap();
                                 let mut sql = "INSERT IGNORE INTO dbno_filename ( dbno,filename,version,project,db_type ) VALUES ".to_string();
                                 sql.push_str(dbno_filename_sql.as_str());
@@ -341,67 +352,67 @@ pub async fn sync_total_async_threading(db_option: &DbOption, project: &str, poo
                                 // let mut insert_join_handles = vec![];
                                 if (i != 0 && i % batch_chunks_cnt == 0) || i == (kv.value().len() - 1) {
                                     // dbg!(i % batch_chunks_cnt );
-                                    let info_sql= take(&mut info_sql);
-                                    let implicit_values_sql= take(&mut implicit_values_sql);
-                                    let explicit_values_sql= take(&mut explicit_values_sql);
-                                    let pdms_elements_sql= take(&mut pdms_elements_sql);
-                                    let dbno_filename_sql= take(&mut dbno_filename_sql);
+                                    let info_sql = take(&mut info_sql);
+                                    let implicit_values_sql = take(&mut implicit_values_sql);
+                                    let explicit_values_sql = take(&mut explicit_values_sql);
+                                    let pdms_elements_sql = take(&mut pdms_elements_sql);
+                                    let dbno_filename_sql = take(&mut dbno_filename_sql);
                                     let implicit_query_data = implicit_query_data.clone();
                                     let pool_clone = pool_clone.clone();
                                     let info_pool_clone = info_pool_clone.clone();
                                     // let insert_handle = tokio::spawn(async move {
-                                        let mut conn = pool_clone.acquire().await.unwrap();
-                                        let mut info_conn = info_pool_clone.acquire().await.unwrap();
-                                        let mut sql = "INSERT IGNORE INTO refno_infos (ref0, project) VALUES ".to_string();
-                                        sql.push_str(info_sql.as_str());
-                                        sql.remove(sql.len() - 1);
-                                        let result = info_conn.execute(sql.as_str()).await;
-                                        match result {
-                                            Ok(_) => {}
-                                            Err(e) => {
-                                                dbg!(&e);
-                                                dbg!(sql.as_str());
-                                            }
+                                    let mut conn = pool_clone.acquire().await.unwrap();
+                                    let mut info_conn = info_pool_clone.acquire().await.unwrap();
+                                    let mut sql = "INSERT IGNORE INTO refno_infos (ref0, project) VALUES ".to_string();
+                                    sql.push_str(info_sql.as_str());
+                                    sql.remove(sql.len() - 1);
+                                    let result = info_conn.execute(sql.as_str()).await;
+                                    match result {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            dbg!(&e);
+                                            dbg!(sql.as_str());
                                         }
+                                    }
 
-                                        //执行隐式数据保存
-                                        let mut sql = String::new();
-                                        sql.push_str(implicit_query_data.as_ref().unwrap().0.as_str());
-                                        sql.push_str(implicit_values_sql.as_str());
-                                        sql.remove(sql.len() - 1);
-                                        let result = conn.execute(sql.as_str()).await;
-                                        match result {
-                                            Ok(_) => {}
-                                            Err(_) => {
-                                                dbg!(sql.as_str());
-                                            }
+                                    //执行隐式数据保存
+                                    let mut sql = String::new();
+                                    sql.push_str(implicit_query_data.as_ref().unwrap().0.as_str());
+                                    sql.push_str(implicit_values_sql.as_str());
+                                    sql.remove(sql.len() - 1);
+                                    let result = conn.execute(sql.as_str()).await;
+                                    match result {
+                                        Ok(_) => {}
+                                        Err(_) => {
+                                            dbg!(sql.as_str());
                                         }
+                                    }
 
-                                        //执行显示数据保存
-                                        let mut sql = "INSERT IGNORE INTO explicit_att (id, refno, type, owner, data) VALUES ".to_string();
-                                        sql.push_str(explicit_values_sql.as_str());
-                                        sql.remove(sql.len() - 1);
-                                        let result = conn.execute(sql.as_str()).await;
-                                        match result {
-                                            Ok(_) => {}
-                                            Err(e) => {
-                                                dbg!(&e);
-                                                dbg!(sql.as_str());
-                                            }
+                                    //执行显示数据保存
+                                    let mut sql = "INSERT IGNORE INTO explicit_att (id, refno, type, owner, data) VALUES ".to_string();
+                                    sql.push_str(explicit_values_sql.as_str());
+                                    sql.remove(sql.len() - 1);
+                                    let result = conn.execute(sql.as_str()).await;
+                                    match result {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            dbg!(&e);
+                                            dbg!(sql.as_str());
                                         }
+                                    }
 
-                                        // pdms_elements 保存
-                                        let mut sql = "INSERT IGNORE INTO pdms_elements (id, refno, type, owner, name, dbno , order_num ) VALUES ".to_string();
-                                        sql.push_str(pdms_elements_sql.as_str());
-                                        sql.remove(sql.len() - 1);
-                                        let result = conn.execute(sql.as_str()).await;
-                                        match result {
-                                            Ok(_) => {}
-                                            Err(e) => {
-                                                dbg!(&e);
-                                                dbg!(sql.as_str());
-                                            }
+                                    // pdms_elements 保存
+                                    let mut sql = "INSERT IGNORE INTO pdms_elements (id, refno, type, owner, name, dbno , order_num ) VALUES ".to_string();
+                                    sql.push_str(pdms_elements_sql.as_str());
+                                    sql.remove(sql.len() - 1);
+                                    let result = conn.execute(sql.as_str()).await;
+                                    match result {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            dbg!(&e);
+                                            dbg!(sql.as_str());
                                         }
+                                    }
                                     // });
 
                                     // insert_join_handles.push(insert_handle);
@@ -428,13 +439,9 @@ pub async fn sync_total_async_threading(db_option: &DbOption, project: &str, poo
 
 
 ///单线程保存
-pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
-    dbg!("单线程插入保存");
+pub async fn sync_total_async(db_option: &DbOption, project: &str, need_parsing_files: &Option<Vec<String>>, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
     let mut data_dir = Path::new(&db_option.project_path);
-    let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
-    let batch_chunks_cnt = db_option.sql_batch_insert_chunk as usize;
-    let batch_handles_cnt = db_option.batch_insert_handles_chunk as usize;
     let mut target_dir = fs::read_dir(&project_dir).unwrap().into_iter().map(|entry| {
         let entry = entry.unwrap();
         entry.path()
@@ -481,6 +488,8 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                         parse_file(&path, &None, &file_name, &project_clone.clone(), "")
                     }).await {
                         for kv in &type_ele_map {
+                            let mut conn = pool_clone.acquire().await.unwrap();
+                            let mut info_conn = info_pool_clone.acquire().await.unwrap();
                             let mut implicit_query_data = None;
                             let mut info_sql = String::new();
                             let mut implicit_values_sql = String::new();
@@ -488,24 +497,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                             let mut pdms_elements_sql = String::new();
                             let mut dbno_filename_sql = String::new();
 
-                            dbno_filename_sql.push_str(&gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(), version.0, &project_clones,db_type.clone()));
-
-                            let mut conn = info_pool_clone.acquire().await.unwrap();
-                            let mut sql = "INSERT IGNORE INTO dbno_filename ( dbno,filename,version,project,db_type ) VALUES ".to_string();
-                            sql.push_str(dbno_filename_sql.as_str());
-                            sql.remove(sql.len() - 1);
-                            let result = conn.execute(sql.as_str()).await;
-                            match result {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(&e);
-                                    dbg!(sql.as_str());
-                                }
-                            }
-
                             for (i, refno) in kv.value().iter().enumerate() {
-                                let mut conn = pool_clone.acquire().await.unwrap();
-                                let mut info_conn = info_pool_clone.acquire().await.unwrap();
                                 let att = total_attr_map.get(refno).unwrap();
                                 if implicit_query_data.is_none() {
                                     implicit_query_data = Some(gen_implicit_attr_query_sql(att.value()));
@@ -538,6 +530,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                             dbg!(sql.as_str());
                                         }
                                     }
+                                    info_sql.clear();
 
                                     //执行隐式数据保存
                                     let mut sql = String::new();
@@ -551,6 +544,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                             dbg!(sql.as_str());
                                         }
                                     }
+                                    implicit_values_sql.clear();
 
                                     //执行显示数据保存
                                     let mut sql = "INSERT IGNORE INTO explicit_att (id, refno, type, owner, data) VALUES ".to_string();
