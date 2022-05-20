@@ -7,6 +7,7 @@ use sqlx::{MySql, Pool, Row};
 use crate::api::{element};
 use crate::database::get_tidb_pool;
 use crate::api::element::query_refno_type;
+use crate::consts::PDMS_INFO_DB;
 
 
 #[tokio::test]
@@ -21,7 +22,7 @@ async fn test_get_world() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_get_children() -> anyhow::Result<()> {
     let url = "mysql://root:root@127.0.0.1:3306";
-    let info_pool = get_tidb_pool(&format!("{}/{}", url, "refno_infos")).await;
+    let info_pool = get_tidb_pool(&format!("{}/{}", url, PDMS_INFO_DB)).await;
     let refno = RefU64(65721589565564);
     let project = element::query_refno_infos(refno, info_pool).await?;
     let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;

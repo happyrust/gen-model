@@ -16,10 +16,10 @@ use parse_pdms_db::{db1_dehash, parse_file};
 use parse_pdms_db::tool::hash_tool::{f32_round_2, f64_round_2, f64_round_3};
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolConnection;
-use aios_database::consts::URL;
 use aios_database::database::{get_connect_url, get_tidb_pool, init_database, init_info_database};
 use aios_database::helper::{qualified_column_name, qualified_table_name};
 use aios_database::options::DbOption;
+use aios_database::consts::*;
 
 use sqlx::Executor;
 use aios_database::api::attr::insert_attr_info;
@@ -40,7 +40,7 @@ pub async fn test_batch_insert(url: &str) {
         .await
         .unwrap();
     let mut pool = connection.try_acquire().unwrap();
-    let sql = r#"INSERT pdms_elements (id, refno, type, name) VALUES (1, 100, 'test', 'unset'), (2, 100, 'test', 'unset')"#.to_string();
+    let sql = format!(r#"INSERT {PDMS_ELEMENTS_TABLE} (id, refno, type, name) VALUES (1, 100, 'test', 'unset'), (2, 100, 'test', 'unset')"#);
     let result = sqlx::query(&sql).execute(&mut pool).await;
     match result {
         Ok(_) => {}
@@ -63,8 +63,8 @@ async fn main() -> anyhow::Result<()> {
 
     let url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port);
     init_info_database(&get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port)).await;
-    let info_pool = get_tidb_pool(&format!("{}/{}", url, "pdms_infos")).await;
-    let mut info_conn = info_pool.clone().acquire().await?;
+    let pdms_info_pool = get_tidb_pool(&format!("{}/{}", url, PDMS_INFO_DB)).await;
+    let mut pdms_info_conn = pdms_info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
     for project in &db_option.included_projects {
         init_database(project, &url).await;
@@ -114,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         create_tables_elapse += table_time.elapsed().as_millis();
-        let result = info_conn.execute(tables::gen_create_dbno_filename_tables_sql().as_str()).await;
+        let result = pdms_info_conn.execute(tables::gen_create_dbno_filename_tables_sql().as_str()).await;
         match result {
             Ok(_) => {}
             Err(e) => {
@@ -123,11 +123,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         if db_option.types_multi_thread {
-            sync_total_async_threading(&db_option, project, project_pool.clone(), info_pool.clone()).await.expect("同步数据失败");
+            sync_total_async_threading(&db_option, project, project_pool.clone(), pdms_info_pool.clone()).await.expect("同步数据失败");
         } else {
-            sync_total_async(&db_option, project, project_pool.clone(), info_pool.clone()).await.expect("同步数据失败");
+            sync_total_async(&db_option, project, project_pool.clone(), pdms_info_pool.clone()).await.expect("同步数据失败");
         }
-        // insert_project_mdb(project_pool.clone(),info_pool.clone()).await?;
+        insert_project_mdb(project_pool.clone(), pdms_info_pool.clone()).await?;
     }
     println!("创建表花费时间: {} ms", create_tables_elapse);
     println!("初始化数据库时间: {} ms", time.elapsed().as_millis() - create_tables_elapse);
@@ -138,7 +138,7 @@ pub fn gen_explicit_att_insert_sql(refno: RefU64, type_name: &str, owner: RefU64
     let mut sql = String::new();
     let mut table_columns_sql = String::new();
     let table_name = type_name.replace("join", "joint");
-    table_columns_sql.push_str("insert ignore into explicit_att (id, refno, type, owner, data)");
+    table_columns_sql.push_str("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (id, refno, type, owner, data)");
 
     let mut table_vals_sql = String::new();
     let data = hex::encode(bincode::serialize(e_att).unwrap());
@@ -323,7 +323,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                                                                      version.0, &project_clones, db_type.clone());
                             let mut info_conn = info_pool_clone.acquire().await.unwrap();
                             //保存dbno的信息表
-                            let mut sql = "INSERT IGNORE INTO dbno_filename ( dbno,filename,version,project,db_type ) VALUES ".to_string();
+                            let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( dbno,filename,version,project,db_type ) VALUES ");
                             sql.push_str(dbno_filename_sql.as_str());
                             sql.remove(sql.len() - 1);
                             let result = info_conn.execute(sql.as_str()).await;
@@ -336,7 +336,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                             }
 
                             //保存refno的信息表
-                            let mut sql = "INSERT IGNORE INTO refno_infos (ref0, project) VALUES ".to_string();
+                            let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (ref0, project) VALUES ");
                             for kv in &refno_info_map {
                                 sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
                             }
@@ -374,13 +374,7 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                     let implicit_values_sql = take(&mut implicit_values_sql);
                                     let explicit_values_sql = take(&mut explicit_values_sql);
                                     let pdms_elements_sql = take(&mut pdms_elements_sql);
-                                    let dbno_filename_sql = take(&mut dbno_filename_sql);
                                     let implicit_query_data = implicit_query_data.clone();
-                                    let pool_clone = pool_clone.clone();
-                                    let info_pool_clone = info_pool_clone.clone();
-                                    // let insert_handle = tokio::spawn(async move {
-
-
                                     //执行隐式数据保存
                                     let mut sql = String::new();
                                     sql.push_str(implicit_query_data.as_ref().unwrap().0.as_str());
@@ -393,9 +387,8 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                             dbg!(sql.as_str());
                                         }
                                     }
-
                                     //执行显示数据保存
-                                    let mut sql = "INSERT IGNORE INTO explicit_att (id, refno, type, owner, data) VALUES ".to_string();
+                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (id, refno, type, owner, data) VALUES ");
                                     sql.push_str(explicit_values_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
@@ -406,9 +399,8 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                             dbg!(sql.as_str());
                                         }
                                     }
-
-                                    // pdms_elements 保存
-                                    let mut sql = "INSERT IGNORE INTO pdms_elements (id, refno, type, owner, name, dbno , order_num ) VALUES ".to_string();
+                                    // {PDMS_ELEMENTS_TABLE} 保存
+                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (id, refno, type, owner, name, dbno , order_num ) VALUES ");
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
@@ -419,14 +411,6 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                             dbg!(sql.as_str());
                                         }
                                     }
-                                    // });
-
-                                    // insert_join_handles.push(insert_handle);
-                                    //
-                                    // if insert_join_handles.len() == batch_handles_cnt || i == (kv.value().len() - 1){
-                                    //     let insert_join_handles = take(&mut insert_join_handles);
-                                    //     futures::future::join_all(insert_join_handles).await;
-                                    // }
                                 }
                             }
                         }
@@ -508,7 +492,7 @@ pub async fn sync_total_async_threading(db_option: &DbOption, project: &str, poo
                                                                                      version.0, &project_clones, db_type.clone());
                             let mut info_conn = info_pool_clone.acquire().await.unwrap();
                             //保存dbno的信息表
-                            let mut sql = "INSERT IGNORE INTO dbno_filename ( dbno,filename,version,project,db_type ) VALUES ".to_string();
+                            let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( dbno,filename,version,project,db_type ) VALUES ");
                             sql.push_str(dbno_filename_sql.as_str());
                             sql.remove(sql.len() - 1);
                             let result = info_conn.execute(sql.as_str()).await;
@@ -521,7 +505,7 @@ pub async fn sync_total_async_threading(db_option: &DbOption, project: &str, poo
                             }
 
                             //保存refno的信息表
-                            let mut sql = "INSERT IGNORE INTO refno_infos (ref0, project) VALUES ".to_string();
+                            let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (ref0, project) VALUES ");
                             for kv in &refno_info_map {
                                 sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
                             }
@@ -578,7 +562,7 @@ pub async fn sync_total_async_threading(db_option: &DbOption, project: &str, poo
                                         }
 
                                         //执行显示数据保存
-                                        let mut sql = "INSERT IGNORE INTO explicit_att (id, refno, type, owner, data) VALUES ".to_string();
+                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (id, refno, type, owner, data) VALUES ");
                                         sql.push_str(explicit_values_sql.as_str());
                                         sql.remove(sql.len() - 1);
                                         let result = project_conn.execute(sql.as_str()).await;
@@ -590,8 +574,8 @@ pub async fn sync_total_async_threading(db_option: &DbOption, project: &str, poo
                                             }
                                         }
 
-                                        // pdms_elements 保存
-                                        let mut sql = "INSERT IGNORE INTO pdms_elements (id, refno, type, owner, name, dbno , order_num ) VALUES ".to_string();
+                                        // {PDMS_ELEMENTS_TABLE} 保存
+                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (id, refno, type, owner, name, dbno , order_num ) VALUES ");
                                         sql.push_str(pdms_elements_sql.as_str());
                                         sql.remove(sql.len() - 1);
                                         let result = project_conn.execute(sql.as_str()).await;

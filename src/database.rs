@@ -3,7 +3,7 @@ use parse_pdms_db::local_db::DbOption;
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::mysql::MySqlArguments;
 use sqlx::pool::PoolConnection;
-use crate::consts::URL;
+use crate::consts::*;
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -22,42 +22,41 @@ pub fn get_connect_url(ip: &str, user: &str, pwd: &str, project: &str, port: &st
 }
 
 pub async fn get_tidb_pool(connection_str: &str) -> Pool<MySql> {
-    let connection = MySqlPool::connect(connection_str)
+    let pool = MySqlPool::connect(connection_str)
         .await
         .unwrap();
-    connection
-    // connection.try_acquire().unwrap()
+    pool
 }
 
 //重新创建database
-pub async fn init_database(project: &str, url: &str) {
+pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()>{
     let connection = MySqlPool::connect(url)
         .await
         .unwrap();
     let mut pool = connection.try_acquire().unwrap();
 
-    let result = sqlx::query(&format!("drop database if exists {project}")).execute(&mut pool).await;
-    let result = sqlx::query(&format!("create database {project}")).execute(&mut pool).await;
-    // let result = sqlx::query(&format!("use {project}")).execute(&mut pool).await;
+    sqlx::query(&format!("drop database if exists {project}")).execute(&mut pool).await?;
+    sqlx::query(&format!("create database {project}")).execute(&mut pool).await?;
+    Ok(())
 }
 
 /// 创建 info 库和表
-pub async fn init_info_database(url: &str) {
+pub async fn init_info_database(url: &str) -> anyhow::Result<()> {
     let connection = MySqlPool::connect(&url)
         .await
         .unwrap();
     let mut pool = connection.try_acquire().unwrap();
-    sqlx::query("create database if not exists pdms_infos;").execute(&mut pool).await;
+    sqlx::query(&format!("CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB};")).execute(&mut pool).await?;
 
     dbg!(url);
-    let connection = MySqlPool::connect(&format!("{url}/pdms_infos"))
+    let connection = MySqlPool::connect(&format!("{url}/{PDMS_INFO_DB}"))
         .await
         .unwrap();
     let mut pool = connection.try_acquire().unwrap();
     let mut sql = String::new();
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, "refno_infos"));
+    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, {PDMS_REFNO_INFOS_TABLE}));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "ref0"));
-    sql.push_str(&format!(r#"{} varchar(20)"#, "project"));
+    sql.push_str(&format!(r#"{} VARCHAR(20)"#, "project"));
 
     sql.push_str(");");
     let result = sqlx::query(&sql).execute(&mut pool).await;
@@ -67,4 +66,6 @@ pub async fn init_info_database(url: &str) {
             dbg!(sql.as_str());
         }
     }
+
+    Ok(())
 }

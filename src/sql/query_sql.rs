@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::env;
 use aios_core::pdms_types::{AiosStr, AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefU64};
 use anyhow::anyhow;
 use dashmap::DashMap;
@@ -8,6 +9,7 @@ use smol_str::SmolStr;
 use sqlx::{MySql, Pool, Row};
 use crate::api::{attr, element};
 use crate::api::element::{query_children, query_pdms_elements_type_name, query_refno_infos};
+use crate::consts::PDMS_INFO_DB;
 use crate::database::get_tidb_pool;
 use crate::REFNO_INFO_MAP;
 use crate::sql::gen_sql::*;
@@ -15,7 +17,7 @@ use crate::sql::gen_sql::*;
 #[tokio::test]
 async fn test_query_implicit_attr() -> anyhow::Result<()> {
     let url = "mysql://root:root@127.0.0.1:3306";
-    let info_pool = get_tidb_pool(&format!("{}/{}", url, "pdms_infos")).await;
+    let info_pool = get_tidb_pool(&format!("{}/{}", url, PDMS_INFO_DB)).await;
     let refno = RefU64(103010495627266);
     let project = query_refno_infos(refno, info_pool).await?;
     let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
@@ -27,7 +29,7 @@ async fn test_query_implicit_attr() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_get_world_children() -> anyhow::Result<()> {
     // let url = "mysql://root:root@127.0.0.1:3306";
-    // let info_pool = get_tidb_pool(&format!("{}/{}", url, "refno_infos")).await;
+    // let info_pool = get_tidb_pool(&format!("{}/{}", url, PDMS_INFO_DB)).await;
     // let refno = RefU64(66108136620032);
     // let project = query_refno_infos(refno, info_pool).await?;
     // let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
@@ -39,7 +41,7 @@ async fn test_get_world_children() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_query_explicit_attr() -> anyhow::Result<()> {
     let url = "mysql://root:root@127.0.0.1:3306";
-    let info_pool = get_tidb_pool(&format!("{}/{}", url, "refno_infos")).await;
+    let info_pool = get_tidb_pool(&format!("{}/{}", url, PDMS_INFO_DB)).await;
     let refno = RefU64(105548821299733);
     let project = query_refno_infos(refno, info_pool).await?;
     let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
@@ -50,9 +52,11 @@ async fn test_query_explicit_attr() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_full_attr() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let info_pool = get_tidb_pool(&format!("{}/{}", url, "refno_infos")).await;
-    let refno = RefU64(65721589565564);
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    dbg!(&url);
+    let info_pool = get_tidb_pool(&format!("{}/{}", url, PDMS_INFO_DB)).await;
+    let refno = RefU64::from_two_nums(23548, 402);
     let project = query_refno_infos(refno, info_pool).await?;
     let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
     let v = attr::query_full_attr(refno, pool).await?;

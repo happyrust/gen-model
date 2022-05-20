@@ -1,5 +1,6 @@
 use sqlx::{MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
+use crate::consts::*;
 
 pub async fn query_dbtype_from_dbno(dbno:i32, pool:Pool<MySql>) -> anyhow::Result<String> {
     let sql = gen_query_dbtype_from_dbno(dbno);
@@ -10,7 +11,7 @@ pub async fn query_dbtype_from_dbno(dbno:i32, pool:Pool<MySql>) -> anyhow::Resul
 
 fn gen_query_dbtype_from_dbno(dbno:i32) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select db_type from dbno_filename where dbno = {}",dbno));
+    sql.push_str(&format!("select db_type from {PDMS_DBNO_INFOS_TABLE} where dbno = {}",dbno));
     sql
 }
 
@@ -22,6 +23,6 @@ pub async fn query_dbtype_from_dbno_count(dbno:i32,pool:Pool<MySql>) -> anyhow::
 
 fn gen_query_dbtype_from_dbno_count(dbno:i32) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select count(*) from dbno_filename where dbno = {}",dbno));
+    sql.push_str(&format!("select count(*) from {PDMS_DBNO_INFOS_TABLE} where dbno = {}",dbno));
     sql
 }

@@ -2,6 +2,7 @@ use aios_core::pdms_types::AiosStr;
 use dashmap::DashMap;
 use smol_str::SmolStr;
 use sqlx::{MySql, MySqlPool, Pool};
+use crate::consts::*;
 use crate::database::get_connect_url;
 use crate::options::DbOption;
 
@@ -41,7 +42,7 @@ impl AiosDBManager {
             }
         }
 
-        let info_url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "refno_infos", &db_option.port);
+        let info_url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, PDMS_REFNO_INFOS_TABLE, &db_option.port);
         let info_db = MySqlPool::connect(&info_url).await?;
         Ok(
             Self {
