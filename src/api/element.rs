@@ -161,14 +161,8 @@ pub async fn query_dbno_world(dbno: i32, pool: Pool<MySql>) -> anyhow::Result<Op
         Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>(0) as u64))) }
         Err(_) => { Ok(None) }
     }
-
 }
 
-// fn gen_query_implicit_attr_sql(refno: RefU64, type_name: &str) -> String {
-//     let mut sql = String::new();
-//     sql.push_str(&format!("select * from {} where id = {}", type_name, refno.0));
-//     sql
-// }
 
 fn gen_query_dbno_type_sql(dbno: i32, type_name: &str) -> String {
     let mut sql = String::new();
@@ -218,11 +212,11 @@ pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, ord
     sql
 }
 
-pub fn gen_refno_infos_insert_sql(refno: RefU64, project: &str) -> String {
-    let mut sql = String::new();
-    sql.push_str(&format!(r#"({},'{}') ,"#, refno.get_0(), project));
-    sql
-}
+// pub fn gen_refno_infos_insert_sql(refno: RefU64, project: &str) -> String {
+//     let mut sql = String::new();
+//     sql.push_str(&format!(r#"({},'{}') ,"#, refno.get_0(), project));
+//     sql
+// }
 
 pub fn gen_dbno_filename_insert_sql(dbno: u32, filename: &str, version: u32, project: &str, db_type: SmolStr) -> String {
     let mut sql = String::new();
