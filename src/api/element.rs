@@ -309,7 +309,7 @@ async fn test_query_world_children() -> anyhow::Result<()> {
 async fn test_query_children_pdms_tree() -> anyhow::Result<()> {
     let url = "mysql://root:root@127.0.0.1:3306";
     let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
-    let refno :RefU64 = RefI32Tuple((23584,31)).into();
+    let refno :RefU64 = RefI32Tuple((15392,0)).into();
     let v = query_children_pdms_tree("SAMPLE", "DESI",refno ,pool.clone()).await?;
     println!("v={:?}", v);
     Ok(())

@@ -16,6 +16,7 @@ futures = "0.3.21"
 smol_str = "0.1.23"
 itertools = "0.10.3"
 lazy_static = "1.4.0"
+async-trait = "0.1.52"
 
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path =  "../aios_core"}
@@ -24,6 +25,8 @@ clap = { version = "3.1.18", features = ["derive"] }
 dashmap = { version = "5.2.0", features = ["serde"] }
 tokio = { vertion = "1.18.2", features = ["full"] }
 serde = {version="1.0.137", features=["derive"]}
+id_tree = { version = "1.8.0", features = ["serde_support"] }
+glam = { version = "0.20.2", features = ["transform-types"] }
 sea-orm = { version = "0.8.0", features = ["default", "runtime-tokio"]}
 
 
