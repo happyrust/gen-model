@@ -6,8 +6,8 @@ use anyhow::Result;
 use futures::poll;
 use crate::api::element::query_mdb_module_worlds;
 
-pub async fn insert_project_mdb(pool:Pool<MySql>) -> anyhow::Result<()> {
-    let project_mdb = query_mdb_module_worlds(pool.clone()).await?;
+pub async fn insert_project_mdb(pool:Pool<MySql>,info_pool:Pool<MySql>) -> anyhow::Result<()> {
+    let project_mdb = query_mdb_module_worlds(pool.clone(),info_pool).await?;
     let sql = gen_insert_project_mdb_sql(project_mdb);
     let mut conn = pool.acquire().await?;
     let result = conn.execute(sql.as_str()).await;

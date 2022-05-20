@@ -100,7 +100,7 @@ pub async fn query_pdms_elements_type_name(refno: RefU64, pool: Pool<MySql>) -> 
     Ok(result.get::<String, _>("type"))
 }
 
-pub async fn query_mdb_module_worlds(pool: Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<RefU64>>>> {
+pub async fn query_mdb_module_worlds(pool: Pool<MySql>,info_pool: Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<RefU64>>>> {
     let mut result = HashMap::new();
     let mdbs = query_type_refnos("MDB", pool.clone()).await?;
     for mdb in mdbs {
@@ -111,11 +111,12 @@ pub async fn query_mdb_module_worlds(pool: Pool<MySql>) -> anyhow::Result<HashMa
             let dbs = dbs.refu64_vec_value().unwrap();
             for db in dbs {
                 if let Some(dbno) = query_dbno_from_db(db, pool.clone()).await? {
-                    let b = query_dbtype_from_dbno_count(dbno, pool.clone()).await? == 0;
+                    let b = query_dbtype_from_dbno_count(dbno, info_pool.clone()).await? == 0;
                     if !b {
-                        let db_type = query_dbtype_from_dbno(dbno, pool.clone()).await?;
-                        let world_refno = query_dbno_world(dbno, pool.clone()).await?;
-                        val.entry(db_type).or_insert_with(Vec::new).push(world_refno);
+                        let db_type = query_dbtype_from_dbno(dbno, info_pool.clone()).await?;
+                        if let Some(world_refno) = query_dbno_world(dbno, pool.clone()).await? {
+                            val.entry(db_type).or_insert_with(Vec::new).push(world_refno);
+                        }
                     }
                 }
             }
@@ -153,10 +154,14 @@ pub async fn query_dbno_from_db(refno: RefU64, pool: Pool<MySql>) -> anyhow::Res
     // };
 }
 
-pub async fn query_dbno_world(dbno: i32, pool: Pool<MySql>) -> anyhow::Result<RefU64> {
+pub async fn query_dbno_world(dbno: i32, pool: Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_dbno_type_sql(dbno, "WORL");
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    Ok(RefU64(result.get::<i64, _>(0) as u64))
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    return match result {
+        Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>(0) as u64))) }
+        Err(_) => { Ok(None) }
+    }
+
 }
 
 // fn gen_query_implicit_attr_sql(refno: RefU64, type_name: &str) -> String {
