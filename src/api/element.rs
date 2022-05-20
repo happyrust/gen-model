@@ -130,6 +130,7 @@ pub async fn query_mdb_module_worlds(pool: Pool<MySql>, info_pool: Pool<MySql>) 
     let mdbs = query_type_refnos("MDB", pool.clone()).await?;
     for mdb in mdbs {
         let mdb_attr = query_explicit_attr(mdb, pool.clone()).await?;
+        // dbg!(mdb_attr.to_string_hashmap());
         let mdb_name = query_name(mdb, pool.clone()).await?;
         if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
             let mut val = HashMap::new();
