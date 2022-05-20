@@ -124,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
         }
         if db_option.types_multi_thread {
             sync_total_async_threading(&db_option, project, project_pool.clone(), info_pool.clone()).await.expect("同步数据失败");
-        }else{
+        } else {
             sync_total_async(&db_option, project, project_pool.clone(), info_pool.clone()).await.expect("同步数据失败");
         }
         // insert_project_mdb(project_pool.clone(),info_pool.clone()).await?;
@@ -339,9 +339,8 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                             let mut sql = "INSERT IGNORE INTO refno_infos (ref0, project) VALUES ".to_string();
                             for kv in &refno_info_map {
                                 sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
-                                sql.remove(sql.len() - 1);
                             }
-
+                            sql.remove(sql.len() - 1);
                             let result = info_conn.execute(sql.as_str()).await;
                             match result {
                                 Ok(_) => {}
@@ -380,7 +379,6 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
                                     let pool_clone = pool_clone.clone();
                                     let info_pool_clone = info_pool_clone.clone();
                                     // let insert_handle = tokio::spawn(async move {
-
 
 
                                     //执行隐式数据保存
@@ -448,7 +446,181 @@ pub async fn sync_total_async(db_option: &DbOption, project: &str, pool: Pool<My
 
 ///单线程保存
 pub async fn sync_total_async_threading(db_option: &DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
+    let mut data_dir = Path::new(&db_option.project_path);
+    let need_parsing_files = &db_option.included_db_files;
+    let project_dir = data_dir.join(&project);
+    let batch_chunks_cnt = db_option.sql_batch_insert_chunk as usize;
+    let batch_handles_cnt = db_option.batch_insert_handles_chunk as usize;
+    let mut target_dir = fs::read_dir(&project_dir).unwrap().into_iter().map(|entry| {
+        let entry = entry.unwrap();
+        entry.path()
+    }).find(|x| x.file_name().unwrap().to_str().unwrap().ends_with("000")).unwrap();
 
+    let mut children_files = fs::read_dir(target_dir)?.into_iter().map(|entry| {
+        let entry = entry.unwrap();
+        entry.path()
+    }).collect::<Vec<PathBuf>>();
 
-    return Ok(());
+    let mut handles = vec![];
+    let project = Arc::new(project.to_string());
+    let url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port);
+    let db_option = Arc::new(db_option.clone());
+    for path in children_files {
+        let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
+        let file_name_clone = Arc::new(file_name.clone());
+        if !file_name.ends_with("com") && !file_name.ends_with("mis") {
+            if need_parsing_files.is_none() || need_parsing_files.as_ref().unwrap().contains(&file_name) {
+                println!("path={:?}", &file_name);
+                let project = project.clone();
+                let project_clone = project.to_string();
+                let pool_clone = pool.clone();
+                let info_pool_clone = info_pool.clone();
+                let filename_clone = file_name_clone.clone();
+                let db_option_clone = db_option.clone();
+                let handle = tokio::spawn(async move {
+                    let project_clones = project_clone.clone();
+                    //后面再考虑成不同的table，如显示属性和隐藏属性
+                    if let Ok(Ok(PdmsDbData {
+                                     all_attr_map,
+                                     total_attr_map,
+                                     ele_id_tree,
+                                     type_ele_map,
+                                     refno_node_id_map,
+                                     string_lookup,
+                                     refno_info_map,
+                                     children_map,
+                                     db_type,
+                                     db_no,
+                                     field_no,
+                                     version,
+                                     room_code_map,
+                                     ..
+                                 })) = tokio::task::spawn_blocking(move || {
+                        parse_file(&path, &None, &file_name, &project_clone.clone(), "")
+                    }).await {
+                        for kv in &type_ele_map {
+                            let mut implicit_query_data = None;
+                            let mut ref0_info_sql = String::new();
+                            let mut implicit_values_sql = String::new();
+                            let mut explicit_values_sql = String::new();
+                            let mut pdms_elements_sql = String::new();
+                            let mut dbno_filename_sql = gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(),
+                                                                                     version.0, &project_clones, db_type.clone());
+                            let mut info_conn = info_pool_clone.acquire().await.unwrap();
+                            //保存dbno的信息表
+                            let mut sql = "INSERT IGNORE INTO dbno_filename ( dbno,filename,version,project,db_type ) VALUES ".to_string();
+                            sql.push_str(dbno_filename_sql.as_str());
+                            sql.remove(sql.len() - 1);
+                            let result = info_conn.execute(sql.as_str()).await;
+                            match result {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    dbg!(&e);
+                                    dbg!(sql.as_str());
+                                }
+                            }
+
+                            //保存refno的信息表
+                            let mut sql = "INSERT IGNORE INTO refno_infos (ref0, project) VALUES ".to_string();
+                            for kv in &refno_info_map {
+                                sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
+                            }
+                            sql.remove(sql.len() - 1);
+                            let result = info_conn.execute(sql.as_str()).await;
+                            match result {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    dbg!(&e);
+                                    dbg!(sql.as_str());
+                                }
+                            }
+
+                            for (i, refno) in kv.value().iter().enumerate() {
+                                let att = total_attr_map.get(refno).unwrap();
+                                if implicit_query_data.is_none() {
+                                    implicit_query_data = Some(gen_implicit_attr_query_sql(att.value()));
+                                }
+                                let column_hashs = &implicit_query_data.as_ref().unwrap().1;
+                                // ref0_info_sql.push_str(&gen_refno_infos_insert_sql(*refno, &project_clones.clone()));
+                                implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), column_hashs));
+                                explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
+                                let name = get_name(&total_attr_map, &children_map, *refno).replace(r#"'"#, r#"\'"#)
+                                    .replace(r#"""#, r#"\""#);
+                                let order = get_order(&total_attr_map, &children_map, *refno);
+                                pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order));
+                                //获取当前项目的连接
+                                let mut project_conn = pool_clone.acquire().await.unwrap();
+
+                                let mut insert_join_handles = vec![];
+                                if (i != 0 && i % batch_chunks_cnt == 0) || i == (kv.value().len() - 1) {
+                                    // dbg!(i % batch_chunks_cnt );
+                                    let info_sql = take(&mut ref0_info_sql);
+                                    let implicit_values_sql = take(&mut implicit_values_sql);
+                                    let explicit_values_sql = take(&mut explicit_values_sql);
+                                    let pdms_elements_sql = take(&mut pdms_elements_sql);
+                                    let dbno_filename_sql = take(&mut dbno_filename_sql);
+                                    let implicit_query_data = implicit_query_data.clone();
+                                    let pool_clone = pool_clone.clone();
+                                    let info_pool_clone = info_pool_clone.clone();
+                                    let insert_handle = tokio::spawn(async move {
+
+                                        //执行隐式数据保存
+                                        let mut sql = String::new();
+                                        sql.push_str(implicit_query_data.as_ref().unwrap().0.as_str());
+                                        sql.push_str(implicit_values_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(_) => {
+                                                dbg!(sql.as_str());
+                                            }
+                                        }
+
+                                        //执行显示数据保存
+                                        let mut sql = "INSERT IGNORE INTO explicit_att (id, refno, type, owner, data) VALUES ".to_string();
+                                        sql.push_str(explicit_values_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
+                                        }
+
+                                        // pdms_elements 保存
+                                        let mut sql = "INSERT IGNORE INTO pdms_elements (id, refno, type, owner, name, dbno , order_num ) VALUES ".to_string();
+                                        sql.push_str(pdms_elements_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
+                                        }
+                                    });
+
+                                    insert_join_handles.push(insert_handle);
+                                    if insert_join_handles.len() == batch_handles_cnt || i == (kv.value().len() - 1) {
+                                        let insert_join_handles = take(&mut insert_join_handles);
+                                        futures::future::join_all(insert_join_handles).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+                handles.push(handle);
+            }
+        }
+        // break;
+    }
+
+    futures::future::join_all(handles).await;
+
+    Ok(())
 }
