@@ -106,6 +106,7 @@ pub async fn query_mdb_module_worlds(pool: Pool<MySql>, info_pool: Pool<MySql>) 
     let mdbs = query_type_refnos("MDB", pool.clone()).await?;
     for mdb in mdbs {
         let mdb_attr = query_explicit_attr(mdb, pool.clone()).await?;
+        // dbg!(mdb_attr.to_string_hashmap());
         let mdb_name = query_name(mdb, pool.clone()).await?;
         if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
             let mut val = HashMap::new();
@@ -309,7 +310,7 @@ async fn test_query_world_children() -> anyhow::Result<()> {
 async fn test_query_children_pdms_tree() -> anyhow::Result<()> {
     // let url = "mysql://root:root@127.0.0.1:3306";
     let url = "mysql://root:@127.0.0.1:4000";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let pool = get_tidb_pool(&format!("{}/{}", url, "Sample")).await;
     let refno: RefU64 = RefI32Tuple((15392, 0)).into();
     let v = query_children_pdms_tree("SAMPLE", "DESI", refno, pool.clone()).await?;
     println!("v={:?}", v);

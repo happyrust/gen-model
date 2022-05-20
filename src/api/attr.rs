@@ -71,7 +71,8 @@ pub async fn query_explicit_attr(refno:RefU64, pool:Pool<MySql>) -> anyhow::Resu
     let sql = gen_query_explicit_attr_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     let val = result.get::<Vec<u8>,_>("data");
-    Ok(bincode::deserialize::<AttrMap>(&val)?)
+    // Ok(bincode::deserialize::<AttrMap>(&val)?)
+    Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
 }
 
 pub async fn query_full_attr(refno:RefU64, pool:Pool<MySql>) -> anyhow::Result<AttrMap> {
