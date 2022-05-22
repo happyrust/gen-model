@@ -16,7 +16,7 @@ use parse_pdms_db::{db1_dehash, parse_file};
 use parse_pdms_db::tool::hash_tool::{f32_round_2, f64_round_2, f64_round_3};
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolConnection;
-use aios_database::database::{get_connect_url, get_tidb_pool, init_database, init_info_database, sync_pdms};
+use aios_database::database::*;
 use aios_database::helper::{qualified_column_name, qualified_table_name};
 use aios_database::options::DbOption;
 use aios_database::consts::*;
@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
     dbg!(&db_option);
 
     if db_option.total_sync {
-        sync_pdms(db_option).await?;
+        sync_pdms(&db_option).await?;
     }
 
     Ok(())

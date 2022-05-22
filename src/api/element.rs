@@ -1,6 +1,7 @@
 use aios_core::pdms_types::{AiosStr, NounHash, RefI32Tuple, RefU64, RefU64Vec};
 use sqlx::{Error, MySql, Pool, Row};
 use std::collections::{BTreeMap, HashMap};
+use std::env;
 use anyhow::anyhow;
 use smol_str::SmolStr;
 use parse_pdms_db::parse::WholeAttMap;
@@ -12,9 +13,10 @@ use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use crate::api::attr::{query_explicit_attr, query_implicit_attr};
 use crate::api::dbno_filename::{query_dbtype_from_dbno, query_dbtype_from_dbno_count};
 use crate::api::project_mdb::query_world_data;
-use crate::database::get_tidb_pool;
+use crate::api::test_sample::{get_test_info_pool, get_test_sample_pool};
 use crate::sql::query_sql;
 use crate::consts::*;
+use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 通过 refno 返回对应的 type
 pub async fn query_refno_type(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<String> {
@@ -93,14 +95,14 @@ fn gen_query_refno_infos_sql(refno: RefU64) -> String {
     sql
 }
 
-pub async fn query_refno_infos(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<String> {
+pub async fn query_project_name(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<String> {
     let sql = gen_query_refno_infos_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     let val = result.get::<String, _>("project");
     Ok(val)
 }
 
-pub async fn query_refno_infos_hash(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<u32> {
+pub async fn query_project_hash(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<u32> {
     let sql = gen_query_refno_infos_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     let val = result.get::<String, _>("project");
@@ -109,7 +111,7 @@ pub async fn query_refno_infos_hash(refno: RefU64, pool: Pool<MySql>) -> anyhow:
 
 fn gen_query_pdms_elements_type_name_sql(refno: RefU64) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select type from {PDMS_ELEMENTS_TABLE} where id = {} and is_del = 0 ", refno.0));
+    sql.push_str(&format!("SELECT type FROM {PDMS_ELEMENTS_TABLE} WHERE id = {} AND is_del = 0 ", refno.0));
     sql
 }
 
@@ -122,6 +124,7 @@ fn gen_query_owner_from_id(refno: RefU64) -> String {
 pub async fn query_pdms_elements_type_name(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<String> {
     let sql = gen_query_pdms_elements_type_name_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    // dbg!(&result);
     Ok(result.get::<String, _>("type"))
 }
 
@@ -130,7 +133,6 @@ pub async fn query_mdb_module_worlds(pool: Pool<MySql>, info_pool: Pool<MySql>) 
     let mdbs = query_type_refnos("MDB", pool.clone()).await?;
     for mdb in mdbs {
         let mdb_attr = query_explicit_attr(mdb, pool.clone()).await?;
-        // dbg!(mdb_attr.to_string_hashmap());
         let mdb_name = query_name(mdb, pool.clone()).await?;
         if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
             let mut val = HashMap::new();
@@ -312,55 +314,4 @@ pub fn gen_query_name_sql(refno: RefU64) -> String {
     sql
 }
 
-#[tokio::test]
-async fn test_get_mdb_type() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let info_pool = get_tidb_pool(&format!("{}/{}", url, "pdms_infos")).await;
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
-    let project = query_mdb_module_worlds(pool, info_pool).await?;
-    if let Some(v) = project.get("/SAMPLE") {
-        if let Some(val) = v.get("DESI") {
-            println!("val={:?}", val);
-        }
-    }
-    println!("v={:?}", project);
-    Ok(())
-}
 
-#[tokio::test]
-async fn test_query_world() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
-    let v = query_world("SAMPLE", "DESI", pool.clone()).await?;
-    println!("v={:?}", v);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_query_world_children() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
-    let v = query_world_children("SAMPLE", "DESI", pool.clone()).await?;
-    println!("v={:?}", v);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_query_children_pdms_tree() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
-    let refno: RefU64 = RefI32Tuple((15392, 0)).into();
-    let v = query_children_pdms_tree("SAMPLE", "DESI", refno, pool.clone()).await?;
-    println!("v={:?}", v);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_query_owner_from_id() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
-    let refno: RefU64 = RefI32Tuple((0, 0)).into();
-    let v = query_owner_from_id(refno, pool.clone()).await?;
-    println!("v={:?}", v);
-    Ok(())
-}

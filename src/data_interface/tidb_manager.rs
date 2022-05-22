@@ -1,3 +1,4 @@
+use std::env;
 use aios_core::pdms_types::{AiosStr, AttrMap, PdmsTree, RefI32Tuple, RefU64, RefU64Vec};
 use anyhow::anyhow;
 use approx::abs_diff_eq;
@@ -7,9 +8,8 @@ use id_tree::NodeId;
 use smol_str::SmolStr;
 use sqlx::{MySql, MySqlPool, Pool};
 use crate::api::attr::{query_full_attr, query_ori_from_id, query_position_from_id};
-use crate::api::element::{query_children, query_children_pdms_tree, query_dbno_from_db, query_dbno_world, query_id_name_from_dbno_type, query_name, query_owner_from_id, query_refno_infos, query_refno_infos_hash, query_type_refnos};
+use crate::api::element::{query_children, query_children_pdms_tree, query_dbno_from_db, query_dbno_world, query_id_name_from_dbno_type, query_name, query_owner_from_id, query_project_name, query_project_hash, query_type_refnos};
 use crate::data_interface::data_trait::PdmsDataInterface;
-use crate::database::{get_connect_url, get_tidb_pool};
 use crate::consts::*;
 use crate::options::DbOption;
 use async_trait::async_trait;
@@ -26,12 +26,14 @@ pub struct AiosDBManager {
     pub needed_parse_files: Option<Vec<String>>,
 
     pub project_path: String,  //整个项目的路径
+
+    pub db_option: DbOption,
 }
 
 #[async_trait]
 impl PdmsDataInterface for AiosDBManager {
     async fn get_ele_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
-        let project_hash = query_refno_infos_hash(refno, self.info_db.clone()).await?;
+        let project_hash = query_project_hash(refno, self.info_db.clone()).await?;
         if let Some(project_pool) = self.project_map.get(&project_hash) {
             let attr = query_full_attr(refno, project_pool.pool.clone()).await?;
             return Ok(attr);
@@ -40,7 +42,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     async fn get_ele_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
-        let project_hash = query_refno_infos_hash(refno, self.info_db.clone()).await?;
+        let project_hash = query_project_hash(refno, self.info_db.clone()).await?;
         let mut r = vec![];
         if let Some(project_pool) = self.project_map.get(&project_hash) {
             let children = query_children(refno, project_pool.pool.clone()).await?;
@@ -53,7 +55,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     async fn get_ele_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
-        let project_hash = query_refno_infos_hash(refno, self.info_db.clone()).await?;
+        let project_hash = query_project_hash(refno, self.info_db.clone()).await?;
         let mut result = RefU64Vec::default();
         if let Some(project_pool) = self.project_map.get(&project_hash) {
             let children = query_children(refno, project_pool.pool.clone()).await?;
@@ -69,7 +71,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr> {
-        let project_hash = query_refno_infos_hash(refno, self.info_db.clone()).await?;
+        let project_hash = query_project_hash(refno, self.info_db.clone()).await?;
         if let Some(project_pool) = self.project_map.get(&project_hash) {
             let name = query_name(refno, project_pool.pool.clone()).await?;
             return Ok(SmolStr::new(name));
@@ -99,18 +101,58 @@ impl PdmsDataInterface for AiosDBManager {
 }
 
 impl AiosDBManager {
-    pub async fn init(db_option: &DbOption) -> anyhow::Result<Self> {
-        let dir = db_option.project_path.to_string();
-        let mut project_map = DashMap::new();
+    #[inline]
+    pub fn get_db_option() -> anyhow::Result<DbOption> {
         use config::{Config, ConfigError, Environment, File};
         let s = Config::builder()
             .add_source(File::with_name("DbOption"))
             .build()?;
-        let db_option: DbOption = s.try_deserialize().unwrap();
 
+        s.try_deserialize::<DbOption>().map_err(|x| anyhow!(x.to_string()))
+    }
+
+    #[inline]
+    pub fn get_default_conn_str(d: &DbOption) -> String {
+        let user = d.user.as_str();
+        let pwd = d.password.as_str();
+        let ip = d.ip.as_str();
+        let port = d.port.as_str();
+        format!("mysql://{user}:{pwd}@{ip}:{port}")
+    }
+
+    #[inline]
+    pub fn default_conn_str(&self) -> String {
+        let d = &self.db_option;
+        let user = d.user.as_str();
+        let pwd = d.password.as_str();
+        let ip = d.ip.as_str();
+        let port = d.port.as_str();
+        format!("mysql://{user}:{pwd}@{ip}:{port}")
+    }
+
+    #[inline]
+    pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
+        MySqlPool::connect(&format!("{connection_str}/{project}")).await.map_err(|x| anyhow!(x.to_string()))
+    }
+
+    #[inline]
+    pub async fn get_default_pool(conn_str: &str) -> anyhow::Result<Pool<MySql>> {
+        MySqlPool::connect(conn_str).await.map_err(|x| anyhow!(x.to_string()))
+    }
+
+    pub async fn init_form_config() -> anyhow::Result<Self> {
+        let db_option = Self::get_db_option()?;
+        Self::init(db_option).await
+    }
+
+    pub async fn init(db_option: DbOption) -> anyhow::Result<Self> {
+        let dir = db_option.project_path.to_string();
+        let mut project_map = DashMap::new();
+
+        let db_option = Self::get_db_option()?;
+        let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         for project in &db_option.included_projects {
-            let url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, project, &db_option.port);
-            let project_pool = MySqlPool::connect(&url).await;
+            let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
             match project_pool {
                 Ok(pool) => {
                     let project_db = AiosPdmsProjectTiDB { project: project.clone(), pool };
@@ -120,15 +162,16 @@ impl AiosDBManager {
             }
         }
 
-        let info_url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, PDMS_REFNO_INFOS_TABLE, &db_option.port);
-        let info_db = MySqlPool::connect(&info_url).await?;
+        let info_db = AiosDBManager::get_db_pool(&default_conn, PDMS_REFNO_INFOS_TABLE).await?;
+        let projects = db_option.included_projects.clone();
         Ok(
             Self {
                 project_map,
                 info_db,
-                projects: db_option.included_projects,
+                projects,
                 needed_parse_files: None,
                 project_path: dir,
+                db_option,
             }
         )
     }
@@ -136,7 +179,7 @@ impl AiosDBManager {
     ///获取世界坐标变换矩阵
     #[inline]
     pub async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>> {
-        if let Ok(project) = query_refno_infos(refno, self.info_db.clone()).await {
+        if let Ok(project) = query_project_name(refno, self.info_db.clone()).await {
             let project_hash = AiosStr(SmolStr::new(project)).get_u32_hash();
             if let Some(mut db) = self.project_map.get(&project_hash) {
                 if let Ok(Some(dbno)) = query_dbno_from_db(refno, db.pool.clone()).await {
@@ -193,9 +236,9 @@ impl AiosPdmsProjectTiDB {
                 )) * Quat::from_rotation_z(bangle.to_radians());
                 final_rot
             } else {
-                query_ori_from_id(refno,self.pool.clone()).await?.unwrap_or_default()
+                query_ori_from_id(refno, self.pool.clone()).await?.unwrap_or_default()
             };
-            translation = translation + rotation * (query_position_from_id(refno,self.pool.clone())).await?.unwrap_or_default();
+            translation = translation + rotation * (query_position_from_id(refno, self.pool.clone())).await?.unwrap_or_default();
             rotation = rotation * t;
         }
         Ok(Some(glam::TransformRT {
@@ -209,7 +252,7 @@ impl AiosPdmsProjectTiDB {
         let mut cur_refno = refno;
         let mut r = vec![];
         while let Ok(attr) = self.get_attr(cur_refno).await {
-            if let Ok(Some(owner)) = query_owner_from_id(cur_refno,self.pool.clone()).await {
+            if let Ok(Some(owner)) = query_owner_from_id(cur_refno, self.pool.clone()).await {
                 r.push(attr);
                 cur_refno = owner;
             } else {
@@ -224,11 +267,7 @@ use config::{Config, ConfigError, Environment, File};
 
 #[tokio::test]
 async fn test_get_attr() -> anyhow::Result<()> {
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let mgr = AiosDBManager::init(&db_option).await?;
+    let mgr = AiosDBManager::init_form_config().await?;
     let refno: RefU64 = RefI32Tuple((23584, 8)).into();
     let v = mgr.get_ele_attr(refno).await?;
     println!("v={:?}", v);
@@ -237,11 +276,7 @@ async fn test_get_attr() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_get_children_attr() -> anyhow::Result<()> {
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let mgr = AiosDBManager::init(&db_option).await?;
+    let mgr = AiosDBManager::init_form_config().await?;
     let refno: RefU64 = RefI32Tuple((23584, 7)).into();
     let v = mgr.get_ele_children_attrs(refno).await?;
     println!("v={:?}", v);
@@ -249,14 +284,15 @@ async fn test_get_children_attr() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_get_ancestors_attrs() {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+async fn test_get_ancestors_attrs() -> anyhow::Result<()> {
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
     let db = AiosPdmsProjectTiDB {
         project: "sample".to_string(),
-        pool
+        pool,
     };
-    let refno : RefU64 = RefI32Tuple((23584,5)).into();
+    let refno: RefU64 = RefI32Tuple((23584, 5)).into();
     let v = db.get_ancestors_attrs(refno).await;
-    println!("v={:?}",v);
+    println!("v={:?}", v);
+    Ok(())
 }

@@ -133,6 +133,7 @@ version = "0.1.0"
 dependencies = [
  "aios_core",
  "anyhow",
+ "approx 0.5.1",
  "async-trait",
  "bincode",
  "clap",
