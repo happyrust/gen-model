@@ -65,7 +65,10 @@ pub fn gen_create_element_tables_sql() -> String {
     sql.push_str(&format!(r#"{} VARCHAR(100),"#, "name"));
     sql.push_str(&format!(r#"{} INT ,"#, "dbno"));
     sql.push_str(&format!(r#"{} INT ,"#, "order_num"));
-    sql.push_str(&format!(r#"{} TINYINT(1) "#,"is_del"));
+    sql.push_str(&format!(r#"{} TINYINT(1) ,"#,"is_del"));
+    sql.push_str(&format!(r#"key {}({}) ,"#,"owner","owner"));
+    sql.push_str(&format!(r#"key {}({}) ,"#,"type","type"));
+    sql.push_str(&format!(r#"key {}({}) "#,"is_del","is_del"));
     sql.push_str(");");
 
     sql
@@ -139,7 +142,7 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
                 sql.push_str(&format!(r#"{} TINYINT(1),"#, att_name));
             }
             AttrVal::Vec3Type(_) => {
-                sql.push_str(&format!(r#"{} VARCHAR(20),"#, att_name));
+                sql.push_str(&format!(r#"{} VARCHAR(50),"#, att_name));
             }
             AttrVal::ElementType(_) => {
                 sql.push_str(&format!(r#"{} BIGINT,"#, att_name));

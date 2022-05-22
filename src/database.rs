@@ -29,9 +29,6 @@ pub trait MySqlMethods {
     fn name() -> String;
 }
 
-
-
-
 #[inline]
 pub fn get_connect_url(ip: &str, user: &str, pwd: &str, project: &str, port: &str) -> String {
     format!("mysql://{user}:{pwd}@{ip}:{port}/{project}")
@@ -96,7 +93,9 @@ pub async fn sync_pdms(db_option: DbOption) -> anyhow::Result<()>{
     let mut pdms_info_conn = pdms_info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
     for project in &db_option.included_projects {
-        init_database(project, &url).await;
+        if db_option.create_database {
+            init_database(project, &url).await;
+        }
         let project_conn_string = format!("{url}/{project}");
         let project_pool = get_tidb_pool(&project_conn_string).await;
         let mut conn = project_pool.acquire().await.unwrap();
@@ -236,51 +235,51 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashs: &Vec<NounHas
     let owner = i_att.get_owner().unwrap();
     table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {},"#, refno.0, refno.to_refno_str(), type_name, owner.0));
     for noun_hash in column_hashs {
-        let v = i_att.get(noun_hash).unwrap();
-
-        match v {
-            AttrVal::InvalidType => {}
-            AttrVal::IntegerType(d) => {
-                table_vals_sql.push_str(&format!("{},", d.to_string()));
+        if let Some(v) = i_att.get(noun_hash) {
+            match v {
+                AttrVal::InvalidType => {}
+                AttrVal::IntegerType(d) => {
+                    table_vals_sql.push_str(&format!("{},", d.to_string()));
+                }
+                AttrVal::StringType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, d));
+                }
+                AttrVal::DoubleType(d) => {
+                    table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
+                }
+                AttrVal::DoubleArrayType(d) => {
+                    table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap().as_slice())));
+                }
+                AttrVal::StringArrayType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                }
+                AttrVal::BoolArrayType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                }
+                AttrVal::IntArrayType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                }
+                AttrVal::BoolType(d) => {
+                    let b = if *d { 1 } else { 0 };
+                    table_vals_sql.push_str(&format!("{},", b));
+                }
+                AttrVal::Vec3Type(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                }
+                AttrVal::ElementType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, d));
+                }
+                AttrVal::WordType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, d));
+                }
+                AttrVal::RefU64Type(d) => {
+                    table_vals_sql.push_str(&format!("{},", d.0));
+                }
+                AttrVal::RefU64Array(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                }
+                AttrVal::StringHashType(_) => {}
             }
-            AttrVal::StringType(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-            }
-            AttrVal::DoubleType(d) => {
-                table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
-            }
-            AttrVal::DoubleArrayType(d) => {
-                table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap().as_slice())));
-            }
-            AttrVal::StringArrayType(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-            }
-            AttrVal::BoolArrayType(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-            }
-            AttrVal::IntArrayType(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-            }
-            AttrVal::BoolType(d) => {
-                let b = if *d { 1 } else { 0 };
-                table_vals_sql.push_str(&format!("{},", b));
-            }
-            AttrVal::Vec3Type(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-            }
-            AttrVal::ElementType(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-            }
-            AttrVal::WordType(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-            }
-            AttrVal::RefU64Type(d) => {
-                table_vals_sql.push_str(&format!("{},", d.0));
-            }
-            AttrVal::RefU64Array(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-            }
-            AttrVal::StringHashType(_) => {}
         }
     }
 
@@ -308,7 +307,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
         entry.path()
     }).collect::<Vec<PathBuf>>();
 
-    let mut handles = vec![];
+    // let mut handles = vec![];
     let project = Arc::new(project.to_string());
     let url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port);
     let db_option = Arc::new(db_option.clone());
@@ -324,7 +323,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                 let info_pool_clone = info_pool.clone();
                 let filename_clone = file_name_clone.clone();
                 let db_option_clone = db_option.clone();
-                let handle = tokio::spawn(async move {
+                // let handle = tokio::spawn(async move {
                     let project_clones = project_clone.clone();
                     //后面再考虑成不同的table，如显示属性和隐藏属性
                     if let Ok(Ok(PdmsDbData {
@@ -393,7 +392,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                                 implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), column_hashs));
                                 explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
                                 let name = get_name(&total_attr_map, &children_map, *refno).replace(r#"'"#, r#"\'"#)
-                                    .replace(r#"""#, r#"\""#);
+                                    .replace(r#"""#, r#"\""#).replace(r#"\"#,r#"\\"#);
                                 let order = get_order(&total_attr_map, &children_map, *refno);
                                 pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order));
                                 //获取当前项目的连接
@@ -432,7 +431,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                                         }
                                     }
                                     // {PDMS_ELEMENTS_TABLE} 保存
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (id, refno, type, owner, name, dbno , order_num ) VALUES ");
+                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (id, refno, type, owner, name, dbno , order_num ,is_del ) VALUES ");
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
@@ -447,14 +446,14 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                             }
                         }
                     }
-                });
-                handles.push(handle);
+                // });
+                // handles.push(handle);
             }
         }
         // break;
     }
 
-    futures::future::join_all(handles).await;
+    // futures::future::join_all(handles).await;
 
     Ok(())
 }
@@ -561,7 +560,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                 implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), column_hashs));
                                 explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
                                 let name = get_name(&total_attr_map, &children_map, *refno).replace(r#"'"#, r#"\'"#)
-                                    .replace(r#"""#, r#"\""#);
+                                    .replace(r#"""#, r#"\""#).replace(r#"\"#,r#"\\"#);
                                 let order = get_order(&total_attr_map, &children_map, *refno);
                                 pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order));
                                 //获取当前项目的连接
@@ -607,7 +606,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                         }
 
                                         // {PDMS_ELEMENTS_TABLE} 保存
-                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (id, refno, type, owner, name, dbno , order_num ) VALUES ");
+                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (id, refno, type, owner, name, dbno , order_num ,is_del ) VALUES ");
                                         sql.push_str(pdms_elements_sql.as_str());
                                         sql.remove(sql.len() - 1);
                                         let result = project_conn.execute(sql.as_str()).await;

@@ -1,4 +1,4 @@
-use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefU64};
+use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64};
 use anyhow::anyhow;
 use sqlx::{Error, MySql, Pool, pool, Row};
 use parse_pdms_db::db_tool::db1_hash;
@@ -8,9 +8,10 @@ use dashmap::DashMap;
 use glam::{Quat, Vec3};
 use sqlx::Executor;
 use sqlx::mysql::MySqlRow;
-use crate::api::element::{query_pdms_elements_type_name, query_refno_type};
+use crate::api::element::{query_pdms_elements_type_name, query_refno_type, query_type_refnos};
 use crate::REFNO_INFO_MAP;
 use crate::consts::*;
+use crate::database::get_tidb_pool;
 
 pub async fn query_implicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<AttrMap> {
     let mut r = AttrMap::default();
@@ -73,7 +74,7 @@ pub async fn query_implicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Re
 pub async fn query_explicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<AttrMap> {
     let sql = gen_query_explicit_attr_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    let val = result.get::<Vec<u8>,_>("data");
+    let val = result.get::<Vec<u8>, _>("data");
     // Ok(bincode::deserialize::<AttrMap>(&val)?)
     Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
 }
@@ -107,7 +108,7 @@ pub async fn query_position_from_id(refno: RefU64, pool: Pool<MySql>) -> anyhow:
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
         Ok(v) => {
-            let pos: [f64; 3] = serde_json::from_str(&v.get::<String, _>(0)).unwrap();
+            let pos: [f64; 3] = serde_json::from_str(&v.get::<String, _>(0)).unwrap_or([0.0, 0.0, 0.0]);
             Ok(Some(Vec3::new(pos[0] as f32, pos[1] as f32, pos[2] as f32)))
         }
         Err(_) => { Ok(None) }
@@ -120,11 +121,23 @@ pub async fn query_ori_from_id(refno: RefU64, pool: Pool<MySql>) -> anyhow::Resu
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
         Ok(result) => {
-            let ang: [f64; 3] = serde_json::from_str(&result.get::<String, _>(0)).unwrap();
+            let ang: [f64; 3] = serde_json::from_str(&result.get::<String, _>(0)).unwrap_or([0.0, 0.0, 0.0]);
             let mat = (glam::f32::Mat3::from_rotation_z(ang[2].to_radians() as f32)
                 * glam::f32::Mat3::from_rotation_y(ang[1].to_radians() as f32)
                 * glam::f32::Mat3::from_rotation_x(ang[0].to_radians() as f32));
             Ok(Some(Quat::from_mat3(&mat)))
+        }
+        Err(_) => { Ok(None) }
+    };
+}
+
+pub async fn query_foreign_refno(refno: RefU64, foreign_type: &str, pool: Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
+    let type_name = query_refno_type(refno, pool.clone()).await?;
+    let sql = gen_query_foreign_refno_sql(refno, &type_name, foreign_type);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    return match result {
+        Ok(v) => {
+            return Ok(Some(RefU64(v.get::<i64, _>(0) as u64)));
         }
         Err(_) => { Ok(None) }
     };
@@ -155,6 +168,12 @@ pub fn gen_query_explicit_attr_sql(refno: RefU64) -> String {
     sql
 }
 
+fn gen_query_foreign_refno_sql(refno: RefU64, type_name: &str, foreign_type: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select {} from {} where id = {} ;", foreign_type, type_name, refno.0));
+    sql
+}
+
 fn gen_query_ori_from_id(refno: RefU64, type_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("select ori from {} where id = {} ;", type_name, refno.0));
@@ -163,6 +182,45 @@ fn gen_query_ori_from_id(refno: RefU64, type_name: &str) -> String {
 
 fn gen_position_from_id(refno: RefU64, type_name: &str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select pos from {} where id = {} ;", refno.0, type_name));
+    sql.push_str(&format!("select pos from {} where id = {} ;", type_name, refno.0));
     sql
+}
+
+fn gen_test_not_exist_table_sql() -> String {
+    let sql = "select * from acrw".to_string();
+    sql
+}
+
+
+#[tokio::test]
+async fn test_query_foreign_refno() -> anyhow::Result<()> {
+    let url = "mysql://root:root@127.0.0.1:3306";
+    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let refno: RefU64 = RefI32Tuple((23584, 121)).into();
+    let v = query_foreign_refno(refno, "catr", pool.clone()).await?;
+    println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_position_refno() -> anyhow::Result<()> {
+    let url = "mysql://root:root@127.0.0.1:3306";
+    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let refno: RefU64 = RefI32Tuple((23584, 11)).into();
+    let v = query_position_from_id(refno, pool).await?;
+    println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_test_not_exist_table_sql() -> anyhow::Result<()> {
+    let url = "mysql://root:root@127.0.0.1:3306";
+    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let sql = gen_test_not_exist_table_sql();
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    match result {
+        Ok(v) => { dbg!("exist"); }
+        Err(_) => { dbg!("not exist"); }
+    }
+    Ok(())
 }
