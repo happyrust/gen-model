@@ -13,9 +13,10 @@ use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use crate::api::attr::{query_explicit_attr, query_implicit_attr};
 use crate::api::dbno_filename::{query_dbtype_from_dbno, query_dbtype_from_dbno_count};
 use crate::api::project_mdb::query_world_data;
-use crate::database::get_tidb_pool;
+use crate::api::test_sample::{get_test_info_pool, get_test_sample_pool};
 use crate::sql::query_sql;
 use crate::consts::*;
+use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 通过 refno 返回对应的 type
 pub async fn query_refno_type(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<String> {
@@ -168,14 +169,14 @@ fn gen_query_refno_infos_sql(refno: RefU64) -> String {
     sql
 }
 
-pub async fn query_refno_infos(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<String> {
+pub async fn query_project_name(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<String> {
     let sql = gen_query_refno_infos_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     let val = result.get::<String, _>("project");
     Ok(val)
 }
 
-pub async fn query_refno_infos_hash(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<u32> {
+pub async fn query_project_hash(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<u32> {
     let sql = gen_query_refno_infos_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     let val = result.get::<String, _>("project");
@@ -193,7 +194,7 @@ pub async fn query_id_from_name(name: &str, pool: Pool<MySql>) -> anyhow::Result
 
 fn gen_query_pdms_elements_type_name_sql(refno: RefU64) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select type from {PDMS_ELEMENTS_TABLE} where id = {} and is_del = 0 ", refno.0));
+    sql.push_str(&format!("SELECT type FROM {PDMS_ELEMENTS_TABLE} WHERE id = {} AND is_del = 0 ", refno.0));
     sql
 }
 

@@ -8,58 +8,8 @@ use parse_pdms_db::db_tool::db1_hash;
 use smol_str::SmolStr;
 use sqlx::{MySql, Pool, Row};
 use crate::api::{attr, element};
-use crate::api::element::{query_children, query_pdms_elements_type_name, query_refno_infos};
+use crate::api::element::{query_children, query_pdms_elements_type_name, query_project_name};
 use crate::consts::PDMS_INFO_DB;
-use crate::database::get_tidb_pool;
+use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::REFNO_INFO_MAP;
 use crate::sql::gen_sql::*;
-
-#[tokio::test]
-async fn test_query_implicit_attr() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let info_pool = get_tidb_pool(&format!("{}/{}", url, PDMS_INFO_DB)).await;
-    let refno = RefU64(103010495627266);
-    let project = query_refno_infos(refno, info_pool).await?;
-    let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
-    let v = attr::query_implicit_attr(refno, pool).await.unwrap();
-    println!("v={:?}", v.to_string_hashmap());
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_get_world_children() -> anyhow::Result<()> {
-    // let url = "mysql://root:root@127.0.0.1:3306";
-    // let info_pool = get_tidb_pool(&format!("{}/{}", url, PDMS_INFO_DB)).await;
-    // let refno = RefU64(66108136620032);
-    // let project = query_refno_infos(refno, info_pool).await?;
-    // let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
-    // let v = element::query_children_pdms_tree("SAMPLE","DESI",refno, pool).await?;
-    // println!("v={:?}", v);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_query_explicit_attr() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let info_pool = get_tidb_pool(&format!("{}/{}", url, PDMS_INFO_DB)).await;
-    let refno = RefU64(105548821299733);
-    let project = query_refno_infos(refno, info_pool).await?;
-    let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
-    let v = attr::query_explicit_attr(refno, pool).await?;
-    println!("v={:?}", v.to_string_hashmap());
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_query_full_attr() -> anyhow::Result<()> {
-    let _ = dotenv::dotenv();
-    let url = env::var("DATABASE_URL")?;
-    dbg!(&url);
-    let info_pool = get_tidb_pool(&format!("{}/{}", url, PDMS_INFO_DB)).await;
-    let refno = RefU64::from_two_nums(23548, 402);
-    let project = query_refno_infos(refno, info_pool).await?;
-    let pool = get_tidb_pool(&format!("{}/{}", url, project)).await;
-    let v = attr::query_full_attr(refno, pool).await?;
-    println!("v={:?}", v.to_string_hashmap());
-    Ok(())
-}

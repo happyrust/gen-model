@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::fmt::format;
 use std::time::Instant;
 use aios_core::pdms_types::{AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, RefU64};
 use aios_core::pdms_types::AttrVal::StringType;
@@ -20,6 +21,7 @@ use crate::api::element::*;
 use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use sqlx::Executor;
+use crate::data_interface::tidb_manager::AiosDBManager;
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -29,17 +31,10 @@ pub trait MySqlMethods {
     fn name() -> String;
 }
 
-#[inline]
-pub fn get_connect_url(ip: &str, user: &str, pwd: &str, project: &str, port: &str) -> String {
-    format!("mysql://{user}:{pwd}@{ip}:{port}/{project}")
-}
 
-pub async fn get_tidb_pool(connection_str: &str) -> Pool<MySql> {
-    let pool = MySqlPool::connect(connection_str)
-        .await
-        .unwrap();
-    pool
-}
+
+
+
 
 //重新创建database
 pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()>{
@@ -84,21 +79,18 @@ pub async fn init_info_database(url: &str) -> anyhow::Result<()> {
 }
 
 
-pub async fn sync_pdms(db_option: DbOption) -> anyhow::Result<()>{
+pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()>{
+    println!("开始同步pdms/E3D数据");
     let mut time = Instant::now();
-
-    let url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port);
-    init_info_database(&get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port)).await;
-    let pdms_info_pool = get_tidb_pool(&format!("{}/{}", url, PDMS_INFO_DB)).await;
+    let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
+    init_info_database(&default_conn_str).await?;
+    let pdms_info_pool = AiosDBManager::get_db_pool(&default_conn_str, PDMS_INFO_DB).await?;
     let mut pdms_info_conn = pdms_info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
     for project in &db_option.included_projects {
-        if db_option.create_database {
-            init_database(project, &url).await;
-        }
-        let project_conn_string = format!("{url}/{project}");
-        let project_pool = get_tidb_pool(&project_conn_string).await;
-        let mut conn = project_pool.acquire().await.unwrap();
+        init_database(project, &default_conn_str).await?;
+        let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
+        let mut conn = project_pool.acquire().await?;
         let mut table_time = Instant::now();
         let mut tables_sql = String::new();
         if let Ok(db_info) = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")) {
@@ -309,7 +301,6 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
 
     // let mut handles = vec![];
     let project = Arc::new(project.to_string());
-    let url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port);
     let db_option = Arc::new(db_option.clone());
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
@@ -478,7 +469,6 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
 
     let mut handles = vec![];
     let project = Arc::new(project.to_string());
-    let url = get_connect_url(&db_option.ip, &db_option.user, &db_option.password, "", &db_option.port);
     let db_option = Arc::new(db_option.clone());
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();

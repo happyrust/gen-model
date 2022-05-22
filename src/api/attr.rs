@@ -22,44 +22,46 @@ pub async fn query_implicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Re
     if let Some(val) = REFNO_INFO_MAP.get(&(type_hash as i32)) {
         for info in val.value() {
             if info.offset != 0 {
-                let default_type = db1_dehash(*info.key() as u32).to_lowercase();
+                // let default_type = db1_dehash(*info.key() as u32).to_lowercase();
+                let t = info.name.to_lowercase();
+                let t = t.as_str();
                 match info.att_type {
                     DbAttributeType::INTEGER => {
-                        let v = query_r.get::<i32, _>(default_type.as_str());
+                        let v = query_r.get::<i32, _>(t);
                         r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::IntegerType(v));
                     }
                     DbAttributeType::DOUBLE => {
-                        let v = query_r.get::<f64, _>(default_type.as_str());
+                        let v = query_r.get::<f64, _>(t);
                         r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::DoubleType(v));
                     }
                     DbAttributeType::BOOL => {
-                        let v = query_r.get::<bool, _>(default_type.as_str());
+                        let v = query_r.get::<bool, _>(t);
                         r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::BoolType(v));
                     }
                     DbAttributeType::STRING => {
-                        let v = SmolStr::new(query_r.get::<String, _>(default_type.as_str()));
+                        let v = SmolStr::new(query_r.get::<String, _>(t));
                         r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::StringType(v));
                     }
                     DbAttributeType::ELEMENT => {
-                        let v = query_r.get::<i64, _>(default_type.as_str());
+                        let v = query_r.get::<i64, _>(t);
                         r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::RefU64Type(RefU64(v as u64)));
                     }
                     DbAttributeType::WORD => {
-                        let v = SmolStr::new(query_r.get::<String, _>(default_type.as_str()));
+                        let v = SmolStr::new(query_r.get::<String, _>(t));
                         r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::StringType(v));
                     }
                     DbAttributeType::DOUBLEVEC => {
-                        let v = query_r.get::<Vec<u8>, _>(default_type.as_str());
+                        let v = query_r.get::<Vec<u8>, _>(t);
                         let v = bincode::deserialize::<Vec<f64>>(&v).unwrap();
                         r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::DoubleArrayType(v));
                     }
                     DbAttributeType::INTVEC => {
-                        let v = query_r.get::<String, _>(default_type.as_str());
+                        let v = query_r.get::<String, _>(t);
                         let v = serde_json::from_str::<Vec<i32>>(&v).unwrap();
                         r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::IntArrayType(v));
                     }
                     DbAttributeType::Vec3Type => {
-                        let v = query_r.get::<String, _>(default_type.as_str());
+                        let v = query_r.get::<String, _>(t);
                         let v = serde_json::from_str::<[f64; 3]>(&v).unwrap();
                         r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::Vec3Type(v));
                     }
