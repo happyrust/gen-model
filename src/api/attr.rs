@@ -1,8 +1,7 @@
 use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefU64};
+use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use anyhow::anyhow;
 use sqlx::{Error, MySql, Pool, pool, Row};
-use parse_pdms_db::db_tool::db1_hash;
-use parse_pdms_db::db1_dehash;
 use smol_str::SmolStr;
 use dashmap::DashMap;
 use glam::{Quat, Vec3};
@@ -12,6 +11,8 @@ use crate::api::element::{query_pdms_elements_type_name, query_refno_type};
 use crate::REFNO_INFO_MAP;
 use crate::consts::*;
 
+
+/// 获得隐式属性
 pub async fn query_implicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<AttrMap> {
     let mut r = AttrMap::default();
     let type_name = query_pdms_elements_type_name(refno, pool.clone()).await?;

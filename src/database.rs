@@ -181,7 +181,7 @@ pub fn gen_implicit_attr_query_sql(att: &WholeAttMap) -> (String, Vec<NounHash>)
 
     let mut column_hashs = vec![];
     for (k, v) in &i_att.map {
-        let mut att_name_full = parse_pdms_db::db1_dehash(k.0).to_lowercase();
+        let mut att_name_full = db1_dehash(k.0).to_lowercase();
         if att_name_full.as_str() == "numbdb" {
             att_name_full = "dbno".to_string();
         }
@@ -320,7 +320,6 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                                      ele_id_tree,
                                      type_ele_map,
                                      refno_node_id_map,
-                                     string_lookup,
                                      refno_info_map,
                                      children_map,
                                      db_type,
@@ -488,7 +487,6 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                      ele_id_tree,
                                      type_ele_map,
                                      refno_node_id_map,
-                                     string_lookup,
                                      refno_info_map,
                                      children_map,
                                      db_type,

@@ -1,0 +1,562 @@
+use std::collections::HashMap;
+use aios_core::parsed_data::*;
+use aios_core::parsed_data::geo_params_data::CateGeoParam;
+use aios_core::pdms_data::{AxisParam, ScomInfo};
+use anyhow::anyhow;
+use parse_pdms_db::tiny_expr::expr_eval::interp;
+use parse_pdms_db::tool::hash_tool::{f64_round_2, f64_round_3};
+use nom::Parser;
+use regex::{NoExpand, Regex};
+use smol_str::SmolStr;
+use crate::cata::direction_parse::parse_expr_to_dir;
+use crate::cata::polish_notation::Stack;
+use crate::cata::resolve::resolve_axis_param;
+
+#[test]
+fn test_exp() {
+    let input_exp = "PARAM 1 2 TIMES SUM PARAM 1 IPARAM 1";
+    // dbg!(input_exp.replace("PARAM 1", "test"));
+    let s = "PARAM 1";
+    let re = Regex::new(format!(r"^{s}|\s{s}").as_str()).unwrap();
+    let rs = "test";
+    let new_exp = re.replace_all(input_exp,  format!(" {rs} ").as_str()).to_string();
+    dbg!(new_exp);
+}
+
+#[test]
+fn test_expression_regex() {
+    let input_exp = "( ( ( -  DESP [1]/2 ) - DESP [2] - ATTRIB CPAR[3]  ) )";
+    let new_exp = input_exp.replace("ATTRIB", "");
+    let mut map = HashMap::new();
+
+    map.insert("DESP1".to_string(), 1);
+    map.insert("CPAR3".to_string(), 2);
+
+    let re = Regex::new(r"(DESIGN?\s+)?([I|C|O)]?PARAM?)\s*(\d+)").unwrap();
+    let input_exp = "DESIGN PARAM 1";
+    for cap in re.captures_iter(&input_exp) {
+        println!("{} {} {}", &cap[1], &cap[2], &cap[3]);
+    }
+    let input_exp = "CPARAM 1";
+    if let Some(caps) = re.captures(&input_exp){
+        println!("{} {} {}", caps.get(1).map_or("", |m| m.as_str()), caps.get(2).map_or("", |m| m.as_str()),
+                 caps.get(3).map_or("", |m| m.as_str()));
+    }
+
+
+    let input_exp = "DESIGN IPARA 1";
+    for cap in re.captures_iter(&input_exp) {
+        println!("{} {} {}", &cap[1], &cap[2], &cap[3]);
+    }
+
+    let input_exp = "( ATTRIB PARA[3] * TAN (  ANGL [2]/2 ) )";
+    let input_exp = "( ATTRIB PARA[3] * TAN ( ATTRIB ANGL/2 ) )";
+    // let input_exp = "TANF PARAM 3 DDANGLE";
+    let new_exp = input_exp.replace("ATTRIB", "");
+    let re = Regex::new(r"([A-Z]+[0-9]*)(\s*\[(\d+)\])?").unwrap();
+    println!("Test :{input_exp}");
+    for caps in re.captures_iter(&new_exp) {
+        let c1 = caps.get(1).map_or("", |m| m.as_str());
+        let c2 = caps.get(2).map_or("", |m| m.as_str());
+        let c3 = caps.get(3).map_or("", |m| m.as_str());
+        println!("{} {}", c1, c3);
+    }
+}
+
+pub fn eval_str_to_f32(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) -> anyhow::Result<f32> {
+    eval_str_to_f64(input_expr, context).map(|x| x as f32)
+}
+
+pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) -> anyhow::Result<f64> {
+    if input_expr.trim().to_lowercase() == "unset" {
+        return Ok(0.0);  //todo 待验证
+    }
+    let re = Regex::new(r"([A-Z]+[0-9]*)(\s*\[(\d+)\])?").unwrap();
+    let mut new_exp = input_expr.replace("ATTRIB", "");
+    let mut new_exp = new_exp.replace("RPRO", "");
+    let mut result_exp = new_exp.clone();
+    let loop_cnt = if input_expr.contains("RPRO") { 2 } else { 1 };
+    // if input_expr.contains("TAN") {
+        // dbg!(input_expr);
+    // }
+    for _ in 0..loop_cnt {
+        for caps in re.captures_iter(&new_exp) {
+            let s = &caps[0];
+            let c1 = caps.get(1).map_or("", |m| m.as_str());
+            let c2 = caps.get(2).map_or("", |m| m.as_str());
+            let c3 = caps.get(3).map_or("", |m| m.as_str());
+            // println!("{} {}", c1, c3);
+            let k: SmolStr = format!("{}{}", c1, c3).into();
+            if context.contains_key(&k) {
+                result_exp = result_exp.replace(s, &context[&k]);
+                // dbg!(&result_exp);
+            }else if c1 == "DESI" || c1 == "DESP"{
+                result_exp = result_exp.replace(s, "0.0");
+            }
+        }
+        //如果有RPRO 需要执行两次处理
+        result_exp = result_exp.replace("ATTRIB", "");
+        new_exp = result_exp.clone();
+    }
+
+    //因为 attrib 的原因，这里还需要再执行一遍处理，以防止有可能出现
+    //处理出现 DESIGN IPARA 1 这种没有 “[]”的情况
+    let re = Regex::new(r"(DESIGN?\s+)?([I|C|O|A)]?PARAM?)\s*(\d+)").unwrap();
+    let mut new_exp = result_exp.clone();
+    for caps in re.captures_iter(&result_exp) {
+        let s = &caps[0];
+        let c1 = caps.get(1).map_or("", |m| m.as_str());
+        let c2 = caps.get(2).map_or("", |m| m.as_str());
+        let c3 = caps.get(3).map_or("", |m| m.as_str());
+        let mut k = SmolStr::new("");
+        if c1.starts_with("DESIGN")  {
+            k = format!("DESI{}", c3).into();  //design's params
+        }else {
+            if c2.starts_with("IPAR") {
+                k = format!("IPARA{}", c3).into();
+            }else if c2.starts_with("CPAR"){
+                k = format!("IPARA{}", c3).into();
+            }else if c2.starts_with("PARA") || c2.starts_with("APAR"){
+                k = format!("PARA{}", c3).into();
+            }else if c2.starts_with("OPAR"){
+                k = format!("OPAR{}", c3).into();
+            }else if c2.starts_with("DDES"){
+                k = format!("DESI{}", c3).into();
+            }
+        }
+        if context.contains_key(&k) {
+            //need to replace whole word
+            let re = Regex::new(format!(r"^{s}|\s{s}").as_str()).unwrap();
+            let rs = &*context[&k];
+            new_exp = re.replace_all(&new_exp,  format!(" {rs} ").as_str()).to_string();
+        }
+    }
+    let seg_strs: Vec<SmolStr> = new_exp.split_whitespace().map(|x| x.trim().into()).collect::<Vec<_>>();
+    if seg_strs.len() == 0 {
+        return Ok(0.0);
+    }
+    // dbg!(&seg_strs);
+
+    let mut result_string = String::new();
+    let mut p_vals = vec![];
+    for s in seg_strs {
+        let upper_s = s.to_uppercase();
+        match upper_s.as_str() {
+            "TIMES" | "MULT" => p_vals.push("*".to_string()),
+            "DIV" => p_vals.push("/".to_string()),
+            "DDHEIGHT" => p_vals.push(context["DDHEIGHT"].to_string()),
+            "DDRADIUS" => p_vals.push(context["DDRADIUS"].to_string()),
+            "DDANGLE"  => p_vals.push(context["DDANGLE"].to_string()),
+            _ => {
+                if upper_s.ends_with("mm") {
+                    p_vals.push(upper_s[..upper_s.len() - 2].to_string());
+                } else {
+                    p_vals.push(upper_s.to_string())
+                }
+            }
+        }
+    }
+    // dbg!(&p_vals);
+    let mut i = 0;
+    let mut new_vals = vec![];
+    while i < p_vals.len() {
+        if p_vals[i] == "TWICE" {   //todo add function to eval
+            if i + 1 < p_vals.len() {
+                if let Ok(val) = p_vals[i + 1].parse::<f64>() {
+                    let v = val * 2.0f64;
+                    // result_string.push_str(v.to_string().as_str());
+                    new_vals.push(v.to_string());
+                }
+            }
+            i += 2;
+        } else if p_vals[i] == "TANF" {  //todo add function to eval
+            if i + 2 < p_vals.len() {
+                if let Ok(val) = p_vals[i + 1].parse::<f64>() {
+                    if let Ok(angle) = p_vals[i + 2].parse::<f64>() {
+                        {
+                            let v = val * ((angle / 2.0).to_radians() as f64).tan();
+                            // result_string.push_str(v.to_string().as_str());
+                            new_vals.push(v.to_string());
+                        }
+                    }
+                }
+            }
+            i += 3;
+        }else {
+            new_vals.push(p_vals[i].clone());
+            i += 1;
+        }
+    }
+    let mut i = 0;
+    while i < new_vals.len() {
+        if (new_vals[i] == "SUM" || new_vals[i] == "DIFFERENCE") && i < new_vals.len() - 2 {
+            if new_vals[i] == "SUM" {
+                result_string.push_str(&format!(
+                    "({} {} {})",
+                    new_vals[i + 1],
+                    "+",
+                    new_vals[i + 2]
+                ));
+            } else {
+                result_string.push_str(&format!(
+                    "({} {} {})",
+                    new_vals[i + 1],
+                    "-",
+                    new_vals[i + 2]
+                ));
+            }
+            i += 3;
+        }else {
+            result_string.push_str(new_vals[i].as_str());
+            i += 1;
+        }
+        result_string.push_str(" ");
+    }
+
+    // dbg!(&result_string);
+    if let Ok(val) = interp(&result_string.to_lowercase()) {
+        Ok(f64_round_3(val).into())
+    } else {
+        if let Ok(mut stack) = Stack::init(&result_string) {
+            return stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", input_expr)));
+        } else {
+            dbg!(&context);
+            dbg!(input_expr);
+            dbg!(&result_string);
+            return Err(anyhow!(format!("求解失败 {}", input_expr)));
+        }
+    }
+}
+
+pub fn resolve_to_cate_geo_params(gmse: GmseParamData) -> anyhow::Result<CateGeoParam> {
+    let geo = match &gmse.type_name[..] {
+        "SANN" => {
+            CateGeoParam::Profile(CateProfileParam::SANN(SannData {
+                xy: [gmse.verts[0][0], gmse.verts[0][1]],
+                dxy: [gmse.dxy[0][0], gmse.dxy[0][1]],
+                ptaxis: Some(gmse.paxises[0].clone()),
+                pangle: gmse.pang as f32,
+                pradius: gmse.prad as f32,
+                pwidth: gmse.pwid as f32,
+                drad: gmse.drad as f32,
+                dwid: gmse.dwid as f32,
+            }))
+        }
+        "SPRO" => {   //structural profile
+            CateGeoParam::Profile(CateProfileParam::SPRO(gmse.verts))
+        }
+        "BOXI" => {
+            let z_length = if gmse.box_lengths.len() >= 3 {
+                gmse.box_lengths[2]
+            } else {
+                gmse.box_lengths[1]
+            };
+            CateGeoParam::Boxi(CateBoxImpliedParam {
+                axis: Some(gmse.paxises[0].clone()),
+                x_length: gmse.box_lengths[0],
+                z_length,
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        "LCYL" => {
+            // 圆柱体
+            CateGeoParam::LCylinder(CateLCylinderParam {
+                refno: gmse.refno,
+                axis: Some(gmse.paxises[0].clone()),
+                dist_to_btm: gmse.distances[0],
+                diameter: gmse.diameters[0],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+                dist_to_top: gmse.distances[1],
+            })
+        }
+        "SCYL" => {
+            // 圆柱体
+            CateGeoParam::SCylinder(CateSCylinderParam {
+                axis: Some(gmse.paxises[0].clone()),
+                dist_to_btm: gmse.distances[0],
+                height: gmse.phei,
+                diameter: gmse.diameters[0],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        "LINE" => {
+            CateGeoParam::Line(CateLineParam {
+                pa: Some(gmse.paxises[0].clone()),
+                pb: Some(gmse.paxises[1].clone()),
+                diameter: 0.0, //gmse.diameters[0],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        "LPYR" => {
+            CateGeoParam::Pyramid(CatePyramidParam {
+                pa: Some(gmse.paxises[0].clone()),
+                pb: Some(gmse.paxises[1].clone()),
+                pc: Some(gmse.paxises[2].clone()),
+                x_bottom: gmse.xyz[0],
+                y_bottom: gmse.xyz[1],
+                x_top: gmse.xyz[2],
+                y_top: gmse.xyz[3],
+                dist_to_btm: gmse.distances[0],
+                dist_to_top: gmse.distances[1],
+                x_offset: gmse.xyz[4],
+                y_offset: gmse.xyz[5],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        "SSLC" => {
+            CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam{
+                axis: Some(gmse.paxises[0].clone()),
+                height: gmse.phei,
+                diameter: gmse.diameters[0],
+                distance: gmse.distances[0],
+                x_shear: gmse.shears[0],
+                y_shear: gmse.shears[1],
+                alt_x_shear: gmse.shears[2],
+                alt_y_shear: gmse.shears[3],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        "LSNO" => {
+            CateGeoParam::Snout(CateSnoutParam {
+                pa: Some(gmse.paxises[0].clone()),
+                pb: Some(gmse.paxises[1].clone()),
+                dist_to_btm: gmse.distances[0],
+                dist_to_top: gmse.distances[1],
+                btm_diameter: gmse.diameters[0],
+                top_diameter: gmse.diameters[1],
+                offset: gmse.offset,
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        "SBOX" => {
+            if gmse.box_lengths.len() == 3 && gmse.xyz.len() == 3 {
+                CateGeoParam::Box(CateBoxParam {
+                    size: vec![
+                        gmse.box_lengths[0],
+                        gmse.box_lengths[1],
+                        gmse.box_lengths[2],
+                    ],
+                    offset: vec![
+                        gmse.xyz[0],
+                        gmse.xyz[1],
+                        gmse.xyz[2],
+                    ],
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }else{
+                CateGeoParam::Unknown
+            }
+        }
+        "SCON" => {
+            // 圆锥
+            CateGeoParam::Cone(CateConeParam {
+                axis: Some(gmse.paxises[0].clone()),
+                dist_to_btm: gmse.distances[0],
+                diameter: gmse.diameters[0],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        "SCTO" => {
+            // 弯管
+            CateGeoParam::Torus(CateTorusParam {
+                pa: Some(gmse.paxises[0].clone()),
+                pb: Some(gmse.paxises[1].clone()),
+                diameter: gmse.diameters[0],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        // "SDIS" => {
+        // 圆片
+        // Some(CateGeoParam::Disc(CateDiscParam {
+        //     axis: Some(gmse.paxises[0].clone()),
+        //     dist_to_btm: gmse.distances[0],
+        //     diameter: gmse.diameters[0],
+        //     centre_line_flag: gmse.centre_line_flag,
+        //     tube_flag: gmse.tube_flag,
+        // }))
+        // }
+        "SDSH" => {
+            CateGeoParam::Dish(CateDishParam {
+                axis: Some(gmse.paxises[0].clone()),
+                dist_to_btm: gmse.distances[0],
+                height: gmse.phei,
+                diameter: gmse.diameters[0],
+                radius: gmse.radius,
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        "SEXT" => {
+            CateGeoParam::Extrusion(CateExtrusionParam {
+                refno: gmse.refno,
+                pa: Some(gmse.paxises[0].clone()),
+                pb: Some(gmse.paxises[1].clone()),
+                height: gmse.phei,
+                x: gmse.xyz[0],
+                y: gmse.xyz[1],
+                z: gmse.xyz[2],
+                verts: gmse.verts,
+                prads: gmse.prads,
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        "SLINE" => {
+            CateGeoParam::Sline(CateSlineParam {
+                start_pt: vec![0.0; 3],
+                end_pt: vec![0.0; 3],
+                diameter: gmse.diameters[0],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        "SREV" => {
+            CateGeoParam::Revolution(CateRevolutionParam {
+                pa: Some(gmse.paxises[0].clone()),
+                pb: Some(gmse.paxises[1].clone()),
+                angel: gmse.angle,
+                x: gmse.xyz[0],
+                y: gmse.xyz[1],
+                z: gmse.xyz[2],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        "SRTO" => { // 如 =15192/210474
+            // 截面为矩形的弯管
+            CateGeoParam::RectTorus(CateRectTorusParam {
+                pa: Some(gmse.paxises[0].clone()),
+                pb: Some(gmse.paxises[1].clone()),
+                height: gmse.phei,
+                diameter: gmse.diameters[0],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        // "SSLC" => {
+        //todo
+        // Some(CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam {
+        //     axis: Some(gmse.paxises[0].clone()),
+        //     height: gmse.phei,
+        //     diameter: gmse.diameters[0],
+        //     distance: gmse.distances[0],
+        //     x_shear: 0.0,
+        //     y_shear: 0.0,
+        //     alt_x_shear: 0.0,
+        //     alt_y_shear: 0.0,
+        //     centre_line_flag: gmse.centre_line_flag,
+        //     tube_flag: gmse.tube_flag,
+        // }))
+        // }
+        "SSPH" => {
+            // 球
+            CateGeoParam::Sphere(CateSphereParam {
+                axis: Some(gmse.paxises[0].clone()),
+                dist_to_center: gmse.distances[0],
+                diameter: gmse.diameters[0],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            })
+        }
+        _ => CateGeoParam::Unknown,
+    };
+    Ok(geo)
+}
+
+pub fn resolve_dir_and_pos(axis: &AxisParam,
+                           ddangle: f64,
+                           scom: &ScomInfo,
+                           context: &HashMap<SmolStr, SmolStr>) -> (Vec<f64>, Vec<f64>) {
+    //替换掉中间出现dataset的值的这种情况 X ( ATTRIB RPRO ANGL ) Z
+    let mut dir_str = axis.direction.trim().to_string();
+    // //dbg!(&dir_str);
+    if dir_str.contains("(") {
+        let s: Vec<_> = dir_str.split("(").collect();
+        if s.len() > 1 {
+            let ss: Vec<_> = s[1].split(")").collect();
+            if ss.len() > 1 {
+                let val_str = ss[0];
+                let val_result = eval_str_to_f64(val_str, context).unwrap_or_default().to_string();
+                dir_str = dir_str.replace(val_str, &val_result);
+            }
+        }
+    }
+    let mut dir = vec![0.0f64; 3];
+    let mut pos = vec![0.0f64; 3];
+
+    let re = Regex::new(r"^P\d+$").unwrap();
+    if re.is_match(&dir_str) {
+        let pnt_indx = dir_str[1..].parse::<i32>().unwrap_or(i32::MAX);
+        if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
+            if let Some(axis) = resolve_axis_param(&scom.axis_params[indx], scom, context) {
+                dir = axis.dir.clone();
+                pos = axis.pt;
+            }
+        }
+    } else {
+        dir = parse_str_axis_to_vec3(&dir_str, ddangle).into();
+    }
+    return (dir, pos);
+}
+
+pub fn parse_str_axis_to_vec3(paxis: &str, ddangle: f64) -> [f64; 3] {
+    let paxis = paxis.to_uppercase().replace("AXIS", "").replace(" ", "");
+    let mut paxis_str = &paxis[..];
+    //含DDANGLE的处理
+    if paxis_str.contains("DDANGLE") {
+        let angle = ddangle.to_radians();
+        let mut axises: Vec<&str> = Vec::new();
+        for s in paxis_str.split("DDANGLE") {
+            let s = s.trim();
+            if s != "" {
+                axises.push(s);
+            }
+        }
+        if axises.len() != 2 {
+            panic!("点集 DDANGLE 参数错误！");
+        }
+        return match &format!("{}{}", axises[0], axises[1])[..] {
+            "XY" => [angle.cos(), angle.sin(), 0.0],
+            "XZ" => [angle.cos(), 0.0, angle.sin()],
+            "YZ" => [0.0, angle.cos(), angle.sin()],
+            "YX" => [angle.sin(), angle.cos(), 0.0],
+            "ZX" => [angle.sin(), 0.0, angle.cos()],
+            "ZY" => [0.0, angle.sin(), angle.cos()],
+
+            "-XY" => [-angle.cos(), angle.sin(), 0.0],
+            "-XZ" => [-angle.cos(), 0.0, angle.sin()],
+            "-YZ" => [0.0, -angle.cos(), angle.sin()],
+            "-YX" => [angle.sin(), -angle.cos(), 0.0],
+            "-ZX" => [angle.sin(), 0.0, -angle.cos()],
+            "-ZY" => [0.0, angle.sin(), -angle.cos()],
+
+            "X-Y" => [angle.cos(), -angle.sin(), 0.0],
+            "X-Z" => [angle.cos(), 0.0, -angle.sin()],
+            "Y-Z" => [0.0, angle.cos(), -angle.sin()],
+            "Y-X" => [-angle.sin(), angle.cos(), 0.0],
+            "Z-X" => [-angle.sin(), 0.0, angle.cos()],
+            "Z-Y" => [0.0, -angle.sin(), angle.cos()],
+
+            "-X-Y" => [-angle.cos(), -angle.sin(), 0.0],
+            "-X-Z" => [-angle.cos(), 0.0, -angle.sin()],
+            "-Y-Z" => [0.0, -angle.cos(), -angle.sin()],
+            "-Y-X" => [-angle.sin(), -angle.cos(), 0.0],
+            "-Z-X" => [-angle.sin(), 0.0, -angle.cos()],
+            "-Z-Y" => [0.0, -angle.sin(), -angle.cos()],
+
+            _ => panic!("点集 DDANGLE 参数错误！"),
+        };
+    }
+    let v = parse_expr_to_dir(paxis_str);
+    [f64_round_2(v[0] as f64), f64_round_2(v[1] as f64), f64_round_2(v[2] as f64)]
+}

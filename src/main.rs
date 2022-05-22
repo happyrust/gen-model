@@ -12,8 +12,6 @@ use aios_core::tool::db_tool::db1_hash;
 use dashmap::DashMap;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use aios_database::{BATCH_CHUNKS_CNT, tables};
-use parse_pdms_db::{db1_dehash, parse_file};
-use parse_pdms_db::tool::hash_tool::{f32_round_2, f64_round_2, f64_round_3};
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolConnection;
 use aios_database::database::*;
@@ -30,6 +28,8 @@ use aios_database::tables::gen_create_attr_info_tables_sql;
 
 #[macro_use]
 extern crate clap;
+#[macro_use]
+extern crate nom;
 
 pub async fn test_batch_insert(url: &str) {
     let connection = MySqlPool::connect(&url)

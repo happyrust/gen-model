@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::env;
 use aios_core::pdms_types::{AiosStr, AttrMap, EleNode, RefU64};
 use crate::db_types::EleNodeTIDB;
-use parse_pdms_db::db_tool::db1_hash;
 use smol_str::SmolStr;
 use sqlx::{MySql, Pool, Row};
 use crate::api::{element};

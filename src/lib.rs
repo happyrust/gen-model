@@ -8,7 +8,6 @@ pub mod tables;
 pub mod defs;
 pub mod database;
 pub mod consts;
-pub mod insert_sql;
 pub mod options;
 pub mod helper;
 pub mod query_sql;
@@ -16,6 +15,10 @@ pub mod sql;
 pub mod api;
 pub mod db_types;
 pub mod data_interface;
+pub mod cata;
+
+#[macro_use]
+extern crate nom;
 
 lazy_static! {
     static ref REFNO_INFO_MAP: DashMap<i32, DashMap<i32, AttrInfo>> = {

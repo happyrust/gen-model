@@ -14,7 +14,7 @@ pub trait PdmsDataInterface {
         Ok(true)
     }
 
-    async fn get_ele_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
+    async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
 
     async fn get_ele_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>>;
 
