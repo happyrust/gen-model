@@ -128,7 +128,7 @@ pub async fn query_world(mdb: &str, module: &str, pool: Pool<MySql>) -> anyhow::
 }
 
 pub async fn query_world_ele_node(mdb: &str, module: &str, pool: Pool<MySql>) -> anyhow::Result<Option<EleNodeTIDB>> {
-    let mdb = format!("/{}", mdb);
+    let mdb = format!("/{}",mdb);
     let world_data = query_world_data(&mdb, module, pool.clone()).await?;
     let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
     let world_refno = data[0];
@@ -149,7 +149,11 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: Pool<MySql>) ->
                 children_count,
             }))
         }
-        Err(_) => { Ok(None) }
+        Err(e) => {
+            dbg!(e);
+            dbg!(sql);
+            Ok(None)
+        }
     };
 }
 

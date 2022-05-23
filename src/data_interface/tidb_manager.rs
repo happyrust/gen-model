@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::env;
-use aios_core::pdms_types::{AiosStr, AttrMap, PdmsTree, RefI32Tuple, RefU64, RefU64Vec};
+use aios_core::pdms_types::{AiosStr, AiosStrHash, AttrMap, PdmsTree, RefI32Tuple, RefU64, RefU64Vec};
 use anyhow::anyhow;
 use approx::abs_diff_eq;
 use dashmap::DashMap;
@@ -19,7 +20,8 @@ pub struct AiosDBManager {
     // db_option 中 include_project 中的所有 project 对应的 db
     pub project_map: DashMap<u32, AiosPdmsProjectTiDB>,
     // 存放 refno_info 的 db
-    pub info_db: Pool<MySql>,
+    // pub info_db: Pool<MySql>,
+    pub info_db: HashMap<i32, String>,
 
     pub projects: Vec<String>,
 
@@ -33,35 +35,38 @@ pub struct AiosDBManager {
 #[async_trait]
 impl PdmsDataInterface for AiosDBManager {
     async fn get_ele_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
-        let project_hash = query_project_hash(refno, self.info_db.clone()).await?;
-        if let Some(project_pool) = self.project_map.get(&project_hash) {
-            let attr = query_full_attr(refno, project_pool.pool.clone()).await?;
-            return Ok(attr);
+        if let Some(project_hash) = self.get_project_hash(refno) {
+            if let Some(project_pool) = self.project_map.get(&project_hash) {
+                let attr = query_full_attr(refno, project_pool.pool.clone()).await?;
+                return Ok(attr);
+            }
         }
         Ok(AttrMap::default())
     }
 
     async fn get_ele_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
-        let project_hash = query_project_hash(refno, self.info_db.clone()).await?;
         let mut r = vec![];
-        if let Some(project_pool) = self.project_map.get(&project_hash) {
-            let children = query_children(refno, project_pool.pool.clone()).await?;
-            for child in children {
-                let attr = self.get_ele_attr(child.0).await?;
-                r.push(attr);
+        if let Some(project_hash) = self.get_project_hash(refno) {
+            if let Some(project_pool) = self.project_map.get(&project_hash) {
+                let children = query_children(refno, project_pool.pool.clone()).await?;
+                for child in children {
+                    let attr = self.get_ele_attr(child.0).await?;
+                    r.push(attr);
+                }
             }
         }
         Ok(r)
     }
 
     async fn get_ele_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
-        let project_hash = query_project_hash(refno, self.info_db.clone()).await?;
         let mut result = RefU64Vec::default();
-        if let Some(project_pool) = self.project_map.get(&project_hash) {
-            let children = query_children(refno, project_pool.pool.clone()).await?;
-            children.into_iter().for_each(|child| {
-                result.push(child.0);
-            });
+        if let Some(project_hash) = self.get_project_hash(refno) {
+            if let Some(project_pool) = self.project_map.get(&project_hash) {
+                let children = query_children(refno, project_pool.pool.clone()).await?;
+                children.into_iter().for_each(|child| {
+                    result.push(child.0);
+                });
+            }
         }
         Ok(result)
     }
@@ -71,10 +76,11 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr> {
-        let project_hash = query_project_hash(refno, self.info_db.clone()).await?;
-        if let Some(project_pool) = self.project_map.get(&project_hash) {
-            let name = query_name(refno, project_pool.pool.clone()).await?;
-            return Ok(SmolStr::new(name));
+        if let Some(project_hash) = self.get_project_hash(refno) {
+            if let Some(project_pool) = self.project_map.get(&project_hash) {
+                let name = query_name(refno, project_pool.pool.clone()).await?;
+                return Ok(SmolStr::new(name));
+            }
         }
         Ok(SmolStr::new(""))
     }
@@ -161,8 +167,8 @@ impl AiosDBManager {
                 Err(_) => { dbg!("project: {} init failed",project); }
             }
         }
-
-        let info_db = AiosDBManager::get_db_pool(&default_conn, PDMS_INFO_DB).await?;
+        let info_conn = AiosDBManager::get_db_pool(&default_conn, PDMS_INFO_DB).await?;
+        let info_db = get_refno_infos(info_conn).await?;
         let projects = db_option.included_projects.clone();
         Ok(
             Self {
@@ -179,8 +185,7 @@ impl AiosDBManager {
     ///获取世界坐标变换矩阵
     #[inline]
     pub async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>> {
-        if let Ok(project) = query_project_name(refno, self.info_db.clone()).await {
-            let project_hash = AiosStr(SmolStr::new(project)).get_u32_hash();
+        if let Some(project_hash) = self.get_project_hash(refno) {
             if let Some(mut db) = self.project_map.get(&project_hash) {
                 if let Ok(Some(dbno)) = query_dbno_from_db(refno, db.pool.clone()).await {
                     return db.get_world_transform(refno).await;
@@ -189,11 +194,18 @@ impl AiosDBManager {
         }
         Ok(Some(glam::TransformRT::IDENTITY))
     }
+
+    pub fn get_project_hash(&self, refno: RefU64) -> Option<AiosStrHash> {
+        if let Some(project_name) = self.info_db.get(&(refno.get_0() as i32)) {
+            return Some(AiosStr(SmolStr::new(project_name)).get_u32_hash());
+        }
+        None
+    }
 }
 
 
 // 单个project 的 pool
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AiosPdmsProjectTiDB {
     pub project: String,
     pub pool: Pool<MySql>,
@@ -264,6 +276,7 @@ impl AiosPdmsProjectTiDB {
 }
 
 use config::{Config, ConfigError, Environment, File};
+use crate::api::refno_info::get_refno_infos;
 
 #[tokio::test]
 async fn test_get_attr() -> anyhow::Result<()> {

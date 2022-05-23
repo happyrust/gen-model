@@ -14,6 +14,7 @@ use std::fs;
 use std::sync::Arc;
 use parse_pdms_db::parse_file;
 use std::mem::take;
+use dashmap::DashMap;
 use crate::api::project_mdb::insert_project_mdb;
 use crate::consts::*;
 use crate::{options, tables};
@@ -296,7 +297,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
         entry.path()
     }).collect::<Vec<PathBuf>>();
 
-    // let mut handles = vec![];
+    let mut handles = vec![];
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
     for path in children_files {
@@ -353,7 +354,6 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                                     dbg!(sql.as_str());
                                 }
                             }
-
                             //保存refno的信息表
                             let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (ref0, project) VALUES ");
                             for kv in &refno_info_map {
