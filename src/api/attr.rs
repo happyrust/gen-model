@@ -1,3 +1,4 @@
+use std::env;
 use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64};
 use anyhow::anyhow;
 use sqlx::{Error, MySql, Pool, pool, Row};
@@ -11,7 +12,7 @@ use sqlx::mysql::MySqlRow;
 use crate::api::element::{query_pdms_elements_type_name, query_refno_type, query_type_refnos};
 use crate::REFNO_INFO_MAP;
 use crate::consts::*;
-use crate::database::get_tidb_pool;
+use crate::data_interface::tidb_manager::AiosDBManager;
 
 pub async fn query_implicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<AttrMap> {
     let mut r = AttrMap::default();
@@ -27,43 +28,88 @@ pub async fn query_implicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Re
                 let t = t.as_str();
                 match info.att_type {
                     DbAttributeType::INTEGER => {
-                        let v = query_r.get::<i32, _>(t);
-                        r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::IntegerType(v));
+                        let v = query_r.try_get::<i32, _>(t);
+                        match v {
+                            Ok(v) => {
+                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::IntegerType(v));
+                            }
+                            Err(_) => {}
+                        }
                     }
                     DbAttributeType::DOUBLE => {
-                        let v = query_r.get::<f64, _>(t);
-                        r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::DoubleType(v));
+                        let v = query_r.try_get::<f64, _>(t);
+                        match v {
+                            Ok(v) => {
+                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::DoubleType(v));
+                            }
+                            Err(_) => {}
+                        }
                     }
                     DbAttributeType::BOOL => {
-                        let v = query_r.get::<bool, _>(t);
-                        r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::BoolType(v));
+                        let v = query_r.try_get::<bool, _>(t);
+                        match v {
+                            Ok(v) => {
+                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::BoolType(v));
+                            }
+                            Err(_) => {}
+                        }
                     }
                     DbAttributeType::STRING => {
-                        let v = SmolStr::new(query_r.get::<String, _>(t));
-                        r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::StringType(v));
+                        let v = query_r.try_get::<String, _>(t);
+                        match v {
+                            Ok(v) => {
+                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::StringType(SmolStr::new(v)));
+                            }
+                            Err(_) => {}
+                        }
                     }
                     DbAttributeType::ELEMENT => {
-                        let v = query_r.get::<i64, _>(t);
-                        r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::RefU64Type(RefU64(v as u64)));
+                        let v = query_r.try_get::<i64, _>(t);
+                        match v {
+                            Ok(v) => {
+                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::RefU64Type(RefU64(v as u64)));
+                            }
+                            Err(_) => {}
+                        }
                     }
                     DbAttributeType::WORD => {
-                        let v = SmolStr::new(query_r.get::<String, _>(t));
-                        r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::StringType(v));
+                        let v = query_r.try_get::<String, _>(t);
+                        match v {
+                            Ok(v) => {
+                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::StringType(SmolStr::new(v)));
+                            }
+                            Err(_) => {}
+                        }
                     }
                     DbAttributeType::DOUBLEVEC => {
-                        let v = query_r.get::<Vec<u8>, _>(t);
-                        let v = bincode::deserialize::<Vec<f64>>(&v).unwrap();
-                        r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::DoubleArrayType(v));
+                        let v = query_r.try_get::<Vec<u8>, _>(t);
+                        match v {
+                            Ok(v) => {
+                                let v = bincode::deserialize::<Vec<f64>>(&v).unwrap();
+                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::DoubleArrayType(v));
+                            }
+                            Err(_) => {}
+                        }
                     }
                     DbAttributeType::INTVEC => {
-                        let v = query_r.get::<String, _>(t);
-                        let v = serde_json::from_str::<Vec<i32>>(&v).unwrap();
-                        r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::IntArrayType(v));
+                        let v = query_r.try_get::<String, _>(t);
+                        match v {
+                            Ok(v) => {
+                                let v = serde_json::from_str::<Vec<i32>>(&v).unwrap();
+                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::IntArrayType(v));
+                            }
+                            Err(_) => {}
+                        }
                     }
                     DbAttributeType::Vec3Type => {
-                        let v = query_r.get::<String, _>(t);
-                        let v = serde_json::from_str::<[f64; 3]>(&v).unwrap();
-                        r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::Vec3Type(v));
+                        let v = query_r.try_get::<String, _>(t);
+                        match v {
+                            Ok(v) => {
+                                let v = serde_json::from_str::<[f64; 3]>(&v).unwrap();
+                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::Vec3Type(v));
+                            }
+                            Err(_) => {}
+                        }
                     }
                     _ => {}
                 }
@@ -196,8 +242,8 @@ fn gen_test_not_exist_table_sql() -> String {
 
 #[tokio::test]
 async fn test_query_foreign_refno() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
     let refno: RefU64 = RefI32Tuple((23584, 121)).into();
     let v = query_foreign_refno(refno, "catr", pool.clone()).await?;
     println!("v={:?}", v);
@@ -206,8 +252,8 @@ async fn test_query_foreign_refno() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_position_refno() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
     let refno: RefU64 = RefI32Tuple((23584, 11)).into();
     let v = query_position_from_id(refno, pool).await?;
     println!("v={:?}", v);
@@ -216,12 +262,19 @@ async fn test_query_position_refno() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_test_not_exist_table_sql() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
     let sql = gen_test_not_exist_table_sql();
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     match result {
-        Ok(v) => { dbg!("exist"); }
+        Ok(v) => {
+            let r = v.try_get::<String, _>("pos");
+            match r {
+                Ok(v) => { println!("r={:?}", v); }
+                Err(_) => { dbg!("not column"); }
+            }
+        }
         Err(_) => { dbg!("not exist"); }
     }
     Ok(())

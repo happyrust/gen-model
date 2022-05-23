@@ -308,7 +308,11 @@ pub async fn query_id_from_dbno_type(dbno: u32, pool: Pool<MySql>) -> anyhow::Re
             }
             Ok(Some(r))
         }
-        Err(_) => { Ok(None) }
+        Err(e) => {
+            dbg!(e);
+            dbg!(&sql);
+            Ok(None)
+        }
     };
 }
 
@@ -332,7 +336,7 @@ fn gen_query_id_name_from_dbno_type_sql(dbno: i32, type_name: &str) -> String {
 
 fn gen_query_id_name_type_from_dbno(dbno: u32) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select id ,name type ,from {PDMS_ELEMENTS_TABLE} where dbno = {} and is_del = 0 ; ", dbno));
+    sql.push_str(&format!("select id ,name, type from {PDMS_ELEMENTS_TABLE} where dbno = {} and is_del = 0 ; ", dbno));
     sql
 }
 
@@ -434,9 +438,9 @@ pub fn gen_query_name_sql(refno: RefU64) -> String {
 
 #[tokio::test]
 async fn test_get_mdb_type() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let info_pool = get_tidb_pool(&format!("{}/{}", url, "pdms_info_db")).await;
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let url = env::var("DATABASE_URL")?;
+    let info_pool = AiosDBManager::get_db_pool(&url,"pdms_info_db").await?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
     let project = query_mdb_module_worlds(pool, info_pool).await?;
     if let Some(v) = project.get("/SAMPLE") {
         if let Some(val) = v.get("DESI") {
@@ -449,8 +453,8 @@ async fn test_get_mdb_type() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_world() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
     let v = query_world("SAMPLE", "DESI", pool.clone()).await?;
     println!("v={:?}", v);
     Ok(())
@@ -458,8 +462,8 @@ async fn test_query_world() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_world_children() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
     let v = query_world_children("SAMPLE", "DESI", pool.clone()).await?;
     println!("v={:?}", v);
     Ok(())
@@ -467,8 +471,8 @@ async fn test_query_world_children() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_children_pdms_tree() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
     let refno: RefU64 = RefI32Tuple((15392, 0)).into();
     let v = query_children_pdms_tree("SAMPLE", "DESI", refno, pool.clone()).await?;
     println!("v={:?}", v);
@@ -477,8 +481,8 @@ async fn test_query_children_pdms_tree() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_owner_from_id() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
     let refno: RefU64 = RefI32Tuple((0, 0)).into();
     let v = query_owner_from_id(refno, pool.clone()).await?;
     println!("v={:?}", v);
@@ -487,8 +491,8 @@ async fn test_query_owner_from_id() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_world_ele_node() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
     let v = query_world_ele_node("SAMPLE", "DESI", pool.clone()).await?;
     println!("v={:?}", v);
     Ok(())
@@ -496,8 +500,8 @@ async fn test_query_world_ele_node() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_children_ele_node() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
     let refno: RefU64 = RefI32Tuple((23584, 5)).into();
     let v = query_children_ele_node(refno, pool.clone()).await?;
     println!("v={:?}", v);
@@ -506,8 +510,8 @@ async fn test_query_children_ele_node() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_children_pdms_tree_ele_node() -> anyhow::Result<()> {
-    let url = "mysql://root:root@127.0.0.1:3306";
-    let pool = get_tidb_pool(&format!("{}/{}", url, "sample")).await;
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
     let refno: RefU64 = RefI32Tuple((15392, 0)).into();
     let v = query_children_pdms_tree_ele_node("SAMPLE", "DESI", refno, pool.clone()).await?;
     println!("v={:?}", v);

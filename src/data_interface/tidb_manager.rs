@@ -162,7 +162,7 @@ impl AiosDBManager {
             }
         }
 
-        let info_db = AiosDBManager::get_db_pool(&default_conn, PDMS_REFNO_INFOS_TABLE).await?;
+        let info_db = AiosDBManager::get_db_pool(&default_conn, PDMS_INFO_DB).await?;
         let projects = db_option.included_projects.clone();
         Ok(
             Self {
