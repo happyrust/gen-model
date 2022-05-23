@@ -8,6 +8,8 @@ pub struct DbOption {
     pub total_sync: bool,
     #[clap(long)]
     pub incr_sync: bool,
+    #[clap(long)]
+    pub recreate_db: bool,
     #[clap(long, default_value = "12.1SP4Projects")]
     pub project_path: String,
     //#[clap(long, default_value = "MASTER", "SAMPLE")]

@@ -14,3 +14,4 @@ sql_batch_insert_chunk = 500
 batch_insert_handles_chunk = 1
 files_multi_thread = true
 types_multi_thread = true
+recreate_db = true

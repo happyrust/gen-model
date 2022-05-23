@@ -41,7 +41,7 @@ pub fn gen_create_uda_tables_sql() -> String {
 
 /// 每个dbno对应的filename
 #[inline]
-pub fn gen_create_dbno_filename_tables_sql() -> String {
+pub fn gen_create_dbno_infos_tables_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_DBNO_INFOS_TABLE} ("#));
     sql.push_str(&format!(r#"{} INT PRIMARY KEY ,"#, "dbno"));
@@ -50,6 +50,9 @@ pub fn gen_create_dbno_filename_tables_sql() -> String {
     sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "project"));
     sql.push_str(&format!(r#"{} VARCHAR(10) "#, "db_type"));
     sql.push_str(");");
+
+    sql.push_str(&format!("CREATE INDEX info_db_type_idx ON {PDMS_DBNO_INFOS_TABLE} (db_type);"));
+    sql.push_str(&format!("CREATE INDEX info_dbno_idx ON {PDMS_DBNO_INFOS_TABLE} (dbno);"));
     sql
 }
 
@@ -71,6 +74,10 @@ pub fn gen_create_element_tables_sql() -> String {
     sql.push_str(&format!(r#"key {}({}) "#,"is_del","is_del"));
     sql.push_str(");");
 
+    sql.push_str(&format!("CREATE INDEX ele_type_idx ON {PDMS_ELEMENTS_TABLE} (type);"));
+    sql.push_str(&format!("CREATE INDEX ele_dbno_idx ON {PDMS_ELEMENTS_TABLE} (dbno);"));
+    sql.push_str(&format!("CREATE INDEX ele_owner_idx ON {PDMS_ELEMENTS_TABLE} (owner);"));
+
     sql
 }
 
@@ -81,6 +88,8 @@ pub fn gen_create_attr_info_tables_sql() -> String {
     sql.push_str(&format!(r#"{} varchar(8) ,"#, "type"));
     sql.push_str(&format!(r#"{} blob "#, "info"));
     sql.push_str(");");
+
+    sql.push_str(&format!("CREATE INDEX ref0_type_idx ON {PDMS_REFNO_INFOS_TABLE} (type);"));
     sql
 }
 
@@ -91,6 +100,8 @@ pub fn gen_create_project_mdb_sql() -> String {
     sql.push_str(&format!(r#"{} VARCHAR(10) ,"#, "db_type"));
     sql.push_str(&format!(r#"{} BLOB "#,"data"));
     sql.push_str(");");
+
+    sql.push_str(&format!("CREATE INDEX proj_mdb_db_type_idx ON {PDMS_PROJECT_MDB_TABLE} (db_type);"));
     sql
 }
 
@@ -98,13 +109,13 @@ pub fn gen_create_project_mdb_sql() -> String {
 pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, (String, AttrVal)>) -> String {
     let mut sql = String::new();
     let table_name = qualified_table_name(type_name);
+    let table_name = table_name.as_str();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, table_name));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "id"));  //refno 的64位
     sql.push_str(&format!(r#"{} VARCHAR(30),"#, "refno"));   //refno
     sql.push_str(&format!(r#"{} VARCHAR(8),"#, "type"));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL,"#, "owner"));
-    // sql.push_str(&format!(r#"{} VARCHAR(30),"#, "refno"));
 
     for (offset, (k, v)) in att_bmap {
         // let att_name = db1_dehash(k.0).to_lowercase();
@@ -160,6 +171,9 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
 
     sql.remove(sql.len() - 1);
     sql.push_str(");");
+
+    // sql.push_str(&format!("CREATE INDEX owner_idx ON {table_name} (owner);"));
+    // sql.push_str(&format!("CREATE INDEX type_idx ON {table_name} (type);"));
 
     sql
 }
