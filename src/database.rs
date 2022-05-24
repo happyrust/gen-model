@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::format;
 use std::time::Instant;
-use aios_core::pdms_types::{AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, RefU64};
+use aios_core::pdms_types::{AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use sqlx::{MySql, MySqlPool, Pool};
@@ -23,6 +23,7 @@ use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use sqlx::Executor;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql};
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -33,19 +34,15 @@ pub trait MySqlMethods {
 }
 
 
-
-
-
-
 //重新创建database
-pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()>{
+pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()> {
     let connection = MySqlPool::connect(url)
         .await
         .unwrap();
     let mut pool = connection.try_acquire().unwrap();
 
     sqlx::query(&format!("drop database if exists {project}")).execute(&mut pool).await?;
-    sqlx::query(&format!("create database {project}")).execute(&mut pool).await?;
+    sqlx::query(&format!("create database {project} default charset utf8")).execute(&mut pool).await?;
     Ok(())
 }
 
@@ -56,7 +53,7 @@ pub async fn init_info_database(url: &str) -> anyhow::Result<()> {
 
     let mut pool = AiosDBManager::get_db_pool(&url, PDMS_INFO_DB).await?;
     let mut sql = String::new();
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, {PDMS_REFNO_INFOS_TABLE}));
+    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, { PDMS_REFNO_INFOS_TABLE }));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "ref0"));
     sql.push_str(&format!(r#"{} VARCHAR(20)"#, "project"));
 
@@ -73,7 +70,7 @@ pub async fn init_info_database(url: &str) -> anyhow::Result<()> {
 }
 
 
-pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()>{
+pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     println!("开始同步pdms/E3D数据");
     let mut time = Instant::now();
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
@@ -84,6 +81,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()>{
     for project in &db_option.included_projects {
         if db_option.recreate_db {
             init_database(project, &default_conn_str).await?;
+
             let mut table_time = Instant::now();
             let mut tables_sql = String::new();
             if let Ok(db_info) = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")) {
@@ -119,6 +117,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()>{
             let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
             let mut conn = project_pool.acquire().await?;
 
+
             tables_sql.push_str(&tables::gen_create_element_tables_sql());
             tables_sql.push_str(&tables::gen_create_project_mdb_sql());
             let result = conn.execute(tables_sql.as_str()).await;
@@ -129,6 +128,17 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()>{
                     dbg!(tables_sql.as_str());
                 }
             }
+            // 创建 ssc树的固定节点
+            let result = conn.execute(tables::gen_create_ssc_element_tables_sql().as_str()).await;
+            match result {
+                Ok(_) => {}
+                Err(e) => {
+                    dbg!(&e);
+                    dbg!(tables_sql.as_str());
+                }
+            }
+            insert_set_ssc_node_sql(project_pool).await?;
+
             create_tables_elapse += table_time.elapsed().as_millis();
             let result = pdms_info_conn.execute(tables::gen_create_dbno_infos_tables_sql().as_str()).await;
             match result {
@@ -286,7 +296,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
     let batch_chunks_cnt = db_option.sql_batch_insert_chunk as usize;
-    let batch_handles_cnt = db_option.batch_insert_handles_chunk as usize;
+    let _batch_handles_cnt = db_option.batch_insert_handles_chunk as usize;
     let mut target_dir = fs::read_dir(&project_dir).unwrap().into_iter().map(|entry| {
         let entry = entry.unwrap();
         entry.path()
@@ -311,7 +321,6 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                 let pool_clone = pool.clone();
                 let info_pool_clone = info_pool.clone();
                 let filename_clone = file_name_clone.clone();
-                let db_option_clone = db_option.clone();
                 let handle = tokio::spawn(async move {
                     let project_clones = project_clone.clone();
                     //后面再考虑成不同的table，如显示属性和隐藏属性
@@ -376,15 +385,14 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                                     implicit_query_data = Some(gen_implicit_attr_query_sql(att.value()));
                                 }
                                 let column_hashs = &implicit_query_data.as_ref().unwrap().1;
-                                // ref0_info_sql.push_str(&gen_refno_infos_insert_sql(*refno, &project_clones.clone()));
                                 implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), column_hashs));
                                 explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
                                 let name = get_name(&total_attr_map, &children_map, *refno).replace(r#"'"#, r#"\'"#)
-                                    .replace(r#"""#, r#"\""#).replace(r#"\"#,r#"\\"#);
+                                    .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
                                 let order = get_order(&total_attr_map, &children_map, *refno);
                                 pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order));
                                 //获取当前项目的连接
-                                let mut project_conn = pool_clone.acquire().await.unwrap();
+                                let mut project_conn = pool_clone.clone().acquire().await.unwrap();
 
                                 // let mut insert_join_handles = vec![];
                                 if (i != 0 && i % batch_chunks_cnt == 0) || i == (kv.value().len() - 1) {
@@ -433,6 +441,34 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                                 }
                             }
                         }
+                        let mut project_conn = pool_clone.acquire().await.unwrap();
+                        for (room_name, refnos) in room_code_map {
+                            let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
+                            let mut values_sql = String::new();
+                            if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
+                                let mut order = 0;
+                                for refno in refnos {
+                                    if let Some(total_attr) = &total_attr_map.get(&refno) {
+                                        let type_name = total_attr.implicit_attmap.get_type();
+                                        let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
+                                            .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
+                                        values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
+                                    }
+                                    order += 1;
+                                }
+                                values_sql.remove(values_sql.len() - 1);
+                                values_sql.push_str(";");
+                                let sql = format!("{}{}", insert_sql, values_sql);
+                                let result = project_conn.execute(sql.as_str()).await;
+                                match result {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(&e);
+                                        dbg!(sql.as_str());
+                                    }
+                                }
+                            }
+                        }
                     }
                 });
                 handles.push(handle);
@@ -442,7 +478,6 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
     }
 
     futures::future::join_all(handles).await;
-
     Ok(())
 }
 
@@ -547,7 +582,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                 implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), column_hashs));
                                 explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
                                 let name = get_name(&total_attr_map, &children_map, *refno).replace(r#"'"#, r#"\'"#)
-                                    .replace(r#"""#, r#"\""#).replace(r#"\"#,r#"\\"#);
+                                    .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
                                 let order = get_order(&total_attr_map, &children_map, *refno);
                                 pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order));
                                 //获取当前项目的连接
@@ -610,6 +645,34 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                     if insert_join_handles.len() == batch_handles_cnt || i == (kv.value().len() - 1) {
                                         let insert_join_handles = take(&mut insert_join_handles);
                                         futures::future::join_all(insert_join_handles).await;
+                                    }
+                                }
+                            }
+                        }
+                        let mut project_conn = pool_clone.acquire().await.unwrap();
+                        for (room_name, refnos) in room_code_map {
+                            let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
+                            let mut values_sql = String::new();
+                            if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
+                                let mut order = 0;
+                                for refno in refnos {
+                                    if let Some(total_attr) = &total_attr_map.get(&refno) {
+                                        let type_name = total_attr.implicit_attmap.get_type();
+                                        let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
+                                            .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
+                                        values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
+                                    }
+                                    order += 1;
+                                }
+                                values_sql.remove(values_sql.len() - 1);
+                                values_sql.push_str(";");
+                                let sql = format!("{}{}", insert_sql, values_sql);
+                                let result = project_conn.execute(sql.as_str()).await;
+                                match result {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(&e);
+                                        dbg!(sql.as_str());
                                     }
                                 }
                             }

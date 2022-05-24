@@ -186,12 +186,25 @@ pub async fn query_project_hash(refno: RefU64, pool: Pool<MySql>) -> anyhow::Res
     let val = result.get::<String, _>("project");
     Ok(AiosStr(SmolStr::new(val)).get_u32_hash())
 }
-
+/// 通过 name 获取 refno （pdms）
 pub async fn query_id_from_name(name: &str, pool: Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_id_from_name_sql(name);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     match result {
         Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>(0) as u64))) }
+        Err(_) => { Ok(None) }
+    }
+}
+
+/// 通过 name 获取 refno （ssc）
+pub async fn query_id_from_name_ssc(name: &str, pool: Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
+    let sql = gen_query_id_from_name_ssc_sql(name);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    match result {
+        Ok(v) => {
+            let refno = RefU64(v.get::<i64, _>("id") as u64);
+            Ok(Some(refno))
+        }
         Err(_) => { Ok(None) }
     }
 }
@@ -211,6 +224,12 @@ fn gen_query_owner_from_id(refno: RefU64) -> String {
 fn gen_query_id_from_name_sql(name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("select id from {PDMS_ELEMENTS_TABLE} where name = '{}' ", name));
+    sql
+}
+
+fn gen_query_id_from_name_ssc_sql(name: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select id from {PDMS_SSC_ELEMENTS_TABLE} where name = '{}' ", name));
     sql
 }
 
@@ -396,7 +415,7 @@ pub fn get_name(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashMa
     let attr = whole_attr.get(&refno).unwrap();
     let type_name = attr.implicit_attmap.get_type();
     return if let Some(name) = attr.explicit_attmap.get(&NounHash(db1_hash("NAME"))) {
-        name.string_value().to_string()
+        name.string_value().unwrap_or(SmolStr::new("")).to_string()
     } else {
         let owner = attr.implicit_attmap.get_owner().unwrap();
         let mut idx = 1;

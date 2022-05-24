@@ -68,16 +68,29 @@ pub fn gen_create_element_tables_sql() -> String {
     sql.push_str(&format!(r#"{} VARCHAR(100),"#, "name"));
     sql.push_str(&format!(r#"{} INT ,"#, "dbno"));
     sql.push_str(&format!(r#"{} INT ,"#, "order_num"));
-    sql.push_str(&format!(r#"{} TINYINT(1) ,"#,"is_del"));
-    sql.push_str(&format!(r#"key {}({}) ,"#,"owner","owner"));
-    sql.push_str(&format!(r#"key {}({}) ,"#,"type","type"));
-    sql.push_str(&format!(r#"key {}({}) "#,"is_del","is_del"));
+    sql.push_str(&format!(r#"{} TINYINT(1) "#, "is_del"));
     sql.push_str(");");
 
     sql.push_str(&format!("CREATE INDEX ele_type_idx ON {PDMS_ELEMENTS_TABLE} (type);"));
     sql.push_str(&format!("CREATE INDEX ele_dbno_idx ON {PDMS_ELEMENTS_TABLE} (dbno);"));
     sql.push_str(&format!("CREATE INDEX ele_owner_idx ON {PDMS_ELEMENTS_TABLE} (owner);"));
+    sql
+}
 
+pub fn gen_create_ssc_element_tables_sql() -> String {
+    let mut sql = String::new();
+    //后续可以创建一个owner表
+    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_SSC_ELEMENTS_TABLE} ("#));
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "id"));  //refno 的64位
+    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "refno"));
+    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "type"));
+    sql.push_str(&format!(r#"{} BIGINT,"#, "owner"));
+    sql.push_str(&format!(r#"{} VARCHAR(100),"#, "name"));
+    sql.push_str(&format!(r#"{} INT"#, "order_num"));
+    sql.push_str(");");
+
+    sql.push_str(&format!("CREATE INDEX ele_type_idx ON {PDMS_SSC_ELEMENTS_TABLE} (type);"));
+    sql.push_str(&format!("CREATE INDEX ele_owner_idx ON {PDMS_SSC_ELEMENTS_TABLE} (owner);"));
     sql
 }
 
@@ -98,7 +111,7 @@ pub fn gen_create_project_mdb_sql() -> String {
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_PROJECT_MDB_TABLE} ("#));
     sql.push_str(&format!(r#"{} VARCHAR(20) ,"#, "mdb_name"));
     sql.push_str(&format!(r#"{} VARCHAR(10) ,"#, "db_type"));
-    sql.push_str(&format!(r#"{} BLOB "#,"data"));
+    sql.push_str(&format!(r#"{} BLOB "#, "data"));
     sql.push_str(");");
 
     sql.push_str(&format!("CREATE INDEX proj_mdb_db_type_idx ON {PDMS_PROJECT_MDB_TABLE} (db_type);"));
