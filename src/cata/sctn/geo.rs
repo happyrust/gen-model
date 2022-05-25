@@ -1,32 +1,35 @@
 use std::f32::EPSILON;
-use crate::parsed_data::{CateProfileParam, GeomsInfo};
 use std::vec::Vec;
-use bevy::prelude::Transform;
+use aios_core::parsed_data::geo_params_data::CateGeoParam;
+use aios_core::parsed_data::GeomsInfo;
+use aios_core::pdms_types::AttrMap;
+use aios_core::prim_geo::category::CateBrepShape;
+use aios_core::prim_geo::loft::SctnSolid;
 use glam::{TransformSRT, Vec3};
-use crate::data_interface::PdmsDataInterface;
-use crate::parsed_data::geo_params_data::CateGeoParam;
-use crate::pdms_types::AttrMap;
-use crate::prim_geo::category::CateBrepShape;
-use crate::prim_geo::loft::SctnSolid;
+use regex::internal::Input;
+use crate::data_interface::interface::PdmsDataInterface;
 
-pub fn create_geos<T: PdmsDataInterface>(att: &AttrMap, geom_info: &GeomsInfo, interface: &mut T) -> Vec<CateBrepShape>  {
+pub async fn create_st_geos<T: PdmsDataInterface>(att: &AttrMap, geom_info: &GeomsInfo, interface: &mut T) -> anyhow::Result<Vec<CateBrepShape>>  {
     let mut brep_shapes = vec![];
     let geoms = &geom_info.geometries;
-    if geoms.len() == 0 { return brep_shapes; }
+    if geoms.len() == 0 { return Ok(brep_shapes); }
 
     let type_name = att.get_type();
     let arc_path = if type_name == "GENSEC" {
-        let parent_pos = interface.get_ele_world_transform(att.get_refno().unwrap()).translation;
+        let parent_pos = interface.get_world_transform(att.get_refno().unwrap()).await?.unwrap_or_default().translation;
         //dbg!(parent_pos);
-        let children_hash = interface.get_ele_children_refs(att.get_refno().unwrap());
+        let children_refs = interface.get_children_refs(att.get_refno().unwrap()).await?;
         let mut res = None;
-        for x in children_hash.iter() {
-            let refs = interface.get_ele_children_refs(*x);
+        for x in children_refs.iter() {
+            let refs = interface.get_children_refs(*x).await?;
             if refs.len() >= 3 {
+                let pt1 = interface.get_world_transform(refs[0]).await?.unwrap_or_default().translation;
+                let pt2 = interface.get_world_transform(refs[1]).await?.unwrap_or_default().translation;
+                let pt3 = interface.get_world_transform(refs[2]).await?.unwrap_or_default().translation;
                 res = Some((
-                    interface.get_ele_world_transform(refs[0]).translation - parent_pos,
-                    interface.get_ele_world_transform(refs[1]).translation - parent_pos,
-                    interface.get_ele_world_transform(refs[2]).translation - parent_pos,
+                    pt1 - parent_pos,
+                    pt2 - parent_pos,
+                    pt3 - parent_pos,
                 ));
             }
         }
@@ -63,5 +66,5 @@ pub fn create_geos<T: PdmsDataInterface>(att: &AttrMap, geom_info: &GeomsInfo, i
         }
     }
 
-    brep_shapes
+    Ok(brep_shapes)
 }

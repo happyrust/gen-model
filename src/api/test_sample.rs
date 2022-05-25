@@ -22,6 +22,7 @@ pub async fn get_test_info_pool() -> Pool<MySql> {
 
 #[cfg(test)]
 mod tests {
+    use crate::api::element;
     use super::*;
 
     #[tokio::test]
@@ -42,7 +43,7 @@ mod tests {
     async fn test_query_world() -> anyhow::Result<()> {
         let info_pool = get_test_info_pool().await;
         let pool = get_test_sample_pool().await;
-        let v = query_world("SAMPLE", "DESI", pool.clone()).await?;
+        let v = query_world("SAMPLE", "DESI", &pool).await?;
         println!("v={:?}", v);
         Ok(())
     }
@@ -51,7 +52,7 @@ mod tests {
     async fn test_query_world_children() -> anyhow::Result<()> {
         let info_pool = get_test_info_pool().await;
         let pool = get_test_sample_pool().await;
-        let v = query_world_children("SAMPLE", "DESI", pool.clone()).await?;
+        let v = query_world_children("SAMPLE", "DESI", &pool).await?;
         println!("v={:?}", v);
         Ok(())
     }
@@ -61,7 +62,7 @@ mod tests {
         let info_pool = get_test_info_pool().await;
         let pool = get_test_sample_pool().await;
         let refno: RefU64 = RefI32Tuple((15392, 0)).into();
-        let v = query_children_pdms_tree("SAMPLE", "DESI", refno, pool.clone()).await?;
+        let v = query_children_pdms_tree("SAMPLE", "DESI", refno, &pool).await?;
         println!("v={:?}", v);
         Ok(())
     }
@@ -121,6 +122,18 @@ mod tests {
         let v = attr::query_full_attr(refno, pool).await?;
         dbg!(t.elapsed().as_millis());
         println!("v={:?}", v.to_string_hashmap());
+        Ok(())
+    }
+
+
+    #[tokio::test]
+    async fn test_get_children() -> anyhow::Result<()> {
+        let info_pool = get_test_info_pool().await;
+        let refno = RefU64(65721589565564);
+        let project = element::query_project_name(refno, info_pool).await?;
+        let pool = get_test_sample_pool().await;
+        let v = element::query_children(refno, &pool).await?;
+        println!("v={:?}", v);
         Ok(())
     }
 }

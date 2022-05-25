@@ -124,7 +124,7 @@ pub async fn query_axis_params<T: PdmsDataInterface>(
     // 查找ptse
     let mut map = BTreeMap::new();
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_ele_children_attrs(refno).await?;
+    let children = interface.get_children_attrs(refno).await?;
     for child in children {
         let number = child.get_i32("NUMB").unwrap_or(-1);
         if let Some(axis) =  get_axis_param(&child){
@@ -141,7 +141,7 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
 ) -> anyhow::Result<Vec<GmParam>> {
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_ele_children_attrs(refno).await?;
+    let children = interface.get_children_attrs(refno).await?;
     for child in children {
         //暂时把 Level 的判断加到这里
         if !child.is_visible_by_level(None).unwrap_or(true) {
@@ -284,17 +284,17 @@ pub async fn query_gm_param(att_map: &AttrMap, interface: &mut dyn PdmsDataInter
     let refno = att_map.get_refno().unwrap_or_default();
     let type_name = att_map.get_type();
     if type_name == "SEXT" {
-        let children = interface.get_ele_children_attrs(refno).await.ok()?;
+        let children = interface.get_children_attrs(refno).await.ok()?;
         for child in children {
             let r = child.get_refno().unwrap_or_default();
-            for a in interface.get_ele_children_attrs(r).await.unwrap_or_default() {
+            for a in interface.get_children_attrs(r).await.unwrap_or_default() {
                 verts.push([a.get_as_string("PX").unwrap_or_default(), a.get_as_string("PY").unwrap_or_default()]);
                 prads.push(a.get_as_string("PRAD").unwrap_or_default());
             } 
         }
     }else{
         if has_chidren {
-            for a in interface.get_ele_children_attrs(refno).await.ok()? {
+            for a in interface.get_children_attrs(refno).await.ok()? {
                 verts.push([a.get_as_string("PX").unwrap_or_default(), a.get_as_string("PY").unwrap_or_default()]);
                 dxy.push([a.get_as_string("DX").unwrap_or_default(), a.get_as_string("DY").unwrap_or_default()]);
             }
@@ -335,7 +335,7 @@ pub async  fn process_dtse_params<T: PdmsDataInterface>(
     context: &mut HashMap<SmolStr, SmolStr>,
 ) -> Option<bool> {
     let dtre_refno = attr_map.get_foreign_refno("DTRE")?;
-    let children = interface.get_ele_children_attrs(dtre_refno).await.unwrap_or_default();
+    let children = interface.get_children_attrs(dtre_refno).await.unwrap_or_default();
     for child in children {
         let key = child.get_as_string("DKEY")?;
         let exp = child.get_as_string("PPRO")?;

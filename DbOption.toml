@@ -1,7 +1,7 @@
 total_sync = true
 incr_sync = false
 project_path = "/Volumes/DPC/12.1SP4Projects"
-included_projects = ["Sample", "Master"]
+included_projects = ["Sample"] #, "Master"]
 mdb_name = "Sample"
 project_name = "Sample"
 main_db_code = 7200
@@ -13,4 +13,4 @@ sql_batch_insert_chunk = 100
 batch_insert_handles_chunk = 100
 files_multi_thread = true
 types_multi_thread = true
-recreate_db = false
+recreate_db = true

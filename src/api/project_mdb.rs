@@ -22,7 +22,7 @@ pub async fn insert_project_mdb(pool: Pool<MySql>, info_pool: Pool<MySql>) -> an
     Ok(())
 }
 
-pub async fn query_world_data(mdb: &str, module: &str, pool: Pool<MySql>) -> anyhow::Result<Vec<u8>> {
+pub async fn query_world_data(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<u8>> {
     let sql = gen_query_world_sql(mdb, module);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(result.get::<Vec<u8>, _>(0))

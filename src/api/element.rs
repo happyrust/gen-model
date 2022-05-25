@@ -1,4 +1,4 @@
-use aios_core::pdms_types::{AiosStr, NounHash, RefI32Tuple, RefU64, RefU64Vec};
+use aios_core::pdms_types::{AiosStr, EleTreeNode, NounHash, RefI32Tuple, RefU64, RefU64Vec};
 use sqlx::{Error, MySql, Pool, Row};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
@@ -24,29 +24,29 @@ pub async fn query_refno_type(refno: RefU64, pool: Pool<MySql>) -> anyhow::Resul
     Ok(result.get::<String, _>(0))
 }
 
-pub async fn query_children_pdms_tree(mdb: &str, model: &str, refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<Vec<(RefU64, AiosStr)>> {
+pub async fn query_children_pdms_tree(mdb: &str, model: &str, refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, AiosStr)>> {
     let type_name = query_refno_type(refno, pool.clone()).await?;
     return if type_name == "WORL" {
-        query_world_children(mdb, model, pool.clone()).await
+        query_world_children(mdb, model, pool).await
     } else {
-        query_children(refno, pool.clone()).await
+        query_children(refno, pool).await
     };
 }
 
-pub async fn query_world_children(mdb: &str, model: &str, pool: Pool<MySql>) -> anyhow::Result<Vec<(RefU64, AiosStr)>> {
+pub async fn query_world_children(mdb: &str, model: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, AiosStr)>> {
     let mut result = vec![];
     let mdb = format!("/{}", mdb);
-    let world_data = query_world_data(&mdb, model, pool.clone()).await?;
+    let world_data = query_world_data(&mdb, model, pool).await?;
     let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
     for world in data {
-        let children = query_children(world, pool.clone()).await?;
+        let children = query_children(world, pool).await?;
         result.push(children);
     }
     Ok(result.into_iter().flatten().collect())
 }
 
 /// 获取某个refno 的 children 并未合并 world
-pub async fn query_children(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<Vec<(RefU64, AiosStr)>> {
+pub async fn query_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, AiosStr)>> {
     let mut r = vec![];
     let mut b_map = BTreeMap::new();
     let sql = gen_pdms_elements_get_children_sql(refno);
@@ -69,13 +69,24 @@ pub async fn query_children_count(refno: RefU64, pool: Pool<MySql>) -> anyhow::R
     Ok(count_result.get::<i32, _>(0) as usize)
 }
 
-pub async fn query_world(mdb: &str, module: &str, pool: Pool<MySql>) -> anyhow::Result<(RefU64, AiosStr)> {
+pub async fn query_world(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
     let mdb = format!("/{}", mdb);
-    let world_data = query_world_data(&mdb, module, pool.clone()).await?;
+    let world_data = query_world_data(&mdb, module, pool).await?;
     let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
-    let world_refno = data[0];
-    let world_name = query_name(world_refno, pool.clone()).await?;
-    Ok((world_refno, AiosStr(SmolStr::new(world_name))))
+    let refno = data[0];
+    query_ele_node(refno, pool).await
+}
+
+/// 查询生成Element node
+pub async fn query_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
+    let sql = format!("select * from {PDMS_ELEMENTS_TABLE} where id = {} and is_del = 0;", *refno);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    Ok(EleTreeNode{
+        refno,
+        noun: result.get::<String, _>("type"),
+        name: result.get::<String, _>("name"),
+        owner: RefU64::from(result.get::<i64, _>("owner") as u64),
+    })
 }
 
 /// 通过 refno 获取 owner
@@ -88,6 +99,7 @@ pub async fn query_owner_from_id(refno: RefU64, pool: Pool<MySql>) -> anyhow::Re
     };
 }
 
+/// 生产
 fn gen_query_refno_infos_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("select project from {PDMS_REFNO_INFOS_TABLE} where ref0 = {} limit 1;", refno.get_0()));
@@ -101,12 +113,12 @@ pub async fn query_project_name(refno: RefU64, pool: Pool<MySql>) -> anyhow::Res
     Ok(val)
 }
 
-pub async fn query_project_hash(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<u32> {
-    let sql = gen_query_refno_infos_sql(refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    let val = result.get::<String, _>("project");
-    Ok(AiosStr(SmolStr::new(val)).get_u32_hash())
-}
+// pub async fn query_project_hash(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<u32> {
+//     let sql = gen_query_refno_infos_sql(refno);
+//     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+//     let val = result.get::<String, _>("project");
+//     Ok(AiosStr(SmolStr::new(val)).get_u32_hash())
+// }
 
 fn gen_query_pdms_elements_type_name_sql(refno: RefU64) -> String {
     let mut sql = String::new();

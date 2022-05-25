@@ -73,7 +73,7 @@ pub async fn init_info_database(url: &str) -> anyhow::Result<()> {
 
 
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()>{
-    println!("开始同部pdms/E3D数据");
+    println!("开始同部pdms/E3D: {} 的数据", &db_option.project_name);
     let mut time = Instant::now();
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
     init_info_database(&default_conn_str).await?;
