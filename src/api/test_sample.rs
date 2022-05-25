@@ -3,7 +3,7 @@ use std::time::Instant;
 use aios_core::pdms_types::{RefI32Tuple, RefU64};
 use sqlx::{MySql, Pool};
 use crate::api::attr;
-use crate::api::element::{query_children_pdms_tree, query_mdb_module_worlds, query_owner_from_id, query_project_name, query_world, query_world_children};
+use crate::api::element::*;
 use crate::consts::PDMS_INFO_DB;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
@@ -22,6 +22,7 @@ pub async fn get_test_info_pool() -> Pool<MySql> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use crate::api::element;
     use super::*;
 
@@ -79,12 +80,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_implicit_attr() -> anyhow::Result<()> {
-        let info_pool = get_test_info_pool().await;
-        let pool = get_test_sample_pool().await;
-        let refno = RefU64(103010495627266);
-        let project = query_project_name(refno, &info_pool).await?;
+        let refno = RefU64::from_two_nums(23548, 402);
+        let mgr = AiosDBManager::init_form_config().await?;
+        let project = mgr.get_project_name(refno).unwrap();
         dbg!(&project);
-        let v = attr::query_implicit_attr(refno, &pool).await.unwrap();
+        let v = attr::query_implicit_attr(refno, &mgr.get_project_pool(refno).unwrap()).await.unwrap();
         println!("v={:?}", v.to_string_hashmap());
         Ok(())
     }
@@ -103,37 +103,45 @@ mod tests {
 
     #[tokio::test]
     async fn test_query_explicit_attr() -> anyhow::Result<()> {
-        let info_pool = get_test_info_pool().await;
-        let pool = get_test_sample_pool().await;
         let refno = RefU64(105548821299733);
-        let project = query_project_name(refno, &info_pool).await?;
-        let v = attr::query_explicit_attr(refno, &pool).await?;
+        let mgr = AiosDBManager::init_form_config().await?;
+        let project = mgr.get_project_name(refno).unwrap();
+        dbg!(&project);
+        let v = attr::query_explicit_attr(refno, &mgr.get_project_pool(refno).unwrap()).await?;
         println!("v={:?}", v.to_string_hashmap());
         Ok(())
     }
 
     #[tokio::test]
     async fn test_query_full_attr() -> anyhow::Result<()> {
-        let info_pool = get_test_info_pool().await;
-        let pool = get_test_sample_pool().await;
-        let refno = RefU64::from_two_nums(23548, 402);
-        let project = query_project_name(refno, &info_pool).await?;
+
         let t = Instant::now();
-        let v = attr::query_full_attr(refno, &pool).await?;
+        let refno = RefU64::from_two_nums(23548, 402);
+        let mgr = Arc::new(AiosDBManager::init_form_config().await?);
+        let mut handles = vec![];
+        for _  in 0..10000 {
+            let mgr = mgr.clone();
+            let handle = tokio::spawn(async move{
+                let project = mgr.get_project_name(refno).unwrap();
+                let v = attr::query_full_attr(refno, &mgr.get_project_pool(refno).unwrap()).await.unwrap_or_default();
+                // println!("v={:?}", v.to_string_hashmap());
+            });
+            handles.push(handle);
+        }
+        futures::future::join_all(handles).await;
         dbg!(t.elapsed().as_millis());
-        println!("v={:?}", v.to_string_hashmap());
         Ok(())
     }
 
 
     #[tokio::test]
     async fn test_get_children() -> anyhow::Result<()> {
-        let info_pool = get_test_info_pool().await;
-        let refno = RefU64(65721589565564);
-        let project = element::query_project_name(refno, &info_pool).await?;
-        let pool = get_test_sample_pool().await;
-        let v = element::query_children(refno, &pool).await?;
-        println!("v={:?}", v);
+        // let info_pool = get_test_info_pool().await;
+        // let refno = RefU64(65721589565564);
+        // let project = element::query_project_name(refno, &info_pool).await?;
+        // let pool = get_test_sample_pool().await;
+        // let v = element::query_children(refno, &pool).await?;
+        // println!("v={:?}", v);
         Ok(())
     }
 }

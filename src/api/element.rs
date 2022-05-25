@@ -17,6 +17,7 @@ use crate::api::test_sample::{get_test_info_pool, get_test_sample_pool};
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
+
 /// 通过 refno 返回对应的 type
 pub async fn query_refno_type(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<String> {
     let sql = gen_query_refno_type_sql(refno);
@@ -33,10 +34,10 @@ pub async fn query_children_pdms_tree(mdb: &str, model: &str, refno: RefU64, poo
     };
 }
 
-pub async fn query_children_pdms_tree_ele_node(mdb: &str, model: &str, refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleNodeTIDB>> {
+pub async fn query_children_pdms_tree_ele_node(mdb: &str, model: &str, refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
     let type_name = query_refno_type(refno, &pool).await?;
     return if type_name == "WORL" {
-        query_world_children_ele_node(mdb, model, &pool).await
+        query_world_children_eles(mdb, model, &pool).await
     } else {
         query_children_ele_node(refno, &pool).await
     };
@@ -54,9 +55,10 @@ pub async fn query_world_children(mdb: &str, model: &str, pool: &Pool<MySql>) ->
     Ok(result.into_iter().flatten().collect())
 }
 
-pub async fn query_world_children_ele_node(mdb: &str, model: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleNodeTIDB>> {
+/// 获取world下的pdms elements
+pub async fn query_world_children_eles(mdb: &str, model: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
     let mut result = vec![];
-    let mdb = format!("/{}", mdb);
+    let mdb = format!("/{mdb}");
     let world_data = query_world_data(&mdb, model, pool).await?;
     let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
     for world in data {
@@ -84,7 +86,7 @@ pub async fn query_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result
     Ok(r)
 }
 
-pub async fn query_children_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleNodeTIDB>> {
+pub async fn query_children_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
     let mut r = vec![];
     let mut b_map = BTreeMap::new();
     let sql = gen_pdms_elements_get_children_ele_node_sql(refno);
@@ -96,7 +98,7 @@ pub async fn query_children_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyho
         let owner = RefU64(val.get::<i64, _>("owner") as u64);
         let order = val.get::<i32, _>("order_num");
         let children_count = query_children_count(child_refno, &pool).await?;
-        b_map.insert(order, EleNodeTIDB {
+        b_map.insert(order, PdmsElement {
             refno: child_refno.to_refno_string(),
             owner,
             name,
@@ -137,7 +139,7 @@ pub async fn query_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result
     })
 }
 
-pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<EleNodeTIDB>> {
+pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<PdmsElement>> {
     let mdb = format!("/{}",mdb);
     let world_data = query_world_data(&mdb, module, &pool).await?;
     let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
@@ -150,7 +152,7 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -
             let name = val.get::<String, _>("name");
             let type_name = val.get::<String, _>("type");
             let children_count = query_children_count(world_refno, pool).await?;
-            Ok(Some(EleNodeTIDB {
+            Ok(Some(PdmsElement {
                 refno: world_refno.to_refno_string(),
                 owner,
                 name,
@@ -182,13 +184,6 @@ fn gen_query_refno_infos_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("select project from {PDMS_REFNO_INFOS_TABLE} where ref0 = {} limit 1;", refno.get_0()));
     sql
-}
-
-pub async fn query_project_name(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<String> {
-    let sql = gen_query_refno_infos_sql(refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    let val = result.get::<String, _>("project");
-    Ok(val)
 }
 
 // pub async fn query_project_hash(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<u32> {

@@ -1,4 +1,5 @@
 use std::env;
+use aios_core::consts::{BOX_NOUN, NAME_NOUN, OWNER_NOUN, REFNO_NOUN};
 use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64};
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use anyhow::anyhow;
@@ -8,7 +9,7 @@ use dashmap::DashMap;
 use glam::{Quat, Vec3};
 use sqlx::Executor;
 use sqlx::mysql::MySqlRow;
-use crate::api::element::{query_pdms_elements_type_name, query_refno_type, query_type_refnos};
+use crate::api::element::{query_ele_node, query_pdms_elements_type_name, query_refno_type, query_type_refnos};
 use crate::REFNO_INFO_MAP;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -124,17 +125,20 @@ pub async fn query_explicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
     let sql = gen_query_explicit_attr_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     let val = result.get::<Vec<u8>,_>("data");
-    // Ok(bincode::deserialize::<AttrMap>(&val)?)
     Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
 }
 
 pub async fn query_full_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
-    let mut implicit_attr = query_implicit_attr(refno, pool).await?;
+    let mut attr = query_implicit_attr(refno, pool).await?;
     let explicit_attr = query_explicit_attr(refno, pool).await?;
+    let ele = query_ele_node(refno, pool).await?;
     for (k, v) in explicit_attr.map {
-        implicit_attr.entry(k).or_insert(v);
+        attr.entry(k).or_insert(v);
     }
-    Ok(implicit_attr)
+    attr.entry(NounHash::from(REFNO_NOUN)).or_insert(AttrVal::RefU64Type(ele.refno));
+    attr.entry(NounHash::from(NAME_NOUN)).or_insert(AttrVal::StringType(ele.name.into()));
+    attr.entry(NounHash::from(OWNER_NOUN)).or_insert(AttrVal::RefU64Type(ele.owner));
+    Ok(attr)
 }
 
 pub async fn insert_attr_info(pool: Pool<MySql>) -> anyhow::Result<()> {
