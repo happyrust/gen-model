@@ -136,6 +136,7 @@ dependencies = [
  "approx 0.5.1",
  "async-trait",
  "bincode",
+ "calamine",
  "clap",
  "config",
  "dashmap",
@@ -3499,6 +3500,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "katexit"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64d159b3c7a9ceb86b5b3bc9ce1d8e53fc03311f47cd67d3b4d26d4ef1c2c71a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "kernel32-sys"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3752,6 +3764,17 @@ name = "matches"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a3e378b66a060d48947b590737b30a1be76706c8dd7b8ba0f2fe3989c68a853f"
+
+[[package]]
+name = "matext4cgmath"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6541e181de37f70f0aceb25441823a3d0efa9cc1d23f475a0d3926678949178"
+dependencies = [
+ "cgmath 0.18.0",
+ "katexit",
+ "num-complex 0.4.1",
+]
 
 [[package]]
 name = "matrixmultiply"
@@ -6720,6 +6743,7 @@ name = "truck-base"
 version = "0.2.0"
 dependencies = [
  "cgmath 0.18.0",
+ "matext4cgmath",
  "serde",
 ]
 
@@ -6728,6 +6752,7 @@ name = "truck-geometry"
 version = "0.2.0"
 dependencies = [
  "derive_more",
+ "num 0.4.0",
  "serde",
  "thiserror",
  "truck-base",

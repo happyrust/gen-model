@@ -33,7 +33,16 @@ pub async fn query_children_pdms_tree(mdb: &str, model: &str, refno: RefU64, poo
     };
 }
 
-pub async fn query_world_children(mdb: &str, model: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, AiosStr)>> {
+pub async fn query_children_pdms_tree_ele_node(mdb: &str, model: &str, refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<Vec<EleNodeTIDB>> {
+    let type_name = query_refno_type(refno, pool.clone()).await?;
+    return if type_name == "WORL" {
+        query_world_children_ele_node(mdb, model, pool.clone()).await
+    } else {
+        query_children_ele_node(refno, pool.clone()).await
+    };
+}
+
+pub async fn query_world_children(mdb: &str, model: &str, pool: Pool<MySql>) -> anyhow::Result<Vec<(RefU64, AiosStr)>> {
     let mut result = vec![];
     let mdb = format!("/{}", mdb);
     let world_data = query_world_data(&mdb, model, pool).await?;
@@ -45,17 +54,56 @@ pub async fn query_world_children(mdb: &str, model: &str, pool: &Pool<MySql>) ->
     Ok(result.into_iter().flatten().collect())
 }
 
+pub async fn query_world_children_ele_node(mdb: &str, model: &str, pool: Pool<MySql>) -> anyhow::Result<Vec<EleNodeTIDB>> {
+    let mut result = vec![];
+    let mdb = format!("/{}", mdb);
+    let world_data = query_world_data(&mdb, model, pool.clone()).await?;
+    let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
+    for world in data {
+        let children = query_children_ele_node(world, pool.clone()).await?;
+        result.push(children);
+    }
+    Ok(result.into_iter().flatten().collect())
+}
+
 /// 获取某个refno 的 children 并未合并 world
 pub async fn query_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, AiosStr)>> {
     let mut r = vec![];
     let mut b_map = BTreeMap::new();
-    let sql = gen_pdms_elements_get_children_sql(refno);
+    let sql = gen_pdms_elements_get_children_ele_node_sql(refno);
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     for val in vals {
         let child_refno = RefU64(val.get::<i64, _>("id") as u64);
         let name = AiosStr(SmolStr::new(val.get::<String, _>("name")));
         let order = val.get::<i32, _>("order_num");
         b_map.insert(order, (child_refno, name));
+    }
+    for (_, v) in b_map {
+        r.push(v);
+    }
+    Ok(r)
+}
+
+pub async fn query_children_ele_node(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<Vec<EleNodeTIDB>> {
+    let mut r = vec![];
+    let mut b_map = BTreeMap::new();
+    let sql = gen_pdms_elements_get_children_ele_node_sql(refno);
+    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    for val in vals {
+        let child_refno = RefU64(val.get::<i64, _>("id") as u64);
+        let name = AiosStr(SmolStr::new(val.get::<String, _>("name")));
+        let type_name = AiosStr(SmolStr::new(val.get::<String, _>("type")));
+        let owner = RefU64(val.get::<i64, _>("owner") as u64);
+        let order = val.get::<i32, _>("order_num");
+        let children_count = query_children_count(child_refno, pool.clone()).await?;
+        b_map.insert(order, EleNodeTIDB {
+            refno: AiosStr(child_refno.to_refno_str()),
+            owner,
+            name,
+            noun: type_name,
+            version: 0,
+            children_count,
+        });
     }
     for (_, v) in b_map {
         r.push(v);
@@ -89,6 +137,36 @@ pub async fn query_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result
     })
 }
 
+pub async fn query_world_ele_node(mdb: &str, module: &str, pool: Pool<MySql>) -> anyhow::Result<Option<EleNodeTIDB>> {
+    let mdb = format!("/{}",mdb);
+    let world_data = query_world_data(&mdb, module, pool.clone()).await?;
+    let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
+    let world_refno = data[0];
+    let sql = gen_query_node_id_from_refno_sql(world_refno);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    return match result {
+        Ok(val) => {
+            let owner = RefU64(val.get::<i64, _>("owner") as u64);
+            let name = AiosStr(SmolStr::new(val.get::<String, _>("name")));
+            let type_name = AiosStr(SmolStr::new(val.get::<String, _>("type")));
+            let children_count = query_children_count(world_refno, pool).await?;
+            Ok(Some(EleNodeTIDB {
+                refno: AiosStr(world_refno.to_refno_str()),
+                owner,
+                name,
+                noun: type_name,
+                version: 0,
+                children_count,
+            }))
+        }
+        Err(e) => {
+            dbg!(e);
+            dbg!(sql);
+            Ok(None)
+        }
+    };
+}
+
 /// 通过 refno 获取 owner
 pub async fn query_owner_from_id(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_owner_from_id(refno);
@@ -119,6 +197,28 @@ pub async fn query_project_name(refno: RefU64, pool: Pool<MySql>) -> anyhow::Res
 //     let val = result.get::<String, _>("project");
 //     Ok(AiosStr(SmolStr::new(val)).get_u32_hash())
 // }
+/// 通过 name 获取 refno （pdms）
+pub async fn query_id_from_name(name: &str, pool: Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
+    let sql = gen_query_id_from_name_sql(name);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    match result {
+        Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>(0) as u64))) }
+        Err(_) => { Ok(None) }
+    }
+}
+
+/// 通过 name 获取 refno （ssc）
+pub async fn query_id_from_name_ssc(name: &str, pool: Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
+    let sql = gen_query_id_from_name_ssc_sql(name);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    match result {
+        Ok(v) => {
+            let refno = RefU64(v.get::<i64, _>("id") as u64);
+            Ok(Some(refno))
+        }
+        Err(_) => { Ok(None) }
+    }
+}
 
 fn gen_query_pdms_elements_type_name_sql(refno: RefU64) -> String {
     let mut sql = String::new();
@@ -132,10 +232,21 @@ fn gen_query_owner_from_id(refno: RefU64) -> String {
     sql
 }
 
+fn gen_query_id_from_name_sql(name: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select id from {PDMS_ELEMENTS_TABLE} where name = '{}' ", name));
+    sql
+}
+
+fn gen_query_id_from_name_ssc_sql(name: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select id from {PDMS_SSC_ELEMENTS_TABLE} where name = '{}' ", name));
+    sql
+}
+
 pub async fn query_pdms_elements_type_name(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<String> {
     let sql = gen_query_pdms_elements_type_name_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    // dbg!(&result);
     Ok(result.get::<String, _>("type"))
 }
 
@@ -206,7 +317,7 @@ pub async fn query_id_name_from_dbno_type(dbno: i32, type_name: &str, pool: Pool
         Ok(vals) => {
             let mut r = vec![];
             for v in vals {
-                let refno = RefU64(v.get::<i64, _>("refno") as u64);
+                let refno = RefU64(v.get::<i64, _>("id") as u64);
                 let name = AiosStr(SmolStr::new(v.get::<String, _>("name")));
                 r.push((refno, name))
             }
@@ -216,6 +327,28 @@ pub async fn query_id_name_from_dbno_type(dbno: i32, type_name: &str, pool: Pool
     };
 }
 
+/// 根据 dbno 查询 refno name 和 type
+pub async fn query_id_from_dbno_type(dbno: u32, pool: Pool<MySql>) -> anyhow::Result<Option<Vec<(RefU64, AiosStr,AiosStr)>>> {
+    let sql = gen_query_id_name_type_from_dbno(dbno);
+    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    return match result {
+        Ok(vals) => {
+            let mut r = vec![];
+            for v in vals {
+                let refno = RefU64(v.get::<i64, _>("id") as u64);
+                let name = AiosStr(SmolStr::new(v.get::<String, _>("name")));
+                let type_name = AiosStr(SmolStr::new(v.get::<String,_>("type")));
+                r.push((refno, name,type_name))
+            }
+            Ok(Some(r))
+        }
+        Err(e) => {
+            dbg!(e);
+            dbg!(&sql);
+            Ok(None)
+        }
+    };
+}
 
 fn gen_query_id_from_dbno_type_sql(dbno: i32, type_name: &str) -> String {
     let mut sql = String::new();
@@ -223,9 +356,21 @@ fn gen_query_id_from_dbno_type_sql(dbno: i32, type_name: &str) -> String {
     sql
 }
 
+fn gen_query_node_id_from_refno_sql(refno: RefU64) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select owner,name,type from {PDMS_ELEMENTS_TABLE} where id = {}", refno.0));
+    sql
+}
+
 fn gen_query_id_name_from_dbno_type_sql(dbno: i32, type_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("select id ,name from {PDMS_ELEMENTS_TABLE} where type = '{}' and dbno = {} and is_del = 0 ; ", type_name, dbno));
+    sql
+}
+
+fn gen_query_id_name_type_from_dbno(dbno: u32) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select id ,name, type from {PDMS_ELEMENTS_TABLE} where dbno = {} and is_del = 0 ; ", dbno));
     sql
 }
 
@@ -241,9 +386,9 @@ fn gen_pdms_elements_dbno_sql(dbno: u32, type_name: &str) -> String {
     sql
 }
 
-fn gen_pdms_elements_get_children_sql(refno: RefU64) -> String {
+fn gen_pdms_elements_get_children_ele_node_sql(refno: RefU64) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select id,name,type,order_num from {PDMS_ELEMENTS_TABLE} where owner = {} and is_del = 0 ", refno.0));
+    sql.push_str(&format!("select id,name,type,owner,order_num from {PDMS_ELEMENTS_TABLE} where owner = {} and is_del = 0 ", refno.0));
     sql
 }
 
@@ -281,7 +426,7 @@ pub fn get_name(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashMa
     let attr = whole_attr.get(&refno).unwrap();
     let type_name = attr.implicit_attmap.get_type();
     return if let Some(name) = attr.explicit_attmap.get(&NounHash(db1_hash("NAME"))) {
-        name.string_value().to_string()
+        name.string_value().unwrap_or(SmolStr::new("")).to_string()
     } else {
         let owner = attr.implicit_attmap.get_owner().unwrap();
         let mut idx = 1;
@@ -325,4 +470,84 @@ pub fn gen_query_name_sql(refno: RefU64) -> String {
     sql
 }
 
+#[tokio::test]
+async fn test_get_mdb_type() -> anyhow::Result<()> {
+    let url = env::var("DATABASE_URL")?;
+    let info_pool = AiosDBManager::get_db_pool(&url,"pdms_info_db").await?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
+    let project = query_mdb_module_worlds(pool, info_pool).await?;
+    if let Some(v) = project.get("/SAMPLE") {
+        if let Some(val) = v.get("DESI") {
+            println!("val={:?}", val);
+        }
+    }
+    println!("v={:?}", project);
+    Ok(())
+}
 
+#[tokio::test]
+async fn test_query_world() -> anyhow::Result<()> {
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
+    let v = query_world("SAMPLE", "DESI", pool.clone()).await?;
+    println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_world_children() -> anyhow::Result<()> {
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
+    let v = query_world_children("SAMPLE", "DESI", pool.clone()).await?;
+    println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_children_pdms_tree() -> anyhow::Result<()> {
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
+    let refno: RefU64 = RefI32Tuple((15392, 0)).into();
+    let v = query_children_pdms_tree("SAMPLE", "DESI", refno, pool.clone()).await?;
+    println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_owner_from_id() -> anyhow::Result<()> {
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
+    let refno: RefU64 = RefI32Tuple((0, 0)).into();
+    let v = query_owner_from_id(refno, pool.clone()).await?;
+    println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_world_ele_node() -> anyhow::Result<()> {
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
+    let v = query_world_ele_node("SAMPLE", "DESI", pool.clone()).await?;
+    println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_children_ele_node() -> anyhow::Result<()> {
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
+    let refno: RefU64 = RefI32Tuple((23584, 5)).into();
+    let v = query_children_ele_node(refno, pool.clone()).await?;
+    println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_children_pdms_tree_ele_node() -> anyhow::Result<()> {
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
+    let refno: RefU64 = RefI32Tuple((15392, 0)).into();
+    let v = query_children_pdms_tree_ele_node("SAMPLE", "DESI", refno, pool.clone()).await?;
+    println!("v={:?}", v);
+    Ok(())
+}

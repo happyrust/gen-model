@@ -14,6 +14,7 @@ use std::fs;
 use std::sync::Arc;
 use parse_pdms_db::parse_file;
 use std::mem::take;
+use dashmap::DashMap;
 use crate::api::project_mdb::insert_project_mdb;
 use crate::consts::*;
 use crate::{options, tables};
@@ -22,6 +23,7 @@ use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use sqlx::Executor;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql};
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -37,14 +39,14 @@ pub trait MySqlMethods {
 
 
 //重新创建database
-pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()>{
+pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()> {
     let connection = MySqlPool::connect(url)
         .await
         .unwrap();
     let mut pool = connection.try_acquire().unwrap();
 
     sqlx::query(&format!("drop database if exists {project}")).execute(&mut pool).await?;
-    sqlx::query(&format!("create database {project}")).execute(&mut pool).await?;
+    sqlx::query(&format!("create database {project} default charset utf8")).execute(&mut pool).await?;
     Ok(())
 }
 
@@ -128,6 +130,17 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()>{
                     dbg!(tables_sql.as_str());
                 }
             }
+            // 创建 ssc树的固定节点
+            let result = conn.execute(tables::gen_create_ssc_element_tables_sql().as_str()).await;
+            match result {
+                Ok(_) => {}
+                Err(e) => {
+                    dbg!(&e);
+                    dbg!(tables_sql.as_str());
+                }
+            }
+            insert_set_ssc_node_sql(project_pool).await?;
+
             create_tables_elapse += table_time.elapsed().as_millis();
             let result = pdms_info_conn.execute(tables::gen_create_dbno_infos_tables_sql().as_str()).await;
             match result {
@@ -181,7 +194,7 @@ pub fn gen_implicit_attr_query_sql(att: &WholeAttMap) -> (String, Vec<NounHash>)
 
     let mut column_hashs = vec![];
     for (k, v) in &i_att.map {
-        let mut att_name_full = db1_dehash(k.0).to_lowercase();
+        let mut att_name_full = parse_pdms_db::db1_dehash(k.0).to_lowercase();
         if att_name_full.as_str() == "numbdb" {
             att_name_full = "dbno".to_string();
         }
@@ -224,51 +237,51 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashs: &Vec<NounHas
     let owner = i_att.get_owner().unwrap();
     table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {},"#, refno.0, refno.to_refno_str(), type_name, owner.0));
     for noun_hash in column_hashs {
-        let v = i_att.get(noun_hash).unwrap();
-
-        match v {
-            AttrVal::InvalidType => {}
-            AttrVal::IntegerType(d) => {
-                table_vals_sql.push_str(&format!("{},", d.to_string()));
+        if let Some(v) = i_att.get(noun_hash) {
+            match v {
+                AttrVal::InvalidType => {}
+                AttrVal::IntegerType(d) => {
+                    table_vals_sql.push_str(&format!("{},", d.to_string()));
+                }
+                AttrVal::StringType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, d));
+                }
+                AttrVal::DoubleType(d) => {
+                    table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
+                }
+                AttrVal::DoubleArrayType(d) => {
+                    table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap().as_slice())));
+                }
+                AttrVal::StringArrayType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                }
+                AttrVal::BoolArrayType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                }
+                AttrVal::IntArrayType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                }
+                AttrVal::BoolType(d) => {
+                    let b = if *d { 1 } else { 0 };
+                    table_vals_sql.push_str(&format!("{},", b));
+                }
+                AttrVal::Vec3Type(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                }
+                AttrVal::ElementType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, d));
+                }
+                AttrVal::WordType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, d));
+                }
+                AttrVal::RefU64Type(d) => {
+                    table_vals_sql.push_str(&format!("{},", d.0));
+                }
+                AttrVal::RefU64Array(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                }
+                AttrVal::StringHashType(_) => {}
             }
-            AttrVal::StringType(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-            }
-            AttrVal::DoubleType(d) => {
-                table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
-            }
-            AttrVal::DoubleArrayType(d) => {
-                table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap().as_slice())));
-            }
-            AttrVal::StringArrayType(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-            }
-            AttrVal::BoolArrayType(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-            }
-            AttrVal::IntArrayType(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-            }
-            AttrVal::BoolType(d) => {
-                let b = if *d { 1 } else { 0 };
-                table_vals_sql.push_str(&format!("{},", b));
-            }
-            AttrVal::Vec3Type(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-            }
-            AttrVal::ElementType(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-            }
-            AttrVal::WordType(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-            }
-            AttrVal::RefU64Type(d) => {
-                table_vals_sql.push_str(&format!("{},", d.0));
-            }
-            AttrVal::RefU64Array(d) => {
-                table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
-            }
-            AttrVal::StringHashType(_) => {}
         }
     }
 
@@ -285,7 +298,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
     let batch_chunks_cnt = db_option.sql_batch_insert_chunk as usize;
-    let batch_handles_cnt = db_option.batch_insert_handles_chunk as usize;
+    let _batch_handles_cnt = db_option.batch_insert_handles_chunk as usize;
     let mut target_dir = fs::read_dir(&project_dir).unwrap().into_iter().map(|entry| {
         let entry = entry.unwrap();
         entry.path()
@@ -432,6 +445,34 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                                 }
                             }
                         }
+                        let mut project_conn = pool_clone.acquire().await.unwrap();
+                        for (room_name, refnos) in room_code_map {
+                            let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
+                            let mut values_sql = String::new();
+                            if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
+                                let mut order = 0;
+                                for refno in refnos {
+                                    if let Some(total_attr) = &total_attr_map.get(&refno) {
+                                        let type_name = total_attr.implicit_attmap.get_type();
+                                        let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
+                                            .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
+                                        values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
+                                    }
+                                    order += 1;
+                                }
+                                values_sql.remove(values_sql.len() - 1);
+                                values_sql.push_str(";");
+                                let sql = format!("{}{}", insert_sql, values_sql);
+                                let result = project_conn.execute(sql.as_str()).await;
+                                match result {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(&e);
+                                        dbg!(sql.as_str());
+                                    }
+                                }
+                            }
+                        }
                     }
                 });
                 handles.push(handle);
@@ -487,6 +528,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                      ele_id_tree,
                                      type_ele_map,
                                      refno_node_id_map,
+                                     string_lookup,
                                      refno_info_map,
                                      children_map,
                                      db_type,
@@ -608,6 +650,34 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                     if insert_join_handles.len() == batch_handles_cnt || i == (kv.value().len() - 1) {
                                         let insert_join_handles = take(&mut insert_join_handles);
                                         futures::future::join_all(insert_join_handles).await;
+                                    }
+                                }
+                            }
+                        }
+                        let mut project_conn = pool_clone.acquire().await.unwrap();
+                        for (room_name, refnos) in room_code_map {
+                            let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
+                            let mut values_sql = String::new();
+                            if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
+                                let mut order = 0;
+                                for refno in refnos {
+                                    if let Some(total_attr) = &total_attr_map.get(&refno) {
+                                        let type_name = total_attr.implicit_attmap.get_type();
+                                        let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
+                                            .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
+                                        values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
+                                    }
+                                    order += 1;
+                                }
+                                values_sql.remove(values_sql.len() - 1);
+                                values_sql.push_str(";");
+                                let sql = format!("{}{}", insert_sql, values_sql);
+                                let result = project_conn.execute(sql.as_str()).await;
+                                match result {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(&e);
+                                        dbg!(sql.as_str());
                                     }
                                 }
                             }

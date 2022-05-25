@@ -1,5 +1,3 @@
-#![feature(once_cell)]
-
 use lazy_static::lazy_static;
 use dashmap::DashMap;
 use aios_core::pdms_types::AttrInfo;
