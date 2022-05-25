@@ -29,7 +29,7 @@ mod tests {
     async fn test_get_mdb_type() -> anyhow::Result<()> {
         let info_pool = get_test_info_pool().await;
         let pool = get_test_sample_pool().await;
-        let project = query_mdb_module_worlds(pool, info_pool).await?;
+        let project = query_mdb_module_worlds(&pool, &info_pool).await?;
         if let Some(v) = project.get("/SAMPLE") {
             if let Some(val) = v.get("DESI") {
                 println!("val={:?}", val);
@@ -72,7 +72,7 @@ mod tests {
         let info_pool = get_test_info_pool().await;
         let pool = get_test_sample_pool().await;
         let refno: RefU64 = RefI32Tuple((0, 0)).into();
-        let v = query_owner_from_id(refno, pool.clone()).await?;
+        let v = query_owner_from_id(refno, &pool).await?;
         println!("v={:?}", v);
         Ok(())
     }
@@ -82,9 +82,9 @@ mod tests {
         let info_pool = get_test_info_pool().await;
         let pool = get_test_sample_pool().await;
         let refno = RefU64(103010495627266);
-        let project = query_project_name(refno, info_pool).await?;
+        let project = query_project_name(refno, &info_pool).await?;
         dbg!(&project);
-        let v = attr::query_implicit_attr(refno, pool).await.unwrap();
+        let v = attr::query_implicit_attr(refno, &pool).await.unwrap();
         println!("v={:?}", v.to_string_hashmap());
         Ok(())
     }
@@ -106,8 +106,8 @@ mod tests {
         let info_pool = get_test_info_pool().await;
         let pool = get_test_sample_pool().await;
         let refno = RefU64(105548821299733);
-        let project = query_project_name(refno, info_pool).await?;
-        let v = attr::query_explicit_attr(refno, pool).await?;
+        let project = query_project_name(refno, &info_pool).await?;
+        let v = attr::query_explicit_attr(refno, &pool).await?;
         println!("v={:?}", v.to_string_hashmap());
         Ok(())
     }
@@ -117,9 +117,9 @@ mod tests {
         let info_pool = get_test_info_pool().await;
         let pool = get_test_sample_pool().await;
         let refno = RefU64::from_two_nums(23548, 402);
-        let project = query_project_name(refno, info_pool).await?;
+        let project = query_project_name(refno, &info_pool).await?;
         let t = Instant::now();
-        let v = attr::query_full_attr(refno, pool).await?;
+        let v = attr::query_full_attr(refno, &pool).await?;
         dbg!(t.elapsed().as_millis());
         println!("v={:?}", v.to_string_hashmap());
         Ok(())
@@ -130,7 +130,7 @@ mod tests {
     async fn test_get_children() -> anyhow::Result<()> {
         let info_pool = get_test_info_pool().await;
         let refno = RefU64(65721589565564);
-        let project = element::query_project_name(refno, info_pool).await?;
+        let project = element::query_project_name(refno, &info_pool).await?;
         let pool = get_test_sample_pool().await;
         let v = element::query_children(refno, &pool).await?;
         println!("v={:?}", v);

@@ -64,9 +64,9 @@ pub struct AiosDBManager {
 impl PdmsDataInterface for AiosDBManager {
 
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
-        let project_name = query_project_name(refno, self.info_db.clone()).await?;
+        let project_name = query_project_name(refno, &self.info_db).await?;
         if let Some(project_pool) = self.project_map.get(&project_name) {
-            let attr = query_full_attr(refno, project_pool.pool.clone()).await?;
+            let attr = query_full_attr(refno, &project_pool.pool).await?;
             return Ok(attr);
         }
         Ok(AttrMap::default())
@@ -81,7 +81,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     async fn get_children_nodes(&self, refno: RefU64) -> anyhow::Result<Vec<EleTreeNode>> {
-        let project_name = query_project_name(refno, self.info_db.clone()).await?;
+        let project_name = query_project_name(refno, &self.info_db).await?;
         let mut r = vec![];
         if let Some(project_pool) = self.project_map.get(&project_name) {
             let children = query_children(refno, &project_pool.pool).await?;
@@ -94,7 +94,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     async fn get_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
-        let project_name = query_project_name(refno, self.info_db.clone()).await?;
+        let project_name = query_project_name(refno, &self.info_db).await?;
         let mut r = vec![];
         if let Some(project_pool) = self.project_map.get(&project_name) {
             let children = query_children(refno, &project_pool.pool).await?;
@@ -107,7 +107,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
-        let project_name = query_project_name(refno, self.info_db.clone()).await?;
+        let project_name = query_project_name(refno, &self.info_db).await?;
         let mut result = RefU64Vec::default();
         if let Some(project_pool) = self.project_map.get(&project_name) {
             let children = query_children(refno, &project_pool.pool).await?;
@@ -123,9 +123,9 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr> {
-        let project_name = query_project_name(refno, self.info_db.clone()).await?;
+        let project_name = query_project_name(refno, &self.info_db).await?;
         if let Some(project_pool) = self.project_map.get(&project_name) {
-            let name = query_name(refno, project_pool.pool.clone()).await?;
+            let name = query_name(refno, &project_pool.pool).await?;
             return Ok(SmolStr::new(name));
         }
         Ok(SmolStr::new(""))
@@ -133,17 +133,17 @@ impl PdmsDataInterface for AiosDBManager {
 
     async fn get_refnos_by_type(&self, project: &str, att_type: &str) -> anyhow::Result<RefU64Vec> {
         if let Some(project_pool) = self.project_map.get(project) {
-            let r = query_type_refnos(att_type, project_pool.pool.clone()).await?;
+            let r = query_type_refnos(att_type, &project_pool.pool).await?;
             return Ok(r);
         }
         Ok(RefU64Vec::default())
     }
 
-    async fn get_db_world(&self, project: &str, db_no: u32) -> anyhow::Result<Option<(RefU64, AiosStr)>> {
+    async fn get_db_world(&self, project: &str, db_no: u32) -> anyhow::Result<Option<(RefU64, String)>> {
         if let Some(project_pool) = self.project_map.get(project) {
-            let r = query_id_name_from_dbno_type(db_no as i32, "WORL", project_pool.pool.clone()).await?;
-            if let Some(r) = r {
-                return Ok(Some(r[0].clone()));
+            let r = query_id_name_from_dbno_type(db_no as i32, "WORL", &project_pool.pool).await?;
+            if let Some(mut r) = r {
+                return Ok(Some(r.remove(0)));
             }
         }
         return Ok(None);
@@ -231,9 +231,9 @@ impl AiosDBManager {
     ///获取世界坐标变换矩阵
     #[inline]
     pub async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>> {
-        if let Ok(project) = query_project_name(refno, self.info_db.clone()).await {
+        if let Ok(project) = query_project_name(refno, &self.info_db).await {
             if let Some(mut db) = self.project_map.get(&project) {
-                if let Ok(Some(dbno)) = query_dbno_from_db(refno, db.pool.clone()).await {
+                if let Ok(Some(dbno)) = query_dbno_from_db(refno, &db.pool).await {
                     return db.get_world_transform(refno).await;
                 }
             }
@@ -688,7 +688,7 @@ pub struct AiosPdmsProjectTiDB {
 
 impl AiosPdmsProjectTiDB {
     pub async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
-        query_full_attr(refno, self.pool.clone()).await
+        query_full_attr(refno, &self.pool).await
     }
 
     ///获得世界坐标系
@@ -723,9 +723,9 @@ impl AiosPdmsProjectTiDB {
                 )) * Quat::from_rotation_z(bangle.to_radians());
                 final_rot
             } else {
-                query_ori_from_id(refno, self.pool.clone()).await?.unwrap_or_default()
+                query_ori_from_id(refno, &self.pool).await?.unwrap_or_default()
             };
-            translation = translation + rotation * (query_position_from_id(refno, self.pool.clone())).await?.unwrap_or_default();
+            translation = translation + rotation * (query_position_from_id(refno, &self.pool)).await?.unwrap_or_default();
             rotation = rotation * t;
         }
         Ok(Some(glam::TransformRT {
@@ -739,7 +739,7 @@ impl AiosPdmsProjectTiDB {
         let mut cur_refno = refno;
         let mut r = vec![];
         while let Ok(attr) = self.get_attr(cur_refno).await {
-            if let Ok(Some(owner)) = query_owner_from_id(cur_refno, self.pool.clone()).await {
+            if let Ok(Some(owner)) = query_owner_from_id(cur_refno, &self.pool).await {
                 r.push(attr);
                 cur_refno = owner;
             } else {

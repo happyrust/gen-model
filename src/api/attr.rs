@@ -1,9 +1,8 @@
-use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefU64};
+use std::env;
+use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64};
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use anyhow::anyhow;
 use sqlx::{Error, MySql, Pool, pool, Row};
-use parse_pdms_db::db_tool::db1_hash;
-use parse_pdms_db::db1_dehash;
 use smol_str::SmolStr;
 use dashmap::DashMap;
 use glam::{Quat, Vec3};
@@ -16,9 +15,9 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 
 
 /// 获得隐式属性
-pub async fn query_implicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<AttrMap> {
+pub async fn query_implicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
     let mut r = AttrMap::default();
-    let type_name = query_pdms_elements_type_name(refno, pool.clone()).await?;
+    let type_name = query_pdms_elements_type_name(refno, pool).await?;
     let type_hash = db1_hash(&type_name);
     let sql = gen_query_implicit_attr_sql(refno, &type_name);
     let query_r = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
@@ -121,7 +120,7 @@ pub async fn query_implicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Re
     Ok(r)
 }
 
-pub async fn query_explicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<AttrMap> {
+pub async fn query_explicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
     let sql = gen_query_explicit_attr_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     let val = result.get::<Vec<u8>,_>("data");
@@ -129,9 +128,9 @@ pub async fn query_explicit_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Re
     Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
 }
 
-pub async fn query_full_attr(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<AttrMap> {
-    let mut implicit_attr = query_implicit_attr(refno, pool.clone()).await?;
-    let explicit_attr = query_explicit_attr(refno, pool.clone()).await?;
+pub async fn query_full_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
+    let mut implicit_attr = query_implicit_attr(refno, pool).await?;
+    let explicit_attr = query_explicit_attr(refno, pool).await?;
     for (k, v) in explicit_attr.map {
         implicit_attr.entry(k).or_insert(v);
     }
@@ -152,8 +151,8 @@ pub async fn insert_attr_info(pool: Pool<MySql>) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn query_position_from_id(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<Option<Vec3>> {
-    let type_name = query_refno_type(refno, pool.clone()).await?;
+pub async fn query_position_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<Vec3>> {
+    let type_name = query_refno_type(refno, pool).await?;
     let sql = gen_position_from_id(refno, &type_name);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
@@ -165,8 +164,8 @@ pub async fn query_position_from_id(refno: RefU64, pool: Pool<MySql>) -> anyhow:
     };
 }
 
-pub async fn query_ori_from_id(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<Option<Quat>> {
-    let type_name = query_refno_type(refno, pool.clone()).await?;
+pub async fn query_ori_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<Quat>> {
+    let type_name = query_refno_type(refno, pool).await?;
     let sql = gen_query_ori_from_id(refno, &type_name);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
@@ -181,8 +180,8 @@ pub async fn query_ori_from_id(refno: RefU64, pool: Pool<MySql>) -> anyhow::Resu
     };
 }
 
-pub async fn query_foreign_refno(refno: RefU64, foreign_type: &str, pool: Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
-    let type_name = query_refno_type(refno, pool.clone()).await?;
+pub async fn query_foreign_refno(refno: RefU64, foreign_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
+    let type_name = query_refno_type(refno, pool).await?;
     let sql = gen_query_foreign_refno_sql(refno, &type_name, foreign_type);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
@@ -247,7 +246,7 @@ async fn test_query_foreign_refno() -> anyhow::Result<()> {
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
     let refno: RefU64 = RefI32Tuple((23584, 121)).into();
-    let v = query_foreign_refno(refno, "catr", pool.clone()).await?;
+    let v = query_foreign_refno(refno, "catr", &pool).await?;
     println!("v={:?}", v);
     Ok(())
 }
@@ -257,7 +256,7 @@ async fn test_query_position_refno() -> anyhow::Result<()> {
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
     let refno: RefU64 = RefI32Tuple((23584, 11)).into();
-    let v = query_position_from_id(refno, pool).await?;
+    let v = query_position_from_id(refno, &pool).await?;
     println!("v={:?}", v);
     Ok(())
 }

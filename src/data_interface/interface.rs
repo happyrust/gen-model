@@ -33,5 +33,5 @@ pub trait PdmsDataInterface {
 
     async fn get_refnos_by_type(&self, project: &str, att_type: &str) -> anyhow::Result<RefU64Vec>;
 
-    async fn get_db_world(&self, project: &str, db_no: u32) -> anyhow::Result<Option<(RefU64, AiosStr)>>;
+    async fn get_db_world(&self, project: &str, db_no: u32) -> anyhow::Result<Option<(RefU64, String)>>;
 }

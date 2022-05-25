@@ -16,6 +16,7 @@ pub mod api;
 pub mod db_types;
 pub mod data_interface;
 pub mod cata;
+pub mod ssc;
 
 #[macro_use]
 extern crate nom;
