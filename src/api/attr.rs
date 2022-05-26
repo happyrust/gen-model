@@ -1,6 +1,7 @@
 use std::env;
-use aios_core::consts::{BOX_NOUN, NAME_NOUN, OWNER_NOUN, REFNO_NOUN};
+use aios_core::consts::*;
 use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64};
+use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use anyhow::anyhow;
 use sqlx::{Error, MySql, Pool, pool, Row};
@@ -14,17 +15,28 @@ use crate::api::element::{query_ele_node, query_owner_from_id, query_pdms_elemen
 use crate::REFNO_INFO_MAP;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::helper::qualified_table_name;
 
-
-/// 获得隐式属性
-pub async fn query_implicit_attr(refno: RefU64, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
-    let mut r = AttrMap::default();
-    let type_name = query_pdms_elements_type_name(refno, pool).await?;
-    let type_hash = db1_hash(&type_name);
-    let sql = gen_query_implicit_attr_sql(refno, &type_name, &column_names);
+/// 指定从特定的表查询数据，根据owner查询
+pub async fn query_implicit_attrs_by_owner(owner: RefU64, type_name: &str, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>> {
+    let type_name = type_name.to_lowercase();
+    let sql = gen_query_implicit_attr_sql_by_owner(owner, &type_name, &column_names);
     let column_names = column_names.unwrap_or_default();
-    let query_r = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    if let Some(val) = REFNO_INFO_MAP.get(&(type_hash as i32)) {
+    let rows = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let type_hash = db1_hash(type_name.to_uppercase().as_str());
+
+    let mut att_maps = vec![];
+    for r in &rows {
+        let a = convert_row_to_attmap(r, type_hash as i32, &column_names)?;
+        att_maps.push(a);
+    }
+    Ok(att_maps)
+}
+
+#[inline]
+pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &Vec<&str>) -> anyhow::Result<AttrMap>{
+    let mut r = AttrMap::default();
+    if let Some(val) = REFNO_INFO_MAP.get(&type_hash ) {
         for info in val.value() {
             if !column_names.is_empty() && !column_names.contains(&info.name.as_str()) {
                 continue;
@@ -35,49 +47,49 @@ pub async fn query_implicit_attr(refno: RefU64, pool: &Pool<MySql>, column_names
                 let hash = NounHash::from(db1_hash(&info.name));
                 match info.att_type {
                     DbAttributeType::INTEGER => {
-                        query_r.try_get::<i32, _>(t).map(|v| {
+                        row.try_get::<i32, _>(t).map(|v| {
                             r.entry(hash).or_insert(AttrVal::IntegerType(v))
                         })?;
                     }
                     DbAttributeType::DOUBLE => {
-                        query_r.try_get::<f64, _>(t).map(|v| {
+                        row.try_get::<f64, _>(t).map(|v| {
                             r.entry(hash).or_insert(AttrVal::DoubleType(v))
                         })?;
                     }
                     DbAttributeType::BOOL => {
-                        query_r.try_get::<bool, _>(t).map(|v| {
+                        row.try_get::<bool, _>(t).map(|v| {
                             r.entry(hash).or_insert(AttrVal::BoolType(v))
                         })?;
                     }
                     DbAttributeType::STRING => {
-                        query_r.try_get::<String, _>(t).map(|v| {
+                        row.try_get::<String, _>(t).map(|v| {
                             r.entry(hash).or_insert(AttrVal::StringType(v.into()))
                         })?;
                     }
                     DbAttributeType::ELEMENT => {
-                        query_r.try_get::<i64, _>(t).map(|v| {
+                        row.try_get::<i64, _>(t).map(|v| {
                             r.entry(hash).or_insert(AttrVal::RefU64Type(RefU64(v as u64)))
                         })?;
                     }
                     DbAttributeType::WORD => {
-                        query_r.try_get::<String, _>(t).map(|v| {
+                        row.try_get::<String, _>(t).map(|v| {
                             r.entry(hash).or_insert(AttrVal::StringType(SmolStr::new(v)))
                         })?;
                     }
                     DbAttributeType::DOUBLEVEC => {
-                        query_r.try_get::<Vec<u8>, _>(t).map(|v| {
+                        row.try_get::<Vec<u8>, _>(t).map(|v| {
                             let v = bincode::deserialize::<Vec<f64>>(&v).unwrap();
                             r.entry(hash).or_insert(AttrVal::DoubleArrayType(v))
                         })?;
                     }
                     DbAttributeType::INTVEC => {
-                        query_r.try_get::<String, _>(t).map(|v| {
+                        row.try_get::<String, _>(t).map(|v| {
                             let v = serde_json::from_str::<Vec<i32>>(&v).unwrap();
                             r.entry(hash).or_insert(AttrVal::IntArrayType(v))
                         })?;
                     }
-                    DbAttributeType::Vec3Type => {
-                        query_r.try_get::<String, _>(t).map(|v| {
+                    DbAttributeType::Vec3Type | DbAttributeType::ORIENTATION | DbAttributeType::POSITION => {
+                        row.try_get::<String, _>(t).map(|v| {
                             let v = serde_json::from_str::<[f64; 3]>(&v).unwrap_or_default();
                             r.entry(hash).or_insert(AttrVal::Vec3Type(v))
                         })?;
@@ -87,6 +99,32 @@ pub async fn query_implicit_attr(refno: RefU64, pool: &Pool<MySql>, column_names
             }
         }
     }
+    if column_names.contains(&"TYPE")  {
+        row.try_get::<String, _>("TYPE").map(|v| {
+            r.entry(TYPE_HASH).or_insert(AttrVal::StringType(v.into()))
+        })?;
+    }
+    if column_names.contains(&"NAME")  {
+        row.try_get::<String, _>("NAME").map(|v| {
+            r.entry(NAME_HASH).or_insert(AttrVal::StringType(v.into()))
+        })?;
+    }
+    if column_names.contains(&"OWNER")  {
+        row.try_get::<i64, _>("OWNER").map(|v| {
+            r.entry(OWNER_HASH).or_insert(AttrVal::RefU64Type(RefU64(v as u64)))
+        })?;
+    }
+    Ok(r)
+}
+
+/// 获得隐式属性
+pub async fn query_implicit_attr(refno: RefU64, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
+    let type_name = query_pdms_elements_type_name(refno, pool).await?;
+    let type_hash = db1_hash(&type_name);
+    let sql = gen_query_implicit_attr_sql(refno, &type_name, &column_names);
+    let column_names = column_names.unwrap_or_default();
+    let row = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let mut r = convert_row_to_attmap(&row, type_hash as i32, &column_names)?;
     Ok(r)
 }
 
@@ -104,9 +142,9 @@ pub async fn query_full_attr(refno: RefU64, pool: &Pool<MySql>, column_names: Op
     for (k, v) in explicit_attr.map {
         attr.entry(k).or_insert(v);
     }
-    attr.entry(NounHash::from(REFNO_NOUN)).or_insert(AttrVal::RefU64Type(ele.refno));
-    attr.entry(NounHash::from(NAME_NOUN)).or_insert(AttrVal::StringType(ele.name.into()));
-    attr.entry(NounHash::from(OWNER_NOUN)).or_insert(AttrVal::RefU64Type(ele.owner));
+    attr.entry(REFNO_HASH).or_insert(AttrVal::RefU64Type(ele.refno));
+    attr.entry(NAME_HASH).or_insert(AttrVal::StringType(ele.name.into()));
+    attr.entry(OWNER_HASH).or_insert(AttrVal::RefU64Type(ele.owner));
     Ok(attr)
 }
 
@@ -188,7 +226,18 @@ pub fn gen_query_implicit_attr_sql(refno: RefU64, type_name: &str, columns: &Opt
     let cols_sql = columns.as_ref().map(|x|{
         x.iter().map(|x| x.to_lowercase()).join(",")
     }).unwrap_or("*".to_string());
-    sql.push_str(&format!("select {cols_sql} from {} where id = {}", type_name, refno.0));
+    sql.push_str(&format!("select {cols_sql} from {} where id = {}", qualified_table_name(type_name), refno.0));
+    sql
+}
+
+/// 生成通过owner获取的sql语句
+#[inline]
+pub fn gen_query_implicit_attr_sql_by_owner(owner: RefU64, type_name: &str, columns: &Option<Vec<&str>>) -> String {
+    let mut sql = String::new();
+    let cols_sql = columns.as_ref().map(|x|{
+        x.iter().map(|x| x.to_lowercase()).join(",")
+    }).unwrap_or("*".to_string());
+    sql.push_str(&format!("select {cols_sql} from {} where owner = {}", type_name, owner.0));
     sql
 }
 

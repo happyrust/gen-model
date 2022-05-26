@@ -421,7 +421,7 @@ pub fn get_name(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashMa
     let attr = whole_attr.get(&refno).unwrap();
     let type_name = attr.implicit_attmap.get_type();
     return if let Some(name) = attr.explicit_attmap.get(&NounHash(db1_hash("NAME"))) {
-        name.string_value().unwrap_or(SmolStr::new("")).to_string()
+        name.string_value()
     } else {
         let owner = attr.implicit_attmap.get_owner().unwrap();
         let mut idx = 1;

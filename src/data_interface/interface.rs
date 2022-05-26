@@ -21,6 +21,8 @@ pub trait PdmsDataInterface {
 
     async fn get_implicit_attr(&self, refno: RefU64, columns: Option<Vec<&str>>) -> anyhow::Result<AttrMap>;
 
+    async fn get_implicit_attrs_by_owner(&self, owner: RefU64, type_name: &str, columns: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>>;
+
     async fn get_parent_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
 
     async fn get_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>>;

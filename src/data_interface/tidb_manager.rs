@@ -18,7 +18,7 @@ use id_tree::{Node, NodeId};
 use smol_str::SmolStr;
 use once_cell::sync::Lazy;
 use sqlx::{MySql, MySqlPool, Pool};
-use crate::api::attr::{query_explicit_attr, query_full_attr, query_implicit_attr, query_ori_from_id, query_parent_attr, query_position_from_id};
+use crate::api::attr::{query_explicit_attr, query_full_attr, query_implicit_attr, query_implicit_attrs_by_owner, query_ori_from_id, query_parent_attr, query_position_from_id};
 use crate::api::element::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::consts::*;
@@ -33,10 +33,10 @@ pub type CateBrepShapeMap = HashMap<RefU64, Vec<CateBrepShape>>;
 //     Mutex::new(world)
 // });
 
-static PRIM_HASH_NOUNS: Lazy<Vec<u32>> = Lazy::new(|| {
-    vec![BOX_NOUN, CYLI_NOUN, SPHE_NOUN, CONE_NOUN, CTOR_NOUN, DISH_NOUN,
-         LOOP_NOUN, PYRA_NOUN, RTOR_NOUN, REVO_NOUN, POHE_NOUN, PLOO_NOUN, SPINE_NOUN]
-});
+// static PRIM_HASH_NOUNS: Lazy<Vec<u32>> = Lazy::new(|| {
+//     vec![BOX_HASH, CYLI_NOUN, SPHE_NOUN, CONE_NOUN, CTOR_NOUN, DISH_NOUN,
+//          LOOP_NOUN, PYRA_NOUN, RTOR_NOUN, REVO_NOUN, POHE_NOUN, PLOO_NOUN, SPINE_NOUN]
+// });
 
 static PRIM_NOUN_NAMES: Lazy<Vec<&'static str>> = Lazy::new(|| {
     vec!["BOX", "CYLI", "SPHE", "CONE", "DISH", "CTOR", "RTOR", "PYRA", "LOOP",
@@ -83,6 +83,14 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(AttrMap::default())
     }
 
+    async fn get_implicit_attrs_by_owner(&self, owner: RefU64, type_name: &str, columns: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>> {
+        if let Some(project_pool) = self.get_project_pool(owner) {
+            let attr = query_implicit_attrs_by_owner(owner, type_name, &project_pool, columns).await?;
+            return Ok(attr);
+        }
+        Ok(vec![])
+    }
+
     async fn get_parent_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
         if let Some(project_pool) = self.get_project_pool(refno) {
             let attr = query_parent_attr(refno, &project_pool, None).await?;
@@ -102,8 +110,8 @@ impl PdmsDataInterface for AiosDBManager {
     async fn get_parent_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>> {
         let mut node = None;
         if let Some(project_pool) = self.get_project_pool(refno) {
-            let parent =
-            node = Some(query_ele_node(refno, &project_pool).await?);
+            let parent = query_owner_from_id(refno, &project_pool).await?.ok_or(anyhow!("parent not exist".to_string()))?;
+            node = Some(query_ele_node(parent, &project_pool).await?);
         }
         Ok(node)
     }
@@ -429,18 +437,26 @@ impl AiosDBManager {
         let t = Instant::now();
         let eles = self.get_refnos_by_types(project, vec!["BOX"] /*PRIM_NOUN_NAMES.clone()*/).await?;
         dbg!(eles.len());
-        //先缓存transform
+        // 提前先缓存transform
         for refno in eles {
+            //提前缓存并且写入到数据库里
+            //可以单独建一张表，先插入这部分数据
             let transform = self.get_world_transform(refno).await?;
         }
 
         let loop_eles = self.get_refnos_by_types(project, vec!["LOOP", "PLOO"]).await?;
+        //最好是批量取数据，而不是循环去取
+        //处理loop elements
         for refno in loop_eles {
-            let transform = self.get_world_transform(refno).await?;
-            let mut parent_att = self.get_parent_attr(refno).await?;
+            // let transform = self.get_world_transform(refno).await?;
+            // let mut parent_att = self.get_implicit_attrs_by_owner(refno, Some(vec!["TYPE", "ANGL"])).await?;
+            let mut parent_att = self.get_parent_ele_node(refno).await?.unwrap_or_default();
             // let parent_noun_name = parent_att.get_type();
             let mut loop_verts: Vec<Vec3> = vec![];
             let mut fradius_vec: Vec<f32> = vec![];
+            // let atts = self.get_implicit_attrs_by_owner(refno, "VERT", Some(vec!["POS", "FRAD"])).await?;
+            // dbg!(atts.len());
+            // self.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await
             if let Ok(children_refs) = self.get_children_refs(refno).await {
                 for x in children_refs {
                     if let Ok(a) = self.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
@@ -449,7 +465,27 @@ impl AiosDBManager {
                     }
                 }
             }
+            // dbg!(&parent_att.noun);
+            if parent_att.noun == "REVO" {
+                // dbg!(&parent_att);
+                let parent_att = self.get_implicit_attr(parent_att.refno, Some(vec!["ANGL"])).await?;
+                let angle = parent_att.get_f32("ANGL").unwrap_or_default();
+                dbg!(angle);
+                if angle >= f32::EPSILON {
+                    let revo = Box::new(Revolution {
+                        loop_verts,
+                        angle,
+                        ..Default::default()
+                    });
+                    if revo.check_valid() {
+                        let item_trans = revo.get_trans();
+                        let r = cached_mesh_mgr.get_pdms_mesh_hash_key(revo);
+                        let geo_hash = Some(r);
+                    }
+                }
+            }
         }
+        dbg!(cached_mesh_mgr.meshes.len());
         dbg!(t.elapsed().as_millis());
         //遍历所有的基本体
 
