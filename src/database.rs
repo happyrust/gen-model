@@ -445,35 +445,36 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                                 }
                             }
                         }
-                        // let mut project_conn = pool_clone.acquire().await.unwrap();
-                        // for (room_name, refnos) in room_code_map {
-                        //     let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
-                        //     let mut values_sql = String::new();
-                        //     if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
-                        //         let mut order = 0;
-                        //         for refno in refnos {
-                        //             if let Some(total_attr) = &total_attr_map.get(&refno) {
-                        //                 let type_name = total_attr.implicit_attmap.get_type();
-                        //                 let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
-                        //                     .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
-                        //                 values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
-                        //             }
-                        //             order += 1;
-                        //         }
-                        //         values_sql.remove(values_sql.len() - 1);
-                        //         values_sql.push_str(";");
-                        //         let sql = format!("{}{}", insert_sql, values_sql);
-                        //         let result = project_conn.execute(sql.as_str()).await;
-                        //         match result {
-                        //             Ok(_) => {}
-                        //             Err(e) => {
-                        //                 dbg!(&e);
-                        //                 dbg!(sql.as_str());
-                        //             }
-                        //         }
-                        //     }
-                        // }
-                        //
+                        // 将带room_code数据的refno存放在pdms_ssc_element中
+                        let mut project_conn = pool_clone.acquire().await.unwrap();
+                        for (room_name, refnos) in room_code_map {
+                            let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
+                            let mut values_sql = String::new();
+                            if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
+                                let mut order = 0;
+                                for refno in refnos {
+                                    if let Some(total_attr) = &total_attr_map.get(&refno) {
+                                        let type_name = total_attr.implicit_attmap.get_type();
+                                        let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
+                                            .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
+                                        values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
+                                    }
+                                    order += 1;
+                                }
+                                values_sql.remove(values_sql.len() - 1);
+                                values_sql.push_str(";");
+                                let sql = format!("{}{}", insert_sql, values_sql);
+                                let result = project_conn.execute(sql.as_str()).await;
+                                match result {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(&e);
+                                        dbg!(sql.as_str());
+                                    }
+                                }
+                            }
+                        }
+
                     }
                 });
                 handles.push(handle);
@@ -654,35 +655,36 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                 }
                             }
                         }
+                        // 将带有room_code属性的参考号放入pdms_ssc_elements中
                         let mut project_conn = pool_clone.acquire().await.unwrap();
-                        // for (room_name, refnos) in room_code_map {
-                        //     let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
-                        //     let mut values_sql = String::new();
-                        //     if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
-                        //         let mut order = 0;
-                        //         for refno in refnos {
-                        //             if let Some(total_attr) = &total_attr_map.get(&refno) {
-                        //                 let type_name = total_attr.implicit_attmap.get_type();
-                        //                 let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
-                        //                     .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
-                        //                 values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
-                        //             }
-                        //             order += 1;
-                        //         }
-                        //         values_sql.remove(values_sql.len() - 1);
-                        //         values_sql.push_str(";");
-                        //         let sql = format!("{}{}", insert_sql, values_sql);
-                        //         let result = project_conn.execute(sql.as_str()).await;
-                        //         match result {
-                        //             Ok(_) => {}
-                        //             Err(e) => {
-                        //                 dbg!(&e);
-                        //                 dbg!(sql.as_str());
-                        //             }
-                        //         }
-                        //     }
-                        // }
-                        //
+                        for (room_name, refnos) in room_code_map {
+                            let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
+                            let mut values_sql = String::new();
+                            if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
+                                let mut order = 0;
+                                for refno in refnos {
+                                    if let Some(total_attr) = &total_attr_map.get(&refno) {
+                                        let type_name = total_attr.implicit_attmap.get_type();
+                                        let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
+                                            .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
+                                        values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
+                                    }
+                                    order += 1;
+                                }
+                                values_sql.remove(values_sql.len() - 1);
+                                values_sql.push_str(";");
+                                let sql = format!("{}{}", insert_sql, values_sql);
+                                let result = project_conn.execute(sql.as_str()).await;
+                                match result {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(&e);
+                                        dbg!(sql.as_str());
+                                    }
+                                }
+                            }
+                        }
+
                     }
                 });
                 handles.push(handle);
