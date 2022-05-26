@@ -23,6 +23,7 @@ use sqlx::Executor;
 use aios_database::api::attr::insert_attr_info;
 use aios_database::api::element::*;
 use aios_database::api::project_mdb::insert_project_mdb;
+use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::tables::gen_create_attr_info_tables_sql;
 
 
@@ -59,6 +60,9 @@ async fn main() -> anyhow::Result<()> {
     if db_option.total_sync {
         sync_pdms(&db_option).await?;
     }
+
+    let mut mgr = AiosDBManager::init_form_config().await?;
+    mgr.cache_geos_data("Sample", "SAMPLE").await?;
 
     Ok(())
 }

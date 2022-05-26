@@ -14,11 +14,11 @@ use anyhow::anyhow;
 use approx::{abs_diff_eq, abs_diff_ne};
 use dashmap::DashMap;
 use glam::{Quat, TransformRT, TransformSRT, Vec3};
-use id_tree::NodeId;
+use id_tree::{Node, NodeId};
 use smol_str::SmolStr;
 use once_cell::sync::Lazy;
 use sqlx::{MySql, MySqlPool, Pool};
-use crate::api::attr::{query_full_attr, query_ori_from_id, query_position_from_id};
+use crate::api::attr::{query_explicit_attr, query_full_attr, query_implicit_attr, query_ori_from_id, query_parent_attr, query_position_from_id};
 use crate::api::element::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::consts::*;
@@ -26,6 +26,7 @@ use crate::options::DbOption;
 use async_trait::async_trait;
 
 pub const TUBI_TOL: f32 = 10.0f32;
+
 pub type CateBrepShapeMap = HashMap<RefU64, Vec<CateBrepShape>>;
 // static GLOBAL_COLLISION_WORLD: Lazy<Mutex<CollisionWorld<f32, (RefU64, RefU64)>>> = Lazy::new(|| {
 //     let mut world = CollisionWorld::<f32, (RefU64, RefU64)>::new(0.001f32);
@@ -37,6 +38,11 @@ static PRIM_HASH_NOUNS: Lazy<Vec<u32>> = Lazy::new(|| {
          LOOP_NOUN, PYRA_NOUN, RTOR_NOUN, REVO_NOUN, POHE_NOUN, PLOO_NOUN, SPINE_NOUN]
 });
 
+static PRIM_NOUN_NAMES: Lazy<Vec<&'static str>> = Lazy::new(|| {
+    vec!["BOX", "CYLI", "SPHE", "CONE", "DISH", "CTOR", "RTOR", "PYRA", "LOOP",
+         "PLOO", "SPINE", "GENS", "POHE", "REVO", "NREV", ]
+});
+
 static GENRIC_NOUN_NAMES: Lazy<Vec<SmolStr>> = Lazy::new(|| {
     vec!["EQUI".into(), "PIPE".into(), "STRU".into(), "ROOM".into(), "STWALL".into(), "FLOOR".into()]
 });
@@ -44,7 +50,6 @@ static GENRIC_NOUN_NAMES: Lazy<Vec<SmolStr>> = Lazy::new(|| {
 
 #[derive(Debug)]
 pub struct AiosDBManager {
-
     pub project_map: DashMap<String, AiosPdmsProjectTiDB>,
 
     pub ref0_map: DashMap<u32, String>,
@@ -62,13 +67,45 @@ pub struct AiosDBManager {
 
 #[async_trait]
 impl PdmsDataInterface for AiosDBManager {
-
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
         if let Some(project_pool) = self.get_project_pool(refno) {
-            let attr = query_full_attr(refno, &project_pool).await?;
+            let attr = query_full_attr(refno, &project_pool, None).await?;
             return Ok(attr);
         }
         Ok(AttrMap::default())
+    }
+
+    async fn get_implicit_attr(&self, refno: RefU64, columns: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
+        if let Some(project_pool) = self.get_project_pool(refno) {
+            let attr = query_implicit_attr(refno, &project_pool, columns).await?;
+            return Ok(attr);
+        }
+        Ok(AttrMap::default())
+    }
+
+    async fn get_parent_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
+        if let Some(project_pool) = self.get_project_pool(refno) {
+            let attr = query_parent_attr(refno, &project_pool, None).await?;
+            return Ok(attr);
+        }
+        Ok(AttrMap::default())
+    }
+
+    async fn get_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>> {
+        let mut node = None;
+        if let Some(project_pool) = self.get_project_pool(refno) {
+            node = Some(query_ele_node(refno, &project_pool).await?);
+        }
+        Ok(node)
+    }
+
+    async fn get_parent_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>> {
+        let mut node = None;
+        if let Some(project_pool) = self.get_project_pool(refno) {
+            let parent =
+            node = Some(query_ele_node(refno, &project_pool).await?);
+        }
+        Ok(node)
     }
 
     async fn get_world(&self, project: &str, mdb_name: &str, module: &str) -> anyhow::Result<EleTreeNode> {
@@ -126,9 +163,9 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(SmolStr::new(""))
     }
 
-    async fn get_refnos_by_type(&self, project: &str, att_type: &str) -> anyhow::Result<RefU64Vec> {
+    async fn get_refnos_by_types(&self, project: &str, att_types: Vec<&str>) -> anyhow::Result<RefU64Vec> {
         if let Some(project_pool) = self.project_map.get(project) {
-            let r = query_type_refnos(att_type, &project_pool.value().pool).await?;
+            let r = query_types_refnos(att_types, &project_pool.value().pool).await?;
             return Ok(r);
         }
         Ok(RefU64Vec::default())
@@ -223,7 +260,7 @@ impl AiosDBManager {
                 needed_parse_files: None,
                 project_path: dir,
                 db_option,
-                cached_mesh_mgr: Default::default()
+                cached_mesh_mgr: Default::default(),
             }
         )
     }
@@ -237,9 +274,9 @@ impl AiosDBManager {
     ///获得project 的db
     #[inline]
     pub fn get_project_db(&self, refno: RefU64) -> Option<AiosPdmsProjectTiDB> {
-        if let Some(d) = self.ref0_map.get(&refno.get_0()){
+        if let Some(d) = self.ref0_map.get(&refno.get_0()) {
             self.project_map.get(d.value()).map(|x| x.value().clone())
-        }else{
+        } else {
             None
         }
     }
@@ -247,9 +284,9 @@ impl AiosDBManager {
     ///获得project 的mysql pool
     #[inline]
     pub fn get_project_pool(&self, refno: RefU64) -> Option<Pool<MySql>> {
-        if let Some(d) = self.ref0_map.get(&refno.get_0()){
+        if let Some(d) = self.ref0_map.get(&refno.get_0()) {
             self.project_map.get(d.value()).map(|x| x.value().pool.clone())
-        }else{
+        } else {
             None
         }
     }
@@ -259,9 +296,7 @@ impl AiosDBManager {
     pub async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>> {
         if let Some(project) = self.get_project_name(refno) {
             if let Some(mut db) = self.project_map.get(&project) {
-                if let Ok(Some(dbno)) = query_dbno_from_db(refno, &db.pool).await {
-                    return db.get_world_transform(refno).await;
-                }
+                return db.get_world_transform(refno).await;
             }
         }
         Ok(Some(glam::TransformRT::IDENTITY))
@@ -386,24 +421,57 @@ impl AiosDBManager {
         // let mut type_refs_map = HashMap::new();
 
         // let root_ele = self.get_world("Sample","SAMPLE", "DESI").await?;
-        let root_ele = self.get_world(project,mdb, "DESI").await?;
-        dbg!(&root_ele);
-        let mut children = self.get_children_nodes(root_ele.refno).await?;
-        dbg!(&children);
-        while !children.is_empty() {
-            let cur_node = children.remove(0);
-            dbg!(&cur_node);
 
-            if PRIM_HASH_NOUNS.contains(&cur_node.get_noun_hash()) {
+        //filter by type
+        //生成transform到数据库中，可以临时先放到dashmap里
+        // let mut node_transform = DashMap::new();
+        //先获取box的测试一下
+        let t = Instant::now();
+        let eles = self.get_refnos_by_types(project, vec!["BOX"] /*PRIM_NOUN_NAMES.clone()*/).await?;
+        dbg!(eles.len());
+        //先缓存transform
+        for refno in eles {
+            let transform = self.get_world_transform(refno).await?;
+        }
 
-            }
-
-            let nodes = self.get_children_nodes(cur_node.refno).await?;
-            children.extend_from_slice(&nodes);
-            if children.len() == 50 {
-                break;
+        let loop_eles = self.get_refnos_by_types(project, vec!["LOOP", "PLOO"]).await?;
+        for refno in loop_eles {
+            let transform = self.get_world_transform(refno).await?;
+            let mut parent_att = self.get_parent_attr(refno).await?;
+            // let parent_noun_name = parent_att.get_type();
+            let mut loop_verts: Vec<Vec3> = vec![];
+            let mut fradius_vec: Vec<f32> = vec![];
+            if let Ok(children_refs) = self.get_children_refs(refno).await {
+                for x in children_refs {
+                    if let Ok(a) = self.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
+                        loop_verts.push(a.get_position().unwrap_or_default());
+                        fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
+                    }
+                }
             }
         }
+        dbg!(t.elapsed().as_millis());
+        //遍历所有的基本体
+
+
+        // let root_ele = self.get_world(project,mdb, "DESI").await?;
+        // dbg!(&root_ele);
+        // let mut children = self.get_children_nodes(root_ele.refno).await?;
+        // dbg!(&children);
+        // while !children.is_empty() {
+        //     let cur_node = children.remove(0);
+        //     dbg!(&cur_node);
+        //
+        //     if PRIM_HASH_NOUNS.contains(&cur_node.get_noun_hash()) {
+        //
+        //     }
+        //
+        //     let nodes = self.get_children_nodes(cur_node.refno).await?;
+        //     children.extend_from_slice(&nodes);
+        //     if children.len() == 50 {
+        //         break;
+        //     }
+        // }
 
 
         // {
@@ -714,7 +782,7 @@ pub struct AiosPdmsProjectTiDB {
 
 impl AiosPdmsProjectTiDB {
     pub async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
-        query_full_attr(refno, &self.pool).await
+        query_full_attr(refno, &self.pool, None).await
     }
 
     ///获得世界坐标系
@@ -787,9 +855,9 @@ async fn test_get_attr() -> anyhow::Result<()> {
     let mut mgr = AiosDBManager::init_form_config().await?;
     let refno: RefU64 = RefI32Tuple((23584, 8)).into();
     let v = mgr.get_attr(refno).await?;
-    println!("v={:?}", v);
+    println!("v={:?}", v.to_string_hashmap());
 
-    mgr.cache_geos_data("Sample", "SAMPLE").await?;
+    // mgr.cache_geos_data("Sample", "SAMPLE").await?;
 
     Ok(())
 }

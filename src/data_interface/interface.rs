@@ -19,6 +19,14 @@ pub trait PdmsDataInterface {
 
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
 
+    async fn get_implicit_attr(&self, refno: RefU64, columns: Option<Vec<&str>>) -> anyhow::Result<AttrMap>;
+
+    async fn get_parent_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
+
+    async fn get_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>>;
+
+    async fn get_parent_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>>;
+
     async fn get_world(&self, project: &str, mdb_name: &str, module: &str)  -> anyhow::Result<EleTreeNode>;
 
     async fn get_children_nodes(&self, refno: RefU64) -> anyhow::Result<Vec<EleTreeNode>>;
@@ -31,7 +39,7 @@ pub trait PdmsDataInterface {
 
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr>;
 
-    async fn get_refnos_by_type(&self, project: &str, att_type: &str) -> anyhow::Result<RefU64Vec>;
+    async fn get_refnos_by_types(&self, project: &str, att_type: Vec<&str>) -> anyhow::Result<RefU64Vec>;
 
     async fn get_db_world(&self, project: &str, db_no: u32) -> anyhow::Result<Option<(RefU64, String)>>;
 }

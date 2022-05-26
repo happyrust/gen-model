@@ -39,7 +39,7 @@ pub async fn query_children_pdms_tree_ele_node(mdb: &str, model: &str, refno: Re
     return if type_name == "WORL" {
         query_world_children_eles(mdb, model, &pool).await
     } else {
-        query_children_ele_node(refno, &pool).await
+        query_children_eles(refno, &pool).await
     };
 }
 
@@ -62,7 +62,7 @@ pub async fn query_world_children_eles(mdb: &str, model: &str, pool: &Pool<MySql
     let world_data = query_world_data(&mdb, model, pool).await?;
     let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
     for world in data {
-        let children = query_children_ele_node(world, pool).await?;
+        let children = query_children_eles(world, pool).await?;
         result.push(children);
     }
     Ok(result.into_iter().flatten().collect())
@@ -86,7 +86,7 @@ pub async fn query_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result
     Ok(r)
 }
 
-pub async fn query_children_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
+pub async fn query_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
     let mut r = vec![];
     let mut b_map = BTreeMap::new();
     let sql = gen_pdms_elements_get_children_ele_node_sql(refno);
@@ -247,7 +247,7 @@ pub async fn query_pdms_elements_type_name(refno: RefU64, pool: &Pool<MySql>) ->
 
 pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<RefU64>>>> {
     let mut result = HashMap::new();
-    let mdbs = query_type_refnos("MDB", pool).await?;
+    let mdbs = query_types_refnos(vec!["MDB"], pool).await?;
     for mdb in mdbs {
         let mdb_attr = query_explicit_attr(mdb, pool).await?;
         let mdb_name = query_name(mdb, &pool).await?;
@@ -269,9 +269,9 @@ pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>
     Ok(result)
 }
 
-pub async fn query_type_refnos(type_name: &str, pool: &Pool<MySql>) -> anyhow::Result<RefU64Vec> {
+pub async fn query_types_refnos(type_names: Vec<&str>, pool: &Pool<MySql>) -> anyhow::Result<RefU64Vec> {
     let mut r = vec![];
-    let sql = gen_query_type_refnos_sql(type_name);
+    let sql = gen_query_type_refnos_sql(&type_names);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     for val in result {
         let v = val.get::<i64, _>(0) as u64;
@@ -453,9 +453,16 @@ pub fn gen_query_refno_type_sql(refno: RefU64) -> String {
     sql
 }
 
-pub fn gen_query_type_refnos_sql(type_name: &str) -> String {
+pub fn gen_query_type_refnos_sql(type_names: &Vec<&str>) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select id from {PDMS_ELEMENTS_TABLE} where type = '{}' and is_del = 0;", type_name));
+    let mut in_sql = " (".to_string();
+    for type_name in type_names {
+        in_sql.push_str(&format!(r#"'{type_name}',"#));
+    }
+    in_sql.remove(in_sql.len() - 1);
+    in_sql.push_str(") ");
+    sql.push_str(&format!("select id from {PDMS_ELEMENTS_TABLE} where type in {in_sql} and is_del = 0;"));
+    dbg!(&sql);
     sql
 }
 
@@ -532,7 +539,7 @@ async fn test_query_children_ele_node() -> anyhow::Result<()> {
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url,"sample").await?;
     let refno: RefU64 = RefI32Tuple((23584, 5)).into();
-    let v = query_children_ele_node(refno, &pool).await?;
+    let v = query_children_eles(refno, &pool).await?;
     println!("v={:?}", v);
     Ok(())
 }

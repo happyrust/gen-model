@@ -7,111 +7,80 @@ use sqlx::{Error, MySql, Pool, pool, Row};
 use smol_str::SmolStr;
 use dashmap::DashMap;
 use glam::{Quat, Vec3};
+use itertools::Itertools;
 use sqlx::Executor;
 use sqlx::mysql::MySqlRow;
-use crate::api::element::{query_ele_node, query_pdms_elements_type_name, query_refno_type, query_type_refnos};
+use crate::api::element::{query_ele_node, query_owner_from_id, query_pdms_elements_type_name, query_refno_type, query_types_refnos};
 use crate::REFNO_INFO_MAP;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 
 /// 获得隐式属性
-pub async fn query_implicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
+pub async fn query_implicit_attr(refno: RefU64, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
     let mut r = AttrMap::default();
     let type_name = query_pdms_elements_type_name(refno, pool).await?;
     let type_hash = db1_hash(&type_name);
-    let sql = gen_query_implicit_attr_sql(refno, &type_name);
+    let sql = gen_query_implicit_attr_sql(refno, &type_name, &column_names);
+    let column_names = column_names.unwrap_or_default();
     let query_r = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     if let Some(val) = REFNO_INFO_MAP.get(&(type_hash as i32)) {
         for info in val.value() {
+            if !column_names.is_empty() && !column_names.contains(&info.name.as_str()) {
+                continue;
+            }
             if info.offset != 0 {
-                // let default_type = db1_dehash(*info.key() as u32).to_lowercase();
                 let t = info.name.to_lowercase();
                 let t = t.as_str();
+                let hash = NounHash::from(db1_hash(&info.name));
                 match info.att_type {
                     DbAttributeType::INTEGER => {
-                        let v = query_r.try_get::<i32, _>(t);
-                        match v {
-                            Ok(v) => {
-                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::IntegerType(v));
-                            }
-                            Err(_) => {}
-                        }
+                        query_r.try_get::<i32, _>(t).map(|v| {
+                            r.entry(hash).or_insert(AttrVal::IntegerType(v))
+                        })?;
                     }
                     DbAttributeType::DOUBLE => {
-                        let v = query_r.try_get::<f64, _>(t);
-                        match v {
-                            Ok(v) => {
-                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::DoubleType(v));
-                            }
-                            Err(_) => {}
-                        }
+                        query_r.try_get::<f64, _>(t).map(|v| {
+                            r.entry(hash).or_insert(AttrVal::DoubleType(v))
+                        })?;
                     }
                     DbAttributeType::BOOL => {
-                        let v = query_r.try_get::<bool, _>(t);
-                        match v {
-                            Ok(v) => {
-                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::BoolType(v));
-                            }
-                            Err(_) => {}
-                        }
+                        query_r.try_get::<bool, _>(t).map(|v| {
+                            r.entry(hash).or_insert(AttrVal::BoolType(v))
+                        })?;
                     }
                     DbAttributeType::STRING => {
-                        let v = query_r.try_get::<String, _>(t);
-                        match v {
-                            Ok(v) => {
-                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::StringType(SmolStr::new(v)));
-                            }
-                            Err(_) => {}
-                        }
+                        query_r.try_get::<String, _>(t).map(|v| {
+                            r.entry(hash).or_insert(AttrVal::StringType(v.into()))
+                        })?;
                     }
                     DbAttributeType::ELEMENT => {
-                        let v = query_r.try_get::<i64, _>(t);
-                        match v {
-                            Ok(v) => {
-                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::RefU64Type(RefU64(v as u64)));
-                            }
-                            Err(_) => {}
-                        }
+                        query_r.try_get::<i64, _>(t).map(|v| {
+                            r.entry(hash).or_insert(AttrVal::RefU64Type(RefU64(v as u64)))
+                        })?;
                     }
                     DbAttributeType::WORD => {
-                        let v = query_r.try_get::<String, _>(t);
-                        match v {
-                            Ok(v) => {
-                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::StringType(SmolStr::new(v)));
-                            }
-                            Err(_) => {}
-                        }
+                        query_r.try_get::<String, _>(t).map(|v| {
+                            r.entry(hash).or_insert(AttrVal::StringType(SmolStr::new(v)))
+                        })?;
                     }
                     DbAttributeType::DOUBLEVEC => {
-                        let v = query_r.try_get::<Vec<u8>, _>(t);
-                        match v {
-                            Ok(v) => {
-                                let v = bincode::deserialize::<Vec<f64>>(&v).unwrap();
-                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::DoubleArrayType(v));
-                            }
-                            Err(_) => {}
-                        }
+                        query_r.try_get::<Vec<u8>, _>(t).map(|v| {
+                            let v = bincode::deserialize::<Vec<f64>>(&v).unwrap();
+                            r.entry(hash).or_insert(AttrVal::DoubleArrayType(v))
+                        })?;
                     }
                     DbAttributeType::INTVEC => {
-                        let v = query_r.try_get::<String, _>(t);
-                        match v {
-                            Ok(v) => {
-                                let v = serde_json::from_str::<Vec<i32>>(&v).unwrap();
-                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::IntArrayType(v));
-                            }
-                            Err(_) => {}
-                        }
+                        query_r.try_get::<String, _>(t).map(|v| {
+                            let v = serde_json::from_str::<Vec<i32>>(&v).unwrap();
+                            r.entry(hash).or_insert(AttrVal::IntArrayType(v))
+                        })?;
                     }
                     DbAttributeType::Vec3Type => {
-                        let v = query_r.try_get::<String, _>(t);
-                        match v {
-                            Ok(v) => {
-                                let v = serde_json::from_str::<[f64; 3]>(&v).unwrap();
-                                r.entry(NounHash(*info.key() as u32)).or_insert(AttrVal::Vec3Type(v));
-                            }
-                            Err(_) => {}
-                        }
+                        query_r.try_get::<String, _>(t).map(|v| {
+                            let v = serde_json::from_str::<[f64; 3]>(&v).unwrap_or_default();
+                            r.entry(hash).or_insert(AttrVal::Vec3Type(v))
+                        })?;
                     }
                     _ => {}
                 }
@@ -128,8 +97,8 @@ pub async fn query_explicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
     Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
 }
 
-pub async fn query_full_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
-    let mut attr = query_implicit_attr(refno, pool).await?;
+pub async fn query_full_attr(refno: RefU64, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
+    let mut attr = query_implicit_attr(refno, pool, column_names).await?;
     let explicit_attr = query_explicit_attr(refno, pool).await?;
     let ele = query_ele_node(refno, pool).await?;
     for (k, v) in explicit_attr.map {
@@ -139,6 +108,11 @@ pub async fn query_full_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Resul
     attr.entry(NounHash::from(NAME_NOUN)).or_insert(AttrVal::StringType(ele.name.into()));
     attr.entry(NounHash::from(OWNER_NOUN)).or_insert(AttrVal::RefU64Type(ele.owner));
     Ok(attr)
+}
+
+pub async fn query_parent_attr(refno: RefU64, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
+    let owner = query_owner_from_id(refno, pool).await?.unwrap_or_default();
+    query_full_attr(owner, pool, column_names).await
 }
 
 pub async fn insert_attr_info(pool: Pool<MySql>) -> anyhow::Result<()> {
@@ -209,9 +183,12 @@ fn gen_insert_attr_info_sql(attr_info: &DashMap<i32, DashMap<i32, AttrInfo>>) ->
     sql
 }
 
-pub fn gen_query_implicit_attr_sql(refno: RefU64, type_name: &str) -> String {
+pub fn gen_query_implicit_attr_sql(refno: RefU64, type_name: &str, columns: &Option<Vec<&str>>) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select * from {} where id = {}", type_name, refno.0));
+    let cols_sql = columns.as_ref().map(|x|{
+        x.iter().map(|x| x.to_lowercase()).join(",")
+    }).unwrap_or("*".to_string());
+    sql.push_str(&format!("select {cols_sql} from {} where id = {}", type_name, refno.0));
     sql
 }
 
