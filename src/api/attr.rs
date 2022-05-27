@@ -180,9 +180,8 @@ pub async fn query_position_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyhow
     };
 }
 
-pub async fn query_ori_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<Quat>> {
-    let type_name = query_refno_type(refno, pool).await?;
-    let sql = gen_query_ori_from_id(refno, &type_name);
+pub async fn query_ori_from_id(refno: RefU64, table_name: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<Quat>> {
+    let sql = gen_query_ori_from_id(refno, table_name);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
         Ok(result) => {

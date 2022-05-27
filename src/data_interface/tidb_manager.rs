@@ -1,6 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
-use std::sync::Mutex;
+use std::mem::take;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use aios_core::consts::*;
 use aios_core::pdms_types::{AiosStr, AttrMap, CachedMeshesMgr, EleGeoInstData, EleTreeNode, PdmsMeshMgr, PdmsNodeTrait, PdmsTree, RefI32Tuple, RefU64, RefU64Vec, ShapeInstancesMgr};
@@ -9,7 +10,7 @@ use aios_core::prim_geo::extrusion::{CurveType, Extrusion};
 use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
 use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::PdmsTubing;
-use aios_core::shape::pdms_shape::{BrepShapeTrait, VerifiedShape};
+use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
 use anyhow::anyhow;
 use approx::{abs_diff_eq, abs_diff_ne};
 use dashmap::DashMap;
@@ -62,7 +63,9 @@ pub struct AiosDBManager {
 
     pub db_option: DbOption,
 
-    cached_mesh_mgr: CachedMeshesMgr,
+    cached_mesh_mgr: Arc<CachedMeshesMgr>,
+
+    cached_world_transforms_map: Arc<DashMap<RefU64, TransformRT>>,   //记录所有需要记录的world transform, need to flush to database
 }
 
 #[async_trait]
@@ -73,6 +76,14 @@ impl PdmsDataInterface for AiosDBManager {
             return Ok(attr);
         }
         Ok(AttrMap::default())
+    }
+
+    async fn get_owner(&self, refno: RefU64) -> anyhow::Result<RefU64> {
+        if let Some(project_pool) = self.get_project_pool(refno) {
+            let refno = query_owner_from_id(refno, &project_pool).await?.unwrap_or_default();
+            return Ok(refno);
+        }
+        Ok(RefU64::default())
     }
 
     async fn get_implicit_attr(&self, refno: RefU64, columns: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
@@ -99,19 +110,23 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(AttrMap::default())
     }
 
+    /// 获得节点数据
     async fn get_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>> {
-        let mut node = None;
         if let Some(project_pool) = self.get_project_pool(refno) {
-            node = Some(query_ele_node(refno, &project_pool).await?);
+            if  let Ok(node) = query_ele_node(refno, &project_pool).await{
+                return Ok(Some(node))
+            }
         }
-        Ok(node)
+        Ok(None)
     }
 
-    async fn get_parent_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>> {
+    async fn get_owner_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>> {
         let mut node = None;
         if let Some(project_pool) = self.get_project_pool(refno) {
             let parent = query_owner_from_id(refno, &project_pool).await?.ok_or(anyhow!("parent not exist".to_string()))?;
-            node = Some(query_ele_node(parent, &project_pool).await?);
+            if parent.is_valid() {
+                node = Some(query_ele_node(parent, &project_pool).await?);
+            }
         }
         Ok(node)
     }
@@ -159,10 +174,6 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(result)
     }
 
-    async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<TransformRT>> {
-        Ok(self.get_world_transform(refno).await?)
-    }
-
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr> {
         if let Some(project_pool) = self.get_project_pool(refno) {
             let name = query_name(refno, &project_pool).await?;
@@ -187,6 +198,101 @@ impl PdmsDataInterface for AiosDBManager {
             }
         }
         return Ok(None);
+    }
+
+    //包含自己
+    async fn get_ancestors_attrs(&self, refno: RefU64) -> Vec<AttrMap> {
+        let mut cur_refno = refno;
+        let mut r = vec![];
+        let pool = self.get_project_pool(refno).unwrap();
+        while let Ok(attr) = self.get_implicit_attr(cur_refno, None).await {
+            //后面是不是要缓存这个层级结构
+            if let Ok(Some(owner)) = query_owner_from_id(cur_refno, &pool).await {
+                r.push(attr);
+                cur_refno = owner;
+            } else {
+                break;
+            }
+        }
+        r
+    }
+
+    async fn get_ancestor_nodes(&self, refno: RefU64) -> Vec<EleTreeNode> {
+        let mut cur_refno = refno;
+        let mut r = vec![];
+        while let Ok(owner) = self.get_owner_ele_node(cur_refno).await {
+            //后面是不是要缓存这个层级结构
+            if owner.is_some() {
+                cur_refno = owner.as_ref().unwrap().refno;
+                r.push(owner.unwrap());
+            }
+        }
+        r
+    }
+
+    ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
+    async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>> {
+        // let mut ancestors = self.get_ancestor_nodes(refno).await;
+        let mut new_ancestors = VecDeque::new();
+        let mut rotation = Quat::IDENTITY;
+        let mut translation = Vec3::ZERO;
+        let mut cur_refno = refno;
+        while let Ok(Some(node)) = self.get_ele_node(cur_refno).await {
+            //后面是不是要缓存这个层级结构
+            if self.cached_world_transforms_map.contains_key(&node.refno) {
+                self.cached_world_transforms_map.get(&node.refno).map(|x| {
+                    rotation = x.rotation;
+                    translation = x.translation;
+                });
+                break;
+            }
+            cur_refno = node.owner;
+            new_ancestors.push_front(node);
+        }
+        if new_ancestors.len() == 2 {
+            dbg!(&new_ancestors);
+        }
+        dbg!(new_ancestors.len());
+        for node in new_ancestors {
+            let type_name = node.noun.as_str();
+            let (quat, pos) = if type_name == "SCTN" || type_name == "STWALL" {
+                let mut quat = Quat::IDENTITY;
+                let att = self.get_implicit_attr(node.refno, Some(vec!["POSS", "POSE", "BANG", "POS"])).await?;
+                let poss = att.get_poss().unwrap();
+                let pose = att.get_pose().unwrap();
+                let extru_dir: Vec3 = (pose - poss).normalize();
+                let bangle = att.get_f32("BANG").unwrap_or_default();
+                //如果和Z轴平行，需要使用Y轴作为参考轴
+                let d = extru_dir.dot(Vec3::Z).abs();
+
+                let mut ref_axis = if abs_diff_eq!(1.0, d) {
+                    Vec3::Y
+                } else { Vec3::Z };
+
+                let p_axis = ref_axis.cross(extru_dir).normalize();
+                let y_axis = extru_dir.cross(p_axis).normalize();
+                quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
+                    &[p_axis.to_array(), y_axis.to_array(), extru_dir.to_array()]
+                )) * Quat::from_rotation_z(bangle.to_radians());
+                let pos = att.get_position().unwrap_or_default();
+                (quat, pos)
+            } else {
+                let att = self.get_implicit_attr(node.refno, Some(vec!["ORI", "POS"])).await?;
+                let pos = att.get_position().unwrap_or_default();
+                let quat = att.get_rotation().unwrap_or_default();
+                (quat, pos)
+            };
+            translation = translation + rotation * pos;
+            rotation = rotation * quat;
+            self.cached_world_transforms_map.entry(node.refno).or_insert(TransformRT {
+                rotation,
+                translation,
+            });
+        }
+        Ok(Some(glam::TransformRT {
+            rotation,
+            translation,
+        }))
     }
 }
 
@@ -269,6 +375,7 @@ impl AiosDBManager {
                 project_path: dir,
                 db_option,
                 cached_mesh_mgr: Default::default(),
+                cached_world_transforms_map: Arc::new(Default::default()),
             }
         )
     }
@@ -299,16 +406,14 @@ impl AiosDBManager {
         }
     }
 
-    ///获取世界坐标变换矩阵
-    #[inline]
-    pub async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>> {
-        if let Some(project) = self.get_project_name(refno) {
-            if let Some(mut db) = self.project_map.get(&project) {
-                return db.get_world_transform(refno).await;
-            }
-        }
-        Ok(Some(glam::TransformRT::IDENTITY))
-    }
+    // ///获取世界坐标变换矩阵
+    // #[inline]
+    // pub async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>> {
+    //     if let Some(project_pool) = self.get_project_pool(refno) {
+    //         return self.get_world_transform(refno).await;
+    //     }
+    //     Ok(Some(glam::TransformRT::IDENTITY))
+    // }
 
     /// 返回geo data
     pub async fn get_design_geoms(&mut self, refno: RefU64) -> anyhow::Result<CateBrepShapeMap> {
@@ -420,7 +525,7 @@ impl AiosDBManager {
     }
 
     /// 生成模型
-    pub async fn cache_geos_data(&mut self, project: &str, mdb: &str) -> anyhow::Result<PdmsMeshMgr> {
+    pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<PdmsMeshMgr> {
         let mut time = Instant::now();
         let mut cached_mesh_mgr = CachedMeshesMgr::default();
         let mut inst_map = HashMap::new();
@@ -435,57 +540,85 @@ impl AiosDBManager {
         // let mut node_transform = DashMap::new();
         //先获取box的测试一下
         let t = Instant::now();
-        let eles = self.get_refnos_by_types(project, vec!["BOX"] /*PRIM_NOUN_NAMES.clone()*/).await?;
-        dbg!(eles.len());
-        // 提前先缓存transform
-        for refno in eles {
-            //提前缓存并且写入到数据库里
-            //可以单独建一张表，先插入这部分数据
-            let transform = self.get_world_transform(refno).await?;
-        }
-
-        let loop_eles = self.get_refnos_by_types(project, vec!["LOOP", "PLOO"]).await?;
+        // let eles = self.get_refnos_by_types(project, vec!["BOX"] /*PRIM_NOUN_NAMES.clone()*/).await?;
+        // dbg!(eles.len());
+        // // 提前先缓存transform
+        // for refno in eles {
+        //     //提前缓存并且写入到数据库里
+        //     //可以单独建一张表，先插入这部分数据
+        //     // let transform = self.get_world_transform(refno).await?;
+        // }
+        // let mut all_world_transforms_map = Arc::new(DashMap::new());
+        let loop_eles = mgr.get_refnos_by_types(project, PRIM_NOUN_NAMES.clone()).await?;
+        dbg!(loop_eles.len());
         //最好是批量取数据，而不是循环去取
         //处理loop elements
+        let mut handles = vec![];
         for refno in loop_eles {
-            // let transform = self.get_world_transform(refno).await?;
-            // let mut parent_att = self.get_implicit_attrs_by_owner(refno, Some(vec!["TYPE", "ANGL"])).await?;
-            let mut parent_att = self.get_parent_ele_node(refno).await?.unwrap_or_default();
-            // let parent_noun_name = parent_att.get_type();
-            let mut loop_verts: Vec<Vec3> = vec![];
-            let mut fradius_vec: Vec<f32> = vec![];
-            // let atts = self.get_implicit_attrs_by_owner(refno, "VERT", Some(vec!["POS", "FRAD"])).await?;
-            // dbg!(atts.len());
-            // self.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await
-            if let Ok(children_refs) = self.get_children_refs(refno).await {
-                for x in children_refs {
-                    if let Ok(a) = self.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
-                        loop_verts.push(a.get_position().unwrap_or_default());
-                        fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
-                    }
-                }
-            }
-            // dbg!(&parent_att.noun);
-            if parent_att.noun == "REVO" {
-                // dbg!(&parent_att);
-                let parent_att = self.get_implicit_attr(parent_att.refno, Some(vec!["ANGL"])).await?;
-                let angle = parent_att.get_f32("ANGL").unwrap_or_default();
-                dbg!(angle);
-                if angle >= f32::EPSILON {
-                    let revo = Box::new(Revolution {
-                        loop_verts,
-                        angle,
-                        ..Default::default()
-                    });
-                    if revo.check_valid() {
-                        let item_trans = revo.get_trans();
-                        let r = cached_mesh_mgr.get_pdms_mesh_hash_key(revo);
-                        let geo_hash = Some(r);
-                    }
-                }
+            let mgr = mgr.clone();
+            let handle = tokio::spawn(async move {
+                //在这里直接处理完所有需要处理的transform
+                let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
+                mgr.cached_mesh_mgr.meshes.entry(12u64).or_insert(PdmsMesh::default());
+            });
+            handles.push(handle);
+            if handles.len() == 100 {
+                futures::future::join_all(take(&mut handles)).await;
             }
         }
-        dbg!(cached_mesh_mgr.meshes.len());
+
+        // for refno in loop_eles {
+        //     // let transform = self.get_world_transform(refno).await?;
+        //     // let mut parent_att = self.get_implicit_attrs_by_owner(refno, Some(vec!["TYPE", "ANGL"])).await?;
+        //     let mut parent_att = self.get_parent_ele_node(refno).await?.unwrap_or_default();
+        //     // let parent_noun_name = parent_att.get_type();
+        //     let mut loop_verts: Vec<Vec3> = vec![];
+        //     let mut fradius_vec: Vec<f32> = vec![];
+        //     // let atts = self.get_implicit_attrs_by_owner(refno, "VERT", Some(vec!["POS", "FRAD"])).await?;
+        //     // dbg!(atts.len());
+        //     // self.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await
+        //     if let Ok(children_refs) = self.get_children_refs(refno).await {
+        //         for x in children_refs {
+        //             if let Ok(a) = self.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
+        //                 loop_verts.push(a.get_position().unwrap_or_default());
+        //                 fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
+        //             }
+        //         }
+        //     }
+        //     // dbg!(&parent_att.noun);
+        //     let parent_refno = parent_att.refno;
+        //     if parent_att.noun == "REVO" {
+        //         // dbg!(&parent_att);
+        //         let parent_att = self.get_implicit_attr(parent_att.refno, Some(vec!["ANGL", "LEVE"])).await?;
+        //         let angle = parent_att.get_f32("ANGL").unwrap_or_default();
+        //         dbg!(angle);
+        //         if angle >= f32::EPSILON {
+        //             let revo = Box::new(Revolution {
+        //                 loop_verts,
+        //                 angle,
+        //                 ..Default::default()
+        //             });
+        //             if revo.check_valid() {
+        //                 let item_trans = revo.get_trans();
+        //                 let geo_hash= cached_mesh_mgr.get_pdms_mesh_hash_key(revo);
+        //                 //后面单独去处理一遍
+        //                 let tr: TransformSRT = item_trans * self.get_world_transform(parent_refno).await?.unwrap_or_default();
+        //                 let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
+        //                 bbox.scaled(&tr.scale);
+        //                 let geom_data = EleGeoInstData {
+        //                     geo_hash,
+        //                     bbox,
+        //                     global_transform: (tr.rotation, tr.translation, tr.scale),
+        //                     visible: parent_att.is_visible_by_level(None).unwrap_or(true),
+        //                     generic_type: "STRU".to_string(),  //todo add generic type
+        //                     zone_refno: parent_refno,
+        //                 };
+        //                 inst_map.entry(parent_refno).or_insert(Vec::new()).push(geom_data);
+        //             }
+        //         }
+        //     }
+        // }
+        // dbg!(cached_mesh_mgr.meshes.len());
         dbg!(t.elapsed().as_millis());
         //遍历所有的基本体
 
@@ -753,9 +886,6 @@ impl AiosDBManager {
         //                     level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(target_refno);
         //                 }
         //                 let tr: TransformSRT = item_trans * self.get_world_transform(target_refno).unwrap_or_default();
-        //                 // let xyz = tr.rotation.to_euler(glam::EulerRot::XYZ);
-        //                 // //dbg!((xyz.0.to_degrees(), xyz.1.to_degrees(), xyz.2.to_degrees()));
-        //                 // //dbg!(&tr);
         //                 let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
         //                 bbox.scaled(&tr.scale);
         //                 let geom_data = EleGeoInstData {
@@ -820,64 +950,6 @@ impl AiosPdmsProjectTiDB {
     pub async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
         query_full_attr(refno, &self.pool, None).await
     }
-
-    ///获得世界坐标系
-    pub async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>> {
-        let mut ancestors = self.get_ancestors_attrs(refno).await;
-        ancestors.reverse();
-        let mut rotation = Quat::IDENTITY;
-        let mut translation = Vec3::ZERO;
-        for attr in ancestors {
-            let t = if attr.get_type() == "SCTN" || attr.get_type() == "STWALL" {
-                let tr = TransformRT {
-                    rotation,
-                    translation,
-                };
-                let mut final_rot = Quat::IDENTITY;
-
-                let poss = attr.get_poss().ok_or(anyhow!("can not find poss"))?;
-                let pose = attr.get_pose().ok_or(anyhow!("can not find poss"))?;
-                let extru_dir: Vec3 = (pose - poss).normalize();
-                let bangle = attr.get_f32("BANG").unwrap_or_default();
-                //如果和Z轴平行，需要使用Y轴作为参考轴
-                let d = extru_dir.dot(Vec3::Z).abs();
-
-                let mut ref_axis = if abs_diff_eq!(1.0, d) {
-                    Vec3::Y
-                } else { Vec3::Z };
-
-                let p_axis = ref_axis.cross(extru_dir).normalize();
-                let y_axis = extru_dir.cross(p_axis).normalize();
-                final_rot = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
-                    &[p_axis.to_array(), y_axis.to_array(), extru_dir.to_array()]
-                )) * Quat::from_rotation_z(bangle.to_radians());
-                final_rot
-            } else {
-                query_ori_from_id(refno, &self.pool).await?.unwrap_or_default()
-            };
-            translation = translation + rotation * (query_position_from_id(refno, &self.pool)).await?.unwrap_or_default();
-            rotation = rotation * t;
-        }
-        Ok(Some(glam::TransformRT {
-            rotation,
-            translation,
-        }))
-    }
-
-    //包含自己
-    pub async fn get_ancestors_attrs(&self, refno: RefU64) -> Vec<AttrMap> {
-        let mut cur_refno = refno;
-        let mut r = vec![];
-        while let Ok(attr) = self.get_attr(cur_refno).await {
-            if let Ok(Some(owner)) = query_owner_from_id(cur_refno, &self.pool).await {
-                r.push(attr);
-                cur_refno = owner;
-            } else {
-                break;
-            }
-        }
-        r
-    }
 }
 
 use config::{Config, ConfigError, Environment, File};
@@ -885,6 +957,7 @@ use crate::api::refno_info::get_refno_infos;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn;
 use crate::cata::sctn::geo::create_st_geos;
+use crate::helper::qualified_table_name;
 
 #[tokio::test]
 async fn test_get_attr() -> anyhow::Result<()> {

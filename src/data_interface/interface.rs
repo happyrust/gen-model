@@ -19,6 +19,8 @@ pub trait PdmsDataInterface {
 
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
 
+    async fn get_owner(&self, refno: RefU64) -> anyhow::Result<RefU64>;
+
     async fn get_implicit_attr(&self, refno: RefU64, columns: Option<Vec<&str>>) -> anyhow::Result<AttrMap>;
 
     async fn get_implicit_attrs_by_owner(&self, owner: RefU64, type_name: &str, columns: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>>;
@@ -27,7 +29,7 @@ pub trait PdmsDataInterface {
 
     async fn get_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>>;
 
-    async fn get_parent_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>>;
+    async fn get_owner_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>>;
 
     async fn get_world(&self, project: &str, mdb_name: &str, module: &str)  -> anyhow::Result<EleTreeNode>;
 
@@ -37,11 +39,15 @@ pub trait PdmsDataInterface {
 
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec>;
 
-    async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<TransformRT>>;
-
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr>;
 
     async fn get_refnos_by_types(&self, project: &str, att_type: Vec<&str>) -> anyhow::Result<RefU64Vec>;
 
     async fn get_db_world(&self, project: &str, db_no: u32) -> anyhow::Result<Option<(RefU64, String)>>;
+
+    async fn get_ancestors_attrs(&self, refno: RefU64) -> Vec<AttrMap>;
+
+    async fn get_ancestor_nodes(&self, refno: RefU64) -> Vec<EleTreeNode>;
+
+    async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>>;
 }

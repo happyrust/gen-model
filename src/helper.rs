@@ -1,3 +1,4 @@
+use nom::character::complete::tab;
 
 #[inline]
 pub fn qualified_table_name(table: &str) -> String{
