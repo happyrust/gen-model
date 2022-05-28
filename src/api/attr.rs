@@ -12,7 +12,7 @@ use itertools::Itertools;
 use sqlx::Executor;
 use sqlx::mysql::MySqlRow;
 use crate::api::element::{query_ele_node, query_owner_from_id, query_pdms_elements_type_name, query_refno_type, query_types_refnos};
-use crate::REFNO_INFO_MAP;
+use crate::ATTR_INFO_MAP;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::helper::qualified_table_name;
@@ -36,7 +36,7 @@ pub async fn query_implicit_attrs_by_owner(owner: RefU64, type_name: &str, pool:
 #[inline]
 pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &Vec<&str>) -> anyhow::Result<AttrMap>{
     let mut r = AttrMap::default();
-    if let Some(val) = REFNO_INFO_MAP.get(&type_hash ) {
+    if let Some(val) = ATTR_INFO_MAP.get(&type_hash ) {
         for info in val.value() {
             if !column_names.is_empty() && !column_names.contains(&info.name.as_str()) {
                 continue;
@@ -120,11 +120,33 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &Vec<
 /// 获得隐式属性
 pub async fn query_implicit_attr(refno: RefU64, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
     let type_name = query_pdms_elements_type_name(refno, pool).await?;
-    let type_hash = db1_hash(&type_name);
+    let type_hash = db1_hash(&type_name) as i32;
+    let mut exclude_columns = vec![];
+    //需要过滤一遍
+    let column_names = if column_names.is_some() {
+        let mut column_names = column_names.unwrap();
+        //Some(vec![]) 应该返回空的
+        if column_names.len() == 0 { return Ok(AttrMap::default()); }
+        if let Some(names_map) = ATTR_INFO_MAP.get_names_of_type(&type_name) {
+            exclude_columns = column_names.drain_filter(|x|{
+                !names_map.value().contains(*x)
+            }).collect();
+        }
+        column_names
+    }else{
+        vec![]
+    };
     let sql = gen_query_implicit_attr_sql(refno, &type_name, &column_names);
-    let column_names = column_names.unwrap_or_default();
     let row = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    let mut r = convert_row_to_attmap(&row, type_hash as i32, &column_names)?;
+    let mut r = convert_row_to_attmap(&row, type_hash, &column_names)?;
+    //其他的插入
+    exclude_columns.iter().for_each(|x| {
+        dbg!(&exclude_columns);
+        let hash = NounHash::from(db1_hash(*x));
+        r.insert(hash, AttrVal::InvalidType);
+    });
+    // AttrVal::InvalidType
+
     Ok(r)
 }
 
@@ -154,7 +176,7 @@ pub async fn query_parent_attr(refno: RefU64, pool: &Pool<MySql>, column_names: 
 }
 
 pub async fn insert_attr_info(pool: Pool<MySql>) -> anyhow::Result<()> {
-    let sql = gen_insert_attr_info_sql(&REFNO_INFO_MAP);
+    let sql = gen_insert_attr_info_sql(&ATTR_INFO_MAP);
     let mut conn = pool.acquire().await?;
     let result = conn.execute(sql.as_str()).await;
     match result {
@@ -220,11 +242,13 @@ fn gen_insert_attr_info_sql(attr_info: &DashMap<i32, DashMap<i32, AttrInfo>>) ->
     sql
 }
 
-pub fn gen_query_implicit_attr_sql(refno: RefU64, type_name: &str, columns: &Option<Vec<&str>>) -> String {
+pub fn gen_query_implicit_attr_sql(refno: RefU64, type_name: &str, columns: &Vec<&str>) -> String {
     let mut sql = String::new();
-    let cols_sql = columns.as_ref().map(|x|{
-        x.iter().map(|x| x.to_lowercase()).join(",")
-    }).unwrap_or("*".to_string());
+    let cols_sql = if columns.len() == 0  {
+        "*".to_string()
+    } else{
+        columns.iter().map(|x| x.to_lowercase()).join(",")
+    };
     sql.push_str(&format!("select {cols_sql} from {} where id = {}", qualified_table_name(type_name), refno.0));
     sql
 }

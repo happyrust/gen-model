@@ -461,8 +461,7 @@ pub fn gen_query_type_refnos_sql(type_names: &Vec<&str>) -> String {
     }
     in_sql.remove(in_sql.len() - 1);
     in_sql.push_str(") ");
-    sql.push_str(&format!("select id from {PDMS_ELEMENTS_TABLE} where type in {in_sql} and is_del = 0;"));
-    dbg!(&sql);
+    sql.push_str(&format!("select id from {PDMS_ELEMENTS_TABLE} where type in {in_sql} and is_del = 0 order by id;"));
     sql
 }
 

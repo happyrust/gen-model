@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    AiosDBManager::cache_geos_data(mgr.clone(), "Sample", "SAMPLE").await?;
+    AiosDBManager::cache_geos_data(mgr.clone(), "Sample").await?;
 
     Ok(())
 }
