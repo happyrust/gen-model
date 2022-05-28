@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::panic;
 use aios_core::parsed_data::*;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::pdms_data::{AxisParam, ScomInfo};
@@ -261,15 +262,20 @@ pub fn resolve_to_cate_geo_params(gmse: GmseParamData) -> anyhow::Result<CateGeo
         }
         "LCYL" => {
             // 圆柱体
-            CateGeoParam::LCylinder(CateLCylinderParam {
-                refno: gmse.refno,
-                axis: Some(gmse.paxises[0].clone()),
-                dist_to_btm: gmse.distances[0],
-                diameter: gmse.diameters[0],
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-                dist_to_top: gmse.distances[1],
-            })
+            let result = panic::catch_unwind(|| {
+                CateGeoParam::LCylinder(CateLCylinderParam {
+                    refno: gmse.refno,
+                    axis: Some(gmse.paxises[0].clone()),
+                    dist_to_btm: gmse.distances[0],
+                    diameter: gmse.diameters[0],
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                    dist_to_top: gmse.distances[1],
+                })
+            });
+
+            result.expect(&format!("圆柱体：{} 生成出错", gmse.refno.to_refno_str()))
+
         }
         "SCYL" => {
             // 圆柱体

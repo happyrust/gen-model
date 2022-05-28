@@ -8,7 +8,7 @@ use id_tree::NodeId;
 
 
 #[async_trait]
-pub trait PdmsDataInterface {
+pub trait PdmsDataInterface : Send + Sync{
 
     async fn sync_total_project(&self) -> anyhow::Result<bool> {
         Ok(true)
@@ -42,7 +42,7 @@ pub trait PdmsDataInterface {
 
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr>;
 
-    async fn get_refnos_by_types(&self, project: &str, att_type: Vec<&str>) -> anyhow::Result<RefU64Vec>;
+    async fn get_refnos_by_types<'a>(&self, project: &'a str, att_types: &'a Vec<&str>) -> anyhow::Result<RefU64Vec>;
 
     async fn get_db_world(&self, project: &str, db_no: u32) -> anyhow::Result<Option<(RefU64, String)>>;
 

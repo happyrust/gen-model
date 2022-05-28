@@ -41,7 +41,8 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &Vec<
             if !column_names.is_empty() && !column_names.contains(&info.name.as_str()) {
                 continue;
             }
-            if info.offset != 0 {
+            //type 需要获取
+            if info.offset != 0 || info.hash as u32 == *TYPE_HASH {
                 let t = info.name.to_lowercase();
                 let t = t.as_str();
                 let hash = NounHash::from(db1_hash(&info.name));

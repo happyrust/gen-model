@@ -2,19 +2,22 @@ use std::f32::EPSILON;
 use std::vec::Vec;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::parsed_data::GeomsInfo;
-use aios_core::pdms_types::AttrMap;
+use aios_core::pdms_types::{AttrMap, RefU64};
 use aios_core::prim_geo::category::CateBrepShape;
 use aios_core::prim_geo::loft::SctnSolid;
+use append_only_vec::AppendOnlyVec;
+use dashmap::{DashMap, DashSet};
 use glam::{TransformSRT, Vec3};
 use regex::internal::Input;
 use crate::data_interface::interface::PdmsDataInterface;
+use crate::data_interface::tidb_manager::CateBrepShapeMap;
 
-pub async fn create_st_geos<T: PdmsDataInterface>(att: &AttrMap, geom_info: &GeomsInfo, interface: &mut T) -> anyhow::Result<Vec<CateBrepShape>>  {
-    let mut brep_shapes = vec![];
+pub async fn create_st_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, geom_info: &GeomsInfo, brep_shapes_map: &CateBrepShapeMap, interface: &T) -> anyhow::Result<bool>  {
     let geoms = &geom_info.geometries;
-    if geoms.len() == 0 { return Ok(brep_shapes); }
+    if geoms.len() == 0 { return Ok(true); }
 
     let type_name = att.get_type();
+    // let refno = att.get_refno().unwrap_or_default();
     let arc_path = if type_name == "GENSEC" {
         let parent_pos = interface.get_world_transform(att.get_refno().unwrap()).await?.unwrap_or_default().translation;
         //dbg!(parent_pos);
@@ -57,7 +60,7 @@ pub async fn create_st_geos<T: PdmsDataInterface>(att: &AttrMap, geom_info: &Geo
                 height,
                 arc_path,
             };
-            brep_shapes.push(CateBrepShape{
+            brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape{
                 brep_shape: Box::new(loft),
                 transform: TransformSRT::IDENTITY,
                 visible: true,
@@ -66,5 +69,5 @@ pub async fn create_st_geos<T: PdmsDataInterface>(att: &AttrMap, geom_info: &Geo
         }
     }
 
-    Ok(brep_shapes)
+    Ok(true)
 }

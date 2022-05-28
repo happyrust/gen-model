@@ -247,7 +247,7 @@ pub async fn query_pdms_elements_type_name(refno: RefU64, pool: &Pool<MySql>) ->
 
 pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<RefU64>>>> {
     let mut result = HashMap::new();
-    let mdbs = query_types_refnos(vec!["MDB"], pool).await?;
+    let mdbs = query_types_refnos(&vec!["MDB"], pool).await?;
     for mdb in mdbs {
         let mdb_attr = query_explicit_attr(mdb, pool).await?;
         let mdb_name = query_name(mdb, &pool).await?;
@@ -269,9 +269,9 @@ pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>
     Ok(result)
 }
 
-pub async fn query_types_refnos(type_names: Vec<&str>, pool: &Pool<MySql>) -> anyhow::Result<RefU64Vec> {
+pub async fn query_types_refnos(type_names: &Vec<&str>, pool: &Pool<MySql>) -> anyhow::Result<RefU64Vec> {
     let mut r = vec![];
-    let sql = gen_query_type_refnos_sql(&type_names);
+    let sql = gen_query_type_refnos_sql(type_names);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     for val in result {
         let v = val.get::<i64, _>(0) as u64;

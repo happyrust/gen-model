@@ -3767,9 +3767,9 @@
 				"hash": 1004632,
 				"offset": 19,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"912575": {
 				"name": "BVIS",
@@ -3803,9 +3803,9 @@
 				"hash": 1004605,
 				"offset": 16,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			}
 		},
 		"621505": {
@@ -6445,9 +6445,9 @@
 				"hash": 726127,
 				"offset": 31,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"912575": {
 				"name": "BVIS",
@@ -8048,9 +8048,9 @@
 				"hash": 726127,
 				"offset": 31,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"711574": {
 				"name": "PBDI",
@@ -8403,9 +8403,9 @@
 				"hash": 726127,
 				"offset": 31,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"772338": {
 				"name": "CLFL",
@@ -8614,9 +8614,9 @@
 				"hash": 1004605,
 				"offset": 31,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"174799030": {
 				"name": "DESXCL",
@@ -8677,9 +8677,9 @@
 				"hash": 1004632,
 				"offset": 34,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"532105": {
 				"name": "PX",
@@ -14100,9 +14100,9 @@
 				"hash": 1004605,
 				"offset": 36,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"654334": {
 				"name": "POFF",
@@ -14145,9 +14145,9 @@
 				"hash": 1004632,
 				"offset": 39,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"790306": {
 				"name": "PBDM",
@@ -18630,9 +18630,9 @@
 				"hash": 726127,
 				"offset": 31,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"772338": {
 				"name": "CLFL",
@@ -19032,9 +19032,9 @@
 				"hash": 726127,
 				"offset": 26,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"280249889": {
 				"name": "NODIMS",
@@ -19627,9 +19627,9 @@
 				"hash": 1004632,
 				"offset": 34,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"532159": {
 				"name": "PZ",
@@ -19654,9 +19654,9 @@
 				"hash": 1004605,
 				"offset": 31,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"772598": {
 				"name": "TUFL",
@@ -19939,9 +19939,9 @@
 				"hash": 1004632,
 				"offset": 19,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"912575": {
 				"name": "BVIS",
@@ -19966,9 +19966,9 @@
 				"hash": 1004605,
 				"offset": 16,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"642215": {
 				"name": "TYPE",
@@ -23914,9 +23914,9 @@
 				"hash": 726127,
 				"offset": 37,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"750558": {
 				"name": "LOCK",
@@ -24069,9 +24069,9 @@
 				"hash": 1004632,
 				"offset": 34,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"860074": {
 				"name": "PURP",
@@ -24150,9 +24150,9 @@
 				"hash": 1004605,
 				"offset": 31,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"532159": {
 				"name": "PZ",
@@ -24882,9 +24882,9 @@
 				"hash": 1004605,
 				"offset": 22,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"772338": {
 				"name": "CLFL",
@@ -24945,9 +24945,9 @@
 				"hash": 1004659,
 				"offset": 19,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"926656": {
 				"name": "PCBT",
@@ -25035,9 +25035,9 @@
 				"hash": 1004632,
 				"offset": 16,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"660544": {
 				"name": "PBOF",
@@ -30003,9 +30003,9 @@
 				"hash": 726127,
 				"offset": 36,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"280249889": {
 				"name": "NODIMS",
@@ -31186,9 +31186,9 @@
 				"hash": 1004605,
 				"offset": 36,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"750558": {
 				"name": "LOCK",
@@ -31294,9 +31294,9 @@
 				"hash": 1004632,
 				"offset": 39,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"711574": {
 				"name": "PBDI",
@@ -34319,9 +34319,9 @@
 				"hash": 726127,
 				"offset": 27,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"5788249": {
 				"name": "PZAXI",
@@ -36857,9 +36857,9 @@
 				"hash": 726127,
 				"offset": 26,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"646041": {
 				"name": "LEVE",
@@ -38361,9 +38361,9 @@
 				"hash": 726127,
 				"offset": 26,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"557809": {
 				"name": "PDIA",
@@ -38507,9 +38507,9 @@
 				"hash": 1004632,
 				"offset": 19,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"642215": {
 				"name": "TYPE",
@@ -38561,9 +38561,9 @@
 				"hash": 1004605,
 				"offset": 16,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"646041": {
 				"name": "LEVE",
@@ -41465,9 +41465,9 @@
 				"hash": 1004605,
 				"offset": 22,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"280249889": {
 				"name": "NODIMS",
@@ -41492,9 +41492,9 @@
 				"hash": 1004632,
 				"offset": 16,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"926656": {
 				"name": "PCBT",
@@ -41510,9 +41510,9 @@
 				"hash": 1004659,
 				"offset": 19,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"861019": {
 				"name": "PBTP",
@@ -42881,9 +42881,9 @@
 				"hash": 726127,
 				"offset": 26,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"557809": {
 				"name": "PDIA",
@@ -43126,9 +43126,9 @@
 				"hash": 726127,
 				"offset": 31,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			}
 		},
 		"784855": {
@@ -43437,9 +43437,9 @@
 				"hash": 726127,
 				"offset": 16,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"639322": {
 				"name": "PZLE",
@@ -46063,9 +46063,9 @@
 				"hash": 1004632,
 				"offset": 34,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"174799030": {
 				"name": "DESXCL",
@@ -46126,9 +46126,9 @@
 				"hash": 1004605,
 				"offset": 31,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"860074": {
 				"name": "PURP",
@@ -47594,9 +47594,9 @@
 				"hash": 726127,
 				"offset": 31,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"646041": {
 				"name": "LEVE",
@@ -51462,9 +51462,9 @@
 				"hash": 726127,
 				"offset": 0,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"10206636": {
 				"name": "OWNER",
@@ -52762,9 +52762,9 @@
 				"hash": 726127,
 				"offset": 26,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"557809": {
 				"name": "PDIA",
@@ -53424,9 +53424,9 @@
 				"hash": 726127,
 				"offset": 36,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"642215": {
 				"name": "TYPE",
@@ -54119,9 +54119,9 @@
 				"hash": 1004605,
 				"offset": 16,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"912575": {
 				"name": "BVIS",
@@ -54137,9 +54137,9 @@
 				"hash": 1004632,
 				"offset": 19,
 				"default_val": {
-					"IntegerType": 0
+					"StringType": ""
 				},
-				"att_type": "INTEGER"
+				"att_type": "STRING"
 			},
 			"772598": {
 				"name": "TUFL",

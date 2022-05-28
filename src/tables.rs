@@ -184,7 +184,7 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
     sql.remove(sql.len() - 1);
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX {type_name}_owner_idx ON {table_name} (owner);"));
+    // sql.push_str(&format!("CREATE INDEX {type_name}_owner_idx ON {table_name} (owner);"));
     // sql.push_str(&format!("CREATE INDEX {type_name}_type_idx ON {table_name} (type);"));
 
     sql
