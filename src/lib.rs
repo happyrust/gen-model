@@ -68,6 +68,18 @@ impl AttInfoMap {
     }
 
     #[inline]
+    pub fn exist_att_by_name(&self, type_name: &str, att_name: &str) -> bool {
+        self.type_att_names_map.get(type_name).map(|x| x.contains(att_name)).unwrap_or(false)
+    }
+
+    /// 至少有一个 name 存在
+    #[inline]
+    pub fn exist_least_one_att_by_names(&self, type_name: &str, att_names: &Vec<&str>) -> bool {
+        self.type_att_names_map.get(type_name).map(|x|
+            att_names.iter().any(|v| x.value().contains(*v))).unwrap_or(false)
+    }
+
+    #[inline]
     pub fn get_val_type_of_att(&self, att_name: &str) -> Option<Ref<String, DbAttributeType>> {
         self.att_name_type_map.get(att_name)
     }

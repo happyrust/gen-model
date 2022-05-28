@@ -217,14 +217,14 @@ impl PdmsDataInterface for AiosDBManager {
         r
     }
 
-    async fn get_ancestor_nodes(&self, refno: RefU64) -> VecDeque<EleTreeNode> {
+    async fn get_ancestor_nodes(&self, refno: RefU64) -> anyhow::Result<VecDeque<EleTreeNode>> {
         let mut cur_refno = refno;
         let mut ancestors = VecDeque::new();
-        while let Ok(Some(node)) = self.get_ele_node(cur_refno).await {
+        while let Some(node) = self.get_ele_node(cur_refno).await? {
             cur_refno = node.owner;
             ancestors.push_front(node);
         }
-        ancestors
+        Ok(ancestors)
     }
 
     ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
@@ -270,13 +270,17 @@ impl PdmsDataInterface for AiosDBManager {
                 let pos = att.get_position().unwrap_or_default();
                 (quat, pos)
             } else {
-                if let Ok(att) = self.get_implicit_attr(node.refno, Some(vec!["ORI", "POS"])).await {
-                    let pos = att.get_position().unwrap_or_default();
-                    let quat = att.get_rotation().unwrap_or_default();
-                    (quat, pos)
-                } else {
-                    (Quat::IDENTITY, Vec3::default())
+                //这里可以直接判断有没有这两个属性，没有就直接返回
+                let mut quat = Quat::IDENTITY;
+                let mut pos = Vec3::default();
+                let att_names = vec!["ORI", "POSS", "POS"];
+                if ATTR_INFO_MAP.exist_least_one_att_by_names(node.noun.as_str(), &att_names) {
+                    if let Ok(att) = self.get_implicit_attr(node.refno, Some(vec!["ORI", "POS", "POSS"])).await {
+                        pos = att.get_position().unwrap_or_default();
+                        quat = att.get_rotation().unwrap_or_default();
+                    }
                 }
+                (quat, pos)
             };
             translation = translation + rotation * pos;
             rotation = rotation * quat;
@@ -1024,6 +1028,7 @@ impl AiosPdmsProjectTiDB {
 
 use config::{Config, ConfigError, Environment, File};
 use crate::api::refno_info::get_refno_infos;
+use crate::ATTR_INFO_MAP;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn;
 use crate::cata::sctn::geo::create_st_geos;

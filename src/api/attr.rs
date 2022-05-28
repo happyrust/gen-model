@@ -140,13 +140,14 @@ pub async fn query_implicit_attr(refno: RefU64, pool: &Pool<MySql>, column_names
     let row = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     let mut r = convert_row_to_attmap(&row, type_hash, &column_names)?;
     //其他的插入
-    exclude_columns.iter().for_each(|x| {
-        dbg!(&exclude_columns);
-        let hash = NounHash::from(db1_hash(*x));
-        r.insert(hash, AttrVal::InvalidType);
-    });
-    // AttrVal::InvalidType
-
+    if exclude_columns.len() > 0 {
+        // dbg!(refno.to_refno_str());
+        // dbg!(&exclude_columns);
+        exclude_columns.iter().for_each(|x| {
+            let hash = NounHash::from(db1_hash(*x));
+            r.insert(hash, AttrVal::InvalidType);
+        });
+    }
     Ok(r)
 }
 

@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use aios_core::pdms_types::{AiosStr, AttrMap, EleTreeNode, PdmsTree, RefU64, RefU64Vec};
 use smol_str::SmolStr;
 use async_trait::async_trait;
@@ -47,7 +48,7 @@ pub trait PdmsDataInterface {
 
     async fn get_ancestors_attrs(&self, refno: RefU64) -> Vec<AttrMap>;
 
-    async fn get_ancestor_nodes(&self, refno: RefU64) -> Vec<EleTreeNode>;
+    async fn get_ancestor_nodes(&self, refno: RefU64) -> anyhow::Result<VecDeque<EleTreeNode>>;
 
     async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>>;
 }
