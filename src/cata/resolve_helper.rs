@@ -4,6 +4,7 @@ use aios_core::parsed_data::*;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::pdms_data::{AxisParam, ScomInfo};
 use anyhow::anyhow;
+use itertools::any;
 use parse_pdms_db::tiny_expr::expr_eval::interp;
 use parse_pdms_db::tool::hash_tool::{f64_round_2, f64_round_3};
 use nom::Parser;
@@ -20,7 +21,7 @@ fn test_exp() {
     let s = "PARAM 1";
     let re = Regex::new(format!(r"^{s}|\s{s}").as_str()).unwrap();
     let rs = "test";
-    let new_exp = re.replace_all(input_exp,  format!(" {rs} ").as_str()).to_string();
+    let new_exp = re.replace_all(input_exp, format!(" {rs} ").as_str()).to_string();
     dbg!(new_exp);
 }
 
@@ -39,7 +40,7 @@ fn test_expression_regex() {
         println!("{} {} {}", &cap[1], &cap[2], &cap[3]);
     }
     let input_exp = "CPARAM 1";
-    if let Some(caps) = re.captures(&input_exp){
+    if let Some(caps) = re.captures(&input_exp) {
         println!("{} {} {}", caps.get(1).map_or("", |m| m.as_str()), caps.get(2).map_or("", |m| m.as_str()),
                  caps.get(3).map_or("", |m| m.as_str()));
     }
@@ -78,7 +79,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
     let mut result_exp = new_exp.clone();
     let loop_cnt = if input_expr.contains("RPRO") { 2 } else { 1 };
     // if input_expr.contains("TAN") {
-        // dbg!(input_expr);
+    // dbg!(input_expr);
     // }
     for _ in 0..loop_cnt {
         for caps in re.captures_iter(&new_exp) {
@@ -91,7 +92,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
             if context.contains_key(&k) {
                 result_exp = result_exp.replace(s, &context[&k]);
                 // dbg!(&result_exp);
-            }else if c1 == "DESI" || c1 == "DESP"{
+            } else if c1 == "DESI" || c1 == "DESP" {
                 result_exp = result_exp.replace(s, "0.0");
             }
         }
@@ -110,18 +111,18 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
         let c2 = caps.get(2).map_or("", |m| m.as_str());
         let c3 = caps.get(3).map_or("", |m| m.as_str());
         let mut k = SmolStr::new("");
-        if c1.starts_with("DESIGN")  {
+        if c1.starts_with("DESIGN") {
             k = format!("DESI{}", c3).into();  //design's params
-        }else {
+        } else {
             if c2.starts_with("IPAR") {
                 k = format!("IPARA{}", c3).into();
-            }else if c2.starts_with("CPAR"){
+            } else if c2.starts_with("CPAR") {
                 k = format!("IPARA{}", c3).into();
-            }else if c2.starts_with("PARA") || c2.starts_with("APAR"){
+            } else if c2.starts_with("PARA") || c2.starts_with("APAR") {
                 k = format!("PARA{}", c3).into();
-            }else if c2.starts_with("OPAR"){
+            } else if c2.starts_with("OPAR") {
                 k = format!("OPAR{}", c3).into();
-            }else if c2.starts_with("DDES"){
+            } else if c2.starts_with("DDES") {
                 k = format!("DESI{}", c3).into();
             }
         }
@@ -129,7 +130,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
             //need to replace whole word
             let re = Regex::new(format!(r"^{s}|\s{s}").as_str()).unwrap();
             let rs = &*context[&k];
-            new_exp = re.replace_all(&new_exp,  format!(" {rs} ").as_str()).to_string();
+            new_exp = re.replace_all(&new_exp, format!(" {rs} ").as_str()).to_string();
         }
     }
     let seg_strs: Vec<SmolStr> = new_exp.split_whitespace().map(|x| x.trim().into()).collect::<Vec<_>>();
@@ -147,7 +148,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
             "DIV" => p_vals.push("/".to_string()),
             "DDHEIGHT" => p_vals.push(context["DDHEIGHT"].to_string()),
             "DDRADIUS" => p_vals.push(context["DDRADIUS"].to_string()),
-            "DDANGLE"  => p_vals.push(context["DDANGLE"].to_string()),
+            "DDANGLE" => p_vals.push(context["DDANGLE"].to_string()),
             _ => {
                 if upper_s.ends_with("mm") {
                     p_vals.push(upper_s[..upper_s.len() - 2].to_string());
@@ -183,7 +184,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
                 }
             }
             i += 3;
-        }else {
+        } else {
             new_vals.push(p_vals[i].clone());
             i += 1;
         }
@@ -207,7 +208,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
                 ));
             }
             i += 3;
-        }else {
+        } else {
             result_string.push_str(new_vals[i].as_str());
             i += 1;
         }
@@ -229,40 +230,41 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
     }
 }
 
-pub fn resolve_to_cate_geo_params(gmse: GmseParamData) -> anyhow::Result<CateGeoParam> {
-    let geo = match &gmse.type_name[..] {
-        "SANN" => {
-            CateGeoParam::Profile(CateProfileParam::SANN(SannData {
-                xy: [gmse.verts[0][0], gmse.verts[0][1]],
-                dxy: [gmse.dxy[0][0], gmse.dxy[0][1]],
-                ptaxis: Some(gmse.paxises[0].clone()),
-                pangle: gmse.pang as f32,
-                pradius: gmse.prad as f32,
-                pwidth: gmse.pwid as f32,
-                drad: gmse.drad as f32,
-                dwid: gmse.dwid as f32,
-            }))
-        }
-        "SPRO" => {   //structural profile
-            CateGeoParam::Profile(CateProfileParam::SPRO(gmse.verts))
-        }
-        "BOXI" => {
-            let z_length = if gmse.box_lengths.len() >= 3 {
-                gmse.box_lengths[2]
-            } else {
-                gmse.box_lengths[1]
-            };
-            CateGeoParam::Boxi(CateBoxImpliedParam {
-                axis: Some(gmse.paxises[0].clone()),
-                x_length: gmse.box_lengths[0],
-                z_length,
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        "LCYL" => {
-            // 圆柱体
-            let result = panic::catch_unwind(|| {
+/// 解析成不同的几何体参数
+pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGeoParam> {
+    let geo = panic::catch_unwind(|| {
+        match &gmse.type_name[..] {
+            "SANN" => {
+                CateGeoParam::Profile(CateProfileParam::SANN(SannData {
+                    xy: [gmse.verts[0][0], gmse.verts[0][1]],
+                    dxy: [gmse.dxy[0][0], gmse.dxy[0][1]],
+                    ptaxis: Some(gmse.paxises[0].clone()),
+                    pangle: gmse.pang as f32,
+                    pradius: gmse.prad as f32,
+                    pwidth: gmse.pwid as f32,
+                    drad: gmse.drad as f32,
+                    dwid: gmse.dwid as f32,
+                }))
+            }
+            "SPRO" => {   //structural profile
+                CateGeoParam::Profile(CateProfileParam::SPRO(gmse.verts.clone()))
+            }
+            "BOXI" => {
+                let z_length = if gmse.box_lengths.len() >= 3 {
+                    gmse.box_lengths[2]
+                } else {
+                    gmse.box_lengths[1]
+                };
+                CateGeoParam::Boxi(CateBoxImpliedParam {
+                    axis: Some(gmse.paxises[0].clone()),
+                    x_length: gmse.box_lengths[0],
+                    z_length,
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            "LCYL" => {
+                // 圆柱体
                 CateGeoParam::LCylinder(CateLCylinderParam {
                     refno: gmse.refno,
                     axis: Some(gmse.paxises[0].clone()),
@@ -272,218 +274,208 @@ pub fn resolve_to_cate_geo_params(gmse: GmseParamData) -> anyhow::Result<CateGeo
                     tube_flag: gmse.tube_flag,
                     dist_to_top: gmse.distances[1],
                 })
-            });
-
-            result.expect(&format!("圆柱体：{} 生成出错", gmse.refno.to_refno_str()))
-
-        }
-        "SCYL" => {
-            // 圆柱体
-            CateGeoParam::SCylinder(CateSCylinderParam {
-                axis: Some(gmse.paxises[0].clone()),
-                dist_to_btm: gmse.distances[0],
-                height: gmse.phei,
-                diameter: gmse.diameters[0],
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        "LINE" => {
-            CateGeoParam::Unknown
-
-            // let result = panic::catch_unwind(|| {
-            //     CateGeoParam::Line(CateLineParam {
-            //         pa: Some(gmse.paxises[0].clone()),
-            //         pb: Some(gmse.paxises[1].clone()),
-            //         diameter: 0.0, //gmse.diameters[0],
-            //         centre_line_flag: gmse.centre_line_flag,
-            //         tube_flag: gmse.tube_flag,
-            //     })
-            // });
-            //
-            // result.expect(&format!("线段：{} 生成出错, 数据: {:?}", gmse.refno.to_refno_str(), &gmse))
-
-        }
-        "LPYR" => {
-            CateGeoParam::Pyramid(CatePyramidParam {
-                pa: Some(gmse.paxises[0].clone()),
-                pb: Some(gmse.paxises[1].clone()),
-                pc: Some(gmse.paxises[2].clone()),
-                x_bottom: gmse.xyz[0],
-                y_bottom: gmse.xyz[1],
-                x_top: gmse.xyz[2],
-                y_top: gmse.xyz[3],
-                dist_to_btm: gmse.distances[0],
-                dist_to_top: gmse.distances[1],
-                x_offset: gmse.xyz[4],
-                y_offset: gmse.xyz[5],
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        "SSLC" => {
-            CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam{
-                axis: Some(gmse.paxises[0].clone()),
-                height: gmse.phei,
-                diameter: gmse.diameters[0],
-                distance: gmse.distances[0],
-                x_shear: gmse.shears[0],
-                y_shear: gmse.shears[1],
-                alt_x_shear: gmse.shears[2],
-                alt_y_shear: gmse.shears[3],
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        "LSNO" => {
-            CateGeoParam::Snout(CateSnoutParam {
-                pa: Some(gmse.paxises[0].clone()),
-                pb: Some(gmse.paxises[1].clone()),
-                dist_to_btm: gmse.distances[0],
-                dist_to_top: gmse.distances[1],
-                btm_diameter: gmse.diameters[0],
-                top_diameter: gmse.diameters[1],
-                offset: gmse.offset,
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        "SBOX" => {
-            if gmse.box_lengths.len() == 3 && gmse.xyz.len() == 3 {
-                CateGeoParam::Box(CateBoxParam {
-                    size: vec![
-                        gmse.box_lengths[0],
-                        gmse.box_lengths[1],
-                        gmse.box_lengths[2],
-                    ],
-                    offset: vec![
-                        gmse.xyz[0],
-                        gmse.xyz[1],
-                        gmse.xyz[2],
-                    ],
+            }
+            "SCYL" => {
+                // 圆柱体
+                CateGeoParam::SCylinder(CateSCylinderParam {
+                    axis: Some(gmse.paxises[0].clone()),
+                    dist_to_btm: gmse.distances[0],
+                    height: gmse.phei,
+                    diameter: gmse.diameters[0],
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
                 })
-            }else{
-                CateGeoParam::Unknown
             }
+            "LINE" => {
+                CateGeoParam::Line(CateLineParam {
+                    pa: Some(gmse.paxises[0].clone()),
+                    pb: Some(gmse.paxises[1].clone()),
+                    diameter: 0.0, //gmse.diameters[0],
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            "LPYR" => {
+                CateGeoParam::Pyramid(CatePyramidParam {
+                    pa: Some(gmse.paxises[0].clone()),
+                    pb: Some(gmse.paxises[1].clone()),
+                    pc: Some(gmse.paxises[2].clone()),
+                    x_bottom: gmse.xyz[0],
+                    y_bottom: gmse.xyz[1],
+                    x_top: gmse.xyz[2],
+                    y_top: gmse.xyz[3],
+                    dist_to_btm: gmse.distances[0],
+                    dist_to_top: gmse.distances[1],
+                    x_offset: gmse.xyz[4],
+                    y_offset: gmse.xyz[5],
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            "SSLC" => {
+                CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam {
+                    axis: Some(gmse.paxises[0].clone()),
+                    height: gmse.phei,
+                    diameter: gmse.diameters[0],
+                    distance: gmse.distances[0],
+                    x_shear: gmse.shears[0],
+                    y_shear: gmse.shears[1],
+                    alt_x_shear: gmse.shears[2],
+                    alt_y_shear: gmse.shears[3],
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            "LSNO" => {
+                CateGeoParam::Snout(CateSnoutParam {
+                    pa: Some(gmse.paxises[0].clone()),
+                    pb: Some(gmse.paxises[1].clone()),
+                    dist_to_btm: gmse.distances[0],
+                    dist_to_top: gmse.distances[1],
+                    btm_diameter: gmse.diameters[0],
+                    top_diameter: gmse.diameters[1],
+                    offset: gmse.offset,
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            "SBOX" => {
+                if gmse.box_lengths.len() == 3 && gmse.xyz.len() == 3 {
+                    CateGeoParam::Box(CateBoxParam {
+                        size: vec![
+                            gmse.box_lengths[0],
+                            gmse.box_lengths[1],
+                            gmse.box_lengths[2],
+                        ],
+                        offset: vec![
+                            gmse.xyz[0],
+                            gmse.xyz[1],
+                            gmse.xyz[2],
+                        ],
+                        centre_line_flag: gmse.centre_line_flag,
+                        tube_flag: gmse.tube_flag,
+                    })
+                } else {
+                    CateGeoParam::Unknown
+                }
+            }
+            "SCON" => {
+                // 圆锥
+                CateGeoParam::Cone(CateConeParam {
+                    axis: Some(gmse.paxises[0].clone()),
+                    dist_to_btm: gmse.distances[0],
+                    diameter: gmse.diameters[0],
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            "SCTO" => {
+                // 弯管
+                CateGeoParam::Torus(CateTorusParam {
+                    pa: Some(gmse.paxises[0].clone()),
+                    pb: Some(gmse.paxises[1].clone()),
+                    diameter: gmse.diameters[0],
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            // "SDIS" => {
+            // 圆片
+            // Some(CateGeoParam::Disc(CateDiscParam {
+            //     axis: Some(gmse.paxises[0].clone()),
+            //     dist_to_btm: gmse.distances[0],
+            //     diameter: gmse.diameters[0],
+            //     centre_line_flag: gmse.centre_line_flag,
+            //     tube_flag: gmse.tube_flag,
+            // }))
+            // }
+            "SDSH" => {
+                CateGeoParam::Dish(CateDishParam {
+                    axis: Some(gmse.paxises[0].clone()),
+                    dist_to_btm: gmse.distances[0],
+                    height: gmse.phei,
+                    diameter: gmse.diameters[0],
+                    radius: gmse.radius,
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            "SEXT" => {
+                CateGeoParam::Extrusion(CateExtrusionParam {
+                    refno: gmse.refno,
+                    pa: Some(gmse.paxises[0].clone()),
+                    pb: Some(gmse.paxises[1].clone()),
+                    height: gmse.phei,
+                    x: gmse.xyz[0],
+                    y: gmse.xyz[1],
+                    z: gmse.xyz[2],
+                    verts: gmse.verts.clone(),
+                    prads: gmse.prads.clone(),
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            "SLINE" => {
+                CateGeoParam::Sline(CateSlineParam {
+                    start_pt: vec![0.0; 3],
+                    end_pt: vec![0.0; 3],
+                    diameter: gmse.diameters[0],
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            "SREV" => {
+                CateGeoParam::Revolution(CateRevolutionParam {
+                    pa: Some(gmse.paxises[0].clone()),
+                    pb: Some(gmse.paxises[1].clone()),
+                    angel: gmse.angle,
+                    x: gmse.xyz[0],
+                    y: gmse.xyz[1],
+                    z: gmse.xyz[2],
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            "SRTO" => { // 如 =15192/210474
+                // 截面为矩形的弯管
+                CateGeoParam::RectTorus(CateRectTorusParam {
+                    pa: Some(gmse.paxises[0].clone()),
+                    pb: Some(gmse.paxises[1].clone()),
+                    height: gmse.phei,
+                    diameter: gmse.diameters[0],
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            // "SSLC" => {
+            //todo
+            // Some(CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam {
+            //     axis: Some(gmse.paxises[0].clone()),
+            //     height: gmse.phei,
+            //     diameter: gmse.diameters[0],
+            //     distance: gmse.distances[0],
+            //     x_shear: 0.0,
+            //     y_shear: 0.0,
+            //     alt_x_shear: 0.0,
+            //     alt_y_shear: 0.0,
+            //     centre_line_flag: gmse.centre_line_flag,
+            //     tube_flag: gmse.tube_flag,
+            // }))
+            // }
+            "SSPH" => {
+                // 球
+                CateGeoParam::Sphere(CateSphereParam {
+                    axis: Some(gmse.paxises[0].clone()),
+                    dist_to_center: gmse.distances[0],
+                    diameter: gmse.diameters[0],
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
+            _ => CateGeoParam::Unknown,
         }
-        "SCON" => {
-            // 圆锥
-            CateGeoParam::Cone(CateConeParam {
-                axis: Some(gmse.paxises[0].clone()),
-                dist_to_btm: gmse.distances[0],
-                diameter: gmse.diameters[0],
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        "SCTO" => {
-            // 弯管
-            CateGeoParam::Torus(CateTorusParam {
-                pa: Some(gmse.paxises[0].clone()),
-                pb: Some(gmse.paxises[1].clone()),
-                diameter: gmse.diameters[0],
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        // "SDIS" => {
-        // 圆片
-        // Some(CateGeoParam::Disc(CateDiscParam {
-        //     axis: Some(gmse.paxises[0].clone()),
-        //     dist_to_btm: gmse.distances[0],
-        //     diameter: gmse.diameters[0],
-        //     centre_line_flag: gmse.centre_line_flag,
-        //     tube_flag: gmse.tube_flag,
-        // }))
-        // }
-        "SDSH" => {
-            CateGeoParam::Dish(CateDishParam {
-                axis: Some(gmse.paxises[0].clone()),
-                dist_to_btm: gmse.distances[0],
-                height: gmse.phei,
-                diameter: gmse.diameters[0],
-                radius: gmse.radius,
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        "SEXT" => {
-            CateGeoParam::Extrusion(CateExtrusionParam {
-                refno: gmse.refno,
-                pa: Some(gmse.paxises[0].clone()),
-                pb: Some(gmse.paxises[1].clone()),
-                height: gmse.phei,
-                x: gmse.xyz[0],
-                y: gmse.xyz[1],
-                z: gmse.xyz[2],
-                verts: gmse.verts,
-                prads: gmse.prads,
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        "SLINE" => {
-            CateGeoParam::Sline(CateSlineParam {
-                start_pt: vec![0.0; 3],
-                end_pt: vec![0.0; 3],
-                diameter: gmse.diameters[0],
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        "SREV" => {
-            CateGeoParam::Revolution(CateRevolutionParam {
-                pa: Some(gmse.paxises[0].clone()),
-                pb: Some(gmse.paxises[1].clone()),
-                angel: gmse.angle,
-                x: gmse.xyz[0],
-                y: gmse.xyz[1],
-                z: gmse.xyz[2],
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        "SRTO" => { // 如 =15192/210474
-            // 截面为矩形的弯管
-            CateGeoParam::RectTorus(CateRectTorusParam {
-                pa: Some(gmse.paxises[0].clone()),
-                pb: Some(gmse.paxises[1].clone()),
-                height: gmse.phei,
-                diameter: gmse.diameters[0],
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        // "SSLC" => {
-        //todo
-        // Some(CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam {
-        //     axis: Some(gmse.paxises[0].clone()),
-        //     height: gmse.phei,
-        //     diameter: gmse.diameters[0],
-        //     distance: gmse.distances[0],
-        //     x_shear: 0.0,
-        //     y_shear: 0.0,
-        //     alt_x_shear: 0.0,
-        //     alt_y_shear: 0.0,
-        //     centre_line_flag: gmse.centre_line_flag,
-        //     tube_flag: gmse.tube_flag,
-        // }))
-        // }
-        "SSPH" => {
-            // 球
-            CateGeoParam::Sphere(CateSphereParam {
-                axis: Some(gmse.paxises[0].clone()),
-                dist_to_center: gmse.distances[0],
-                diameter: gmse.diameters[0],
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
-        }
-        _ => CateGeoParam::Unknown,
-    };
-    Ok(geo)
+    });
+    geo.map_err(|x| anyhow!(format!("几何体生成出错, 数据: {:?}", &gmse)))
 }
 
 pub fn resolve_dir_and_pos(axis: &AxisParam,

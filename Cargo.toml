@@ -5,6 +5,7 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+
 [dependencies]
 #sea-query = { path = "/Volumes/DPC/workspace/sea-query" }
 config = "0.13.1"
@@ -29,6 +30,7 @@ regex = "1.5.6"
 calamine = "0.18.0"
 append-only-vec = "0.1.2"
 
+
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path =  "../aios_core"}
 
@@ -40,6 +42,11 @@ id_tree = { version = "1.8.0", features = ["serde_support"] }
 glam = { version = "0.20.2", features = ["transform-types"] }
 sea-orm = { version = "0.8.0", features = ["default", "runtime-tokio"]}
 
+#[target.'cfg(target_os = "macos")'.dependencies]
+#simple-process-stats = { path = "../simple-process-stats"}
+#
+#[target.'cfg(target_os = "windows")'.dependencies]
+#simple-process-stats = "1.0.0"
 
 [dependencies.sqlx]
 version = "^0.5"

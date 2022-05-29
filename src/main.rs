@@ -60,9 +60,6 @@ async fn main() -> anyhow::Result<()> {
     if db_option.total_sync {
         sync_pdms(&db_option).await?;
     }
-
-    // let mut mgr = AiosDBManager::init_form_config().await?;
-    // mgr.cache_geos_data("Sample", "SAMPLE").await?;
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     AiosDBManager::cache_geos_data(mgr.clone(), "Sample").await?;
 

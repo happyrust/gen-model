@@ -4765,7 +4765,6 @@ dependencies = [
  "approx 0.5.1",
  "async-trait",
  "bevy",
- "bevy-inspector-egui",
  "bevy_egui",
  "bincode",
  "bitflags",

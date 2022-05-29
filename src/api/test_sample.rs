@@ -84,10 +84,10 @@ mod tests {
         let mgr = AiosDBManager::init_form_config().await?;
         let project = mgr.get_project_name(refno).unwrap();
         dbg!(&project);
-        let v = attr::query_implicit_attr(refno, &mgr.get_project_pool(refno).unwrap(), None).await.unwrap();
-        println!("v={:?}", v.to_string_hashmap());
-        let v = attr::query_implicit_attr(refno, &mgr.get_project_pool(refno).unwrap(), Some(vec!["ANGL"])).await.unwrap();
-        println!("v={:?}", v.to_string_hashmap());
+        // let v = attr::query_implicit_attr(refno, &mgr.get_project_pool(refno).unwrap(), None).await.unwrap();
+        // println!("v={:?}", v.to_string_hashmap());
+        // let v = attr::query_implicit_attr(refno, &mgr.get_project_pool(refno).unwrap(), Some(vec!["ANGL"])).await.unwrap();
+        // println!("v={:?}", v.to_string_hashmap());
         Ok(())
     }
 
@@ -117,22 +117,22 @@ mod tests {
     #[tokio::test]
     async fn test_query_full_attr() -> anyhow::Result<()> {
 
-        let t = Instant::now();
-        let refno = RefU64::from_two_nums(23548, 402);
-        let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-        let mut handles = vec![];
-        for _  in 0..10000 {
-            let mgr = mgr.clone();
-            let handle = tokio::spawn(async move{
-                let project = mgr.get_project_name(refno).unwrap();
-                let pool = mgr.get_project_pool(refno).unwrap();
-                let v = attr::query_full_attr(refno, &pool, None).await.unwrap_or_default();
-                // println!("v={:?}", v.to_string_hashmap());
-            });
-            handles.push(handle);
-        }
-        futures::future::join_all(handles).await;
-        dbg!(t.elapsed().as_millis());
+        // let t = Instant::now();
+        // let refno = RefU64::from_two_nums(23548, 402);
+        // let mgr = Arc::new(AiosDBManager::init_form_config().await?);
+        // let mut handles = vec![];
+        // for _  in 0..10000 {
+        //     let mgr = mgr.clone();
+        //     let handle = tokio::spawn(async move{
+        //         let project = mgr.get_project_name(refno).unwrap();
+        //         let pool = mgr.get_project_pool(refno).unwrap();
+        //         let v = attr::query_full_attr(refno, &pool, None).await.unwrap_or_default();
+        //         // println!("v={:?}", v.to_string_hashmap());
+        //     });
+        //     handles.push(handle);
+        // }
+        // futures::future::join_all(handles).await;
+        // dbg!(t.elapsed().as_millis());
         Ok(())
     }
 

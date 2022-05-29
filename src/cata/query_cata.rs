@@ -190,7 +190,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     //求解AXIS的数据
     let axis_map = resolve_axis_params(scom_info, &cur_context);
     // dbg!(&axis_map);
-    let geometries = resolve_gms(&scom_info.gm_params, &cur_context, &axis_map, None);
+    let geometries = resolve_gms(&scom_info.gm_params, &cur_context, &axis_map);
     // dbg!(&geometries);
     Ok(GeomsInfo {
         geometries,

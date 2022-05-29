@@ -2,9 +2,10 @@ use std::collections::VecDeque;
 use aios_core::pdms_types::{AiosStr, AttrMap, EleTreeNode, PdmsTree, RefU64, RefU64Vec};
 use smol_str::SmolStr;
 use async_trait::async_trait;
+use dashmap::mapref::one::Ref;
 use glam::TransformRT;
 use id_tree::NodeId;
-
+use crate::data_interface::defines::CachedRefBasic;
 
 
 #[async_trait]
@@ -20,13 +21,17 @@ pub trait PdmsDataInterface : Send + Sync{
 
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
 
-    async fn get_owner(&self, refno: RefU64) -> anyhow::Result<RefU64>;
+    fn get_owner(&self, refno: RefU64) -> RefU64;
 
     async fn get_implicit_attr(&self, refno: RefU64, columns: Option<Vec<&str>>) -> anyhow::Result<AttrMap>;
 
     async fn get_implicit_attrs_by_owner(&self, owner: RefU64, type_name: &str, columns: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>>;
 
     async fn get_parent_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
+
+    fn get_refno_basic(&self, refno: RefU64) -> Option<Ref<RefU64, CachedRefBasic>>;
+
+    fn get_owner_ref_basic(&self, refno: RefU64) -> Option<Ref<RefU64, CachedRefBasic>>;
 
     async fn get_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>>;
 

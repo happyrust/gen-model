@@ -131,12 +131,13 @@ pub async fn query_world(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow:
 pub async fn query_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
     let sql = format!("SELECT * FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} and IS_DEL = 0;", *refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let children_count = query_children_count(refno, &pool).await?;
     Ok(EleTreeNode{
         refno,
         noun: result.get::<String, _>("TYPE"),
         name: result.get::<String, _>("NAME"),
         owner: RefU64::from(result.get::<i64, _>("OWNER") as u64),
-        children_count: 0
+        children_count,
     })
 }
 

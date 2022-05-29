@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use aios_core::pdms_types::{NounHash, RefU64};
+use anyhow::anyhow;
 use crate::consts::*;
 use dashmap::DashMap;
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
+use crate::data_interface::defines::CachedRefBasic;
 use crate::helper::qualified_table_name;
 
 ///更新获得ref0->project 缓存
@@ -27,24 +30,28 @@ pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Str
     Ok(map)
 }
 
-//获取生成refno到table name的映射
-pub async fn get_refno_table_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<RefU64, String>> {
-    let mut map = DashMap::new();
-    let sql = format!("SELECT ID, TYPE  FROM {PDMS_ELEMENTS_TABLE}");
+/// 获取生成refno到RefBasic的映射
+pub async fn sync_refno_basic_map(pool: &Pool<MySql>, map: Arc<DashMap<RefU64, CachedRefBasic>>) -> anyhow::Result<bool> {
+    let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE}");
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match results {
         Ok(vals) => {
             for val in vals {
                 let refno = (val.get::<i64, _>("ID") as u64).into();
+                let owner = (val.get::<i64, _>("OWNER") as u64).into();
                 let type_name = val.get::<String, _>("TYPE");
-                let table_name = qualified_table_name(type_name.as_str());
-                map.insert(refno, table_name);
+                let table = qualified_table_name(type_name.as_str());
+                map.insert(refno, CachedRefBasic {
+                    owner,
+                    table
+                });
             }
         }
         Err(e) => {
-            dbg!(e);
+            dbg!(&e);
             dbg!(sql);
+            return Err(anyhow!(e.to_string()));
         }
     }
-    Ok(map)
+    Ok(true)
 }
