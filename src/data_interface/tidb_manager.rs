@@ -548,7 +548,7 @@ impl AiosDBManager {
                 let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
                 //在这里直接处理完所有需要处理的transform
                 let desi_trans_origin = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
-                dbg!(&desi_trans_origin);
+                // dbg!(&desi_trans_origin);
                 let mut item_trans = TransformSRT::default();
                 // let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
                 let brep_shapes = CateBrepShapeMap::new();

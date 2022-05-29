@@ -31332,9 +31332,9 @@
 				"hash": 545848,
 				"offset": 16,
 				"default_val": {
-					"IntegerType": 0
+					"IntArrayType": []
 				},
-				"att_type": "INTEGER"
+				"att_type": "INTVEC"
 			},
 			"646041": {
 				"name": "LEVE",

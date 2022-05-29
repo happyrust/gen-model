@@ -289,13 +289,20 @@ pub fn resolve_to_cate_geo_params(gmse: GmseParamData) -> anyhow::Result<CateGeo
             })
         }
         "LINE" => {
-            CateGeoParam::Line(CateLineParam {
-                pa: Some(gmse.paxises[0].clone()),
-                pb: Some(gmse.paxises[1].clone()),
-                diameter: 0.0, //gmse.diameters[0],
-                centre_line_flag: gmse.centre_line_flag,
-                tube_flag: gmse.tube_flag,
-            })
+            CateGeoParam::Unknown
+
+            // let result = panic::catch_unwind(|| {
+            //     CateGeoParam::Line(CateLineParam {
+            //         pa: Some(gmse.paxises[0].clone()),
+            //         pb: Some(gmse.paxises[1].clone()),
+            //         diameter: 0.0, //gmse.diameters[0],
+            //         centre_line_flag: gmse.centre_line_flag,
+            //         tube_flag: gmse.tube_flag,
+            //     })
+            // });
+            //
+            // result.expect(&format!("线段：{} 生成出错, 数据: {:?}", gmse.refno.to_refno_str(), &gmse))
+
         }
         "LPYR" => {
             CateGeoParam::Pyramid(CatePyramidParam {

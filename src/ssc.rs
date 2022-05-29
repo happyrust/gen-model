@@ -222,13 +222,13 @@ pub async fn query_ssc_world(pool: Pool<MySql>) -> anyhow::Result<Option<EleTree
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
         Ok(val) => {
-            let refno =  RefU64(val.get::<i64, _>("id") as u64);
+            let refno =  RefU64(val.get::<i64, _>("ID") as u64);
             let children_count = query_ssc_children_count(refno,&pool).await?;
             let node = EleTreeNode {
                 refno,
-                noun: val.get::<String, _>("type"),
-                name: val.get::<String, _>("name"),
-                owner: RefU64(val.get::<i64, _>("owner") as u64),
+                noun: val.get::<String, _>("TYPE"),
+                name: val.get::<String, _>("NAME"),
+                owner: RefU64(val.get::<i64, _>("OWNER") as u64),
                 children_count,
             };
             Ok(Some(node))
@@ -252,9 +252,9 @@ pub async fn query_ssc_children(refno:RefU64,pool:Pool<MySql>) -> anyhow::Result
                 let children_count = query_ssc_children_count(refno, &pool).await?;
                 let node = EleTreeNode {
                     refno,
-                    noun: val.get::<String, _>("type"),
-                    name: val.get::<String, _>("name"),
-                    owner: RefU64(val.get::<i64, _>("owner") as u64),
+                    noun: val.get::<String, _>("TYPE"),
+                    name: val.get::<String, _>("NAME"),
+                    owner: RefU64(val.get::<i64, _>("OWNER") as u64),
                     children_count,
                 };
                 r.push(node);
