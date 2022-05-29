@@ -35,10 +35,6 @@ pub trait MySqlMethods {
 }
 
 
-
-
-
-
 //重新创建database
 pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()> {
     let connection = MySqlPool::connect(url)
@@ -58,7 +54,7 @@ pub async fn init_info_database(url: &str) -> anyhow::Result<()> {
 
     let mut pool = AiosDBManager::get_db_pool(&url, PDMS_INFO_DB).await?;
     let mut sql = String::new();
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, {PDMS_REFNO_INFOS_TABLE}));
+    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, { PDMS_REFNO_INFOS_TABLE }));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "ref0"));
     sql.push_str(&format!(r#"{} VARCHAR(20)"#, "project"));
 
@@ -75,7 +71,7 @@ pub async fn init_info_database(url: &str) -> anyhow::Result<()> {
 }
 
 
-pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()>{
+pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     println!("开始同部pdms/E3D: {} 的数据", &db_option.project_name);
     let mut time = Instant::now();
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
@@ -447,35 +443,37 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                             }
                         }
                         // 将带room_code数据的refno存放在pdms_ssc_element中
-                        // let mut project_conn = pool_clone.acquire().await.unwrap();
-                        // for (room_name, refnos) in room_code_map {
-                        //     let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
-                        //     let mut values_sql = String::new();
-                        //     if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
-                        //         let mut order = 0;
-                        //         for refno in refnos {
-                        //             if let Some(total_attr) = &total_attr_map.get(&refno) {
-                        //                 let type_name = total_attr.implicit_attmap.get_type();
-                        //                 let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
-                        //                     .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
-                        //                 values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
-                        //             }
-                        //             order += 1;
-                        //         }
-                        //         values_sql.remove(values_sql.len() - 1);
-                        //         values_sql.push_str(";");
-                        //         let sql = format!("{}{}", insert_sql, values_sql);
-                        //         let result = project_conn.execute(sql.as_str()).await;
-                        //         match result {
-                        //             Ok(_) => {}
-                        //             Err(e) => {
-                        //                 dbg!(&e);
-                        //                 dbg!(sql.as_str());
-                        //             }
-                        //         }
-                        //     }
-                        // }
-
+                        let mut project_conn = pool_clone.acquire().await.unwrap();
+                        for (room_name, refnos) in room_code_map {
+                            let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
+                            let mut values_sql = String::new();
+                            let room_name = room_name.split('-').collect::<Vec<&str>>();
+                            if room_name.len() > 2 {
+                                if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name[2], pool_clone.clone()).await {
+                                    let mut order = 0;
+                                    for refno in refnos {
+                                        if let Some(total_attr) = &total_attr_map.get(&refno) {
+                                            let type_name = total_attr.implicit_attmap.get_type();
+                                            let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
+                                                .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
+                                            values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
+                                        }
+                                        order += 1;
+                                    }
+                                    values_sql.remove(values_sql.len() - 1);
+                                    values_sql.push_str(";");
+                                    let sql = format!("{}{}", insert_sql, values_sql);
+                                    let result = project_conn.execute(sql.as_str()).await;
+                                    match result {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            dbg!(&e);
+                                            dbg!(sql.as_str());
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 });
                 handles.push(handle);
@@ -657,35 +655,34 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                             }
                         }
                         // 将带有room_code属性的参考号放入pdms_ssc_elements中
-                        // let mut project_conn = pool_clone.acquire().await.unwrap();
-                        // for (room_name, refnos) in room_code_map {
-                        //     let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
-                        //     let mut values_sql = String::new();
-                        //     if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
-                        //         let mut order = 0;
-                        //         for refno in refnos {
-                        //             if let Some(total_attr) = &total_attr_map.get(&refno) {
-                        //                 let type_name = total_attr.implicit_attmap.get_type();
-                        //                 let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
-                        //                     .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
-                        //                 values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
-                        //             }
-                        //             order += 1;
-                        //         }
-                        //         values_sql.remove(values_sql.len() - 1);
-                        //         values_sql.push_str(";");
-                        //         let sql = format!("{}{}", insert_sql, values_sql);
-                        //         let result = project_conn.execute(sql.as_str()).await;
-                        //         match result {
-                        //             Ok(_) => {}
-                        //             Err(e) => {
-                        //                 dbg!(&e);
-                        //                 dbg!(sql.as_str());
-                        //             }
-                        //         }
-                        //     }
-                        // }
-
+                        let mut project_conn = pool_clone.acquire().await.unwrap();
+                        for (room_name, refnos) in room_code_map {
+                            let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
+                            let mut values_sql = String::new();
+                            if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
+                                let mut order = 0;
+                                for refno in refnos {
+                                    if let Some(total_attr) = &total_attr_map.get(&refno) {
+                                        let type_name = total_attr.implicit_attmap.get_type();
+                                        let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
+                                            .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
+                                        values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
+                                    }
+                                    order += 1;
+                                }
+                                values_sql.remove(values_sql.len() - 1);
+                                values_sql.push_str(";");
+                                let sql = format!("{}{}", insert_sql, values_sql);
+                                let result = project_conn.execute(sql.as_str()).await;
+                                match result {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(&e);
+                                        dbg!(sql.as_str());
+                                    }
+                                }
+                            }
+                        }
                     }
                 });
                 handles.push(handle);
