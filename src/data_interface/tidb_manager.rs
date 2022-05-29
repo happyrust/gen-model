@@ -843,9 +843,9 @@ impl AiosDBManager {
     pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let mut time = Instant::now();
 
-        // Self::cache_prim_geos(mgr.clone(), project).await?;
-        // Self::cache_loop_geos(mgr.clone(), project).await?;
-        // Self::cache_pohe_geos(mgr.clone(), project).await?;
+        Self::cache_prim_geos(mgr.clone(), project).await?;
+        Self::cache_loop_geos(mgr.clone(), project).await?;
+        Self::cache_pohe_geos(mgr.clone(), project).await?;
         Self::cache_cata_geos(mgr.clone(), project).await?;
 
 

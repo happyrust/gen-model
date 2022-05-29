@@ -136,6 +136,7 @@ pub async fn query_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result
         noun: result.get::<String, _>("type"),
         name: result.get::<String, _>("name"),
         owner: RefU64::from(result.get::<i64, _>("owner") as u64),
+        children_count: 0
     })
 }
 

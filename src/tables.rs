@@ -144,7 +144,7 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
             }
             AttrVal::StringType(_) => {
                 //根据不同类型优化一下string的大小
-                sql.push_str(&format!(r#"{} VARCHAR(20),"#, att_name));
+                sql.push_str(&format!(r#"{} VARCHAR(300),"#, att_name));
             }
             AttrVal::DoubleType(_) => {
                 sql.push_str(&format!(r#"{} DOUBLE,"#, att_name));
@@ -153,25 +153,25 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
                 sql.push_str(&format!(r#"{} BLOB,"#, att_name));
             }
             AttrVal::StringArrayType(_) => {
-                sql.push_str(&format!(r#"{} VARCHAR(80),"#, att_name));  //暂时用blob来表示，至于需不需要分表，看情况
+                sql.push_str(&format!(r#"{} VARCHAR(300),"#, att_name));  //暂时用blob来表示，至于需不需要分表，看情况
             }
             AttrVal::BoolArrayType(_) => {
                 sql.push_str(&format!(r#"{} INT,"#, att_name));
             }
             AttrVal::IntArrayType(_) | AttrVal::RefU64Array(_) => {
-                sql.push_str(&format!(r#"{} VARCHAR(50),"#, att_name));
+                sql.push_str(&format!(r#"{} VARCHAR(100),"#, att_name));
             }
             AttrVal::BoolType(_) => {
                 sql.push_str(&format!(r#"{} TINYINT(1),"#, att_name));
             }
             AttrVal::Vec3Type(_) => {
-                sql.push_str(&format!(r#"{} VARCHAR(50),"#, att_name));
+                sql.push_str(&format!(r#"{} VARCHAR(100),"#, att_name));
             }
             AttrVal::ElementType(_) => {
                 sql.push_str(&format!(r#"{} BIGINT,"#, att_name));
             }
             AttrVal::WordType(_) => {
-                sql.push_str(&format!(r#"{} VARCHAR(20),"#, att_name));
+                sql.push_str(&format!(r#"{} VARCHAR(50),"#, att_name));
             }
             AttrVal::RefU64Type(_) => {
                 sql.push_str(&format!(r#"{} BIGINT,"#, att_name));
