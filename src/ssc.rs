@@ -1,11 +1,13 @@
 use std::collections::HashMap;
-use aios_core::pdms_types::RefU64;
+use aios_core::pdms_types::{EleTreeNode, RefU64};
 use anyhow::anyhow;
 use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use smol_str::SmolStr;
-use sqlx::{MySql, Pool};
+use sqlx::{Error, MySql, Pool, Row};
 use sqlx::Executor;
-use serde::{Serialize,Deserialize};
+use serde::{Serialize, Deserialize};
+use sqlx::mysql::MySqlRow;
+use crate::consts::PDMS_SSC_ELEMENTS_TABLE;
 
 // 房间信息 excel 字段
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -60,7 +62,7 @@ pub fn set_ssc_node() -> String {
     let refno = RefU64(1);
     let mut owner_refno = RefU64(0);
     // root
-    let (_root_refno, root_sql) = gen_insert_ssc_node_sql(refno, "SSC", owner_refno, "\"华龙一号\" 标准SSC结构", 0);
+    let (_root_refno, root_sql) = gen_insert_ssc_node_sql(refno, "WORL", owner_refno, "\"华龙一号\" 标准SSC结构", 0);
     sql.push_str(&root_sql);
     owner_refno = refno;
     // 第二层
@@ -215,6 +217,82 @@ pub fn gen_insert_ssc_node_sql(refno: RefU64, type_name: &str, owner: RefU64, na
     (RefU64(refno.0 + 1), sql)
 }
 
+pub async fn query_ssc_world(pool: Pool<MySql>) -> anyhow::Result<Option<EleTreeNode>> {
+    let sql = gen_query_ssc_world_sql();
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    return match result {
+        Ok(val) => {
+            let refno =  RefU64(val.get::<i64, _>("id") as u64);
+            let children_count = query_ssc_children_count(refno,&pool).await?;
+            let node = EleTreeNode {
+                refno,
+                noun: val.get::<String, _>("type"),
+                name: val.get::<String, _>("name"),
+                owner: RefU64(val.get::<i64, _>("owner") as u64),
+                children_count,
+            };
+            Ok(Some(node))
+        }
+        Err(e) => {
+            dbg!(sql);
+            dbg!(e);
+            Ok(None)
+        }
+    };
+}
+
+pub async fn query_ssc_children(refno:RefU64,pool:Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {
+    let sql = gen_query_ssc_children_sql(refno);
+    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    return match result {
+        Ok(vals) => {
+            let mut r = vec![];
+            for val in vals {
+                let refno = RefU64(val.get::<i64, _>("id") as u64);
+                let children_count = query_ssc_children_count(refno, &pool).await?;
+                let node = EleTreeNode {
+                    refno,
+                    noun: val.get::<String, _>("type"),
+                    name: val.get::<String, _>("name"),
+                    owner: RefU64(val.get::<i64, _>("owner") as u64),
+                    children_count,
+                };
+                r.push(node);
+            }
+            Ok(r)
+        }
+        Err(e) => {
+            dbg!(sql);
+            dbg!(e);
+            Ok(vec![])
+        }
+    };
+}
+
+pub async fn query_ssc_children_count(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<usize> {
+    let count_sql = gen_query_ssc_children_count_sql(refno);
+    let count_result = sqlx::query(&count_sql).fetch_one(&mut pool.acquire().await?).await?;
+    Ok(count_result.get::<i32, _>(0) as usize)
+}
+
+fn gen_query_ssc_children_count_sql(refno: RefU64) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select count(*) from {PDMS_SSC_ELEMENTS_TABLE} where owner = {}", refno.0));
+    sql
+}
+
+fn gen_query_ssc_children_sql(refno: RefU64) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select * from {PDMS_SSC_ELEMENTS_TABLE} where owner = {}", refno.0));
+    sql
+}
+
+fn gen_query_ssc_world_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("select * from {PDMS_SSC_ELEMENTS_TABLE} where type = 'WORL' ;"));
+    sql
+}
+
 #[test]
 fn test_set_ssc_tree() {
     let sql = set_ssc_node();
@@ -224,5 +302,5 @@ fn test_set_ssc_tree() {
 #[test]
 fn test_read_excel() {
     let result = get_room_info_from_excel().unwrap();
-    println!("result={:?}",result);
+    println!("result={:?}", result);
 }

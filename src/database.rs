@@ -445,7 +445,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                         // 将带room_code数据的refno存放在pdms_ssc_element中
                         // let mut project_conn = pool_clone.acquire().await.unwrap();
                         // for (room_name, refnos) in room_code_map {
-                        //     let insert_sql = "insert ignore into pdms_ssc_elements (ID, refno, type, owner, name, order_num) VALUES ";
+                        //     let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
                         //     let mut values_sql = String::new();
                         //     if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
                         //         let mut order = 0;
@@ -655,7 +655,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                         // 将带有room_code属性的参考号放入pdms_ssc_elements中
                         // let mut project_conn = pool_clone.acquire().await.unwrap();
                         // for (room_name, refnos) in room_code_map {
-                        //     let insert_sql = "insert ignore into pdms_ssc_elements (ID, refno, type, owner, name, order_num) VALUES ";
+                        //     let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
                         //     let mut values_sql = String::new();
                         //     if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
                         //         let mut order = 0;

@@ -133,9 +133,9 @@ pub async fn query_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(EleTreeNode{
         refno,
-        noun: result.get::<String, _>("TYPE"),
-        name: result.get::<String, _>("NAME"),
-        owner: RefU64::from(result.get::<i64, _>("OWNER") as u64),
+        noun: result.get::<String, _>("type"),
+        name: result.get::<String, _>("name"),
+        owner: RefU64::from(result.get::<i64, _>("owner") as u64),
         children_count: 0
     })
 }
@@ -331,9 +331,9 @@ pub async fn query_id_from_dbno_type(dbno: u32, pool: &Pool<MySql>) -> anyhow::R
         Ok(vals) => {
             let mut r = vec![];
             for v in vals {
-                let refno = RefU64(v.get::<i64, _>("ID") as u64);
-                let name = v.get::<String, _>("NAME");
-                let type_name = v.get::<String,_>("TYPE");
+                let refno = RefU64(v.get::<i64, _>("id") as u64);
+                let name = v.get::<String, _>("name");
+                let type_name = v.get::<String,_>("type");
                 r.push((refno, name,type_name))
             }
             Ok(Some(r))
