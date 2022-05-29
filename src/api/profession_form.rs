@@ -73,7 +73,7 @@ pub async fn gen_insert_profession_to_db_sql(map: Vec<HashMap<String, String>>, 
 pub async fn select_profession_form_data_page(table: &str, page: u32, page_count: u32, pool: Pool<MySql>) -> anyhow::Result<Vec<HashMap<String, String>>> {
     let mut r = vec![];
     let count = page * page_count;
-    let sql = format!("select * from {} order by id limit {} , {}", table, count, page_count);
+    let sql = format!("SELECT * FROM {} ORDER BY ID LIMIT {} , {}", table, count, page_count);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match result {
         Ok(vals) => {
@@ -115,8 +115,8 @@ async fn test_gen_insert_to_db_sql() -> anyhow::Result<()> {
 async fn test_select_profession_form_data_page() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let v = select_profession_form_data_page("explicit_att", 0, 10, pool).await.unwrap();
+    let pool = AiosDBManager::get_db_pool(&url, "Sample").await?;
+    let v = select_profession_form_data_page("EXPLICIT_ATT", 0, 10, pool).await.unwrap();
     for i in v {
         println!("i={:?}", i);
     }

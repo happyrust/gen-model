@@ -41,7 +41,7 @@ fn get_room_info_from_excel() -> anyhow::Result<HashMap<String, Vec<SmolStr>>> {
 }
 
 pub async fn insert_set_ssc_node_sql(pool: Pool<MySql>) -> anyhow::Result<()> {
-    let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
+    let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
     let sql = format!("{}{}", insert_sql, set_ssc_node());
     let mut conn = pool.acquire().await?;
     let result = conn.execute(sql.as_str()).await;

@@ -4,7 +4,7 @@ use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use aios_core::consts::*;
-use aios_core::pdms_types::{AiosStr, AttrMap, CachedMeshesMgr, EleGeoInstData, EleTreeNode, PdmsMeshMgr, PdmsNodeTrait, PdmsTree, RefI32Tuple, RefU64, RefU64Vec, ShapeInstancesMgr};
+use aios_core::pdms_types::{AiosStr, AttrMap, CachedMeshesMgr, EleGeoInstData, EleTreeNode, NounHash, PdmsMeshMgr, PdmsNodeTrait, PdmsTree, RefI32Tuple, RefU64, RefU64Vec, ShapeInstancesMgr};
 use aios_core::prim_geo::category::{CateBrepShape, convert_to_brep_shapes};
 use aios_core::prim_geo::extrusion::{CurveType, Extrusion};
 use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
@@ -66,6 +66,8 @@ pub struct AiosDBManager {
     pub db_option: DbOption,
 
     mesh_mgr: Arc<PdmsMeshMgr>,
+
+    cached_refno_type_map: Arc<DashMap<RefU64, NounHash>>,    //缓存到本地数据库
 
     cached_world_transforms_map: Arc<DashMap<RefU64, TransformRT>>,   //记录所有需要记录的world transform, need to flush to database
 }
@@ -366,7 +368,8 @@ impl AiosDBManager {
         }
 
         let info_conn = AiosDBManager::get_db_pool(&default_conn, PDMS_INFO_DB).await?;
-        let ref0_map = get_refno_infos(&info_conn).await?;
+        let ref0_map = get_ref0_map(&info_conn).await?;
+        // let cached_refno_type_map = get_refno_table_map(&project);
         let projects = db_option.included_projects.clone();
         Ok(
             Self {
@@ -377,6 +380,7 @@ impl AiosDBManager {
                 project_path: dir,
                 db_option,
                 mesh_mgr: Arc::new(Default::default()),
+                cached_refno_type_map: Arc::new(Default::default()),
                 cached_world_transforms_map: Arc::new(Default::default()),
             }
         )
@@ -444,9 +448,9 @@ impl AiosDBManager {
             // dbg!(mgr.ref0_map.get(&htube_ref.get_0()));
             let mut bore = 0.0f32;
             if let Ok(hstube_att) = mgr.get_attr(htube_ref).await {
-                dbg!(hstube_att.to_string_hashmap());
+                // dbg!(hstube_att.to_string_hashmap());
                 let hstube_cat_att = mgr.get_attr(hstube_att.get_foreign_refno("CATR").unwrap_or_default()).await?;
-                dbg!(hstube_cat_att.to_string_hashmap());
+                // dbg!(hstube_cat_att.to_string_hashmap());
                 let params = hstube_cat_att.get_f64_vec("PARA").unwrap_or_default();
                 if params.len() >= 2 {
                     bore = params[1] as f32;
@@ -529,12 +533,13 @@ impl AiosDBManager {
 
     pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        // let has_cata_types = ATTR_INFO_MAP.get_has_cat_ref_types().iter().map(|x| x.clone()).collect::<Vec<_>>();
+        let has_cata_types = ATTR_INFO_MAP.get_has_cat_ref_types().iter().map(|x| x.clone()).collect::<Vec<_>>();
+        // dbg!(&has_cata_types);
         // let has_cata_types = has_cata_types.iter().map(|x| x.as_str()).collect();
         // dbg!(&has_cata_types);
         let hash_cata_refnos = mgr.get_refnos_by_types(project, &vec!["BRAN"]).await?;
         let mut handles = vec![];
-        let hash_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584,5443)]);
+        // let hash_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584,5443)]);
         let has_cata_cnt = hash_cata_refnos.len();
         for (i, refno) in hash_cata_refnos.into_iter().enumerate() {
             let mgr = mgr.clone();
@@ -1245,7 +1250,7 @@ impl AiosPdmsProjectTiDB {
 }
 
 use config::{Config, ConfigError, Environment, File};
-use crate::api::refno_info::get_refno_infos;
+use crate::api::refno_info::{get_ref0_map, get_refno_table_map};
 use crate::ATTR_INFO_MAP;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn;

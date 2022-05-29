@@ -9,30 +9,31 @@ use sqlx::pool::PoolConnection;
 use crate::consts::*;
 use crate::helper::*;
 
-
+#[inline]
 pub fn gen_create_explicit_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_EXPLICIT_TABLE} ("#));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "id"));  //refno 的64位
-    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "refno"));
-    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "type"));
-    sql.push_str(&format!(r#"{} BIGINT,"#, "owner"));
-    sql.push_str(&format!(r#"{} BLOB"#, "data"));
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));  //refno 的64位
+    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "REFNO"));
+    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
+    sql.push_str(&format!(r#"{} BIGINT,"#, "OWNER"));
+    sql.push_str(&format!(r#"{} BLOB"#, "DATA"));
     sql.push_str(");");
 
     sql
 }
 
+#[inline]
 pub fn gen_create_uda_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_UDA_TABLE} ("#));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "id"));  //refno 的64位
-    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "refno"));   //主要是方便显示查看
-    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "type"));
-    sql.push_str(&format!(r#"{} BIGINT,"#, "owner"));
-    sql.push_str(&format!(r#"{} BLOB"#, "data"));
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));  //refno 的64位
+    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "REFNO"));   //主要是方便显示查看
+    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
+    sql.push_str(&format!(r#"{} BIGINT,"#, "OWNER"));
+    sql.push_str(&format!(r#"{} BLOB"#, "DATA"));
     sql.push_str(");");
 
     sql
@@ -43,15 +44,15 @@ pub fn gen_create_uda_tables_sql() -> String {
 pub fn gen_create_dbno_infos_tables_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_DBNO_INFOS_TABLE} ("#));
-    sql.push_str(&format!(r#"{} INT PRIMARY KEY ,"#, "dbno"));
-    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "filename"));
-    sql.push_str(&format!(r#"{} INT, "#, "version"));
-    sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "project"));
-    sql.push_str(&format!(r#"{} VARCHAR(10) "#, "db_type"));
+    sql.push_str(&format!(r#"{} INT PRIMARY KEY ,"#, "NUMBDB"));
+    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "FILENAME"));
+    sql.push_str(&format!(r#"{} INT, "#, "VERSION"));
+    sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "PROJECT"));
+    sql.push_str(&format!(r#"{} VARCHAR(10) "#, "DB_TYPE"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX info_db_type_idx ON {PDMS_DBNO_INFOS_TABLE} (db_type);"));
-    sql.push_str(&format!("CREATE INDEX info_dbno_idx ON {PDMS_DBNO_INFOS_TABLE} (dbno);"));
+    sql.push_str(&format!("CREATE INDEX INFO_DB_TYPE_IDX ON {PDMS_DBNO_INFOS_TABLE} (DB_TYPE);"));
+    sql.push_str(&format!("CREATE INDEX INFO_DBNO_IDX ON {PDMS_DBNO_INFOS_TABLE} (NUMBDB);"));
     sql
 }
 
@@ -60,60 +61,63 @@ pub fn gen_create_element_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_ELEMENTS_TABLE} ("#));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "id"));  //refno 的64位
-    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "refno"));
-    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "type"));
-    sql.push_str(&format!(r#"{} BIGINT,"#, "owner"));
-    sql.push_str(&format!(r#"{} VARCHAR(100),"#, "name"));
-    sql.push_str(&format!(r#"{} INT ,"#, "dbno"));
-    sql.push_str(&format!(r#"{} INT ,"#, "order_num"));
-    sql.push_str(&format!(r#"{} TINYINT(1) "#, "is_del"));
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));  //refno 的64位
+    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "REFNO"));
+    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
+    sql.push_str(&format!(r#"{} BIGINT,"#, "OWNER"));
+    sql.push_str(&format!(r#"{} VARCHAR(100),"#, "NAME"));
+    sql.push_str(&format!(r#"{} INT ,"#, "NUMBDB"));
+    sql.push_str(&format!(r#"{} INT ,"#, "ORDER_NUM"));
+    sql.push_str(&format!(r#"{} TINYINT(1) "#, "IS_DEL"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX ele_type_idx ON {PDMS_ELEMENTS_TABLE} (type);"));
-    sql.push_str(&format!("CREATE INDEX ele_dbno_idx ON {PDMS_ELEMENTS_TABLE} (dbno);"));
-    sql.push_str(&format!("CREATE INDEX ele_owner_idx ON {PDMS_ELEMENTS_TABLE} (owner);"));
+    sql.push_str(&format!("CREATE INDEX ELE_TYPE_IDX ON {PDMS_ELEMENTS_TABLE} (TYPE);"));
+    sql.push_str(&format!("CREATE INDEX ELE_DBNO_IDX ON {PDMS_ELEMENTS_TABLE} (NUMBDB);"));
+    sql.push_str(&format!("CREATE INDEX ELE_OWNER_IDX ON {PDMS_ELEMENTS_TABLE} (OWNER);"));
     sql
 }
 
+#[inline]
 pub fn gen_create_ssc_element_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_SSC_ELEMENTS_TABLE} ("#));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "id"));  //refno 的64位
-    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "refno"));
-    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "type"));
-    sql.push_str(&format!(r#"{} BIGINT,"#, "owner"));
-    sql.push_str(&format!(r#"{} VARCHAR(100),"#, "name"));
-    sql.push_str(&format!(r#"{} INT"#, "order_num"));
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));  //refno 的64位
+    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "REFNO"));
+    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
+    sql.push_str(&format!(r#"{} BIGINT,"#, "OWNER"));
+    sql.push_str(&format!(r#"{} VARCHAR(100),"#, "NAME"));
+    sql.push_str(&format!(r#"{} INT"#, "ORDER_NUM"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX ele_type_idx ON {PDMS_SSC_ELEMENTS_TABLE} (type);"));
-    sql.push_str(&format!("CREATE INDEX ele_owner_idx ON {PDMS_SSC_ELEMENTS_TABLE} (owner);"));
+    sql.push_str(&format!("CREATE INDEX ele_type_idx ON {PDMS_SSC_ELEMENTS_TABLE} (TYPE);"));
+    sql.push_str(&format!("CREATE INDEX ele_owner_idx ON {PDMS_SSC_ELEMENTS_TABLE} (OWNER);"));
     sql
 }
 
+#[inline]
 pub fn gen_create_attr_info_tables_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_REFNO_INFOS_TABLE} ("#));
-    sql.push_str(&format!(r#"{} int primary key ,"#, "type_hash"));
-    sql.push_str(&format!(r#"{} varchar(8) ,"#, "type"));
-    sql.push_str(&format!(r#"{} blob "#, "info"));
+    sql.push_str(&format!(r#"{} INT PRIMARY KEY ,"#, "TYPE_HASH"));
+    sql.push_str(&format!(r#"{} VARCHAR(8) ,"#, "TYPE"));
+    sql.push_str(&format!(r#"{} BLOB "#, "INFO"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX ref0_type_idx ON {PDMS_REFNO_INFOS_TABLE} (type);"));
+    sql.push_str(&format!("CREATE INDEX REF0_TYPE_IDX ON {PDMS_REFNO_INFOS_TABLE} (TYPE);"));
     sql
 }
 
+#[inline]
 pub fn gen_create_project_mdb_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_PROJECT_MDB_TABLE} ("#));
-    sql.push_str(&format!(r#"{} VARCHAR(20) ,"#, "mdb_name"));
-    sql.push_str(&format!(r#"{} VARCHAR(10) ,"#, "db_type"));
-    sql.push_str(&format!(r#"{} BLOB "#, "data"));
+    sql.push_str(&format!(r#"{} VARCHAR(20) ,"#, "MDB_NAME"));
+    sql.push_str(&format!(r#"{} VARCHAR(10) ,"#, "DB_TYPE"));
+    sql.push_str(&format!(r#"{} BLOB "#, "DATA"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX proj_mdb_db_type_idx ON {PDMS_PROJECT_MDB_TABLE} (db_type);"));
+    sql.push_str(&format!("CREATE INDEX PROJ_MDB_DB_TYPE_IDX ON {PDMS_PROJECT_MDB_TABLE} (DB_TYPE);"));
     sql
 }
 
@@ -124,18 +128,17 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
     let table_name = table_name.as_str();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, table_name));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "id"));  //refno 的64位
-    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "refno"));   //refno
-    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "type"));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL,"#, "owner"));
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));  //refno 的64位
+    sql.push_str(&format!(r#"{} VARCHAR(30),"#, "REFNO"));   //refno
+    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL,"#, "OWNER"));
 
     for (offset, (k, v)) in att_bmap {
         // let att_name = db1_dehash(k.0).to_lowercase();
-        let mut att_name_full = k.to_lowercase();
-        if att_name_full.as_str() == "numbdb" {
-            att_name_full = "dbno".to_string();
-        }
-        let att_name = qualified_column_name(att_name_full.as_str());
+        // if k.as_str() == "numbdb" {
+        //     att_name_full = "dbno".to_string();
+        // }
+        let att_name = qualified_column_name(k);
 
         match v {
             AttrVal::InvalidType => {}
@@ -184,8 +187,8 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
     sql.remove(sql.len() - 1);
     sql.push_str(");");
 
-    // sql.push_str(&format!("CREATE INDEX {type_name}_owner_idx ON {table_name} (owner);"));
-    // sql.push_str(&format!("CREATE INDEX {type_name}_type_idx ON {table_name} (type);"));
+    // sql.push_str(&format!("CREATE INDEX {type_name}_OWNER_IDX ON {table_name} (owner);"));
+    // sql.push_str(&format!("CREATE INDEX {type_name}_TYPE_IDX ON {table_name} (type);"));
 
     sql
 }

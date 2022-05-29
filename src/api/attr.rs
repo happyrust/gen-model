@@ -19,7 +19,6 @@ use crate::helper::qualified_table_name;
 
 /// 指定从特定的表查询数据，根据owner查询
 pub async fn query_implicit_attrs_by_owner(owner: RefU64, type_name: &str, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>> {
-    let type_name = type_name.to_lowercase();
     let sql = gen_query_implicit_attr_sql_by_owner(owner, &type_name, &column_names);
     let column_names = column_names.unwrap_or_default();
     let rows = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
@@ -43,8 +42,7 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &Vec<
             }
             //type 需要获取
             if info.offset != 0 || info.hash as u32 == *TYPE_HASH {
-                let t = info.name.to_lowercase();
-                let t = t.as_str();
+                let t = info.name.as_str();
                 let hash = NounHash::from(db1_hash(&info.name));
                 match info.att_type {
                     DbAttributeType::INTEGER => {
@@ -155,7 +153,7 @@ pub async fn query_implicit_attr(refno: RefU64, pool: &Pool<MySql>, column_names
 pub async fn query_explicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
     let sql = gen_query_explicit_attr_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    let val = result.get::<Vec<u8>,_>("data");
+    let val = result.get::<Vec<u8>,_>("DATA");
     Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
 }
 
@@ -233,7 +231,7 @@ pub async fn query_foreign_refno(refno: RefU64, foreign_type: &str, pool: &Pool<
 
 fn gen_insert_attr_info_sql(attr_info: &DashMap<i32, DashMap<i32, AttrInfo>>) -> String {
     let mut sql = String::new();
-    sql.push_str("insert ignore into attr_info (type_hash, type,info ) Values ");
+    sql.push_str("INSERT IGNORE INTO ATTR_INFO (TYPE_HASH, TYPE,INFO ) VALUES ");
     for info in attr_info {
         let type_hash = *info.key() as u32;
         let type_name = db1_dehash(type_hash);
@@ -249,51 +247,48 @@ pub fn gen_query_implicit_attr_sql(refno: RefU64, type_name: &str, columns: &Vec
     let cols_sql = if columns.len() == 0  {
         "*".to_string()
     } else{
-        columns.iter().map(|x| x.to_lowercase()).join(",")
+        columns.join(",")
     };
-    sql.push_str(&format!("select {cols_sql} from {} where id = {}", qualified_table_name(type_name), refno.0));
+    sql.push_str(&format!("SELECT {cols_sql} FROM {} WHERE ID = {}", qualified_table_name(type_name), refno.0));
     sql
 }
 
 /// 生成通过owner获取的sql语句
 #[inline]
 pub fn gen_query_implicit_attr_sql_by_owner(owner: RefU64, type_name: &str, columns: &Option<Vec<&str>>) -> String {
+    let table_name = qualified_table_name(type_name);
     let mut sql = String::new();
     let cols_sql = columns.as_ref().map(|x|{
-        x.iter().map(|x| x.to_lowercase()).join(",")
+        x.join(",")
     }).unwrap_or("*".to_string());
-    sql.push_str(&format!("select {cols_sql} from {} where owner = {}", type_name, owner.0));
+    sql.push_str(&format!("SELECT {cols_sql} FROM {} WHERE OWNER = {}", table_name, owner.0));
     sql
 }
 
 pub fn gen_query_explicit_attr_sql(refno: RefU64) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select * from {PDMS_EXPLICIT_TABLE} where id = {} ;", refno.0));
+    sql.push_str(&format!("SELECT * FROM {PDMS_EXPLICIT_TABLE} WHERE ID = {} ;", refno.0));
     sql
 }
 
 fn gen_query_foreign_refno_sql(refno: RefU64, type_name: &str, foreign_type: &str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select {} from {} where id = {} ;", foreign_type, type_name, refno.0));
+    sql.push_str(&format!("SELECT {} FROM {} WHERE ID = {} ;", foreign_type, type_name, refno.0));
     sql
 }
 
 fn gen_query_ori_from_id(refno: RefU64, type_name: &str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select ori from {} where id = {} ;", type_name, refno.0));
+    sql.push_str(&format!("SELECT ORI FROM {} where ID = {} ;", type_name, refno.0));
     sql
 }
 
 fn gen_position_from_id(refno: RefU64, type_name: &str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select pos from {} where id = {} ;", type_name, refno.0));
+    sql.push_str(&format!("SELECT POS FROM {} where ID = {} ;", type_name, refno.0));
     sql
 }
 
-fn gen_test_not_exist_table_sql() -> String {
-    let sql = "select * from acrw".to_string();
-    sql
-}
 
 
 #[tokio::test]
@@ -325,7 +320,7 @@ async fn test_test_not_exist_table_sql() -> anyhow::Result<()> {
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     match result {
         Ok(v) => {
-            let r = v.try_get::<String, _>("pos");
+            let r = v.try_get::<String, _>("POS");
             match r {
                 Ok(v) => { println!("r={:?}", v); }
                 Err(_) => { dbg!("not column"); }

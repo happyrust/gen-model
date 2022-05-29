@@ -13,7 +13,7 @@ pub async fn query_dbtype_from_dbno(dbno: i32, pool: &Pool<MySql>) -> anyhow::Re
 
 fn gen_query_dbtype_from_dbno(dbno: i32) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select db_type from {PDMS_DBNO_INFOS_TABLE} where dbno = {}", dbno));
+    sql.push_str(&format!("SELECT DB_TYPE FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {}", dbno));
     sql
 }
 
@@ -25,6 +25,6 @@ pub async fn query_dbtype_from_dbno_count(dbno: i32, pool: &Pool<MySql>) -> anyh
 
 fn gen_query_dbtype_from_dbno_count(dbno: i32) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("select count(*) from {PDMS_DBNO_INFOS_TABLE} where dbno = {}", dbno));
+    sql.push_str(&format!("SELECT COUNT(*) FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {}", dbno));
     sql
 }

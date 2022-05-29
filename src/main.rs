@@ -37,7 +37,7 @@ pub async fn test_batch_insert(url: &str) {
         .await
         .unwrap();
     let mut pool = connection.try_acquire().unwrap();
-    let sql = format!(r#"INSERT {PDMS_ELEMENTS_TABLE} (id, refno, type, name) VALUES (1, 100, 'test', 'unset'), (2, 100, 'test', 'unset')"#);
+    let sql = format!(r#"INSERT {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, NAME) VALUES (1, 100, 'test', 'unset'), (2, 100, 'test', 'unset')"#);
     let result = sqlx::query(&sql).execute(&mut pool).await;
     match result {
         Ok(_) => {}
