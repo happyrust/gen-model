@@ -4,10 +4,11 @@ use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 #[derive(Debug, Default, Clone)]
 pub struct CachedRefBasic {
     pub(crate) owner: RefU64,
-    pub(crate) table: String, //提前处理好成了table name，有关键字冲突的地方，删除最后的_
+    pub(crate) table: String, //提前处理好成了table name，有关键字冲突的地方，删除最后的
 }
 
 impl CachedRefBasic{
+
     #[inline]
     pub fn get_type(&self) -> &str{
         if self.table.ends_with("_") {
@@ -31,4 +32,5 @@ impl CachedRefBasic{
     pub fn get_owner(&self) -> RefU64{
         self.owner
     }
+
 }

@@ -612,7 +612,8 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                         let result = project_conn.execute(sql.as_str()).await;
                                         match result {
                                             Ok(_) => {}
-                                            Err(_) => {
+                                            Err(e) => {
+                                                dbg!(&e);
                                                 dbg!(sql.as_str());
                                             }
                                         }

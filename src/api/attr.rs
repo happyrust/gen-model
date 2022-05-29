@@ -136,7 +136,7 @@ pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic, pool
     }else{
         vec![]
     };
-    let sql = gen_query_implicit_attr_sql(refno, type_name, &column_names);
+    let sql = gen_query_implicit_attr_sql(refno, ref_basic.get_table_name(), &column_names);
     let row = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     let mut r = convert_row_to_attmap(&row, type_hash, &column_names)?;
     //其他的插入
@@ -237,14 +237,14 @@ fn gen_insert_attr_info_sql(attr_info: &DashMap<i32, DashMap<i32, AttrInfo>>) ->
     sql
 }
 
-pub fn gen_query_implicit_attr_sql(refno: RefU64, type_name: &str, columns: &Vec<&str>) -> String {
+pub fn gen_query_implicit_attr_sql(refno: RefU64, table_name: &str, columns: &Vec<&str>) -> String {
     let mut sql = String::new();
     let cols_sql = if columns.len() == 0  {
         "*".to_string()
     } else{
         columns.join(",")
     };
-    sql.push_str(&format!("SELECT {cols_sql} FROM {} WHERE ID = {}", qualified_table_name(type_name), refno.0));
+    sql.push_str(&format!("SELECT {cols_sql} FROM {} WHERE ID = {}", table_name, refno.0));
     sql
 }
 

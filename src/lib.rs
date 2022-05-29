@@ -13,7 +13,6 @@ use dashmap::mapref::one::Ref;
 use nom::combinator::map;
 
 pub mod tables;
-pub mod defs;
 pub mod database;
 pub mod consts;
 pub mod options;
