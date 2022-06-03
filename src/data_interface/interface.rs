@@ -47,7 +47,7 @@ pub trait PdmsDataInterface : Send + Sync{
 
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr>;
 
-    async fn get_refnos_by_types<'a>(&self, project: &'a str, att_types: &'a Vec<&str>) -> anyhow::Result<RefU64Vec>;
+    async fn get_refnos_by_types<'a>(&self, project: &'a str, att_types: &'a Vec<&str>, dbnos: Option<Vec<i32>>) -> anyhow::Result<RefU64Vec>;
 
     async fn get_db_world(&self, project: &str, db_no: u32) -> anyhow::Result<Option<(RefU64, String)>>;
 
@@ -56,4 +56,5 @@ pub trait PdmsDataInterface : Send + Sync{
     async fn get_ancestor_nodes(&self, refno: RefU64) -> anyhow::Result<VecDeque<EleTreeNode>>;
 
     async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>>;
+
 }

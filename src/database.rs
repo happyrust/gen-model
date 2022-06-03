@@ -71,6 +71,7 @@ pub async fn init_info_database(url: &str) -> anyhow::Result<()> {
 }
 
 
+/// 同步pdms数据到数据
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()>{
     println!("开始同部pdms/E3D: {} 的数据", &db_option.project_name);
     let mut time = Instant::now();
@@ -241,7 +242,7 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashs: &Vec<NounHas
                     table_vals_sql.push_str(&format!("{},", d.to_string()));
                 }
                 AttrVal::StringType(d) => {
-                    table_vals_sql.push_str(&format!(r#"'{}',"#, d));
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
                 }
                 AttrVal::DoubleType(d) => {
                     table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));

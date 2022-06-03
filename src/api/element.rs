@@ -8,6 +8,7 @@ use smol_str::SmolStr;
 use parse_pdms_db::parse::WholeAttMap;
 use dashmap::DashMap;
 use futures::poll;
+use itertools::Itertools;
 use sea_orm::sea_query::any;
 use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use crate::api::attr::{query_explicit_attr, query_implicit_attr};
@@ -247,33 +248,81 @@ pub async fn query_pdms_elements_type_name(refno: RefU64, pool: &Pool<MySql>) ->
     Ok(result.get::<String, _>("TYPE"))
 }
 
-pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<RefU64>>>> {
-    let mut result = HashMap::new();
-    let mdbs = query_types_refnos(&vec!["MDB"], pool).await?;
+
+//query_mdb_dbnos_by_name
+// pub async fn query_mdb_dbnos_by_name(pool: &Pool<MySql>, mdb_name: &str, info_pool: &Pool<MySql>) -> anyhow::Result<Vec<i32>> {
+//     let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
+//     for mdb in mdbs {
+//         let mdb_attr = query_explicit_attr(mdb, pool).await?;
+//         let tmp_mdb_name = query_name(mdb, &pool).await?;
+//         if  tmp_mdb_name.as_str() == mdb_name {
+//             if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
+//                 let mut map = HashMap::new();
+//                 let dbs = dbs.refu64_vec_value().unwrap();
+//                 for db in dbs {
+//                     if let Some(dbno) = query_dbno_from_db(db, pool).await? {
+//                         if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool).await? {
+//                             map.entry(db_type).or_insert_with(Vec::new).push(world_refno);
+//                         }
+//                     }
+//                 }
+//             }
+//         }
+//     }
+//     Ok(vec![])
+// }
+
+/// 获得不同mdb下所有的world
+pub async fn query_mdb_dbnos(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<i32>>>> {
+    let mut mdb_map = HashMap::new();
+    let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
     for mdb in mdbs {
         let mdb_attr = query_explicit_attr(mdb, pool).await?;
         let mdb_name = query_name(mdb, &pool).await?;
         if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
-            let mut val = HashMap::new();
+            let mut map = HashMap::new();
+            let dbs = dbs.refu64_vec_value().unwrap();
+            for db in dbs {
+                if let Some(dbno) = query_dbno_from_db(db, pool).await? {
+                    if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool).await? {
+                        map.entry(db_type).or_insert_with(Vec::new).push(dbno);
+                    }
+                }
+            }
+            mdb_map.entry(mdb_name).or_insert(map);
+        }
+    }
+    Ok(mdb_map)
+}
+
+/// 获得不同mdb下所有的world
+pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<RefU64>>>> {
+    let mut mdb_map = HashMap::new();
+    let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
+    for mdb in mdbs {
+        let mdb_attr = query_explicit_attr(mdb, pool).await?;
+        let mdb_name = query_name(mdb, &pool).await?;
+        if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
+            let mut map = HashMap::new();
             let dbs = dbs.refu64_vec_value().unwrap();
             for db in dbs {
                 if let Some(dbno) = query_dbno_from_db(db, pool).await? {
                     if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool).await? {
                         if let Some(world_refno) = query_dbno_world(dbno, pool).await? {
-                            val.entry(db_type).or_insert_with(Vec::new).push(world_refno);
+                            map.entry(db_type).or_insert_with(Vec::new).push(world_refno);
                         }
                     }
                 }
             }
-            result.entry(mdb_name).or_insert(val);
+            mdb_map.entry(mdb_name).or_insert(map);
         }
     }
-    Ok(result)
+    Ok(mdb_map)
 }
 
-pub async fn query_types_refnos(type_names: &Vec<&str>, pool: &Pool<MySql>) -> anyhow::Result<RefU64Vec> {
+pub async fn query_types_refnos(type_names: &Vec<&str>, pool: &Pool<MySql>, dbnos: Option<Vec<i32>>) -> anyhow::Result<RefU64Vec> {
     let mut r = vec![];
-    let sql = gen_query_type_refnos_sql(type_names);
+    let sql = gen_query_type_refnos_sql(type_names, dbnos);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     for val in result {
         let v = val.get::<i64, _>(0) as u64;
@@ -455,7 +504,7 @@ pub fn gen_query_refno_type_sql(refno: RefU64) -> String {
     sql
 }
 
-pub fn gen_query_type_refnos_sql(type_names: &Vec<&str>) -> String {
+pub fn gen_query_type_refnos_sql(type_names: &Vec<&str>, dbnos: Option<Vec<i32>>) -> String {
     let mut sql = String::new();
     let mut in_sql = " (".to_string();
     for type_name in type_names {
@@ -463,7 +512,17 @@ pub fn gen_query_type_refnos_sql(type_names: &Vec<&str>) -> String {
     }
     in_sql.remove(in_sql.len() - 1);
     in_sql.push_str(") ");
-    sql.push_str(&format!("SELECT ID FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE IN {in_sql} AND IS_DEL = 0 ORDER BY ID;"));
+
+    let mut dbnos_filter_sql = "".to_string();
+    if dbnos.is_some() {
+        let dbnos = dbnos.unwrap();
+        if dbnos.len() > 0 {
+            let sql_str = dbnos.iter().map(|x| x.to_string()).join(",");
+            dbnos_filter_sql.push_str(&format!(" AND NUMBDB IN ({sql_str}) "));
+        }
+    }
+
+    sql.push_str(&format!("SELECT ID FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE IN {in_sql} {dbnos_filter_sql} AND IS_DEL = 0 ORDER BY ID;"));
     sql
 }
 
