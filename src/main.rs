@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
         sync_pdms(&db_option).await?;
     }
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    AiosDBManager::cache_geos_data(mgr.clone(), "Sample").await?;
+    AiosDBManager::cache_geos_data(mgr.clone(), "Sample", "SAMPLE").await?;
 
     // mgr.mesh_mgr.serialize_to_json_file();
     mgr.mesh_mgr.serialize_to_bin_file("Sample");

@@ -100,7 +100,7 @@ pub async fn query_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
         let order = val.get::<i32, _>("ORDER_NUM");
         let children_count = query_children_count(child_refno, &pool).await?;
         b_map.insert(order, PdmsElement {
-            refno: child_refno.to_refno_string(),
+            refno: child_refno.to_string(),
             owner,
             name,
             noun: type_name,
@@ -156,7 +156,7 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -
             let type_name = val.get::<String, _>("TYPE");
             let children_count = query_children_count(world_refno, pool).await?;
             Ok(Some(PdmsElement {
-                refno: world_refno.to_refno_string(),
+                refno: world_refno.to_string(),
                 owner,
                 name,
                 noun: type_name,

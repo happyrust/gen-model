@@ -555,14 +555,14 @@ impl AiosDBManager {
                 if !current_tubing.finished && bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL {
                     current_tubing.end_pt = bran_ttube_pt;
                     current_tubing.finished = true;
-                    result_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                    result_map.entry(branch_refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
                 }
             }
         }
         Ok(true)
     }
 
-    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
+    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
         // let has_cata_types = ATTR_INFO_MAP.get_has_cat_ref_types().iter().map(|x| x.clone()).collect::<Vec<_>>();
         // dbg!(&has_cata_types);
@@ -577,8 +577,9 @@ impl AiosDBManager {
         let mut dbnos = None;
 
         // dbg!(&mdb_dbnos_map);
-        if mdb_dbnos_map.contains_key("/SAMPLE") {
-            dbnos = mdb_dbnos_map.get("/SAMPLE").unwrap().get("DESI").cloned();
+        let key_str = format!("/{mdb}");
+        if mdb_dbnos_map.contains_key(&key_str) {
+            dbnos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned();
         }
         dbg!(&dbnos);
 
@@ -890,12 +891,12 @@ impl AiosDBManager {
     }
 
     /// 生成模型
-    pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
+    pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<bool> {
         let mut time = Instant::now();
         // Self::cache_prim_geos(mgr.clone(), project).await?;
         // Self::cache_loop_geos(mgr.clone(), project).await?;
         // Self::cache_pohe_geos(mgr.clone(), project).await?;
-        Self::cache_cata_geos(mgr.clone(), project).await?;
+        Self::cache_cata_geos(mgr.clone(), project, mdb).await?;
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
         Ok(true)
     }
