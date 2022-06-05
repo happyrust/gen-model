@@ -1,14 +1,16 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt::format;
 use std::fs;
+use std::fs::File;
+use std::io::Write;
 use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use itertools::Itertools;
-use aios_core::pdms_types::{AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, RefI32Tuple, RefU64};
+use aios_core::pdms_types::{AttrMap, AttrVal, DbAttributeType, NounHash, PdmsDatabaseInfo, RefI32Tuple, RefU64};
 use aios_core::pdms_types::AttrVal::StringType;
-use aios_core::tool::db_tool::db1_hash;
+use aios_core::tool::db_tool::{db1_hash, read_attr_info_config, read_attr_info_config_from_json};
 use dashmap::DashMap;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use aios_database::{BATCH_CHUNKS_CNT, tables};
@@ -47,6 +49,37 @@ pub async fn test_batch_insert(url: &str) {
     }
 }
 
+#[test]
+fn change_att_info_data() {
+    let mut config = read_attr_info_config_from_json("all_attr_info.json");
+    let mut att = &mut config.noun_attr_info_map;
+    for mut kv  in att.iter_mut() {
+        for mut kkv in kv.iter_mut() {
+            if kkv.name == "LEVE" {
+                kkv.att_type = DbAttributeType::INTVEC;
+                kkv.default_val = aios_core::pdms_types::AttrVal::IntArrayType(Vec::new());
+            }
+        }
+    }
+    // if let Some(value) = att.get(&(db1_hash("DB") as i32)){
+    //     if let Some(mut v) = value.value().get_mut(&865153){
+    //         v.att_type = aios_core::pdms_types::DbAttributeType::INTEGER;
+    //         v.default_val = aios_core::pdms_types::AttrVal::IntegerType(1);
+    //     }
+    // };
+    // config.noun_attr_info_map = att;
+    let mut file = File::create("all_attr_info_new.json").unwrap();
+    file.write((&serde_json::to_string(&config).unwrap()).as_ref()).expect("TODO: panic message");
+
+    // 查看是否修改成功
+    // let att = read_attr_info_config("all_attr_info_new.bin").noun_attr_info_map;
+    // if let Some(value) = att.get(&(db1_hash("DB") as i32)) {
+    //     if let Some(mut v) = value.value().get(&865153) {
+    //         println!("v={:?}", v.value());
+    //     }
+    // };
+}
+
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -65,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
 
     // mgr.mesh_mgr.serialize_to_json_file();
     mgr.mesh_mgr.serialize_to_bin_file("Sample");
+    mgr.mesh_mgr.serialize_to_json_file();
 
     Ok(())
 }

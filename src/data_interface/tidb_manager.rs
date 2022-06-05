@@ -300,6 +300,7 @@ impl PdmsDataInterface for AiosDBManager {
                 let att_names = vec!["ORI", "POSS", "POS"];
                 if ATTR_INFO_MAP.exist_least_one_att_by_names(type_name, &att_names) {
                     if let Ok(att) = self.get_implicit_attr(refno, Some(vec!["ORI", "POS", "POSS"])).await {
+                        dbg!(att.to_string_hashmap());
                         pos = att.get_position().unwrap_or_default();
                         quat = att.get_rotation().unwrap_or_default();
                     }
@@ -308,6 +309,7 @@ impl PdmsDataInterface for AiosDBManager {
             };
             translation = translation + rotation * pos;
             rotation = rotation * quat;
+            println!("{} : {:?}", refno.to_refno_str(), (translation, rotation));
             self.cached_world_transforms_map.entry(refno).or_insert(TransformRT {
                 rotation,
                 translation,
@@ -450,13 +452,11 @@ impl AiosDBManager {
     pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64, result_map: &CateBrepShapeMap) -> anyhow::Result<bool> {
         let desi_att = mgr.get_implicit_attr(design_refno, None).await?;
         let type_name = desi_att.get_type();
-        if type_name == "BRAN" {
+        let is_bran = type_name == "BRAN";
+        if !is_bran {
             return Ok(false);
         }
-        // dbg!(design_refno.to_refno_str());
-        let is_bran = type_name == "BRAN";
         let geoms = resolve_desi_comp(design_refno, mgr.as_ref()).await.unwrap_or_default();
-        // dbg!(&geoms);
         if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" {
             create_st_geos(design_refno, &desi_att, &geoms, &result_map, mgr.as_ref()).await?;
         } else {
@@ -599,6 +599,7 @@ impl AiosDBManager {
                 // let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
                 let brep_shapes = CateBrepShapeMap::new();
                 Self::get_cata_branch_geoms(mgr.clone(), refno, &brep_shapes).await.unwrap_or_default();
+                Self::get_cata_single_geoms(mgr.clone(), refno, &brep_shapes).await.unwrap_or_default();
                 // dbg!(&brep_shapes);
                 for (child_refno, shapes) in brep_shapes {
                     let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
@@ -666,7 +667,9 @@ impl AiosDBManager {
 
     pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, None).await?;
+        let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, Some(vec![7200])).await?;
+        let test_refno = RefU64::from_two_nums(23584, 2705);
+        prim_refnos = RefU64Vec(vec![test_refno]);
         let prim_cnt = prim_refnos.len();
         let mut handles = vec![];
         for (i, refno) in prim_refnos.into_iter().enumerate() {
@@ -676,6 +679,7 @@ impl AiosDBManager {
                 let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
                 //在这里直接处理完所有需要处理的transform
                 let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
+                dbg!(&transform);
                 let mut geo_hash = None;
                 let mut item_trans = TransformSRT::default();
                 let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
@@ -688,9 +692,12 @@ impl AiosDBManager {
                 }
 
                 let parent_refno = mgr.get_owner(refno);
-                let mut parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["LEVE"])).await.unwrap_or_default();
+                // let mut parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["LEVE"])).await.unwrap_or_default();
                 if let Some(geo_hash) = geo_hash {
-                    let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
+                    let visible = attr.is_visible_by_level(None).unwrap_or(true);
+                    dbg!(&visible);
+                    // dbg!(item_trans);
+                    //后面要保留两个 transform，一个是最后拉伸后的几何体的，一个是原本的transform
                     let tr: TransformSRT = item_trans * transform;
                     let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
                     bbox.scaled(&tr.scale);
@@ -700,9 +707,9 @@ impl AiosDBManager {
                         global_transform: (tr.rotation, tr.translation, tr.scale),
                         visible,
                         generic_type: "STRU".to_string(),  //todo add generic type
-                        zone_refno: refno,
+                        zone_refno: parent_refno,
                     };
-                    inst_map.entry(parent_refno).or_insert(Vec::new()).push(geom_data);
+                    inst_map.entry(refno).or_insert(Vec::new()).push(geom_data);
                 }
             });
             handles.push(handle);
@@ -893,10 +900,10 @@ impl AiosDBManager {
     /// 生成模型
     pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<bool> {
         let mut time = Instant::now();
-        // Self::cache_prim_geos(mgr.clone(), project).await?;
+        Self::cache_prim_geos(mgr.clone(), project).await?;
         // Self::cache_loop_geos(mgr.clone(), project).await?;
         // Self::cache_pohe_geos(mgr.clone(), project).await?;
-        Self::cache_cata_geos(mgr.clone(), project, mdb).await?;
+        // Self::cache_cata_geos(mgr.clone(), project, mdb).await?;
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
         Ok(true)
     }

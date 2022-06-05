@@ -560,7 +560,7 @@ dependencies = [
  "crossbeam-channel",
  "downcast-rs",
  "js-sys",
- "ndk-glue 0.6.2",
+ "ndk-glue 0.5.2",
  "notify 5.0.0-pre.11",
  "parking_lot 0.11.2",
  "rand 0.8.5",
@@ -739,7 +739,7 @@ dependencies = [
  "bevy_ui",
  "bevy_utils",
  "bevy_window",
- "ndk-glue 0.6.2",
+ "ndk-glue 0.5.2",
 ]
 
 [[package]]
@@ -3388,6 +3388,7 @@ version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c71bee8ea72d685477e28bd004cfe1bf99c754d688cd78cad139eae4089484d4"
 dependencies = [
+ "android_logger",
  "lazy_static",
  "libc",
  "log",
@@ -3403,7 +3404,6 @@ version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d0c4a7b83860226e6b4183edac21851f05d5a51756e97a1144b7f5a6b63e65f"
 dependencies = [
- "android_logger",
  "lazy_static",
  "libc",
  "log",
