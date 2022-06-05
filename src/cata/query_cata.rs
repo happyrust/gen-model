@@ -42,6 +42,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     let scom_info = query_scom_info(scom_ref, interface).await?;
     let mut context: HashMap<SmolStr, SmolStr> = HashMap::new();
+    context.insert("DESI_REFNO".into(), refno.to_refno_str());
     let mut desp = attr_map.get_f64_vec("DESP").unwrap_or_default();
     for i in 0..desp.len() {
         context.insert(
@@ -92,6 +93,9 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
             axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
             axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
         }
+        if ptre_refno.to_refno_str() == "15192/77158" {
+            dbg!(&axis_params);
+        }
     }
     let gmref_name = if is_sprf { "GSTR" } else { "GMRE" };
     let mut gm_params = vec![];
@@ -125,7 +129,11 @@ pub async fn query_axis_params<T: PdmsDataInterface>(
     let mut map = BTreeMap::new();
     let refno = attr_map.get_refno().unwrap_or_default();
     let children = interface.get_children_attrs(refno).await?;
+
     for child in children {
+        if refno.to_refno_str() == "15192/77158" {
+            dbg!(child.to_string_hashmap());
+        }
         let number = child.get_i32("NUMB").unwrap_or(-1);
         if let Some(axis) =  get_axis_param(&child){
             map.entry(number).or_insert(axis);
@@ -188,6 +196,9 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         cur_context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
     }
     //求解AXIS的数据
+    // if scom_info.attr_map.get_refno_as_string().unwrap_or_default() == "15192/47225" {
+    //     dbg!(&scom_info);
+    // }
     let axis_map = resolve_axis_params(scom_info, &cur_context);
     // dbg!(&axis_map);
     let geometries = resolve_gms(&scom_info.gm_params, &cur_context, &axis_map);
@@ -223,7 +234,7 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             y: attr_map.get_as_string("PY")?,
             z: attr_map.get_as_string("PZ")?,
             distance: "".into(),
-            direction: attr_map.get_as_string("PTCD")?,
+            direction: attr_map.get_as_string("PTCDI")?,
             pconnect,
             pbore,
         },
@@ -237,13 +248,13 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             pconnect,
             pbore,
         },
-        "PTPOS" => AxisParam {
+        "PTPOS" => AxisParam {   //todo need fix " TPOS OF CREF"   " TDIR OF CREF"
             attr_map: attr_map.clone(),
             x: "".into(),
             y: "".into(),
             z: "".into(),
             distance: attr_map.get_as_string("PTCP")?,
-            direction: attr_map.get_as_string("PTCD")?,
+            direction: attr_map.get_as_string("PTCDI")?,
             pconnect,
             pbore,
         },

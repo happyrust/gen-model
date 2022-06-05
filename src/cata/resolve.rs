@@ -3,6 +3,7 @@ use std::ops::Neg;
 use aios_core::parsed_data::{CateAxisParam, GmseParamData};
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::pdms_data::{AxisParam, GmParam, ScomInfo};
+use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
 use smol_str::SmolStr;
@@ -39,9 +40,9 @@ pub fn resolve_gms(
                         Some(v)
                     }
                     Err(e) => {
-                        // dbg!(e);
-                        // dbg!(gmse_strs);
-                        // dbg!(context);
+                        dbg!(e);
+                        dbg!(g);
+                        dbg!(context);
                         None
                     }
                 }
@@ -58,6 +59,9 @@ pub fn resolve_paragon_gm_params(
     context: &HashMap<SmolStr, SmolStr>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
 ) -> anyhow::Result<CateGeoParam> {
+    // if gm_param.refno != RefU64::from_two_nums(15192, 77154) {
+    //     return Ok(CateGeoParam::Unknown);
+    // }
     if let Ok(gm_data) = resolve_gmse_params(gm_param, context, axis_params){
         resolve_to_cate_geo_params(&gm_data)
     }else{

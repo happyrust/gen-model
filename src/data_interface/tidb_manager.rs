@@ -300,7 +300,6 @@ impl PdmsDataInterface for AiosDBManager {
                 let att_names = vec!["ORI", "POSS", "POS"];
                 if ATTR_INFO_MAP.exist_least_one_att_by_names(type_name, &att_names) {
                     if let Ok(att) = self.get_implicit_attr(refno, Some(vec!["ORI", "POS", "POSS"])).await {
-                        dbg!(att.to_string_hashmap());
                         pos = att.get_position().unwrap_or_default();
                         quat = att.get_rotation().unwrap_or_default();
                     }
@@ -309,7 +308,7 @@ impl PdmsDataInterface for AiosDBManager {
             };
             translation = translation + rotation * pos;
             rotation = rotation * quat;
-            println!("{} : {:?}", refno.to_refno_str(), (translation, rotation));
+            // println!("{} : {:?}", refno.to_refno_str(), (translation, rotation));
             self.cached_world_transforms_map.entry(refno).or_insert(TransformRT {
                 rotation,
                 translation,
@@ -599,7 +598,7 @@ impl AiosDBManager {
                 // let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
                 let brep_shapes = CateBrepShapeMap::new();
                 Self::get_cata_branch_geoms(mgr.clone(), refno, &brep_shapes).await.unwrap_or_default();
-                Self::get_cata_single_geoms(mgr.clone(), refno, &brep_shapes).await.unwrap_or_default();
+                // Self::get_cata_single_geoms(mgr.clone(), refno, &brep_shapes).await.unwrap_or_default();
                 // dbg!(&brep_shapes);
                 for (child_refno, shapes) in brep_shapes {
                     let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
@@ -668,8 +667,8 @@ impl AiosDBManager {
     pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
         let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, Some(vec![7200])).await?;
-        let test_refno = RefU64::from_two_nums(23584, 2705);
-        prim_refnos = RefU64Vec(vec![test_refno]);
+        // let test_refno = RefU64::from_two_nums(23584, 2705);
+        // prim_refnos = RefU64Vec(vec![test_refno]);
         let prim_cnt = prim_refnos.len();
         let mut handles = vec![];
         for (i, refno) in prim_refnos.into_iter().enumerate() {
@@ -679,7 +678,7 @@ impl AiosDBManager {
                 let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
                 //在这里直接处理完所有需要处理的transform
                 let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
-                dbg!(&transform);
+                // dbg!(&transform);
                 let mut geo_hash = None;
                 let mut item_trans = TransformSRT::default();
                 let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
@@ -695,7 +694,7 @@ impl AiosDBManager {
                 // let mut parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["LEVE"])).await.unwrap_or_default();
                 if let Some(geo_hash) = geo_hash {
                     let visible = attr.is_visible_by_level(None).unwrap_or(true);
-                    dbg!(&visible);
+                    // dbg!(&visible);
                     // dbg!(item_trans);
                     //后面要保留两个 transform，一个是最后拉伸后的几何体的，一个是原本的transform
                     let tr: TransformSRT = item_trans * transform;
@@ -724,7 +723,7 @@ impl AiosDBManager {
 
     pub async fn cache_pohe_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let pohe_refnos = mgr.get_refnos_by_types(project, &vec!["POHE"], None).await?;
+        let pohe_refnos = mgr.get_refnos_by_types(project, &vec!["POHE"], Option::from(vec![7200])).await?;
         let pohe_cnt = pohe_refnos.len();
         let mut handles = vec![];
         for (i, refno) in pohe_refnos.into_iter().enumerate() {
@@ -799,7 +798,7 @@ impl AiosDBManager {
 
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], None).await?;
+        let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], Option::from(vec![7200])).await?;
         let loop_cnt = loop_refnos.len();
         //最好是批量取数据，而不是循环去取
         //处理loop elements
@@ -900,10 +899,10 @@ impl AiosDBManager {
     /// 生成模型
     pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<bool> {
         let mut time = Instant::now();
-        Self::cache_prim_geos(mgr.clone(), project).await?;
+        // Self::cache_prim_geos(mgr.clone(), project).await?;
         // Self::cache_loop_geos(mgr.clone(), project).await?;
         // Self::cache_pohe_geos(mgr.clone(), project).await?;
-        // Self::cache_cata_geos(mgr.clone(), project, mdb).await?;
+        Self::cache_cata_geos(mgr.clone(), project, mdb).await?;
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
         Ok(true)
     }

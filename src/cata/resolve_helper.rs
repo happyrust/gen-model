@@ -475,7 +475,8 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             _ => CateGeoParam::Unknown,
         }
     });
-    geo.map_err(|x| anyhow!(format!("几何体生成出错, 数据: {:?}", &gmse)))
+    Ok(geo.expect(&format!("几何体生成出错, 数据: {:?}", &gmse)))
+    // geo.map_err(|x| anyhow!(format!("几何体生成出错, 数据: {:?}", &gmse)))
 }
 
 pub fn resolve_dir_and_pos(axis: &AxisParam,
