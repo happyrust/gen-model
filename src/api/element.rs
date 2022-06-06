@@ -196,7 +196,7 @@ fn gen_query_refno_infos_sql(refno: RefU64) -> String {
 //     Ok(val)).get_u32_hash())
 // }
 /// 通过 name 获取 refno （pdms）
-pub async fn query_id_from_name(name: &str, pool: Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
+pub async fn query_id_from_name(name: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_id_from_name_sql(name);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     match result {

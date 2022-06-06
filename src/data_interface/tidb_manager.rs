@@ -58,6 +58,8 @@ pub struct AiosDBManager {
 
     pub ref0_map: DashMap<u32, String>,
 
+    pub info_pool: Pool<MySql>,
+
     pub projects: Vec<String>,
 
     pub needed_parse_files: Option<Vec<String>>,
@@ -410,6 +412,7 @@ impl AiosDBManager {
             Self {
                 project_map,
                 ref0_map,
+                info_pool:info_conn,
                 projects,
                 needed_parse_files: None,
                 project_path: dir,
