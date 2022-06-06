@@ -10,6 +10,7 @@ pub const PDMS_SSC_ELEMENTS_TABLE: &'static str = "PDMS_SSC_ELEMENTS";
 pub const PDMS_REFNO_INFOS_TABLE: &'static str =  "REFNO_INFOS";
 pub const PDMS_DBNO_INFOS_TABLE: &'static str =  "DBNO_INFOS";
 pub const PDMS_PROJECT_MDB_TABLE: &'static str =  "PROJECT_MDB";
+pub const PDMS_DATA_STATE: &'static str = "DATA_STATE";
 // project_mdb
 // 专业表单
 pub const PROFESSION_TX_XT:&'static str = "TX_XT";

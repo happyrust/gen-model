@@ -217,13 +217,13 @@ pub fn gen_insert_ssc_node_sql(refno: RefU64, type_name: &str, owner: RefU64, na
     (RefU64(refno.0 + 1), sql)
 }
 
-pub async fn query_ssc_world(pool: Pool<MySql>) -> anyhow::Result<Option<EleTreeNode>> {
+pub async fn query_ssc_world(pool: &Pool<MySql>) -> anyhow::Result<Option<EleTreeNode>> {
     let sql = gen_query_ssc_world_sql();
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
         Ok(val) => {
-            let refno =  RefU64(val.get::<i64, _>("ID") as u64);
-            let children_count = query_ssc_children_count(refno,&pool).await?;
+            let refno = RefU64(val.get::<i64, _>("ID") as u64);
+            let children_count = query_ssc_children_count(refno, &pool).await?;
             let node = EleTreeNode {
                 refno,
                 noun: val.get::<String, _>("TYPE"),
@@ -241,7 +241,7 @@ pub async fn query_ssc_world(pool: Pool<MySql>) -> anyhow::Result<Option<EleTree
     };
 }
 
-pub async fn query_ssc_children(refno:RefU64,pool:Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {
+pub async fn query_ssc_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {
     let sql = gen_query_ssc_children_sql(refno);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     return match result {
