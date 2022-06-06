@@ -95,6 +95,18 @@ pub fn gen_create_ssc_element_tables_sql() -> String {
     sql
 }
 
+/// 创建 数据状态表
+pub fn gen_create_data_state_tables_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_DATA_STATE} ("#));
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));
+    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
+    sql.push_str(&format!(r#"{} VARCHAR(100),"#, "NAME"));
+    sql.push_str(&format!(r#"{} VARCHAR(50)"#, "STATE"));
+    sql.push_str(");");
+    sql
+}
+
 #[inline]
 pub fn gen_create_attr_info_tables_sql() -> String {
     let mut sql = String::new();
@@ -134,10 +146,6 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
     sql.push_str(&format!(r#"{} BIGINT NOT NULL,"#, "OWNER"));
 
     for (offset, (k, v)) in att_bmap {
-        // let att_name = db1_dehash(k.0).to_lowercase();
-        // if k.as_str() == "numbdb" {
-        //     att_name_full = "dbno".to_string();
-        // }
         let att_name = qualified_column_name(k);
 
         match v {

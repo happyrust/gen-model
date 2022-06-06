@@ -163,6 +163,12 @@ pub async fn query_full_attr(refno: RefU64, ref_basic: &CachedRefBasic, pool: &P
     for (k, v) in explicit_attr.map {
         attr.entry(k).or_insert(v);
     }
+    // 赋默认值
+    if let Some(map) = ATTR_INFO_MAP.map.get(&db1_hash(&ele.noun)) {
+        for values in map.value() {
+            attr.entry(*(values.key() as u32)).or_insert(values.default_val.clone());
+        }
+    }
     attr.entry(REFNO_HASH).or_insert(AttrVal::RefU64Type(ele.refno));
     attr.entry(NAME_HASH).or_insert(AttrVal::StringType(ele.name.into()));
     attr.entry(OWNER_HASH).or_insert(AttrVal::RefU64Type(ele.owner));
@@ -303,25 +309,5 @@ async fn test_query_position_refno() -> anyhow::Result<()> {
     let refno: RefU64 = RefI32Tuple((23584, 11)).into();
     let v = query_position_from_id(refno, &pool).await?;
     println!("v={:?}", v);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_test_not_exist_table_sql() -> anyhow::Result<()> {
-    let _ = dotenv::dotenv();
-    let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let sql = gen_test_not_exist_table_sql();
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
-    match result {
-        Ok(v) => {
-            let r = v.try_get::<String, _>("POS");
-            match r {
-                Ok(v) => { println!("r={:?}", v); }
-                Err(_) => { dbg!("not column"); }
-            }
-        }
-        Err(_) => { dbg!("not exist"); }
-    }
     Ok(())
 }

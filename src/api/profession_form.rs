@@ -5,7 +5,7 @@ use sqlx::{MySql, Pool, Executor, Error, Row, Column};
 use sqlx::mysql::MySqlRow;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
-pub async fn create_and_insert_profession_table(map: Vec<HashMap<String, String>>, form_name: &str, pool: Pool<MySql>) -> anyhow::Result<()> {
+pub async fn create_and_insert_profession_table(map: Vec<HashMap<String, String>>, form_name: &str, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let mut conn = pool.acquire().await?;
     let sql = gen_create_profession_table_sql(&map[0], form_name);
     let result = conn.execute(sql.as_str()).await;
@@ -31,7 +31,7 @@ pub fn gen_create_profession_table_sql(map: &HashMap<String, String>, form_name:
     sql
 }
 
-pub async fn gen_insert_profession_to_db_sql(map: Vec<HashMap<String, String>>, form_name: &str, pool: Pool<MySql>) -> anyhow::Result<()> {
+pub async fn gen_insert_profession_to_db_sql(map: Vec<HashMap<String, String>>, form_name: &str, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let mut project_conn = pool.acquire().await?;
     let mut sql = String::new();
     sql.push_str(&format!("insert ignore into {} ( ", form_name));
@@ -70,7 +70,7 @@ pub async fn gen_insert_profession_to_db_sql(map: Vec<HashMap<String, String>>, 
     Ok(())
 }
 
-pub async fn select_profession_form_data_page(table: &str, page: u32, page_count: u32, pool: Pool<MySql>) -> anyhow::Result<Vec<HashMap<String, String>>> {
+pub async fn select_profession_form_data_page(table: &str, page: u32, page_count: u32, pool: &Pool<MySql>) -> anyhow::Result<Vec<HashMap<String, String>>> {
     let mut r = vec![];
     let count = page * page_count;
     let sql = format!("SELECT * FROM {} ORDER BY ID LIMIT {} , {}", table, count, page_count);
@@ -107,7 +107,7 @@ async fn test_gen_insert_to_db_sql() -> anyhow::Result<()> {
     map.insert("a".to_string(), "f".to_string());
     map.insert("c".to_string(), "h".to_string());
     val.push(map);
-    let sql = create_and_insert_profession_table(val, "test", pool).await;
+    let sql = create_and_insert_profession_table(val, "test", &pool).await;
     Ok(())
 }
 
@@ -116,7 +116,7 @@ async fn test_select_profession_form_data_page() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "Sample").await?;
-    let v = select_profession_form_data_page("EXPLICIT_ATT", 0, 10, pool).await.unwrap();
+    let v = select_profession_form_data_page("EXPLICIT_ATT", 0, 10, &pool).await.unwrap();
     for i in v {
         println!("i={:?}", i);
     }
