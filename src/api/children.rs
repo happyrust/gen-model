@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
 use std::env;
+use std::fmt::format;
 use aios_core::pdms_types::{RefI32Tuple, RefU64, RefU64Vec};
-use sqlx::{MySql, Pool};
+use sqlx::{MySql, Pool, Row};
+use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::api::element::query_children;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
@@ -20,6 +22,24 @@ pub async fn travel_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::
         }
     }
     Ok(result)
+}
+
+pub async fn query_children_id_name_with_type(refno:RefU64,pool:Pool<MySql>) -> anyhow::Result<Vec<(RefU64,String)>> {
+    let mut result = vec![];
+    let sql = gen_query_children_id_name_with_type_sql(refno);
+    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    for val in vals {
+        let child_refno = RefU64(val.get::<i64, _>("ID") as u64);
+        let name = val.get::<String, _>("NAME");
+        result.push((child_refno,name));
+    }
+    Ok(result)
+}
+
+fn gen_query_children_id_name_with_type_sql(refno:RefU64) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE OWNER = {}",refno.0));
+    sql
 }
 
 #[tokio::test]
