@@ -939,17 +939,3 @@ async fn test_get_children_attr() -> anyhow::Result<()> {
     println!("v={:?}", v);
     Ok(())
 }
-
-#[tokio::test]
-async fn test_get_ancestors_attrs() -> anyhow::Result<()> {
-    let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let db = AiosPdmsProjectTiDB {
-        project: "sample".to_string(),
-        pool,
-    };
-    let refno: RefU64 = RefI32Tuple((23584, 5)).into();
-    let v = db.get_ancestors_attrs(refno).await;
-    println!("v={:?}", v);
-    Ok(())
-}
