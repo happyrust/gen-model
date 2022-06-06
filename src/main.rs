@@ -10,7 +10,7 @@ use std::time::Instant;
 use itertools::Itertools;
 use aios_core::pdms_types::{AttrMap, AttrVal, DbAttributeType, NounHash, PdmsDatabaseInfo, RefI32Tuple, RefU64};
 use aios_core::pdms_types::AttrVal::StringType;
-use aios_core::tool::db_tool::{db1_hash, read_attr_info_config, read_attr_info_config_from_json};
+use aios_core::tool::db_tool::{db1_hash, read_attr_info_config, /*read_attr_info_config_from_json*/};
 use dashmap::DashMap;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use aios_database::{BATCH_CHUNKS_CNT, tables};

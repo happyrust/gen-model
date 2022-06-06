@@ -164,9 +164,9 @@ pub async fn query_full_attr(refno: RefU64, ref_basic: &CachedRefBasic, pool: &P
         attr.entry(k).or_insert(v);
     }
     // 赋默认值
-    if let Some(map) = ATTR_INFO_MAP.map.get(&db1_hash(&ele.noun)) {
+    if let Some(map) = ATTR_INFO_MAP.map.get(&(db1_hash(&ele.noun) as i32)) {
         for values in map.value() {
-            attr.entry(*(values.key() as u32)).or_insert(values.default_val.clone());
+            attr.entry(NounHash(*values.key() as u32)).or_insert(values.default_val.clone());
         }
     }
     attr.entry(REFNO_HASH).or_insert(AttrVal::RefU64Type(ele.refno));
