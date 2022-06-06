@@ -147,7 +147,6 @@ pub fn resolve_gmse_params(
                 "P" => {
                     if let Ok(index) = name.trim()[1..].parse::<i32>() {
                         if index == 0 {
-                            //todo
                             paxises.push(CateAxisParam::zero());
                         } else {
                             if axis_param_map.contains_key(&index) {
