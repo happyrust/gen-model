@@ -1,66 +1,62 @@
 use aios_core::pdms_types::{DataScope, DataScopeVec, DataState, DataStateVec, RefU64};
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
-// use crate::api::element::travel_children_eles;
+use crate::api::children::travel_children_eles;
 use crate::consts::PDMS_DATA_STATE;
 use crate::consts::PDMS_ELEMENTS_TABLE;
 
 /// 查找该节点下的所有子节点的data_state数据
 pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<DataStateVec> {
-    // let refnos = travel_children_eles(refno, pool).await?.into_iter()
-    //     .map(|v| RefU64::from_refno_string(v.refno))
-    //     .collect::<Vec<RefU64>>();
+    let refnos = travel_children_eles(refno, pool).await?;
     let mut r = vec![];
-    // let sql = gen_query_refnos_state_sql(refnos);
-    // let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
-    // match result {
-    //     Ok(vals) => {
-    //         for val in vals {
-    //             let refno = RefU64(val.get::<i64, _>("id") as u64);
-    //             let att_type = val.get::<String, _>("type");
-    //             let name = val.get::<String, _>("name");
-    //             let state = val.get::<String, _>("state");
-    //             r.push(DataState {
-    //                 refno,
-    //                 att_type,
-    //                 name,
-    //                 state,
-    //             })
-    //         }
-    //     }
-    //     Err(e) => {
-    //         dbg!(&e);
-    //         dbg!(&sql);
-    //     }
-    // }
+    let sql = gen_query_refnos_state_sql(refnos);
+    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    match result {
+        Ok(vals) => {
+            for val in vals {
+                let refno = RefU64(val.get::<i64, _>("id") as u64);
+                let att_type = val.get::<String, _>("type");
+                let name = val.get::<String, _>("name");
+                let state = val.get::<String, _>("state");
+                r.push(DataState {
+                    refno,
+                    att_type,
+                    name,
+                    state,
+                })
+            }
+        }
+        Err(e) => {
+            dbg!(&e);
+            dbg!(&sql);
+        }
+    }
     Ok(DataStateVec { data_states: r })
 }
 
 pub async fn query_refnos_scope(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<DataScopeVec> {
-    // let refnos = travel_children_eles(refno, pool).await?.into_iter()
-    //     .map(|v| RefU64::from_refno_string(v.refno))
-    //     .collect::<Vec<RefU64>>();
+    let refnos = travel_children_eles(refno, pool).await?;
     let mut r = vec![];
-    // let sql = gen_query_refnos_scope_sql(refnos);
-    // let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
-    // match result {
-    //     Ok(vals) => {
-    //         for val in vals {
-    //             let refno = RefU64(val.get::<i64, _>("ID") as u64);
-    //             let att_type = val.get::<String, _>("TYPE");
-    //             let name = val.get::<String, _>("NAME");
-    //             r.push(DataScope {
-    //                 refno,
-    //                 att_type,
-    //                 name,
-    //             })
-    //         }
-    //     }
-    //     Err(e) => {
-    //         dbg!(e);
-    //         dbg!(sql);
-    //     }
-    // }
+    let sql = gen_query_refnos_scope_sql(refnos);
+    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    match result {
+        Ok(vals) => {
+            for val in vals {
+                let refno = RefU64(val.get::<i64, _>("ID") as u64);
+                let att_type = val.get::<String, _>("TYPE");
+                let name = val.get::<String, _>("NAME");
+                r.push(DataScope {
+                    refno,
+                    att_type,
+                    name,
+                })
+            }
+        }
+        Err(e) => {
+            dbg!(e);
+            dbg!(sql);
+        }
+    }
     Ok(DataScopeVec {
         data_scopes: r,
     })
