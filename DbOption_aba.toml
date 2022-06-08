@@ -1,10 +1,10 @@
-total_sync = false
+total_sync = true
 incr_sync = false
-project_path = "/Volumes/DPC/12.1SP4Projects"
-included_projects = ["Sample", "Master"]
-mdb_name = "Sample"
-project_name = "Sample"
-main_db_code = 7200
+project_path = "/Volumes/DPC/aba"
+included_projects = ["ABA", "GDP"]
+mdb_name = "ABA"
+project_name = "ABA"
+main_db_code = 1
 ip = "127.0.0.1"
 user = "root"
 password = ""

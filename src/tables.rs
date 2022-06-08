@@ -51,8 +51,8 @@ pub fn gen_create_dbno_infos_tables_sql() -> String {
     sql.push_str(&format!(r#"{} VARCHAR(10) "#, "DB_TYPE"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX INFO_DB_TYPE_IDX ON {PDMS_DBNO_INFOS_TABLE} (DB_TYPE);"));
-    sql.push_str(&format!("CREATE INDEX INFO_DBNO_IDX ON {PDMS_DBNO_INFOS_TABLE} (NUMBDB);"));
+    // sql.push_str(&format!("CREATE INDEX INFO_DB_TYPE_IDX ON {PDMS_DBNO_INFOS_TABLE} (DB_TYPE);"));
+    // sql.push_str(&format!("CREATE INDEX INFO_DBNO_IDX ON {PDMS_DBNO_INFOS_TABLE} (NUMBDB);"));
     sql
 }
 

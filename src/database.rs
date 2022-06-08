@@ -16,9 +16,10 @@ use parse_pdms_db::parse_file;
 use std::mem::take;
 use aios_core::consts::*;
 use dashmap::DashMap;
+use itertools::Itertools;
 use crate::api::project_mdb::insert_project_mdb;
 use crate::consts::*;
-use crate::{options, tables};
+use crate::{ATTR_INFO_MAP, options, tables};
 use crate::api::element::*;
 use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
@@ -183,32 +184,38 @@ pub fn gen_explicit_att_insert_sql(refno: RefU64, type_name: &str, owner: RefU64
     sql
 }
 
-pub fn gen_implicit_attr_query_sql(att: &WholeAttMap) -> (String, Vec<NounHash>) {
-    let i_att = &att.implicit_attmap;
-    let type_name = i_att.get_type();
-    let table_name = qualified_table_name(type_name);
+/// 生成隐藏属性的插入语句的前面列名部分
+pub fn gen_implicit_attr_insert_sql(hash: u32) -> (String, Vec<NounHash>) {
+    // let i_att = &att.implicit_attmap;
+    let type_name = db1_dehash(hash);
+    let table_name = qualified_table_name(type_name.as_str());
     let mut table_columns_sql = String::new();
-    table_columns_sql.push_str(&format!("INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER,", table_name));
+    table_columns_sql.push_str(&format!("INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
 
-    let mut column_hashs = vec![];
-    for (k, v) in &i_att.map {
-        let mut att_name_full = db1_dehash(k.0);
-        // if att_name_full.as_str() == "NUMBDB" {
-        //     att_name_full = "dbno".to_string();
-        // }
-        let att_name = qualified_column_name(att_name_full.as_str());
-        if att_name.starts_with(":") || att_name.as_str() == "REFNO" || att_name.as_str() == "TYPE" || att_name.as_str() == "OWNER" {
-            continue;
-        }
-        match v {
-            AttrVal::InvalidType => {}
-            _ => {
-                table_columns_sql.push_str(&format!("{},", att_name.as_str()));
-                column_hashs.push(k.clone());
-            }
-        }
+    let implicit_names = ATTR_INFO_MAP.get_type_implicit_att_names(type_name.as_str());
+    let column_hashs = implicit_names.iter().map(|x| NounHash(db1_hash(x.as_str()))).collect_vec();
+    let v_sql = implicit_names.iter().map(|x| qualified_column_name(x.as_str()))
+        .join(",");
+    // dbg!(&v_sql);
+    if v_sql.len() > 0 {
+        table_columns_sql.push_str(" , ");
     }
-    table_columns_sql.remove(table_columns_sql.len() - 1);
+    table_columns_sql.push_str(v_sql.as_str());
+    // for (k, v) in &i_att.map {
+    //     let mut att_name_full = db1_dehash(k.0);
+    //     let att_name = qualified_column_name(att_name_full.as_str());
+    //     if att_name.starts_with(":") || att_name.as_str() == "REFNO" || att_name.as_str() == "TYPE" || att_name.as_str() == "OWNER" {
+    //         continue;
+    //     }
+    //     match v {
+    //         AttrVal::InvalidType => {}
+    //         _ => {
+    //             table_columns_sql.push_str(&format!("{},", att_name.as_str()));
+    //             column_hashs.push(k.clone());
+    //         }
+    //     }
+    // }
+    // table_columns_sql.remove(table_columns_sql.len() - 1);
     table_columns_sql.push_str(") VALUES ");
 
     (table_columns_sql, column_hashs)
@@ -227,14 +234,15 @@ pub fn gen_explicit_attr_value_sql(att: &WholeAttMap) -> String {
     table_vals_sql
 }
 
-pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashs: &Vec<NounHash>) -> String {
+/// 生成隐藏属性的插入语句的后面数据部分
+pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHash>) -> String {
     let mut table_vals_sql = String::new();
     let i_att = &att.implicit_attmap;
     let refno = i_att.get_refno().unwrap();
     let type_name = i_att.get_type();
     let owner = i_att.get_owner().unwrap();
     table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {},"#, refno.0, refno.to_refno_str(), type_name, owner.0));
-    for noun_hash in column_hashs {
+    for noun_hash in column_hashes {
         if let Some(v) = i_att.get(noun_hash) {
             match v {
                 AttrVal::InvalidType => {}
@@ -248,23 +256,23 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashs: &Vec<NounHas
                     table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
                 }
                 AttrVal::DoubleArrayType(d) => {
-                    table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap().as_slice())));
+                    table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap_or_default().as_slice())));
                 }
                 AttrVal::StringArrayType(d) => {
-                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
                 }
                 AttrVal::BoolArrayType(d) => {
-                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
                 }
                 AttrVal::IntArrayType(d) => {
-                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
                 }
                 AttrVal::BoolType(d) => {
                     let b = if *d { 1 } else { 0 };
                     table_vals_sql.push_str(&format!("{},", b));
                 }
                 AttrVal::Vec3Type(d) => {
-                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
                 }
                 AttrVal::ElementType(d) => {
                     table_vals_sql.push_str(&format!(r#"'{}',"#, d));
@@ -276,7 +284,7 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashs: &Vec<NounHas
                     table_vals_sql.push_str(&format!("{},", d.0));
                 }
                 AttrVal::RefU64Array(d) => {
-                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap()));
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
                 }
                 AttrVal::StringHashType(_) => {}
             }
@@ -343,7 +351,8 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                         parse_file(&path, &None, &file_name, &project_clone.clone(), "")
                     }).await {
                         for kv in &type_ele_map {
-                            let mut implicit_query_data = None;
+                            let type_hash = *kv.key();
+                            let mut implicit_insert_data_sql = None;
                             let mut ref0_info_sql = String::new();
                             let mut implicit_values_sql = String::new();
                             let mut explicit_values_sql = String::new();
@@ -382,12 +391,12 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
 
                             for (i, refno) in kv.value().iter().enumerate() {
                                 let att = total_attr_map.get(refno).unwrap();
-                                if implicit_query_data.is_none() {
-                                    implicit_query_data = Some(gen_implicit_attr_query_sql(att.value()));
+                                if implicit_insert_data_sql.is_none() {
+                                    implicit_insert_data_sql = Some(gen_implicit_attr_insert_sql(type_hash));
                                 }
-                                let column_hashs = &implicit_query_data.as_ref().unwrap().1;
+                                let columns = &implicit_insert_data_sql.as_ref().unwrap().1;
                                 // ref0_info_sql.push_str(&gen_refno_infos_insert_sql(*refno, &project_clones.clone()));
-                                implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), column_hashs));
+                                implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), columns));
                                 explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
                                 let name = get_name(&total_attr_map, &children_map, *refno).replace(r#"'"#, r#"\'"#)
                                     .replace(r#"""#, r#"\""#);
@@ -403,10 +412,10 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                                     let implicit_values_sql = take(&mut implicit_values_sql);
                                     let explicit_values_sql = take(&mut explicit_values_sql);
                                     let pdms_elements_sql = take(&mut pdms_elements_sql);
-                                    let implicit_query_data = implicit_query_data.clone();
+                                    // let implicit_query_data = implicit_insert_data_sql.clone();
                                     //执行隐式数据保存
                                     let mut sql = String::new();
-                                    sql.push_str(implicit_query_data.as_ref().unwrap().0.as_str());
+                                    sql.push_str(implicit_insert_data_sql.as_ref().unwrap().0.as_str());
                                     sql.push_str(implicit_values_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
@@ -540,6 +549,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                         parse_file(&path, &None, &file_name, &project_clone.clone(), "")
                     }).await {
                         for kv in &type_ele_map {
+                            let type_hash = *kv.key();
                             let mut implicit_query_data = None;
                             let mut ref0_info_sql = String::new();
                             let mut implicit_values_sql = String::new();
@@ -551,7 +561,6 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                             //保存dbno的信息表
                             let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
                             sql.push_str(dbno_filename_sql.as_str());
-                            sql.remove(sql.len() - 1);
                             let result = info_conn.execute(sql.as_str()).await;
                             match result {
                                 Ok(_) => {}
@@ -579,7 +588,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                             for (i, refno) in kv.value().iter().enumerate() {
                                 let att = total_attr_map.get(refno).unwrap();
                                 if implicit_query_data.is_none() {
-                                    implicit_query_data = Some(gen_implicit_attr_query_sql(att.value()));
+                                    implicit_query_data = Some(gen_implicit_attr_insert_sql(type_hash));
                                 }
                                 let column_hashs = &implicit_query_data.as_ref().unwrap().1;
                                 // ref0_info_sql.push_str(&gen_refno_infos_insert_sql(*refno, &project_clones.clone()));
