@@ -1,9 +1,11 @@
-use aios_core::pdms_types::{DataScope, DataScopeVec, DataState, DataStateVec, RefU64};
-use sqlx::{Error, MySql, Pool, Row};
+use std::env;
+use aios_core::pdms_types::{DataScope, DataScopeVec, DataState, DataStateVec, RefI32Tuple, RefU64};
+use sqlx::{Error, Executor, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
 use crate::api::children::travel_children_eles;
 use crate::consts::PDMS_DATA_STATE;
 use crate::consts::PDMS_ELEMENTS_TABLE;
+use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 查找该节点下的所有子节点的data_state数据
 pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<DataStateVec> {
@@ -14,10 +16,10 @@ pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Re
     match result {
         Ok(vals) => {
             for val in vals {
-                let refno = RefU64(val.get::<i64, _>("id") as u64);
-                let att_type = val.get::<String, _>("type");
-                let name = val.get::<String, _>("name");
-                let state = val.get::<String, _>("state");
+                let refno = RefU64(val.get::<i64, _>("ID") as u64);
+                let att_type = val.get::<String, _>("TYPE");
+                let name = val.get::<String, _>("NAME");
+                let state = val.try_get::<String, _>("STATE").unwrap_or("unset".to_string());
                 r.push(DataState {
                     refno,
                     att_type,
@@ -37,7 +39,7 @@ pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Re
 pub async fn query_refnos_scope(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<DataScopeVec> {
     let refnos = travel_children_eles(refno, pool).await?;
     let mut r = vec![];
-    let sql = gen_query_refnos_scope_sql(refnos);
+    let sql = gen_query_refnos_state_sql(refnos);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match result {
         Ok(vals) => {
@@ -62,6 +64,46 @@ pub async fn query_refnos_scope(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Re
     })
 }
 
+/// 将设定的state值插入到数据库中
+pub async fn insert_refnos_state(vals: DataScopeVec, state: String, pool: &Pool<MySql>) -> anyhow::Result<()> {
+    let sql = gen_insert_refnos_state_sql(vals, state);
+    let result = pool.execute(sql.as_str()).await;
+    match result {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(&e);
+            dbg!(sql.as_str());
+        }
+    }
+    Ok(())
+}
+
+fn gen_insert_refnos_state_sql(vals: DataScopeVec, state: String) -> String {
+    let mut sql = String::new();
+    let mut insert_sql = String::new();
+    sql.push_str(&format!("INSERT INTO {PDMS_DATA_STATE} (ID,STATE) VALUES "));
+    for val in vals.data_scopes {
+        if &val.att_type != "WORL" && &val.att_type != "SITE" {
+            insert_sql.push_str(&format!("( {},'{}'),", val.refno.0, state));
+        }
+    }
+    insert_sql.remove(insert_sql.len() - 1);
+    sql.push_str(insert_sql.as_str());
+    sql.push_str(";");
+    sql
+}
+
+// fn gen_query_refnos_state_sql(refnos: Vec<RefU64>) -> String {
+//     let mut sql = String::new();
+//     let mut refnos_sql = String::new();
+//     for refno in refnos {
+//         refnos_sql.push_str(&format!("{} ,", refno.0));
+//     }
+//     refnos_sql.remove(refnos_sql.len() - 1);
+//     sql.push_str(&format!("SELECT * FROM {PDMS_DATA_STATE} WHERE ID IN ({})", refnos_sql));
+//     sql
+// }
+
 fn gen_query_refnos_state_sql(refnos: Vec<RefU64>) -> String {
     let mut sql = String::new();
     let mut refnos_sql = String::new();
@@ -69,19 +111,20 @@ fn gen_query_refnos_state_sql(refnos: Vec<RefU64>) -> String {
         refnos_sql.push_str(&format!("{} ,", refno.0));
     }
     refnos_sql.remove(refnos_sql.len() - 1);
-    sql.push_str(&format!("SELECT * FROM {PDMS_DATA_STATE} WHERE ID IN ({})", refnos_sql));
+    // sql.push_str(&format!("SELECT ID,TYPE,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE ID IN ({}) AND IS_DEL = 0", refnos_sql));
+    sql.push_str(&format!("SELECT A.ID ,A.TYPE,A.NAME,B.STATE FROM {PDMS_ELEMENTS_TABLE} A LEFT JOIN {PDMS_DATA_STATE} B ON A.ID = B.ID WHERE A.ID IN ({});", refnos_sql));
     sql
 }
 
-fn gen_query_refnos_scope_sql(refnos: Vec<RefU64>) -> String {
-    let mut sql = String::new();
-    let mut refnos_sql = String::new();
-    for refno in refnos {
-        refnos_sql.push_str(&format!("{} ,", refno.0));
-    }
-    refnos_sql.remove(refnos_sql.len() - 1);
-    sql.push_str(&format!("SELECT ID,TYPE,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE ID IN ({}) AND IS_DEL = 0", refnos_sql));
-    sql
+#[tokio::test]
+async fn test_query_refnos_state() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
+    let refno: RefU64 = RefI32Tuple((23584, 1)).into();
+    let v = query_refnos_state(refno, &pool).await?;
+    dbg!(&v);
+    Ok(())
 }
 
 #[test]

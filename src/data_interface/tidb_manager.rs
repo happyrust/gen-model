@@ -396,7 +396,7 @@ impl AiosDBManager {
                     sync_refno_basic_map(&pool, cached_refno_basic_map.clone()).await?;
                     project_map.entry(project.clone()).or_insert(pool);
                 }
-                Err(_) => { dbg!("project: {} init failed",project); }
+                Err(_) => { println!("project: {} init failed",project); }
             }
         }
         println!("缓存RefBasic数据花费：{}ms", time.elapsed().as_millis());
