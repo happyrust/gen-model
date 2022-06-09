@@ -367,7 +367,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                             //保存dbno的信息表
                             let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
                             sql.push_str(dbno_filename_sql.as_str());
-                            sql.remove(sql.len() - 1);
+                            // sql.remove(sql.len() - 1);
                             let result = info_conn.execute(sql.as_str()).await;
                             match result {
                                 Ok(_) => {}
@@ -573,20 +573,20 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                 }
                             }
 
-                        //保存refno的信息表
-                        let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (REF0, PROJECT) VALUES ");
-                        for kv in &refno_info_map {
-                            sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
-                        }
-                        sql.remove(sql.len() - 1);
-                        let result = info_conn.execute(sql.as_str()).await;
-                        match result {
-                            Ok(_) => {}
-                            Err(e) => {
-                                dbg!(&e);
-                                dbg!(sql.as_str());
+                            //保存refno的信息表
+                            let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (REF0, PROJECT) VALUES ");
+                            for kv in &refno_info_map {
+                                sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
                             }
-                        }
+                            sql.remove(sql.len() - 1);
+                            let result = info_conn.execute(sql.as_str()).await;
+                            match result {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    dbg!(&e);
+                                    dbg!(sql.as_str());
+                                }
+                            }
 
                             for (i, refno) in kv.value().iter().enumerate() {
                                 let att = total_attr_map.get(refno).unwrap();
@@ -604,103 +604,104 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                 //获取当前项目的连接
                                 let mut project_conn = pool_clone.acquire().await.unwrap();
 
-                            let mut insert_join_handles = vec![];
-                            if (i != 0 && i % batch_chunks_cnt == 0) || i == (kv.value().len() - 1) {
-                                // dbg!(i % batch_chunks_cnt );
-                                let info_sql = take(&mut ref0_info_sql);
-                                let implicit_values_sql = take(&mut implicit_values_sql);
-                                let explicit_values_sql = take(&mut explicit_values_sql);
-                                let pdms_elements_sql = take(&mut pdms_elements_sql);
-                                let dbno_filename_sql = take(&mut dbno_filename_sql);
-                                let implicit_query_data = implicit_query_data.clone();
-                                let pool_clone = pool_clone.clone();
-                                let info_pool_clone = info_pool_clone.clone();
-                                let insert_handle = tokio::spawn(async move {
+                                let mut insert_join_handles = vec![];
+                                if (i != 0 && i % batch_chunks_cnt == 0) || i == (kv.value().len() - 1) {
+                                    // dbg!(i % batch_chunks_cnt );
+                                    let info_sql = take(&mut ref0_info_sql);
+                                    let implicit_values_sql = take(&mut implicit_values_sql);
+                                    let explicit_values_sql = take(&mut explicit_values_sql);
+                                    let pdms_elements_sql = take(&mut pdms_elements_sql);
+                                    let dbno_filename_sql = take(&mut dbno_filename_sql);
+                                    let implicit_query_data = implicit_query_data.clone();
+                                    let pool_clone = pool_clone.clone();
+                                    let info_pool_clone = info_pool_clone.clone();
+                                    let insert_handle = tokio::spawn(async move {
 
-                                    //执行隐式数据保存
-                                    let mut sql = String::new();
-                                    sql.push_str(implicit_query_data.as_ref().unwrap().0.as_str());
-                                    sql.push_str(implicit_values_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            dbg!(&e);
-                                            dbg!(sql.as_str());
+                                        //执行隐式数据保存
+                                        let mut sql = String::new();
+                                        sql.push_str(implicit_query_data.as_ref().unwrap().0.as_str());
+                                        sql.push_str(implicit_values_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
                                         }
-                                    }
 
-                                    //执行显示数据保存
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
-                                    sql.push_str(explicit_values_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            dbg!(&e);
-                                            dbg!(sql.as_str());
+                                        //执行显示数据保存
+                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                        sql.push_str(explicit_values_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
                                         }
-                                    }
 
-                                    // {PDMS_ELEMENTS_TABLE} 保存
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL  ) VALUES ");
-                                    sql.push_str(pdms_elements_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            dbg!(&e);
-                                            dbg!(sql.as_str());
+                                        // {PDMS_ELEMENTS_TABLE} 保存
+                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL  ) VALUES ");
+                                        sql.push_str(pdms_elements_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
                                         }
-                                    }
-                                });
+                                    });
 
-                                insert_join_handles.push(insert_handle);
-                                if insert_join_handles.len() == batch_handles_cnt || i == (kv.value().len() - 1) {
-                                    let insert_join_handles = take(&mut insert_join_handles);
-                                    futures::future::join_all(insert_join_handles).await;
+                                    insert_join_handles.push(insert_handle);
+                                    if insert_join_handles.len() == batch_handles_cnt || i == (kv.value().len() - 1) {
+                                        let insert_join_handles = take(&mut insert_join_handles);
+                                        futures::future::join_all(insert_join_handles).await;
+                                    }
+                                }
+                            }
+                        }
+                        // 将带有room_code属性的参考号放入pdms_ssc_elements中
+                        let mut project_conn = pool_clone.acquire().await.unwrap();
+                        for (room_name, refnos) in room_code_map {
+                            let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
+                            let mut values_sql = String::new();
+                            if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
+                                let mut order = 0;
+                                for refno in refnos {
+                                    if let Some(total_attr) = &total_attr_map.get(&refno) {
+                                        let type_name = total_attr.implicit_attmap.get_type();
+                                        let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
+                                            .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
+                                        values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
+                                    }
+                                    order += 1;
+                                }
+                                values_sql.remove(values_sql.len() - 1);
+                                values_sql.push_str(";");
+                                let sql = format!("{}{}", insert_sql, values_sql);
+                                let result = project_conn.execute(sql.as_str()).await;
+                                match result {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(&e);
+                                        dbg!(sql.as_str());
+                                    }
                                 }
                             }
                         }
                     }
-                    // 将带有room_code属性的参考号放入pdms_ssc_elements中
-                    let mut project_conn = pool_clone.acquire().await.unwrap();
-                    for (room_name, refnos) in room_code_map {
-                        let insert_sql = "insert ignore into pdms_ssc_elements (id, refno, type, owner, name, order_num) VALUES ";
-                        let mut values_sql = String::new();
-                        if let Ok(Some(owner_refno)) = query_id_from_name_ssc(&room_name, pool_clone.clone()).await {
-                            let mut order = 0;
-                            for refno in refnos {
-                                if let Some(total_attr) = &total_attr_map.get(&refno) {
-                                    let type_name = total_attr.implicit_attmap.get_type();
-                                    let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
-                                        .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
-                                    values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
-                                }
-                                order += 1;
-                            }
-                            values_sql.remove(values_sql.len() - 1);
-                            values_sql.push_str(";");
-                            let sql = format!("{}{}", insert_sql, values_sql);
-                            let result = project_conn.execute(sql.as_str()).await;
-                            match result {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(&e);
-                                    dbg!(sql.as_str());
-                                }
-                            }
-                        }
-                    }
-                }
-                // });
-                // handles.push(handle);
+                    // });
+                    // handles.push(handle);
+                });
             }
+            // break;
         }
-        // break;
     }
 
     // futures::future::join_all(handles).await;
