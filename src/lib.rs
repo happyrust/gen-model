@@ -10,6 +10,7 @@ use serde_json::from_str;
 use aios_core::pdms_types::PdmsDatabaseInfo;
 use aios_core::tool::db_tool::db1_dehash;
 use dashmap::mapref::one::Ref;
+use itertools::Itertools;
 use nom::combinator::map;
 
 pub mod tables;
@@ -30,10 +31,11 @@ extern crate nom;
 
 #[derive(Default, Debug, Clone)]
 pub struct AttInfoMap{
-    pub map: DashMap<i32, DashMap<i32, AttrInfo>>,
-    pub type_att_names_map: DashMap<String, BTreeSet<String>>,
-    pub att_name_type_map: DashMap<String, DbAttributeType>,
-    pub has_cat_ref_types: DashSet<String>,
+    map: DashMap<i32, DashMap<i32, AttrInfo>>,
+    type_att_names_map: DashMap<String, BTreeSet<String>>,
+    type_explicit_att_names_map: DashMap<String, BTreeSet<String>>,
+    att_name_type_map: DashMap<String, DbAttributeType>,
+    has_cat_ref_types_set: DashSet<String>,
 }
 
 impl Deref for AttInfoMap {
@@ -52,9 +54,13 @@ impl AttInfoMap {
             for v in k.value() {
                 self.type_att_names_map.entry(type_name.clone())
                     .or_insert(BTreeSet::new()).insert(v.name.to_string());
+                if v.offset > 0 {
+                    self.type_explicit_att_names_map.entry(type_name.clone())
+                        .or_insert(BTreeSet::new()).insert(v.name.to_string());
+                }
                 self.att_name_type_map.insert(v.name.to_string(), v.att_type);
                 if v.name.as_str() == "CATR" || v.name.as_str() == "SPRE" {
-                    self.has_cat_ref_types.insert(type_name.clone());
+                    self.has_cat_ref_types_set.insert(type_name.clone());
                 }
             }
         }
@@ -62,8 +68,23 @@ impl AttInfoMap {
 
     /// 有元件库的类型
     #[inline]
-    pub fn get_has_cat_ref_types(&self) -> &DashSet<String> {
-        &self.has_cat_ref_types
+    pub fn get_has_cat_ref_types_set(&self) -> &DashSet<String> {
+        &self.has_cat_ref_types_set
+    }
+
+    /// 获取有catref的类型
+    #[inline]
+    pub fn get_has_cat_ref_type_names(&self) -> Vec<String> {
+        self.get_has_cat_ref_types_set().iter().map(|x| x.clone()).collect::<Vec<_>>()
+    }
+
+    /// 获取有catref的类型
+    #[inline]
+    pub fn get_type_implicit_att_names(&self, type_name: &str) -> Vec<String> {
+        self.type_explicit_att_names_map.get(type_name).map(|v|{
+            v.value().iter().cloned().collect_vec()
+        }).unwrap_or_default()
+        // self.type_explicit_att_names_map.iter().map(|x| x.clone()).collect::<Vec<_>>()
     }
 
     #[inline]
@@ -101,8 +122,9 @@ lazy_static! {
         let mut att_info_map = AttInfoMap{
             map: db_info.noun_attr_info_map,
             type_att_names_map: Default::default(),
+            type_explicit_att_names_map: Default::default(),
             att_name_type_map: Default::default(),
-            has_cat_ref_types: Default::default(),
+            has_cat_ref_types_set: Default::default(),
         };
         att_info_map.init_type_att_names_map();
         att_info_map

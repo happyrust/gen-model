@@ -12,16 +12,17 @@ use regex::internal::Input;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::CateBrepShapeMap;
 
-pub async fn create_st_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, geom_info: &GeomsInfo, brep_shapes_map: &CateBrepShapeMap, interface: &T) -> anyhow::Result<bool>  {
+pub async fn create_st_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, geom_info: &GeomsInfo,
+                                                  brep_shapes_map: &CateBrepShapeMap, interface: &T) -> anyhow::Result<bool>  {
     let geoms = &geom_info.geometries;
     if geoms.len() == 0 { return Ok(true); }
 
     let type_name = att.get_type();
     // let refno = att.get_refno().unwrap_or_default();
     let arc_path = if type_name == "GENSEC" {
-        let parent_pos = interface.get_world_transform(att.get_refno().unwrap()).await?.unwrap_or_default().translation;
+        let parent_pos = interface.get_world_transform(refno).await?.unwrap_or_default().translation;
         //dbg!(parent_pos);
-        let children_refs = interface.get_children_refs(att.get_refno().unwrap()).await?;
+        let children_refs = interface.get_children_refs(refno).await?;
         let mut res = None;
         for x in children_refs.iter() {
             let refs = interface.get_children_refs(*x).await?;

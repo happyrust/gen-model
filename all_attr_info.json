@@ -15070,7 +15070,7 @@
 		},
 		"553867": {
 			"612916": {
-				"name": "PTCDI",
+				"name": "PTCD",
 				"hash": 612916,
 				"offset": 0,
 				"default_val": {
@@ -33772,7 +33772,7 @@
 				"att_type": "STRING"
 			},
 			"612916": {
-				"name": "PTCDI",
+				"name": "PTCD",
 				"hash": 612916,
 				"offset": 0,
 				"default_val": {

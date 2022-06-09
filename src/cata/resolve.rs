@@ -41,8 +41,8 @@ pub fn resolve_gms(
                     }
                     Err(e) => {
                         dbg!(e);
-                        dbg!(g);
-                        dbg!(context);
+                        // dbg!(g);
+                        // dbg!(context);
                         None
                     }
                 }
@@ -59,7 +59,7 @@ pub fn resolve_paragon_gm_params(
     context: &HashMap<SmolStr, SmolStr>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
 ) -> anyhow::Result<CateGeoParam> {
-    // if gm_param.refno != RefU64::from_two_nums(15192, 77154) {
+    // if gm_param.refno != RefU64::from_two_nums(15194, 4258) {
     //     return Ok(CateGeoParam::Unknown);
     // }
     if let Ok(gm_data) = resolve_gmse_params(gm_param, context, axis_params){

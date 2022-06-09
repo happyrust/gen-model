@@ -393,7 +393,7 @@ impl AiosDBManager {
             match project_pool {
                 Ok(pool) => {
                     //暂时保存在内存，需要序列化到heed LMDB数据库
-                    sync_refno_basic_map(&pool, cached_refno_basic_map.clone()).await?;
+                    sync_refno_basic_map(&pool, cached_refno_basic_map.clone()).await.unwrap();
                     project_map.entry(project.clone()).or_insert(pool);
                 }
                 Err(_) => { println!("project: {} init failed",project); }
@@ -452,12 +452,20 @@ impl AiosDBManager {
 
     ///获取单个元件的模型数据
     pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64, result_map: &CateBrepShapeMap) -> anyhow::Result<bool> {
-        let desi_att = mgr.get_implicit_attr(design_refno, None).await?;
-        let type_name = desi_att.get_type();
-        let is_bran = type_name == "BRAN";
-        if !is_bran {
+
+        let cur_ele = mgr.get_refno_basic(design_refno).unwrap();
+        let type_name = cur_ele.get_type();
+        let owner = mgr.get_owner_ref_basic(design_refno).unwrap();
+        if type_name == "BRAN" {
             return Ok(false);
         }
+        if owner.get_type() == "BRAN" {
+            dbg!(design_refno);
+            return Ok(false);
+        }
+
+        let desi_att = mgr.get_implicit_attr(design_refno, None).await?;
+
         let geoms = resolve_desi_comp(design_refno, mgr.as_ref()).await.unwrap_or_default();
         if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" {
             create_st_geos(design_refno, &desi_att, &geoms, &result_map, mgr.as_ref()).await?;
@@ -566,8 +574,8 @@ impl AiosDBManager {
 
     pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        // let has_cata_types = ATTR_INFO_MAP.get_has_cat_ref_types().iter().map(|x| x.clone()).collect::<Vec<_>>();
-        // dbg!(&has_cata_types);
+        let has_cata_types = ATTR_INFO_MAP.get_has_cat_ref_type_names();
+        dbg!(&has_cata_types);
         // let has_cata_types = has_cata_types.iter().map(|x| x.as_str()).collect();
         // dbg!(&has_cata_types);
         // let dbnos = query_mdb_dbnos_by_name("Sample").await?;
@@ -583,25 +591,96 @@ impl AiosDBManager {
         if mdb_dbnos_map.contains_key(&key_str) {
             dbnos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned();
         }
-        dbg!(&dbnos);
+        // dbg!(&dbnos);
+        let mut att_types = vec!["BRAN"];
+        att_types.extend_from_slice(&vec![
+            "TP",
+            "SPLR",
+            "WELD",
+            "FILT",
+            "ELCONN",
+            "HELE",
+            "PCLA",
+            "PANE",
+            "CMPF",
+            "WALL",
+            "SUBE",
+            "FIXING",
+            "INST",
+            "PJOI",
+            "PFIT",
+            "CROS",
+            "GWALL",
+            "OLET",
+            // "BEND",
+            "IDAM",
+            "CLOS",
+            "FLOOR",
+            "SCLA",
+            "SILE",
+            "EQUI",
+            "COUP",
+            "GENSEC",
+            "AHU",
+            "TAPE",
+            "FLEX",
+            // "HACC",
+            "VTWA",
+            // "DUCT",
+            "TRNS",
+            "STRT",
+            "STWALL",
+            "HFAN",
+            "DAMP",
+            "PAVE",
+            "RNODE",
+            "PRTELE",
+            "GRIL",
+            "PCOM",
+            "FITT",
+            "GPART",
+            "THRE",
+            "UNIO",
+            "SCREED",
+            "NOZZ",
+            "PALJ",
+            "SUBJ",
+            "PLOO",
+            "SJOI",
+            "CABLE",
+            "BATT",
+            "CMFI",
+            "MESH",
+            "PLAT",
+            "CNODE",
+            "SCOJ",
+            "SEVE",
+            "FBLI",
+            "STIF",
+            "SBFI",
+            "OFST",
+            "BRCO",
+            "SELJ",
+            "CAP",
+            "SCTN",
+        ]);
 
-        let hash_cata_refnos = mgr.get_refnos_by_types(project, &vec!["BRAN"], dbnos).await?;
+        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Option::from(vec![7200])).await?;
+        dbg!(&has_cata_refnos.len());
         let mut handles = vec![];
         // let hash_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 5495)]);
-        let has_cata_cnt = hash_cata_refnos.len();
-        for (i, refno) in hash_cata_refnos.into_iter().enumerate() {
+        let has_cata_cnt = has_cata_refnos.len();
+        for (i, refno) in has_cata_refnos.into_iter().enumerate() {
             let mgr = mgr.clone();
             let handle = tokio::spawn(async move {
                 let inst_map = &mgr.mesh_mgr.inst_mgr;
                 let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
                 //在这里直接处理完所有需要处理的transform
-
-
                 let mut item_trans = TransformSRT::default();
                 // let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
                 let brep_shapes = CateBrepShapeMap::new();
                 Self::get_cata_branch_geoms(mgr.clone(), refno, &brep_shapes).await.unwrap_or_default();
-                // Self::get_cata_single_geoms(mgr.clone(), refno, &brep_shapes).await.unwrap_or_default();
+                Self::get_cata_single_geoms(mgr.clone(), refno, &brep_shapes).await.unwrap_or_default();
                 // dbg!(&brep_shapes);
                 for (child_refno, shapes) in brep_shapes {
                     let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
@@ -663,7 +742,7 @@ impl AiosDBManager {
             }
         }
         dbg!(mgr.mesh_mgr.inst_mgr.len());
-        println!("处理常规基本几何体: {} 花费时间: {} ms", has_cata_cnt, t.elapsed().as_millis());
+        println!("处理元件库几何体: {} 花费时间: {} ms", has_cata_cnt, t.elapsed().as_millis());
         Ok(true)
     }
 
@@ -902,9 +981,9 @@ impl AiosDBManager {
     /// 生成模型
     pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<bool> {
         let mut time = Instant::now();
-        // Self::cache_prim_geos(mgr.clone(), project).await?;
-        // Self::cache_loop_geos(mgr.clone(), project).await?;
-        // Self::cache_pohe_geos(mgr.clone(), project).await?;
+        Self::cache_prim_geos(mgr.clone(), project).await?;
+        Self::cache_loop_geos(mgr.clone(), project).await?;
+        Self::cache_pohe_geos(mgr.clone(), project).await?;
         Self::cache_cata_geos(mgr.clone(), project, mdb).await?;
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
         Ok(true)
