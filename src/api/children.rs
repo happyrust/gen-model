@@ -64,6 +64,19 @@ pub async fn query_children_id_name_with_type(refno: RefU64, att_type: &str, poo
     Ok(result)
 }
 
+/// 模糊查询 类型为 att_type ，name 中包含指定值的所有 refno和 name
+pub async fn fuzzy_query_refnos_by_name(att_type:String,name:String,pool:&Pool<MySql>) -> anyhow::Result<Vec<(RefU64,String)>> {
+    let mut result = vec![];
+    let sql = gen_fuzzy_query_refnos_by_name_sql(att_type,name);
+    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    for val in vals {
+        let refno = RefU64(val.get::<i64,_>("ID") as u64);
+        let name = val.get::<String,_>("NAME");
+        result.push((refno,name));
+    }
+    Ok(result)
+}
+
 fn gen_query_names_from_refnos_sql(refnos: Vec<RefU64>, att_type: String) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID,NAME,OWNER FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND ID IN ( ", att_type));
@@ -79,6 +92,12 @@ fn gen_query_names_from_refnos_sql(refnos: Vec<RefU64>, att_type: String) -> Str
 fn gen_query_children_id_name_with_type_sql(refno: RefU64, att_type: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE OWNER = {} AND TYPE = '{}' ", refno.0, att_type));
+    sql
+}
+
+fn gen_fuzzy_query_refnos_by_name_sql(att_type:String,name:String) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND NAME LIKE '%{}%'",att_type,name));
     sql
 }
 

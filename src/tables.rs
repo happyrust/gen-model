@@ -214,6 +214,15 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
     sql
 }
 
+pub fn gen_create_room_code_table_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {ROOM_CODE} ("));
+    sql.push_str(&format!("{} VARCHAR(50) ,", "ROOM_NAME"));
+    sql.push_str(&format!("{} BLOB", "REFNOS"));
+    sql.push_str(");");
+    sql
+}
+
 pub fn gen_creat_version_info_table_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {PDMS_VERSION} ("));
