@@ -26,7 +26,7 @@ use crate::options::DbOption;
 use sqlx::Executor;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql};
-use crate::tables::{gen_create_data_state_tables_sql, gen_create_project_mdb_json_sql};
+use crate::tables::{gen_creat_version_info_table_sql, gen_create_data_state_tables_sql, gen_create_pdms_version_table_sql, gen_create_project_mdb_json_sql};
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -75,7 +75,7 @@ pub async fn init_info_database(url: &str) -> anyhow::Result<()> {
 
 /// 同步pdms数据到数据
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
-    println!("开始同部pdms/E3D: {} 的数据", &db_option.project_name);
+    println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
     let mut time = Instant::now();
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
     init_info_database(&default_conn_str).await?;
@@ -124,6 +124,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             tables_sql.push_str(&tables::gen_create_project_mdb_sql());
             tables_sql.push_str(&gen_create_project_mdb_json_sql());
             tables_sql.push_str(&gen_create_data_state_tables_sql());
+            tables_sql.push_str(&gen_create_pdms_version_table_sql());
             let result = conn.execute(tables_sql.as_str()).await;
             match result {
                 Ok(_) => {}
@@ -145,6 +146,14 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
 
             create_tables_elapse += table_time.elapsed().as_millis();
             let result = pdms_info_conn.execute(tables::gen_create_dbno_infos_tables_sql().as_str()).await;
+            match result {
+                Ok(_) => {}
+                Err(e) => {
+                    dbg!(&e);
+                    dbg!(tables_sql.as_str());
+                }
+            }
+            let result = pdms_info_conn.execute(gen_creat_version_info_table_sql().as_str()).await;
             match result {
                 Ok(_) => {}
                 Err(e) => {
@@ -365,7 +374,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                                                                                      version.0, &project_clones, db_type.clone());
                             let mut info_conn = info_pool_clone.acquire().await.unwrap();
                             //保存dbno的信息表
-                            let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
+                            let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
                             sql.push_str(dbno_filename_sql.as_str());
                             // sql.remove(sql.len() - 1);
                             let result = info_conn.execute(sql.as_str()).await;
@@ -378,7 +387,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str, pool
                             }
 
                             //保存refno的信息表
-                            let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (REF0, PROJECT) VALUES ");
+                            let mut sql = format!("REPLACE INTO {PDMS_REFNO_INFOS_TABLE} (REF0, PROJECT) VALUES ");
                             for kv in &refno_info_map {
                                 sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
                             }
@@ -562,7 +571,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                                                                      version.0, &project_clones, db_type.clone());
                             let mut info_conn = info_pool_clone.acquire().await.unwrap();
                             //保存dbno的信息表
-                            let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
+                            let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
                             sql.push_str(dbno_filename_sql.as_str());
                             let result = info_conn.execute(sql.as_str()).await;
                             match result {
@@ -574,7 +583,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                             }
 
                             //保存refno的信息表
-                            let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (REF0, PROJECT) VALUES ");
+                            let mut sql = format!("REPLACE INTO {PDMS_REFNO_INFOS_TABLE} (REF0, PROJECT) VALUES ");
                             for kv in &refno_info_map {
                                 sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
                             }

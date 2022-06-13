@@ -15,5 +15,7 @@ types_multi_thread = false
 ip = "127.0.0.1"
 user = "root"
 password = "root"
+#password = ""
 port = "3306"
+#port = "50523"
 recreate_db = true

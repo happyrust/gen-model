@@ -13,6 +13,8 @@ pub const PDMS_PROJECT_MDB_TABLE: &'static str =  "PROJECT_MDB";
 pub const PDMS_DATA_STATE: &'static str = "DATA_STATE";
 pub const INCREMENT_DATA: &'static str = "INCREMENT_DATA";
 pub const PDMS_PROJECT_MDB_TABLE_JSON: &'static str = "PROJECT_MDB_JSON";
+pub const VERSION_DATA: &'static str = "VERSION_DATA";
+pub const PDMS_VERSION: &'static str = "PDMS_VERSION";
 // project_mdb
 // 专业表单
 pub const PROFESSION_TX_XT:&'static str = "TX_XT";

@@ -213,3 +213,27 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
 
     sql
 }
+
+pub fn gen_creat_version_info_table_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {PDMS_VERSION} ("));
+    sql.push_str(&format!("{} VARCHAR(20) ,", "PROJECT"));
+    sql.push_str(&format!("{} INT", "VERSION"));
+    sql.push_str(");");
+    sql
+}
+
+/// 创建版本管理的数据表
+pub fn gen_create_pdms_version_table_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {VERSION_DATA} ("));
+    sql.push_str(&format!("{} BIGINT PRIMARY KEY AUTO_INCREMENT ,", "ID"));
+    sql.push_str(&format!("{} BIGINT ,", "REFNO"));
+    sql.push_str(&format!("{} INT ,", "BIG_VERSION"));
+    sql.push_str(&format!("{} INT ,", "SMALL_VERSION"));
+    sql.push_str(&format!("{} INT ,", "PDMS_VERSION"));
+    sql.push_str(&format!("{} SMALLINT ,", "OPERATE"));
+    sql.push_str(&format!("{} BLOB", "DATA"));
+    sql.push_str(");");
+    sql
+}

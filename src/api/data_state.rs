@@ -81,7 +81,7 @@ pub async fn insert_refnos_state(vals: DataScopeVec, state: String, pool: &Pool<
 fn gen_insert_refnos_state_sql(vals: DataScopeVec, state: String) -> String {
     let mut sql = String::new();
     let mut insert_sql = String::new();
-    sql.push_str(&format!("INSERT INTO {PDMS_DATA_STATE} (ID,STATE) VALUES "));
+    sql.push_str(&format!("REPLACE INTO {PDMS_DATA_STATE} (ID,STATE) VALUES "));
     for val in vals.data_scopes {
         if &val.att_type != "WORL" && &val.att_type != "SITE" {
             insert_sql.push_str(&format!("( {},'{}'),", val.refno.0, state));
@@ -90,6 +90,7 @@ fn gen_insert_refnos_state_sql(vals: DataScopeVec, state: String) -> String {
     insert_sql.remove(insert_sql.len() - 1);
     sql.push_str(insert_sql.as_str());
     sql.push_str(";");
+    dbg!(&sql);
     sql
 }
 
