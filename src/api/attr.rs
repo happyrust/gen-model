@@ -34,9 +34,9 @@ pub async fn query_implicit_attrs_by_owner(owner: RefU64, type_name: &str, pool:
 }
 
 #[inline]
-pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &Vec<&str>) -> anyhow::Result<AttrMap>{
+pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &Vec<&str>) -> anyhow::Result<AttrMap> {
     let mut r = AttrMap::default();
-    if let Some(val) = ATTR_INFO_MAP.get(&type_hash ) {
+    if let Some(val) = ATTR_INFO_MAP.get(&type_hash) {
         for info in val.value() {
             if !column_names.is_empty() && !column_names.contains(&info.name.as_str()) {
                 continue;
@@ -99,17 +99,17 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &Vec<
             }
         }
     }
-    if column_names.contains(&"TYPE")  {
+    if column_names.contains(&"TYPE") {
         row.try_get::<String, _>("TYPE").map(|v| {
             r.entry(TYPE_HASH).or_insert(AttrVal::StringType(v.into()))
         })?;
     }
-    if column_names.contains(&"NAME")  {
+    if column_names.contains(&"NAME") {
         row.try_get::<String, _>("NAME").map(|v| {
             r.entry(NAME_HASH).or_insert(AttrVal::StringType(v.into()))
         })?;
     }
-    if column_names.contains(&"OWNER")  {
+    if column_names.contains(&"OWNER") {
         row.try_get::<i64, _>("OWNER").map(|v| {
             r.entry(OWNER_HASH).or_insert(AttrVal::RefU64Type(RefU64(v as u64)))
         })?;
@@ -128,12 +128,12 @@ pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic, pool
         //Some(vec![]) 应该返回空的
         if column_names.len() == 0 { return Ok(AttrMap::default()); }
         if let Some(names_map) = ATTR_INFO_MAP.get_names_of_type(type_name) {
-            exclude_columns = column_names.drain_filter(|x|{
+            exclude_columns = column_names.drain_filter(|x| {
                 !names_map.value().contains(*x)
             }).collect();
         }
         column_names
-    }else{
+    } else {
         vec![]
     };
     let sql = gen_query_implicit_attr_sql(refno, ref_basic.get_table_name(), &column_names);
@@ -152,7 +152,7 @@ pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic, pool
 pub async fn query_explicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
     let sql = gen_query_explicit_attr_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    let val = result.get::<Vec<u8>,_>("DATA");
+    let val = result.get::<Vec<u8>, _>("DATA");
     Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
 }
 
@@ -169,9 +169,9 @@ pub async fn query_full_attr(refno: RefU64, ref_basic: &CachedRefBasic, pool: &P
             attr.entry(NounHash(*values.key() as u32)).or_insert(values.default_val.clone());
         }
     }
-    attr.entry(REFNO_HASH).or_insert(AttrVal::RefU64Type(ele.refno));
-    attr.entry(NAME_HASH).or_insert(AttrVal::StringType(ele.name.into()));
-    attr.entry(OWNER_HASH).or_insert(AttrVal::RefU64Type(ele.owner));
+    attr.insert(REFNO_HASH, AttrVal::RefU64Type(ele.refno));
+    attr.insert(NAME_HASH, AttrVal::StringType(ele.name.into()));
+    attr.insert(OWNER_HASH, AttrVal::RefU64Type(ele.owner));
     Ok(attr)
 }
 
@@ -245,9 +245,9 @@ fn gen_insert_attr_info_sql(attr_info: &DashMap<i32, DashMap<i32, AttrInfo>>) ->
 
 pub fn gen_query_implicit_attr_sql(refno: RefU64, table_name: &str, columns: &Vec<&str>) -> String {
     let mut sql = String::new();
-    let cols_sql = if columns.len() == 0  {
+    let cols_sql = if columns.len() == 0 {
         "*".to_string()
-    } else{
+    } else {
         columns.join(",")
     };
     sql.push_str(&format!("SELECT {cols_sql} FROM {} WHERE ID = {}", table_name, refno.0));
@@ -259,7 +259,7 @@ pub fn gen_query_implicit_attr_sql(refno: RefU64, table_name: &str, columns: &Ve
 pub fn gen_query_implicit_attr_sql_by_owner(owner: RefU64, type_name: &str, columns: &Option<Vec<&str>>) -> String {
     let table_name = qualified_table_name(type_name);
     let mut sql = String::new();
-    let cols_sql = columns.as_ref().map(|x|{
+    let cols_sql = columns.as_ref().map(|x| {
         x.join(",")
     }).unwrap_or("*".to_string());
     sql.push_str(&format!("SELECT {cols_sql} FROM {} WHERE OWNER = {}", table_name, owner.0));
@@ -289,7 +289,6 @@ fn gen_position_from_id(refno: RefU64, type_name: &str) -> String {
     sql.push_str(&format!("SELECT POS FROM {} where ID = {} ;", type_name, refno.0));
     sql
 }
-
 
 
 #[tokio::test]

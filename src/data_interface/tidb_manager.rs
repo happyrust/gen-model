@@ -68,6 +68,8 @@ pub struct AiosDBManager {
 
     pub ref0_map: DashMap<u32, String>,
 
+    pub info_pool: Pool<MySql>,
+
     pub projects: Vec<String>,
 
     pub needed_parse_files: Option<Vec<String>>,
@@ -424,7 +426,7 @@ impl AiosDBManager {
                     sync_refno_basic_map(&pool, cached_refno_basic_map.clone()).await.unwrap();
                     project_map.entry(project.clone()).or_insert(pool);
                 }
-                Err(_) => { dbg!("project: {} init failed",project); }
+                Err(_) => { println!("project: {} init failed",project); }
             }
         }
         println!("缓存RefBasic数据花费：{}ms", time.elapsed().as_millis());
@@ -440,6 +442,7 @@ impl AiosDBManager {
             Self {
                 project_map,
                 ref0_map,
+                info_pool:info_conn,
                 projects,
                 needed_parse_files: None,
                 project_path: dir,
@@ -1082,20 +1085,6 @@ async fn test_get_children_attr() -> anyhow::Result<()> {
     let mgr = AiosDBManager::init_form_config().await?;
     let refno: RefU64 = RefI32Tuple((23584, 7)).into();
     let v = mgr.get_children_attrs(refno).await?;
-    println!("v={:?}", v);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_get_ancestors_attrs() -> anyhow::Result<()> {
-    let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let db = AiosPdmsProjectTiDB {
-        project: "sample".to_string(),
-        pool,
-    };
-    let refno: RefU64 = RefI32Tuple((23584, 5)).into();
-    let v = db.get_ancestors_attrs(refno).await;
     println!("v={:?}", v);
     Ok(())
 }

@@ -9,7 +9,8 @@ use crate::api::element::query_mdb_module_worlds;
 
 pub async fn insert_project_mdb(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<()> {
     let project_mdb = query_mdb_module_worlds(pool, info_pool).await?;
-    let sql = gen_insert_project_mdb_sql(project_mdb);
+    let sql = gen_insert_project_mdb_sql(project_mdb.clone());
+    let json_sql = gen_insert_project_mdb_json_sql(project_mdb);
     let mut conn = pool.acquire().await?;
     let result = conn.execute(sql.as_str()).await;
     match result {
@@ -17,6 +18,14 @@ pub async fn insert_project_mdb(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> 
         Err(e) => {
             dbg!(&e);
             dbg!(sql.as_str());
+        }
+    }
+    let json_result = conn.execute(json_sql.as_str()).await;
+    match json_result {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(&e);
+            dbg!(json_sql.as_str());
         }
     }
     Ok(())
@@ -35,6 +44,19 @@ pub fn gen_insert_project_mdb_sql(mdbs: HashMap<String, HashMap<String, Vec<RefU
         for (db_type, data) in vals {
             let data = hex::encode(bincode::serialize(&data).unwrap());
             sql.push_str(&format!("( '{}' , '{}', 0x{} ),", &name, db_type, data));
+        }
+    }
+    sql.remove(sql.len() - 1);
+    sql
+}
+
+pub fn gen_insert_project_mdb_json_sql(mdbs: HashMap<String, HashMap<String, Vec<RefU64>>>) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("INSERT IGNORE INTO {PDMS_PROJECT_MDB_TABLE_JSON} (MDB_NAME,DB_TYPE,DATA) VALUES "));
+    for (name, vals) in mdbs {
+        for (db_type, data) in vals {
+            let data = serde_json::to_string(&data).unwrap();
+            sql.push_str(&format!("( '{}' , '{}', '{}' ),", &name, db_type, data));
         }
     }
     sql.remove(sql.len() - 1);

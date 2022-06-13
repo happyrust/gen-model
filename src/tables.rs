@@ -100,8 +100,8 @@ pub fn gen_create_data_state_tables_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_DATA_STATE} ("#));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));
-    sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
-    sql.push_str(&format!(r#"{} VARCHAR(100),"#, "NAME"));
+    // sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
+    // sql.push_str(&format!(r#"{} VARCHAR(100),"#, "NAME"));
     sql.push_str(&format!(r#"{} VARCHAR(50)"#, "STATE"));
     sql.push_str(");");
     sql
@@ -130,6 +130,19 @@ pub fn gen_create_project_mdb_sql() -> String {
     sql.push_str(");");
 
     sql.push_str(&format!("CREATE INDEX PROJ_MDB_DB_TYPE_IDX ON {PDMS_PROJECT_MDB_TABLE} (DB_TYPE);"));
+    sql
+}
+
+#[inline]
+pub fn gen_create_project_mdb_json_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_PROJECT_MDB_TABLE_JSON} ("#));
+    sql.push_str(&format!(r#"{} VARCHAR(20) ,"#, "MDB_NAME"));
+    sql.push_str(&format!(r#"{} VARCHAR(10) ,"#, "DB_TYPE"));
+    sql.push_str(&format!(r#"{} VARCHAR(1000) "#, "DATA"));
+    sql.push_str(");");
+
+    sql.push_str(&format!("CREATE INDEX PROJ_MDB_DB_TYPE_IDX ON {PDMS_PROJECT_MDB_TABLE_JSON} (DB_TYPE);"));
     sql
 }
 
@@ -198,5 +211,29 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
     // sql.push_str(&format!("CREATE INDEX {type_name}_OWNER_IDX ON {table_name} (owner);"));
     // sql.push_str(&format!("CREATE INDEX {type_name}_TYPE_IDX ON {table_name} (type);"));
 
+    sql
+}
+
+pub fn gen_creat_version_info_table_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {PDMS_VERSION} ("));
+    sql.push_str(&format!("{} VARCHAR(20) ,", "PROJECT"));
+    sql.push_str(&format!("{} INT", "VERSION"));
+    sql.push_str(");");
+    sql
+}
+
+/// 创建版本管理的数据表
+pub fn gen_create_pdms_version_table_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {VERSION_DATA} ("));
+    sql.push_str(&format!("{} BIGINT PRIMARY KEY AUTO_INCREMENT ,", "ID"));
+    sql.push_str(&format!("{} BIGINT ,", "REFNO"));
+    sql.push_str(&format!("{} INT ,", "BIG_VERSION"));
+    sql.push_str(&format!("{} INT ,", "SMALL_VERSION"));
+    sql.push_str(&format!("{} INT ,", "PDMS_VERSION"));
+    sql.push_str(&format!("{} SMALLINT ,", "OPERATE"));
+    sql.push_str(&format!("{} BLOB", "DATA"));
+    sql.push_str(");");
     sql
 }
