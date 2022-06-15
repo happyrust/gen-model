@@ -54,9 +54,12 @@ pub async fn test_batch_insert(url: &str) {
 async fn test_get_att() -> anyhow::Result<()>{
 
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    let attr = mgr.get_attr(RefU64::from_two_nums(15192, 77164)).await?;
+    let attr = mgr.get_attr(RefU64::from_two_nums(23584, 6169)).await?;
 
     dbg!(attr.to_string_hashmap());
+
+    let world_transform = mgr.get_world_transform(RefU64::from_two_nums(23584, 6169)).await?;
+    dbg!(&world_transform);
 
     Ok(())
 }
@@ -81,10 +84,11 @@ async fn main() -> anyhow::Result<()> {
     }
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     // AiosDBManager::cache_geos_data(mgr.clone(), "Sample", "SAMPLE").await?;
-    AiosDBManager::cache_geos_data(mgr.clone(), db_option.project_name.as_str(), db_option.mdb_name.to_uppercase().as_str()).await?;
+    AiosDBManager::cache_geos_data(mgr.clone(), db_option.project_name.as_str(),
+                                   db_option.mdb_name.to_uppercase().as_str()).await?;
 
     // mgr.mesh_mgr.serialize_to_json_file();
-    // mgr.mesh_mgr.serialize_to_bin_file("Sample");
+    mgr.mesh_mgr.serialize_to_bin_file("Sample");
     // mgr.mesh_mgr.serialize_to_json_file();
 
     Ok(())

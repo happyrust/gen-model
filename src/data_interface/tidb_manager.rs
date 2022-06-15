@@ -47,6 +47,16 @@ static GNERAL_PRIM_NOUN_NAMES: Lazy<Vec<&'static str>> = Lazy::new(|| {
     vec!["BOX", "CYLI", "SPHE", "CONE", "DISH", "CTOR", "RTOR", "PYRA"]
 });
 
+static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> = Lazy::new(|| {
+    // vec!["EQUI", "PIPE", "STRU", "ELEC", ""]
+    let mut m = HashMap::new();
+    m.insert("EQUI", PdmsGenericType::EQUI);
+    m.insert("PIPE", PdmsGenericType::PIPE);
+    m.insert("ROOM", PdmsGenericType::ROOM);
+    m.insert("STRU", PdmsGenericType::STRU);
+    m
+});
+
 static GENRIC_NOUN_NAMES: Lazy<Vec<SmolStr>> = Lazy::new(|| {
     vec!["EQUI".into(), "PIPE".into(), "STRU".into(), "ROOM".into(), "STWALL".into(), "FLOOR".into()]
 });
@@ -77,6 +87,8 @@ pub struct AiosDBManager {
 
 #[async_trait]
 impl PdmsDataInterface for AiosDBManager {
+
+    /// 获得最全的数据
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
@@ -94,6 +106,7 @@ impl PdmsDataInterface for AiosDBManager {
             .map(|x| x.value().get_owner()).unwrap_or_default()
     }
 
+    /// 获得隐含数据的属性
     async fn get_implicit_attr(&self, refno: RefU64, columns: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
@@ -104,6 +117,7 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(AttrMap::default())
     }
 
+    /// 获得OWNER隐含数据的属性
     async fn get_implicit_attrs_by_owner(&self, owner: RefU64, type_name: &str, columns: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>> {
         if let Some(project_pool) = self.get_project_pool(owner) {
             let attr = query_implicit_attrs_by_owner(owner, type_name, &project_pool, columns).await?;
@@ -112,6 +126,7 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(vec![])
     }
 
+    /// 获取parent的attr数据
     async fn get_parent_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
         // if let Some(project_pool) = self.get_project_pool(refno) {
         //     let attr = query_parent_attr(refno, &project_pool, None).await?;
@@ -120,6 +135,7 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(AttrMap::default())
     }
 
+    /// 获得缓存的refno基本信息
     #[inline]
     fn get_refno_basic(&self, refno: RefU64) -> Option<Ref<RefU64, CachedRefBasic>> {
         if !refno.is_valid() {
@@ -129,6 +145,7 @@ impl PdmsDataInterface for AiosDBManager {
         }
     }
 
+    /// 获得owner缓存的refno基本信息
     #[inline]
     fn get_owner_ref_basic(&self, refno: RefU64) -> Option<Ref<RefU64, CachedRefBasic>> {
         let owner_ref = self.get_owner(refno);
@@ -225,7 +242,19 @@ impl PdmsDataInterface for AiosDBManager {
         return Ok(None);
     }
 
-    //包含自己
+    /// 获得参考号的祖先参考号
+    fn get_ancestors_refnos(&self, refno: RefU64) -> Vec<RefU64>{
+        let map = &self.cached_refno_basic_map;
+        let mut result = vec![refno]; //需要包含自己
+        let mut cur_refno = refno;
+        while let Some(b) = map.get(&cur_refno) {
+            cur_refno = b.owner;
+            result.push(cur_refno);
+        }
+        result
+    }
+
+    /// 获得参考号的祖先属性
     async fn get_ancestors_attrs(&self, refno: RefU64) -> Vec<AttrMap> {
         let mut cur_refno = refno;
         let mut r = vec![];
@@ -242,6 +271,7 @@ impl PdmsDataInterface for AiosDBManager {
         r
     }
 
+    /// 获得参考号的祖先节点
     async fn get_ancestor_nodes(&self, refno: RefU64) -> anyhow::Result<VecDeque<EleTreeNode>> {
         let mut cur_refno = refno;
         let mut ancestors = VecDeque::new();
@@ -450,6 +480,20 @@ impl AiosDBManager {
         }
     }
 
+    ///获得参考号对应的一般类型
+    pub fn get_generic_type(&self, refno: RefU64) -> PdmsGenericType{
+        let map = &self.cached_refno_basic_map;
+        let mut cur_refno = refno;
+        while let Some(b) = map.get(&cur_refno) {
+            let type_name = b.get_type();
+            if PDMS_GNERAL_TYPE_NAMES_MAP.contains_key(&type_name) {
+                return PDMS_GNERAL_TYPE_NAMES_MAP[&type_name];
+            }
+            cur_refno = b.owner;
+        }
+        PdmsGenericType::UNKOWN
+    }
+
     ///获取单个元件的模型数据
     pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64, result_map: &CateBrepShapeMap) -> anyhow::Result<bool> {
 
@@ -533,7 +577,7 @@ impl AiosDBManager {
                     if !current_tubing.finished && a_pos.distance(current_tubing.start_pt) > TUBI_TOL {
                         current_tubing.end_pt = a_pos;
                         current_tubing.finished = true;
-                        result_map.entry(branch_refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                        result_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
                     }
                 }
             }
@@ -558,20 +602,20 @@ impl AiosDBManager {
             for geom in geoms.geometries {
                 if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
                     result_map.entry(refno).or_insert(Vec::new()).push(cate_shape);
-                    // break;
                 }
             } // end geoms.geometries
             if refno == last_child {
                 if !current_tubing.finished && bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL {
                     current_tubing.end_pt = bran_ttube_pt;
                     current_tubing.finished = true;
-                    result_map.entry(branch_refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                    result_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
                 }
             }
         }
         Ok(true)
     }
 
+    /// 缓存使用元件库的几何体
     pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
         let has_cata_types = ATTR_INFO_MAP.get_has_cat_ref_type_names();
@@ -675,6 +719,7 @@ impl AiosDBManager {
             let handle = tokio::spawn(async move {
                 let inst_map = &mgr.mesh_mgr.inst_mgr;
                 let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
+                let level_shape_mgr = &mgr.mesh_mgr.level_shape_mgr;
                 //在这里直接处理完所有需要处理的transform
                 let mut item_trans = TransformSRT::default();
                 // let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
@@ -684,22 +729,16 @@ impl AiosDBManager {
                 // dbg!(&brep_shapes);
                 for (child_refno, shapes) in brep_shapes {
                     let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
-                    //记录对应的不同颜色类型
-                    // if let Some((noun_name, r)) = mgr.get_general_type_refno(d.refno) {
-                    //     type_geom_refs_map.entry(r).or_insert(Vec::new()).push(d.refno);
-                    //     type_refs_map.entry(noun_name.clone()).or_insert(HashSet::new()).insert(r);
-                    //     color_type = Some(noun_name);
-                    // }
-                    //维护每个节点有那些几何实例
-                    // let ancestors = tree.ancestors(&cur_node_id).unwrap();
-                    // for ancestor in ancestors {
-                    //     let p_refno = ancestor.data().refno;
-                    //     level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(cur_refno);
-                    // }
-                    //当前自身也要加进去
-                    // if d.refno != cur_refno {
-                    //     level_shape_mgr.entry(d.refno).or_insert(RefU64Vec::default()).push(cur_refno);
-                    // }
+                    let ancestors = mgr.get_ancestors_refnos(child_refno);
+                    for p_refno in ancestors {
+                        level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(child_refno);
+                    }
+                    let mut geos_info = EleGeosInfo{
+                        data: vec![],
+                        visible: true,
+                        generic_type: mgr.get_generic_type(child_refno),
+                    };
+                    let mut geo_insts = &mut geos_info.data;
                     for shape in shapes {
                         let CateBrepShape {
                             brep_shape,
@@ -723,17 +762,16 @@ impl AiosDBManager {
                         }
                         let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
                         bbox.scaled(&item_trans.scale);
-                        let geom_data = EleGeoInstData {
+                        let geom_inst = EleGeoInstance {
                             geo_hash,
                             bbox,
                             global_transform: (desi_trans.rotation, desi_trans.translation, item_trans.scale),
-                            visible: true,
-                            generic_type: "PIPE".to_string(), //color_type.clone().unwrap_or_default(),
-                            zone_refno: refno,
-                            //mgr.get_parent_att_by_type(cur_refno, "ZONE")?.map(|x| x.get_refno().unwrap_or_default()).unwrap_or_default(),
+                            visible,
                         };
-                        inst_map.entry(child_refno).or_insert(Vec::new()).push(geom_data);
+                        geo_insts.push(geom_inst);
                     }
+
+                    inst_map.entry(child_refno).or_insert(geos_info);
                 }
             });
             handles.push(handle);
@@ -746,6 +784,7 @@ impl AiosDBManager {
         Ok(true)
     }
 
+    /// 生成基本体的几何数据
     pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
         let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, Some(vec![7200])).await?;
@@ -758,8 +797,18 @@ impl AiosDBManager {
             let handle = tokio::spawn(async move {
                 let inst_map = &mgr.mesh_mgr.inst_mgr;
                 let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
-                //在这里直接处理完所有需要处理的transform
+                let level_shape_mgr = &mgr.mesh_mgr.level_shape_mgr;
                 let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
+                let ancestors = mgr.get_ancestors_refnos(refno);
+                for p_refno in ancestors {
+                    level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(refno);
+                }
+                let mut geos_info = EleGeosInfo{
+                    data: vec![],
+                    visible: true,
+                    generic_type: mgr.get_generic_type(refno),
+                };
+                let mut geo_insts = &mut geos_info.data;
                 // dbg!(&transform);
                 let mut geo_hash = None;
                 let mut item_trans = TransformSRT::default();
@@ -782,15 +831,14 @@ impl AiosDBManager {
                     let tr: TransformSRT = item_trans * transform;
                     let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
                     bbox.scaled(&tr.scale);
-                    let geom_data = EleGeoInstData {
+                    let geom_inst = EleGeoInstance {
                         geo_hash,
                         bbox,
                         global_transform: (tr.rotation, tr.translation, tr.scale),
                         visible,
-                        generic_type: "STRU".to_string(),  //todo add generic type
-                        zone_refno: parent_refno,
                     };
-                    inst_map.entry(refno).or_insert(Vec::new()).push(geom_data);
+                    geo_insts.push(geom_inst);
+                    inst_map.entry(refno).or_insert(geos_info);
                 }
             });
             handles.push(handle);
@@ -802,82 +850,82 @@ impl AiosDBManager {
         println!("处理常规基本几何体: {} 花费时间: {} ms", prim_cnt, t.elapsed().as_millis());
         Ok(true)
     }
-
-    pub async fn cache_pohe_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
-        let t = Instant::now();
-        let pohe_refnos = mgr.get_refnos_by_types(project, &vec!["POHE"], Option::from(vec![7200])).await?;
-        let pohe_cnt = pohe_refnos.len();
-        let mut handles = vec![];
-        for (i, refno) in pohe_refnos.into_iter().enumerate() {
-            let mgr = mgr.clone();
-            let handle = tokio::spawn(async move {
-                let inst_map = &mgr.mesh_mgr.inst_mgr;
-                let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
-                //在这里直接处理完所有需要处理的transform
-                let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
-                let mut geo_hash = None;
-                let mut item_trans = TransformSRT::default();
-                let mut facet = Facet::default();
-                if let Ok(children_refs) = mgr.get_children_refs(refno).await {
-                    for pogo_ref in children_refs {
-                        let mut vertices: Vec<[f32; 3]> = vec![];
-                        let mut tv = vec![];
-                        if let Ok(p_refs) = mgr.get_children_refs(pogo_ref).await {
-                            let v_cnt = p_refs.len();
-                            if v_cnt >= 3 {
-                                for x in p_refs {
-                                    //todo 后面需要做错误处理
-                                    let v = mgr.get_implicit_attr(x, Some(vec!["POS"])).await.unwrap_or_default().get_position().unwrap_or_default();
-                                    vertices.push([v[0], v[1], v[2]]);
-                                    if tv.len() < 3 {
-                                        tv.push(v);
-                                    }
-                                }
-                                let n = (tv[1] - tv[0]).cross(tv[2] - tv[1]).normalize();
-                                let mut polygon = Polygon {
-                                    contours: vec![Contour {
-                                        vertices,
-                                        normals: vec![n.into(); v_cnt],
-                                    }]
-                                };
-                                facet.polygons.push(polygon);
-                            }
-                        }
-                    }
-                }
-                if facet.check_valid() {
-                    item_trans = facet.get_trans();
-                    let r = cached_mesh_mgr.get_pdms_mesh_hash_key(Box::new(facet));
-                    geo_hash = Some(r);
-                }
-
-                let parent_refno = mgr.get_owner(refno);
-                let mut parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["LEVE"])).await.unwrap_or_default();
-                if let Some(geo_hash) = geo_hash {
-                    let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
-                    let tr: TransformSRT = item_trans * transform;
-                    let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
-                    bbox.scaled(&tr.scale);
-                    let geom_data = EleGeoInstData {
-                        geo_hash,
-                        bbox,
-                        global_transform: (tr.rotation, tr.translation, tr.scale),
-                        visible,
-                        generic_type: "STRU".to_string(),  //todo add generic type
-                        zone_refno: refno,
-                    };
-                    inst_map.entry(parent_refno).or_insert(Vec::new()).push(geom_data);
-                }
-            });
-            handles.push(handle);
-            if i == pohe_cnt - 1 || handles.len() == 100 {
-                futures::future::join_all(take(&mut handles)).await;
-            }
-        }
-        println!("处理POHE几何体: {} 花费时间: {} ms", pohe_cnt, t.elapsed().as_millis());
-        Ok(true)
-    }
-
+    //
+    // pub async fn cache_pohe_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
+    //     let t = Instant::now();
+    //     let pohe_refnos = mgr.get_refnos_by_types(project, &vec!["POHE"], Option::from(vec![7200])).await?;
+    //     let pohe_cnt = pohe_refnos.len();
+    //     let mut handles = vec![];
+    //     for (i, refno) in pohe_refnos.into_iter().enumerate() {
+    //         let mgr = mgr.clone();
+    //         let handle = tokio::spawn(async move {
+    //             let inst_map = &mgr.mesh_mgr.inst_mgr;
+    //             let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
+    //             //在这里直接处理完所有需要处理的transform
+    //             let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
+    //             let mut geo_hash = None;
+    //             let mut item_trans = TransformSRT::default();
+    //             let mut facet = Facet::default();
+    //             if let Ok(children_refs) = mgr.get_children_refs(refno).await {
+    //                 for pogo_ref in children_refs {
+    //                     let mut vertices: Vec<[f32; 3]> = vec![];
+    //                     let mut tv = vec![];
+    //                     if let Ok(p_refs) = mgr.get_children_refs(pogo_ref).await {
+    //                         let v_cnt = p_refs.len();
+    //                         if v_cnt >= 3 {
+    //                             for x in p_refs {
+    //                                 //todo 后面需要做错误处理
+    //                                 let v = mgr.get_implicit_attr(x, Some(vec!["POS"])).await.unwrap_or_default().get_position().unwrap_or_default();
+    //                                 vertices.push([v[0], v[1], v[2]]);
+    //                                 if tv.len() < 3 {
+    //                                     tv.push(v);
+    //                                 }
+    //                             }
+    //                             let n = (tv[1] - tv[0]).cross(tv[2] - tv[1]).normalize();
+    //                             let mut polygon = Polygon {
+    //                                 contours: vec![Contour {
+    //                                     vertices,
+    //                                     normals: vec![n.into(); v_cnt],
+    //                                 }]
+    //                             };
+    //                             facet.polygons.push(polygon);
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //             if facet.check_valid() {
+    //                 item_trans = facet.get_trans();
+    //                 let r = cached_mesh_mgr.get_pdms_mesh_hash_key(Box::new(facet));
+    //                 geo_hash = Some(r);
+    //             }
+    //
+    //             let parent_refno = mgr.get_owner(refno);
+    //             let mut parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["LEVE"])).await.unwrap_or_default();
+    //             if let Some(geo_hash) = geo_hash {
+    //                 let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
+    //                 let tr: TransformSRT = item_trans * transform;
+    //                 let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
+    //                 bbox.scaled(&tr.scale);
+    //                 let geom_data = EleGeoInstance {
+    //                     geo_hash,
+    //                     bbox,
+    //                     global_transform: (tr.rotation, tr.translation, tr.scale),
+    //                     visible,
+    //                     generic_type: "STRU".to_string(),  //todo add generic type
+    //                     zone_refno: refno,
+    //                 };
+    //                 inst_map.entry(parent_refno).or_insert(Vec::new()).push(geom_data);
+    //             }
+    //         });
+    //         handles.push(handle);
+    //         if i == pohe_cnt - 1 || handles.len() == 100 {
+    //             futures::future::join_all(take(&mut handles)).await;
+    //         }
+    //     }
+    //     println!("处理POHE几何体: {} 花费时间: {} ms", pohe_cnt, t.elapsed().as_millis());
+    //     Ok(true)
+    // }
+    //
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
         let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], Option::from(vec![7200])).await?;
@@ -891,7 +939,21 @@ impl AiosDBManager {
                 let inst_map = &mgr.mesh_mgr.inst_mgr;
                 let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
                 //在这里直接处理完所有需要处理的transform
+                // let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
+
+                let level_shape_mgr = &mgr.mesh_mgr.level_shape_mgr;
                 let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
+                let ancestors = mgr.get_ancestors_refnos(refno);
+                for p_refno in ancestors {
+                    level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(refno);
+                }
+                let mut geos_info = EleGeosInfo{
+                    data: vec![],
+                    visible: true,
+                    generic_type: mgr.get_generic_type(refno),
+                };
+                let mut geo_insts = &mut geos_info.data;
+
                 if let Some(refno_basic) = mgr.get_refno_basic(refno) {
                     let parent_basic = mgr.get_owner_ref_basic(refno).unwrap();
                     let parent_type = parent_basic.get_type();
@@ -956,17 +1018,22 @@ impl AiosDBManager {
                         let tr: TransformSRT = item_trans * transform;
                         let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
                         bbox.scaled(&tr.scale);
-                        let geom_data = EleGeoInstData {
+
+                        let geom_inst = EleGeoInstance {
                             geo_hash,
                             bbox,
                             global_transform: (tr.rotation, tr.translation, tr.scale),
                             visible,
-                            generic_type: "STRU".to_string(),  //todo add generic type
-                            zone_refno: parent_refno,
+                            // generic_type: "STRU".to_string(),  //todo add generic type
+                            // zone_refno: parent_refno,
                         };
-                        inst_map.entry(parent_refno).or_insert(Vec::new()).push(geom_data);
+                        // inst_map.entry(parent_refno).or_insert(Vec::new()).push(geom_data);
+                        geo_insts.push(geom_inst);
+
                     }
                 }
+
+                inst_map.entry(refno).or_insert(geos_info);
             });
             handles.push(handle);
             if i == loop_cnt - 1 || handles.len() == 100 {
@@ -983,7 +1050,7 @@ impl AiosDBManager {
         let mut time = Instant::now();
         Self::cache_prim_geos(mgr.clone(), project).await?;
         Self::cache_loop_geos(mgr.clone(), project).await?;
-        Self::cache_pohe_geos(mgr.clone(), project).await?;
+        // Self::cache_pohe_geos(mgr.clone(), project).await?;
         Self::cache_cata_geos(mgr.clone(), project, mdb).await?;
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
         Ok(true)

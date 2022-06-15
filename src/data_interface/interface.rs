@@ -51,6 +51,8 @@ pub trait PdmsDataInterface : Send + Sync{
 
     async fn get_db_world(&self, project: &str, db_no: u32) -> anyhow::Result<Option<(RefU64, String)>>;
 
+    fn get_ancestors_refnos(&self, refno: RefU64) -> Vec<RefU64>;
+
     async fn get_ancestors_attrs(&self, refno: RefU64) -> Vec<AttrMap>;
 
     async fn get_ancestor_nodes(&self, refno: RefU64) -> anyhow::Result<VecDeque<EleTreeNode>>;
