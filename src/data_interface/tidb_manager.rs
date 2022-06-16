@@ -87,7 +87,6 @@ pub struct AiosDBManager {
 
 #[async_trait]
 impl PdmsDataInterface for AiosDBManager {
-
     /// 获得最全的数据
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
         if let Some(project_pool) = self.get_project_pool(refno) {
@@ -243,7 +242,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     /// 获得参考号的祖先参考号
-    fn get_ancestors_refnos(&self, refno: RefU64) -> Vec<RefU64>{
+    fn get_ancestors_refnos(&self, refno: RefU64) -> Vec<RefU64> {
         let map = &self.cached_refno_basic_map;
         let mut result = vec![refno]; //需要包含自己
         let mut cur_refno = refno;
@@ -426,7 +425,7 @@ impl AiosDBManager {
                     sync_refno_basic_map(&pool, cached_refno_basic_map.clone()).await.unwrap();
                     project_map.entry(project.clone()).or_insert(pool);
                 }
-                Err(_) => { println!("project: {} init failed",project); }
+                Err(_) => { println!("project: {} init failed", project); }
             }
         }
         println!("缓存RefBasic数据花费：{}ms", time.elapsed().as_millis());
@@ -434,7 +433,7 @@ impl AiosDBManager {
         // let process_stats = ProcessStats::get().await.expect("could not get stats for running process");
         // println!("{:?}", process_stats);
 
-        let info_conn = AiosDBManager::get_db_pool(&default_conn, PDMS_INFO_DB).await?;
+        let info_conn = AiosDBManager::get_db_pool(&default_conn, &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name)).await?;
         let ref0_map = get_ref0_map(&info_conn).await?;
         // let cached_refno_type_map = get_refno_table_map(&project);
         let projects = db_option.included_projects.clone();
@@ -442,7 +441,7 @@ impl AiosDBManager {
             Self {
                 project_map,
                 ref0_map,
-                info_pool:info_conn,
+                info_pool: info_conn,
                 projects,
                 needed_parse_files: None,
                 project_path: dir,
@@ -481,7 +480,7 @@ impl AiosDBManager {
     }
 
     ///获得参考号对应的一般类型
-    pub fn get_generic_type(&self, refno: RefU64) -> PdmsGenericType{
+    pub fn get_generic_type(&self, refno: RefU64) -> PdmsGenericType {
         let map = &self.cached_refno_basic_map;
         let mut cur_refno = refno;
         while let Some(b) = map.get(&cur_refno) {
@@ -496,7 +495,6 @@ impl AiosDBManager {
 
     ///获取单个元件的模型数据
     pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64, result_map: &CateBrepShapeMap) -> anyhow::Result<bool> {
-
         let cur_ele = mgr.get_refno_basic(design_refno).unwrap();
         let type_name = cur_ele.get_type();
         let owner = mgr.get_owner_ref_basic(design_refno).unwrap();
@@ -624,8 +622,8 @@ impl AiosDBManager {
         // dbg!(&has_cata_types);
         // let dbnos = query_mdb_dbnos_by_name("Sample").await?;
         let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
-        let info_pool = AiosDBManager::get_db_pool(&url,"PDMS_INFO_DB").await?;
-        let pool = AiosDBManager::get_db_pool(&url,project).await?;
+        let info_pool = AiosDBManager::get_db_pool(&url, "PDMS_INFO_DB").await?;
+        let pool = AiosDBManager::get_db_pool(&url, project).await?;
         let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
 
         let mut dbnos = None;
@@ -733,7 +731,7 @@ impl AiosDBManager {
                     for p_refno in ancestors {
                         level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(child_refno);
                     }
-                    let mut geos_info = EleGeosInfo{
+                    let mut geos_info = EleGeosInfo {
                         data: vec![],
                         visible: true,
                         generic_type: mgr.get_generic_type(child_refno),
@@ -803,7 +801,7 @@ impl AiosDBManager {
                 for p_refno in ancestors {
                     level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(refno);
                 }
-                let mut geos_info = EleGeosInfo{
+                let mut geos_info = EleGeosInfo {
                     data: vec![],
                     visible: true,
                     generic_type: mgr.get_generic_type(refno),
@@ -947,7 +945,7 @@ impl AiosDBManager {
                 for p_refno in ancestors {
                     level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(refno);
                 }
-                let mut geos_info = EleGeosInfo{
+                let mut geos_info = EleGeosInfo {
                     data: vec![],
                     visible: true,
                     generic_type: mgr.get_generic_type(refno),
@@ -1029,7 +1027,6 @@ impl AiosDBManager {
                         };
                         // inst_map.entry(parent_refno).or_insert(Vec::new()).push(geom_data);
                         geo_insts.push(geom_inst);
-
                     }
                 }
 
