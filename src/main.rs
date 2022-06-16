@@ -10,7 +10,7 @@ use std::time::Instant;
 use itertools::Itertools;
 use aios_core::pdms_types::{AttrMap, AttrVal, DbAttributeType, NounHash, PdmsDatabaseInfo, RefI32Tuple, RefU64};
 use aios_core::pdms_types::AttrVal::StringType;
-use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_json};
+use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use dashmap::DashMap;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use aios_database::{BATCH_CHUNKS_CNT, tables};
@@ -82,13 +82,13 @@ async fn main() -> anyhow::Result<()> {
     if db_option.total_sync {
         sync_pdms(&db_option).await?;
     }
-    let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
+    let mgr = Arc::new(AiosDBManager::init_form_config().await?);
     // AiosDBManager::cache_geos_data(mgr.clone(), "Sample", "SAMPLE").await?;
     AiosDBManager::cache_geos_data(mgr.clone(), db_option.project_name.as_str(),
                                    db_option.mdb_name.to_uppercase().as_str()).await?;
 
     // mgr.mesh_mgr.serialize_to_json_file();
-    mgr.mesh_mgr.serialize_to_bin_file("Sample");
+    mgr.mesh_mgr.serialize_to_bin_file(&db_option.project_name);
     // mgr.mesh_mgr.serialize_to_json_file();
 
     Ok(())

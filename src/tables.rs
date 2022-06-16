@@ -108,15 +108,15 @@ pub fn gen_create_data_state_tables_sql() -> String {
 }
 
 #[inline]
-pub fn gen_create_attr_info_tables_sql() -> String {
+pub fn gen_create_attr_info_tables_sql(project_name:&str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_REFNO_INFOS_TABLE} ("#));
+    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_REFNO_INFOS_TABLE}("#));
     sql.push_str(&format!(r#"{} INT PRIMARY KEY ,"#, "TYPE_HASH"));
     sql.push_str(&format!(r#"{} VARCHAR(8) ,"#, "TYPE"));
     sql.push_str(&format!(r#"{} BLOB "#, "INFO"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX REF0_TYPE_IDX ON {PDMS_REFNO_INFOS_TABLE} (TYPE);"));
+    sql.push_str(&format!("CREATE INDEX REF0_TYPE_IDX ON {PDMS_REFNO_INFOS_TABLE}(TYPE);"));
     sql
 }
 
@@ -217,15 +217,15 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
 pub fn gen_create_room_code_table_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {ROOM_CODE} ("));
-    sql.push_str(&format!("{} VARCHAR(50) ,", "ROOM_NAME"));
-    sql.push_str(&format!("{} BLOB", "REFNOS"));
+    sql.push_str(&format!("{} BIGINT ,","REFNO"));
+    sql.push_str(&format!("{} VARCHAR(50) ", "ROOM_NAME"));
     sql.push_str(");");
     sql
 }
 
-pub fn gen_creat_version_info_table_sql() -> String {
+pub fn gen_creat_version_info_table_sql(project_name:&str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {PDMS_VERSION} ("));
+    sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {PDMS_VERSION}("));
     sql.push_str(&format!("{} VARCHAR(20) ,", "PROJECT"));
     sql.push_str(&format!("{} INT", "VERSION"));
     sql.push_str(");");

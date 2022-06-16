@@ -182,19 +182,6 @@ pub async fn query_owner_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
     };
 }
 
-/// 生产
-fn gen_query_refno_infos_sql(refno: RefU64) -> String {
-    let mut sql = String::new();
-    sql.push_str(&format!("SELECT PROJECT FROM {PDMS_REFNO_INFOS_TABLE} WHERE REF0 = {} LIMIT 1;", refno.get_0()));
-    sql
-}
-
-// pub async fn query_project_hash(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<u32> {
-//     let sql = gen_query_refno_infos_sql(refno);
-//     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-//     let val = result.get::<String, _>("project");
-//     Ok(val)).get_u32_hash())
-// }
 /// 通过 name 获取 refno （pdms）
 pub async fn query_id_from_name(name: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_id_from_name_sql(name);

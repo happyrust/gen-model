@@ -487,7 +487,7 @@ impl AiosDBManager {
         while let Some(b) = map.get(&cur_refno) {
             let type_name = b.get_type();
             if PDMS_GNERAL_TYPE_NAMES_MAP.contains_key(&type_name) {
-                return PDMS_GNERAL_TYPE_NAMES_MAP[&type_name];
+                return *PDMS_GNERAL_TYPE_NAMES_MAP.get(type_name).unwrap();
             }
             cur_refno = b.owner;
         }
@@ -625,7 +625,7 @@ impl AiosDBManager {
         // let dbnos = query_mdb_dbnos_by_name("Sample").await?;
         let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
         let info_pool = AiosDBManager::get_db_pool(&url,"PDMS_INFO_DB").await?;
-        let pool = AiosDBManager::get_db_pool(&url,"SAMPLE").await?;
+        let pool = AiosDBManager::get_db_pool(&url,project).await?;
         let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
 
         let mut dbnos = None;
@@ -709,7 +709,7 @@ impl AiosDBManager {
             "SCTN",
         ]);
 
-        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Option::from(vec![7200])).await?;
+        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Option::from(vec![1900])).await?;
         dbg!(&has_cata_refnos.len());
         let mut handles = vec![];
         // let hash_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 5495)]);
@@ -787,7 +787,7 @@ impl AiosDBManager {
     /// 生成基本体的几何数据
     pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, Some(vec![7200])).await?;
+        let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, Some(vec![1900])).await?;
         // let test_refno = RefU64::from_two_nums(23584, 2705);
         // prim_refnos = RefU64Vec(vec![test_refno]);
         let prim_cnt = prim_refnos.len();
@@ -928,7 +928,7 @@ impl AiosDBManager {
     //
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], Option::from(vec![7200])).await?;
+        let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], Option::from(vec![1900])).await?;
         let loop_cnt = loop_refnos.len();
         //最好是批量取数据，而不是循环去取
         //处理loop elements
