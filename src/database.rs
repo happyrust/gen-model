@@ -172,7 +172,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         if db_option.types_multi_thread {
             dbg!("执行单线程解析");
             sync_total_async_threading(&db_option, project, project_pool.clone(),
-                                       pdms_info_pool.clone()).await.expect("同步数据失败");
+                                       pdms_info_pool.clone(), ssc_zone_map, ssc_zone_name_map).await.expect("同步数据失败");
         } else {
             dbg!("执行多线程解析");
             sync_total_async(&db_option, project, project_pool.clone(),
@@ -495,49 +495,11 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                                     dbg!(room_code_sql.as_str());
                                 }
                             }
-
-                            // let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
-                            // let mut values_sql = String::new();
-                            // let room_name = room_name.split('-').collect::<Vec<_>>()[0];
-
-                            // if let Ok(Some(owner_refno)) = query_id_from_name_ssc(room_name, pool_clone.clone()).await {
-                            //     let mut order = 0;
-                            //     for refno in refnos {
-                            //         if let Some(total_attr) = &total_attr_map.get(&refno) {
-                            //             let type_name = total_attr.implicit_attmap.get_type();
-                            //             let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
-                            //                 .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
-                            //             values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
-                            //         }
-                            //         order += 1;
-                            //     }
-                            //     values_sql.remove(values_sql.len() - 1);
-                            //     values_sql.push_str(";");
-                            //     let sql = format!("{}{}", insert_sql, values_sql);
-                            //     let result = project_conn.execute(sql.as_str()).await;
-                            //     match result {
-                            //         Ok(_) => {}
-                            //         Err(e) => {
-                            //             dbg!(&e);
-                            //             dbg!(sql.as_str());
-                            //         }
-                            //     }
-                            //
-                            //     // room_code_sql.remove(room_code_sql.len() - 1);
-                            //     // let result = project_conn.execute(room_code_sql.as_str()).await;
-                            //     // match result {
-                            //     //     Ok(_) => {}
-                            //     //     Err(e) => {
-                            //     //         dbg!(&e);
-                            //     //         dbg!(room_code_sql.as_str());
-                            //     //     }
-                            //     // }
-                            // }
                         }
-                        let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
                         let mut value_sql = insert_ssc_room_node(room_code_map, zone_code_map,
                                                                  ssc_zone_map_clone, ssc_zone_name_map_clone, &pool_clone).await;
                         if value_sql.len() != 0 {
+                            let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
                             value_sql.remove(value_sql.len() - 1);
                             let insert_sql = format!("{}{} ;", insert_sql, value_sql);
                             let result = project_conn.execute(insert_sql.as_str()).await;
@@ -564,7 +526,8 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
 
 
 ///单线程保存
-pub async fn sync_total_async_threading(db_option: &options::DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
+pub async fn sync_total_async_threading(db_option: &options::DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>,
+                                        ssc_zone_map: HashMap<String, RefU64>, ssc_zone_name_map: HashMap<String, String>) -> anyhow::Result<()> {
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
@@ -595,6 +558,8 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                 let info_pool_clone = info_pool.clone();
                 let filename_clone = file_name_clone.clone();
                 let db_option_clone = db_option.clone();
+                let ssc_zone_map_clone = ssc_zone_map.clone();
+                let ssc_zone_name_map_clone = ssc_zone_name_map.clone();
                 // let handle = tokio::spawn(async move {
                 let project_clones = project_clone.clone();
                 //后面再考虑成不同的table，如显示属性和隐藏属性
@@ -611,6 +576,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                  field_no,
                                  version,
                                  room_code_map,
+                                 zone_code_map,
                                  ..
                              })) = tokio::task::spawn_blocking(move || {
                     parse_file(&path, &None, &file_name, &project_clone.clone(), "")
@@ -732,47 +698,34 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                     }
                     let mut project_conn = pool_clone.acquire().await.unwrap();
                     // 将带有 room_code 属性的保存下来
-                    for (room_name, refnos) in room_code_map {
+                    for (room_name, refnos) in room_code_map.clone() {
                         // 将room_code单独存放到room_code表中
                         let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
                         for refno in refnos.clone() {
                             room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
                         }
-
+                        room_code_sql.remove(room_code_sql.len() - 1);
+                        let result = project_conn.execute(room_code_sql.as_str()).await;
+                        match result {
+                            Ok(_) => {}
+                            Err(e) => {
+                                dbg!(&e);
+                                dbg!(room_code_sql.as_str());
+                            }
+                        }
+                    }
+                    let mut value_sql = insert_ssc_room_node(room_code_map, zone_code_map,
+                                                             ssc_zone_map_clone, ssc_zone_name_map_clone, &pool_clone).await;
+                    if value_sql.len() != 0 {
                         let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
-                        let mut values_sql = String::new();
-                        let room_name = room_name.split('-').collect::<Vec<_>>()[0];
-                        if let Ok(Some(owner_refno)) = query_id_from_name_ssc(room_name, pool_clone.clone()).await {
-                            let mut order = 0;
-                            for refno in refnos {
-                                if let Some(total_attr) = &total_attr_map.get(&refno) {
-                                    let type_name = total_attr.implicit_attmap.get_type();
-                                    let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
-                                        .replace(r#"""#, r#"\""#).replace(r#"\"#, r#"\\"#);
-                                    values_sql.push_str(&gen_insert_ssc_node_sql(refno, type_name, owner_refno, &name, order).1);
-                                }
-                                order += 1;
-                            }
-                            values_sql.remove(values_sql.len() - 1);
-                            values_sql.push_str(";");
-                            let sql = format!("{}{}", insert_sql, values_sql);
-                            let result = project_conn.execute(sql.as_str()).await;
-                            match result {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(&e);
-                                    dbg!(sql.as_str());
-                                }
-                            }
-
-                            room_code_sql.remove(room_code_sql.len() - 1);
-                            let result = project_conn.execute(room_code_sql.as_str()).await;
-                            match result {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(&e);
-                                    dbg!(room_code_sql.as_str());
-                                }
+                        value_sql.remove(value_sql.len() - 1);
+                        let insert_sql = format!("{}{} ;", insert_sql, value_sql);
+                        let result = project_conn.execute(insert_sql.as_str()).await;
+                        match result {
+                            Ok(_) => {}
+                            Err(e) => {
+                                dbg!(&e);
+                                dbg!(insert_sql.as_str());
                             }
                         }
                     }
