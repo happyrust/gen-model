@@ -391,7 +391,11 @@ impl AiosDBManager {
     /// 获得pool
     #[inline]
     pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
-        MySqlPool::connect(&format!("{connection_str}/{project}")).await.map_err(|x| anyhow!(x.to_string()))
+        MySqlPool::connect(&format!("{connection_str}/{}",project)).await.map_err(
+            {
+                |x| anyhow!(x.to_string())
+            }
+        )
     }
 
     ///获得默认的pool
@@ -433,7 +437,7 @@ impl AiosDBManager {
         // let process_stats = ProcessStats::get().await.expect("could not get stats for running process");
         // println!("{:?}", process_stats);
 
-        let info_conn = AiosDBManager::get_db_pool(&default_conn, &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name)).await?;
+        let info_conn = AiosDBManager::get_db_pool(&default_conn, &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name.to_uppercase())).await?;
         let ref0_map = get_ref0_map(&info_conn).await?;
         // let cached_refno_type_map = get_refno_table_map(&project);
         let projects = db_option.included_projects.clone();

@@ -4,9 +4,9 @@ use std::fmt::format;
 use aios_core::pdms_types::{RefI32Tuple, RefU64, RefU64Vec};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::PDMS_ELEMENTS_TABLE;
-use crate::api::element::query_children;
+use crate::api::element::{query_children, query_owner_from_id, query_refno_type};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use serde::{Serialize,Deserialize};
+use serde::{Serialize, Deserialize};
 
 /// 遍历该节点下的 children (包含自己)
 pub async fn travel_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
@@ -65,16 +65,26 @@ pub async fn query_children_id_name_with_type(refno: RefU64, att_type: &str, poo
 }
 
 /// 模糊查询 类型为 att_type ，name 中包含指定值的所有 refno和 name
-pub async fn fuzzy_query_refnos_by_name(att_type:String,name:String,pool:&Pool<MySql>) -> anyhow::Result<Vec<(RefU64,String)>> {
+pub async fn fuzzy_query_refnos_by_name(att_type: String, name: String, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = vec![];
-    let sql = gen_fuzzy_query_refnos_by_name_sql(att_type,name);
+    let sql = gen_fuzzy_query_refnos_by_name_sql(att_type, name);
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     for val in vals {
-        let refno = RefU64(val.get::<i64,_>("ID") as u64);
-        let name = val.get::<String,_>("NAME");
-        result.push((refno,name));
+        let refno = RefU64(val.get::<i64, _>("ID") as u64);
+        let name = val.get::<String, _>("NAME");
+        result.push((refno, name));
     }
     Ok(result)
+}
+
+/// 通过 refno 获取 owner 和 owner 的type
+pub async fn query_owner_type_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<(RefU64, String)>> {
+    if let Ok(Some(owner)) = query_owner_from_id(refno, pool).await {
+        if let Ok(att_type) = query_refno_type(owner, pool).await {
+            return Ok(Some((owner, att_type)));
+        }
+    }
+    Ok(None)
 }
 
 fn gen_query_names_from_refnos_sql(refnos: Vec<RefU64>, att_type: String) -> String {
@@ -95,9 +105,15 @@ fn gen_query_children_id_name_with_type_sql(refno: RefU64, att_type: &str) -> St
     sql
 }
 
-fn gen_fuzzy_query_refnos_by_name_sql(att_type:String,name:String) -> String {
+fn gen_fuzzy_query_refnos_by_name_sql(att_type: String, name: String) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND NAME LIKE '%{}%'",att_type,name));
+    sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND NAME LIKE '%{}%'", att_type, name));
+    sql
+}
+
+fn gen_query_owner_type_from_id(refno: RefU64) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT OWNER,TYPE FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND IS_DEL = 0 ", refno.0));
     sql
 }
 
