@@ -391,11 +391,20 @@ impl AiosDBManager {
     /// 获得pool
     #[inline]
     pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
-        MySqlPool::connect(&format!("{connection_str}/{}",project)).await.map_err(
+        MySqlPool::connect(&format!("{connection_str}/{}", project)).await.map_err(
             {
                 |x| anyhow!(x.to_string())
             }
         )
+    }
+
+    pub fn gen_pool_from_refno(self, refno: RefU64) -> anyhow::Result<Option<Pool<MySql>>> {
+        if let Some(project) = self.ref0_map.get(&refno.get_0()) {
+            if let Some(project_pool) = self.project_map.get(project.value()) {
+                return Ok(Some(project_pool.value().clone()));
+            }
+        }
+        Ok(None)
     }
 
     ///获得默认的pool

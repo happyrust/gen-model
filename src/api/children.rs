@@ -1,7 +1,8 @@
 use std::collections::VecDeque;
 use std::env;
 use std::fmt::format;
-use aios_core::pdms_types::{RefI32Tuple, RefU64, RefU64Vec};
+use aios_core::pdms_types::{EleTreeNode, RefI32Tuple, RefU64, RefU64Vec};
+use calamine::Error::De;
 use sqlx::{MySql, Pool, Row};
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::api::element::{query_children, query_owner_from_id, query_refno_type};
@@ -33,22 +34,29 @@ pub struct SimpleNodeDataForPlat {
 }
 
 /// 遍历该节点的所有子节点为指定type的所有数据 返回 refno name owner
-pub async fn travel_children_with_type_for_plat(refno: RefU64, att_type: String, pool: &Pool<MySql>) -> anyhow::Result<Vec<SimpleNodeDataForPlat>> {
+pub async fn travel_children_with_type(refno: RefU64, att_type: String, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut result = vec![];
     let children = travel_children_eles(refno, pool).await?;
-    let sql = gen_query_names_from_refnos_sql(children, att_type);
+    let sql = gen_query_names_from_refnos_with_type_sql(children, att_type);
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     for val in vals {
         let refno = RefU64(val.get::<i64, _>("ID") as u64);
         let name = val.get::<String, _>("NAME");
         let owner = RefU64(val.get::<i64, _>("OWNER") as u64);
-        result.push(SimpleNodeDataForPlat {
-            refno: refno.to_refno_str().to_string(),
+        result.push(EleTreeNode {
+            refno,
             name,
-            owner: owner.to_refno_str().to_string(),
+            owner,
+            ..Default::default()
         });
     }
     Ok(result)
+}
+
+/// 遍历该节点的所有子节点为指定refno的所有数据 返回 refno name owner
+pub async fn travel_children_with_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
+    let children = travel_children_eles(refno, pool).await?;
+    Ok(children)
 }
 
 /// 查询指定type的children 的 id 、 name
@@ -87,7 +95,7 @@ pub async fn query_owner_type_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyh
     Ok(None)
 }
 
-fn gen_query_names_from_refnos_sql(refnos: Vec<RefU64>, att_type: String) -> String {
+fn gen_query_names_from_refnos_with_type_sql(refnos: Vec<RefU64>, att_type: String) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID,NAME,OWNER FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND ID IN ( ", att_type));
     let mut insert_sql = String::new();
@@ -98,6 +106,31 @@ fn gen_query_names_from_refnos_sql(refnos: Vec<RefU64>, att_type: String) -> Str
     sql.push_str(&format!("{} );", insert_sql));
     sql
 }
+
+fn gen_query_names_from_refnos_sql(refnos: Vec<RefU64>) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT ID,NAME,OWNER FROM {PDMS_ELEMENTS_TABLE} WHERE ID IN ( "));
+    let mut insert_sql = String::new();
+    for refno in refnos {
+        insert_sql.push_str(&format!("{},", refno.0));
+    }
+    insert_sql.remove(insert_sql.len() - 1);
+    sql.push_str(&format!("{} );", insert_sql));
+    sql
+}
+
+fn gen_query_names_from_refnos_with_name_sql(refnos: Vec<RefU64>, name: String) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT ID,NAME,OWNER FROM {PDMS_ELEMENTS_TABLE} WHERE NAME = '{}' IN ( ", name));
+    let mut insert_sql = String::new();
+    for refno in refnos {
+        insert_sql.push_str(&format!("{},", refno.0));
+    }
+    insert_sql.remove(insert_sql.len() - 1);
+    sql.push_str(&format!("{} );", insert_sql));
+    sql
+}
+
 
 fn gen_query_children_id_name_with_type_sql(refno: RefU64, att_type: &str) -> String {
     let mut sql = String::new();
