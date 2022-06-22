@@ -481,7 +481,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                         let mut project_conn = pool_clone.acquire().await.unwrap();
                         // 将带有 room_code 属性的保存下来
                         for (room_name, refnos) in room_code_map.clone() {
-                            // 将room_code单独存放到room_code表中
+                            // 将 room_code 单独存放到 room_code 表中
                             let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
                             for refno in refnos.clone() {
                                 room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
@@ -662,7 +662,8 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                     }
 
                                     //执行显示数据保存
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                    // let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                    let mut sql = format!("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
                                     sql.push_str(explicit_values_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
@@ -675,7 +676,8 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                     }
 
                                     // {PDMS_ELEMENTS_TABLE} 保存
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL  ) VALUES ");
+                                    // let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL  ) VALUES ");
+                                    let mut sql = format!("REPLACE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL  ) VALUES ");
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
@@ -700,7 +702,8 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                     // 将带有 room_code 属性的保存下来
                     for (room_name, refnos) in room_code_map.clone() {
                         // 将room_code单独存放到room_code表中
-                        let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                        // let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                        let mut room_code_sql = format!("REPLACE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
                         for refno in refnos.clone() {
                             room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
                         }
@@ -717,7 +720,8 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                     let mut value_sql = insert_ssc_room_node(room_code_map, zone_code_map,
                                                              ssc_zone_map_clone, ssc_zone_name_map_clone, &pool_clone).await;
                     if value_sql.len() != 0 {
-                        let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
+                        // let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
+                        let insert_sql = "REPLACE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
                         value_sql.remove(value_sql.len() - 1);
                         let insert_sql = format!("{}{} ;", insert_sql, value_sql);
                         let result = project_conn.execute(insert_sql.as_str()).await;

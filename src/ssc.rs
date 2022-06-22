@@ -112,7 +112,8 @@ fn get_room_info_from_excel() -> anyhow::Result<HashMap<String, Vec<SmolStr>>> {
 }
 
 pub async fn insert_set_ssc_node_sql(pool: Pool<MySql>) -> anyhow::Result<(HashMap<String, RefU64>, HashMap<String, String>)> {
-    let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
+    // let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
+    let insert_sql = "REPLACE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
     let (sql, zone_map, zone_name_map) = set_ssc_node();
     let sql = format!("{}{}", insert_sql, sql);
     let mut conn = pool.acquire().await?;
