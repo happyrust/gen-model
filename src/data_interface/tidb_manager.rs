@@ -82,7 +82,10 @@ pub struct AiosDBManager {
 
     cached_refno_basic_map: Arc<DashMap<RefU64, CachedRefBasic>>,    //缓存到本地数据库
 
-    cached_world_transforms_map: Arc<DashMap<RefU64, TransformRT>>,   //记录所有需要记录的world transform, need to flush to database
+    cached_world_transforms_map: Arc<DashMap<RefU64, TransformRT>>,
+    //记录所有需要记录的world transform, need to flush to database
+
+    cached_site: Vec<PdmsElement>, // site 层级的缓存
 }
 
 #[async_trait]
@@ -350,6 +353,8 @@ impl PdmsDataInterface for AiosDBManager {
             translation,
         }))
     }
+
+
 }
 
 
@@ -426,6 +431,7 @@ impl AiosDBManager {
 
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
+        let mut cached_site = vec![];
         let cached_refno_basic_map: Arc<DashMap<RefU64, CachedRefBasic>> = Arc::new(Default::default());
         // let process_stats = ProcessStats::get().await.expect("could not get stats for running process");
         // println!("{:?}", process_stats);
@@ -436,15 +442,16 @@ impl AiosDBManager {
                 Ok(pool) => {
                     //暂时保存在内存，需要序列化到heed LMDB数据库
                     sync_refno_basic_map(&pool, cached_refno_basic_map.clone()).await.unwrap();
-                    project_map.entry(project.clone()).or_insert(pool);
+                    project_map.entry(project.clone()).or_insert(pool.clone());
+                    // 将树节点的site层提前缓存下来
+                    let site_cache = cache_site_node(&db_option.mdb_name, &db_option.module, &pool).await;
+                    cached_site = site_cache;
                 }
                 Err(_) => { println!("project: {} init failed", project); }
             }
         }
         println!("缓存RefBasic数据花费：{}ms", time.elapsed().as_millis());
         dbg!(cached_refno_basic_map.len());
-        // let process_stats = ProcessStats::get().await.expect("could not get stats for running process");
-        // println!("{:?}", process_stats);
 
         let info_conn = AiosDBManager::get_db_pool(&default_conn, &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name.to_uppercase())).await?;
         let ref0_map = get_ref0_map(&info_conn).await?;
@@ -462,8 +469,11 @@ impl AiosDBManager {
                 mesh_mgr: Arc::new(Default::default()),
                 cached_refno_basic_map,
                 cached_world_transforms_map: Arc::new(Default::default()),
+                cached_site,
             }
         )
+
+
     }
 
     ///获得 project 名称
@@ -639,7 +649,7 @@ impl AiosDBManager {
         let pool = AiosDBManager::get_db_pool(&url, project).await?;
         let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
 
-        let mut dbnos = None;
+        let mut dbnos = Some(vec![1402]);
 
         // dbg!(&mdb_dbnos_map);
         let key_str = format!("/{mdb}");
@@ -720,7 +730,7 @@ impl AiosDBManager {
             "SCTN",
         ]);
 
-        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Option::from(vec![1900])).await?;
+        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Some(vec![1402])).await?;
         dbg!(&has_cata_refnos.len());
         let mut handles = vec![];
         // let hash_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 5495)]);
@@ -798,7 +808,7 @@ impl AiosDBManager {
     /// 生成基本体的几何数据
     pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, Some(vec![1900])).await?;
+        let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, Some(vec![1402])).await?;
         // let test_refno = RefU64::from_two_nums(23584, 2705);
         // prim_refnos = RefU64Vec(vec![test_refno]);
         let prim_cnt = prim_refnos.len();
@@ -939,7 +949,7 @@ impl AiosDBManager {
     //
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], Option::from(vec![1900])).await?;
+        let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], Some(vec![1402])).await?;
         let loop_cnt = loop_refnos.len();
         //最好是批量取数据，而不是循环去取
         //处理loop elements
@@ -1065,11 +1075,17 @@ impl AiosDBManager {
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
         Ok(true)
     }
+
+    /// 获取缓存好的site
+    pub fn get_cached_site_nodes(&self) -> anyhow::Result<Vec<PdmsElement>> {
+        Ok(self.cached_site.clone())
+    }
 }
 
 
 use config::{Config, ConfigError, Environment, File};
 use dashmap::mapref::one::Ref;
+use crate::api::children::cache_site_node;
 use crate::api::refno_info::{get_ref0_map, sync_refno_basic_map};
 use crate::ATTR_INFO_MAP;
 use crate::cata::query_cata::resolve_desi_comp;

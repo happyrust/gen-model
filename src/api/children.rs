@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
 use std::env;
 use std::fmt::format;
-use aios_core::pdms_types::{EleTreeNode, RefI32Tuple, RefU64, RefU64Vec};
+use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefI32Tuple, RefU64, RefU64Vec};
 use calamine::Error::De;
 use sqlx::{MySql, Pool, Row};
 use crate::consts::PDMS_ELEMENTS_TABLE;
-use crate::api::element::{query_children, query_owner_from_id, query_refno_type};
+use crate::api::element::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};
 
@@ -33,6 +33,7 @@ pub struct SimpleNodeDataForPlat {
     pub owner: String,
 }
 
+
 /// 遍历该节点的所有子节点为指定type的所有数据 返回 refno name owner
 pub async fn travel_children_with_type(refno: RefU64, att_type: String, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut result = vec![];
@@ -52,6 +53,7 @@ pub async fn travel_children_with_type(refno: RefU64, att_type: String, pool: &P
     }
     Ok(result)
 }
+
 
 /// 遍历该节点的所有子节点为指定refno的所有数据 返回 refno name owner
 pub async fn travel_children_with_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
@@ -93,6 +95,58 @@ pub async fn query_owner_type_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyh
         }
     }
     Ok(None)
+}
+
+pub async fn query_ancestor_of_type(mut refno: RefU64, att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
+    while let Some((owner_refno, owner_type)) = query_owner_type_from_id(refno, pool).await? {
+        refno = owner_refno;
+        if owner_type == att_type {
+            break;
+        }
+    }
+    Ok(Some(refno))
+}
+
+/// 获取children有那些tpe
+pub async fn query_children_contains_types(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<Vec<String>>> {
+    if let Ok(children) = query_children_eles(refno, pool).await {
+        let result = children.into_iter().map(|child| {
+            child.noun
+        }).collect::<Vec<String>>();
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+/// 查找他的owner直到包含传进来的Vec<att_type>
+pub async fn query_owner_till_type(mut refno: RefU64, types: Vec<String>, pool: &Pool<MySql>) -> anyhow::Result<RefU64> {
+    while let Some((owner_refno, owner_type)) = query_owner_type_from_id(refno, pool).await? {
+        refno = owner_refno;
+        if types.contains(&owner_type) {
+            break;
+        }
+    }
+    Ok(refno)
+}
+
+/// 将树节点的 site 提前保存下来
+pub async fn cache_site_node(mdb: &str, module: &str, pool: &Pool<MySql>) -> Vec<PdmsElement> {
+    if let Ok(world) = query_world(mdb, module, pool).await {
+        if let Ok(children) = query_world_children_eles(mdb, module, pool).await {
+            let children = children.into_iter().map(|child| {
+                PdmsElement {
+                    refno: child.refno,
+                    owner: world.refno,
+                    name: child.name,
+                    noun: child.noun,
+                    version: child.version,
+                    children_count: child.children_count,
+                }
+            }).collect::<Vec<PdmsElement>>();
+            return children;
+        }
+    }
+    vec![]
 }
 
 fn gen_query_names_from_refnos_with_type_sql(refnos: Vec<RefU64>, att_type: String) -> String {
@@ -159,5 +213,16 @@ async fn test_travel_children_eles() -> anyhow::Result<()> {
     let refno: RefU64 = RefI32Tuple((23584, 5693)).into();
     let v = travel_children_eles(refno, &pool).await?;
     dbg!(&v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_ancestor_of_type() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
+    let refno: RefU64 = RefI32Tuple((23584, 38)).into();
+    let v = query_ancestor_of_type(refno, "SITE", &pool).await?;
+    println!("v={:?}", v);
     Ok(())
 }

@@ -84,8 +84,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     let mut pdms_info_conn = pdms_info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
     for project in &db_option.included_projects {
-        let mut ssc_zone_map = HashMap::new();
-        let mut ssc_zone_name_map = HashMap::new();
         if db_option.recreate_db {
             init_database(project, &default_conn_str).await?;
             let mut table_time = Instant::now();
@@ -137,18 +135,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                     dbg!(tables_sql.as_str());
                 }
             }
-            // 创建 ssc树的固定节点
-            let result = conn.execute(tables::gen_create_ssc_element_tables_sql().as_str()).await;
-            match result {
-                Ok(_) => {}
-                Err(e) => {
-                    dbg!(&e);
-                    dbg!(tables_sql.as_str());
-                }
-            }
-            let (zone_map, zone_name_map) = insert_set_ssc_node_sql(project_pool).await?;
-            ssc_zone_map = zone_map;
-            ssc_zone_name_map = zone_name_map;
+
 
             create_tables_elapse += table_time.elapsed().as_millis();
             let result = pdms_info_conn.execute(tables::gen_create_dbno_infos_tables_sql().as_str()).await;
@@ -172,14 +159,15 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         if db_option.types_multi_thread {
             dbg!("执行单线程解析");
             sync_total_async_threading(&db_option, project, project_pool.clone(),
-                                       pdms_info_pool.clone(), ssc_zone_map, ssc_zone_name_map).await.expect("同步数据失败");
+                                       pdms_info_pool.clone()).await.expect("同步数据失败");
         } else {
             dbg!("执行多线程解析");
             sync_total_async(&db_option, project, project_pool.clone(),
-                             pdms_info_pool.clone(), ssc_zone_map, ssc_zone_name_map).await.expect("同步数据失败");
+                             pdms_info_pool.clone()).await.expect("同步数据失败");
         }
         insert_project_mdb(&project_pool, &pdms_info_pool).await?;
     }
+
     println!("创建表花费时间: {} ms", create_tables_elapse);
     println!("初始化数据库时间: {} ms", time.elapsed().as_millis() - create_tables_elapse);
 
@@ -321,8 +309,7 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
 
 ///多线程保存
 pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
-                              pool: Pool<MySql>, info_pool: Pool<MySql>,
-                              ssc_zone_map: HashMap<String, RefU64>, ssc_zone_name_map: HashMap<String, String>) -> anyhow::Result<()> {
+                              pool: Pool<MySql>, info_pool: Pool<MySql> ) -> anyhow::Result<()> {
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
@@ -353,8 +340,6 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                 let info_pool_clone = info_pool.clone();
                 let filename_clone = file_name_clone.clone();
                 let db_option_clone = db_option.clone();
-                let ssc_zone_map_clone = ssc_zone_map.clone();
-                let ssc_zone_name_map_clone = ssc_zone_name_map.clone();
                 let handle = tokio::spawn(async move {
                     let project_clones = project_clone.clone();
                     //后面再考虑成不同的table，如显示属性和隐藏属性
@@ -371,7 +356,6 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                                      field_no,
                                      version,
                                      room_code_map,
-                                     zone_code_map,
                                      ..
                                  })) = tokio::task::spawn_blocking(move || {
                         parse_file(&path, &None, &file_name, &project_clone.clone(), "")
@@ -398,7 +382,6 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                                     dbg!(sql.as_str());
                                 }
                             }
-
                             //保存refno的信息表
                             let mut sql = format!("REPLACE INTO {PDMS_REFNO_INFOS_TABLE}(REF0, PROJECT) VALUES ");
                             for kv in &refno_info_map {
@@ -496,21 +479,6 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                                 }
                             }
                         }
-                        let mut value_sql = insert_ssc_room_node(room_code_map, zone_code_map,
-                                                                 ssc_zone_map_clone, ssc_zone_name_map_clone, &pool_clone).await;
-                        if value_sql.len() != 0 {
-                            let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
-                            value_sql.remove(value_sql.len() - 1);
-                            let insert_sql = format!("{}{} ;", insert_sql, value_sql);
-                            let result = project_conn.execute(insert_sql.as_str()).await;
-                            match result {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(&e);
-                                    dbg!(insert_sql.as_str());
-                                }
-                            }
-                        }
                     }
                 });
                 handles.push(handle);
@@ -526,8 +494,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
 
 
 ///单线程保存
-pub async fn sync_total_async_threading(db_option: &options::DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>,
-                                        ssc_zone_map: HashMap<String, RefU64>, ssc_zone_name_map: HashMap<String, String>) -> anyhow::Result<()> {
+pub async fn sync_total_async_threading(db_option: &options::DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
@@ -558,8 +525,6 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                 let info_pool_clone = info_pool.clone();
                 let filename_clone = file_name_clone.clone();
                 let db_option_clone = db_option.clone();
-                let ssc_zone_map_clone = ssc_zone_map.clone();
-                let ssc_zone_name_map_clone = ssc_zone_name_map.clone();
                 // let handle = tokio::spawn(async move {
                 let project_clones = project_clone.clone();
                 //后面再考虑成不同的table，如显示属性和隐藏属性
@@ -576,7 +541,6 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                  field_no,
                                  version,
                                  room_code_map,
-                                 zone_code_map,
                                  ..
                              })) = tokio::task::spawn_blocking(move || {
                     parse_file(&path, &None, &file_name, &project_clone.clone(), "")
@@ -714,22 +678,6 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                             Err(e) => {
                                 dbg!(&e);
                                 dbg!(room_code_sql.as_str());
-                            }
-                        }
-                    }
-                    let mut value_sql = insert_ssc_room_node(room_code_map, zone_code_map,
-                                                             ssc_zone_map_clone, ssc_zone_name_map_clone, &pool_clone).await;
-                    if value_sql.len() != 0 {
-                        // let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
-                        let insert_sql = "REPLACE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
-                        value_sql.remove(value_sql.len() - 1);
-                        let insert_sql = format!("{}{} ;", insert_sql, value_sql);
-                        let result = project_conn.execute(insert_sql.as_str()).await;
-                        match result {
-                            Ok(_) => {}
-                            Err(e) => {
-                                dbg!(&e);
-                                dbg!(insert_sql.as_str());
                             }
                         }
                     }
