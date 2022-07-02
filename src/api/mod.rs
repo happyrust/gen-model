@@ -10,6 +10,7 @@ pub mod refno_info;
 pub mod dbno_version;
 pub mod children;
 pub mod increment;
+pub mod ssc_data;
 
 pub mod test_sample;
 pub mod data_state;

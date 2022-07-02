@@ -19,6 +19,8 @@ pub struct DbOption {
     #[clap(long)]
     pub mdb_name: String,
     #[clap(long)]
+    pub module: String,
+    #[clap(long)]
     pub project_name: String,
     #[clap(short)]
     pub main_db_code: u32,

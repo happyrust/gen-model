@@ -18,6 +18,7 @@ use crate::api::test_sample::{get_test_info_pool, get_test_sample_pool};
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
+pub const ATT_DIVCO: i32 = 688051937;
 
 /// 通过 refno 返回对应的 type
 pub async fn query_refno_type(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<String> {
@@ -35,14 +36,6 @@ pub async fn query_children_pdms_tree(mdb: &str, model: &str, refno: RefU64, poo
     };
 }
 
-pub async fn query_children_pdms_tree_ele_node(mdb: &str, model: &str, refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
-    let type_name = query_refno_type(refno, &pool).await?;
-    return if type_name == "WORL" {
-        query_world_children_eles(mdb, model, &pool).await
-    } else {
-        query_children_eles(refno, &pool).await
-    };
-}
 
 pub async fn query_world_children(mdb: &str, model: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = vec![];
@@ -58,6 +51,18 @@ pub async fn query_world_children(mdb: &str, model: &str, pool: &Pool<MySql>) ->
 
 /// 获取world下的pdms elements
 pub async fn query_world_children_eles(mdb: &str, model: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
+    let mut result = vec![];
+    let mdb = format!("/{mdb}");
+    let world_data = query_world_data(&mdb, model, pool).await?;
+    let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
+    for world in data {
+        let children = query_children_eles(world, pool).await?;
+        result.push(children);
+    }
+    Ok(result.into_iter().flatten().collect())
+}
+
+pub async fn query_world_children_elenode(mdb: &str, model: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
     let mut result = vec![];
     let mdb = format!("/{mdb}");
     let world_data = query_world_data(&mdb, model, pool).await?;
@@ -142,6 +147,19 @@ pub async fn query_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result
     })
 }
 
+/// 查询生成Element node ,不查询children_count 默认为 0
+pub async fn query_elenode_without_children_count(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
+    let sql = format!("SELECT * FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} and IS_DEL = 0;", *refno);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    Ok(EleTreeNode {
+        refno,
+        noun: result.get::<String, _>("TYPE"),
+        name: result.get::<String, _>("NAME"),
+        owner: RefU64::from(result.get::<i64, _>("OWNER") as u64),
+        children_count: 0,
+    })
+}
+
 pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<PdmsElement>> {
     let mdb = format!("/{}", mdb);
     let world_data = query_world_data(&mdb, module, &pool).await?;
@@ -182,19 +200,6 @@ pub async fn query_owner_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
     };
 }
 
-/// 生产
-fn gen_query_refno_infos_sql(refno: RefU64) -> String {
-    let mut sql = String::new();
-    sql.push_str(&format!("SELECT PROJECT FROM {PDMS_REFNO_INFOS_TABLE} WHERE REF0 = {} LIMIT 1;", refno.get_0()));
-    sql
-}
-
-// pub async fn query_project_hash(refno: RefU64, pool: Pool<MySql>) -> anyhow::Result<u32> {
-//     let sql = gen_query_refno_infos_sql(refno);
-//     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-//     let val = result.get::<String, _>("project");
-//     Ok(val)).get_u32_hash())
-// }
 /// 通过 name 获取 refno （pdms）
 pub async fn query_id_from_name(name: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_id_from_name_sql(name);
@@ -418,6 +423,16 @@ pub async fn query_types_refnos_names(types: &Vec<&str>, pool: &Pool<MySql>) -> 
     Ok(r)
 }
 
+/// 获取zone属于哪个专业
+pub async fn get_zone_divco(refno: RefU64, pool: &Pool<MySql>) -> String {
+    if let Ok(attr) = query_explicit_attr(refno, pool).await {
+        if let Some(val) = attr.map.get(&NounHash(ATT_DIVCO as u32)) {
+            return val.string_value();
+        }
+    }
+    "".to_string()
+}
+
 fn gen_query_types_refnos_names(types: &Vec<&str>) -> String {
     let mut sql = String::new();
     let mut types_sql = String::new();
@@ -496,7 +511,7 @@ pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, ord
     sql
 }
 
-pub fn gen_dbno_filename_insert_sql(dbno: u32, filename: &str, version: u32, project: &str, db_type: SmolStr) -> String {
+pub fn gen_dbno_filename_insert_sql(dbno: u32, filename: &str, version: u32, project: &str, db_type: String) -> String {
     let mut sql = String::new();
     sql.push_str(&format!(r#"({},'{}',{} , '{}','{}')"#, dbno, filename, version, project, db_type));
     sql
@@ -644,6 +659,17 @@ async fn test_query_children_pdms_tree_ele_node() -> anyhow::Result<()> {
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
     let refno: RefU64 = RefI32Tuple((15392, 0)).into();
     let v = query_children_pdms_tree_ele_node("SAMPLE", "DESI", refno, &pool).await?;
+    println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_zone_divco() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
+    let refno: RefU64 = RefI32Tuple((2013286748, 51294)).into();
+    let v = get_zone_divco(refno, &pool).await;
     println!("v={:?}", v);
     Ok(())
 }
