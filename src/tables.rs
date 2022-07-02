@@ -66,6 +66,8 @@ pub fn gen_create_element_tables_sql() -> String {
     sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
     sql.push_str(&format!(r#"{} BIGINT,"#, "OWNER"));
     sql.push_str(&format!(r#"{} VARCHAR(100),"#, "NAME"));
+    // world position 是否需要存储
+    // sql.push_str(&format!(r#"{} INT ,"#, "NUMBDB"));
     sql.push_str(&format!(r#"{} INT ,"#, "NUMBDB"));
     sql.push_str(&format!(r#"{} INT ,"#, "ORDER_NUM"));
     sql.push_str(&format!(r#"{} TINYINT(1) "#, "IS_DEL"));

@@ -32,7 +32,7 @@ append-only-vec = "0.1.2"
 
 
 parse_pdms_db = { path = "../aios-parse-pdms" }
-aios_core = { git = "https://gitee.com/happydpc/aios-core.git" }
+aios_core = { path = "../aios_core" }
 
 clap = { version = "3.1.18", features = ["derive"] }
 dashmap = { version = "5.2.0", features = ["serde"] }
