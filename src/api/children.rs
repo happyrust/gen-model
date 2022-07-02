@@ -149,6 +149,13 @@ pub async fn cache_site_node(mdb: &str, module: &str, pool: &Pool<MySql>) -> Vec
     vec![]
 }
 
+/// 找到某numbdb下的所有指定类型的参考号
+pub async fn get_refnos_by_numbdb(numbdb:i32,att_type:String) -> Vec<RefU64> {
+    vec![]
+}
+
+
+
 fn gen_query_names_from_refnos_with_type_sql(refnos: Vec<RefU64>, att_type: String) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID,NAME,OWNER FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND ID IN ( ", att_type));
@@ -201,6 +208,12 @@ fn gen_fuzzy_query_refnos_by_name_sql(att_type: String, name: String) -> String 
 fn gen_query_owner_type_from_id(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT OWNER,TYPE FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND IS_DEL = 0 ", refno.0));
+    sql
+}
+
+fn gen_get_refnos_by_numbdb(numbdb:i32,att_type:String) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT ID FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB = {} AND TYPE = {} ",numbdb,att_type));
     sql
 }
 

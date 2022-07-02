@@ -15070,7 +15070,7 @@
 		},
 		"553867": {
 			"612916": {
-				"name": "PTCD",
+				"name": "PTCDI",
 				"hash": 612916,
 				"offset": 0,
 				"default_val": {
@@ -18409,6 +18409,15 @@
 					"BoolType": false
 				},
 				"att_type": "BOOL"
+			},
+			"28933118" : {
+				"name": "unset",
+				"hash": 28933118,
+				"offset":38,
+				"default_val": {
+					"StringType": ""
+				},
+				"att_type": "STRING"
 			},
 			"835759": {
 				"name": "ALLO",
@@ -33772,7 +33781,7 @@
 				"att_type": "STRING"
 			},
 			"612916": {
-				"name": "PTCD",
+				"name": "PTCDI",
 				"hash": 612916,
 				"offset": 0,
 				"default_val": {

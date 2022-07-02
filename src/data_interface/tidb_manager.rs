@@ -353,8 +353,6 @@ impl PdmsDataInterface for AiosDBManager {
             translation,
         }))
     }
-
-
 }
 
 
@@ -472,8 +470,6 @@ impl AiosDBManager {
                 cached_site,
             }
         )
-
-
     }
 
     ///获得 project 名称
@@ -645,7 +641,8 @@ impl AiosDBManager {
         // dbg!(&has_cata_types);
         // let dbnos = query_mdb_dbnos_by_name("Sample").await?;
         let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
-        let info_pool = AiosDBManager::get_db_pool(&url, "PDMS_INFO_DB").await?;
+        let info_pool = AiosDBManager::get_db_pool(
+            &url, format!("PDMS_INFO_DB_{}", mgr.db_option.project_name.to_uppercase()).as_str()).await?;
         let pool = AiosDBManager::get_db_pool(&url, project).await?;
         let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
 

@@ -18,3 +18,5 @@ pub const PDMS_VERSION: &'static str = "PDMS_VERSION";
 // project_mdb
 // 专业表单
 pub const PROFESSION_TX_XT: &'static str = "TX_XT";
+
+pub const UNSET_NOUN: u32 = 28933118;

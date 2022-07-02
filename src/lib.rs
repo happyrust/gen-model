@@ -30,7 +30,7 @@ pub mod ssc;
 extern crate nom;
 
 #[derive(Default, Debug, Clone)]
-pub struct AttInfoMap{
+pub struct AttInfoMap {
     map: DashMap<i32, DashMap<i32, AttrInfo>>,
     type_att_names_map: DashMap<String, BTreeSet<String>>,
     type_explicit_att_names_map: DashMap<String, BTreeSet<String>>,
@@ -48,7 +48,7 @@ impl Deref for AttInfoMap {
 
 impl AttInfoMap {
     #[inline]
-    pub fn init_type_att_names_map(&mut self){
+    pub fn init_type_att_names_map(&mut self) {
         for k in &self.map {
             let type_name = db1_dehash(*k.key() as u32);
             for v in k.value() {
@@ -81,8 +81,8 @@ impl AttInfoMap {
     /// 获取有catref的类型
     #[inline]
     pub fn get_type_implicit_att_names(&self, type_name: &str) -> Vec<String> {
-        self.type_explicit_att_names_map.get(type_name).map(|v|{
-            v.value().iter().cloned().collect_vec()
+        self.type_explicit_att_names_map.get(type_name).map(|v| {
+            v.value().iter().cloned().filter(|x| x != "unset").collect_vec()
         }).unwrap_or_default()
         // self.type_explicit_att_names_map.iter().map(|x| x.clone()).collect::<Vec<_>>()
     }
