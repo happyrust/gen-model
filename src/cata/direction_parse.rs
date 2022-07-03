@@ -69,39 +69,6 @@ fn parse_rotation_struct(input: &str) -> IResult<&str, RotationStruct> {
     }))
 }
 
-
-// named!(parse_rotation_struct<&str, RotationStruct>, do_parse!(
-//     axis: recognize!(signed_axis) >>
-//     rot1: opt!(complete!(parse_axis_rotation)) >>
-//     rot2: opt!(complete!(parse_axis_rotation)) >>
-//     (RotationStruct{
-//         origin_axis: *AXISES_MAP.get(axis).unwrap(),
-//         rot1,
-//         rot2,
-//     })
-// ));
-// named!(signed_axis<&str, (Option<&str>, &str)>,
-//     pair!(
-//         opt!(tag!("-")),  // maybe sign?
-//         alt!(tag!("X") | tag!("Y") | tag!("Z"))
-//     )
-// );
-// named!(parse_angle<&str, f32>,
-//     alt!(
-//         float |
-//         delimited!( tag!("("), float, tag!(")") )
-//     )
-// );
-// //recognize!(pair!(parse_angle, signed_axis))
-// named!(parse_axis_rotation<&str, Rotation>, do_parse!(
-//     angle: parse_angle >>
-//     axis: recognize!(signed_axis) >>
-//     (Rotation{
-//         axis: *AXISES_MAP.get(axis).unwrap(),
-//         angle,   //need panic here
-//     })
-// ));
-
 ///解析expression到direction
 pub fn parse_expr_to_dir(expr: &str) -> Vec3 {
     if let Ok((_, res)) = parse_rotation_struct(expr) {

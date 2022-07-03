@@ -1,4 +1,4 @@
-total_sync = false
+total_sync = true
 incr_sync = false
 project_path = "/Volumes/DPC/12.1SP4Projects"
 included_projects = ["Sample", "Master"]

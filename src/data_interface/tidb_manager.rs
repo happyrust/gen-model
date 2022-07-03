@@ -580,8 +580,14 @@ impl AiosDBManager {
         //第一遍完成后，然后生成tubing
         let last_child = children.last().unwrap().clone();
         for refno in children {
+            if refno != RefU64::from_two_nums(23584, 7329){
+                continue;
+            }
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
             let geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap_or_default();
+            // if refno == RefU64::from_two_nums(23584, 7314) {
+            dbg!(&geoms);
+            // }
             let attr = mgr.get_attr(refno).await?;
             if let Some(arrive) = attr.get_i32("ARRI") {
                 if geoms.axis_map.contains_key(&arrive) {
@@ -650,84 +656,84 @@ impl AiosDBManager {
         }
         // dbg!(&dbnos);
         let mut att_types = vec!["BRAN"];
-        // att_types.extend_from_slice(&vec![
-        //     "TP",
-        //     // "SPLR",
-        //     "WELD",
-        //     "FILT",
-        //     "ELCONN",
-        //     "HELE",
-        //     "PCLA",
-        //     "PANE",
-        //     "CMPF",
-        //     "WALL",
-        //     "SUBE",
-        //     "FIXING",
-        //     // "INST",
-        //     "PJOI",
-        //     "PFIT",
-        //     // "CROS",
-        //     "GWALL",
-        //     "OLET",
-        //     // "BEND",
-        //     "IDAM",
-        //     "CLOS",
-        //     "FLOOR",
-        //     "SCLA",
-        //     // "SILE",
-        //     "EQUI",
-        //     // "COUP",
-        //     "GENSEC",
-        //     // "AHU",
-        //     "TAPE",
-        //     "FLEX",
-        //     // "HACC",
-        //     "VTWA",
-        //     // "DUCT",
-        //     // "TRNS",
-        //     "STRT",
-        //     "STWALL",
-        //     "HFAN",
-        //     "DAMP",
-        //     "PAVE",
-        //     "RNODE",
-        //     "PRTELE",
-        //     "GRIL",
-        //     "PCOM",
-        //     "FITT",
-        //     "GPART",
-        //     "THRE",
-        //     "UNIO",
-        //     "SCREED",
-        //     "NOZZ",
-        //     "PALJ",
-        //     "SUBJ",
-        //     "PLOO",
-        //     "SJOI",
-        //     "CABLE",
-        //     "BATT",
-        //     "CMFI",
-        //     "MESH",
-        //     "PLAT",
-        //     "CNODE",
-        //     "SCOJ",
-        //     "SEVE",
-        //     "FBLI",
-        //     // "STIF",
-        //     "SBFI",
-        //     // "OFST",
-        //     // "BRCO",
-        //     // "SELJ",
-        //     // "CAP",
-        //     "SCTN",
-        // ]);
+        att_types.extend_from_slice(&vec![
+            "TP",
+            // "SPLR",
+            "WELD",
+            "FILT",
+            "ELCONN",
+            "HELE",
+            "PCLA",
+            "PANE",
+            "CMPF",
+            "WALL",
+            "SUBE",
+            "FIXING",
+            // "INST",
+            "PJOI",
+            "PFIT",
+            // "CROS",
+            "GWALL",
+            "OLET",
+            // "BEND",
+            "IDAM",
+            "CLOS",
+            "FLOOR",
+            "SCLA",
+            // "SILE",
+            "EQUI",
+            // "COUP",
+            "GENSEC",
+            // "AHU",
+            "TAPE",
+            "FLEX",
+            // "HACC",
+            "VTWA",
+            // "DUCT",
+            // "TRNS",
+            // "STRT",
+            "STWALL",
+            "HFAN",
+            "DAMP",
+            "PAVE",
+            "RNODE",
+            "PRTELE",
+            "GRIL",
+            "PCOM",
+            "FITT",
+            "GPART",
+            "THRE",
+            "UNIO",
+            "SCREED",
+            "NOZZ",
+            "PALJ",
+            "SUBJ",
+            "PLOO",
+            "SJOI",
+            "CABLE",
+            "BATT",
+            "CMFI",
+            "MESH",
+            "PLAT",
+            "CNODE",
+            "SCOJ",
+            "SEVE",
+            "FBLI",
+            // "STIF",
+            "SBFI",
+            // "OFST",
+            // "BRCO",
+            // "SELJ",
+            // "CAP",
+            "SCTN",
+        ]);
 
-        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Some(vec![7200])).await?;
+        // let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Some(vec![7200])).await?;
         // dbg!(&has_cata_refnos.len());
         let mut handles = vec![];
-        let hash_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 5495)]);
-        let has_cata_cnt = hash_cata_refnos.len();
-        for (i, refno) in hash_cata_refnos.into_iter().enumerate() {
+        let has_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 7312)]);
+        let has_cata_cnt = has_cata_refnos.len();
+        for (i, refno) in has_cata_refnos.into_iter().enumerate() {
             let mgr = mgr.clone();
             let handle = tokio::spawn(async move {
                 let inst_map = &mgr.mesh_mgr.inst_mgr;
@@ -1064,8 +1070,8 @@ impl AiosDBManager {
     /// 生成模型
     pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<bool> {
         let mut time = Instant::now();
-        Self::cache_prim_geos(mgr.clone(), project).await?;
-        Self::cache_loop_geos(mgr.clone(), project).await?;
+        // Self::cache_prim_geos(mgr.clone(), project).await?;
+        // Self::cache_loop_geos(mgr.clone(), project).await?;
         // Self::cache_pohe_geos(mgr.clone(), project).await?;
         Self::cache_cata_geos(mgr.clone(), project, mdb).await?;
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());

@@ -236,7 +236,6 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             z: attr_map.get_as_smol_str("PZ")?,
             distance: "".into(),
             direction: {
-                // dbg!(attr_map.to_string_hashmap());
                 attr_map.get_as_smol_str("PTCD").unwrap_or("Y".into())
             },
             pconnect,

@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
                                    db_option.mdb_name.to_uppercase().as_str()).await?;
 
     // mgr.mesh_mgr.serialize_to_json_file();
-    mgr.mesh_mgr.serialize_to_bin_file(&db_option.project_name);
+    mgr.mesh_mgr.serialize_to_specify_file("/Users/dongpengcheng/rust-projects/new/AIOSEditor/assets/mesh/AIOSModel.bin");
     // mgr.mesh_mgr.serialize_to_json_file();
 
     println!("花费时间: {} ms", time.elapsed().as_millis());

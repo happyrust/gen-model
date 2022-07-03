@@ -658,8 +658,8 @@ async fn test_query_children_pdms_tree_ele_node() -> anyhow::Result<()> {
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
     let refno: RefU64 = RefI32Tuple((15392, 0)).into();
-    let v = query_children_pdms_tree_ele_node("SAMPLE", "DESI", refno, &pool).await?;
-    println!("v={:?}", v);
+    // let v = query_children_pdms_tree_ele_node("SAMPLE", "DESI", refno, &pool).await?;
+    // println!("v={:?}", v);
     Ok(())
 }
 

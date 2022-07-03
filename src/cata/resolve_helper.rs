@@ -485,24 +485,42 @@ pub fn resolve_dir_and_pos(axis: &AxisParam,
                            context: &HashMap<SmolStr, SmolStr>) -> (Vec<f64>, Vec<f64>) {
     //替换掉中间出现dataset的值的这种情况 X ( ATTRIB RPRO ANGL ) Z
     let mut dir_str = axis.direction.trim().to_string();
-    // //dbg!(&dir_str);
-    if dir_str.contains("(") {
-        let s: Vec<_> = dir_str.split("(").collect();
-        if s.len() > 1 {
-            let ss: Vec<_> = s[1].split(")").collect();
-            if ss.len() > 1 {
-                let val_str = ss[0];
-                let val_result = eval_str_to_f64(val_str, context).unwrap_or_default().to_string();
-                dir_str = dir_str.replace(val_str, &val_result);
+    let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();
+    let mut new_dir_str = dir_str.clone();
+    if !re.is_match(dir_str.as_str()) {
+        let mut is_two = false;
+        let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
+        for cap in re.captures_iter(&dir_str) {
+            if cap.len() == 4 {
+                let val_str= cap[2].to_string();
+                // dbg!(&val_str);
+                let val_result = eval_str_to_f64(&val_str, context).unwrap_or_default().to_string();
+                new_dir_str = dir_str.replace(&val_str, &val_result);
+                is_two = true;
             }
         }
+        if !is_two {
+            let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
+            for cap in re.captures_iter(&dir_str) {
+                if cap.len() == 6 {
+                    let val_str= cap[4].to_string();
+                    // dbg!(&val_str);
+                    let val_result = eval_str_to_f64(&val_str, context).unwrap_or_default().to_string();
+                    new_dir_str = dir_str.replace(&val_str, &val_result);
+                }
+            }
+        }
+
     }
+
+    // dbg!(&new_dir_str);
+
     let mut dir = vec![0.0f64; 3];
     let mut pos = vec![0.0f64; 3];
 
     let re = Regex::new(r"^P\d+$").unwrap();
-    if re.is_match(&dir_str) {
-        let pnt_indx = dir_str[1..].parse::<i32>().unwrap_or(i32::MAX);
+    if re.is_match(&new_dir_str) {
+        let pnt_indx = new_dir_str[1..].parse::<i32>().unwrap_or(i32::MAX);
         if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
             if let Some(axis) = resolve_axis_param(&scom.axis_params[indx], scom, context) {
                 dir = axis.dir.clone();
@@ -510,12 +528,13 @@ pub fn resolve_dir_and_pos(axis: &AxisParam,
             }
         }
     } else {
-        dir = parse_str_axis_to_vec3(&dir_str, ddangle).into();
+        dir = parse_str_axis_to_vec3(&new_dir_str, ddangle).into();
     }
     return (dir, pos);
 }
 
 pub fn parse_str_axis_to_vec3(paxis: &str, ddangle: f64) -> [f64; 3] {
+    // dbg!(&paxis);
     let paxis = paxis.to_uppercase().replace("AXIS", "").replace(" ", "");
     let mut paxis_str = &paxis[..];
     //含DDANGLE的处理
@@ -565,4 +584,32 @@ pub fn parse_str_axis_to_vec3(paxis: &str, ddangle: f64) -> [f64; 3] {
     }
     let v = parse_expr_to_dir(paxis_str);
     [f64_round_2(v[0] as f64), f64_round_2(v[1] as f64), f64_round_2(v[2] as f64)]
+}
+
+
+
+//[(.*[^-])([-?X|Y|Z])]?
+#[test]
+fn test_parse_dir() {
+    let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
+    let target = "-X (DESIGN PARAM 14 ) -Y";
+    // let target = "-X";
+    let target = target.trim();
+    let target = "-X ( DESIGN PARAM 14 ) -Y ( DESIGN PARAM 19 ) -Z";
+
+    // let re = Regex::new(r"(DESIGN?\s+)?([I|C|O)]?PARAM?)\s*(\d+)").unwrap();
+    // let input_exp = "DESIGN PARAM 1";
+    // dbg!(caps.into_iter().len());
+    for cap in re.captures_iter(&target) {
+        dbg!(cap.len());
+        // dbg!(&cap[0]);
+        dbg!(&cap[1]);
+        dbg!(&cap[2]);
+        dbg!(&cap[3]);
+        dbg!(&cap[4]);
+        dbg!(&cap[5]);
+        // dbg!(&cap[4]);
+        // println!("{} {} {} {}", &cap[1], &cap[2], &cap[3], &cap[4]);
+    }
+
 }
