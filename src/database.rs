@@ -204,7 +204,6 @@ pub fn gen_implicit_attr_insert_sql(hash: u32) -> (String, Vec<NounHash>) {
     table_columns_sql.push_str(&format!("INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
 
     let implicit_names = ATTR_INFO_MAP.get_type_implicit_att_names(type_name.as_str());
-    // let mut column_hashs = vec![];
     let column_hashs = implicit_names.iter().filter_map(|x| (x != "unset").then(|| NounHash(db1_hash(x.as_str())))).collect();
     let v_sql = implicit_names.iter().map(|x| qualified_column_name(x.as_str()))
         .join(",");

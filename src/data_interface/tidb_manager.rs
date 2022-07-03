@@ -226,6 +226,7 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(SmolStr::new(""))
     }
 
+    /// dbnos为空代表所有db都会去获取
     async fn get_refnos_by_types<'a>(&self, project: &'a str, att_types: &'a Vec<&str>, dbnos: Option<Vec<i32>>) -> anyhow::Result<RefU64Vec> {
         if let Some(project_pool) = self.project_map.get(project) {
             let r = query_types_refnos(att_types, project_pool.value(), dbnos).await?;
@@ -513,7 +514,7 @@ impl AiosDBManager {
     }
 
     ///获取单个元件的模型数据
-    pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64, result_map: &CateBrepShapeMap) -> anyhow::Result<bool> {
+    pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64, branch_att: &AttrMap, result_map: &CateBrepShapeMap) -> anyhow::Result<bool> {
         let cur_ele = mgr.get_refno_basic(design_refno).unwrap();
         let type_name = cur_ele.get_type();
         let owner = mgr.get_owner_ref_basic(design_refno).unwrap();
@@ -541,16 +542,11 @@ impl AiosDBManager {
         Ok(true)
     }
 
+    ///记录点集的信息
     ///获得branch的模型数据
-    pub async fn get_cata_branch_geoms(mgr: Arc<AiosDBManager>, branch_refno: RefU64, result_map: &CateBrepShapeMap) -> anyhow::Result<bool> {
-        let branch_att = mgr.get_implicit_attr(branch_refno, None).await?;
-        let type_name = branch_att.get_type();
-        if type_name != "BRAN" {
-            return Ok(false);
-        }
-        // dbg!(design_refno.to_refno_str());
+    async fn get_cata_branch_geoms(mgr: Arc<AiosDBManager>, branch_refno: RefU64, branch_att: &AttrMap, result_map: &CateBrepShapeMap) -> anyhow::Result<bool> {
+
         let bran_transform = mgr.get_world_transform(branch_refno).await?.unwrap_or_default();
-        // dbg!(bran_transform);
         let bran_htube_pt = bran_transform.transform_point3(branch_att.get_vec3("HPOS").ok_or(anyhow!("HPOS not exist".to_string()))?);
         let bran_ttube_pt = bran_transform.transform_point3(branch_att.get_vec3("TPOS").ok_or(anyhow!("TPOS not exist".to_string()))?);
         let htube_ref = branch_att.get_foreign_refno("HSTU").unwrap_or_default();
@@ -558,9 +554,9 @@ impl AiosDBManager {
         // dbg!(mgr.ref0_map.get(&htube_ref.get_0()));
         let mut bore = 0.0f32;
         if let Ok(hstube_att) = mgr.get_attr(htube_ref).await {
-            // dbg!(hstube_att.to_string_hashmap());
+            // dbg!(&hstube_att);
             let hstube_cat_att = mgr.get_attr(hstube_att.get_foreign_refno("CATR").unwrap_or_default()).await?;
-            // dbg!(hstube_cat_att.to_string_hashmap());
+            // dbg!(&hstube_cat_att);
             let params = hstube_cat_att.get_f64_vec("PARA").unwrap_or_default();
             if params.len() >= 2 {
                 bore = params[1] as f32;
@@ -654,84 +650,84 @@ impl AiosDBManager {
         }
         // dbg!(&dbnos);
         let mut att_types = vec!["BRAN"];
-        att_types.extend_from_slice(&vec![
-            "TP",
-            "SPLR",
-            "WELD",
-            "FILT",
-            "ELCONN",
-            "HELE",
-            "PCLA",
-            "PANE",
-            "CMPF",
-            "WALL",
-            "SUBE",
-            "FIXING",
-            "INST",
-            "PJOI",
-            "PFIT",
-            "CROS",
-            "GWALL",
-            "OLET",
-            // "BEND",
-            "IDAM",
-            "CLOS",
-            "FLOOR",
-            "SCLA",
-            "SILE",
-            "EQUI",
-            "COUP",
-            "GENSEC",
-            "AHU",
-            "TAPE",
-            "FLEX",
-            // "HACC",
-            "VTWA",
-            // "DUCT",
-            "TRNS",
-            "STRT",
-            "STWALL",
-            "HFAN",
-            "DAMP",
-            "PAVE",
-            "RNODE",
-            "PRTELE",
-            "GRIL",
-            "PCOM",
-            "FITT",
-            "GPART",
-            "THRE",
-            "UNIO",
-            "SCREED",
-            "NOZZ",
-            "PALJ",
-            "SUBJ",
-            "PLOO",
-            "SJOI",
-            "CABLE",
-            "BATT",
-            "CMFI",
-            "MESH",
-            "PLAT",
-            "CNODE",
-            "SCOJ",
-            "SEVE",
-            "FBLI",
-            "STIF",
-            "SBFI",
-            "OFST",
-            "BRCO",
-            "SELJ",
-            "CAP",
-            "SCTN",
-        ]);
+        // att_types.extend_from_slice(&vec![
+        //     "TP",
+        //     // "SPLR",
+        //     "WELD",
+        //     "FILT",
+        //     "ELCONN",
+        //     "HELE",
+        //     "PCLA",
+        //     "PANE",
+        //     "CMPF",
+        //     "WALL",
+        //     "SUBE",
+        //     "FIXING",
+        //     // "INST",
+        //     "PJOI",
+        //     "PFIT",
+        //     // "CROS",
+        //     "GWALL",
+        //     "OLET",
+        //     // "BEND",
+        //     "IDAM",
+        //     "CLOS",
+        //     "FLOOR",
+        //     "SCLA",
+        //     // "SILE",
+        //     "EQUI",
+        //     // "COUP",
+        //     "GENSEC",
+        //     // "AHU",
+        //     "TAPE",
+        //     "FLEX",
+        //     // "HACC",
+        //     "VTWA",
+        //     // "DUCT",
+        //     // "TRNS",
+        //     "STRT",
+        //     "STWALL",
+        //     "HFAN",
+        //     "DAMP",
+        //     "PAVE",
+        //     "RNODE",
+        //     "PRTELE",
+        //     "GRIL",
+        //     "PCOM",
+        //     "FITT",
+        //     "GPART",
+        //     "THRE",
+        //     "UNIO",
+        //     "SCREED",
+        //     "NOZZ",
+        //     "PALJ",
+        //     "SUBJ",
+        //     "PLOO",
+        //     "SJOI",
+        //     "CABLE",
+        //     "BATT",
+        //     "CMFI",
+        //     "MESH",
+        //     "PLAT",
+        //     "CNODE",
+        //     "SCOJ",
+        //     "SEVE",
+        //     "FBLI",
+        //     // "STIF",
+        //     "SBFI",
+        //     // "OFST",
+        //     // "BRCO",
+        //     // "SELJ",
+        //     // "CAP",
+        //     "SCTN",
+        // ]);
 
-        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Some(vec![1402])).await?;
+        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Some(vec![7200])).await?;
         // dbg!(&has_cata_refnos.len());
         let mut handles = vec![];
-        // let hash_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 5495)]);
-        let has_cata_cnt = has_cata_refnos.len();
-        for (i, refno) in has_cata_refnos.into_iter().enumerate() {
+        let hash_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 5495)]);
+        let has_cata_cnt = hash_cata_refnos.len();
+        for (i, refno) in hash_cata_refnos.into_iter().enumerate() {
             let mgr = mgr.clone();
             let handle = tokio::spawn(async move {
                 let inst_map = &mgr.mesh_mgr.inst_mgr;
@@ -741,8 +737,12 @@ impl AiosDBManager {
                 let mut item_trans = TransformSRT::default();
                 // let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
                 let brep_shapes = CateBrepShapeMap::new();
-                Self::get_cata_branch_geoms(mgr.clone(), refno, &brep_shapes).await.unwrap_or_default();
-                Self::get_cata_single_geoms(mgr.clone(), refno, &brep_shapes).await.unwrap_or_default();
+                let current_att = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
+                if current_att.get_type() == "BRAN" {
+                    Self::get_cata_branch_geoms(mgr.clone(), refno, &current_att, &brep_shapes).await.unwrap_or_default();
+                }else{
+                    Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes).await.unwrap_or_default();
+                }
                 // dbg!(&brep_shapes);
                 for (child_refno, shapes) in brep_shapes {
                     let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
@@ -804,7 +804,7 @@ impl AiosDBManager {
     /// 生成基本体的几何数据
     pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, Some(vec![1402])).await?;
+        let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, Some(vec![7200])).await?;
         // let test_refno = RefU64::from_two_nums(23584, 2705);
         // prim_refnos = RefU64Vec(vec![test_refno]);
         let prim_cnt = prim_refnos.len();
@@ -945,7 +945,7 @@ impl AiosDBManager {
     //
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], Some(vec![1402])).await?;
+        let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], Some(vec![7200])).await?;
         let loop_cnt = loop_refnos.len();
         //最好是批量取数据，而不是循环去取
         //处理loop elements
