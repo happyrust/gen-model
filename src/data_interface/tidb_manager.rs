@@ -636,7 +636,6 @@ impl AiosDBManager {
     pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
         let has_cata_types = ATTR_INFO_MAP.get_has_cat_ref_type_names();
-        dbg!(&has_cata_types);
         // let has_cata_types = has_cata_types.iter().map(|x| x.as_str()).collect();
         // dbg!(&has_cata_types);
         // let dbnos = query_mdb_dbnos_by_name("Sample").await?;
@@ -728,7 +727,7 @@ impl AiosDBManager {
         ]);
 
         let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Some(vec![1402])).await?;
-        dbg!(&has_cata_refnos.len());
+        // dbg!(&has_cata_refnos.len());
         let mut handles = vec![];
         // let hash_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 5495)]);
         let has_cata_cnt = has_cata_refnos.len();

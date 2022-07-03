@@ -92,12 +92,15 @@ async fn main() -> anyhow::Result<()> {
             async_total_ssc_data(&project_db.value()).await?;
         }
     }
+    let mut time = Instant::now();
     AiosDBManager::cache_geos_data(mgr.clone(), db_option.project_name.as_str(),
                                    db_option.mdb_name.to_uppercase().as_str()).await?;
 
     // mgr.mesh_mgr.serialize_to_json_file();
     mgr.mesh_mgr.serialize_to_bin_file(&db_option.project_name);
     // mgr.mesh_mgr.serialize_to_json_file();
+
+    println!("花费时间: {} ms", time.elapsed().as_millis());
 
     Ok(())
 }
