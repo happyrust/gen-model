@@ -85,6 +85,10 @@ async fn main() -> anyhow::Result<()> {
 
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
 
+    dbg!(mgr.get_attr(RefU64::from_refno_str("15213/494985").unwrap()).await).expect("TODO: panic message");
+
+    // return Ok(());
+
     let b_recreate_ssc = false;
     if b_recreate_ssc {
         for project_db in mgr.project_map.iter() {

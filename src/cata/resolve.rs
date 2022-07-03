@@ -30,6 +30,7 @@ pub fn resolve_gms(
     context: &HashMap<SmolStr, SmolStr>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
 ) -> Vec<CateGeoParam> {
+    // dbg!(&gmse_raw_paras);
     gmse_raw_paras
         .iter()
         .filter_map(|g| {

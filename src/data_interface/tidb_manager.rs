@@ -580,13 +580,14 @@ impl AiosDBManager {
         //第一遍完成后，然后生成tubing
         let last_child = children.last().unwrap().clone();
         for refno in children {
-            if refno != RefU64::from_two_nums(23584, 7329){
-                continue;
-            }
+            // if refno != RefU64::from_two_nums(23584, 7172){
+            //     continue;
+            // }
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
+            // dbg!(refno);
             let geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap_or_default();
             // if refno == RefU64::from_two_nums(23584, 7314) {
-            dbg!(&geoms);
+            // dbg!(&geoms);
             // }
             let attr = mgr.get_attr(refno).await?;
             if let Some(arrive) = attr.get_i32("ARRI") {
@@ -647,7 +648,7 @@ impl AiosDBManager {
         let pool = AiosDBManager::get_db_pool(&url, project).await?;
         let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
 
-        let mut dbnos = Some(vec![1402]);
+        let mut dbnos = Some(vec![7200]);
 
         // dbg!(&mdb_dbnos_map);
         let key_str = format!("/{mdb}");
@@ -659,7 +660,7 @@ impl AiosDBManager {
         att_types.extend_from_slice(&vec![
             "TP",
             // "SPLR",
-            "WELD",
+            // "WELD",
             "FILT",
             "ELCONN",
             "HELE",
@@ -677,7 +678,7 @@ impl AiosDBManager {
             "OLET",
             // "BEND",
             "IDAM",
-            "CLOS",
+            // "CLOS",
             "FLOOR",
             "SCLA",
             // "SILE",
@@ -718,7 +719,7 @@ impl AiosDBManager {
             "CNODE",
             "SCOJ",
             "SEVE",
-            "FBLI",
+            // "FBLI",
             // "STIF",
             "SBFI",
             // "OFST",
@@ -728,10 +729,10 @@ impl AiosDBManager {
             "SCTN",
         ]);
 
-        // let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Some(vec![7200])).await?;
+        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Some(vec![7200])).await?;
         // dbg!(&has_cata_refnos.len());
         let mut handles = vec![];
-        let has_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 7312)]);
+        // let has_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 7170)]);
         let has_cata_cnt = has_cata_refnos.len();
         for (i, refno) in has_cata_refnos.into_iter().enumerate() {
             let mgr = mgr.clone();
@@ -1070,8 +1071,8 @@ impl AiosDBManager {
     /// 生成模型
     pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<bool> {
         let mut time = Instant::now();
-        // Self::cache_prim_geos(mgr.clone(), project).await?;
-        // Self::cache_loop_geos(mgr.clone(), project).await?;
+        Self::cache_prim_geos(mgr.clone(), project).await?;
+        Self::cache_loop_geos(mgr.clone(), project).await?;
         // Self::cache_pohe_geos(mgr.clone(), project).await?;
         Self::cache_cata_geos(mgr.clone(), project, mdb).await?;
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
