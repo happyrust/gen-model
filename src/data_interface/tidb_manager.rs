@@ -3,6 +3,7 @@ use std::env;
 use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
 use aios_core::consts::*;
 // use simple_process_stats::ProcessStats;
 use aios_core::pdms_types::*;
@@ -15,18 +16,29 @@ use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
 use anyhow::anyhow;
 use append_only_vec::AppendOnlyVec;
 use approx::{abs_diff_eq, abs_diff_ne};
+use async_trait::async_trait;
+use config::{Config, ConfigError, Environment, File};
 use dashmap::{DashMap, DashSet};
+use dashmap::mapref::one::Ref;
 use glam::{Quat, quat, TransformRT, TransformSRT, Vec3};
 use id_tree::{Node, NodeId};
-use smol_str::SmolStr;
 use once_cell::sync::Lazy;
+use smol_str::SmolStr;
 use sqlx::{MySql, MySqlPool, Pool};
+
 use crate::api::attr::*;
+use crate::api::children::cache_site_node;
 use crate::api::element::*;
-use crate::data_interface::interface::PdmsDataInterface;
+use crate::api::refno_info::{get_ref0_map, sync_refno_basic_map};
+use crate::ATTR_INFO_MAP;
+use crate::cata::query_cata::resolve_desi_comp;
+use crate::cata::sctn;
+use crate::cata::sctn::geo::create_st_geos;
 use crate::consts::*;
+use crate::data_interface::defines::CachedRefBasic;
+use crate::data_interface::interface::PdmsDataInterface;
+use crate::helper::qualified_table_name;
 use crate::options::DbOption;
-use async_trait::async_trait;
 
 pub const TUBI_TOL: f32 = 10.0f32;
 
@@ -545,13 +557,16 @@ impl AiosDBManager {
     ///记录点集的信息
     ///获得branch的模型数据
     async fn get_cata_branch_geoms(mgr: Arc<AiosDBManager>, branch_refno: RefU64, branch_att: &AttrMap, result_map: &CateBrepShapeMap) -> anyhow::Result<bool> {
-
         let bran_transform = mgr.get_world_transform(branch_refno).await?.unwrap_or_default();
         let bran_htube_pt = bran_transform.transform_point3(branch_att.get_vec3("HPOS").ok_or(anyhow!("HPOS not exist".to_string()))?);
         let bran_ttube_pt = bran_transform.transform_point3(branch_att.get_vec3("TPOS").ok_or(anyhow!("TPOS not exist".to_string()))?);
         let htube_ref = branch_att.get_foreign_refno("HSTU").unwrap_or_default();
+        let hconnect = branch_att.get_as_string("HCON").unwrap_or_default();
+        let mut has_tubi = true;
+        if &hconnect == "DUCT" {
+            has_tubi = false;
+        }
         // dbg!(htube_ref);
-        // dbg!(mgr.ref0_map.get(&htube_ref.get_0()));
         let mut bore = 0.0f32;
         if let Ok(hstube_att) = mgr.get_attr(htube_ref).await {
             // dbg!(&hstube_att);
@@ -580,55 +595,61 @@ impl AiosDBManager {
         //第一遍完成后，然后生成tubing
         let last_child = children.last().unwrap().clone();
         for refno in children {
-            // if refno != RefU64::from_two_nums(23584, 7172){
+            // if refno != RefU64::from_two_nums(23584, 7384) {
             //     continue;
             // }
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
             // dbg!(refno);
-            let geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap_or_default();
-            // if refno == RefU64::from_two_nums(23584, 7314) {
+            let mut geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap_or_default();
             // dbg!(&geoms);
-            // }
             let attr = mgr.get_attr(refno).await?;
-            if let Some(arrive) = attr.get_i32("ARRI") {
-                if geoms.axis_map.contains_key(&arrive) {
-                    let p = &geoms.axis_map[&arrive].pt;
-                    let a_pos = world_trans.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
-                    if !current_tubing.finished && a_pos.distance(current_tubing.start_pt) > TUBI_TOL {
-                        current_tubing.end_pt = a_pos;
-                        current_tubing.finished = true;
-                        result_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+            //有隐含管段
+            if has_tubi {
+                if let Some(arrive) = attr.get_i32("ARRI") {
+                    if geoms.axis_map.contains_key(&arrive) {
+                        let p = &geoms.axis_map[&arrive].pt;
+                        let a_pos = world_trans.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
+                        if !current_tubing.finished && a_pos.distance(current_tubing.start_pt) > TUBI_TOL {
+                            current_tubing.end_pt = a_pos;
+                            current_tubing.finished = true;
+                            result_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                        }
                     }
                 }
-            }
-            if let Some(lstube) = attr.get_foreign_refno("LSTU") {
-                if let Ok(lstube_att) = mgr.get_attr(lstube).await {
-                    let lstube_cat_att = mgr.get_attr(lstube_att.get_foreign_refno("CATR").unwrap_or_default()).await?;
-                    let params = lstube_cat_att.get_f64_vec("PARA").unwrap_or_default();
-                    if params.len() >= 2 {
-                        current_tubing.bore = params[1] as f32;
+                if let Some(lstube) = attr.get_foreign_refno("LSTU") {
+                    if let Ok(lstube_att) = mgr.get_attr(lstube).await {
+                        let lstube_cat_att = mgr.get_attr(lstube_att.get_foreign_refno("CATR").unwrap_or_default()).await?;
+                        let params = lstube_cat_att.get_f64_vec("PARA").unwrap_or_default();
+                        if params.len() >= 2 {
+                            current_tubing.bore = params[1] as f32;
+                        }
                     }
                 }
-            }
-            if let Some(leave) = attr.get_i32("LEAV") {
-                if geoms.axis_map.contains_key(&leave) {
-                    let p = &geoms.axis_map[&leave].pt;
-                    let l_pos = world_trans.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
-                    current_tubing.start_pt = l_pos;
-                    current_tubing.finished = false;
+
+                if let Some(leave) = attr.get_i32("LEAV") {
+                    if geoms.axis_map.contains_key(&leave) {
+                        let p = &geoms.axis_map[&leave].pt;
+                        let l_pos = world_trans.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
+                        current_tubing.start_pt = l_pos;
+                        current_tubing.finished = false;
+                    }
                 }
             }
             //管件的生成
-            for geom in geoms.geometries {
+            let len = geoms.geometries.len();
+            for (i, geom) in geoms.geometries.into_iter().enumerate() {
                 if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
                     result_map.entry(refno).or_insert(Vec::new()).push(cate_shape);
                 }
-            } // end geoms.geometries
-            if refno == last_child {
-                if !current_tubing.finished && bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL {
-                    current_tubing.end_pt = bran_ttube_pt;
-                    current_tubing.finished = true;
-                    result_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+            }
+            //有隐含管段
+            if has_tubi {
+                if refno == last_child {
+                    if !current_tubing.finished && bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL {
+                        current_tubing.end_pt = bran_ttube_pt;
+                        current_tubing.finished = true;
+                        result_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                    }
                 }
             }
         }
@@ -732,7 +753,7 @@ impl AiosDBManager {
         let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Some(vec![7200])).await?;
         // dbg!(&has_cata_refnos.len());
         let mut handles = vec![];
-        // let has_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 7170)]);
+        // let has_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 7381)]);
         let has_cata_cnt = has_cata_refnos.len();
         for (i, refno) in has_cata_refnos.into_iter().enumerate() {
             let mgr = mgr.clone();
@@ -747,7 +768,7 @@ impl AiosDBManager {
                 let current_att = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
                 if current_att.get_type() == "BRAN" {
                     Self::get_cata_branch_geoms(mgr.clone(), refno, &current_att, &brep_shapes).await.unwrap_or_default();
-                }else{
+                } else {
                     Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes).await.unwrap_or_default();
                 }
                 // dbg!(&brep_shapes);
@@ -950,11 +971,12 @@ impl AiosDBManager {
     //     Ok(true)
     // }
     //
+
+    //todo 需要使用缓存
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
         let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], Some(vec![7200])).await?;
         let loop_cnt = loop_refnos.len();
-        //最好是批量取数据，而不是循环去取
         //处理loop elements
         let mut handles = vec![];
         for (i, refno) in loop_refnos.into_iter().enumerate() {
@@ -962,8 +984,6 @@ impl AiosDBManager {
             let handle = tokio::spawn(async move {
                 let inst_map = &mgr.mesh_mgr.inst_mgr;
                 let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
-                //在这里直接处理完所有需要处理的transform
-                // let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
 
                 let level_shape_mgr = &mgr.mesh_mgr.level_shape_mgr;
                 let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
@@ -995,7 +1015,6 @@ impl AiosDBManager {
                     let mut parent_att = AttrMap::default();
                     let mut geo_hash = None;
                     let mut item_trans = TransformSRT::default();
-                    // dbg!(parent_type);
                     match parent_type {
                         "REVO" => {
                             parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["ANGL", "LEVE"])).await.unwrap_or_default();
@@ -1013,10 +1032,10 @@ impl AiosDBManager {
                             }
                         }
                         "EXTR" | "PANE" | "FLOOR" | "SCREED" => {
-                            //todo 添加方法，根据type，判断是否有哪些字段，没有的话，就默认给一个空类型
                             let attr = mgr.get_implicit_attr(refno, Some(vec!["HEIG"])).await.unwrap_or_default();
                             parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["SJUS", "HEIG"])).await.unwrap_or_default();
                             let mut height = attr.get_f32("HEIG").unwrap_or(parent_att.get_f32("HEIG").unwrap_or_default());
+                            let i: usize = 0;
                             let extrusion = Box::new(Extrusion {
                                 verts: loop_verts,
                                 height,
@@ -1085,17 +1104,6 @@ impl AiosDBManager {
     }
 }
 
-
-use config::{Config, ConfigError, Environment, File};
-use dashmap::mapref::one::Ref;
-use crate::api::children::cache_site_node;
-use crate::api::refno_info::{get_ref0_map, sync_refno_basic_map};
-use crate::ATTR_INFO_MAP;
-use crate::cata::query_cata::resolve_desi_comp;
-use crate::cata::sctn;
-use crate::cata::sctn::geo::create_st_geos;
-use crate::data_interface::defines::CachedRefBasic;
-use crate::helper::qualified_table_name;
 
 #[tokio::test]
 async fn test_get_attr() -> anyhow::Result<()> {

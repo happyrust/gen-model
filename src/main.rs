@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
 
-    dbg!(mgr.get_attr(RefU64::from_refno_str("15213/494985").unwrap()).await).expect("TODO: panic message");
+    // dbg!(mgr.get_attr(RefU64::from_refno_str("15213/494985").unwrap()).await).expect("TODO: panic message");
 
     // return Ok(());
 

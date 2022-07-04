@@ -8,7 +8,7 @@ use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
 use smol_str::SmolStr;
 use crate::cata::query_cata::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
-use crate::cata::resolve_helper::{eval_str_to_f32, eval_str_to_f64, parse_str_axis_to_vec3, resolve_dir_and_pos, resolve_to_cate_geo_params};
+use crate::cata::resolve_helper::*;
 
 /// 求解axis的数值, 得到 {num:  }
 pub fn resolve_axis_params(
@@ -93,14 +93,23 @@ pub fn resolve_gmse_params(
         .map(|exp| eval_str_to_f32(&exp, context))
         .collect::<anyhow::Result<_>>()?;
 
-    let verts = gm.verts
-        .iter()
-        .try_fold::<_, _, anyhow::Result<_>>(vec![], |mut acc, exp| {
-            let f0 = eval_str_to_f32(exp[0].as_str(), context)? as f32;
-            let f1 = eval_str_to_f32(exp[1].as_str(), context)? as f32;
-            acc.push([f0, f1]);
-            Ok(acc)
-        })?;
+    let mut verts = vec![];
+    for vert in &gm.verts {
+        if vert[0].is_empty() || vert[1].is_empty()  { continue; }
+        if let Ok(f0) = eval_str_to_f32(vert[0].as_str(), context) &&
+            let Ok(f1) = eval_str_to_f32(vert[1].as_str(), context) {
+            verts.push([f0, f1]);
+        }
+    }
+    // dbg!(&verts);
+    // let verts = gm.verts
+    //     .iter()
+    //     .try_fold::<_, _, anyhow::Result<_>>(vec![], |mut acc, exp| {
+    //         let f0 = eval_str_to_f32(exp[0].as_str(), context)? as f32;
+    //         let f1 = eval_str_to_f32(exp[1].as_str(), context)? as f32;
+    //         acc.push([f0, f1]);
+    //         Ok(acc)
+    //     })?;
 
     let phei = eval_str_to_f32(&gm.phei, context)?;
     let offset = eval_str_to_f32(&gm.offset, context)?;
@@ -137,6 +146,7 @@ pub fn resolve_gmse_params(
         .collect::<anyhow::Result<_>>()?;
 
     let mut paxises: Vec<CateAxisParam> = Vec::new();
+    // dbg!(&gm.paxises);
     for name in gm.paxises.iter() {
         if name != "" {
             let (is_negative, name) = if name.starts_with('-') {
@@ -165,7 +175,7 @@ pub fn resolve_gmse_params(
                 "T" => {}
                 _ => {
                     let ddangle = context["DDANGLE"].parse::<f64>().unwrap_or(0.0f64);
-                    let dir = parse_str_axis_to_vec3(name, ddangle);
+                    let dir = parse_str_axis_to_vec3(name, context);
                     let axis = CateAxisParam {
                         pt: vec![0.0f64, 0.0, 0.0],
                         dir: dir.to_vec(),
@@ -210,7 +220,7 @@ pub fn resolve_axis_param(
     scom: &ScomInfo,
     context: &HashMap<SmolStr, SmolStr>,
 ) -> Option<CateAxisParam> {
-    let ddangle = context["DDANGLE"].parse::<f64>().unwrap_or(0.0f64);
+    // let ddangle = context["DDANGLE"].parse::<f64>().unwrap_or(0.0f64);
     let key: SmolStr = axis_param.pconnect.replace("\n", "").replace(" ", "").into();
     let pconnect = if context.contains_key(&key) {
         let tmp = context[&key].parse::<u32>().unwrap_or(0u32);
@@ -223,7 +233,7 @@ pub fn resolve_axis_param(
     match type_name.as_str() {
         "PTAX" => {
             let d = eval_str_to_f64(&axis_param.distance, &context).unwrap_or_default();
-            let (dir, pos) = resolve_dir_and_pos(axis_param, ddangle, scom, context);
+            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);
             Some(CateAxisParam {
                 pt: vec![d * dir[0] + pos[0], d * dir[1] + pos[1], d * dir[2] + pos[2]],
                 dir: dir.to_vec(),
@@ -236,11 +246,11 @@ pub fn resolve_axis_param(
             let y = eval_str_to_f64(&axis_param.y, &context).unwrap_or_default();
             let z = eval_str_to_f64(&axis_param.z, &context).unwrap_or_default();
             // //dbg!(axis_param.attr_map.to_string_hashmap());
-            let (dir, pos) = resolve_dir_and_pos(axis_param, ddangle, scom, context);
+            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);
             Some(CateAxisParam { pt: vec![pos[0] + x, pos[1] + y, pos[2] + z], dir: dir.to_vec(), pconnect, pbore })
         }
         "PTPOS" => {
-            let (dir, pos) = resolve_dir_and_pos(axis_param, ddangle, scom, context);
+            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);
             let pnt_index_str = axis_param.attr_map.get_as_string("PTCPOS").unwrap_or_default();
             let paras = pnt_index_str.split_whitespace().map(|x| x.trim().to_owned()).collect::<Vec<_>>();
             if paras.len() == 2 {

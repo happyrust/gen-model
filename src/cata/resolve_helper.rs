@@ -70,8 +70,10 @@ pub fn eval_str_to_f32(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
 }
 
 pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) -> anyhow::Result<f64> {
-    if input_expr.trim().to_lowercase() == "unset" {
-        return Ok(0.0);  //todo 待验证
+    let r =input_expr.trim().to_lowercase() ;
+    if r.is_empty() || r == "unset" {
+        // return Err(anyhow!("字符串无法解析到f64".to_string()));
+        return Ok(0.0);
     }
     let re = Regex::new(r"([A-Z]+[0-9]*)(\s*\[(\d+)\])?").unwrap();
     let mut new_exp = input_expr.replace("ATTRIB", "");
@@ -296,6 +298,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 })
             }
             "LPYR" => {
+                // dbg!(&gmse.paxises);
                 CateGeoParam::Pyramid(CatePyramidParam {
                     pa: Some(gmse.paxises[0].clone()),
                     pb: Some(gmse.paxises[1].clone()),
@@ -480,14 +483,39 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
 }
 
 pub fn resolve_dir_and_pos(axis: &AxisParam,
-                           ddangle: f64,
                            scom: &ScomInfo,
                            context: &HashMap<SmolStr, SmolStr>) -> (Vec<f64>, Vec<f64>) {
     //替换掉中间出现dataset的值的这种情况 X ( ATTRIB RPRO ANGL ) Z
-    let mut dir_str = axis.direction.trim().to_string();
+    let mut dir_str = axis.direction.trim();
+
+    // dbg!(&new_dir_str);
+
+    let mut dir = vec![0.0f64; 3];
+    let mut pos = vec![0.0f64; 3];
+
+    let re = Regex::new(r"^P\d+$").unwrap();
+    if re.is_match(dir_str) {
+        let pnt_indx = dir_str[1..].parse::<i32>().unwrap_or(i32::MAX);
+        if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
+            if let Some(axis) = resolve_axis_param(&scom.axis_params[indx], scom, context) {
+                dir = axis.dir.clone();
+                pos = axis.pt;
+            }
+        }
+    } else {
+        dir = parse_str_axis_to_vec3(dir_str, context).into();
+    }
+    // dbg!(&dir);
+    return (dir, pos);
+}
+
+pub fn parse_str_axis_to_vec3(pdir: &str, context: &HashMap<SmolStr, SmolStr>) -> [f64; 3] {
+    // let paxis = paxis.to_uppercase().replace("AXIS", "").replace(" ", "");
+    let dir_str = pdir.to_uppercase().replace("AXIS", "");
+
     let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();
     let mut new_dir_str = dir_str.clone();
-    if !re.is_match(dir_str.as_str()) {
+    if !re.is_match(&dir_str) {
         let mut is_two = false;
         let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
         for cap in re.captures_iter(&dir_str) {
@@ -510,79 +538,9 @@ pub fn resolve_dir_and_pos(axis: &AxisParam,
                 }
             }
         }
-
     }
 
-    // dbg!(&new_dir_str);
-
-    let mut dir = vec![0.0f64; 3];
-    let mut pos = vec![0.0f64; 3];
-
-    let re = Regex::new(r"^P\d+$").unwrap();
-    if re.is_match(&new_dir_str) {
-        let pnt_indx = new_dir_str[1..].parse::<i32>().unwrap_or(i32::MAX);
-        if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
-            if let Some(axis) = resolve_axis_param(&scom.axis_params[indx], scom, context) {
-                dir = axis.dir.clone();
-                pos = axis.pt;
-            }
-        }
-    } else {
-        dir = parse_str_axis_to_vec3(&new_dir_str, ddangle).into();
-    }
-    return (dir, pos);
-}
-
-pub fn parse_str_axis_to_vec3(paxis: &str, ddangle: f64) -> [f64; 3] {
-    // dbg!(&paxis);
-    let paxis = paxis.to_uppercase().replace("AXIS", "").replace(" ", "");
-    let mut paxis_str = &paxis[..];
-    //含DDANGLE的处理
-    if paxis_str.contains("DDANGLE") {
-        let angle = ddangle.to_radians();
-        let mut axises: Vec<&str> = Vec::new();
-        for s in paxis_str.split("DDANGLE") {
-            let s = s.trim();
-            if s != "" {
-                axises.push(s);
-            }
-        }
-        if axises.len() != 2 {
-            panic!("点集 DDANGLE 参数错误！");
-        }
-        return match &format!("{}{}", axises[0], axises[1])[..] {
-            "XY" => [angle.cos(), angle.sin(), 0.0],
-            "XZ" => [angle.cos(), 0.0, angle.sin()],
-            "YZ" => [0.0, angle.cos(), angle.sin()],
-            "YX" => [angle.sin(), angle.cos(), 0.0],
-            "ZX" => [angle.sin(), 0.0, angle.cos()],
-            "ZY" => [0.0, angle.sin(), angle.cos()],
-
-            "-XY" => [-angle.cos(), angle.sin(), 0.0],
-            "-XZ" => [-angle.cos(), 0.0, angle.sin()],
-            "-YZ" => [0.0, -angle.cos(), angle.sin()],
-            "-YX" => [angle.sin(), -angle.cos(), 0.0],
-            "-ZX" => [angle.sin(), 0.0, -angle.cos()],
-            "-ZY" => [0.0, angle.sin(), -angle.cos()],
-
-            "X-Y" => [angle.cos(), -angle.sin(), 0.0],
-            "X-Z" => [angle.cos(), 0.0, -angle.sin()],
-            "Y-Z" => [0.0, angle.cos(), -angle.sin()],
-            "Y-X" => [-angle.sin(), angle.cos(), 0.0],
-            "Z-X" => [-angle.sin(), 0.0, angle.cos()],
-            "Z-Y" => [0.0, -angle.sin(), angle.cos()],
-
-            "-X-Y" => [-angle.cos(), -angle.sin(), 0.0],
-            "-X-Z" => [-angle.cos(), 0.0, -angle.sin()],
-            "-Y-Z" => [0.0, -angle.cos(), -angle.sin()],
-            "-Y-X" => [-angle.sin(), -angle.cos(), 0.0],
-            "-Z-X" => [-angle.sin(), 0.0, -angle.cos()],
-            "-Z-Y" => [0.0, -angle.sin(), -angle.cos()],
-
-            _ => panic!("点集 DDANGLE 参数错误！"),
-        };
-    }
-    let v = parse_expr_to_dir(paxis_str);
+    let v = parse_expr_to_dir(&new_dir_str.replace(" ", ""));
     [f64_round_2(v[0] as f64), f64_round_2(v[1] as f64), f64_round_2(v[2] as f64)]
 }
 
