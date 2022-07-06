@@ -101,8 +101,9 @@ dependencies = [
  "approx 0.5.1",
  "bevy",
  "bevy_egui",
+ "bincode",
  "dashmap",
- "fixed",
+ "fixed 2.0.0-alpha.2",
  "flate2",
  "glam",
  "hash32",
@@ -124,8 +125,8 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "skytable",
+ "smallvec",
  "smol_str",
- "transmog-bincode",
  "truck-base",
  "truck-geometry",
  "truck-geotrait",
@@ -2063,6 +2064,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fixed"
+version = "2.0.0-alpha.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e59bccb72eb0e75b9a0c89e4ccfe8686f49aff246e870a5904ed11cc0b328ca5"
+dependencies = [
+ "az",
+ "bytemuck",
+ "half",
+]
+
+[[package]]
 name = "fixedbitset"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3950,7 +3962,7 @@ dependencies = [
  "dynfmt",
  "env_logger 0.9.0",
  "fasteval",
- "fixed",
+ "fixed 1.15.0",
  "flate2",
  "futures",
  "glam",

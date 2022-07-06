@@ -174,11 +174,12 @@ pub fn resolve_gmse_params(
                 }
                 "T" => {}
                 _ => {
-                    let ddangle = context["DDANGLE"].parse::<f64>().unwrap_or(0.0f64);
                     let dir = parse_str_axis_to_vec3(name, context);
                     let axis = CateAxisParam {
-                        pt: vec![0.0f64, 0.0, 0.0],
-                        dir: dir.to_vec(),
+                        refno: Default::default(),
+                        number: 0,
+                        pt: Default::default(),
+                        dir,
                         pconnect: "".to_string(),
                         pbore: 0.0,
                     };
@@ -220,7 +221,6 @@ pub fn resolve_axis_param(
     scom: &ScomInfo,
     context: &HashMap<SmolStr, SmolStr>,
 ) -> Option<CateAxisParam> {
-    // let ddangle = context["DDANGLE"].parse::<f64>().unwrap_or(0.0f64);
     let key: SmolStr = axis_param.pconnect.replace("\n", "").replace(" ", "").into();
     let pconnect = if context.contains_key(&key) {
         let tmp = context[&key].parse::<u32>().unwrap_or(0u32);
@@ -228,45 +228,39 @@ pub fn resolve_axis_param(
     } else {
         "".to_string()
     };
-    let pbore = eval_str_to_f64(&axis_param.pbore, &context).unwrap_or_default();
-    let type_name = axis_param.attr_map.get_type_cloned()?;
-    match type_name.as_str() {
+    let number = axis_param.number;
+    let pbore = eval_str_to_f32(&axis_param.pbore, &context).unwrap_or_default();
+    match axis_param.type_name.as_str() {
         "PTAX" => {
-            let d = eval_str_to_f64(&axis_param.distance, &context).unwrap_or_default();
+            let d = eval_str_to_f32(&axis_param.distance, &context).unwrap_or_default();
             let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);
             Some(CateAxisParam {
-                pt: vec![d * dir[0] + pos[0], d * dir[1] + pos[1], d * dir[2] + pos[2]],
-                dir: dir.to_vec(),
-                pconnect,
-                pbore,
+                refno: axis_param.refno,
+                number,
+                pt: [d * dir[0] + pos[0], d * dir[1] + pos[1], d * dir[2] + pos[2]],
+                dir, pconnect, pbore,
             })
         }
         "PTCA" | "PTMI" => {
-            let x = eval_str_to_f64(&axis_param.x, &context).unwrap_or_default();
-            let y = eval_str_to_f64(&axis_param.y, &context).unwrap_or_default();
-            let z = eval_str_to_f64(&axis_param.z, &context).unwrap_or_default();
-            // //dbg!(axis_param.attr_map.to_string_hashmap());
+            let x = eval_str_to_f32(&axis_param.x, &context).unwrap_or_default();
+            let y = eval_str_to_f32(&axis_param.y, &context).unwrap_or_default();
+            let z = eval_str_to_f32(&axis_param.z, &context).unwrap_or_default();
             let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);
-            Some(CateAxisParam { pt: vec![pos[0] + x, pos[1] + y, pos[2] + z], dir: dir.to_vec(), pconnect, pbore })
+            Some(CateAxisParam { refno: axis_param.refno, number, pt: [pos[0] + x, pos[1] + y, pos[2] + z], dir, pconnect, pbore, })
         }
         "PTPOS" => {
             let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);
-            let pnt_index_str = axis_param.attr_map.get_as_string("PTCPOS").unwrap_or_default();
+            let pnt_index_str = axis_param.pnt_index_str.as_ref()?;
             let paras = pnt_index_str.split_whitespace().map(|x| x.trim().to_owned()).collect::<Vec<_>>();
             if paras.len() == 2 {
                 let pnt_index = paras[1].parse::<i32>().unwrap_or(i32::MAX);
                 if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_index) {
                     if let Some(axis) = resolve_axis_param(&scom.axis_params[indx], scom, context) {
-                        Some(CateAxisParam { pt: axis.pt, dir: dir.to_vec(), pconnect, pbore })
-                    } else {
-                        None
+                        return Some(CateAxisParam { refno: axis_param.refno, number, pt: axis.pt, dir, pconnect, pbore, });
                     }
-                } else {
-                    None
                 }
-            } else {
-                None
             }
+            return None;
         }
         _ => None
     }

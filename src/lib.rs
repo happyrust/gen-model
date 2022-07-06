@@ -1,5 +1,7 @@
 #![feature(drain_filter)]
 #![feature(let_chains)]
+#![feature(default_free_fn)]
+
 use std::any::TypeId;
 use std::collections::BTreeSet;
 use std::ops::Deref;

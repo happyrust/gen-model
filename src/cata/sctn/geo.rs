@@ -16,9 +16,7 @@ pub async fn create_st_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, 
                                                   brep_shapes_map: &CateBrepShapeMap, interface: &T) -> anyhow::Result<bool>  {
     let geoms = &geom_info.geometries;
     if geoms.len() == 0 { return Ok(true); }
-
     let type_name = att.get_type();
-    // let refno = att.get_refno().unwrap_or_default();
     let arc_path = if type_name == "GENSEC" {
         let parent_pos = interface.get_world_transform(refno).await?.unwrap_or_default().translation;
         //dbg!(parent_pos);
@@ -62,10 +60,12 @@ pub async fn create_st_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, 
                 arc_path,
             };
             brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape{
+                refno,
                 brep_shape: Box::new(loft),
                 transform: TransformSRT::IDENTITY,
                 visible: true,
-                is_tubing: false
+                is_tubi: false,
+                pts: Default::default()
             });
         }
     }

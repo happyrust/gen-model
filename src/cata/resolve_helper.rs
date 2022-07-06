@@ -1,12 +1,12 @@
 use std::collections::HashMap;
-use std::panic;
+use std::{mem, panic};
 use aios_core::parsed_data::*;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::pdms_data::{AxisParam, ScomInfo};
 use anyhow::anyhow;
 use itertools::any;
 use parse_pdms_db::tiny_expr::expr_eval::interp;
-use parse_pdms_db::tool::hash_tool::{f64_round_2, f64_round_3};
+use parse_pdms_db::tool::hash_tool::{f32_round_2, f64_round_2, f64_round_3};
 use nom::Parser;
 use regex::{NoExpand, Regex};
 use smol_str::SmolStr;
@@ -484,38 +484,34 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
 
 pub fn resolve_dir_and_pos(axis: &AxisParam,
                            scom: &ScomInfo,
-                           context: &HashMap<SmolStr, SmolStr>) -> (Vec<f64>, Vec<f64>) {
-    //替换掉中间出现dataset的值的这种情况 X ( ATTRIB RPRO ANGL ) Z
+                           context: &HashMap<SmolStr, SmolStr>) -> ([f32; 3], [f32; 3]) {
     let mut dir_str = axis.direction.trim();
-
-    // dbg!(&new_dir_str);
-
-    let mut dir = vec![0.0f64; 3];
-    let mut pos = vec![0.0f64; 3];
+    let mut dir = [0.0f32; 3];
+    let mut pos = [0.0f32; 3];
 
     let re = Regex::new(r"^P\d+$").unwrap();
     if re.is_match(dir_str) {
         let pnt_indx = dir_str[1..].parse::<i32>().unwrap_or(i32::MAX);
         if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
-            if let Some(axis) = resolve_axis_param(&scom.axis_params[indx], scom, context) {
-                dir = axis.dir.clone();
-                pos = axis.pt;
+            if let Some(mut axis) = resolve_axis_param(&scom.axis_params[indx], scom, context) {
+                dir = mem::take(&mut axis.dir);
+                pos = mem::take(&mut axis.pt);
             }
         }
     } else {
         dir = parse_str_axis_to_vec3(dir_str, context).into();
     }
-    // dbg!(&dir);
     return (dir, pos);
 }
 
-pub fn parse_str_axis_to_vec3(pdir: &str, context: &HashMap<SmolStr, SmolStr>) -> [f64; 3] {
-    // let paxis = paxis.to_uppercase().replace("AXIS", "").replace(" ", "");
+pub fn parse_str_axis_to_vec3(pdir: &str, context: &HashMap<SmolStr, SmolStr>) -> [f32; 3] {
     let dir_str = pdir.to_uppercase().replace("AXIS", "");
-
     let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();
     let mut new_dir_str = dir_str.clone();
+    let mut not_single = false;
     if !re.is_match(&dir_str) {
+        // dbg!(&dir_str);
+        not_single = true;
         let mut is_two = false;
         let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
         for cap in re.captures_iter(&dir_str) {
@@ -539,9 +535,12 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &HashMap<SmolStr, SmolStr>) -
             }
         }
     }
-
     let v = parse_expr_to_dir(&new_dir_str.replace(" ", ""));
-    [f64_round_2(v[0] as f64), f64_round_2(v[1] as f64), f64_round_2(v[2] as f64)]
+    if not_single {
+        // dbg!(&new_dir_str);
+        // dbg!(&v);
+    }
+    [f32_round_2(v[0]), f32_round_2(v[1]), f32_round_2(v[2])]
 }
 
 

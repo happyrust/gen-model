@@ -132,9 +132,6 @@ pub async fn query_axis_params<T: PdmsDataInterface>(
     let children = interface.get_children_attrs(refno).await?;
 
     for child in children {
-        // if refno.to_refno_str() == "15192/77158" {
-        //     dbg!(child.to_string_hashmap());
-        // }
         let number = child.get_i32("NUMB").unwrap_or(-1);
         if let Some(axis) = get_axis_param(&child) {
             map.entry(number).or_insert(axis);
@@ -207,7 +204,6 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     Ok(GeomsInfo {
         geometries,
         axis_map,
-        tubi_bore: None,
     })
 }
 
@@ -216,11 +212,13 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
     let type_name = attr_map.get_as_smol_str("TYPE")?;
     let pconnect = attr_map.get_as_smol_str("PCON")?;
     let pbore = attr_map.get_as_smol_str("PBOR")?;
-    let refno = attr_map.get_refno();
-    let pos = attr_map.get_f64_vec("POS").unwrap_or(vec![0.0, 0.0, 0.0]);
+    let refno = attr_map.get_refno()?;
+    let number = attr_map.get_i32("NUMB")?;
     let r = match type_name.as_ref() {
         "PTAX" => AxisParam {
-            attr_map: attr_map.clone(),
+            refno,
+            type_name,
+            number,
             x: "".into(),
             y: "".into(),
             z: "".into(),
@@ -228,9 +226,12 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             direction: attr_map.get_as_smol_str("PAXI")?,
             pconnect,
             pbore,
+            pnt_index_str: None,
         },
         "PTCA" => AxisParam {
-            attr_map: attr_map.clone(),
+            refno,
+            type_name,
+            number,
             x: attr_map.get_as_smol_str("PX")?,
             y: attr_map.get_as_smol_str("PY")?,
             z: attr_map.get_as_smol_str("PZ")?,
@@ -240,9 +241,12 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             },
             pconnect,
             pbore,
+            pnt_index_str: None,
         },
         "PTMI" => AxisParam {
-            attr_map: attr_map.clone(),
+            refno,
+            type_name,
+            number,
             x: attr_map.get_as_smol_str("PX")?,
             y: attr_map.get_as_smol_str("PY")?,
             z: attr_map.get_as_smol_str("PZ")?,
@@ -250,19 +254,27 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             direction: attr_map.get_as_smol_str("PAXI")?,
             pconnect,
             pbore,
+            pnt_index_str: None,
         },
-        "PTPOS" => AxisParam {   //todo need fix " TPOS OF CREF"   " TDIR OF CREF"
-            attr_map: attr_map.clone(),
-            x: "".into(),
-            y: "".into(),
-            z: "".into(),
-            distance: attr_map.get_as_smol_str("PTCP").unwrap_or("0".into()),
-            direction: attr_map.get_as_smol_str("PTCD").unwrap_or("Y".into()),
-            pconnect,
-            pbore,
+        "PTPOS" => {
+            AxisParam {   //todo need fix " TPOS OF CREF"   " TDIR OF CREF"
+                refno,
+                type_name,
+                number,
+                x: "".into(),
+                y: "".into(),
+                z: "".into(),
+                distance: attr_map.get_as_smol_str("PTCP").unwrap_or("0".into()),
+                direction: attr_map.get_as_smol_str("PTCD").unwrap_or("Y".into()),
+                pconnect,
+                pbore,
+                pnt_index_str: attr_map.get_as_string("PTCPOS"),
+            }
         },
         _ => AxisParam {
-            attr_map: attr_map.clone(),
+            refno,
+            type_name,
+            number,
             x: "".into(),
             y: "".into(),
             z: "".into(),
@@ -270,6 +282,7 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             direction: "".into(),
             pconnect,
             pbore,
+            pnt_index_str: None,
         },
     };
     Some(r)

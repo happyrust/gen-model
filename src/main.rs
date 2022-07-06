@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
 
     // mgr.mesh_mgr.serialize_to_json_file();
     mgr.mesh_mgr.serialize_to_specify_file("/Users/dongpengcheng/rust-projects/new/AIOSEditor/assets/mesh/AIOSModel.bin");
-    // mgr.mesh_mgr.serialize_to_json_file();
+    mgr.mesh_mgr.serialize_to_json_file();
 
     println!("花费时间: {} ms", time.elapsed().as_millis());
 
