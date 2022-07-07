@@ -25,6 +25,7 @@ use dashmap::{DashMap, DashSet};
 use dashmap::mapref::one::Ref;
 use glam::{Quat, quat, TransformRT, TransformSRT, Vec3};
 use id_tree::{Node, NodeId};
+use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
 use smol_str::SmolStr;
 use sqlx::{MySql, MySqlPool, Pool};
@@ -38,6 +39,7 @@ use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn;
 use crate::cata::sctn::geo::create_st_geos;
 use crate::consts::*;
+use crate::data_interface::cache::{PDMS_ATT_MAP_CACHE, PDMS_IMPLICIT_ATT_MAP_CACHE};
 use crate::data_interface::defines::CachedRefBasic;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::AIOSAxisMap;
@@ -45,6 +47,10 @@ use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
 pub const TUBI_TOL: f32 = 10.0f32;
+pub const BATCH_COUNT: usize = 50;
+
+
+
 
 pub type CateBrepShapeMap = DashMap<RefU64, Vec<CateBrepShape>>;
 // static GLOBAL_COLLISION_WORLD: Lazy<Mutex<CollisionWorld<f32, (RefU64, RefU64)>>> = Lazy::new(|| {
@@ -108,9 +114,13 @@ pub struct AiosDBManager {
 impl PdmsDataInterface for AiosDBManager {
     /// 获得最全的数据
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
+        if let Some(k) = PDMS_ATT_MAP_CACHE.get(&refno) {
+            return Ok(k.value().clone());
+        }
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_full_attr(refno, ref_basic.value(), &project_pool, None).await?;
+                PDMS_ATT_MAP_CACHE.insert(refno, attr.clone());
                 return Ok(attr);
             }
         }
@@ -126,9 +136,13 @@ impl PdmsDataInterface for AiosDBManager {
 
     /// 获得隐含数据的属性
     async fn get_implicit_attr(&self, refno: RefU64, columns: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
+        if let Some(k) = PDMS_IMPLICIT_ATT_MAP_CACHE.get(&refno) {
+            return Ok(k.value().clone());
+        }
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_implicit_attr(refno, ref_basic.value(), &project_pool, columns).await?;
+                PDMS_IMPLICIT_ATT_MAP_CACHE.insert(refno, attr.clone());
                 return Ok(attr);
             }
         }
@@ -534,7 +548,12 @@ impl AiosDBManager {
                                        brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>) -> anyhow::Result<bool> {
         let cur_ele = mgr.get_refno_basic(design_refno).unwrap();
         let type_name = cur_ele.get_type();
-        let owner = mgr.get_owner_ref_basic(design_refno).unwrap();
+        let owner = mgr.get_owner_ref_basic(design_refno);
+        if owner.is_none() {
+            dbg!(design_refno);
+            return Ok(false);
+        }
+        let owner = owner.unwrap();
         if type_name == "BRAN" {
             return Ok(false);
         }
@@ -575,8 +594,10 @@ impl AiosDBManager {
     async fn get_cata_branch_geoms(mgr: Arc<AiosDBManager>, branch_refno: RefU64, branch_att: &AttrMap,
                                    brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>) -> anyhow::Result<bool> {
         let bran_transform = mgr.get_world_transform(branch_refno).await?.unwrap_or_default();
-        let bran_htube_pt = bran_transform.transform_point3(branch_att.get_vec3("HPOS").ok_or(anyhow!("HPOS not exist".to_string()))?);
-        let bran_ttube_pt = bran_transform.transform_point3(branch_att.get_vec3("TPOS").ok_or(anyhow!("TPOS not exist".to_string()))?);
+        let bran_htube_pt = bran_transform.transform_point3(branch_att.get_vec3("HPOS")
+            .ok_or(anyhow!("HPOS not exist".to_string()))?);
+        let bran_ttube_pt = bran_transform.transform_point3(branch_att.get_vec3("TPOS")
+            .ok_or(anyhow!("TPOS not exist".to_string()))?);
         let htube_ref = branch_att.get_foreign_refno("HSTU").unwrap_or_default();
         let hconnect = branch_att.get_as_string("HCON").unwrap_or_default();
         let mut has_tubi = true;
@@ -692,7 +713,7 @@ impl AiosDBManager {
         let pool = AiosDBManager::get_db_pool(&url, project).await?;
         let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
 
-        let mut dbnos = Some(vec![7200]);
+        let mut dbnos = Some(vec![1]);
 
         // dbg!(&mdb_dbnos_map);
         let key_str = format!("/{mdb}");
@@ -719,7 +740,7 @@ impl AiosDBManager {
             "PFIT",
             // "CROS",
             "GWALL",
-            "OLET",
+            // "OLET",
             // "BEND",
             "IDAM",
             // "CLOS",
@@ -739,7 +760,7 @@ impl AiosDBManager {
             // "STRT",
             "STWALL",
             "HFAN",
-            "DAMP",
+            // "DAMP",
             "PAVE",
             "RNODE",
             "PRTELE",
@@ -747,7 +768,7 @@ impl AiosDBManager {
             "PCOM",
             "FITT",
             "GPART",
-            "THRE",
+            // "THRE",
             "UNIO",
             "SCREED",
             "NOZZ",
@@ -773,7 +794,8 @@ impl AiosDBManager {
             "SCTN",
         ]);
 
-        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Some(vec![7200])).await?;
+        //Some(vec![43])
+        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, None).await?;
         // dbg!(&has_cata_refnos.len());
         let mut handles = vec![];
         // let has_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 7381)]);
@@ -859,7 +881,7 @@ impl AiosDBManager {
                 }
             });
             handles.push(handle);
-            if i == has_cata_cnt - 1 || handles.len() == 100 {
+            if i == has_cata_cnt - 1 || handles.len() == BATCH_COUNT {
                 futures::future::join_all(take(&mut handles)).await;
             }
         }
@@ -871,7 +893,7 @@ impl AiosDBManager {
     /// 生成基本体的几何数据
     pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, Some(vec![7200])).await?;
+        let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, None).await?;
         // let test_refno = RefU64::from_two_nums(23584, 2705);
         // prim_refnos = RefU64Vec(vec![test_refno]);
         let prim_cnt = prim_refnos.len();
@@ -929,7 +951,7 @@ impl AiosDBManager {
                 }
             });
             handles.push(handle);
-            if i == prim_cnt - 1 || handles.len() == 100 {
+            if i == prim_cnt - 1 || handles.len() == BATCH_COUNT {
                 futures::future::join_all(take(&mut handles)).await;
             }
         }
@@ -940,7 +962,7 @@ impl AiosDBManager {
     //
     // pub async fn cache_pohe_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
     //     let t = Instant::now();
-    //     let pohe_refnos = mgr.get_refnos_by_types(project, &vec!["POHE"], Option::from(vec![7200])).await?;
+    //     let pohe_refnos = mgr.get_refnos_by_types(project, &vec!["POHE"], Option::from(vec![1])).await?;
     //     let pohe_cnt = pohe_refnos.len();
     //     let mut handles = vec![];
     //     for (i, refno) in pohe_refnos.into_iter().enumerate() {
@@ -1016,7 +1038,7 @@ impl AiosDBManager {
 
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], Some(vec![7200])).await?;
+        let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], None).await?;
         let loop_cnt = loop_refnos.len();
         //处理loop elements
         let mut handles = vec![];
@@ -1120,7 +1142,7 @@ impl AiosDBManager {
                 inst_map.entry(refno).or_insert(geos_info);
             });
             handles.push(handle);
-            if i == loop_cnt - 1 || handles.len() == 100 {
+            if i == loop_cnt - 1 || handles.len() == BATCH_COUNT {
                 futures::future::join_all(take(&mut handles)).await;
             }
         }

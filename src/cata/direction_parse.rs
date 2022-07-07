@@ -7,6 +7,7 @@ use nom::branch::alt;
 use nom::combinator::{opt, recognize, complete};
 use nom::sequence::{delimited, pair};
 use nom::bytes::complete::*;
+use parse_pdms_db::tool::hash_tool::{f32_round_3, vec3_round_2, vec3_round_3};
 
 lazy_static! {
     pub static ref AXISES_MAP: HashMap<&'static str, Vec3> = {
@@ -85,7 +86,7 @@ pub fn parse_expr_to_dir(expr: &str) -> Vec3 {
                 axis = quat2 * axis;
             }
         }
-        return axis;
+        return vec3_round_2(axis);
     }
     Vec3::ZERO
 }

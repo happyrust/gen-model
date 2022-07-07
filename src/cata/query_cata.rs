@@ -41,7 +41,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         return Err(anyhow!("Scom ref is invalid".to_string()));
     }
     let scom_info = query_scom_info(scom_ref, interface).await?;
-    let mut context: HashMap<SmolStr, SmolStr> = HashMap::new();
+    let mut context: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
     context.insert("DESI_REFNO".into(), refno.to_refno_str());
     let mut desp = attr_map.get_f64_vec("DESP").unwrap_or_default();
     for i in 0..desp.len() {
@@ -164,7 +164,7 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
 pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     scom_info: &ScomInfo,
     interface: &T,
-    context: Option<HashMap<SmolStr, SmolStr>>,
+    context: Option<BTreeMap<SmolStr, SmolStr>>,
 ) -> anyhow::Result<GeomsInfo> {
     let mut cur_context = context.unwrap_or_default();
     //默认值
@@ -364,7 +364,7 @@ pub async fn query_gm_param(att_map: &AttrMap, interface: &dyn PdmsDataInterface
 pub async fn process_dtse_params<T: PdmsDataInterface>(
     attr_map: &AttrMap,
     interface: &T,
-    context: &mut HashMap<SmolStr, SmolStr>,
+    context: &mut BTreeMap<SmolStr, SmolStr>,
 ) -> Option<bool> {
     let dtre_refno = attr_map.get_foreign_refno("DTRE")?;
     let children = interface.get_children_attrs(dtre_refno).await.unwrap_or_default();

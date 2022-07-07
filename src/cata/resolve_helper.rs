@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::{mem, panic};
 use aios_core::parsed_data::*;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
@@ -65,11 +65,11 @@ fn test_expression_regex() {
     }
 }
 
-pub fn eval_str_to_f32(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) -> anyhow::Result<f32> {
+pub fn eval_str_to_f32(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -> anyhow::Result<f32> {
     eval_str_to_f64(input_expr, context).map(|x| x as f32)
 }
 
-pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) -> anyhow::Result<f64> {
+pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -> anyhow::Result<f64> {
     let r =input_expr.trim().to_lowercase() ;
     if r.is_empty() || r == "unset" {
         // return Err(anyhow!("字符串无法解析到f64".to_string()));
@@ -79,11 +79,9 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
     let mut new_exp = input_expr.replace("ATTRIB", "");
     let mut new_exp = new_exp.replace("RPRO", "");
     let mut result_exp = new_exp.clone();
-    let loop_cnt = if input_expr.contains("RPRO") { 2 } else { 1 };
-    // if input_expr.contains("TAN") {
-    // dbg!(input_expr);
-    // }
-    for _ in 0..loop_cnt {
+    //默认两次
+    //let loop_cnt = if input_expr.contains("RPRO") { 2 } else { 1 };
+    for _ in 0..2 {
         for caps in re.captures_iter(&new_exp) {
             let s = &caps[0];
             let c1 = caps.get(1).map_or("", |m| m.as_str());
@@ -139,8 +137,6 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
     if seg_strs.len() == 0 {
         return Ok(0.0);
     }
-    // dbg!(&seg_strs);
-
     let mut result_string = String::new();
     let mut p_vals = vec![];
     for s in seg_strs {
@@ -160,7 +156,6 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
             }
         }
     }
-    // dbg!(&p_vals);
     let mut i = 0;
     let mut new_vals = vec![];
     while i < p_vals.len() {
@@ -168,7 +163,6 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
             if i + 1 < p_vals.len() {
                 if let Ok(val) = p_vals[i + 1].parse::<f64>() {
                     let v = val * 2.0f64;
-                    // result_string.push_str(v.to_string().as_str());
                     new_vals.push(v.to_string());
                 }
             }
@@ -179,7 +173,6 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
                     if let Ok(angle) = p_vals[i + 2].parse::<f64>() {
                         {
                             let v = val * ((angle / 2.0).to_radians() as f64).tan();
-                            // result_string.push_str(v.to_string().as_str());
                             new_vals.push(v.to_string());
                         }
                     }
@@ -224,7 +217,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &HashMap<SmolStr, SmolStr>) ->
         if let Ok(mut stack) = Stack::init(&result_string) {
             return stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", input_expr)));
         } else {
-            // dbg!(&context);
+            dbg!(&context);
             dbg!(input_expr);
             dbg!(&result_string);
             return Err(anyhow!(format!("求解失败 {}", input_expr)));
@@ -484,7 +477,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
 
 pub fn resolve_dir_and_pos(axis: &AxisParam,
                            scom: &ScomInfo,
-                           context: &HashMap<SmolStr, SmolStr>) -> ([f32; 3], [f32; 3]) {
+                           context: &BTreeMap<SmolStr, SmolStr>) -> ([f32; 3], [f32; 3]) {
     let mut dir_str = axis.direction.trim();
     let mut dir = [0.0f32; 3];
     let mut pos = [0.0f32; 3];
@@ -504,7 +497,7 @@ pub fn resolve_dir_and_pos(axis: &AxisParam,
     return (dir, pos);
 }
 
-pub fn parse_str_axis_to_vec3(pdir: &str, context: &HashMap<SmolStr, SmolStr>) -> [f32; 3] {
+pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) -> [f32; 3] {
     let dir_str = pdir.to_uppercase().replace("AXIS", "");
     let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();
     let mut new_dir_str = dir_str.clone();

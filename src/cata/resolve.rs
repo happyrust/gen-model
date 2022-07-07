@@ -13,7 +13,7 @@ use crate::cata::resolve_helper::*;
 /// 求解axis的数值, 得到 {num:  }
 pub fn resolve_axis_params(
     scom: &ScomInfo,
-    context: &HashMap<SmolStr, SmolStr>,
+    context: &BTreeMap<SmolStr, SmolStr>,
 ) -> BTreeMap<i32, CateAxisParam> {
     let mut map = BTreeMap::new();
     for i in 0..scom.axis_params.len() {
@@ -27,7 +27,7 @@ pub fn resolve_axis_params(
 ///求解几何体，允许出错的情况，出错的需要跳过
 pub fn resolve_gms(
     gmse_raw_paras: &[GmParam],
-    context: &HashMap<SmolStr, SmolStr>,
+    context: &BTreeMap<SmolStr, SmolStr>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
 ) -> Vec<CateGeoParam> {
     // dbg!(&gmse_raw_paras);
@@ -57,7 +57,7 @@ pub fn resolve_gms(
 /// 解析gmes的参数
 pub fn resolve_paragon_gm_params(
     gm_param: &GmParam,
-    context: &HashMap<SmolStr, SmolStr>,
+    context: &BTreeMap<SmolStr, SmolStr>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
 ) -> anyhow::Result<CateGeoParam> {
     // if gm_param.refno != RefU64::from_two_nums(15194, 4258) {
@@ -72,7 +72,7 @@ pub fn resolve_paragon_gm_params(
 
 pub fn resolve_gmse_params(
     gm: &GmParam,
-    context: &HashMap<SmolStr, SmolStr>,
+    context: &BTreeMap<SmolStr, SmolStr>,
     axis_param_map: &BTreeMap<i32, CateAxisParam>,
 ) -> anyhow::Result<GmseParamData> {
     let angle = context[DDANGLE_STR].parse::<f32>().unwrap_or(0.0).to_radians();
@@ -219,7 +219,7 @@ pub fn resolve_gmse_params(
 pub fn resolve_axis_param(
     axis_param: &AxisParam,
     scom: &ScomInfo,
-    context: &HashMap<SmolStr, SmolStr>,
+    context: &BTreeMap<SmolStr, SmolStr>,
 ) -> Option<CateAxisParam> {
     let key: SmolStr = axis_param.pconnect.replace("\n", "").replace(" ", "").into();
     let pconnect = if context.contains_key(&key) {
