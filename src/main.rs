@@ -87,7 +87,6 @@ async fn main() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
 
     // dbg!(mgr.get_attr(RefU64::from_refno_str("15213/494985").unwrap()).await).expect("TODO: panic message");
-
     // return Ok(());
 
     let b_recreate_ssc = false;
@@ -99,10 +98,10 @@ async fn main() -> anyhow::Result<()> {
     }
     let mut time = Instant::now();
     AiosDBManager::cache_geos_data(mgr.clone(), db_option.project_name.as_str(),
-                                   db_option.mdb_name.to_uppercase().as_str()).await?;
+                                   db_option.mdb_name.to_uppercase().as_str(), db_option.manual_db_nums.clone()).await?;
 
     // mgr.mesh_mgr.serialize_to_json_file();
-    // mgr.mesh_mgr.serialize_to_specify_file("/Users/dongpengcheng/rust-projects/new/AIOSEditor/assets/mesh/AIOSModel.bin");
+    mgr.mesh_mgr.serialize_to_specify_file("AIOSModel.bin");
     // mgr.mesh_mgr.serialize_to_specify_file("/Users/dongpengcheng/rust-projects/new/AIOSEditor/assets/mesh/AIOSModel.bin");
     // mgr.mesh_mgr.serialize_to_json_file();
 

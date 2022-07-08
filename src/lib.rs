@@ -25,7 +25,6 @@ pub mod database;
 pub mod consts;
 pub mod options;
 pub mod helper;
-pub mod sql;
 pub mod api;
 pub mod data_interface;
 pub mod cata;

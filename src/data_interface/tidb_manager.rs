@@ -482,9 +482,9 @@ impl AiosDBManager {
         }
         println!("缓存RefBasic数据花费：{}ms", time.elapsed().as_millis());
 
-        let info_conn = AiosDBManager::get_db_pool(&default_conn, &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name.to_uppercase())).await?;
+        let info_conn = AiosDBManager::get_db_pool(&default_conn, &format!("{}_{}",
+                                                                           PDMS_INFO_DB, &db_option.project_name.to_uppercase())).await?;
         let ref0_map = get_ref0_map(&info_conn).await?;
-        // let cached_refno_type_map = get_refno_table_map(&project);
         let projects = db_option.included_projects.clone();
         Ok(
             Self {
@@ -497,7 +497,6 @@ impl AiosDBManager {
                 db_option,
                 mesh_mgr: Arc::new(Default::default()),
                 cached_world_transforms_map: Arc::new(Default::default()),
-                // cached_site,
             }
         )
     }
@@ -577,11 +576,6 @@ impl AiosDBManager {
                 }
             }
             refno_ptset_map.insert(design_refno, axis_map);
-            // for geom in geoms.geometries {
-            //     if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
-            //         result_map.entry(design_refno).or_insert(Vec::new()).push(cate_shape);
-            //     }
-            // }
         }
 
         Ok(true)
@@ -699,26 +693,8 @@ impl AiosDBManager {
     }
 
     /// 缓存使用元件库的几何体
-    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<bool> {
+    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, project: &str, mdb: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let has_cata_types = ATTR_INFO_MAP.get_has_cat_ref_type_names();
-        // let has_cata_types = has_cata_types.iter().map(|x| x.as_str()).collect();
-        // dbg!(&has_cata_types);
-        // let dbnos = query_mdb_dbnos_by_name("Sample").await?;
-        let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
-        let info_pool = AiosDBManager::get_db_pool(
-            &url, format!("PDMS_INFO_DB_{}", mgr.db_option.project_name.to_uppercase()).as_str()).await?;
-        let pool = AiosDBManager::get_db_pool(&url, project).await?;
-        let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
-
-        let mut dbnos = Some(vec![1]);
-
-        // dbg!(&mdb_dbnos_map);
-        let key_str = format!("/{mdb}");
-        if mdb_dbnos_map.contains_key(&key_str) {
-            dbnos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned();
-        }
-        // dbg!(&dbnos);
         let mut att_types = vec!["BRAN"];
         att_types.extend_from_slice(&vec![
             "TP",
@@ -763,11 +739,11 @@ impl AiosDBManager {
             "RNODE",
             "PRTELE",
             // "GRIL",
-            "PCOM",
+            // "PCOM",
             "FITT",
             "GPART",
             // "THRE",
-            "UNIO",
+            // "UNIO",
             "SCREED",
             "NOZZ",
             "PALJ",
@@ -793,8 +769,8 @@ impl AiosDBManager {
         ]);
 
         //Some(vec![43])
-        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Some(vec![154])).await?;
-        // dbg!(&has_cata_refnos.len());
+        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, db_nos).await?;
+        dbg!(&has_cata_refnos.len());
         let mut handles = vec![];
         // let has_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 7381)]);
         let has_cata_cnt = has_cata_refnos.len();
@@ -889,9 +865,9 @@ impl AiosDBManager {
     }
 
     /// 生成基本体的几何数据
-    pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
+    pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, None).await?;
+        let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
         // let test_refno = RefU64::from_two_nums(23584, 2705);
         // prim_refnos = RefU64Vec(vec![test_refno]);
         let prim_cnt = prim_refnos.len();
@@ -1034,9 +1010,9 @@ impl AiosDBManager {
     // }
     //
 
-    pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
+    pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], None).await?;
+        let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], db_nos).await?;
         let loop_cnt = loop_refnos.len();
         //处理loop elements
         let mut handles = vec![];
@@ -1150,12 +1126,27 @@ impl AiosDBManager {
     }
 
     /// 生成模型
-    pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, project: &str, mdb: &str) -> anyhow::Result<bool> {
+    pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, project: &str, mdb: &str, mut db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let mut time = Instant::now();
-        Self::cache_prim_geos(mgr.clone(), project).await?;
-        Self::cache_loop_geos(mgr.clone(), project).await?;
+
+        if db_nos.is_none() {
+            let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
+            let info_pool = AiosDBManager::get_db_pool(
+                &url, format!("PDMS_INFO_DB_{}", mgr.db_option.project_name.to_uppercase()).as_str()).await?;
+            let pool = AiosDBManager::get_db_pool(&url, project).await?;
+            let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
+            // dbg!(&mdb_dbnos_map);
+            let key_str = format!("/{mdb}");
+            if mdb_dbnos_map.contains_key(&key_str) {
+                db_nos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned();
+            }
+            // dbg!(db_nos);
+        }
+
+        Self::cache_prim_geos(mgr.clone(), project, db_nos.clone()).await?;
+        Self::cache_loop_geos(mgr.clone(), project, db_nos.clone()).await?;
         // Self::cache_pohe_geos(mgr.clone(), project).await?;
-        Self::cache_cata_geos(mgr.clone(), project, mdb).await?;
+        Self::cache_cata_geos(mgr.clone(), project, mdb, db_nos).await?;
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
         Ok(true)
     }
@@ -1166,7 +1157,6 @@ impl AiosDBManager {
             return Ok(k.value().0.clone());
         }
         Ok(vec![])
-        // Ok(self.cached_site.clone())
     }
 }
 

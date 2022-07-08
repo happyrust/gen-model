@@ -24,6 +24,8 @@ pub struct DbOption {
     pub project_name: String,
     #[clap(short)]
     pub main_db_code: u32,
+    #[clap(skip)]
+    pub manual_db_nums: Option<Vec<i32>>,
     #[clap(long)]
     pub ip: String,
     #[clap(long)]
