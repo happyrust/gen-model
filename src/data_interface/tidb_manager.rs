@@ -39,10 +39,11 @@ use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn;
 use crate::cata::sctn::geo::create_st_geos;
 use crate::consts::*;
-use crate::data_interface::cache::{PDMS_ATT_MAP_CACHE, PDMS_IMPLICIT_ATT_MAP_CACHE};
+use crate::data_interface::cache::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP, PDMS_ATT_MAP_CACHE, PDMS_IMPLICIT_ATT_MAP_CACHE};
 use crate::data_interface::defines::CachedRefBasic;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::AIOSAxisMap;
+use crate::defines::AiosString;
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
@@ -102,12 +103,10 @@ pub struct AiosDBManager {
 
     pub mesh_mgr: Arc<PdmsMeshMgr>,
 
-    cached_refno_basic_map: Arc<DashMap<RefU64, CachedRefBasic>>,    //缓存到本地数据库
-
     cached_world_transforms_map: Arc<DashMap<RefU64, TransformRT>>,
     //记录所有需要记录的world transform, need to flush to database
 
-    cached_site: Vec<PdmsElement>, // site 层级的缓存
+    // cached_site: Vec<PdmsElement>, // site 层级的缓存
 }
 
 #[async_trait]
@@ -130,7 +129,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///获取owner的参考号，从缓存读取
     #[inline]
     fn get_owner(&self, refno: RefU64) -> RefU64 {
-        self.cached_refno_basic_map.get(&refno)
+        CACHED_REFNO_BASIC_MAP.get(&refno)
             .map(|x| x.value().get_owner()).unwrap_or_default()
     }
 
@@ -173,7 +172,7 @@ impl PdmsDataInterface for AiosDBManager {
         if !refno.is_valid() {
             None
         } else {
-            self.cached_refno_basic_map.get(&refno)
+            CACHED_REFNO_BASIC_MAP.get(&refno)
         }
     }
 
@@ -277,10 +276,9 @@ impl PdmsDataInterface for AiosDBManager {
 
     /// 获得参考号的祖先参考号
     fn get_ancestors_refnos(&self, refno: RefU64) -> Vec<RefU64> {
-        let map = &self.cached_refno_basic_map;
         let mut result = vec![refno]; //需要包含自己
         let mut cur_refno = refno;
-        while let Some(b) = map.get(&cur_refno) {
+        while let Some(b) = CACHED_REFNO_BASIC_MAP.get(&cur_refno) {
             cur_refno = b.owner;
             result.push(cur_refno);
         }
@@ -389,7 +387,7 @@ impl PdmsDataInterface for AiosDBManager {
 
 impl AiosDBManager {
     pub fn get_table_name(&self, refno: RefU64) -> String {
-        self.cached_refno_basic_map.get(&refno)
+        CACHED_REFNO_BASIC_MAP.get(&refno)
             .map(|x| x.get_table_name().to_string()).unwrap_or("UNSET".to_string())
     }
 
@@ -460,27 +458,29 @@ impl AiosDBManager {
 
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
-        let mut cached_site = vec![];
-        let cached_refno_basic_map: Arc<DashMap<RefU64, CachedRefBasic>> = Arc::new(Default::default());
+        // let mut cached_site = vec![];
+        // let cached_refno_basic_map: Arc<DashMap<RefU64, CachedRefBasic>> = Arc::new(Default::default());
         // let process_stats = ProcessStats::get().await.expect("could not get stats for running process");
         // println!("{:?}", process_stats);
         let time = Instant::now();
+        CACHED_REFNO_BASIC_MAP.load_all();
+        let need_sync = CACHED_REFNO_BASIC_MAP.is_empty();
         for project in &db_option.included_projects {
             let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
             match project_pool {
                 Ok(pool) => {
                     //暂时保存在内存，需要序列化到heed LMDB数据库
-                    sync_refno_basic_map(&pool, cached_refno_basic_map.clone()).await.unwrap();
+                    if need_sync {
+                        sync_refno_basic_map(&pool).await.unwrap();
+                    }
                     project_map.entry(project.clone()).or_insert(pool.clone());
                     // 将树节点的site层提前缓存下来
-                    let site_cache = cache_site_node(&db_option.mdb_name, &db_option.module, &pool).await;
-                    cached_site = site_cache;
+                    cache_site_node(&db_option.mdb_name, &db_option.module, &pool).await;
                 }
                 Err(_) => { println!("project: {} init failed", project); }
             }
         }
         println!("缓存RefBasic数据花费：{}ms", time.elapsed().as_millis());
-        dbg!(cached_refno_basic_map.len());
 
         let info_conn = AiosDBManager::get_db_pool(&default_conn, &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name.to_uppercase())).await?;
         let ref0_map = get_ref0_map(&info_conn).await?;
@@ -496,9 +496,8 @@ impl AiosDBManager {
                 project_path: dir,
                 db_option,
                 mesh_mgr: Arc::new(Default::default()),
-                cached_refno_basic_map,
                 cached_world_transforms_map: Arc::new(Default::default()),
-                cached_site,
+                // cached_site,
             }
         )
     }
@@ -531,9 +530,8 @@ impl AiosDBManager {
 
     ///获得参考号对应的一般类型
     pub fn get_generic_type(&self, refno: RefU64) -> PdmsGenericType {
-        let map = &self.cached_refno_basic_map;
         let mut cur_refno = refno;
-        while let Some(b) = map.get(&cur_refno) {
+        while let Some(b) = CACHED_REFNO_BASIC_MAP.get(&cur_refno) {
             let type_name = b.get_type();
             if PDMS_GNERAL_TYPE_NAMES_MAP.contains_key(&type_name) {
                 return *PDMS_GNERAL_TYPE_NAMES_MAP.get(type_name).unwrap();
@@ -754,7 +752,7 @@ impl AiosDBManager {
             "TAPE",
             "FLEX",
             // "HACC",
-            "VTWA",
+            // "VTWA",
             // "DUCT",
             // "TRNS",
             // "STRT",
@@ -795,7 +793,7 @@ impl AiosDBManager {
         ]);
 
         //Some(vec![43])
-        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, None).await?;
+        let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, Some(vec![154])).await?;
         // dbg!(&has_cata_refnos.len());
         let mut handles = vec![];
         // let has_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 7381)]);
@@ -1163,8 +1161,12 @@ impl AiosDBManager {
     }
 
     /// 获取缓存好的site
-    pub fn get_cached_site_nodes(&self) -> anyhow::Result<Vec<PdmsElement>> {
-        Ok(self.cached_site.clone())
+    pub fn get_cached_site_nodes(&self, world_refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
+        if let Some(k) = CACHED_MDB_SITE_MAP.get(&world_refno) {
+            return Ok(k.value().0.clone());
+        }
+        Ok(vec![])
+        // Ok(self.cached_site.clone())
     }
 }
 

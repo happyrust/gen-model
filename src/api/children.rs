@@ -1,13 +1,15 @@
 use std::collections::VecDeque;
 use std::env;
 use std::fmt::format;
-use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefI32Tuple, RefU64, RefU64Vec};
+use aios_core::pdms_types::{EleTreeNode, PdmsElement, PdmsElementVec, RefI32Tuple, RefU64, RefU64Vec};
 use calamine::Error::De;
 use sqlx::{MySql, Pool, Row};
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::api::element::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};
+use crate::data_interface::cache::CACHED_MDB_SITE_MAP;
+use crate::defines::AiosString;
 
 /// 遍历该节点下的 children (包含自己)
 pub async fn travel_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
@@ -130,23 +132,20 @@ pub async fn query_owner_till_type(mut refno: RefU64, types: Vec<String>, pool: 
 }
 
 /// 将树节点的 site 提前保存下来
-pub async fn cache_site_node(mdb: &str, module: &str, pool: &Pool<MySql>) -> Vec<PdmsElement> {
+pub async fn cache_site_node(mdb: &str, module: &str, pool: &Pool<MySql>){
+
     if let Ok(world) = query_world(mdb, module, pool).await {
-        if let Ok(children) = query_world_children_eles(mdb, module, pool).await {
-            let children = children.into_iter().map(|child| {
-                PdmsElement {
-                    refno: child.refno,
-                    owner: world.refno,
-                    name: child.name,
-                    noun: child.noun,
-                    version: child.version,
-                    children_count: child.children_count,
+        if !CACHED_MDB_SITE_MAP.contains_key(&world.refno) {
+            dbg!(world.refno);
+            if let Ok(mut children) = query_world_children_eles(mdb, module, pool).await {
+                for mut child in &mut children {
+                    child.owner =  world.refno;
                 }
-            }).collect::<Vec<PdmsElement>>();
-            return children;
+                CACHED_MDB_SITE_MAP.insert(world.refno, PdmsElementVec(children));
+            }
         }
+
     }
-    vec![]
 }
 
 /// 找到某numbdb下的所有指定类型的参考号

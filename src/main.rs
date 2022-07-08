@@ -13,7 +13,7 @@ use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use dashmap::DashMap;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
-use aios_database::{BATCH_CHUNKS_CNT, tables};
+use aios_database::{BATCH_CHUNKS_CNT};
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolConnection;
 use aios_database::database::*;
@@ -83,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
         sync_pdms(&db_option).await?;
     }
 
+
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
 
     // dbg!(mgr.get_attr(RefU64::from_refno_str("15213/494985").unwrap()).await).expect("TODO: panic message");
@@ -101,8 +102,14 @@ async fn main() -> anyhow::Result<()> {
                                    db_option.mdb_name.to_uppercase().as_str()).await?;
 
     // mgr.mesh_mgr.serialize_to_json_file();
-    mgr.mesh_mgr.serialize_to_specify_file("/Users/dongpengcheng/rust-projects/new/AIOSEditor/assets/mesh/AIOSModel.bin");
-    mgr.mesh_mgr.serialize_to_json_file();
+    // mgr.mesh_mgr.serialize_to_specify_file("/Users/dongpengcheng/rust-projects/new/AIOSEditor/assets/mesh/AIOSModel.bin");
+    // mgr.mesh_mgr.serialize_to_specify_file("/Users/dongpengcheng/rust-projects/new/AIOSEditor/assets/mesh/AIOSModel.bin");
+    // mgr.mesh_mgr.serialize_to_json_file();
+
+    mgr.mesh_mgr.cached_mesh_mgr.serialize_to_specify_file("mesh.bin");
+    mgr.mesh_mgr.inst_mgr.serialize_to_specify_file("inst.bin");
+    mgr.mesh_mgr.level_shape_mgr.serialize_to_specify_file("level.bin");
+
 
     println!("花费时间: {} ms", time.elapsed().as_millis());
 

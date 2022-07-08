@@ -29,6 +29,8 @@ nom-derive = "0.10.0"
 regex = "1.5.6"
 calamine = "0.18.0"
 append-only-vec = "0.1.2"
+sled = "0.34.7"
+derive_more = "0.99.17"
 
 
 parse_pdms_db = { path = "../aios-parse-pdms" }

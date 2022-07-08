@@ -6,6 +6,7 @@ use crate::consts::*;
 use dashmap::DashMap;
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
+use crate::data_interface::cache::CACHED_REFNO_BASIC_MAP;
 use crate::data_interface::defines::CachedRefBasic;
 use crate::helper::qualified_table_name;
 
@@ -31,7 +32,7 @@ pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Str
 }
 
 /// 获取生成refno到RefBasic的映射
-pub async fn sync_refno_basic_map(pool: &Pool<MySql>, map: Arc<DashMap<RefU64, CachedRefBasic>>) -> anyhow::Result<bool> {
+pub async fn sync_refno_basic_map(pool: &Pool<MySql>) -> anyhow::Result<bool> {
     let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE}");
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match results {
@@ -41,7 +42,7 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>, map: Arc<DashMap<RefU64, C
                 let owner = (val.get::<i64, _>("OWNER") as u64).into();
                 let type_name = val.get::<String, _>("TYPE");
                 let table = qualified_table_name(type_name.as_str());
-                map.insert(refno, CachedRefBasic {
+                CACHED_REFNO_BASIC_MAP.insert(refno, CachedRefBasic {
                     owner,
                     table
                 });
