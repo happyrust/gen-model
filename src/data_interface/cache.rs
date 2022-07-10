@@ -19,7 +19,7 @@ lazy_static! {
     pub static ref PDMS_ATT_MAP_CACHE: CacheMgr< AttrMap>  = CacheMgr::new("ATTR_MAP_CACHE",false);
     pub static ref PDMS_IMPLICIT_ATT_MAP_CACHE: CacheMgr< AttrMap>  = CacheMgr::new("IMPLICIT_ATTR_MAP_CACHE",false);
 
-    pub static ref CACHED_REFNO_BASIC_MAP: CacheMgr< CachedRefBasic>  = CacheMgr::new("REFNO_BASIC_CACHE",true);
+    pub static ref CACHED_REFNO_BASIC_MAP: CacheMgr< CachedRefBasic>  = CacheMgr::new("REFNO_BASIC_CACHE",false);
     pub static ref CACHED_MDB_SITE_MAP: CacheMgr< PdmsElementVec>  = CacheMgr::new("MDB_SITE_CACHE",false);
 }
 
@@ -29,23 +29,23 @@ pub struct CacheMgr<
     name: String,
     tree: sled::Tree,
     map: DashMap<RefU64, T>,
-    b_cache: bool,
+    use_sled: bool,
 }
 
 impl<T: Into<IVec> + From<IVec> + Clone + Serialize + DeserializeOwned> CacheMgr<T>
 {
-    pub fn new(name: &str, b_cache: bool) -> Self {
+    pub fn new(name: &str, save_to_sled: bool) -> Self {
         let tree = CACHE_DB.open_tree(name).unwrap();
         Self {
             name: name.to_string(),
             tree,
             map: Default::default(),
-            b_cache,
+            use_sled: save_to_sled,
         }
     }
 
-    pub fn b_cache(&self) -> bool {
-        self.b_cache
+    pub fn use_sled(&self) -> bool {
+        self.use_sled
     }
 
     #[inline]
@@ -55,7 +55,7 @@ impl<T: Into<IVec> + From<IVec> + Clone + Serialize + DeserializeOwned> CacheMgr
 
     #[inline]
     pub fn get(&self, k: &RefU64) -> Option<Ref<RefU64, T>> {
-        if !self.map.contains_key(k) {
+        if self.use_sled && !self.map.contains_key(k) {
             if let Ok(Some(bytes)) = self.tree.get::<IVec>(k.into()) {
                 self.map.insert((*k).into(), bytes.into());
             }
@@ -65,9 +65,11 @@ impl<T: Into<IVec> + From<IVec> + Clone + Serialize + DeserializeOwned> CacheMgr
 
     #[inline]
     pub fn load_all(&self) {
-        for k in self.tree.iter() {
-            if let Ok((key, value)) = k {
-                self.map.insert(key.into(), value.into());
+        if self.use_sled {
+            for k in self.tree.iter() {
+                if let Ok((key, value)) = k {
+                    self.map.insert(key.into(), value.into());
+                }
             }
         }
     }
@@ -76,7 +78,9 @@ impl<T: Into<IVec> + From<IVec> + Clone + Serialize + DeserializeOwned> CacheMgr
     pub fn insert(&self, k: RefU64, value: T) {
         self.map.insert(k, value.clone());
         let bytes: IVec = k.into();
-        self.tree.insert(bytes, value);
+        if self.use_sled {
+            self.tree.insert(bytes, value);
+        }
     }
 
     #[inline]

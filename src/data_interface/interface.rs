@@ -53,6 +53,8 @@ pub trait PdmsDataInterface : Send + Sync{
 
     fn get_ancestors_refnos(&self, refno: RefU64) -> Vec<RefU64>;
 
+    fn get_ancestors_refnos_without_world(&self, refno: RefU64) -> Vec<RefU64>;
+
     async fn get_ancestors_attrs(&self, refno: RefU64) -> Vec<AttrMap>;
 
     async fn get_ancestor_nodes(&self, refno: RefU64) -> anyhow::Result<VecDeque<EleTreeNode>>;

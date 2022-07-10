@@ -74,7 +74,7 @@ dependencies = [
  "dotenv",
  "flate2",
  "futures",
- "glam",
+ "glam 0.20.5",
  "hex",
  "id_tree",
  "itertools",
@@ -107,7 +107,7 @@ dependencies = [
  "dashmap",
  "fixed 2.0.0-alpha.2",
  "flate2",
- "glam",
+ "glam 0.20.5",
  "hash32",
  "hash32-derive",
  "hexasphere",
@@ -775,14 +775,14 @@ dependencies = [
 name = "bevy_math"
 version = "0.8.0-dev"
 dependencies = [
- "glam",
+ "glam 0.20.5",
 ]
 
 [[package]]
 name = "bevy_mikktspace"
 version = "0.8.0-dev"
 dependencies = [
- "glam",
+ "glam 0.20.5",
 ]
 
 [[package]]
@@ -817,7 +817,7 @@ dependencies = [
  "bevy_utils",
  "downcast-rs",
  "erased-serde",
- "glam",
+ "glam 0.20.5",
  "parking_lot 0.11.2",
  "serde",
  "smallvec",
@@ -1896,30 +1896,30 @@ dependencies = [
 
 [[package]]
 name = "encase"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f33a42bdd49d6bd63cc10778a55d3f702254c68017a634be723063dc9bad270"
+checksum = "fda10df9ba45ae40850c2b6bbcc69e7fd6e8411ab0eed4e7ba4570c742864f0f"
 dependencies = [
  "const_panic",
  "encase_derive",
- "glam",
+ "glam 0.20.5",
  "thiserror",
 ]
 
 [[package]]
 name = "encase_derive"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d46ef76e6a127b37791f8e48575fc6db50f030ee811ed19c1e381cf819ec1c57"
+checksum = "f62aa61539fa24d28e2e440ac71fabc7bb2e04e3bf62e7621d0962a901040612"
 dependencies = [
  "encase_derive_impl",
 ]
 
 [[package]]
 name = "encase_derive_impl"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36232cf81f78d216f9ae0865e8f8ac562fb6a5dc8d2e3e98c00ccec0b7c6473f"
+checksum = "86e7deaa8e1ea897c9a67081fe4ecb71a62d8f8dee84983f515ff69a3a3a7dc1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2400,6 +2400,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glam"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "781aa11be58ef14b0cd7326618afcbd9cdb5ba686bdab7193d87cdc322cd7033"
+
+[[package]]
 name = "gloo-timers"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2607,11 +2613,11 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hexasphere"
-version = "7.1.0"
+version = "7.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a63b4f20531192178b99682b8911d06108000093cb7e59acf0af342132617d"
+checksum = "9652f2ed7ee9c6374a061039f60fc6e25d7adac7fa10f83365669af3b24b0bf0"
 dependencies = [
- "glam",
+ "glam 0.21.2",
  "once_cell",
 ]
 
@@ -3978,7 +3984,7 @@ dependencies = [
  "fixed 1.15.0",
  "flate2",
  "futures",
- "glam",
+ "glam 0.20.5",
  "hash32",
  "hash32-derive",
  "hex",
