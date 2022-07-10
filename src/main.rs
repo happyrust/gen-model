@@ -90,8 +90,8 @@ async fn main() -> anyhow::Result<()> {
 
     // dbg!(mgr.get_attr(RefU64::from_refno_str("15213/494985").unwrap()).await).expect("TODO: panic message");
     // dbg!(&mgr.dbno_mgr.ref0_dbnos_map.iter().filter(|x| x.1.len() == 1).collect_vec());
-    mgr.dbno_mgr.serialize_to_specify_file("instance/dbno_mgr.num");
-    return Ok(());
+    // mgr.dbno_mgr.serialize_to_specify_file("instance/dbno_mgr.num");
+    // return Ok(());
 
     let b_recreate_ssc = false;
     if b_recreate_ssc {
