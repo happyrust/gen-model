@@ -62,7 +62,7 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>) -> anyhow::Result<
     }
     let (zone_level_map, zone_name_map) = insert_set_ssc_node_sql(project_pool).await?;
     let room_data = query_all_room_data(project_pool).await?;
-    let insert_sql = "REPLACE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
+    let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
     dbg!(&room_data.len());
     let sql = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, project_pool).await;
     let sql = format!("{} {}", insert_sql, sql);
@@ -166,7 +166,8 @@ fn get_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i32, Ve
 
 /// 创建ssc固定节点
 pub async fn insert_set_ssc_node_sql(pool: &Pool<MySql>) -> anyhow::Result<(HashMap<String, RefU64>, HashMap<String, String>)> {
-    let insert_sql = "REPLACE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
+    // let insert_sql = "REPLACE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
+    let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
     let (sql, zone_level_map, zone_name_map) = set_ssc_node()?;
     let sql = format!("{}{}", insert_sql, sql);
     let mut conn = pool.acquire().await?;

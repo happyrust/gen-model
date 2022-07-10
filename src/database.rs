@@ -26,7 +26,7 @@ use crate::options::DbOption;
 use sqlx::Executor;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
-use crate::tables::{gen_creat_version_info_table_sql, gen_create_data_state_tables_sql, gen_create_pdms_version_table_sql, gen_create_project_mdb_json_sql, gen_create_room_code_table_sql};
+use crate::tables::*;
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -124,7 +124,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
 
             let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
             let mut conn = project_pool.acquire().await?;
-            tables_sql.push_str(&tables::gen_create_element_tables_sql(db_option.only_rebuild_pdms_element));
+            tables_sql.push_str(&tables::gen_create_element_tables_sql());
             if !db_option.only_rebuild_pdms_element {
                 tables_sql.push_str(&tables::gen_create_project_mdb_sql());
                 tables_sql.push_str(&gen_create_project_mdb_json_sql());
@@ -186,7 +186,8 @@ pub fn gen_explicit_att_insert_sql(refno: RefU64, type_name: &str, owner: RefU64
     let mut sql = String::new();
     let mut table_columns_sql = String::new();
     let table_name = qualified_table_name(type_name);
-    table_columns_sql.push_str("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA)");
+    // table_columns_sql.push_str("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA)");
+    table_columns_sql.push_str("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA)");
 
     let mut table_vals_sql = String::new();
     let data = hex::encode(e_att.into_compress_bytes());
@@ -206,7 +207,8 @@ pub fn gen_implicit_attr_insert_sql(hash: u32) -> (String, Vec<NounHash>) {
     let type_name = db1_dehash(hash);
     let table_name = qualified_table_name(type_name.as_str());
     let mut table_columns_sql = String::new();
-    table_columns_sql.push_str(&format!("REPLACE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
+    // table_columns_sql.push_str(&format!("REPLACE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
+    table_columns_sql.push_str(&format!("INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
 
     let implicit_names = ATTR_INFO_MAP.get_type_implicit_att_names(type_name.as_str());
     let column_hashs = implicit_names.iter().filter_map(|x| (x != "unset").then(|| NounHash(db1_hash(x.as_str())))).collect();
@@ -381,7 +383,8 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                             let mut info_conn = info_pool_clone.acquire().await.unwrap();
                             //保存dbno的信息表
                             if !db_option_clone.only_rebuild_pdms_element {
-                                let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
+                                // let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
+                                let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
                                 sql.push_str(dbno_filename_sql.as_str());
                                 // sql.remove(sql.len() - 1);
                                 let result = info_conn.execute(sql.as_str()).await;
@@ -393,7 +396,8 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                                     }
                                 }
                                 //保存refno的信息表
-                                let mut sql = format!("REPLACE INTO {PDMS_REFNO_INFOS_TABLE}(REF0, PROJECT) VALUES ");
+                                // let mut sql = format!("REPLACE INTO {PDMS_REFNO_INFOS_TABLE}(REF0, PROJECT) VALUES ");
+                                let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE}(REF0, PROJECT) VALUES ");
                                 for kv in &refno_info_map {
                                     sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
                                 }
@@ -446,7 +450,8 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                                             }
                                         }
                                         //执行显示数据保存
-                                        let mut sql = format!("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                        // let mut sql = format!("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
                                         sql.push_str(explicit_values_sql.as_str());
                                         sql.remove(sql.len() - 1);
                                         let result = project_conn.execute(sql.as_str()).await;
@@ -459,7 +464,8 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                                         }
                                     }
                                     // {PDMS_ELEMENTS_TABLE} 保存
-                                    let mut sql = format!("REPLACE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
+                                    // let mut sql = format!("REPLACE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
+                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
@@ -478,7 +484,8 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                             // 将带有 room_code 属性的保存下来
                             for (room_name, refnos) in room_code_map.clone() {
                                 // 将 room_code 单独存放到 room_code 表中
-                                let mut room_code_sql = format!("REPLACE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                                // let mut room_code_sql = format!("REPLACE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                                let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
                                 for refno in refnos.clone() {
                                     room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
                                 }
@@ -571,7 +578,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                         let mut info_conn = info_pool_clone.acquire().await.unwrap();
                         //保存dbno的信息表
                         if !db_option_clone.only_rebuild_pdms_element {
-                            let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
+                            let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
                             sql.push_str(dbno_filename_sql.as_str());
                             let result = info_conn.execute(sql.as_str()).await;
                             match result {
@@ -583,7 +590,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                             }
 
                             //保存refno的信息表
-                            let mut sql = format!("REPLACE INTO {PDMS_REFNO_INFOS_TABLE}(REF0, PROJECT) VALUES ");
+                            let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE}(REF0, PROJECT) VALUES ");
                             for kv in &refno_info_map {
                                 sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
                             }
@@ -643,7 +650,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                         }
 
                                         //执行显示数据保存
-                                        let mut sql = format!("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
                                         sql.push_str(explicit_values_sql.as_str());
                                         sql.remove(sql.len() - 1);
                                         let result = project_conn.execute(sql.as_str()).await;
@@ -656,7 +663,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                         }
                                     }
                                     // {PDMS_ELEMENTS_TABLE} 保存
-                                    let mut sql = format!("REPLACE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
+                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
@@ -682,7 +689,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                     if !db_option_clone.only_rebuild_pdms_element {
                         for (room_name, refnos) in room_code_map.clone() {
                             // 将room_code单独存放到room_code表中
-                            let mut room_code_sql = format!("REPLACE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                            let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
                             for refno in refnos.clone() {
                                 room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
                             }

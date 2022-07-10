@@ -232,7 +232,7 @@ pub async fn query_foreign_refno(refno: RefU64, foreign_type: &str, pool: &Pool<
 
 fn gen_insert_attr_info_sql(attr_info: &DashMap<i32, DashMap<i32, AttrInfo>>) -> String {
     let mut sql = String::new();
-    sql.push_str("REPLACE INTO ATTR_INFO (TYPE_HASH, TYPE,INFO ) VALUES ");
+    sql.push_str("INSERT IGNORE INTO ATTR_INFO (TYPE_HASH, TYPE,INFO ) VALUES ");
     for info in attr_info {
         let type_hash = *info.key() as u32;
         let type_name = db1_dehash(type_hash);
