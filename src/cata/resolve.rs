@@ -30,11 +30,13 @@ pub fn resolve_gms(
     context: &BTreeMap<SmolStr, SmolStr>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
 ) -> Vec<CateGeoParam> {
-    // dbg!(&gmse_raw_paras);
     gmse_raw_paras
         .iter()
         .filter_map(|g| {
-            if g.visible_flag{
+            if g.visible_flag {
+                if g.gm_type == SmolStr::new("SPRO") && g.verts.len() == 0 {
+                    return None;
+                }
                 let r = resolve_paragon_gm_params(&g, context, axis_params);
                 return match r {
                     Ok(v) => {
@@ -42,12 +44,10 @@ pub fn resolve_gms(
                     }
                     Err(e) => {
                         dbg!(e);
-                        // dbg!(g);
-                        // dbg!(context);
                         None
                     }
-                }
-            }else{
+                };
+            } else {
                 None
             }
         })
@@ -63,9 +63,9 @@ pub fn resolve_paragon_gm_params(
     // if gm_param.refno != RefU64::from_two_nums(15194, 4258) {
     //     return Ok(CateGeoParam::Unknown);
     // }
-    if let Ok(gm_data) = resolve_gmse_params(gm_param, context, axis_params){
+    if let Ok(gm_data) = resolve_gmse_params(gm_param, context, axis_params) {
         resolve_to_cate_geo_params(&gm_data)
-    }else{
+    } else {
         Err(anyhow!(format!("几何数据解析失败: {:?}", gm_param)))
     }
 }
@@ -95,9 +95,10 @@ pub fn resolve_gmse_params(
 
     let mut verts = vec![];
     for vert in &gm.verts {
-        if vert[0].is_empty() || vert[1].is_empty()  { continue; }
+        if vert[0].is_empty() || vert[1].is_empty() { continue; }
         if let Ok(f0) = eval_str_to_f32(vert[0].as_str(), context) &&
-            let Ok(f1) = eval_str_to_f32(vert[1].as_str(), context) {
+        let Ok(f1) = eval_str_to_f32(vert[1].as_str(), context)
+        {
             verts.push([f0, f1]);
         }
     }
@@ -238,7 +239,9 @@ pub fn resolve_axis_param(
                 refno: axis_param.refno,
                 number,
                 pt: [d * dir[0] + pos[0], d * dir[1] + pos[1], d * dir[2] + pos[2]],
-                dir, pconnect, pbore,
+                dir,
+                pconnect,
+                pbore,
             })
         }
         "PTCA" | "PTMI" => {
@@ -246,7 +249,7 @@ pub fn resolve_axis_param(
             let y = eval_str_to_f32(&axis_param.y, &context).unwrap_or_default();
             let z = eval_str_to_f32(&axis_param.z, &context).unwrap_or_default();
             let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);
-            Some(CateAxisParam { refno: axis_param.refno, number, pt: [pos[0] + x, pos[1] + y, pos[2] + z], dir, pconnect, pbore, })
+            Some(CateAxisParam { refno: axis_param.refno, number, pt: [pos[0] + x, pos[1] + y, pos[2] + z], dir, pconnect, pbore })
         }
         "PTPOS" => {
             let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);
@@ -256,7 +259,7 @@ pub fn resolve_axis_param(
                 let pnt_index = paras[1].parse::<i32>().unwrap_or(i32::MAX);
                 if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_index) {
                     if let Some(axis) = resolve_axis_param(&scom.axis_params[indx], scom, context) {
-                        return Some(CateAxisParam { refno: axis_param.refno, number, pt: axis.pt, dir, pconnect, pbore, });
+                        return Some(CateAxisParam { refno: axis_param.refno, number, pt: axis.pt, dir, pconnect, pbore });
                     }
                 }
             }
@@ -280,7 +283,7 @@ pub fn convert_to_context_key(expr: &str, i: &mut usize, strs: &Vec<SmolStr>) ->
             //先忽略保温层厚度
             Some(format!("IPARAM{}", strs[*i]).into())
         }
-        "DESP" | "DDESP"  => {
+        "DESP" | "DDESP" => {
             *i += 1;
             Some(format!("DESP{}", strs[*i]).into())
         }

@@ -70,12 +70,13 @@ pub fn gen_create_element_tables_sql() -> String {
     // sql.push_str(&format!(r#"{} INT ,"#, "NUMBDB"));
     sql.push_str(&format!(r#"{} INT ,"#, "NUMBDB"));
     sql.push_str(&format!(r#"{} INT ,"#, "ORDER_NUM"));
+    sql.push_str(&format!(r#"{} INT ,"#, "CHILDREN_COUNT"));
     sql.push_str(&format!(r#"{} TINYINT(1) "#, "IS_DEL"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX ELE_TYPE_IDX ON {PDMS_ELEMENTS_TABLE} (TYPE);"));
-    sql.push_str(&format!("CREATE INDEX ELE_DBNO_IDX ON {PDMS_ELEMENTS_TABLE} (NUMBDB);"));
-    sql.push_str(&format!("CREATE INDEX ELE_OWNER_IDX ON {PDMS_ELEMENTS_TABLE} (OWNER);"));
+    sql.push_str(&format!("CREATE INDEX IF NOT EXIST ELE_TYPE_IDX ON {PDMS_ELEMENTS_TABLE} (TYPE);"));
+    sql.push_str(&format!("CREATE INDEX IF NOT EXIST ELE_DBNO_IDX ON {PDMS_ELEMENTS_TABLE} (NUMBDB);"));
+    sql.push_str(&format!("CREATE INDEX IF NOT EXIST ELE_OWNER_IDX ON {PDMS_ELEMENTS_TABLE} (OWNER);"));
     sql
 }
 
@@ -92,8 +93,8 @@ pub fn gen_create_ssc_element_tables_sql() -> String {
     sql.push_str(&format!(r#"{} INT"#, "ORDER_NUM"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX ele_type_idx ON {PDMS_SSC_ELEMENTS_TABLE} (TYPE);"));
-    sql.push_str(&format!("CREATE INDEX ele_owner_idx ON {PDMS_SSC_ELEMENTS_TABLE} (OWNER);"));
+    sql.push_str(&format!("CREATE INDEX IF NOT EXIST ELE_TYPE_IDX ON {PDMS_SSC_ELEMENTS_TABLE} (TYPE);"));
+    sql.push_str(&format!("CREATE INDEX IF NOT EXIST ELE_OWNER_IDX ON {PDMS_SSC_ELEMENTS_TABLE} (OWNER);"));
     sql
 }
 
@@ -110,7 +111,7 @@ pub fn gen_create_data_state_tables_sql() -> String {
 }
 
 #[inline]
-pub fn gen_create_attr_info_tables_sql(project_name:&str) -> String {
+pub fn gen_create_attr_info_tables_sql(project_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_REFNO_INFOS_TABLE}("#));
     sql.push_str(&format!(r#"{} INT PRIMARY KEY ,"#, "TYPE_HASH"));
@@ -118,7 +119,7 @@ pub fn gen_create_attr_info_tables_sql(project_name:&str) -> String {
     sql.push_str(&format!(r#"{} BLOB "#, "INFO"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX REF0_TYPE_IDX ON {PDMS_REFNO_INFOS_TABLE}(TYPE);"));
+    sql.push_str(&format!("CREATE INDEX IF NOT EXIST REF0_TYPE_IDX ON {PDMS_REFNO_INFOS_TABLE}(TYPE);"));
     sql
 }
 
@@ -131,7 +132,7 @@ pub fn gen_create_project_mdb_sql() -> String {
     sql.push_str(&format!(r#"{} BLOB "#, "DATA"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX PROJ_MDB_DB_TYPE_IDX ON {PDMS_PROJECT_MDB_TABLE} (DB_TYPE);"));
+    sql.push_str(&format!("CREATE INDEX IF NOT EXIST PROJ_MDB_DB_TYPE_IDX ON {PDMS_PROJECT_MDB_TABLE} (DB_TYPE);"));
     sql
 }
 
@@ -144,7 +145,7 @@ pub fn gen_create_project_mdb_json_sql() -> String {
     sql.push_str(&format!(r#"{} VARCHAR(1000) "#, "DATA"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX PROJ_MDB_DB_TYPE_IDX ON {PDMS_PROJECT_MDB_TABLE_JSON} (DB_TYPE);"));
+    sql.push_str(&format!("CREATE INDEX IF NOT EXIST PROJ_MDB_DB_TYPE_IDX ON {PDMS_PROJECT_MDB_TABLE_JSON} (DB_TYPE);"));
     sql
 }
 
@@ -219,13 +220,13 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
 pub fn gen_create_room_code_table_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {ROOM_CODE} ("));
-    sql.push_str(&format!("{} BIGINT ,","REFNO"));
+    sql.push_str(&format!("{} BIGINT ,", "REFNO"));
     sql.push_str(&format!("{} VARCHAR(50) ", "ROOM_NAME"));
     sql.push_str(");");
     sql
 }
 
-pub fn gen_creat_version_info_table_sql(project_name:&str) -> String {
+pub fn gen_creat_version_info_table_sql(project_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {PDMS_VERSION}("));
     sql.push_str(&format!("{} VARCHAR(20) ,", "PROJECT"));

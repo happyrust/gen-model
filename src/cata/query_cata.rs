@@ -153,8 +153,8 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
         if !child.is_visible_by_level(None).unwrap_or(true) {
             continue;
         }
-        let has_chidren = child.get_type_cloned().unwrap_or_default() == "SPRO";//todo add other types
-        gms.push(query_gm_param(&child, interface, has_chidren).await.unwrap_or_default());
+        let has_children = child.get_type_cloned().unwrap_or_default() == "SPRO";//todo add other types
+        gms.push(query_gm_param(&child, interface, has_children).await.unwrap_or_default());
     }
     Ok(gms)
 }
@@ -199,8 +199,8 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     // }
     let axis_map = resolve_axis_params(scom_info, &cur_context);
     // dbg!(&axis_map);
+
     let geometries = resolve_gms(&scom_info.gm_params, &cur_context, &axis_map);
-    // dbg!(&geometries);
     Ok(GeomsInfo {
         geometries,
         axis_map,
@@ -270,7 +270,7 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
                 pbore,
                 pnt_index_str: attr_map.get_as_string("PTCPOS"),
             }
-        },
+        }
         _ => AxisParam {
             refno,
             type_name,
@@ -315,7 +315,7 @@ pub async fn query_gm_param(att_map: &AttrMap, interface: &dyn PdmsDataInterface
         //先暂时不考虑负实体
         let children = interface.get_children_attrs(refno).await.ok()?;
         for child in children {
-            if let Some(r) = child.get_refno() && child.get_type() == "SLOO"{
+            if let Some(r) = child.get_refno() && child.get_type() == "SLOO" {
                 for a in interface.get_children_attrs(r).await.unwrap_or_default() {
                     verts.push([SmolStr::new(a.get_as_string("PX").unwrap_or_default()),
                         SmolStr::new(a.get_as_string("PY").unwrap_or_default())]);
