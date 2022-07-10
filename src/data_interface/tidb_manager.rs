@@ -891,7 +891,6 @@ impl AiosDBManager {
                     ptset_map: default(),
                 };
                 let mut geo_insts = &mut geos_info.data;
-                // dbg!(&transform);
                 let mut geo_hash = None;
                 let mut item_trans = TransformSRT::default();
                 let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
@@ -902,12 +901,9 @@ impl AiosDBManager {
                         geo_hash = Some(r);
                     }
                 }
-
                 let parent_refno = mgr.get_owner(refno);
-                // let mut parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["LEVE"])).await.unwrap_or_default();
                 if let Some(geo_hash) = geo_hash {
                     let visible = attr.is_visible_by_level(None).unwrap_or(true);
-                    // dbg!(&visible);
                     let tr: TransformSRT = item_trans;
                     let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
                     bbox.scaled(&tr.scale);
@@ -1140,9 +1136,8 @@ impl AiosDBManager {
             if mdb_dbnos_map.contains_key(&key_str) {
                 db_nos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned();
             }
-            // dbg!(db_nos);
         }
-
+        dbg!(db_nos);
         Self::cache_prim_geos(mgr.clone(), project, db_nos.clone()).await?;
         Self::cache_loop_geos(mgr.clone(), project, db_nos.clone()).await?;
         // Self::cache_pohe_geos(mgr.clone(), project).await?;

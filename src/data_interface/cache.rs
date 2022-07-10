@@ -29,6 +29,7 @@ pub struct CacheMgr<
     name: String,
     tree: sled::Tree,
     map: DashMap<RefU64, T>,
+
 }
 
 impl<T: Into<IVec> + From<IVec> + Clone + Serialize + DeserializeOwned> CacheMgr<T>
