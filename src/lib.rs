@@ -32,6 +32,9 @@ pub mod ssc;
 pub mod defines;
 
 #[macro_use]
+extern crate derive_more;
+
+#[macro_use]
 extern crate nom;
 
 lazy_static! {

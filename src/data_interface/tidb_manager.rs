@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use aios_core::consts::*;
+use aios_core::db_number::DbNumMgr;
 use aios_core::parsed_data::{CateAxisParam, GeomsInfo};
 // use simple_process_stats::ProcessStats;
 use aios_core::pdms_types::*;
@@ -99,14 +100,13 @@ pub struct AiosDBManager {
 
     pub db_option: DbOption,
 
+    pub dbno_mgr: DbNumMgr,
+
     pub cached_mesh_mgr: Arc<CachedMeshesMgr>,
 
-    pub mesh_instance_mgr: Arc<DashMap<i32, PdmsMeshInstancehMgr>>,
+    pub mesh_instance_mgr: Arc<DashMap<i32, PdmsMeshInstanceMgr>>,
 
     cached_world_transforms_map: Arc<DashMap<RefU64, TransformRT>>,
-    //记录所有需要记录的world transform, need to flush to database
-
-    // cached_site: Vec<PdmsElement>, // site 层级的缓存
 }
 
 #[async_trait]
@@ -480,15 +480,17 @@ impl AiosDBManager {
         // let process_stats = ProcessStats::get().await.expect("could not get stats for running process");
         // println!("{:?}", process_stats);
         let time = Instant::now();
-        CACHED_REFNO_BASIC_MAP.load_all();
-        let need_sync = CACHED_REFNO_BASIC_MAP.is_empty();
+        let mut dbno_mgr = DbNumMgr::default();
+        // CACHED_REFNO_BASIC_MAP.load_all();
+        // let need_sync = CACHED_REFNO_BASIC_MAP.is_empty();
+        let need_sync = true;
         for project in &db_option.included_projects {
             let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
             match project_pool {
                 Ok(pool) => {
                     //暂时保存在内存，需要序列化到heed LMDB数据库
                     if need_sync {
-                        sync_refno_basic_map(&pool).await.unwrap();
+                        sync_refno_basic_map(&pool, &mut dbno_mgr).await.unwrap();
                     }
                     project_map.entry(project.clone()).or_insert(pool.clone());
                     // 将树节点的site层提前缓存下来
@@ -512,6 +514,7 @@ impl AiosDBManager {
                 needed_parse_files: None,
                 project_path: dir,
                 db_option,
+                dbno_mgr,
                 cached_mesh_mgr: Arc::new(Default::default()),
                 mesh_instance_mgr: Arc::new(Default::default()),
                 cached_world_transforms_map: Arc::new(Default::default()),
@@ -711,7 +714,7 @@ impl AiosDBManager {
     }
 
     /// 缓存使用元件库的几何体
-    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstancehMgr>, project: &str, mdb: &str,
+    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str, mdb: &str,
                                  db_nos: Option<Vec<i32>>, debug_cata_refno: &Option<String>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let mut att_types = vec!["BRAN"];
@@ -752,7 +755,7 @@ impl AiosDBManager {
             // "TRNS",
             // "STRT",
             "STWALL",
-            "HFAN",
+            // "HFAN",
             // "DAMP",
             //"PAVE",
             "RNODE",
@@ -772,7 +775,7 @@ impl AiosDBManager {
             "CABLE",
             "BATT",
             "CMFI",
-            "MESH",
+            // "MESH",
             // "PLAT",
             "CNODE",
             "SCOJ",
@@ -889,7 +892,7 @@ impl AiosDBManager {
     }
 
     /// 生成基本体的几何数据
-    pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstancehMgr>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
+    pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
         // let test_refno = RefU64::from_two_nums(17788, 18653);
@@ -1032,7 +1035,7 @@ impl AiosDBManager {
     // }
     //
 
-    pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstancehMgr>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
+    pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], db_nos).await?;
         let loop_cnt = loop_refnos.len();
@@ -1169,7 +1172,7 @@ impl AiosDBManager {
         dbg!(&db_nos);
         for db_no in db_nos {
 
-            let instance_mgr = Arc::new(PdmsMeshInstancehMgr::default());
+            let instance_mgr = Arc::new(PdmsMeshInstanceMgr::default());
 
             Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
             Self::cache_loop_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;

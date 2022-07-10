@@ -12,7 +12,9 @@ use aios_core::pdms_types::{AttrMap, AttrVal, DbAttributeType, NounHash, PdmsDat
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use dashmap::DashMap;
+use futures::StreamExt;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
+use regex::internal::Input;
 use aios_database::{BATCH_CHUNKS_CNT};
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolConnection;
@@ -87,7 +89,9 @@ async fn main() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
 
     // dbg!(mgr.get_attr(RefU64::from_refno_str("15213/494985").unwrap()).await).expect("TODO: panic message");
-    // return Ok(());
+    // dbg!(&mgr.dbno_mgr.ref0_dbnos_map.iter().filter(|x| x.1.len() == 1).collect_vec());
+    mgr.dbno_mgr.serialize_to_specify_file("instance/dbno_mgr.num");
+    return Ok(());
 
     let b_recreate_ssc = false;
     if b_recreate_ssc {
@@ -103,14 +107,17 @@ async fn main() -> anyhow::Result<()> {
     // mgr.mesh_instance_mgr.serialize_to_specify_file("AIOSModel.bin");
     // mgr.mesh_mgr.serialize_to_specify_file("/Users/dongpengcheng/rust-projects/new/AIOSEditor/assets/mesh/AIOSModel.bin");
     // mgr.mesh_mgr.serialize_to_json_file();
-
+    std::fs::create_dir_all("mesh").unwrap();
     mgr.cached_mesh_mgr.serialize_to_specify_file("mesh/mesh.bin");
 
+    std::fs::create_dir_all("instance").unwrap();
     for k in mgr.mesh_instance_mgr.iter() {
         let db_no = *k.key();
-        k.value().inst_mgr.serialize_to_specify_file(&format!("instance/inst_{db_no}.bin"));
-        k.value().level_shape_mgr.serialize_to_specify_file(&format!("instance/level_{db_no}.bin"));
+        k.value().serialize_to_specify_file(&format!("instance/{db_no}.inst"));
+        // k.value().level_shape_mgr.serialize_to_specify_file(&format!("instance/level_{db_no}.bin"));
     }
+
+    mgr.dbno_mgr.serialize_to_specify_file("instance/dbno_mgr.num");
 
     // mgr.mesh_instance_mgr.inst_mgr.serialize_to_specify_file("inst.bin");
     // mgr.mesh_instance_mgr.level_shape_mgr.serialize_to_specify_file("level.bin");
