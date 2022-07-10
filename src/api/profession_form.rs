@@ -34,7 +34,7 @@ pub fn gen_create_profession_table_sql(map: &HashMap<String, String>, form_name:
 pub async fn gen_insert_profession_to_db_sql(map: Vec<HashMap<String, String>>, form_name: &str, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let mut project_conn = pool.acquire().await?;
     let mut sql = String::new();
-    sql.push_str(&format!("insert ignore into {} ( ", form_name));
+    sql.push_str(&format!("REPLACE INTO {} ( ", form_name));
     let mut key_vec = vec![];
     for keys in map[0].clone().keys() {
         key_vec.push(keys.clone());

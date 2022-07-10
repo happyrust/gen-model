@@ -51,8 +51,6 @@ pub const TUBI_TOL: f32 = 10.0f32;
 pub const BATCH_COUNT: usize = 50;
 
 
-
-
 pub type CateBrepShapeMap = DashMap<RefU64, Vec<CateBrepShape>>;
 // static GLOBAL_COLLISION_WORLD: Lazy<Mutex<CollisionWorld<f32, (RefU64, RefU64)>>> = Lazy::new(|| {
 //     let mut world = CollisionWorld::<f32, (RefU64, RefU64)>::new(0.001f32);
@@ -119,7 +117,9 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_full_attr(refno, ref_basic.value(), &project_pool, None).await?;
-                PDMS_ATT_MAP_CACHE.insert(refno, attr.clone());
+                if PDMS_ATT_MAP_CACHE.b_cache() {
+                    PDMS_ATT_MAP_CACHE.insert(refno, attr.clone());
+                }
                 return Ok(attr);
             }
         }
@@ -141,7 +141,9 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_implicit_attr(refno, ref_basic.value(), &project_pool, columns).await?;
-                PDMS_IMPLICIT_ATT_MAP_CACHE.insert(refno, attr.clone());
+                if PDMS_IMPLICIT_ATT_MAP_CACHE.b_cache() {
+                    PDMS_IMPLICIT_ATT_MAP_CACHE.insert(refno, attr.clone());
+                }
                 return Ok(attr);
             }
         }
@@ -693,7 +695,8 @@ impl AiosDBManager {
     }
 
     /// 缓存使用元件库的几何体
-    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, project: &str, mdb: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
+    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, project: &str, mdb: &str, db_nos: Option<Vec<i32>>,
+                                 debug_cata_refno: &Option<String>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let mut att_types = vec!["BRAN"];
         att_types.extend_from_slice(&vec![
@@ -704,7 +707,7 @@ impl AiosDBManager {
             "ELCONN",
             "HELE",
             "PCLA",
-            "PANE",
+            // "PANE",
             "CMPF",
             "WALL",
             "SUBE",
@@ -735,7 +738,7 @@ impl AiosDBManager {
             "STWALL",
             "HFAN",
             // "DAMP",
-            "PAVE",
+            //"PAVE",
             "RNODE",
             "PRTELE",
             // "GRIL",
@@ -768,13 +771,19 @@ impl AiosDBManager {
             "SCTN",
         ]);
 
-        //Some(vec![43])
         let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, db_nos).await?;
-        dbg!(&has_cata_refnos.len());
         let mut handles = vec![];
         // let has_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 7381)]);
         let has_cata_cnt = has_cata_refnos.len();
         for (i, refno) in has_cata_refnos.into_iter().enumerate() {
+            if let Some(debug_refno) = debug_cata_refno {
+                if let Ok(debug_refno) = RefU64::from_refno_str(debug_refno) {
+                    if refno != debug_refno {
+                        continue;
+                    }
+                }
+            }
+
             let mgr = mgr.clone();
             let handle = tokio::spawn(async move {
                 let inst_map = &mgr.mesh_mgr.inst_mgr;
@@ -793,7 +802,6 @@ impl AiosDBManager {
                                                 &refno_ptset_map).await.unwrap_or_default();
                 }
                 //todo refno_ptset_map 需要存入到数据库
-                // dbg!(&brep_shapes);
                 for (child_refno, shapes) in brep_shapes {
                     let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
                     let ancestors = mgr.get_ancestors_refnos(child_refno);
@@ -850,7 +858,6 @@ impl AiosDBManager {
                         };
                         geo_insts.push(geom_inst);
                     }
-
                     inst_map.entry(child_refno).or_insert(geos_info);
                 }
             });
@@ -868,7 +875,7 @@ impl AiosDBManager {
     pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
-        // let test_refno = RefU64::from_two_nums(23584, 2705);
+        // let test_refno = RefU64::from_two_nums(17788, 18653);
         // prim_refnos = RefU64Vec(vec![test_refno]);
         let prim_cnt = prim_refnos.len();
         let mut handles = vec![];
@@ -893,7 +900,7 @@ impl AiosDBManager {
                 let mut geo_insts = &mut geos_info.data;
                 let mut geo_hash = None;
                 let mut item_trans = TransformSRT::default();
-                let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
+                let attr = mgr.get_attr(refno).await.unwrap_or_default();
                 if let Some(brep_obj) = attr.create_brep_shape() {
                     if brep_obj.check_valid() {
                         item_trans = brep_obj.get_trans();
@@ -1122,16 +1129,18 @@ impl AiosDBManager {
     }
 
     /// 生成模型
-    pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, project: &str, mdb: &str, mut db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
+    pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<bool> {
         let mut time = Instant::now();
-
+        let project = &db_option.project_name;
+        let mdb = &db_option.mdb_name;
+        let mut db_nos = db_option.manual_db_nums;
+        let debug_cata_refno = db_option.debug_cata_refnos;
         if db_nos.is_none() {
             let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
             let info_pool = AiosDBManager::get_db_pool(
                 &url, format!("PDMS_INFO_DB_{}", mgr.db_option.project_name.to_uppercase()).as_str()).await?;
             let pool = AiosDBManager::get_db_pool(&url, project).await?;
             let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
-            // dbg!(&mdb_dbnos_map);
             let key_str = format!("/{mdb}");
             if mdb_dbnos_map.contains_key(&key_str) {
                 db_nos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned();
@@ -1139,9 +1148,12 @@ impl AiosDBManager {
         }
         dbg!(db_nos);
         Self::cache_prim_geos(mgr.clone(), project, db_nos.clone()).await?;
+        dbg!("基本体生成完成");
         Self::cache_loop_geos(mgr.clone(), project, db_nos.clone()).await?;
+        dbg!("loop节点生成完成");
         // Self::cache_pohe_geos(mgr.clone(), project).await?;
-        Self::cache_cata_geos(mgr.clone(), project, mdb, db_nos).await?;
+        Self::cache_cata_geos(mgr.clone(), project, mdb, db_nos, &debug_cata_refno).await?;
+
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
         Ok(true)
     }

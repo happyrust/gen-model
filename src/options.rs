@@ -26,6 +26,10 @@ pub struct DbOption {
     pub main_db_code: u32,
     #[clap(skip)]
     pub manual_db_nums: Option<Vec<i32>>,
+    #[clap(skip)]
+    pub debug_cata_refnos: Option<String>,
+    #[clap(long)]
+    pub only_rebuild_pdms_element: bool,
     #[clap(long)]
     pub ip: String,
     #[clap(long)]

@@ -16,11 +16,11 @@ lazy_static! {
     pub static ref CACHE_DB: sled::Db  = {
        sled::open(CACHE_SLED_NAME).unwrap()
     };
-    pub static ref PDMS_ATT_MAP_CACHE: CacheMgr< AttrMap>  = CacheMgr::new("ATTR_MAP_CACHE");
-    pub static ref PDMS_IMPLICIT_ATT_MAP_CACHE: CacheMgr< AttrMap>  = CacheMgr::new("IMPLICIT_ATTR_MAP_CACHE");
+    pub static ref PDMS_ATT_MAP_CACHE: CacheMgr< AttrMap>  = CacheMgr::new("ATTR_MAP_CACHE",false);
+    pub static ref PDMS_IMPLICIT_ATT_MAP_CACHE: CacheMgr< AttrMap>  = CacheMgr::new("IMPLICIT_ATTR_MAP_CACHE",false);
 
-    pub static ref CACHED_REFNO_BASIC_MAP: CacheMgr< CachedRefBasic>  = CacheMgr::new("REFNO_BASIC_CACHE");
-    pub static ref CACHED_MDB_SITE_MAP: CacheMgr< PdmsElementVec>  = CacheMgr::new("MDB_SITE_CACHE");
+    pub static ref CACHED_REFNO_BASIC_MAP: CacheMgr< CachedRefBasic>  = CacheMgr::new("REFNO_BASIC_CACHE",true);
+    pub static ref CACHED_MDB_SITE_MAP: CacheMgr< PdmsElementVec>  = CacheMgr::new("MDB_SITE_CACHE",false);
 }
 
 #[derive(Clone)]
@@ -29,18 +29,23 @@ pub struct CacheMgr<
     name: String,
     tree: sled::Tree,
     map: DashMap<RefU64, T>,
-
+    b_cache: bool,
 }
 
 impl<T: Into<IVec> + From<IVec> + Clone + Serialize + DeserializeOwned> CacheMgr<T>
 {
-    pub fn new(name: &str) -> Self {
+    pub fn new(name: &str, b_cache: bool) -> Self {
         let tree = CACHE_DB.open_tree(name).unwrap();
         Self {
             name: name.to_string(),
             tree,
             map: Default::default(),
+            b_cache,
         }
+    }
+
+    pub fn b_cache(&self) -> bool {
+        self.b_cache
     }
 
     #[inline]

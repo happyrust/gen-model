@@ -97,8 +97,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     let mut time = Instant::now();
-    AiosDBManager::cache_geos_data(mgr.clone(), db_option.project_name.as_str(),
-                                   db_option.mdb_name.to_uppercase().as_str(), db_option.manual_db_nums.clone()).await?;
+    AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
 
     // mgr.mesh_mgr.serialize_to_json_file();
     mgr.mesh_mgr.serialize_to_specify_file("AIOSModel.bin");

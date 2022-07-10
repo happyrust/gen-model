@@ -103,14 +103,14 @@ pub async fn query_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
         let type_name = val.get::<String, _>("TYPE");
         let owner = RefU64(val.get::<i64, _>("OWNER") as u64);
         let order = val.get::<i32, _>("ORDER_NUM");
-        let children_count = query_children_count(child_refno, &pool).await?;
+        let children_count = val.get::<i32, _>("CHILDREN_COUNT");
         b_map.insert(order, PdmsElement {
             refno: child_refno.to_string(),
             owner,
             name,
             noun: type_name,
             version: 0,
-            children_count,
+            children_count: children_count as usize,
         });
     }
     for (_, v) in b_map {
@@ -119,10 +119,30 @@ pub async fn query_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
     Ok(r)
 }
 
-pub async fn query_children_count(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<usize> {
-    let count_sql = gen_pdms_elements_get_children_count_sql(refno);
-    let count_result = sqlx::query(&count_sql).fetch_one(&mut pool.acquire().await?).await?;
-    Ok(count_result.get::<i32, _>(0) as usize)
+pub async fn query_children_eles_without_children_count(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
+    let mut r = vec![];
+    let mut b_map = BTreeMap::new();
+    let sql = gen_pdms_elements_get_children_ele_node_sql(refno);
+    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    for val in vals {
+        let child_refno = RefU64(val.get::<i64, _>("ID") as u64);
+        let name = val.get::<String, _>("NAME");
+        let type_name = val.get::<String, _>("TYPE");
+        let owner = RefU64(val.get::<i64, _>("OWNER") as u64);
+        let order = val.get::<i32, _>("ORDER_NUM");
+        b_map.insert(order, PdmsElement {
+            refno: child_refno.to_string(),
+            owner,
+            name,
+            noun: type_name,
+            version: 0,
+            children_count: 0,
+        });
+    }
+    for (_, v) in b_map {
+        r.push(v);
+    }
+    Ok(r)
 }
 
 pub async fn query_world(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
@@ -137,13 +157,12 @@ pub async fn query_world(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow:
 pub async fn query_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
     let sql = format!("SELECT * FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} and IS_DEL = 0;", *refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    let children_count = query_children_count(refno, &pool).await?;
     Ok(EleTreeNode {
         refno,
         noun: result.get::<String, _>("TYPE"),
         name: result.get::<String, _>("NAME"),
         owner: RefU64::from(result.get::<i64, _>("OWNER") as u64),
-        children_count,
+        children_count: result.get::<i32, _>("CHILDREN_COUNT") as usize,
     })
 }
 
@@ -172,7 +191,7 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -
             let owner = RefU64(val.get::<i64, _>("OWNER") as u64);
             let name = val.get::<String, _>("NAME");
             let type_name = val.get::<String, _>("TYPE");
-            let children_count = query_children_count(world_refno, pool).await?;
+            let children_count = val.get::<i32, _>("CHILDREN_COUNT") as usize;
             Ok(Some(PdmsElement {
                 refno: world_refno.to_string(),
                 owner,
@@ -237,7 +256,7 @@ fn gen_query_owner_from_id(refno: RefU64) -> String {
 
 fn gen_query_id_from_name_sql(name: &str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT ID FROM {PDMS_ELEMENTS_TABLE} WHERE NAME = '{}' ", name));
+    sql.push_str(&format!("SELECT ID FROM {PDMS_ELEMENTS_TABLE} WHERE NAME like '%{}%' ", name));
     sql
 }
 
@@ -483,7 +502,7 @@ fn gen_pdms_elements_dbno_sql(dbno: u32, type_name: &str) -> String {
 
 fn gen_pdms_elements_get_children_ele_node_sql(refno: RefU64) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT ID,NAME,TYPE,OWNER,ORDER_NUM FROM {PDMS_ELEMENTS_TABLE} WHERE OWNER = {} AND IS_DEL = 0 ", refno.0));
+    sql.push_str(&format!("SELECT ID,NAME,TYPE,OWNER,ORDER_NUM,CHILDREN_COUNT FROM {PDMS_ELEMENTS_TABLE} WHERE OWNER = {} AND IS_DEL = 0 ", refno.0));
     sql
 }
 
@@ -499,15 +518,15 @@ fn gen_pdms_elements_get_children_count_sql(refno: RefU64) -> String {
     sql
 }
 
-pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, order: usize) -> String {
+pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, order: usize, children_count: usize) -> String {
     let implicit = &att.implicit_attmap;
     let refno = implicit.get_refno().unwrap();
     let type_name = implicit.get_type();
     let owner = implicit.get_owner().unwrap();
 
     let mut sql = String::new();
-    sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {} , {} , 0 ) ,"#,
-                          refno.0, refno.to_refno_str(), type_name, owner.0, name, dbno, order));
+    sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {} , {} , {} ,0 ) ,"#,
+                          refno.0, refno.to_refno_str(), type_name, owner.0, name, dbno, order, children_count));
     sql
 }
 

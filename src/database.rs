@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::format;
 use std::time::Instant;
-use aios_core::pdms_types::{AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, RefU64};
+use aios_core::pdms_types::{AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use sqlx::{MySql, MySqlPool, Pool};
@@ -37,15 +37,15 @@ pub trait MySqlMethods {
 }
 
 
-//重新创建database
+//创建database
 pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()> {
     let connection = MySqlPool::connect(url)
         .await
         .unwrap();
     let mut pool = connection.try_acquire().unwrap();
 
-    sqlx::query(&format!("DROP DATABASE IF EXISTS {project}")).execute(&mut pool).await?;
-    sqlx::query(&format!("CREATE DATABASE {project} DEFAULT CHARSET UTF8")).execute(&mut pool).await?;
+    // sqlx::query(&format!("DROP DATABASE IF EXISTS {project}")).execute(&mut pool).await?;
+    sqlx::query(&format!("CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8")).execute(&mut pool).await?;
     Ok(())
 }
 
@@ -181,7 +181,7 @@ pub fn gen_explicit_att_insert_sql(refno: RefU64, type_name: &str, owner: RefU64
     let mut sql = String::new();
     let mut table_columns_sql = String::new();
     let table_name = qualified_table_name(type_name);
-    table_columns_sql.push_str("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA)");
+    table_columns_sql.push_str("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA)");
 
     let mut table_vals_sql = String::new();
     let data = hex::encode(e_att.into_compress_bytes());
@@ -201,7 +201,7 @@ pub fn gen_implicit_attr_insert_sql(hash: u32) -> (String, Vec<NounHash>) {
     let type_name = db1_dehash(hash);
     let table_name = qualified_table_name(type_name.as_str());
     let mut table_columns_sql = String::new();
-    table_columns_sql.push_str(&format!("INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
+    table_columns_sql.push_str(&format!("REPLACE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
 
     let implicit_names = ATTR_INFO_MAP.get_type_implicit_att_names(type_name.as_str());
     let column_hashs = implicit_names.iter().filter_map(|x| (x != "unset").then(|| NounHash(db1_hash(x.as_str())))).collect();
@@ -375,32 +375,33 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                                                                                      version.0, &project_clones, db_type.clone());
                             let mut info_conn = info_pool_clone.acquire().await.unwrap();
                             //保存dbno的信息表
-                            let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
-                            sql.push_str(dbno_filename_sql.as_str());
-                            // sql.remove(sql.len() - 1);
-                            let result = info_conn.execute(sql.as_str()).await;
-                            match result {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(&e);
-                                    dbg!(sql.as_str());
+                            if !db_option_clone.only_rebuild_pdms_element {
+                                let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
+                                sql.push_str(dbno_filename_sql.as_str());
+                                // sql.remove(sql.len() - 1);
+                                let result = info_conn.execute(sql.as_str()).await;
+                                match result {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(&e);
+                                        dbg!(sql.as_str());
+                                    }
+                                }
+                                //保存refno的信息表
+                                let mut sql = format!("REPLACE INTO {PDMS_REFNO_INFOS_TABLE}(REF0, PROJECT) VALUES ");
+                                for kv in &refno_info_map {
+                                    sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
+                                }
+                                sql.remove(sql.len() - 1);
+                                let result = info_conn.execute(sql.as_str()).await;
+                                match result {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(&e);
+                                        dbg!(sql.as_str());
+                                    }
                                 }
                             }
-                            //保存refno的信息表
-                            let mut sql = format!("REPLACE INTO {PDMS_REFNO_INFOS_TABLE}(REF0, PROJECT) VALUES ");
-                            for kv in &refno_info_map {
-                                sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
-                            }
-                            sql.remove(sql.len() - 1);
-                            let result = info_conn.execute(sql.as_str()).await;
-                            match result {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(&e);
-                                    dbg!(sql.as_str());
-                                }
-                            }
-
 
                             for (i, refno) in kv.value().iter().enumerate() {
                                 let att = total_attr_map.get(refno).unwrap();
@@ -414,44 +415,46 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                                 let name = get_name(&total_attr_map, &children_map, *refno).replace(r#"'"#, r#"\'"#)
                                     .replace(r#"""#, r#"\""#);
                                 let order = get_order(&total_attr_map, &children_map, *refno);
-                                pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order));
+                                let children_count = children_map.get(&refno).unwrap_or(&RefU64Vec::default()).len();
+                                pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order, children_count));
                                 //获取当前项目的连接
                                 let mut project_conn = pool_clone.acquire().await.unwrap();
 
                                 // let mut insert_join_handles = vec![];
                                 if (i != 0 && i % batch_chunks_cnt == 0) || i == (kv.value().len() - 1) {
-                                    // dbg!(i % batch_chunks_cnt );
                                     let info_sql = take(&mut ref0_info_sql);
                                     let implicit_values_sql = take(&mut implicit_values_sql);
                                     let explicit_values_sql = take(&mut explicit_values_sql);
                                     let pdms_elements_sql = take(&mut pdms_elements_sql);
                                     // let implicit_query_data = implicit_insert_data_sql.clone();
-                                    //执行隐式数据保存
-                                    let mut sql = String::new();
-                                    sql.push_str(implicit_insert_data_sql.as_ref().unwrap().0.as_str());
-                                    sql.push_str(implicit_values_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(_) => {
-                                            dbg!(sql.as_str());
+                                    if !db_option_clone.only_rebuild_pdms_element {
+                                        //执行隐式数据保存
+                                        let mut sql = String::new();
+                                        sql.push_str(implicit_insert_data_sql.as_ref().unwrap().0.as_str());
+                                        sql.push_str(implicit_values_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(_) => {
+                                                dbg!(sql.as_str());
+                                            }
                                         }
-                                    }
-                                    //执行显示数据保存
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
-                                    sql.push_str(explicit_values_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            dbg!(&e);
-                                            dbg!(sql.as_str());
+                                        //执行显示数据保存
+                                        let mut sql = format!("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                        sql.push_str(explicit_values_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
                                         }
                                     }
                                     // {PDMS_ELEMENTS_TABLE} 保存
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
+                                    let mut sql = format!("REPLACE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
@@ -466,20 +469,22 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                             }
                         }
                         let mut project_conn = pool_clone.acquire().await.unwrap();
-                        // 将带有 room_code 属性的保存下来
-                        for (room_name, refnos) in room_code_map.clone() {
-                            // 将 room_code 单独存放到 room_code 表中
-                            let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
-                            for refno in refnos.clone() {
-                                room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
-                            }
-                            room_code_sql.remove(room_code_sql.len() - 1);
-                            let result = project_conn.execute(room_code_sql.as_str()).await;
-                            match result {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(&e);
-                                    dbg!(room_code_sql.as_str());
+                        if !db_option_clone.only_rebuild_pdms_element {
+                            // 将带有 room_code 属性的保存下来
+                            for (room_name, refnos) in room_code_map.clone() {
+                                // 将 room_code 单独存放到 room_code 表中
+                                let mut room_code_sql = format!("REPLACE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                                for refno in refnos.clone() {
+                                    room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
+                                }
+                                room_code_sql.remove(room_code_sql.len() - 1);
+                                let result = project_conn.execute(room_code_sql.as_str()).await;
+                                match result {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(&e);
+                                        dbg!(room_code_sql.as_str());
+                                    }
                                 }
                             }
                         }
@@ -560,29 +565,31 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                                                                  version.0, &project_clones, db_type.clone());
                         let mut info_conn = info_pool_clone.acquire().await.unwrap();
                         //保存dbno的信息表
-                        let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
-                        sql.push_str(dbno_filename_sql.as_str());
-                        let result = info_conn.execute(sql.as_str()).await;
-                        match result {
-                            Ok(_) => {}
-                            Err(e) => {
-                                dbg!(&e);
-                                dbg!(sql.as_str());
+                        if !db_option_clone.only_rebuild_pdms_element {
+                            let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
+                            sql.push_str(dbno_filename_sql.as_str());
+                            let result = info_conn.execute(sql.as_str()).await;
+                            match result {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    dbg!(&e);
+                                    dbg!(sql.as_str());
+                                }
                             }
-                        }
 
-                        //保存refno的信息表
-                        let mut sql = format!("REPLACE INTO {PDMS_REFNO_INFOS_TABLE}(REF0, PROJECT) VALUES ");
-                        for kv in &refno_info_map {
-                            sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
-                        }
-                        sql.remove(sql.len() - 1);
-                        let result = info_conn.execute(sql.as_str()).await;
-                        match result {
-                            Ok(_) => {}
-                            Err(e) => {
-                                dbg!(&e);
-                                dbg!(sql.as_str());
+                            //保存refno的信息表
+                            let mut sql = format!("REPLACE INTO {PDMS_REFNO_INFOS_TABLE}(REF0, PROJECT) VALUES ");
+                            for kv in &refno_info_map {
+                                sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, /*v.db_no, */project.as_str()));
+                            }
+                            sql.remove(sql.len() - 1);
+                            let result = info_conn.execute(sql.as_str()).await;
+                            match result {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    dbg!(&e);
+                                    dbg!(sql.as_str());
+                                }
                             }
                         }
 
@@ -598,13 +605,13 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                             let name = get_name(&total_attr_map, &children_map, *refno).replace(r#"'"#, r#"\'"#)
                                 .replace(r#"""#, r#"\""#);
                             let order = get_order(&total_attr_map, &children_map, *refno);
-                            pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order));
+                            let children_count = children_map.get(refno).unwrap_or(&RefU64Vec::default()).len();
+                            pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order, children_count));
                             //获取当前项目的连接
                             let mut project_conn = pool_clone.acquire().await.unwrap();
 
                             let mut insert_join_handles = vec![];
                             if (i != 0 && i % batch_chunks_cnt == 0) || i == (kv.value().len() - 1) {
-                                // dbg!(i % batch_chunks_cnt );
                                 let info_sql = take(&mut ref0_info_sql);
                                 let implicit_values_sql = take(&mut implicit_values_sql);
                                 let explicit_values_sql = take(&mut explicit_values_sql);
@@ -613,39 +620,38 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                 let implicit_query_data = implicit_query_data.clone();
                                 let pool_clone = pool_clone.clone();
                                 let info_pool_clone = info_pool_clone.clone();
+                                let db_option_clone = db_option_clone.clone();
                                 let insert_handle = tokio::spawn(async move {
+                                    if !db_option_clone.only_rebuild_pdms_element {
+                                        //执行隐式数据保存
+                                        let mut sql = String::new();
+                                        sql.push_str(implicit_query_data.as_ref().unwrap().0.as_str());
+                                        sql.push_str(implicit_values_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
+                                        }
 
-                                    //执行隐式数据保存
-                                    let mut sql = String::new();
-                                    sql.push_str(implicit_query_data.as_ref().unwrap().0.as_str());
-                                    sql.push_str(implicit_values_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            dbg!(&e);
-                                            dbg!(sql.as_str());
+                                        //执行显示数据保存
+                                        let mut sql = format!("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                        sql.push_str(explicit_values_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
                                         }
                                     }
-
-                                    //执行显示数据保存
-                                    // let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
-                                    let mut sql = format!("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
-                                    sql.push_str(explicit_values_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            dbg!(&e);
-                                            dbg!(sql.as_str());
-                                        }
-                                    }
-
                                     // {PDMS_ELEMENTS_TABLE} 保存
-                                    // let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL  ) VALUES ");
-                                    let mut sql = format!("REPLACE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL  ) VALUES ");
+                                    let mut sql = format!("REPLACE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
@@ -668,20 +674,21 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                     }
                     let mut project_conn = pool_clone.acquire().await.unwrap();
                     // 将带有 room_code 属性的保存下来
-                    for (room_name, refnos) in room_code_map.clone() {
-                        // 将room_code单独存放到room_code表中
-                        // let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
-                        let mut room_code_sql = format!("REPLACE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
-                        for refno in refnos.clone() {
-                            room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
-                        }
-                        room_code_sql.remove(room_code_sql.len() - 1);
-                        let result = project_conn.execute(room_code_sql.as_str()).await;
-                        match result {
-                            Ok(_) => {}
-                            Err(e) => {
-                                dbg!(&e);
-                                dbg!(room_code_sql.as_str());
+                    if !db_option_clone.only_rebuild_pdms_element {
+                        for (room_name, refnos) in room_code_map.clone() {
+                            // 将room_code单独存放到room_code表中
+                            let mut room_code_sql = format!("REPLACE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                            for refno in refnos.clone() {
+                                room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
+                            }
+                            room_code_sql.remove(room_code_sql.len() - 1);
+                            let result = project_conn.execute(room_code_sql.as_str()).await;
+                            match result {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    dbg!(&e);
+                                    dbg!(room_code_sql.as_str());
+                                }
                             }
                         }
                     }
