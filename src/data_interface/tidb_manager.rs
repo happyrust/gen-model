@@ -99,7 +99,9 @@ pub struct AiosDBManager {
 
     pub db_option: DbOption,
 
-    pub mesh_mgr: Arc<PdmsMeshMgr>,
+    pub cached_mesh_mgr: Arc<CachedMeshesMgr>,
+
+    pub mesh_instance_mgr: Arc<DashMap<i32, PdmsMeshInstancehMgr>>,
 
     cached_world_transforms_map: Arc<DashMap<RefU64, TransformRT>>,
     //记录所有需要记录的world transform, need to flush to database
@@ -117,7 +119,7 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_full_attr(refno, ref_basic.value(), &project_pool, None).await?;
-                if PDMS_ATT_MAP_CACHE.b_cache() {
+                if PDMS_ATT_MAP_CACHE.use_sled() {
                     PDMS_ATT_MAP_CACHE.insert(refno, attr.clone());
                 }
                 return Ok(attr);
@@ -141,7 +143,7 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_implicit_attr(refno, ref_basic.value(), &project_pool, columns).await?;
-                if PDMS_IMPLICIT_ATT_MAP_CACHE.b_cache() {
+                if PDMS_IMPLICIT_ATT_MAP_CACHE.use_sled() {
                     PDMS_IMPLICIT_ATT_MAP_CACHE.insert(refno, attr.clone());
                 }
                 return Ok(attr);
@@ -281,6 +283,19 @@ impl PdmsDataInterface for AiosDBManager {
         let mut result = vec![refno]; //需要包含自己
         let mut cur_refno = refno;
         while let Some(b) = CACHED_REFNO_BASIC_MAP.get(&cur_refno) {
+            cur_refno = b.owner;
+            result.push(cur_refno);
+        }
+        result
+    }
+
+    fn get_ancestors_refnos_without_world(&self, refno: RefU64) -> Vec<RefU64> {
+        let mut result = vec![refno]; //需要包含自己
+        let mut cur_refno = refno;
+        while let Some(b) = CACHED_REFNO_BASIC_MAP.get(&cur_refno) {
+            if b.get_type() == "WORL" {
+                break;
+            }
             cur_refno = b.owner;
             result.push(cur_refno);
         }
@@ -497,7 +512,8 @@ impl AiosDBManager {
                 needed_parse_files: None,
                 project_path: dir,
                 db_option,
-                mesh_mgr: Arc::new(Default::default()),
+                cached_mesh_mgr: Arc::new(Default::default()),
+                mesh_instance_mgr: Arc::new(Default::default()),
                 cached_world_transforms_map: Arc::new(Default::default()),
             }
         )
@@ -695,8 +711,8 @@ impl AiosDBManager {
     }
 
     /// 缓存使用元件库的几何体
-    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, project: &str, mdb: &str, db_nos: Option<Vec<i32>>,
-                                 debug_cata_refno: &Option<String>) -> anyhow::Result<bool> {
+    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstancehMgr>, project: &str, mdb: &str,
+                                 db_nos: Option<Vec<i32>>, debug_cata_refno: &Option<String>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let mut att_types = vec!["BRAN"];
         att_types.extend_from_slice(&vec![
@@ -728,7 +744,7 @@ impl AiosDBManager {
             // "COUP",
             "GENSEC",
             // "AHU",
-            "TAPE",
+            // "TAPE",
             "FLEX",
             // "HACC",
             // "VTWA",
@@ -785,10 +801,11 @@ impl AiosDBManager {
             }
 
             let mgr = mgr.clone();
+            let instance_mgr = instance_mgr.clone();
             let handle = tokio::spawn(async move {
-                let inst_map = &mgr.mesh_mgr.inst_mgr;
-                let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
-                let level_shape_mgr = &mgr.mesh_mgr.level_shape_mgr;
+                let inst_map = &instance_mgr.inst_mgr;
+                let cached_mesh_mgr = &mgr.cached_mesh_mgr;
+                let level_shape_mgr = &instance_mgr.level_shape_mgr;
                 //在这里直接处理完所有需要处理的transform
                 // let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
                 let brep_shapes = CateBrepShapeMap::new();
@@ -804,7 +821,7 @@ impl AiosDBManager {
                 //todo refno_ptset_map 需要存入到数据库
                 for (child_refno, shapes) in brep_shapes {
                     let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
-                    let ancestors = mgr.get_ancestors_refnos(child_refno);
+                    let ancestors = mgr.get_ancestors_refnos_without_world(child_refno);
                     for p_refno in ancestors {
                         level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(child_refno);
                     }
@@ -866,27 +883,29 @@ impl AiosDBManager {
                 futures::future::join_all(take(&mut handles)).await;
             }
         }
-        dbg!(mgr.mesh_mgr.inst_mgr.len());
+        dbg!(instance_mgr.inst_mgr.len());
         println!("处理元件库几何体: {} 花费时间: {} ms", has_cata_cnt, t.elapsed().as_millis());
         Ok(true)
     }
 
     /// 生成基本体的几何数据
-    pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
+    pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstancehMgr>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
         // let test_refno = RefU64::from_two_nums(17788, 18653);
         // prim_refnos = RefU64Vec(vec![test_refno]);
         let prim_cnt = prim_refnos.len();
         let mut handles = vec![];
+        //todo 修改 batch 的方式
         for (i, refno) in prim_refnos.into_iter().enumerate() {
             let mgr = mgr.clone();
+            let instance_mgr = instance_mgr.clone();
             let handle = tokio::spawn(async move {
-                let inst_map = &mgr.mesh_mgr.inst_mgr;
-                let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
-                let level_shape_mgr = &mgr.mesh_mgr.level_shape_mgr;
+                let inst_map = &instance_mgr.inst_mgr;
+                let cached_mesh_mgr = &mgr.cached_mesh_mgr;
+                let level_shape_mgr = &instance_mgr.level_shape_mgr;
                 let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
-                let ancestors = mgr.get_ancestors_refnos(refno);
+                let ancestors = mgr.get_ancestors_refnos_without_world(refno);
                 for p_refno in ancestors {
                     level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(refno);
                 }
@@ -932,7 +951,7 @@ impl AiosDBManager {
                 futures::future::join_all(take(&mut handles)).await;
             }
         }
-        dbg!(mgr.mesh_mgr.inst_mgr.len());
+        dbg!(instance_mgr.inst_mgr.len());
         println!("处理常规基本几何体: {} 花费时间: {} ms", prim_cnt, t.elapsed().as_millis());
         Ok(true)
     }
@@ -1013,7 +1032,7 @@ impl AiosDBManager {
     // }
     //
 
-    pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
+    pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstancehMgr>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], db_nos).await?;
         let loop_cnt = loop_refnos.len();
@@ -1021,13 +1040,14 @@ impl AiosDBManager {
         let mut handles = vec![];
         for (i, refno) in loop_refnos.into_iter().enumerate() {
             let mgr = mgr.clone();
+            let instance_mgr = instance_mgr.clone();
             let handle = tokio::spawn(async move {
-                let inst_map = &mgr.mesh_mgr.inst_mgr;
-                let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
+                let inst_map = &instance_mgr.inst_mgr;
+                let cached_mesh_mgr = &mgr.cached_mesh_mgr;
 
-                let level_shape_mgr = &mgr.mesh_mgr.level_shape_mgr;
+                let level_shape_mgr = &instance_mgr.level_shape_mgr;
                 let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
-                let ancestors = mgr.get_ancestors_refnos(refno);
+                let ancestors = mgr.get_ancestors_refnos_without_world(refno);
                 for p_refno in ancestors {
                     level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(refno);
                 }
@@ -1123,7 +1143,7 @@ impl AiosDBManager {
                 futures::future::join_all(take(&mut handles)).await;
             }
         }
-        dbg!(mgr.mesh_mgr.inst_mgr.len());
+        dbg!(instance_mgr.inst_mgr.len());
         println!("处理loops几何体: {} 花费时间: {} ms", loop_cnt, t.elapsed().as_millis());
         Ok(true)
     }
@@ -1133,9 +1153,9 @@ impl AiosDBManager {
         let mut time = Instant::now();
         let project = &db_option.project_name;
         let mdb = &db_option.mdb_name;
-        let mut db_nos = db_option.manual_db_nums;
+        let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
         let debug_cata_refno = db_option.debug_cata_refnos;
-        if db_nos.is_none() {
+        if db_nos.is_empty() {
             let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
             let info_pool = AiosDBManager::get_db_pool(
                 &url, format!("PDMS_INFO_DB_{}", mgr.db_option.project_name.to_uppercase()).as_str()).await?;
@@ -1143,16 +1163,23 @@ impl AiosDBManager {
             let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
             let key_str = format!("/{mdb}");
             if mdb_dbnos_map.contains_key(&key_str) {
-                db_nos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned();
+                db_nos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned().unwrap_or_default();
             }
         }
         dbg!(&db_nos);
-        Self::cache_prim_geos(mgr.clone(), project, db_nos.clone()).await?;
-        dbg!("基本体生成完成");
-        Self::cache_loop_geos(mgr.clone(), project, db_nos.clone()).await?;
-        dbg!("loop节点生成完成");
-        // Self::cache_pohe_geos(mgr.clone(), project).await?;
-        Self::cache_cata_geos(mgr.clone(), project, mdb, db_nos, &debug_cata_refno).await?;
+        for db_no in db_nos {
+
+            let instance_mgr = Arc::new(PdmsMeshInstancehMgr::default());
+
+            Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
+            Self::cache_loop_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
+            // Self::cache_pohe_geos(mgr.clone(), project).await?;
+            Self::cache_cata_geos(mgr.clone(), instance_mgr.clone(), project, mdb, Some(vec![db_no]), &debug_cata_refno).await?;
+
+            mgr.mesh_instance_mgr.insert(db_no, Arc::try_unwrap(instance_mgr).unwrap());
+            println!("{db_no} 生成完毕。");
+        }
+
 
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
         Ok(true)

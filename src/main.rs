@@ -100,13 +100,20 @@ async fn main() -> anyhow::Result<()> {
     AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
 
     // mgr.mesh_mgr.serialize_to_json_file();
-    mgr.mesh_mgr.serialize_to_specify_file("AIOSModel.bin");
+    // mgr.mesh_instance_mgr.serialize_to_specify_file("AIOSModel.bin");
     // mgr.mesh_mgr.serialize_to_specify_file("/Users/dongpengcheng/rust-projects/new/AIOSEditor/assets/mesh/AIOSModel.bin");
     // mgr.mesh_mgr.serialize_to_json_file();
 
-    mgr.mesh_mgr.cached_mesh_mgr.serialize_to_specify_file("mesh.bin");
-    mgr.mesh_mgr.inst_mgr.serialize_to_specify_file("inst.bin");
-    mgr.mesh_mgr.level_shape_mgr.serialize_to_specify_file("level.bin");
+    mgr.cached_mesh_mgr.serialize_to_specify_file("mesh/mesh.bin");
+
+    for k in mgr.mesh_instance_mgr.iter() {
+        let db_no = *k.key();
+        k.value().inst_mgr.serialize_to_specify_file(&format!("instance/inst_{db_no}.bin"));
+        k.value().level_shape_mgr.serialize_to_specify_file(&format!("instance/level_{db_no}.bin"));
+    }
+
+    // mgr.mesh_instance_mgr.inst_mgr.serialize_to_specify_file("inst.bin");
+    // mgr.mesh_instance_mgr.level_shape_mgr.serialize_to_specify_file("level.bin");
 
 
     println!("花费时间: {} ms", time.elapsed().as_millis());

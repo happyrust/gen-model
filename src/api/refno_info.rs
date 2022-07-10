@@ -42,12 +42,10 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>) -> anyhow::Result<bool> {
                 let owner = (val.get::<i64, _>("OWNER") as u64).into();
                 let type_name = val.get::<String, _>("TYPE");
                 let table = qualified_table_name(type_name.as_str());
-                if CACHED_REFNO_BASIC_MAP.b_cache() {
-                    CACHED_REFNO_BASIC_MAP.insert(refno, CachedRefBasic {
-                        owner,
-                        table,
-                    });
-                }
+                CACHED_REFNO_BASIC_MAP.insert(refno, CachedRefBasic {
+                    owner,
+                    table,
+                });
             }
         }
         Err(e) => {

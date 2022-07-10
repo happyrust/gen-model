@@ -195,7 +195,7 @@ pub async fn cache_site_node(mdb: &str, module: &str, pool: &Pool<MySql>) {
                 for mut child in &mut children {
                     child.owner = world.refno;
                 }
-                if CACHED_MDB_SITE_MAP.b_cache() {
+                if CACHED_MDB_SITE_MAP.use_sled() {
                     CACHED_MDB_SITE_MAP.insert(world.refno, PdmsElementVec(children));
                 }
             }
