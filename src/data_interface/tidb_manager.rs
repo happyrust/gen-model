@@ -1146,7 +1146,7 @@ impl AiosDBManager {
                 db_nos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned();
             }
         }
-        dbg!(db_nos);
+        dbg!(&db_nos);
         Self::cache_prim_geos(mgr.clone(), project, db_nos.clone()).await?;
         dbg!("基本体生成完成");
         Self::cache_loop_geos(mgr.clone(), project, db_nos.clone()).await?;

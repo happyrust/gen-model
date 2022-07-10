@@ -29,23 +29,23 @@ pub struct CacheMgr<
     name: String,
     tree: sled::Tree,
     map: DashMap<RefU64, T>,
-    b_cache: bool,
+    save_to_sled: bool,
 }
 
 impl<T: Into<IVec> + From<IVec> + Clone + Serialize + DeserializeOwned> CacheMgr<T>
 {
-    pub fn new(name: &str, b_cache: bool) -> Self {
+    pub fn new(name: &str, save_to_sled: bool) -> Self {
         let tree = CACHE_DB.open_tree(name).unwrap();
         Self {
             name: name.to_string(),
             tree,
             map: Default::default(),
-            b_cache,
+            save_to_sled,
         }
     }
 
     pub fn b_cache(&self) -> bool {
-        self.b_cache
+        self.save_to_sled
     }
 
     #[inline]
