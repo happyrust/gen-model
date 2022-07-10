@@ -29,6 +29,8 @@ pub struct DbOption {
     #[clap(skip)]
     pub debug_cata_refnos: Option<String>,
     #[clap(long)]
+    pub only_rebuild_pdms_element: bool,
+    #[clap(long)]
     pub ip: String,
     #[clap(long)]
     pub user: String,
