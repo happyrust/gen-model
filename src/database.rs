@@ -88,47 +88,50 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             init_database(project, &default_conn_str).await?;
             let mut table_time = Instant::now();
             let mut tables_sql = String::new();
-            if let Ok(db_info) = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")) {
-                for (k, v) in db_info.noun_attr_info_map {
-                    let mut attr_map = BTreeMap::new();
-                    let type_name = db1_dehash(k as u32);
-                    if type_name.is_empty() {
-                        continue;
-                    }
-                    let mut tmp_sets = HashSet::new();
-                    for (kk, vv) in v {
-                        let att_name = vv.name.to_string();
-                        if &att_name != "unset" {
-                            if att_name.starts_with(":") || vv.offset == 0 {
-                                continue;
-                            }
-                            if !tmp_sets.contains(&att_name) {
-                                tmp_sets.insert(att_name.clone());
-                            } else {
-                                continue;
-                            }
-                            if kk == *TYPE_HASH as i32 {
-                                attr_map.insert(vv.offset, (att_name, StringType(db1_dehash(k as u32).into())));
-                            } else {
-                                attr_map.insert(vv.offset, (att_name, vv.default_val));
+            if !db_option.only_rebuild_pdms_element {
+                if let Ok(db_info) = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")) {
+                    for (k, v) in db_info.noun_attr_info_map {
+                        let mut attr_map = BTreeMap::new();
+                        let type_name = db1_dehash(k as u32);
+                        if type_name.is_empty() {
+                            continue;
+                        }
+                        let mut tmp_sets = HashSet::new();
+                        for (kk, vv) in v {
+                            let att_name = vv.name.to_string();
+                            if &att_name != "unset" {
+                                if att_name.starts_with(":") || vv.offset == 0 {
+                                    continue;
+                                }
+                                if !tmp_sets.contains(&att_name) {
+                                    tmp_sets.insert(att_name.clone());
+                                } else {
+                                    continue;
+                                }
+                                if kk == *TYPE_HASH as i32 {
+                                    attr_map.insert(vv.offset, (att_name, StringType(db1_dehash(k as u32).into())));
+                                } else {
+                                    attr_map.insert(vv.offset, (att_name, vv.default_val));
+                                }
                             }
                         }
+                        tables_sql.push_str(&tables::gen_create_implicit_tables_sql(type_name.as_str(), &attr_map));
+                        tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
+                        tables_sql.push_str(&tables::gen_create_uda_tables_sql());
                     }
-                    tables_sql.push_str(&tables::gen_create_implicit_tables_sql(type_name.as_str(), &attr_map));
-                    tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
-                    tables_sql.push_str(&tables::gen_create_uda_tables_sql());
                 }
             }
 
             let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
             let mut conn = project_pool.acquire().await?;
-
-            tables_sql.push_str(&tables::gen_create_element_tables_sql());
-            tables_sql.push_str(&tables::gen_create_project_mdb_sql());
-            tables_sql.push_str(&gen_create_project_mdb_json_sql());
-            tables_sql.push_str(&gen_create_data_state_tables_sql());
-            tables_sql.push_str(&gen_create_pdms_version_table_sql());
-            tables_sql.push_str(&gen_create_room_code_table_sql());
+            tables_sql.push_str(&tables::gen_create_element_tables_sql(db_option.only_rebuild_pdms_element));
+            if !db_option.only_rebuild_pdms_element {
+                tables_sql.push_str(&tables::gen_create_project_mdb_sql());
+                tables_sql.push_str(&gen_create_project_mdb_json_sql());
+                tables_sql.push_str(&gen_create_data_state_tables_sql());
+                tables_sql.push_str(&gen_create_pdms_version_table_sql());
+                tables_sql.push_str(&gen_create_room_code_table_sql());
+            }
             let result = conn.execute(tables_sql.as_str()).await;
             match result {
                 Ok(_) => {}

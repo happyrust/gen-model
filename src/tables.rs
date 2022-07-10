@@ -57,8 +57,11 @@ pub fn gen_create_dbno_infos_tables_sql() -> String {
 }
 
 #[inline]
-pub fn gen_create_element_tables_sql() -> String {
+pub fn gen_create_element_tables_sql(rebuild_pdms_element: bool) -> String {
     let mut sql = String::new();
+    if rebuild_pdms_element {
+        sql.push_str(&format!("DROP TABLE IF EXISTS {PDMS_ELEMENTS_TABLE} ;"));
+    }
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_ELEMENTS_TABLE} ("#));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));  //refno 的64位
