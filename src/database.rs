@@ -466,24 +466,22 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                                     }
                                     // {PDMS_ELEMENTS_TABLE} 保存
                                     // let mut sql = format!("REPLACE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
-                                    if !db_option_clone.only_rebuild_pdms_element {
-                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
-                                        sql.push_str(pdms_elements_sql.as_str());
-                                        sql.remove(sql.len() - 1);
-                                        let result = project_conn.execute(sql.as_str()).await;
-                                        match result {
-                                            Ok(_) => {}
-                                            Err(e) => {
-                                                dbg!(&e);
-                                                dbg!(sql.as_str());
-                                            }
+                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
+                                    sql.push_str(pdms_elements_sql.as_str());
+                                    sql.remove(sql.len() - 1);
+                                    let result = project_conn.execute(sql.as_str()).await;
+                                    match result {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            dbg!(&e);
+                                            dbg!(sql.as_str());
                                         }
                                     }
                                 }
                             }
                         }
                         let mut project_conn = pool_clone.acquire().await.unwrap();
-                        if db_option_clone_clone.only_rebuild_pdms_element {
+                        if !db_option_clone_clone.only_rebuild_pdms_element {
                             // 将带有 room_code 属性的保存下来
                             for (room_name, refnos) in room_code_map.clone() {
                                 // 将 room_code 单独存放到 room_code 表中
@@ -666,17 +664,15 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                         }
                                     }
                                     // {PDMS_ELEMENTS_TABLE} 保存
-                                    if !db_option_clone.only_rebuild_pdms_element {
-                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
-                                        sql.push_str(pdms_elements_sql.as_str());
-                                        sql.remove(sql.len() - 1);
-                                        let result = project_conn.execute(sql.as_str()).await;
-                                        match result {
-                                            Ok(_) => {}
-                                            Err(e) => {
-                                                dbg!(&e);
-                                                dbg!(sql.as_str());
-                                            }
+                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
+                                    sql.push_str(pdms_elements_sql.as_str());
+                                    sql.remove(sql.len() - 1);
+                                    let result = project_conn.execute(sql.as_str()).await;
+                                    match result {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            dbg!(&e);
+                                            dbg!(sql.as_str());
                                         }
                                     }
                                 });
@@ -691,7 +687,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                     }
                     let mut project_conn = pool_clone.acquire().await.unwrap();
                     // 将带有 room_code 属性的保存下来
-                    if db_option_clone.only_rebuild_pdms_element {
+                    if !db_option_clone.only_rebuild_pdms_element {
                         for (room_name, refnos) in room_code_map.clone() {
                             // 将room_code单独存放到room_code表中
                             let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");

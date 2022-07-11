@@ -99,20 +99,19 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
                 // dbg!(&result_exp);
             } else if c1 == "DESI" || c1 == "DESP" {
                 result_exp = result_exp.replace(s, "0.0");
-            }else{
-                found_replaced = false;
             }
         }
         //如果有RPRO 需要执行两次处理
         result_exp = result_exp.replace("ATTRIB", "");
-        new_exp = rpro_re.replace_all(&result_exp, |caps: &Captures| {
+        result_exp = rpro_re.replace_all(&result_exp, |caps: &Captures| {
             format!("{}_{}", &caps[1], &caps[2])
         }).trim().to_string();
+        new_exp = result_exp.clone();
 
         if !found_replaced {
             break;
         }
-
+        found_replaced = false;
     }
 
     //因为 attrib 的原因，这里还需要再执行一遍处理，以防止有可能出现
