@@ -105,6 +105,7 @@ dependencies = [
  "bevy_egui",
  "bincode",
  "dashmap",
+ "derive_more",
  "fixed 2.0.0-alpha.2",
  "flate2",
  "glam 0.20.5",
