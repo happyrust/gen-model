@@ -369,7 +369,7 @@ pub async fn process_dtse_params<T: PdmsDataInterface>(
     let dtre_refno = attr_map.get_foreign_refno("DTRE")?;
     let children = interface.get_children_attrs(dtre_refno).await.unwrap_or_default();
     for child in children {
-        let key = SmolStr::new(child.get_as_string("DKEY")?);
+        let key = SmolStr::new(format!("RPRO_{}", child.get_as_string("DKEY")?));
         let exp = SmolStr::new(child.get_as_string("PPRO")?);
         let default_key = format!("{}_default_expr", key);
         let default_expr = SmolStr::new(child.get_as_string("DPRO")?);

@@ -162,11 +162,11 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         }
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
         if db_option.types_multi_thread {
-            dbg!("执行多线程解析");
+            dbg!("执行单线程解析");
             sync_total_async_threading(&db_option, project, project_pool.clone(),
                                        pdms_info_pool.clone()).await.expect("同步数据失败");
         } else {
-            dbg!("执行单线程解析");
+            dbg!("执行多线程解析");
             sync_total_async(&db_option, project, project_pool.clone(),
                              pdms_info_pool.clone()).await.expect("同步数据失败");
         }
@@ -351,6 +351,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                 let info_pool_clone = info_pool.clone();
                 let filename_clone = file_name_clone.clone();
                 let db_option_clone = db_option.clone();
+                let db_option_clone_clone = db_option_clone.clone();
                 let handle = tokio::spawn(async move {
                     let project_clones = project_clone.clone();
                     //后面再考虑成不同的table，如显示属性和隐藏属性
@@ -465,22 +466,24 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                                     }
                                     // {PDMS_ELEMENTS_TABLE} 保存
                                     // let mut sql = format!("REPLACE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
-                                    sql.push_str(pdms_elements_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            dbg!(&e);
-                                            dbg!(sql.as_str());
+                                    if !db_option_clone.only_rebuild_pdms_element {
+                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
+                                        sql.push_str(pdms_elements_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
                         let mut project_conn = pool_clone.acquire().await.unwrap();
-                        if !db_option_clone.only_rebuild_pdms_element {
+                        if db_option_clone_clone.only_rebuild_pdms_element {
                             // 将带有 room_code 属性的保存下来
                             for (room_name, refnos) in room_code_map.clone() {
                                 // 将 room_code 单独存放到 room_code 表中
@@ -663,15 +666,17 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                                         }
                                     }
                                     // {PDMS_ELEMENTS_TABLE} 保存
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
-                                    sql.push_str(pdms_elements_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            dbg!(&e);
-                                            dbg!(sql.as_str());
+                                    if !db_option_clone.only_rebuild_pdms_element {
+                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
+                                        sql.push_str(pdms_elements_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
                                         }
                                     }
                                 });
@@ -686,7 +691,7 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                     }
                     let mut project_conn = pool_clone.acquire().await.unwrap();
                     // 将带有 room_code 属性的保存下来
-                    if !db_option_clone.only_rebuild_pdms_element {
+                    if db_option_clone.only_rebuild_pdms_element {
                         for (room_name, refnos) in room_code_map.clone() {
                             // 将room_code单独存放到room_code表中
                             let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");

@@ -8,7 +8,7 @@ use itertools::any;
 use parse_pdms_db::tiny_expr::expr_eval::interp;
 use parse_pdms_db::tool::hash_tool::{f32_round_2, f64_round_2, f64_round_3};
 use nom::Parser;
-use regex::{NoExpand, Regex};
+use regex::{Captures, NoExpand, Regex};
 use smol_str::SmolStr;
 use crate::cata::direction_parse::parse_expr_to_dir;
 use crate::cata::polish_notation::Stack;
@@ -75,13 +75,17 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
         // return Err(anyhow!("字符串无法解析到f64".to_string()));
         return Ok(0.0);
     }
-    let re = Regex::new(r"([A-Z]+[0-9]*)(\s*\[(\d+)\])?").unwrap();
+    let re = Regex::new(r"([A-Z_]+[0-9]*)(\s*\[(\d+)\])?").unwrap();
     let mut new_exp = input_expr.replace("ATTRIB", "");
-    let mut new_exp = new_exp.replace("RPRO", "");
+    let rpro_re = Regex::new(r"(RPRO)\s+(\S+)").unwrap();
+    let mut new_exp = rpro_re.replace_all(&new_exp, |caps: &Captures| {
+        format!("{}_{}", &caps[1], &caps[2])
+    }).trim().to_string();
     let mut result_exp = new_exp.clone();
     //默认两次
     //let loop_cnt = if input_expr.contains("RPRO") { 2 } else { 1 };
-    for _ in 0..2 {
+    let mut found_replaced = false;
+    for _ in 0..5 {
         for caps in re.captures_iter(&new_exp) {
             let s = &caps[0];
             let c1 = caps.get(1).map_or("", |m| m.as_str());
@@ -91,14 +95,24 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
             let k: SmolStr = format!("{}{}", c1, c3).into();
             if context.contains_key(&k) {
                 result_exp = result_exp.replace(s, &context[&k]);
+                found_replaced = true;
                 // dbg!(&result_exp);
             } else if c1 == "DESI" || c1 == "DESP" {
                 result_exp = result_exp.replace(s, "0.0");
+            }else{
+                found_replaced = false;
             }
         }
         //如果有RPRO 需要执行两次处理
         result_exp = result_exp.replace("ATTRIB", "");
-        new_exp = result_exp.clone();
+        new_exp = rpro_re.replace_all(&result_exp, |caps: &Captures| {
+            format!("{}_{}", &caps[1], &caps[2])
+        }).trim().to_string();
+
+        if !found_replaced {
+            break;
+        }
+
     }
 
     //因为 attrib 的原因，这里还需要再执行一遍处理，以防止有可能出现
@@ -565,8 +579,29 @@ fn test_parse_dir() {
 }
 
 #[test]
-fn test_math_exp() {
-    let expr = "MAX ( ( ( - 31 ) + 60 ), 29.2 )";
-    let context = HashMap::new();
-    dbg!(eval_str_to_f64(expr, &context)).expect("TODO: panic message");
+fn test_rpro() {
+    use regex::Captures;
+    let s = "RPRO_TLEN";
+    // let rpro_regex = Regex::new(r"RPRO\s*([A-Z]+[0-9]*)").unwrap();
+    // let mut new_exp = rpro_regex.replace_all(&new_exp, "");
+    // dbg!(new_exp);
+
+
+    let re = Regex::new(r"([A-Z]+[0-9]*)(\s*\[(\d+)\])?").unwrap();
+    for caps in re.captures_iter(s){
+        dbg!(&caps[0]);
+    }
+
+    let re = Regex::new(r"(RPRO)\s+(\S+)").unwrap();
+    let result = re.replace(s, |caps: &Captures| {
+        format!("{}_{}", &caps[1], &caps[2])
+    });
+    dbg!(result);
 }
+
+// #[test]
+// fn test_math_exp() {
+//     let expr = "MAX ( ( ( - 31 ) + 60 ), 29.2 )";
+//     let context = HashMap::new();
+//     dbg!(eval_str_to_f64(expr, &context)).expect("TODO: panic message");
+// }

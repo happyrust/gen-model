@@ -472,7 +472,7 @@ fn gen_query_id_from_dbno_type_sql(dbno: i32, type_name: &str) -> String {
 
 fn gen_query_node_id_from_refno_sql(refno: RefU64) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT OWNER,NAME,TYPE FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {}", refno.0));
+    sql.push_str(&format!("SELECT OWNER,NAME,TYPE,CHILDREN_COUNT FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {}", refno.0));
     sql
 }
 
