@@ -119,9 +119,7 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_full_attr(refno, ref_basic.value(), &project_pool, None).await?;
-                if PDMS_ATT_MAP_CACHE.use_sled() {
-                    PDMS_ATT_MAP_CACHE.insert(refno, attr.clone());
-                }
+                PDMS_ATT_MAP_CACHE.insert(refno, attr.clone());
                 return Ok(attr);
             }
         }
@@ -143,9 +141,7 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_implicit_attr(refno, ref_basic.value(), &project_pool, columns).await?;
-                if PDMS_IMPLICIT_ATT_MAP_CACHE.use_sled() {
-                    PDMS_IMPLICIT_ATT_MAP_CACHE.insert(refno, attr.clone());
-                }
+                PDMS_IMPLICIT_ATT_MAP_CACHE.insert(refno, attr.clone());
                 return Ok(attr);
             }
         }
@@ -1171,7 +1167,6 @@ impl AiosDBManager {
         }
         dbg!(&db_nos);
         for db_no in db_nos {
-
             let instance_mgr = Arc::new(PdmsMeshInstanceMgr::default());
 
             Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;

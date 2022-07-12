@@ -39,7 +39,7 @@ pub async fn query_world_data(mdb: &str, module: &str, pool: &Pool<MySql>) -> an
 
 pub fn gen_insert_project_mdb_sql(mdbs: HashMap<String, HashMap<String, Vec<RefU64>>>) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("INSERT IGNORE IGNORE INTO {PDMS_PROJECT_MDB_TABLE} (MDB_NAME,DB_TYPE,DATA) VALUES "));
+    sql.push_str(&format!("INSERT IGNORE INTO {PDMS_PROJECT_MDB_TABLE} (MDB_NAME,DB_TYPE,DATA) VALUES "));
     for (name, vals) in mdbs {
         for (db_type, data) in vals {
             let data = hex::encode(bincode::serialize(&data).unwrap());

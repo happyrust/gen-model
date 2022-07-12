@@ -208,9 +208,7 @@ pub async fn cache_site_node(mdb: &str, module: &str, pool: &Pool<MySql>) {
                 for mut child in &mut children {
                     child.owner = world.refno;
                 }
-                if CACHED_MDB_SITE_MAP.use_sled() {
-                    CACHED_MDB_SITE_MAP.insert(world.refno, PdmsElementVec(children));
-                }
+                CACHED_MDB_SITE_MAP.insert(world.refno, PdmsElementVec(children));
             }
         }
     }
@@ -350,7 +348,7 @@ async fn test_query_ancestor_refnos_till_type() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let v = query_ancestor_refnos_till_type(RefI32Tuple((23584,5454)).into(),"ZONE",&pool).await?;
+    let v = query_ancestor_refnos_till_type(RefI32Tuple((23584, 5454)).into(), "ZONE", &pool).await?;
     println!("v={:?}", v);
     Ok(())
 }
