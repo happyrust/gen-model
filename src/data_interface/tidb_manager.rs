@@ -481,6 +481,7 @@ impl AiosDBManager {
         // let need_sync = CACHED_REFNO_BASIC_MAP.is_empty();
         let need_sync = true;
         for project in &db_option.included_projects {
+            dbg!(&project);
             let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
             match project_pool {
                 Ok(pool) => {
@@ -956,7 +957,6 @@ impl AiosDBManager {
         println!("处理常规基本几何体: {} 花费时间: {} ms", prim_cnt, t.elapsed().as_millis());
         Ok(true)
     }
-    //
     // pub async fn cache_pohe_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
     //     let t = Instant::now();
     //     let pohe_refnos = mgr.get_refnos_by_types(project, &vec!["POHE"], Option::from(vec![1])).await?;
@@ -1169,7 +1169,6 @@ impl AiosDBManager {
         }
         dbg!(&db_nos);
         for db_no in db_nos {
-
             let instance_mgr = Arc::new(PdmsMeshInstanceMgr::default());
 
             Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;

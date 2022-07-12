@@ -164,6 +164,19 @@ pub async fn query_ancestor_of_type(mut refno: RefU64, att_type: &str, pool: &Po
     Ok(Some(refno))
 }
 
+pub async fn query_ancestor_refnos_till_type(mut refno: RefU64, att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
+    let mut result = vec![];
+    while let Some((owner_refno, owner_type)) = query_owner_type_from_id(refno, pool).await? {
+        result.push(refno);
+        refno = owner_refno;
+        if owner_type == att_type {
+            result.push(owner_refno);
+            break;
+        }
+    }
+    Ok(result)
+}
+
 /// 获取children有那些tpe
 pub async fn query_children_contains_types(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<Vec<String>>> {
     if let Ok(children) = query_children_eles(refno, pool).await {
@@ -326,6 +339,16 @@ async fn test_query_contain_noun_refnos() -> anyhow::Result<()> {
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
     let v = query_contain_noun_refnos("SPRE".to_string(), &pool).await?;
+    println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_ancestor_refnos_till_type() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
+    let v = query_ancestor_refnos_till_type(RefI32Tuple((23584, 5454)).into(), "ZONE", &pool).await?;
     println!("v={:?}", v);
     Ok(())
 }
