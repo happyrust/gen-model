@@ -22,7 +22,7 @@ lazy_static! {
     pub static ref PDMS_IMPLICIT_ATT_MAP_CACHE: CacheMgr< AttrMap>  = CacheMgr::new("IMPLICIT_ATTR_MAP_CACHE", false);
 
     pub static ref CACHED_REFNO_BASIC_MAP: CacheMgr< CachedRefBasic>  = CacheMgr::new("REFNO_BASIC_CACHE", false);
-    pub static ref CACHED_MDB_SITE_MAP: CacheMgr< PdmsElementVec>  = CacheMgr::new("MDB_SITE_CACHE", false);
+    pub static ref CACHED_MDB_SITE_MAP: CacheMgr< PdmsElementVec>  = CacheMgr::new("MDB_SITE_CACHE", true);
 }
 
 

@@ -38,7 +38,7 @@ use crate::api::refno_info::{get_ref0_map, sync_refno_basic_map};
 use crate::ATTR_INFO_MAP;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn;
-use crate::cata::sctn::geo::create_st_geos;
+use crate::cata::sctn::geo::create_profile_geos;
 use crate::consts::*;
 use crate::data_interface::cache::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP, PDMS_ATT_MAP_CACHE, PDMS_IMPLICIT_ATT_MAP_CACHE};
 use crate::data_interface::defines::CachedRefBasic;
@@ -560,28 +560,30 @@ impl AiosDBManager {
 
     ///获取单个元件的模型数据
     pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64, branch_att: &AttrMap,
-                                       brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>) -> anyhow::Result<bool> {
+                                       brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>) -> anyhow::Result<Vec3> {
+        let mut center = Vec3::ZERO;
         let cur_ele = mgr.get_refno_basic(design_refno).unwrap();
         let type_name = cur_ele.get_type();
         let owner = mgr.get_owner_ref_basic(design_refno);
         if owner.is_none() {
             dbg!(design_refno);
-            return Ok(false);
+            return Ok(center);
         }
         let owner = owner.unwrap();
         if type_name == "BRAN" {
-            return Ok(false);
+            return Ok(center);
         }
         if owner.get_type() == "BRAN" {
             dbg!(design_refno);
-            return Ok(false);
+            return Ok(center);
         }
 
-        let desi_att = mgr.get_implicit_attr(design_refno, None).await?;
+        let desi_att = mgr.get_attr(design_refno).await?;
 
         let geoms = resolve_desi_comp(design_refno, mgr.as_ref()).await.unwrap_or_default();
-        if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" {
-            create_st_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref()).await?;
+        if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" || type_name == "GWALL" {
+            center = create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref()).await?;
+            // dbg!(center);
         } else {
             let GeomsInfo {
                 geometries,
@@ -596,7 +598,7 @@ impl AiosDBManager {
             refno_ptset_map.insert(design_refno, axis_map);
         }
 
-        Ok(true)
+        Ok(center)
     }
 
     ///记录点集的信息
@@ -716,7 +718,6 @@ impl AiosDBManager {
         let t = Instant::now();
         let mut att_types = vec!["BRAN"];
         att_types.extend_from_slice(&vec![
-            "TP",
             "FILT",
             "ELCONN",
             "HELE",
@@ -728,12 +729,10 @@ impl AiosDBManager {
             "PJOI",
             "PFIT",
             "GWALL",
-            "IDAM",
             "FLOOR",
             "SCLA",
             "EQUI",
             "GENSEC",
-            "FLEX",
             "STWALL",
             "RNODE",
             "PRTELE",
@@ -757,7 +756,14 @@ impl AiosDBManager {
 
         let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, db_nos).await?;
         let mut handles = vec![];
-        // let has_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 7381)]);
+        // let has_cata_refnos = RefU64Vec(vec![
+        //                                      RefU64::from_two_nums(23584, 6975),
+        //                                      RefU64::from_two_nums(23584, 6978),
+        //                                      RefU64::from_two_nums(23584, 6979),
+        //                                      RefU64::from_two_nums(23584, 6980),
+        //                                      // RefU64::from_two_nums(23593, 787),
+        // ]);
+
         let has_cata_cnt = has_cata_refnos.len();
         println!("使用元件库的模型总数：{has_cata_cnt}");
         for (i, refno) in has_cata_refnos.into_iter().enumerate() {
@@ -774,6 +780,7 @@ impl AiosDBManager {
             let instance_mgr = instance_mgr.clone();
             let handle = tokio::spawn(async move {
                 let inst_map = &instance_mgr.inst_mgr;
+                let mut jusl_translation = Vec3::ZERO;
                 let cached_mesh_mgr = &mgr.cached_mesh_mgr;
                 let level_shape_mgr = &instance_mgr.level_shape_mgr;
                 //在这里直接处理完所有需要处理的transform
@@ -781,12 +788,33 @@ impl AiosDBManager {
                 let brep_shapes = CateBrepShapeMap::new();
                 let current_att = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
                 let mut refno_ptset_map = DashMap::new();
-                if current_att.get_type() == "BRAN" {
+                let mut is_branch = false;
+                let cur_type = current_att.get_type();
+                if cur_type == "BRAN" {
+                    is_branch = true;
                     Self::get_cata_branch_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
                                                 &refno_ptset_map).await.unwrap_or_default();
                 } else {
-                    Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
+
+                    let center = Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
                                                 &refno_ptset_map).await.unwrap_or_default();
+
+                    let jusl = current_att.get_as_string("JUSL").unwrap_or_default();
+                    if cur_type == "WALL" {
+                        jusl_translation = match jusl.as_str() {
+                            "OBOW" => {
+                                Vec3::new(0.0, 0.0, center.z.abs() * 2.0)
+                            }
+                            "IBOW" => {
+                                Vec3::new(0.0, 0.0, center.z.abs())
+                            }
+                            _ => {
+                                Vec3::ZERO
+                            }
+                        };
+                    }
+
+                    // dbg!(&jusl_translation);
                 }
                 //todo refno_ptset_map 需要存入到数据库
                 for (child_refno, shapes) in brep_shapes {
@@ -814,7 +842,7 @@ impl AiosDBManager {
                             pts,
                         } = shape;
                         if !visible || !brep_shape.check_valid() { continue; }
-                        let scale = brep_shape.get_trans().scale;
+                        let trans = brep_shape.get_trans();
                         if !brep_shape.check_valid() {
                             continue;
                         }
@@ -832,18 +860,32 @@ impl AiosDBManager {
                         //     transform = trans_origin.inverse() * transform;
                         // }
                         let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
-                        bbox.scaled(&scale);
+                        bbox.scaled(&trans.scale);
                         //tubi 需要特殊处理
-                        let geom_inst = EleGeoInstance {
-                            geo_hash,
-                            refno,
-                            pts,
-                            bbox,
-                            transform: (transform.rotation, transform.translation, scale),
-                            visible,
-                            is_tubi,
-                        };
-                        geo_insts.push(geom_inst);
+                        if cur_type != "WALL" {
+                            let geom_inst = EleGeoInstance {
+                                geo_hash,
+                                refno,
+                                pts,
+                                bbox,
+                                transform: (transform.rotation, transform.translation, trans.scale),
+                                visible,
+                                is_tubi,
+                            };
+                            geo_insts.push(geom_inst);
+                        }else{
+                            let geom_inst = EleGeoInstance {
+                                geo_hash,
+                                refno,
+                                pts,
+                                bbox,
+                                transform: (trans.rotation, trans.translation + jusl_translation, trans.scale),
+                                visible,
+                                is_tubi,
+                            };
+                            geo_insts.push(geom_inst);
+                        }
+
                     }
                     inst_map.entry(child_refno).or_insert(geos_info);
                 }
@@ -1135,6 +1177,7 @@ impl AiosDBManager {
                 db_nos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned().unwrap_or_default();
             }
         }
+        // let db_nos = vec![7200];
         dbg!(&db_nos);
         for db_no in db_nos {
             let instance_mgr = Arc::new(PdmsMeshInstanceMgr::default());

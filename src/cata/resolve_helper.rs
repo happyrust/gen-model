@@ -4,6 +4,7 @@ use aios_core::parsed_data::*;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::pdms_data::{AxisParam, ScomInfo};
 use anyhow::anyhow;
+use glam::Vec3;
 use itertools::any;
 use parse_pdms_db::tiny_expr::expr_eval::interp;
 use parse_pdms_db::tool::hash_tool::{f32_round_2, f64_round_2, f64_round_3};
@@ -255,7 +256,10 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 }))
             }
             "SPRO" => {   //structural profile
-                CateGeoParam::Profile(CateProfileParam::SPRO(gmse.verts.clone()))
+                CateGeoParam::Profile(CateProfileParam::SPRO(SProfileData {
+                    verts: gmse.verts.clone(),
+                    normal_axis: Vec3::from(gmse.paxises[0].dir)
+                }))
             }
             "BOXI" => {
                 let z_length = if gmse.box_lengths.len() >= 3 {
