@@ -119,9 +119,7 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_full_attr(refno, ref_basic.value(), &project_pool, None).await?;
-                if PDMS_ATT_MAP_CACHE.use_sled() {
-                    PDMS_ATT_MAP_CACHE.insert(refno, attr.clone());
-                }
+                PDMS_ATT_MAP_CACHE.insert(refno, attr.clone());
                 return Ok(attr);
             }
         }
@@ -143,9 +141,7 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_implicit_attr(refno, ref_basic.value(), &project_pool, columns).await?;
-                if PDMS_IMPLICIT_ATT_MAP_CACHE.use_sled() {
-                    PDMS_IMPLICIT_ATT_MAP_CACHE.insert(refno, attr.clone());
-                }
+                PDMS_IMPLICIT_ATT_MAP_CACHE.insert(refno, attr.clone());
                 return Ok(attr);
             }
         }
@@ -794,7 +790,9 @@ impl AiosDBManager {
         let mut handles = vec![];
         // let has_cata_refnos = RefU64Vec(vec![RefU64::from_two_nums(23584, 7381)]);
         let has_cata_cnt = has_cata_refnos.len();
+        println!("使用元件库的模型总数：{has_cata_cnt}");
         for (i, refno) in has_cata_refnos.into_iter().enumerate() {
+            println!("正在处理元件库的模型，剩余：{}, 当前参考号：{}", has_cata_cnt - i, refno.to_refno_string());
             if let Some(debug_refno) = debug_cata_refno {
                 if let Ok(debug_refno) = RefU64::from_refno_str(debug_refno) {
                     if refno != debug_refno {
