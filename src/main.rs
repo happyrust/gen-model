@@ -93,12 +93,14 @@ async fn main() -> anyhow::Result<()> {
     // mgr.dbno_mgr.serialize_to_specify_file("instance/dbno_mgr.num");
     // return Ok(());
 
-    let b_recreate_ssc = false;
+    let b_recreate_ssc = db_option.rebuild_ssc_tree;
     if b_recreate_ssc {
+        dbg!("正在同步SSC");
         for project_db in mgr.project_map.iter() {
             // 保存ssc
             async_total_ssc_data(&project_db.value()).await?;
         }
+        dbg!("SSC同步完成");
     }
     let mut time = Instant::now();
     AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
@@ -109,7 +111,6 @@ async fn main() -> anyhow::Result<()> {
     for k in mgr.mesh_instance_mgr.iter() {
         let db_no = *k.key();
         k.value().serialize_to_specify_file(&format!("instance/{db_no}.inst"));
-        // k.value().level_shape_mgr.serialize_to_specify_file(&format!("instance/level_{db_no}.bin"));
     }
     mgr.dbno_mgr.serialize_to_specify_file("instance/dbno_mgr.num");
 
