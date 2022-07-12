@@ -40,7 +40,7 @@ use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn;
 use crate::cata::sctn::geo::create_profile_geos;
 use crate::consts::*;
-use crate::data_interface::cache::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP, PDMS_ATT_MAP_CACHE, PDMS_IMPLICIT_ATT_MAP_CACHE};
+use crate::data_interface::cache::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP, PDMS_ATT_MAP_CACHE, };
 use crate::data_interface::defines::CachedRefBasic;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::AIOSAxisMap;
@@ -135,13 +135,13 @@ impl PdmsDataInterface for AiosDBManager {
 
     /// 获得隐含数据的属性
     async fn get_implicit_attr(&self, refno: RefU64, columns: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
-        if let Some(k) = PDMS_IMPLICIT_ATT_MAP_CACHE.get(&refno) {
-            return Ok(k.value().clone());
-        }
+        // if let Some(k) = PDMS_IMPLICIT_ATT_MAP_CACHE.get(&refno) {
+        //     return Ok(k.value().clone());
+        // }
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_implicit_attr(refno, ref_basic.value(), &project_pool, columns).await?;
-                PDMS_IMPLICIT_ATT_MAP_CACHE.insert(refno, attr.clone());
+                // PDMS_IMPLICIT_ATT_MAP_CACHE.insert(refno, attr.clone());
                 return Ok(attr);
             }
         }
@@ -581,7 +581,7 @@ impl AiosDBManager {
         let desi_att = mgr.get_attr(design_refno).await?;
 
         let geoms = resolve_desi_comp(design_refno, mgr.as_ref()).await.unwrap_or_default();
-        if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" || type_name == "GWALL" {
+        if type_name == "SCTN" || type_name == "STWALL" || /*type_name == "GENSEC" ||*/ type_name == "WALL" || type_name == "GWALL" {
             center = create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref()).await?;
             // dbg!(center);
         } else {
@@ -757,10 +757,10 @@ impl AiosDBManager {
         let has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, db_nos).await?;
         let mut handles = vec![];
         // let has_cata_refnos = RefU64Vec(vec![
-        //                                      RefU64::from_two_nums(23584, 6975),
-        //                                      RefU64::from_two_nums(23584, 6978),
-        //                                      RefU64::from_two_nums(23584, 6979),
-        //                                      RefU64::from_two_nums(23584, 6980),
+        //                                      RefU64::from_two_nums(23584, 8544),
+        //                                      // RefU64::from_two_nums(23584, 6978),
+        //                                      // RefU64::from_two_nums(23584, 6979),
+        //                                      // RefU64::from_two_nums(23584, 6980),
         //                                      // RefU64::from_two_nums(23593, 787),
         // ]);
 
@@ -799,14 +799,19 @@ impl AiosDBManager {
                     let center = Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
                                                 &refno_ptset_map).await.unwrap_or_default();
 
+
                     let jusl = current_att.get_as_string("JUSL").unwrap_or_default();
-                    if cur_type == "WALL" {
+                    let h = center.length();
+                    if cur_type == "WALL" || cur_type == "SCTN"{
                         jusl_translation = match jusl.as_str() {
                             "OBOW" => {
-                                Vec3::new(0.0, 0.0, center.z.abs() * 2.0)
+                                Vec3::new(0.0, 0.0, h * 2.0)
+                            }
+                            "LTOC" => {
+                                Vec3::new(0.0, 0.0, h )
                             }
                             "IBOW" => {
-                                Vec3::new(0.0, 0.0, center.z.abs())
+                                Vec3::new(0.0, 0.0, h)
                             }
                             _ => {
                                 Vec3::ZERO
@@ -862,7 +867,7 @@ impl AiosDBManager {
                         let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
                         bbox.scaled(&trans.scale);
                         //tubi 需要特殊处理
-                        if cur_type != "WALL" {
+                        if cur_type != "WALL" && cur_type != "SCTN"{
                             let geom_inst = EleGeoInstance {
                                 geo_hash,
                                 refno,
@@ -1046,6 +1051,7 @@ impl AiosDBManager {
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], db_nos).await?;
+        // let loop_refnos = vec![RefU64::from_two_nums(23584, 8569)];
         let loop_cnt = loop_refnos.len();
         //处理loop elements
         let mut handles = vec![];
@@ -1085,19 +1091,25 @@ impl AiosDBManager {
                             }
                         }
                     }
+                    // dbg!(&loop_verts);
+                    // dbg!(&fradius_vec);
                     let mut parent_att = AttrMap::default();
                     let mut geo_hash = None;
                     let mut item_trans = TransformSRT::default();
                     match parent_type {
                         "REVO" => {
                             parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["ANGL", "LEVE"])).await.unwrap_or_default();
+                            // parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
+                            // dbg!(&parent_att);
                             let angle = parent_att.get_f32("ANGL").unwrap_or_default();
+                            // dbg!(angle);
                             if angle >= f32::EPSILON {
                                 let revo = Box::new(Revolution {
                                     loop_verts,
                                     angle,
                                     ..Default::default()
                                 });
+                                // dbg!(&revo);
                                 if revo.check_valid() {
                                     item_trans = revo.get_trans();
                                     geo_hash = Some(cached_mesh_mgr.get_pdms_mesh_hash_key(revo));

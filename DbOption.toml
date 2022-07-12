@@ -9,6 +9,7 @@ manual_db_nums = [7200]
 #only_save_types_db = ["BOX"]
 #included_db_files = ["sam7200_0001"]
 only_rebuild_pdms_element = false
+rebuild_ssc_tree = false
 main_db_code = 7200
 ip = "127.0.0.1"
 user = "root"

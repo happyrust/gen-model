@@ -22,7 +22,6 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
     let mut plane_normal = Vec3::Z;
     let mut extrude_dir = Vec3::Z;
     let arc_path = if type_name == "GENSEC" || type_name == "WALL" {
-        // let parent_pos = interface.get_world_transform(refno).await?.unwrap_or_default().translation;
         let children_refs = interface.get_children_refs(refno).await?;
         let mut res = None;
         for x in children_refs.iter() {
@@ -50,12 +49,13 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
         res
     } else { None };
 
+
     let mut height = 0.0;
     if arc_path.is_none() {
         if let Some(poss) = att.get_poss() && let Some(pose) = att.get_pose() {
             height = pose.distance(poss);
             extrude_dir = pose - poss;
-            center = extrude_dir/ 2.0;
+            // center = extrude_dir/ 2.0;
             extrude_dir = extrude_dir.normalize();
         }
     }
@@ -70,6 +70,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
 
             if let CateProfileParam::SPRO(spro) = profile{
                 plane_normal = spro.normal_axis.normalize();
+                // dbg!(plane_normal);
                 let len = spro.verts.len();
                 if len != 0 {
                     let rot = Quat::from_rotation_arc(Vec3::Z, plane_normal);

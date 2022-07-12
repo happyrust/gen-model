@@ -125,7 +125,6 @@ pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic, pool
     //需要过滤一遍
     let column_names = if column_names.is_some() {
         let mut column_names = column_names.unwrap();
-        //Some(vec![]) 应该返回空的
         if column_names.len() == 0 { return Ok(AttrMap::default()); }
         if let Some(names_map) = ATTR_INFO_MAP.get_names_of_type(type_name) {
             exclude_columns = column_names.drain_filter(|x| {

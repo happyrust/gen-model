@@ -110,7 +110,6 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all("./assets/instance").unwrap();
     for k in mgr.mesh_instance_mgr.iter() {
         let db_no = *k.key();
-        k.value().serialize_to_specify_file(&format!("instance/{db_no}.inst"));
         k.value().serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
         // k.value().level_shape_mgr.serialize_to_specify_file(&format!("instance/level_{db_no}.bin"));
     }
