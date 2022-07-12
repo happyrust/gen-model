@@ -1,4 +1,3 @@
-
 use serde::{Serialize, Deserialize};
 use clap::Parser;
 
@@ -15,7 +14,8 @@ pub struct DbOption {
     //#[clap(long, default_value = "MASTER", "SAMPLE")]
     pub included_projects: Vec<String>,
     #[clap(skip)]
-    pub included_db_files: Option<Vec<String>>,  //if none all files parsed, if not, only included parsed
+    pub included_db_files: Option<Vec<String>>,
+    //if none all files parsed, if not, only included parsed
     #[clap(long)]
     pub mdb_name: String,
     #[clap(long)]
@@ -45,7 +45,9 @@ pub struct DbOption {
     #[clap(short)]
     pub types_multi_thread: bool,
     #[clap(short)]
+    pub rebuild_ssc_tree: bool,
+    #[clap(short)]
     pub batch_insert_handles_chunk: u32,
     #[clap(skip)]
-    pub only_save_types_db:Option<Vec<String>>,
+    pub only_save_types_db: Option<Vec<String>>,
 }

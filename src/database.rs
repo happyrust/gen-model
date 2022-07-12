@@ -697,7 +697,7 @@ pub async fn sync_total_async_single_thread(db_option: &options::DbOption, proje
                                     let mut ref0_info_sql = String::new();
                                     let mut implicit_values_sql = String::new();
                                     let mut explicit_values_sql = String::new();
-                                    // let mut pdms_elements_sql = String::new();
+                                    let mut pdms_elements_sql = String::new();
                                     let mut dbno_filename_sql = gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(),
                                                                                              version.0, &project_clones, db_type.clone());
                                     let mut info_conn = info_pool_clone.acquire().await.unwrap();
@@ -742,7 +742,7 @@ pub async fn sync_total_async_single_thread(db_option: &options::DbOption, proje
                                             .replace(r#"""#, r#"\""#);
                                         let order = get_order(&total_attr_map, &children_map, *refno);
                                         let children_count = children_map.get(refno).unwrap_or(&RefU64Vec::default()).len();
-                                        // pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order, children_count));
+                                        pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order, children_count));
                                         //获取当前项目的连接
                                         let mut project_conn = pool_clone.acquire().await.unwrap();
 
@@ -785,18 +785,6 @@ pub async fn sync_total_async_single_thread(db_option: &options::DbOption, proje
                                                         }
                                                     }
                                                 }
-                                                // {PDMS_ELEMENTS_TABLE} 保存
-                                                // let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
-                                                // sql.push_str(pdms_elements_sql.as_str());
-                                                // sql.remove(sql.len() - 1);
-                                                // let result = project_conn.execute(sql.as_str()).await;
-                                                // match result {
-                                                //     Ok(_) => {}
-                                                //     Err(e) => {
-                                                //         dbg!(&e);
-                                                //         dbg!(sql.as_str());
-                                                //     }
-                                                // }
                                             });
 
                                             insert_join_handles.push(insert_handle);
