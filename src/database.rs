@@ -161,15 +161,15 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             }
         }
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
-        // if db_option.types_multi_thread {
-        //     dbg!("执行单线程解析");
-        //     sync_total_async_threading(&db_option, project, project_pool.clone(),
-        //                                pdms_info_pool.clone()).await.expect("同步数据失败");
-        // } else {
-        //     dbg!("执行多线程解析");
-        //     sync_total_async(&db_option, project, project_pool.clone(),
-        //                      pdms_info_pool.clone()).await.expect("同步数据失败");
-        // }
+        if db_option.types_multi_thread {
+            dbg!("执行单线程解析");
+            sync_total_async_threading(&db_option, project, project_pool.clone(),
+                                       pdms_info_pool.clone()).await.expect("同步数据失败");
+        } else {
+            dbg!("执行多线程解析");
+            sync_total_async(&db_option, project, project_pool.clone(),
+                             pdms_info_pool.clone()).await.expect("同步数据失败");
+        }
         if !db_option.only_rebuild_pdms_element {
             insert_project_mdb(&project_pool, &pdms_info_pool).await?;
         }
