@@ -121,7 +121,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
 
     //因为 attrib 的原因，这里还需要再执行一遍处理，以防止有可能出现
     //处理出现 DESIGN IPARA 1 这种没有 “[]”的情况
-    dbg!(&result_exp);
+    // dbg!(&result_exp);
     let re = Regex::new(r"(DESIGN?\s+)?([I|C|O|A)]?PARAM?)\s*(\d+)").unwrap();
     let mut new_exp = result_exp.clone();
     for caps in re.captures_iter(&result_exp) {
@@ -525,11 +525,11 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) 
     let mut new_dir_str = dir_str.clone();
     let mut not_single = false;
     if !re.is_match(&dir_str) {
-        dbg!(&dir_str);
+        // dbg!(&dir_str);
         not_single = true;
         let mut is_three = false;
 
-        let re = Regex::new(r"(-?[X|Y|Z])\s*?\((.*)?\)\s*(-?[X|Y|Z])\s*?\((.*)?\)\s*(-?[X|Y|Z])").unwrap();
+        let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
         for cap in re.captures_iter(&dir_str) {
             if cap.len() == 6 {
                 let val_str= cap[2].to_string();
@@ -539,21 +539,22 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) 
                 let val_str= cap[4].to_string();
                 let val_result = eval_str_to_f64(&val_str, context).unwrap_or_default().to_string();
                 new_dir_str = new_dir_str.replace(&val_str, &val_result);
-
-                dbg!(&new_dir_str);
+                // dbg!(&new_dir_str);
                 is_three = true;
             }
         }
 
         if !is_three {
-            let re = Regex::new(r"(-?[X|Y|Z])\s*?\((.*)?\)\s*(-?[X|Y|Z])").unwrap();
+            // dbg!(is_three);
+            let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
+            // let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
             for cap in re.captures_iter(&dir_str) {
                 if cap.len() == 4 {
                     let val_str= cap[2].to_string();
-                    dbg!(&val_str);
+                    // dbg!(&val_str);
                     let val_result = eval_str_to_f64(&val_str, context).unwrap_or_default().to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
-                    dbg!(&new_dir_str);
+                    // dbg!(&new_dir_str);
                 }
             }
         }
@@ -577,6 +578,8 @@ fn parse_3_axis() {
     context.insert("RPRO_CPAR".into(), "DESIGN PARAM 14".into());
     let str = "X ( RPRO_CPAR )  Y ( DESIGN PARAM 13 ) Z";
     // let str = "X ( DESIGN PARAM 14 )  Y ";
+    let str = "X (60.0)  Y ";
+    let str = "X ( 45 )  Y ( 35 ) Z";
     let axis = parse_str_axis_to_vec3(str, &context);
     dbg!(axis);
 }

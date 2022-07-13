@@ -1097,13 +1097,7 @@ impl AiosDBManager {
                         }
 
                         //check 最后一个
-                        if loop_verts.len() > 2 {
-                            if loop_verts.first().unwrap().distance(*loop_verts.last().unwrap()) < EPSILON {
-                                loop_verts.remove(loop_verts.len() - 1);
-                                fradius_vec.remove(fradius_vec.len() - 1);
-                                // fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
-                            }
-                        }else {
+                        if loop_verts.len() < 2 {
                             return ;
                         }
 
