@@ -89,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     if let Some(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file("./assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(cache_mesh);
+        dbg!("read cached mesh ok.");
     }
 
     // dbg!(mgr.get_attr(RefU64::from_refno_str("15213/494985").unwrap()).await).expect("TODO: panic message");
