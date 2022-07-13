@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::default::default;
 use std::default::Default;
 use std::env;
+use std::f32::EPSILON;
 use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -742,7 +743,6 @@ impl AiosDBManager {
             "NOZZ",
             "PALJ",
             "SUBJ",
-            "PLOO",
             "SJOI",
             "CABLE",
             "BATT",
@@ -1086,10 +1086,29 @@ impl AiosDBManager {
                     if let Ok(children_refs) = mgr.get_children_refs(refno).await {
                         for x in children_refs {
                             if let Ok(a) = mgr.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
-                                loop_verts.push(a.get_position().unwrap_or_default());
-                                fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
+                                let pt = a.get_position().unwrap_or_default();
+                                if loop_verts.len() > 0 {
+                                    //todo fix length 相同的问题
+                                   if pt.distance(*loop_verts.last().unwrap()) > EPSILON {
+                                       loop_verts.push(pt);
+                                       fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
+                                   }
+                                }
                             }
                         }
+
+                        //check 最后一个
+                        if loop_verts.len() > 2 {
+                            if loop_verts.first().unwrap().distance(*loop_verts.last().unwrap()) < EPSILON {
+                                loop_verts.remove(loop_verts.len() - 1);
+                                fradius_vec.remove(fradius_vec.len() - 1);
+                                // fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
+                            }
+                        }else {
+                            return ;
+                        }
+
+
                     }
                     // dbg!(&loop_verts);
                     // dbg!(&fradius_vec);
