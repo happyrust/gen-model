@@ -105,14 +105,15 @@ async fn main() -> anyhow::Result<()> {
     let mut time = Instant::now();
     AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
 
-    std::fs::create_dir_all("mesh").unwrap();
-    mgr.cached_mesh_mgr.serialize_to_specify_file("mesh/mesh.bin");
-    std::fs::create_dir_all("instance").unwrap();
+    std::fs::create_dir_all("./assets/mesh").unwrap();
+    mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
+    std::fs::create_dir_all("./assets/instance").unwrap();
     for k in mgr.mesh_instance_mgr.iter() {
         let db_no = *k.key();
-        k.value().serialize_to_specify_file(&format!("instance/{db_no}.inst"));
+        k.value().serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
+        // k.value().level_shape_mgr.serialize_to_specify_file(&format!("instance/level_{db_no}.bin"));
     }
-    mgr.dbno_mgr.serialize_to_specify_file("instance/dbno_mgr.num");
+    mgr.dbno_mgr.serialize_to_specify_file("./assets/instance/dbno_mgr.num");
 
 
     println!("花费时间: {} ms", time.elapsed().as_millis());

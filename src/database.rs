@@ -162,13 +162,14 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         }
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
         if db_option.types_multi_thread {
-            dbg!("执行单线程解析");
-            sync_total_async_threading(&db_option, project, project_pool.clone(),
-                                       pdms_info_pool.clone()).await.expect("同步数据失败");
-        } else {
             dbg!("执行多线程解析");
-            sync_total_async(&db_option, project, project_pool.clone(),
-                             pdms_info_pool.clone()).await.expect("同步数据失败");
+            sync_total_async_multi_thread(&db_option, project, project_pool.clone(),
+                                          pdms_info_pool.clone()).await.expect("同步数据失败");
+
+        } else {
+            dbg!("执行单线程解析");
+            sync_total_async_single_thread(&db_option, project, project_pool.clone(),
+                                           pdms_info_pool.clone()).await.expect("同步数据失败");
         }
         if !db_option.only_rebuild_pdms_element {
             insert_project_mdb(&project_pool, &pdms_info_pool).await?;
@@ -320,9 +321,9 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
     table_vals_sql
 }
 
-///多线程保存
-pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
-                              pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
+/// multi thread
+pub async fn sync_total_async_multi_thread(db_option: &options::DbOption, project: &str,
+                                           pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
@@ -468,7 +469,7 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                                     }
                                     // {PDMS_ELEMENTS_TABLE} 保存
                                     // let mut sql = format!("REPLACE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM, IS_DEL ) VALUES ");
+                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
@@ -508,7 +509,6 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
                 handles.push(handle);
             }
         }
-        // break;
     }
 
     futures::future::join_all(handles).await;
@@ -517,7 +517,8 @@ pub async fn sync_total_async(db_option: &options::DbOption, project: &str,
 }
 
 
-pub async fn sync_total_async_threading(db_option: &options::DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
+///single thread
+pub async fn sync_total_async_single_thread(db_option: &options::DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
@@ -818,15 +819,9 @@ pub async fn sync_total_async_threading(db_option: &options::DbOption, project: 
                         }
                     }
                 }
-                // });
-                // handles.push(handle);
-                // });
             }
-            // break;
         }
     }
-
-// futures::future::join_all(handles).await;
 
     Ok(())
 }
