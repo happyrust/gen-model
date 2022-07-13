@@ -1093,6 +1093,9 @@ impl AiosDBManager {
                                        loop_verts.push(pt);
                                        fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
                                    }
+                                }else{
+                                    loop_verts.push(pt);
+                                    fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
                                 }
                             }
                         }
