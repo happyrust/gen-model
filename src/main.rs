@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use itertools::Itertools;
-use aios_core::pdms_types::{AttrMap, AttrVal, DbAttributeType, NounHash, PdmsDatabaseInfo, RefI32Tuple, RefU64};
+use aios_core::pdms_types::{AttrMap, AttrVal, CachedMeshesMgr, DbAttributeType, NounHash, PdmsDatabaseInfo, RefI32Tuple, RefU64};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use dashmap::DashMap;
@@ -86,7 +86,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
 
-    let mgr = Arc::new(AiosDBManager::init_form_config().await?);
+    let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
+    if let Some(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file("./assets/mesh/mesh.bin") {
+        Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(cache_mesh);
+    }
 
     // dbg!(mgr.get_attr(RefU64::from_refno_str("15213/494985").unwrap()).await).expect("TODO: panic message");
     // dbg!(&mgr.dbno_mgr.ref0_dbnos_map.iter().filter(|x| x.1.len() == 1).collect_vec());

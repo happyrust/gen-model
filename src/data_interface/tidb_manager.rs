@@ -582,7 +582,7 @@ impl AiosDBManager {
         let desi_att = mgr.get_attr(design_refno).await?;
 
         let geoms = resolve_desi_comp(design_refno, mgr.as_ref()).await.unwrap_or_default();
-        if type_name == "SCTN" || type_name == "STWALL" || /*type_name == "GENSEC" ||*/ type_name == "WALL" || type_name == "GWALL" {
+        if type_name == "SCTN" || type_name == "STWALL" || /*type_name == "GENSEC" ||*/ type_name == "WALL"  {
             center = create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref()).await?;
             // dbg!(center);
         } else {
@@ -725,12 +725,12 @@ impl AiosDBManager {
             "PCLA",
             "CMPF",
             "WALL",
-            "SUBE",
+            // "SUBE",
             "FIXING",
             "PJOI",
             "PFIT",
-            "GWALL",
-            "FLOOR",
+            // "GWALL",
+            // "FLOOR",
             "SCLA",
             "EQUI",
             "GENSEC",
@@ -743,11 +743,11 @@ impl AiosDBManager {
             "NOZZ",
             "PALJ",
             "SUBJ",
-            "SJOI",
+            // "SJOI",
             "CABLE",
             "BATT",
             "CMFI",
-            "CNODE",
+            // "CNODE",
             "SCOJ",
             "SEVE",
             "SBFI",
