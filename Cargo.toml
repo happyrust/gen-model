@@ -34,7 +34,8 @@ derive_more = "0.99.17"
 
 
 parse_pdms_db = { path = "../aios-parse-pdms" }
-aios_core = { path = "../aios_core" }
+aios_core = { git = "https://gitee.com/happydpc/aios-core" }
+#aios_core = { path = "../aios-core"}
 
 clap = { version = "3.1.18", features = ["derive"] }
 dashmap = { version = "5.2.0", features = ["serde"] }
@@ -43,12 +44,15 @@ serde = {version="1.0.137", features=["derive"]}
 id_tree = { version = "1.8.0", features = ["serde_support"] }
 glam = { version = "0.20.2", features = ["transform-types"] }
 sea-orm = { version = "0.8.0", features = ["default", "runtime-tokio"]}
-
+#openssl = { version = "0.10", features = ["vendored"] }
 #[target.'cfg(target_os = "macos")'.dependencies]
 #simple-process-stats = { path = "../simple-process-stats"}
 #
 #[target.'cfg(target_os = "windows")'.dependencies]
 #simple-process-stats = "1.0.0"
+
+[build-dependencies]
+cc = { version = "1.0", features = ["parallel"] }
 
 [dependencies.sqlx]
 version = "^0.5"

@@ -15,3 +15,4 @@ batch_insert_handles_chunk = 100
 files_multi_thread = true
 types_multi_thread = true
 recreate_db = true
+
