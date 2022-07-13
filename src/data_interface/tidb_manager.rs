@@ -1171,7 +1171,7 @@ impl AiosDBManager {
 
                         let geom_inst = EleGeoInstance {
                             geo_hash,
-                            refno,
+                            refno: parent_att.get_refno().unwrap_or_default(),
                             pts: Default::default(),
                             bbox,
                             transform: (tr.rotation, tr.translation, tr.scale),
