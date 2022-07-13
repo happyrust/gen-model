@@ -722,22 +722,18 @@ impl AiosDBManager {
             "FILT",
             "ELCONN",
             "HELE",
-            "PCLA",
             "CMPF",
             "WALL",
-            // "SUBE",
             "FIXING",
             "PJOI",
             "PFIT",
-            // "GWALL",
-            // "FLOOR",
             "SCLA",
             "EQUI",
             "GENSEC",
             "STWALL",
             "RNODE",
             "PRTELE",
-            "FITT",
+            // "FITT",
             "GPART",
             "SCREED",
             "NOZZ",
@@ -786,7 +782,7 @@ impl AiosDBManager {
                 //在这里直接处理完所有需要处理的transform
                 // let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
                 let brep_shapes = CateBrepShapeMap::new();
-                let current_att = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
+                let current_att = mgr.get_attr(refno).await.unwrap_or_default();
                 let mut refno_ptset_map = DashMap::new();
                 let mut is_branch = false;
                 let cur_type = current_att.get_type();
@@ -1216,10 +1212,12 @@ impl AiosDBManager {
         for db_no in db_nos {
             let instance_mgr = Arc::new(PdmsMeshInstanceMgr::default());
 
-            Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
-            Self::cache_loop_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
-            // Self::cache_pohe_geos(mgr.clone(), project).await?;
             Self::cache_cata_geos(mgr.clone(), instance_mgr.clone(), project, mdb, Some(vec![db_no]), &debug_cata_refno).await?;
+            if debug_cata_refno.is_none() {
+                Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
+                Self::cache_loop_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
+                // Self::cache_pohe_geos(mgr.clone(), project).await?;
+            }
 
             mgr.mesh_instance_mgr.insert(db_no, Arc::try_unwrap(instance_mgr).unwrap());
             println!("{db_no} 生成完毕。");
