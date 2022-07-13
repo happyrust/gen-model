@@ -722,22 +722,18 @@ impl AiosDBManager {
             "FILT",
             "ELCONN",
             "HELE",
-            "PCLA",
             "CMPF",
             "WALL",
-            // "SUBE",
             "FIXING",
             "PJOI",
             "PFIT",
-            // "GWALL",
-            // "FLOOR",
             "SCLA",
             "EQUI",
             "GENSEC",
             "STWALL",
             "RNODE",
             "PRTELE",
-            "FITT",
+            // "FITT",
             "GPART",
             "SCREED",
             "NOZZ",
@@ -1220,7 +1216,7 @@ impl AiosDBManager {
             if debug_cata_refno.is_none() {
                 Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
                 Self::cache_loop_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
-                Self::cache_pohe_geos(mgr.clone(), project).await?;
+                // Self::cache_pohe_geos(mgr.clone(), project).await?;
             }
 
             mgr.mesh_instance_mgr.insert(db_no, Arc::try_unwrap(instance_mgr).unwrap());

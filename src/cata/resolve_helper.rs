@@ -71,7 +71,7 @@ pub fn eval_str_to_f32(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
 }
 
 pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -> anyhow::Result<f64> {
-    let r =input_expr.trim().to_lowercase() ;
+    let r = input_expr.trim().to_lowercase() ;
     if r.is_empty() || r == "unset" {
         // return Err(anyhow!("字符串无法解析到f64".to_string()));
         return Ok(0.0);
@@ -79,10 +79,13 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
     let re = Regex::new(r"([A-Z_]+[0-9]*)(\s*\[(\d+)\])?").unwrap();
     let mut new_exp = input_expr.replace("ATTRIB", "");
     let rpro_re = Regex::new(r"(RPRO)\s+(\S+)").unwrap();
-    let mut new_exp = rpro_re.replace_all(&new_exp, |caps: &Captures| {
-        format!("{}_{}", &caps[1], &caps[2])
-    }).trim().to_string();
+    if new_exp.contains("RPRO") {
+        new_exp = rpro_re.replace_all(&new_exp, |caps: &Captures| {
+            format!("{}_{}", &caps[1], &caps[2])
+        }).trim().to_string();
+    }
     let mut result_exp = new_exp.clone();
+    // dbg!(&result_exp);
     //默认两次
     //let loop_cnt = if input_expr.contains("RPRO") { 2 } else { 1 };
     let mut found_replaced = false;
@@ -104,11 +107,12 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
         }
         //如果有RPRO 需要执行两次处理
         result_exp = result_exp.replace("ATTRIB", "");
-        result_exp = rpro_re.replace_all(&result_exp, |caps: &Captures| {
-            format!("{}_{}", &caps[1], &caps[2])
-        }).trim().to_string();
+        if result_exp.contains("RPRO") {
+            result_exp = rpro_re.replace_all(&result_exp, |caps: &Captures| {
+                format!("{}_{}", &caps[1], &caps[2])
+            }).trim().to_string();
+        }
         new_exp = result_exp.clone();
-
         if !found_replaced {
             break;
         }
@@ -117,6 +121,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
 
     //因为 attrib 的原因，这里还需要再执行一遍处理，以防止有可能出现
     //处理出现 DESIGN IPARA 1 这种没有 “[]”的情况
+    dbg!(&result_exp);
     let re = Regex::new(r"(DESIGN?\s+)?([I|C|O|A)]?PARAM?)\s*(\d+)").unwrap();
     let mut new_exp = result_exp.clone();
     for caps in re.captures_iter(&result_exp) {
@@ -520,27 +525,35 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) 
     let mut new_dir_str = dir_str.clone();
     let mut not_single = false;
     if !re.is_match(&dir_str) {
-        // dbg!(&dir_str);
+        dbg!(&dir_str);
         not_single = true;
-        let mut is_two = false;
-        let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
+        let mut is_three = false;
+
+        let re = Regex::new(r"(-?[X|Y|Z])\s*?\((.*)?\)\s*(-?[X|Y|Z])\s*?\((.*)?\)\s*(-?[X|Y|Z])").unwrap();
         for cap in re.captures_iter(&dir_str) {
-            if cap.len() == 4 {
+            if cap.len() == 6 {
                 let val_str= cap[2].to_string();
-                // dbg!(&val_str);
                 let val_result = eval_str_to_f64(&val_str, context).unwrap_or_default().to_string();
                 new_dir_str = dir_str.replace(&val_str, &val_result);
-                is_two = true;
+
+                let val_str= cap[4].to_string();
+                let val_result = eval_str_to_f64(&val_str, context).unwrap_or_default().to_string();
+                new_dir_str = new_dir_str.replace(&val_str, &val_result);
+
+                dbg!(&new_dir_str);
+                is_three = true;
             }
         }
-        if !is_two {
-            let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
+
+        if !is_three {
+            let re = Regex::new(r"(-?[X|Y|Z])\s*?\((.*)?\)\s*(-?[X|Y|Z])").unwrap();
             for cap in re.captures_iter(&dir_str) {
-                if cap.len() == 6 {
-                    let val_str= cap[4].to_string();
-                    // dbg!(&val_str);
+                if cap.len() == 4 {
+                    let val_str= cap[2].to_string();
+                    dbg!(&val_str);
                     let val_result = eval_str_to_f64(&val_str, context).unwrap_or_default().to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
+                    dbg!(&new_dir_str);
                 }
             }
         }
@@ -554,6 +567,19 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) 
 }
 
 
+#[test]
+fn parse_3_axis() {
+    // let str = "X ( 45 )  Y ( 35 ) Z";
+    //-X (DESIGN PARAM 14 ) -Y
+    let mut context = BTreeMap::new();
+    context.insert("DESI14".into(), "30.0".into());
+    context.insert("DESI13".into(), "30.0".into());
+    context.insert("RPRO_CPAR".into(), "DESIGN PARAM 14".into());
+    let str = "X ( RPRO_CPAR )  Y ( DESIGN PARAM 13 ) Z";
+    // let str = "X ( DESIGN PARAM 14 )  Y ";
+    let axis = parse_str_axis_to_vec3(str, &context);
+    dbg!(axis);
+}
 
 //[(.*[^-])([-?X|Y|Z])]?
 #[test]
