@@ -168,7 +168,7 @@ pub async fn query_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result
 
 /// 查询生成Element node ,不查询children_count 默认为 0
 pub async fn query_elenode_without_children_count(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
-    let sql = format!("SELECT * FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} and IS_DEL = 0;", *refno);
+    let sql = format!("SELECT TYPE,NAME,OWNER FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} and IS_DEL = 0;", *refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(EleTreeNode {
         refno,
@@ -177,6 +177,33 @@ pub async fn query_elenode_without_children_count(refno: RefU64, pool: &Pool<MyS
         owner: RefU64::from(result.get::<i64, _>("OWNER") as u64),
         children_count: 0,
     })
+}
+
+pub async fn query_elenodes_without_children_count(refnos: Vec<RefU64>, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {
+    let mut eles = vec![];
+    let mut sqls = vec![];
+    for refs in refnos.chunks(10000) {
+        let mut refno_str = String::new();
+        for refno in refs {
+            refno_str.push_str(&format!("{} ,", refno.0));
+        }
+        refno_str.remove(refno_str.len() - 1);
+        let sql = format!("SELECT ID,TYPE,NAME,OWNER FROM {PDMS_ELEMENTS_TABLE} WHERE ID IN ( {} ) and IS_DEL = 0;", refno_str);
+        sqls.push(sql);
+    }
+    for sql in sqls {
+        let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+        for r in result {
+            eles.push(EleTreeNode {
+                refno: RefU64(r.get::<i64, _>("ID") as u64),
+                noun: r.get::<String, _>("TYPE"),
+                name: r.get::<String, _>("NAME"),
+                owner: RefU64::from(r.get::<i64, _>("OWNER") as u64),
+                children_count: 0,
+            })
+        }
+    }
+    Ok(eles)
 }
 
 pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<PdmsElement>> {

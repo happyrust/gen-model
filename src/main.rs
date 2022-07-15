@@ -124,3 +124,10 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn get_noun_hash() {
+    let noun = "SCTN";
+    let hash = db1_hash(noun);
+    dbg!(hash);
+}
