@@ -1,0 +1,20 @@
+pub const BANG_TYPES: [&'static str; 16] = [
+    "GENSEC",
+    "SJOI",
+    "PAVE",
+    "CMFI",
+    "STWALL",
+    "PJOI",
+    "RNODE",
+    "CWBRAN",
+    "SCTN",
+    "CMPF",
+    "FITT",
+    "SUBJ",
+    "SEVE",
+    "SCOJ",
+    // "WALL",
+    "SBFI",
+    "PFIT",
+];
+
