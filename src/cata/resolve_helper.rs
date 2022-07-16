@@ -148,7 +148,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
         if context.contains_key(&k) {
             //need to replace whole word
             let re = Regex::new(format!(r"^{s}|\s{s}").as_str()).unwrap();
-            let rs = &*context[&k];
+            let rs = if context.contains_key(&k) { &*context[&k] } else { "0.0" };
             new_exp = re.replace_all(&new_exp, format!(" {rs} ").as_str()).to_string();
         }
     }
@@ -575,13 +575,16 @@ fn parse_3_axis() {
     let mut context = BTreeMap::new();
     context.insert("DESI14".into(), "30.0".into());
     context.insert("DESI13".into(), "30.0".into());
+    context.insert("DDANGLE".into(), "45.0".into());
+    context.insert("PARAM 2".into(), "30.0".into());
     context.insert("RPRO_CPAR".into(), "DESIGN PARAM 14".into());
     let str = "X ( RPRO_CPAR )  Y ( DESIGN PARAM 13 ) Z";
     // let str = "X ( DESIGN PARAM 14 )  Y ";
     let str = "X (60.0)  Y ";
     let str = "X ( 45 )  Y ( 35 ) Z";
-    let axis = parse_str_axis_to_vec3(str, &context);
-    dbg!(axis);
+    let str = "TANF PARAM 2 DDANGLE";
+    let r = eval_str_to_f64(str, &context);
+    dbg!(r);
 }
 
 //[(.*[^-])([-?X|Y|Z])]?
