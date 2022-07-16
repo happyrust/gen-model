@@ -1,9 +1,13 @@
+use std::sync::Arc;
 use aios_core::pdms_types::{EleTreeNode, RefU64};
+use dashmap::{DashMap, DashSet};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::ROOM_CODE;
+use serde::{Serialize, Deserialize};
 use crate::consts::PDMS_SSC_ELEMENTS_TABLE;
-use crate::api::element::{query_ele_node, query_elenode_without_children_count};
+use crate::api::element::{query_ele_node, query_elenode_without_children_count, query_elenodes_without_children_count};
 
+#[derive(Debug, Default, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub struct SscEleNode {
     pub refno: RefU64,
     pub noun: String,
@@ -14,23 +18,35 @@ pub struct SscEleNode {
 
 /// 获取所有带有房间号的节点属性
 pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<Vec<SscEleNode>> {
-    let mut result = vec![];
     let sql = gen_query_all_room_data_sql();
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let mut refno_room_map = DashMap::new();
+    let mut sql = String::new();
+    let mut sqls = vec![];
     for val in vals {
         let refno = RefU64(val.get::<i64, _>("REFNO") as u64);
         let room_name = val.get::<String, _>("ROOM_NAME");
-        if let Ok(elenode) = query_elenode_without_children_count(refno, pool).await {
-            result.push(SscEleNode {
-                refno,
-                noun: elenode.noun,
-                name: elenode.name,
-                owner: elenode.owner,
-                room_code: room_name,
-            })
-        }
+        refno_room_map.insert(refno, room_name);
+        sqls.push(refno);
     }
-    Ok(result)
+    if let Ok(elenodes) = query_elenodes_without_children_count(sqls, &pool).await {
+        dbg!(&elenodes.len());
+        let mut result = vec![];
+        for ele in elenodes {
+            if let Some(room_name) = refno_room_map.get(&ele.refno) {
+                result.push(SscEleNode {
+                    refno: ele.refno,
+                    noun: ele.noun,
+                    name: ele.name,
+                    owner: ele.owner,
+                    room_code: room_name.value().to_string(),
+                })
+            }
+        }
+        println!("总共有{}房间元件", result.len());
+        return Ok(result);
+    }
+    Ok(vec![])
 }
 
 pub async fn query_ssc_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {

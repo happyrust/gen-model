@@ -67,6 +67,7 @@ pub async fn query_refnos_scope(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Re
 /// 将设定的state值插入到数据库中
 pub async fn insert_refnos_state(vals: DataScopeVec, state: String, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let sql = gen_insert_refnos_state_sql(vals, state);
+    dbg!(&sql);
     let result = pool.execute(sql.as_str()).await;
     match result {
         Ok(_) => {}
@@ -90,7 +91,6 @@ fn gen_insert_refnos_state_sql(vals: DataScopeVec, state: String) -> String {
     insert_sql.remove(insert_sql.len() - 1);
     sql.push_str(insert_sql.as_str());
     sql.push_str(";");
-    dbg!(&sql);
     sql
 }
 

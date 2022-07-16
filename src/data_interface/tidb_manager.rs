@@ -480,17 +480,10 @@ impl AiosDBManager {
 
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
-        // let mut cached_site = vec![];
-        // let cached_refno_basic_map: Arc<DashMap<RefU64, CachedRefBasic>> = Arc::new(Default::default());
-        // let process_stats = ProcessStats::get().await.expect("could not get stats for running process");
-        // println!("{:?}", process_stats);
         let time = Instant::now();
         let mut dbno_mgr = DbNumMgr::default();
-        // CACHED_REFNO_BASIC_MAP.load_all();
-        // let need_sync = CACHED_REFNO_BASIC_MAP.is_empty();
         let need_sync = true;
         for project in &db_option.included_projects {
-            dbg!(&project);
             let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
             match project_pool {
                 Ok(pool) => {
