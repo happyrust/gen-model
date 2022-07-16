@@ -2,14 +2,14 @@ use std::env;
 use aios_core::pdms_types::{DataScope, DataScopeVec, DataState, DataStateVec, RefI32Tuple, RefU64};
 use sqlx::{Error, Executor, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
-use crate::api::children::travel_children_eles;
+use crate::api::children::{travel_children_eles, travel_children_without_leaf};
 use crate::consts::PDMS_DATA_STATE;
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 查找该节点下的所有子节点的data_state数据
 pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<DataStateVec> {
-    let refnos = travel_children_eles(refno, pool).await?;
+    let refnos = travel_children_without_leaf(refno, pool).await?;
     let mut r = vec![];
     let sql = gen_query_refnos_state_sql(refnos);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
@@ -37,7 +37,7 @@ pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Re
 }
 
 pub async fn query_refnos_scope(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<DataScopeVec> {
-    let refnos = travel_children_eles(refno, pool).await?;
+    let refnos = travel_children_without_leaf(refno, pool).await?;
     let mut r = vec![];
     let sql = gen_query_refnos_state_sql(refnos);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
@@ -67,7 +67,6 @@ pub async fn query_refnos_scope(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Re
 /// 将设定的state值插入到数据库中
 pub async fn insert_refnos_state(vals: DataScopeVec, state: String, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let sql = gen_insert_refnos_state_sql(vals, state);
-    dbg!(&sql);
     let result = pool.execute(sql.as_str()).await;
     match result {
         Ok(_) => {}

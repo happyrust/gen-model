@@ -10,7 +10,7 @@ use std::time::Instant;
 use itertools::Itertools;
 use aios_core::pdms_types::{AttrMap, AttrVal, CachedMeshesMgr, DbAttributeType, NounHash, PdmsDatabaseInfo, RefI32Tuple, RefU64};
 use aios_core::pdms_types::AttrVal::StringType;
-use aios_core::tool::db_tool::{db1_dehash, db1_hash};
+use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_bin};
 use dashmap::DashMap;
 use futures::StreamExt;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
@@ -127,7 +127,17 @@ async fn main() -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "SCTN";
+    let noun = "PIPCA";
+    let noun = "HROD";
     let hash = db1_hash(noun);
     dbg!(hash);
+}
+
+#[test]
+fn read_info_bin() {
+    let info_map = read_attr_info_config_from_bin("all_attr_info.bin");
+    let info = info_map.noun_attr_info_map;
+    if let Some(v) = info.get(&621602){
+        dbg!(&v.value());
+    };
 }

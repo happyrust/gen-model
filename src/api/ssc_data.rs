@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use aios_core::pdms_types::{EleTreeNode, RefU64};
 use dashmap::{DashMap, DashSet};
@@ -30,7 +31,6 @@ pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<Vec<SscEl
         sqls.push(refno);
     }
     if let Ok(elenodes) = query_elenodes_without_children_count(sqls, &pool).await {
-        dbg!(&elenodes.len());
         let mut result = vec![];
         for ele in elenodes {
             if let Some(room_name) = refno_room_map.get(&ele.refno) {
@@ -143,6 +143,23 @@ pub async fn query_ssc_children_count(refno: RefU64, pool: &Pool<MySql>) -> anyh
     let count_sql = gen_query_ssc_children_count_sql(refno);
     let count_result = sqlx::query(&count_sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(count_result.get::<i32, _>(0) as usize)
+}
+
+/// 遍历该ssc节点的所有子节点
+pub async fn travel_ssc_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
+    let mut result = vec![];
+    let mut deque = VecDeque::new();
+    deque.push_back(refno);
+    result.push(refno);
+    while deque.len() > 0 {
+        let refno = deque.pop_front().unwrap();
+        let children = query_ssc_children_without_children_count(refno, pool).await?;
+        for child in children{
+            deque.push_back(child.refno);
+            result.push(child.refno);
+        }
+    }
+    Ok(result)
 }
 
 
