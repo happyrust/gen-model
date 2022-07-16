@@ -18,7 +18,6 @@ use nom::combinator::map;
 use aios_core::pdms_data::AttInfoMap;
 use anyhow::anyhow;
 use sled::IVec;
-use crate::data_interface::cache::{CACHED_REFNO_BASIC_MAP, PDMS_ATT_MAP_CACHE, };
 
 pub mod tables;
 pub mod database;
@@ -55,7 +54,7 @@ lazy_static! {
 
 pub const BATCH_CHUNKS_CNT: usize = 50;
 
-pub const CACHE_SLED_NAME: &'static str = "cache.db";
+
 //
 // ///将当前的缓存数据，保存到sled，方便下次使用
 // pub fn save_to_cache_sled_db() -> anyhow::Result<()> {

@@ -6,6 +6,8 @@ use std::f32::EPSILON;
 use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use aios_core::cache::mgr::*;
+use aios_core::cache::refno::*;
 
 use aios_core::consts::*;
 use aios_core::db_number::DbNumMgr;
@@ -32,6 +34,7 @@ use once_cell::sync::Lazy;
 use smol_str::SmolStr;
 use sqlx::{MySql, MySqlPool, Pool};
 
+
 use crate::api::attr::*;
 use crate::api::children::cache_site_node;
 use crate::api::element::*;
@@ -42,8 +45,6 @@ use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn;
 use crate::cata::sctn::geo::create_profile_geos;
 use crate::consts::*;
-use crate::data_interface::cache::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP, PDMS_ATT_MAP_CACHE};
-use crate::data_interface::defines::CachedRefBasic;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::AIOSAxisMap;
 use crate::defines::AiosString;
@@ -1043,7 +1044,7 @@ impl AiosDBManager {
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], db_nos).await?;
-        // let loop_refnos = vec![RefU64::from_two_nums(23584, 8569)];
+        // let loop_refnos = vec![RefU64::from_two_nums(23584, 6006)];
         let loop_cnt = loop_refnos.len();
         //处理loop elements
         let mut handles = vec![];
@@ -1073,10 +1074,12 @@ impl AiosDBManager {
                     let mut target_refno = parent_refno;
                     let mut loop_verts: Vec<Vec3> = vec![];
                     let mut fradius_vec: Vec<f32> = vec![];
+
+                    // let mut origin_pt = Vec3::ZERO;
                     if let Ok(children_refs) = mgr.get_children_refs(refno).await {
                         for x in children_refs {
                             if let Ok(a) = mgr.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
-                                let pt = a.get_position().unwrap_or_default();
+                                let pt = a.get_position().unwrap_or_default() /*- origin_pt*/;
                                 if loop_verts.len() > 0 {
                                     //todo fix length 相同的问题
                                     if pt.distance(*loop_verts.last().unwrap()) > EPSILON {
@@ -1084,6 +1087,8 @@ impl AiosDBManager {
                                         fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
                                     }
                                 } else {
+                                    // origin_pt = pt;
+                                    // loop_verts.push(Vec3::ZERO);
                                     loop_verts.push(pt);
                                     fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
                                 }
@@ -1113,6 +1118,7 @@ impl AiosDBManager {
                                 // dbg!(&revo);
                                 if revo.check_valid() {
                                     item_trans = revo.get_trans();
+                                    // item_trans.translation += origin_pt;
                                     geo_hash = Some(cached_mesh_mgr.get_pdms_mesh_hash_key(revo));
                                 }
                             }
@@ -1130,8 +1136,10 @@ impl AiosDBManager {
                                 fradius_vec,
                                 ..Default::default()
                             });
+                            // dbg!(&extrusion);
                             if extrusion.check_valid() {
                                 item_trans = extrusion.get_trans();
+                                // item_trans.translation += origin_pt;
                                 if let Some(sjus) = attr.get_str("SJUS") {
                                     if sjus == "UTOP" || sjus == "DTOP" {
                                         item_trans.translation = item_trans.translation + Vec3::new(0.0, 0.0, -height);
@@ -1207,8 +1215,8 @@ impl AiosDBManager {
 
             Self::cache_cata_geos(mgr.clone(), instance_mgr.clone(), project, mdb, Some(vec![db_no]), &debug_cata_refno).await?;
             // if debug_cata_refno.is_none() {
-            Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
             Self::cache_loop_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
+            Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
             // Self::cache_pohe_geos(mgr.clone(), project).await?;
             // }
 

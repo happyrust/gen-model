@@ -1,4 +1,5 @@
 use std::env;
+use aios_core::cache::refno::CachedRefBasic;
 use aios_core::consts::*;
 use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64};
 use aios_core::pdms_types::AttrVal::StringType;
@@ -14,7 +15,6 @@ use sqlx::mysql::MySqlRow;
 use crate::api::element::{query_ele_node, query_owner_from_id, query_pdms_elements_type_name, query_refno_type, query_types_refnos};
 use crate::ATTR_INFO_MAP;
 use crate::consts::*;
-use crate::data_interface::defines::CachedRefBasic;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::helper::qualified_table_name;
 
