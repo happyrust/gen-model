@@ -1216,11 +1216,11 @@ impl AiosDBManager {
     }
 
     /// 获取缓存好的site
-    pub fn get_cached_site_nodes(&self, world_refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
+    pub fn get_cached_site_nodes(&self, world_refno: RefU64) -> anyhow::Result<Option<Vec<PdmsElement>>> {
         if let Some(k) = CACHED_MDB_SITE_MAP.get(&world_refno) {
-            return Ok(k.value().0.clone());
+            return Ok(Some(k.value().0.clone()));
         }
-        Ok(vec![])
+        Ok(None)
     }
 }
 

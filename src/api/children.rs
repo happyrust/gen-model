@@ -29,6 +29,28 @@ pub async fn travel_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::
     Ok(result)
 }
 
+
+/// 遍历该节点的children，不包含叶子节点
+pub async fn travel_children_without_leaf(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
+    let mut result = vec![];
+    let mut deque = VecDeque::new();
+    deque.push_back(refno);
+    result.push(refno);
+    while deque.len() > 0 {
+        let refno = deque.pop_front().unwrap();
+        let children = query_children_eles(refno, pool).await?;
+        for ele in children {
+            if ele.children_count != 0 {
+                if let Ok(ele_refno) = RefU64::from_refno_str(ele.refno.as_str()) {
+                    result.push(ele_refno);
+                    deque.push_back(ele_refno);
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
 /// 遍历该节点下的 children (不包含自己) 返回 EleTreeNode
 pub async fn travel_children_for_elenode(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut result = vec![];
