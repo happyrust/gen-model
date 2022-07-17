@@ -136,8 +136,11 @@ fn get_noun_hash() {
 #[test]
 fn read_info_bin() {
     let info_map = read_attr_info_config_from_bin("all_attr_info.bin");
-    let info = info_map.noun_attr_info_map;
-    if let Some(v) = info.get(&621602){
-        dbg!(&v.value());
-    };
+    let data = serde_json::to_string(&info_map).unwrap();
+    let mut file = File::create("all_attr_info_new.json").unwrap();
+    file.write(data.as_bytes()).unwrap();
+    // let info = info_map.noun_attr_info_map;
+    // if let Some(v) = info.get(&621602){
+    //     dbg!(&v.value());
+    // };
 }
