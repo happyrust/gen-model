@@ -18,3 +18,11 @@ pub const BANG_TYPES: [&'static str; 5] = [
     "PFIT",
 ];
 
+pub const JUSLINE_TYPES: [&'static str; 5] = [
+    "GENSEC",
+    "STWALL",
+    "SCTN",
+    "WALL",
+    "GWALL",
+];
+
