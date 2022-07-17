@@ -760,7 +760,6 @@ impl AiosDBManager {
             {
                 mgr.get_refnos_by_types(project, &att_types, db_nos).await?
             };
-        let mut handles = vec![];
         let debug_refno = if let Some(debug_refno) = debug_cata_refno {
             RefU64::from_refno_str(debug_refno).ok()
         } else {
@@ -777,123 +776,136 @@ impl AiosDBManager {
 
         let has_cata_cnt = has_cata_refnos.len();
         println!("使用元件库的模型总数：{has_cata_cnt}");
-        for (i, refno) in has_cata_refnos.into_iter().enumerate() {
-            println!("正在处理元件库的模型，剩余：{}, 当前参考号：{}", has_cata_cnt - i, refno.to_refno_string());
+
+        let batch_chunks_cnt = has_cata_cnt / BATCH_COUNT + 1;
+        let mut handles = vec![];
+        let all_refnos = Arc::new(has_cata_refnos);
+        let processed_cnt = Arc::new(Mutex::new(has_cata_cnt));
+        for i in 0..batch_chunks_cnt as usize{
 
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
+            let all_refnos = all_refnos.clone();
+            let processed_cnt = processed_cnt.clone();
             let handle = tokio::spawn(async move {
-                let inst_map = &instance_mgr.inst_mgr;
-                let mut jusl_translation = Vec3::ZERO;
-                let cached_mesh_mgr = &mgr.cached_mesh_mgr;
-                let level_shape_mgr = &instance_mgr.level_shape_mgr;
-                //在这里直接处理完所有需要处理的transform
-                // let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
-                let brep_shapes = CateBrepShapeMap::new();
-                let current_att = mgr.get_attr(refno).await.unwrap_or_default();
-                let mut refno_ptset_map = DashMap::new();
-                let mut is_auto_tubi = false;
-                let cur_type = current_att.get_type();
-                if cur_type == "BRAN" || cur_type == "HANG" {
-                    is_auto_tubi = true;
-                    Self::get_cata_auto_tubi_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
-                                                   &refno_ptset_map).await.unwrap_or_default();
-                } else {
-                    let center = Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
-                                                             &refno_ptset_map).await.unwrap_or_default();
+                let start_idx = i * BATCH_COUNT;
+                let mut end_idx = start_idx + BATCH_COUNT;
+                if end_idx > has_cata_cnt as usize {
+                    end_idx = has_cata_cnt as usize;
+                }
+                for j in start_idx..end_idx {
+                    let refno = all_refnos[j];
+                    println!("正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}", j, refno.to_refno_string(), processed_cnt.lock().unwrap().to_owned());
+                    let inst_map = &instance_mgr.inst_mgr;
+                    let mut jusl_translation = Vec3::ZERO;
+                    let cached_mesh_mgr = &mgr.cached_mesh_mgr;
+                    let level_shape_mgr = &instance_mgr.level_shape_mgr;
+                    //在这里直接处理完所有需要处理的transform
+                    // let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
+                    let brep_shapes = CateBrepShapeMap::new();
+                    let current_att = mgr.get_attr(refno).await.unwrap_or_default();
+                    let mut refno_ptset_map = DashMap::new();
+                    let mut is_auto_tubi = false;
+                    let cur_type = current_att.get_type();
+                    if cur_type == "BRAN" || cur_type == "HANG" {
+                        is_auto_tubi = true;
+                        Self::get_cata_auto_tubi_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
+                                                       &refno_ptset_map).await.unwrap_or_default();
+                    } else {
+                        let center = Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
+                                                                 &refno_ptset_map).await.unwrap_or_default();
 
-                    let jusl = current_att.get_as_string("JUSL").unwrap_or_default();
-                    let h = center.length();
-                    //todo need fix out jusline
-                    // if JUSLINE_TYPES.contains(&cur_type) {
-                    //     jusl_translation = match jusl.as_str() {
-                    //         "OBOW" => {
-                    //             Vec3::new(0.0, 0.0, h * 2.0)
-                    //         }
-                    //         "LTOC" => {
-                    //             Vec3::new(0.0, 0.0, h)
-                    //         }
-                    //         "IBOW" => {
-                    //             Vec3::new(0.0, 0.0, h)
-                    //         }
-                    //         _ => {
-                    //             Vec3::ZERO
-                    //         }
-                    //     };
-                    // }
-                    // dbg!(&jusl_translation);
-                }
-                if debug_refno.is_some() && debug_refno.unwrap() == refno {
-                    dbg!(&brep_shapes);
-                }
-                //todo refno_ptset_map 需要存入到数据库
-                for (child_refno, shapes) in brep_shapes {
-                    let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
-                    let ancestors = mgr.get_ancestors_refnos_without_world(child_refno);
-                    for p_refno in ancestors {
-                        level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(child_refno);
+                        let jusl = current_att.get_as_string("JUSL").unwrap_or_default();
+                        let h = center.length();
+                        //todo need fix out jusline
+                        // if JUSLINE_TYPES.contains(&cur_type) {
+                        //     jusl_translation = match jusl.as_str() {
+                        //         "OBOW" => {
+                        //             Vec3::new(0.0, 0.0, h * 2.0)
+                        //         }
+                        //         "LTOC" => {
+                        //             Vec3::new(0.0, 0.0, h)
+                        //         }
+                        //         "IBOW" => {
+                        //             Vec3::new(0.0, 0.0, h)
+                        //         }
+                        //         _ => {
+                        //             Vec3::ZERO
+                        //         }
+                        //     };
+                        // }
+                        // dbg!(&jusl_translation);
                     }
-                    let mut geos_info = EleGeosInfo {
-                        data: vec![],
-                        visible: true,
-                        generic_type: mgr.get_generic_type(child_refno),
-                        world_transform: (trans_origin.rotation, trans_origin.translation, Vec3::ONE),
-                        ptset_map: refno_ptset_map.remove(&child_refno).map(|x| x.1).unwrap_or_default(),
-                    };
-                    let mut geo_insts = &mut geos_info.data;
-                    for shape in shapes {
-                        //shape 的信息
-                        let CateBrepShape {
-                            refno,
-                            brep_shape,
-                            mut transform,
-                            visible,
-                            is_tubi,
-                            pts,
-                        } = shape;
-                        if !visible || !brep_shape.check_valid() { continue; }
-                        let trans = brep_shape.get_trans();
-                        if !brep_shape.check_valid() {
-                            continue;
+                    if debug_refno.is_some() && debug_refno.unwrap() == refno {
+                        dbg!(&brep_shapes);
+                    }
+
+                    for (child_refno, shapes) in brep_shapes {
+                        let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
+                        let ancestors = mgr.get_ancestors_refnos_without_world(child_refno);
+                        for p_refno in ancestors {
+                            level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(child_refno);
                         }
-                        let geo_hash = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_shape);
-                        let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
-                        bbox.scaled(&trans.scale);
-                        //tubi 需要特殊处理
-                        if JUSLINE_TYPES.contains(&cur_type) {
-                            let geom_inst = EleGeoInstance {
-                                geo_hash,
+                        let mut geos_info = EleGeosInfo {
+                            data: vec![],
+                            visible: true,
+                            generic_type: mgr.get_generic_type(child_refno),
+                            world_transform: (trans_origin.rotation, trans_origin.translation, Vec3::ONE),
+                            ptset_map: refno_ptset_map.remove(&child_refno).map(|x| x.1).unwrap_or_default(),
+                        };
+                        let mut geo_insts = &mut geos_info.data;
+                        for shape in shapes {
+                            //shape 的信息
+                            let CateBrepShape {
                                 refno,
-                                pts,
-                                bbox,
-                                transform: (trans.rotation, trans.translation + jusl_translation, trans.scale),
+                                brep_shape,
+                                mut transform,
                                 visible,
                                 is_tubi,
-                            };
-                            geo_insts.push(geom_inst);
-                        } else {
-                            let geom_inst = EleGeoInstance {
-                                geo_hash,
-                                refno,
                                 pts,
-                                bbox,
-                                transform: (transform.rotation, transform.translation, trans.scale),
-                                visible,
-                                is_tubi,
-                            };
-                            geo_insts.push(geom_inst);
+                            } = shape;
+                            if !visible || !brep_shape.check_valid() { continue; }
+                            let trans = brep_shape.get_trans();
+                            if !brep_shape.check_valid() {
+                                continue;
+                            }
+                            let geo_hash = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_shape);
+                            let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
+                            bbox.scaled(&trans.scale);
+                            //tubi 需要特殊处理
+                            if JUSLINE_TYPES.contains(&cur_type) {
+                                let geom_inst = EleGeoInstance {
+                                    geo_hash,
+                                    refno,
+                                    pts,
+                                    bbox,
+                                    transform: (trans.rotation, trans.translation + jusl_translation, trans.scale),
+                                    visible,
+                                    is_tubi,
+                                };
+                                geo_insts.push(geom_inst);
+                            } else {
+                                let geom_inst = EleGeoInstance {
+                                    geo_hash,
+                                    refno,
+                                    pts,
+                                    bbox,
+                                    transform: (transform.rotation, transform.translation, trans.scale),
+                                    visible,
+                                    is_tubi,
+                                };
+                                geo_insts.push(geom_inst);
+                            }
                         }
+                        inst_map.entry(child_refno).or_insert(geos_info);
                     }
-                    // dbg!(child_refno);
-                    // dbg!(&geos_info);
-                    inst_map.entry(child_refno).or_insert(geos_info);
+
+                    *processed_cnt.lock().unwrap() -= 1;
                 }
             });
             handles.push(handle);
-            if i == has_cata_cnt - 1 || handles.len() == BATCH_COUNT {
-                futures::future::join_all(take(&mut handles)).await;
-            }
         }
+        futures::future::join_all(take(&mut handles)).await;
         dbg!(instance_mgr.inst_mgr.len());
         println!("处理元件库几何体: {} 花费时间: {} ms", has_cata_cnt, t.elapsed().as_millis());
         Ok(true)
