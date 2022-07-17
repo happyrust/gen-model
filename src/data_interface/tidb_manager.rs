@@ -656,10 +656,12 @@ impl AiosDBManager {
             // if refno != RefU64::from_two_nums(23584, 7410) {
             //     continue;
             // }
-            let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
-            let mut geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap_or_default();
-            // dbg!(&geoms);
             let attr = mgr.get_attr(refno).await?;
+            println!("正在处理元件{}: {}", attr.get_type(), refno.to_refno_string());
+            let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
+            // let mut geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap_or_default();
+            let mut geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap();
+            dbg!(&geoms);
             //有隐含管段
             if has_tubi {
                 if let Some(arrive) = attr.get_i32("ARRI") {
@@ -802,23 +804,23 @@ impl AiosDBManager {
 
                     let jusl = current_att.get_as_string("JUSL").unwrap_or_default();
                     let h = center.length();
-                    if cur_type == "WALL" || cur_type == "SCTN" {
-                        jusl_translation = match jusl.as_str() {
-                            "OBOW" => {
-                                Vec3::new(0.0, 0.0, h * 2.0)
-                            }
-                            "LTOC" => {
-                                Vec3::new(0.0, 0.0, h)
-                            }
-                            "IBOW" => {
-                                Vec3::new(0.0, 0.0, h)
-                            }
-                            _ => {
-                                Vec3::ZERO
-                            }
-                        };
-                    }
-
+                    //todo need fix out jusline
+                    // if JUSLINE_TYPES.contains(&cur_type) {
+                    //     jusl_translation = match jusl.as_str() {
+                    //         "OBOW" => {
+                    //             Vec3::new(0.0, 0.0, h * 2.0)
+                    //         }
+                    //         "LTOC" => {
+                    //             Vec3::new(0.0, 0.0, h)
+                    //         }
+                    //         "IBOW" => {
+                    //             Vec3::new(0.0, 0.0, h)
+                    //         }
+                    //         _ => {
+                    //             Vec3::ZERO
+                    //         }
+                    //     };
+                    // }
                     // dbg!(&jusl_translation);
                 }
                 if debug_refno.is_some() && debug_refno.unwrap() == refno {
