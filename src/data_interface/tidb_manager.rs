@@ -661,7 +661,7 @@ impl AiosDBManager {
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
             // let mut geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap_or_default();
             let mut geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap();
-            dbg!(&geoms);
+            // dbg!(&geoms);
             //有隐含管段
             if has_tubi {
                 if let Some(arrive) = attr.get_i32("ARRI") {
