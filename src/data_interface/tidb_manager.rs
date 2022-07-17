@@ -7,6 +7,8 @@ use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use aios_core::cache::mgr::*;
+use aios_core::cache::refno::*;
 use aios_core::consts::*;
 use aios_core::db_number::DbNumMgr;
 use aios_core::parsed_data::{CateAxisParam, GeomsInfo};
@@ -37,13 +39,11 @@ use crate::api::children::cache_site_node;
 use crate::api::element::*;
 use crate::api::refno_info::{get_ref0_map, sync_refno_basic_map};
 use crate::ATTR_INFO_MAP;
-use crate::cata::consts::BANG_TYPES;
+use crate::cata::consts::{BANG_TYPES, JUSLINE_TYPES};
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn;
 use crate::cata::sctn::geo::create_profile_geos;
 use crate::consts::*;
-use crate::data_interface::cache::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP, PDMS_ATT_MAP_CACHE};
-use crate::data_interface::defines::CachedRefBasic;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::AIOSAxisMap;
 use crate::defines::AiosString;
@@ -353,14 +353,15 @@ impl PdmsDataInterface for AiosDBManager {
             let type_name = ref_basic.get_type();
             // dbg!(type_name);
             let (quat, pos) =
-                if BANG_TYPES.contains(&type_name){
+                if BANG_TYPES.contains(&type_name) {
                     let mut quat = Quat::IDENTITY;
                     let att = self.get_implicit_attr(refno, Some(vec!["POSS", "POSE", "BANG", "POS"])).await?;
                     let extru_dir: Vec3 = if let Some(poss) = att.get_poss() &&
-                        let Some(pose) = att.get_pose() {
+                    let Some(pose) = att.get_pose()
+                    {
                         (pose - poss).normalize()
                     } else{
-                      Vec3::Z
+                        Vec3::Z
                     };
                     let bangle = att.get_f32("BANG").unwrap_or_default();
                     // dbg!(bangle);
@@ -618,7 +619,7 @@ impl AiosDBManager {
         let h_ref = group_att.get_foreign_refno(if is_hang { "HREF" } else { "HSTU" }).unwrap_or_default();
         let hconnect = group_att.get_as_string("HCON").unwrap_or_default();
         let mut has_tubi = true;
-        if &hconnect == "DUCT" {
+        if hconnect.as_str() == "DUCT"{
             has_tubi = false;
         }
         // dbg!(htube_ref);
@@ -655,10 +656,12 @@ impl AiosDBManager {
             // if refno != RefU64::from_two_nums(23584, 7410) {
             //     continue;
             // }
-            let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
-            let mut geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap_or_default();
-            // dbg!(&geoms);
             let attr = mgr.get_attr(refno).await?;
+            println!("正在处理元件{}: {}", attr.get_type(), refno.to_refno_string());
+            let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
+            // let mut geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap_or_default();
+            let mut geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap();
+            // dbg!(&geoms);
             //有隐含管段
             if has_tubi {
                 if let Some(arrive) = attr.get_i32("ARRI") {
@@ -727,11 +730,12 @@ impl AiosDBManager {
             "ELCONN",
             "CMPF",
             "WALL",
+            "STWALL",
+            "GWALL",   //需要考虑是否有PLOO在下方
             "FIXING",
             "PJOI",
             "PFIT",
             "GENSEC",
-            "STWALL",
             // "RNODE",
             "PRTELE",
             "GPART",
@@ -750,29 +754,25 @@ impl AiosDBManager {
         ]);
 
         let has_cata_refnos =
-            // if let Some(debug_refno) = debug_cata_refno {
-            //     RefU64Vec(vec![RefU64::from_refno_str(debug_refno).unwrap_or_default()])
-            // }else
+            if let Some(debug_refno) = debug_cata_refno {
+                RefU64Vec(vec![RefU64::from_refno_str(debug_refno).unwrap_or_default()])
+            }else
             {
                 mgr.get_refnos_by_types(project, &att_types, db_nos).await?
             };
-        // let has_cata_refnos = vec![
-        //     RefU64::from_two_nums(23584, 5881),
-        //     // RefU64::from_two_nums(23584, 7621),
-        //     // RefU64::from_two_nums(23584, 7622),
-        //     // RefU64::from_two_nums(23584, 7623),
-        //     // RefU64::from_two_nums(23584, 7624),
-        //     // RefU64::from_two_nums(23584, 7625),
-        //     // RefU64::from_two_nums(23584, 7626),
-        // ];
         let mut handles = vec![];
+        let debug_refno = if let Some(debug_refno) = debug_cata_refno {
+            RefU64::from_refno_str(debug_refno).ok()
+        } else {
+            None
+        };
         // let has_cata_refnos = RefU64Vec(vec![
         //                                      RefU64::from_two_nums(23584, 6980),
-        //                                      RefU64::from_two_nums(23584, 6975),
-        //                                      RefU64::from_two_nums(23584, 6978),
-        //                                      RefU64::from_two_nums(23584, 6979),
-        //                                      RefU64::from_two_nums(23584, 6985),
-        //                                      RefU64::from_two_nums(23584, 6987),
+        //                                      // RefU64::from_two_nums(23584, 6975),
+        //                                      // RefU64::from_two_nums(23584, 6978),
+        //                                      // RefU64::from_two_nums(23584, 6979),
+        //                                      // RefU64::from_two_nums(23584, 6985),
+        //                                      // RefU64::from_two_nums(23584, 6987),
         // ]);
 
         let has_cata_cnt = has_cata_refnos.len();
@@ -802,27 +802,29 @@ impl AiosDBManager {
                     let center = Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
                                                              &refno_ptset_map).await.unwrap_or_default();
 
-
                     let jusl = current_att.get_as_string("JUSL").unwrap_or_default();
                     let h = center.length();
-                    if cur_type == "WALL" || cur_type == "SCTN" {
-                        jusl_translation = match jusl.as_str() {
-                            "OBOW" => {
-                                Vec3::new(0.0, 0.0, h * 2.0)
-                            }
-                            "LTOC" => {
-                                Vec3::new(0.0, 0.0, h)
-                            }
-                            "IBOW" => {
-                                Vec3::new(0.0, 0.0, h)
-                            }
-                            _ => {
-                                Vec3::ZERO
-                            }
-                        };
-                    }
-
+                    //todo need fix out jusline
+                    // if JUSLINE_TYPES.contains(&cur_type) {
+                    //     jusl_translation = match jusl.as_str() {
+                    //         "OBOW" => {
+                    //             Vec3::new(0.0, 0.0, h * 2.0)
+                    //         }
+                    //         "LTOC" => {
+                    //             Vec3::new(0.0, 0.0, h)
+                    //         }
+                    //         "IBOW" => {
+                    //             Vec3::new(0.0, 0.0, h)
+                    //         }
+                    //         _ => {
+                    //             Vec3::ZERO
+                    //         }
+                    //     };
+                    // }
                     // dbg!(&jusl_translation);
+                }
+                if debug_refno.is_some() && debug_refno.unwrap() == refno {
+                    dbg!(&brep_shapes);
                 }
                 //todo refno_ptset_map 需要存入到数据库
                 for (child_refno, shapes) in brep_shapes {
@@ -858,13 +860,13 @@ impl AiosDBManager {
                         let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
                         bbox.scaled(&trans.scale);
                         //tubi 需要特殊处理
-                        if cur_type != "WALL" && cur_type != "SCTN" {
+                        if JUSLINE_TYPES.contains(&cur_type) {
                             let geom_inst = EleGeoInstance {
                                 geo_hash,
                                 refno,
                                 pts,
                                 bbox,
-                                transform: (transform.rotation, transform.translation, trans.scale),
+                                transform: (trans.rotation, trans.translation + jusl_translation, trans.scale),
                                 visible,
                                 is_tubi,
                             };
@@ -875,7 +877,7 @@ impl AiosDBManager {
                                 refno,
                                 pts,
                                 bbox,
-                                transform: (trans.rotation, trans.translation + jusl_translation, trans.scale),
+                                transform: (transform.rotation, transform.translation, trans.scale),
                                 visible,
                                 is_tubi,
                             };
@@ -1043,7 +1045,7 @@ impl AiosDBManager {
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], db_nos).await?;
-        // let loop_refnos = vec![RefU64::from_two_nums(23584, 8569)];
+        // let loop_refnos = vec![RefU64::from_two_nums(23584, 6006)];
         let loop_cnt = loop_refnos.len();
         //处理loop elements
         let mut handles = vec![];
@@ -1073,10 +1075,12 @@ impl AiosDBManager {
                     let mut target_refno = parent_refno;
                     let mut loop_verts: Vec<Vec3> = vec![];
                     let mut fradius_vec: Vec<f32> = vec![];
+
+                    // let mut origin_pt = Vec3::ZERO;
                     if let Ok(children_refs) = mgr.get_children_refs(refno).await {
                         for x in children_refs {
                             if let Ok(a) = mgr.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
-                                let pt = a.get_position().unwrap_or_default();
+                                let pt = a.get_position().unwrap_or_default() /*- origin_pt*/;
                                 if loop_verts.len() > 0 {
                                     //todo fix length 相同的问题
                                     if pt.distance(*loop_verts.last().unwrap()) > EPSILON {
@@ -1084,6 +1088,8 @@ impl AiosDBManager {
                                         fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
                                     }
                                 } else {
+                                    // origin_pt = pt;
+                                    // loop_verts.push(Vec3::ZERO);
                                     loop_verts.push(pt);
                                     fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
                                 }
@@ -1113,12 +1119,13 @@ impl AiosDBManager {
                                 // dbg!(&revo);
                                 if revo.check_valid() {
                                     item_trans = revo.get_trans();
+                                    // item_trans.translation += origin_pt;
                                     geo_hash = Some(cached_mesh_mgr.get_pdms_mesh_hash_key(revo));
                                 }
                             }
                         }
-                        "AEXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" => {
-                            // let attr = mgr.get_implicit_attr(refno, Some(vec!["HEIG"])).await.unwrap_or_default();
+                        //todo 关于justline，可能需要jusline的信息才能判断中心点
+                        "AEXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
                             let attr = mgr.get_attr(refno).await.unwrap_or_default();
                             parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
                             target_refno = parent_refno;
@@ -1130,8 +1137,10 @@ impl AiosDBManager {
                                 fradius_vec,
                                 ..Default::default()
                             });
+                            // dbg!(&extrusion);
                             if extrusion.check_valid() {
                                 item_trans = extrusion.get_trans();
+                                // item_trans.translation += origin_pt;
                                 if let Some(sjus) = attr.get_str("SJUS") {
                                     if sjus == "UTOP" || sjus == "DTOP" {
                                         item_trans.translation = item_trans.translation + Vec3::new(0.0, 0.0, -height);
@@ -1205,10 +1214,13 @@ impl AiosDBManager {
         for db_no in db_nos {
             let instance_mgr = Arc::new(PdmsMeshInstanceMgr::default());
 
+            // let mut excluded_cata_design = HashSet::new();
+
+            Self::cache_loop_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
+            Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
+
             Self::cache_cata_geos(mgr.clone(), instance_mgr.clone(), project, mdb, Some(vec![db_no]), &debug_cata_refno).await?;
             // if debug_cata_refno.is_none() {
-            Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
-            Self::cache_loop_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
             // Self::cache_pohe_geos(mgr.clone(), project).await?;
             // }
 

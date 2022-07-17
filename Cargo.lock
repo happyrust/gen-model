@@ -66,6 +66,7 @@ dependencies = [
  "approx 0.5.1",
  "async-trait",
  "bincode",
+ "bitflags",
  "calamine",
  "cc",
  "clap",
@@ -99,16 +100,15 @@ dependencies = [
 [[package]]
 name = "aios_core"
 version = "0.1.0"
-source = "git+https://gitee.com/happydpc/aios-core#09adf4a0185484e3ceb2930e026097890865a406"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
  "bevy",
  "bevy_egui",
  "bincode",
+ "bitflags",
  "dashmap",
  "derive_more",
- "fixed 2.0.0-alpha.2",
  "flate2",
  "glam 0.20.5",
  "hash32",
@@ -124,6 +124,7 @@ dependencies = [
  "ncollide3d",
  "nom",
  "nom-derive",
+ "ordered-float 3.0.0",
  "prost",
  "serde",
  "serde-name",
@@ -537,7 +538,6 @@ checksum = "3bdca834647821e0b13d9539a8634eb62d3501b6b6c2cec1722786ee6671b851"
 [[package]]
 name = "bevy"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_internal",
 ]
@@ -545,7 +545,6 @@ dependencies = [
 [[package]]
 name = "bevy_app"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_derive",
  "bevy_ecs",
@@ -559,7 +558,6 @@ dependencies = [
 [[package]]
 name = "bevy_asset"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "anyhow",
  "bevy_app",
@@ -586,7 +584,6 @@ dependencies = [
 [[package]]
 name = "bevy_core"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -600,7 +597,6 @@ dependencies = [
 [[package]]
 name = "bevy_core_pipeline"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_app",
  "bevy_asset",
@@ -616,7 +612,6 @@ dependencies = [
 [[package]]
 name = "bevy_derive"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_macro_utils",
  "quote",
@@ -626,7 +621,6 @@ dependencies = [
 [[package]]
 name = "bevy_diagnostic"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -638,7 +632,6 @@ dependencies = [
 [[package]]
 name = "bevy_ecs"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "async-channel",
  "bevy_ecs_macros",
@@ -656,7 +649,6 @@ dependencies = [
 [[package]]
 name = "bevy_ecs_macros"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_macro_utils",
  "proc-macro2",
@@ -667,7 +659,6 @@ dependencies = [
 [[package]]
 name = "bevy_egui"
 version = "0.14.0"
-source = "git+https://gitee.com/happydpc/bevy_egui#f1a2f9c4a5cbe8be971071e11fe0871896ff2c4e"
 dependencies = [
  "arboard",
  "bevy",
@@ -679,7 +670,6 @@ dependencies = [
 [[package]]
 name = "bevy_encase_derive"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_macro_utils",
  "encase_derive_impl",
@@ -688,7 +678,6 @@ dependencies = [
 [[package]]
 name = "bevy_gltf"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "anyhow",
  "base64",
@@ -714,7 +703,6 @@ dependencies = [
 [[package]]
 name = "bevy_hierarchy"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -726,7 +714,6 @@ dependencies = [
 [[package]]
 name = "bevy_input"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -737,7 +724,6 @@ dependencies = [
 [[package]]
 name = "bevy_internal"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_app",
  "bevy_asset",
@@ -770,7 +756,6 @@ dependencies = [
 [[package]]
 name = "bevy_log"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "android_log-sys",
  "bevy_app",
@@ -784,7 +769,6 @@ dependencies = [
 [[package]]
 name = "bevy_macro_utils"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "quote",
  "syn",
@@ -794,7 +778,6 @@ dependencies = [
 [[package]]
 name = "bevy_math"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "glam 0.20.5",
 ]
@@ -802,7 +785,6 @@ dependencies = [
 [[package]]
 name = "bevy_mikktspace"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "glam 0.20.5",
 ]
@@ -810,7 +792,6 @@ dependencies = [
 [[package]]
 name = "bevy_pbr"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_app",
  "bevy_asset",
@@ -831,12 +812,10 @@ dependencies = [
 [[package]]
 name = "bevy_ptr"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 
 [[package]]
 name = "bevy_reflect"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_reflect_derive",
  "bevy_utils",
@@ -852,7 +831,6 @@ dependencies = [
 [[package]]
 name = "bevy_reflect_derive"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_macro_utils",
  "proc-macro2",
@@ -864,7 +842,6 @@ dependencies = [
 [[package]]
 name = "bevy_render"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "anyhow",
  "bevy_app",
@@ -902,7 +879,6 @@ dependencies = [
 [[package]]
 name = "bevy_render_macros"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_macro_utils",
  "proc-macro2",
@@ -913,7 +889,6 @@ dependencies = [
 [[package]]
 name = "bevy_scene"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "anyhow",
  "bevy_app",
@@ -931,7 +906,6 @@ dependencies = [
 [[package]]
 name = "bevy_sprite"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_app",
  "bevy_asset",
@@ -955,7 +929,6 @@ dependencies = [
 [[package]]
 name = "bevy_tasks"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "async-channel",
  "async-executor",
@@ -968,7 +941,6 @@ dependencies = [
 [[package]]
 name = "bevy_text"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -990,7 +962,6 @@ dependencies = [
 [[package]]
 name = "bevy_time"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -1001,7 +972,6 @@ dependencies = [
 [[package]]
 name = "bevy_transform"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -1013,7 +983,6 @@ dependencies = [
 [[package]]
 name = "bevy_ui"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_app",
  "bevy_asset",
@@ -1040,7 +1009,6 @@ dependencies = [
 [[package]]
 name = "bevy_utils"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "ahash",
  "getrandom",
@@ -1053,7 +1021,6 @@ dependencies = [
 [[package]]
 name = "bevy_window"
 version = "0.8.0-dev"
-source = "git+https://gitee.com/happydpc/bevy#f510b47bd037866c9a6489532863b00f86cb49d2"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -1915,7 +1882,6 @@ dependencies = [
 [[package]]
 name = "egui"
 version = "0.18.1"
-source = "git+https://gitee.com/happydpc/egui#19ffc085f642fd20347e1570edbe1ce8c026b20e"
 dependencies = [
  "ahash",
  "epaint",
@@ -1931,7 +1897,6 @@ checksum = "3f107b87b6afc2a64fd13cac55fe06d6c8859f12d4b14cbcdd2c67d0976781be"
 [[package]]
 name = "emath"
 version = "0.18.0"
-source = "git+https://gitee.com/happydpc/egui#19ffc085f642fd20347e1570edbe1ce8c026b20e"
 dependencies = [
  "bytemuck",
 ]
@@ -2003,7 +1968,6 @@ dependencies = [
 [[package]]
 name = "epaint"
 version = "0.18.1"
-source = "git+https://gitee.com/happydpc/egui#19ffc085f642fd20347e1570edbe1ce8c026b20e"
 dependencies = [
  "ab_glyph",
  "ahash",
@@ -2107,17 +2071,6 @@ dependencies = [
  "bytemuck",
  "half",
  "typenum",
-]
-
-[[package]]
-name = "fixed"
-version = "2.0.0-alpha.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e59bccb72eb0e75b9a0c89e4ccfe8686f49aff246e870a5904ed11cc0b328ca5"
-dependencies = [
- "az",
- "bytemuck",
- "half",
 ]
 
 [[package]]
@@ -3945,6 +3898,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ordered-float"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96bcbab4bfea7a59c2c0fe47211a1ac4e3e96bea6eb446d704f310bc5c732ae2"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "ordered-multimap"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4070,7 +4032,7 @@ dependencies = [
  "dynfmt",
  "env_logger 0.9.0",
  "fasteval",
- "fixed 1.16.0",
+ "fixed",
  "flate2",
  "futures",
  "glam 0.20.5",
@@ -4092,7 +4054,7 @@ dependencies = [
  "nom-derive",
  "notify 4.0.17",
  "once_cell",
- "ordered-float",
+ "ordered-float 2.10.0",
  "phf",
  "pollster",
  "prost",
@@ -4117,7 +4079,6 @@ dependencies = [
  "truck-polymesh",
  "truck-rendimpl",
  "truck-topology",
- "winit",
 ]
 
 [[package]]
@@ -4218,9 +4179,9 @@ dependencies = [
 
 [[package]]
 name = "phf"
-version = "0.9.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2ac8b67553a7ca9457ce0e526948cad581819238f4a9d1ea74545851fa24f37"
+checksum = "fabbf1ead8a5bcbc20f5f8b939ee3f5b0f6f281b6ad3468b84656b658b455259"
 dependencies = [
  "phf_macros",
  "phf_shared",
@@ -4229,9 +4190,9 @@ dependencies = [
 
 [[package]]
 name = "phf_generator"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d43f3220d96e0080cc9ea234978ccd80d904eafb17be31bb0f76daaea6493082"
+checksum = "5d5285893bb5eb82e6aaf5d59ee909a06a16737a8970984dd7746ba9283498d6"
 dependencies = [
  "phf_shared",
  "rand 0.8.5",
@@ -4239,9 +4200,9 @@ dependencies = [
 
 [[package]]
 name = "phf_macros"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b706f5936eb50ed880ae3009395b43ed19db5bff2ebd459c95e7bf013a89ab86"
+checksum = "58fdf3184dd560f160dd73922bea2d5cd6e8f064bf4b13110abd81b03697b4e0"
 dependencies = [
  "phf_generator",
  "phf_shared",
@@ -4253,9 +4214,9 @@ dependencies = [
 
 [[package]]
 name = "phf_shared"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a68318426de33640f02be62b4ae8eb1261be2efbc337b60c54d845bf4484e0d9"
+checksum = "b6796ad771acdc0123d2a88dc428b5e38ef24456743ddb1744ed628f9815c096"
 dependencies = [
  "siphasher",
 ]
