@@ -619,7 +619,7 @@ impl AiosDBManager {
         let h_ref = group_att.get_foreign_refno(if is_hang { "HREF" } else { "HSTU" }).unwrap_or_default();
         let hconnect = group_att.get_as_string("HCON").unwrap_or_default();
         let mut has_tubi = true;
-        if &hconnect == "DUCT" {
+        if hconnect.as_str() == "DUCT"{
             has_tubi = false;
         }
         // dbg!(htube_ref);
