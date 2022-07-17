@@ -754,9 +754,9 @@ impl AiosDBManager {
         ]);
 
         let has_cata_refnos =
-            // if let Some(debug_refno) = debug_cata_refno {
-            //     RefU64Vec(vec![RefU64::from_refno_str(debug_refno).unwrap_or_default()])
-            // }else
+            if let Some(debug_refno) = debug_cata_refno {
+                RefU64Vec(vec![RefU64::from_refno_str(debug_refno).unwrap_or_default()])
+            }else
             {
                 mgr.get_refnos_by_types(project, &att_types, db_nos).await?
             };
