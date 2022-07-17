@@ -1123,7 +1123,7 @@ impl AiosDBManager {
                                 }
                             }
                         }
-                        "AEXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" => {
+                        "AEXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
                             // let attr = mgr.get_implicit_attr(refno, Some(vec!["HEIG"])).await.unwrap_or_default();
                             let attr = mgr.get_attr(refno).await.unwrap_or_default();
                             parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
