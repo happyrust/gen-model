@@ -50,4 +50,7 @@ pub struct DbOption {
     pub batch_insert_handles_chunk: u32,
     #[clap(skip)]
     pub only_save_types_db: Option<Vec<String>>,
+
+    #[clap(short)]
+    pub gen_model_batch_size: usize,
 }

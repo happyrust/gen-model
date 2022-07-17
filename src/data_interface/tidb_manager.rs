@@ -51,7 +51,7 @@ use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
 pub const TUBI_TOL: f32 = 10.0f32;
-pub const BATCH_COUNT: usize = 50;
+// pub const batch_size: usize = 50;
 
 
 pub type CateBrepShapeMap = DashMap<RefU64, Vec<CateBrepShape>>;
@@ -724,6 +724,7 @@ impl AiosDBManager {
     /// 缓存使用元件库的几何体
     pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str, mdb: &str,
                                  db_nos: Option<Vec<i32>>, debug_cata_refno: &Option<String>) -> anyhow::Result<bool> {
+        let batch_size = mgr.db_option.gen_model_batch_size;
         let t = Instant::now();
         let mut att_types = vec!["BRAN", "HANG"];
         att_types.extend_from_slice(&vec![
@@ -777,19 +778,18 @@ impl AiosDBManager {
         let has_cata_cnt = has_cata_refnos.len();
         println!("使用元件库的模型总数：{has_cata_cnt}");
 
-        let batch_chunks_cnt = has_cata_cnt / BATCH_COUNT + 1;
+        let batch_chunks_cnt = has_cata_cnt / batch_size + 1;
         let mut handles = vec![];
         let all_refnos = Arc::new(has_cata_refnos);
         let processed_cnt = Arc::new(Mutex::new(has_cata_cnt));
         for i in 0..batch_chunks_cnt as usize{
-
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
             let all_refnos = all_refnos.clone();
             let processed_cnt = processed_cnt.clone();
             let handle = tokio::spawn(async move {
-                let start_idx = i * BATCH_COUNT;
-                let mut end_idx = start_idx + BATCH_COUNT;
+                let start_idx = i * batch_size;
+                let mut end_idx = start_idx + batch_size;
                 if end_idx > has_cata_cnt as usize {
                     end_idx = has_cata_cnt as usize;
                 }
@@ -839,7 +839,6 @@ impl AiosDBManager {
                     if debug_refno.is_some() && debug_refno.unwrap() == refno {
                         dbg!(&brep_shapes);
                     }
-
                     for (child_refno, shapes) in brep_shapes {
                         let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
                         let ancestors = mgr.get_ancestors_refnos_without_world(child_refno);
@@ -899,7 +898,6 @@ impl AiosDBManager {
                         }
                         inst_map.entry(child_refno).or_insert(geos_info);
                     }
-
                     *processed_cnt.lock().unwrap() -= 1;
                 }
             });
@@ -914,66 +912,81 @@ impl AiosDBManager {
     /// 生成基本体的几何数据
     pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
+        let batch_size = mgr.db_option.gen_model_batch_size;
         let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
         // let test_refno = RefU64::from_two_nums(17788, 18653);
         // prim_refnos = RefU64Vec(vec![test_refno]);
         let prim_cnt = prim_refnos.len();
+
+        let batch_chunks_cnt = prim_cnt / batch_size + 1;
         let mut handles = vec![];
-        //todo 修改 batch 的方式
-        for (i, refno) in prim_refnos.into_iter().enumerate() {
+        let all_refnos = Arc::new(prim_refnos);
+        let processed_cnt = Arc::new(Mutex::new(prim_cnt));
+        for i in 0..batch_chunks_cnt as usize{
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
+
+            let all_refnos = all_refnos.clone();
+            let processed_cnt = processed_cnt.clone();
             let handle = tokio::spawn(async move {
+                let start_idx = i * batch_size;
+                let mut end_idx = start_idx + batch_size;
+                if end_idx > prim_cnt as usize {
+                    end_idx = prim_cnt as usize;
+                }
+
                 let inst_map = &instance_mgr.inst_mgr;
                 let cached_mesh_mgr = &mgr.cached_mesh_mgr;
                 let level_shape_mgr = &instance_mgr.level_shape_mgr;
-                let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
-                let ancestors = mgr.get_ancestors_refnos_without_world(refno);
-                for p_refno in ancestors {
-                    level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(refno);
-                }
-                let mut geos_info = EleGeosInfo {
-                    data: vec![],
-                    visible: true,
-                    generic_type: mgr.get_generic_type(refno),
-                    world_transform: (transform.rotation, transform.translation, Vec3::ONE),
-                    ptset_map: default(),
-                };
-                let mut geo_insts = &mut geos_info.data;
-                let mut geo_hash = None;
-                let mut item_trans = TransformSRT::default();
-                let attr = mgr.get_attr(refno).await.unwrap_or_default();
-                if let Some(brep_obj) = attr.create_brep_shape() {
-                    if brep_obj.check_valid() {
-                        item_trans = brep_obj.get_trans();
-                        let r = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_obj);
-                        geo_hash = Some(r);
+                for j in start_idx..end_idx {
+                    let refno = all_refnos[j];
+
+                    let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
+                    let ancestors = mgr.get_ancestors_refnos_without_world(refno);
+                    for p_refno in ancestors {
+                        level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(refno);
                     }
-                }
-                let parent_refno = mgr.get_owner(refno);
-                if let Some(geo_hash) = geo_hash {
-                    let visible = attr.is_visible_by_level(None).unwrap_or(true);
-                    let tr: TransformSRT = item_trans;
-                    let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
-                    bbox.scaled(&tr.scale);
-                    let geom_inst = EleGeoInstance {
-                        geo_hash,
-                        refno,
-                        pts: Default::default(),
-                        bbox,
-                        transform: (tr.rotation, tr.translation, tr.scale),
-                        visible,
-                        is_tubi: false,
+                    let mut geos_info = EleGeosInfo {
+                        data: vec![],
+                        visible: true,
+                        generic_type: mgr.get_generic_type(refno),
+                        world_transform: (transform.rotation, transform.translation, Vec3::ONE),
+                        ptset_map: default(),
                     };
-                    geo_insts.push(geom_inst);
-                    inst_map.entry(refno).or_insert(geos_info);
+                    let mut geo_insts = &mut geos_info.data;
+                    let mut geo_hash = None;
+                    let mut item_trans = TransformSRT::default();
+                    let attr = mgr.get_attr(refno).await.unwrap_or_default();
+                    if let Some(brep_obj) = attr.create_brep_shape() {
+                        if brep_obj.check_valid() {
+                            item_trans = brep_obj.get_trans();
+                            let r = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_obj);
+                            geo_hash = Some(r);
+                        }
+                    }
+                    let parent_refno = mgr.get_owner(refno);
+                    if let Some(geo_hash) = geo_hash {
+                        let visible = attr.is_visible_by_level(None).unwrap_or(true);
+                        let tr: TransformSRT = item_trans;
+                        let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
+                        bbox.scaled(&tr.scale);
+                        let geom_inst = EleGeoInstance {
+                            geo_hash,
+                            refno,
+                            pts: Default::default(),
+                            bbox,
+                            transform: (tr.rotation, tr.translation, tr.scale),
+                            visible,
+                            is_tubi: false,
+                        };
+                        geo_insts.push(geom_inst);
+                        inst_map.entry(refno).or_insert(geos_info);
+                    }
                 }
             });
             handles.push(handle);
-            if i == prim_cnt - 1 || handles.len() == BATCH_COUNT {
-                futures::future::join_all(take(&mut handles)).await;
-            }
         }
+        futures::future::join_all(take(&mut handles)).await;
         dbg!(instance_mgr.inst_mgr.len());
         println!("处理常规基本几何体: {} 花费时间: {} ms", prim_cnt, t.elapsed().as_millis());
         Ok(true)
@@ -1056,148 +1069,166 @@ impl AiosDBManager {
 
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
+        let batch_size = mgr.db_option.gen_model_batch_size;
         let loop_refnos = mgr.get_refnos_by_types(project, &vec!["PLOO", "LOOP"], db_nos).await?;
         // let loop_refnos = vec![RefU64::from_two_nums(23584, 6006)];
         let loop_cnt = loop_refnos.len();
         //处理loop elements
+        let batch_chunks_cnt = loop_cnt / batch_size + 1;
+        dbg!(batch_chunks_cnt);
         let mut handles = vec![];
-        for (i, refno) in loop_refnos.into_iter().enumerate() {
+        let all_refnos = Arc::new(loop_refnos);
+        let processed_cnt = Arc::new(Mutex::new(loop_cnt));
+        for i in 0..batch_chunks_cnt as usize{
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
+
+            let all_refnos = all_refnos.clone();
+            let processed_cnt = processed_cnt.clone();
             let handle = tokio::spawn(async move {
+                let start_idx = i * batch_size;
+                let mut end_idx = start_idx + batch_size;
+                if end_idx > loop_cnt as usize {
+                    end_idx = loop_cnt as usize;
+                }
+
                 let inst_map = &instance_mgr.inst_mgr;
                 let cached_mesh_mgr = &mgr.cached_mesh_mgr;
-
                 let level_shape_mgr = &instance_mgr.level_shape_mgr;
-                let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
+                for j in start_idx..end_idx {
+                    let refno = all_refnos[j];
+                    println!("正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}", j,
+                             refno.to_refno_string(), processed_cnt.lock().unwrap().to_owned());
+                    let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
 
-                let mut geos_info = EleGeosInfo {
-                    data: vec![],
-                    visible: true,
-                    world_transform: (transform.rotation, transform.translation, Vec3::ONE),
-                    generic_type: mgr.get_generic_type(refno),
-                    ptset_map: default(),
-                };
-                let mut geo_insts = &mut geos_info.data;
+                    let mut geos_info = EleGeosInfo {
+                        data: vec![],
+                        visible: true,
+                        world_transform: (transform.rotation, transform.translation, Vec3::ONE),
+                        generic_type: mgr.get_generic_type(refno),
+                        ptset_map: default(),
+                    };
+                    let mut geo_insts = &mut geos_info.data;
 
-                if let Some(refno_basic) = mgr.get_refno_basic(refno) {
-                    let parent_basic = mgr.get_owner_ref_basic(refno).unwrap();
-                    let parent_type = parent_basic.get_type();
-                    let parent_refno = refno_basic.get_owner();
-                    let mut target_refno = parent_refno;
-                    let mut loop_verts: Vec<Vec3> = vec![];
-                    let mut fradius_vec: Vec<f32> = vec![];
+                    if let Some(refno_basic) = mgr.get_refno_basic(refno) {
+                        let parent_basic = mgr.get_owner_ref_basic(refno).unwrap();
+                        let parent_type = parent_basic.get_type();
+                        let parent_refno = refno_basic.get_owner();
+                        let mut target_refno = parent_refno;
+                        let mut loop_verts: Vec<Vec3> = vec![];
+                        let mut fradius_vec: Vec<f32> = vec![];
 
-                    // let mut origin_pt = Vec3::ZERO;
-                    if let Ok(children_refs) = mgr.get_children_refs(refno).await {
-                        for x in children_refs {
-                            if let Ok(a) = mgr.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
-                                let pt = a.get_position().unwrap_or_default() /*- origin_pt*/;
-                                if loop_verts.len() > 0 {
-                                    //todo fix length 相同的问题
-                                    if pt.distance(*loop_verts.last().unwrap()) > EPSILON {
+                        // let mut origin_pt = Vec3::ZERO;
+                        if let Ok(children_refs) = mgr.get_children_refs(refno).await {
+                            for x in children_refs {
+                                if let Ok(a) = mgr.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
+                                    let pt = a.get_position().unwrap_or_default() /*- origin_pt*/;
+                                    if loop_verts.len() > 0 {
+                                        //todo fix length 相同的问题
+                                        if pt.distance(*loop_verts.last().unwrap()) > EPSILON {
+                                            loop_verts.push(pt);
+                                            fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
+                                        }
+                                    } else {
+                                        // origin_pt = pt;
+                                        // loop_verts.push(Vec3::ZERO);
                                         loop_verts.push(pt);
                                         fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
                                     }
-                                } else {
-                                    // origin_pt = pt;
-                                    // loop_verts.push(Vec3::ZERO);
-                                    loop_verts.push(pt);
-                                    fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
                                 }
                             }
+                            //check 最后一个
+                            // if loop_verts.len() < 2 {
+                            //     return;
+                            // }
                         }
-                        //check 最后一个
-                        if loop_verts.len() < 2 {
-                            return;
-                        }
-                    }
-                    let mut parent_att = AttrMap::default();
-                    let mut geo_hash = None;
-                    let mut item_trans = TransformSRT::default();
-                    match parent_type {
-                        "REVO" => {
-                            parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
-                            // parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
-                            // dbg!(&parent_att);
-                            let angle = parent_att.get_f32("ANGL").unwrap_or_default();
-                            // dbg!(angle);
-                            if angle >= f32::EPSILON {
-                                let revo = Box::new(Revolution {
-                                    loop_verts,
-                                    angle,
-                                    ..Default::default()
-                                });
-                                // dbg!(&revo);
-                                if revo.check_valid() {
-                                    item_trans = revo.get_trans();
-                                    // item_trans.translation += origin_pt;
-                                    geo_hash = Some(cached_mesh_mgr.get_pdms_mesh_hash_key(revo));
-                                }
-                            }
-                        }
-                        //todo 关于justline，可能需要jusline的信息才能判断中心点
-                        "AEXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
-                            let attr = mgr.get_attr(refno).await.unwrap_or_default();
-                            parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
-                            target_refno = parent_refno;
-                            let mut height = attr.get_f32("HEIG").unwrap_or(parent_att.get_f32("HEIG").unwrap_or_default());
-                            let i: usize = 0;
-                            let extrusion = Box::new(Extrusion {
-                                verts: loop_verts,
-                                height,
-                                fradius_vec,
-                                ..Default::default()
-                            });
-                            // dbg!(&extrusion);
-                            if extrusion.check_valid() {
-                                item_trans = extrusion.get_trans();
-                                // item_trans.translation += origin_pt;
-                                if let Some(sjus) = attr.get_str("SJUS") {
-                                    if sjus == "UTOP" || sjus == "DTOP" {
-                                        item_trans.translation = item_trans.translation + Vec3::new(0.0, 0.0, -height);
+                        let mut parent_att = AttrMap::default();
+                        let mut geo_hash = None;
+                        let mut item_trans = TransformSRT::default();
+                        match parent_type {
+                            "REVO" => {
+                                parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
+                                // parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
+                                // dbg!(&parent_att);
+                                let angle = parent_att.get_f32("ANGL").unwrap_or_default();
+                                // dbg!(angle);
+                                if angle >= f32::EPSILON {
+                                    let revo = Box::new(Revolution {
+                                        loop_verts,
+                                        angle,
+                                        ..Default::default()
+                                    });
+                                    // dbg!(&revo);
+                                    if revo.check_valid() {
+                                        item_trans = revo.get_trans();
+                                        // item_trans.translation += origin_pt;
+                                        geo_hash = Some(cached_mesh_mgr.get_pdms_mesh_hash_key(revo));
                                     }
                                 }
-                                let r = cached_mesh_mgr.get_pdms_mesh_hash_key(extrusion);
-                                geo_hash = Some(r);
                             }
+                            //todo 关于justline，可能需要jusline的信息才能判断中心点
+                            "AEXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
+                                let attr = mgr.get_attr(refno).await.unwrap_or_default();
+                                parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
+                                target_refno = parent_refno;
+                                let mut height = attr.get_f32("HEIG").unwrap_or(parent_att.get_f32("HEIG").unwrap_or_default());
+                                let i: usize = 0;
+                                let extrusion = Box::new(Extrusion {
+                                    verts: loop_verts,
+                                    height,
+                                    fradius_vec,
+                                    ..Default::default()
+                                });
+                                // dbg!(&extrusion);
+                                if extrusion.check_valid() {
+                                    item_trans = extrusion.get_trans();
+                                    // item_trans.translation += origin_pt;
+                                    if let Some(sjus) = attr.get_str("SJUS") {
+                                        if sjus == "UTOP" || sjus == "DTOP" {
+                                            item_trans.translation = item_trans.translation + Vec3::new(0.0, 0.0, -height);
+                                        }
+                                    }
+                                    let r = cached_mesh_mgr.get_pdms_mesh_hash_key(extrusion);
+                                    geo_hash = Some(r);
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
-                    }
 
-                    if let Some(geo_hash) = geo_hash {
-                        let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
-                        let tr: TransformSRT = item_trans;
-                        let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
-                        bbox.scaled(&tr.scale);
+                        if let Some(geo_hash) = geo_hash {
+                            let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
+                            let tr: TransformSRT = item_trans;
+                            let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
+                            bbox.scaled(&tr.scale);
 
-                        // if parent_att.get_refno().is_none() {
-                        //    dbg!(refno);
-                        // }
+                            // if parent_att.get_refno().is_none() {
+                            //    dbg!(refno);
+                            // }
 
-                        let geom_inst = EleGeoInstance {
-                            geo_hash,
-                            refno,
-                            pts: Default::default(),
-                            bbox,
-                            transform: (tr.rotation, tr.translation, tr.scale),
-                            visible,
-                            is_tubi: false,
-                        };
-                        geo_insts.push(geom_inst);
+                            let geom_inst = EleGeoInstance {
+                                geo_hash,
+                                refno,
+                                pts: Default::default(),
+                                bbox,
+                                transform: (tr.rotation, tr.translation, tr.scale),
+                                visible,
+                                is_tubi: false,
+                            };
+                            geo_insts.push(geom_inst);
+                        }
+                        let ancestors = mgr.get_ancestors_refnos_without_world(refno);
+                        for p_refno in ancestors {
+                            level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(target_refno);
+                        }
+                        inst_map.entry(target_refno).or_insert(geos_info);
                     }
-                    let ancestors = mgr.get_ancestors_refnos_without_world(refno);
-                    for p_refno in ancestors {
-                        level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(target_refno);
-                    }
-                    inst_map.entry(target_refno).or_insert(geos_info);
+                    *processed_cnt.lock().unwrap() -= 1;
                 }
             });
             handles.push(handle);
-            if i == loop_cnt - 1 || handles.len() == BATCH_COUNT {
-                futures::future::join_all(take(&mut handles)).await;
-            }
         }
+        futures::future::join_all(take(&mut handles)).await;
+
         dbg!(instance_mgr.inst_mgr.len());
         println!("处理loops几何体: {} 花费时间: {} ms", loop_cnt, t.elapsed().as_millis());
         Ok(true)
@@ -1223,20 +1254,27 @@ impl AiosDBManager {
         }
         // let db_nos = vec![7200];
         dbg!(&db_nos);
+        std::fs::create_dir_all("./assets/mesh").unwrap();
+        std::fs::create_dir_all("./assets/instance").unwrap();
+
+
         for db_no in db_nos {
             let instance_mgr = Arc::new(PdmsMeshInstanceMgr::default());
 
-            // let mut excluded_cata_design = HashSet::new();
+            println!("开始处理db: {db_no}");
 
             Self::cache_loop_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
             Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
-
             Self::cache_cata_geos(mgr.clone(), instance_mgr.clone(), project, mdb, Some(vec![db_no]), &debug_cata_refno).await?;
             // if debug_cata_refno.is_none() {
             // Self::cache_pohe_geos(mgr.clone(), project).await?;
             // }
 
-            mgr.mesh_instance_mgr.insert(db_no, Arc::try_unwrap(instance_mgr).unwrap());
+            mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
+            instance_mgr.serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
+            mgr.dbno_mgr.serialize_to_specify_file("./assets/instance/dbno_mgr.num");
+
+            // mgr.mesh_instance_mgr.insert(db_no, Arc::try_unwrap(instance_mgr).unwrap());
             println!("{db_no} 生成完毕。");
         }
 
