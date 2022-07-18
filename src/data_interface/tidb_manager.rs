@@ -1147,20 +1147,15 @@ impl AiosDBManager {
                         match parent_type {
                             "REVO" => {
                                 parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
-                                // parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
-                                // dbg!(&parent_att);
                                 let angle = parent_att.get_f32("ANGL").unwrap_or_default();
-                                // dbg!(angle);
                                 if angle >= f32::EPSILON {
                                     let revo = Box::new(Revolution {
-                                        loop_verts,
+                                        verts: loop_verts,
                                         angle,
                                         ..Default::default()
                                     });
-                                    // dbg!(&revo);
                                     if revo.check_valid() {
                                         item_trans = revo.get_trans();
-                                        // item_trans.translation += origin_pt;
                                         geo_hash = Some(cached_mesh_mgr.get_pdms_mesh_hash_key(revo));
                                     }
                                 }

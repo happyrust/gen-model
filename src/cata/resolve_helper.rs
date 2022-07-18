@@ -446,7 +446,8 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 CateGeoParam::Revolution(CateRevolutionParam {
                     pa: Some(gmse.paxises[0].clone()),
                     pb: Some(gmse.paxises[1].clone()),
-                    angel: gmse.angle,
+                    angle: gmse.angle,
+                    verts: gmse.verts.clone(),
                     x: gmse.xyz[0],
                     y: gmse.xyz[1],
                     z: gmse.xyz[2],
@@ -454,7 +455,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SRTO" => { // 如 =15192/210474
+            "SRTO" => {
                 // 截面为矩形的弯管
                 CateGeoParam::RectTorus(CateRectTorusParam {
                     pa: Some(gmse.paxises[0].clone()),
