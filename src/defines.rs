@@ -9,9 +9,6 @@ use aios_core::cache::refno::CachedRefBasic;
 use aios_core::pdms_types::PdmsElementVec;
 
 lazy_static! {
-    // pub static ref CACHE_DB: sled::Db  = {
-    //    sled::open(CACHE_SLED_NAME).unwrap()
-    // };
     pub static ref PDMS_ATT_MAP_CACHE: CacheMgr< AttrMap>  = CacheMgr::new("ATTR_MAP_CACHE",  true);
     pub static ref PDMS_ANCESTOR_CACHE: CacheMgr<RefU64Vec>  = CacheMgr::new("ANCESTOR_CACHE",  true);
     pub static ref CACHED_REFNO_BASIC_MAP: CacheMgr< CachedRefBasic>  = CacheMgr::new("REFNO_BASIC_CACHE",  false);

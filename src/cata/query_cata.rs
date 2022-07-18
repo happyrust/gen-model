@@ -19,6 +19,7 @@ pub const DDANGLE_STR: &'static str = "DDANGLE";
 pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     refno: RefU64,
     interface: &T,
+    is_debug: bool,
 ) -> anyhow::Result<GeomsInfo> {
     let attr_map = interface.get_attr(refno).await?;
     let mut scom_ref = None;
@@ -41,6 +42,9 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         return Err(anyhow!("Scom ref is invalid".to_string()));
     }
     let scom_info = query_scom_info(scom_ref, interface).await?;
+    if is_debug {
+        dbg!(&scom_info);
+    }
     let mut context: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
     context.insert("DESI_REFNO".into(), refno.to_refno_str());
     let mut desp = attr_map.get_f64_vec("DESP").unwrap_or_default();
@@ -67,7 +71,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     let radi = attr_map.get_as_string("RADI").unwrap_or("0.0".into());
     context.insert(DDRADIUS_STR.into(), SmolStr::new(radi.clone()));
     context.insert("RADI".into(), SmolStr::new(radi));
-    let mut geom_info = resolve_cata_comp(&scom_info, interface, Some(context)).await;
+    let mut geom_info = resolve_cata_comp(&scom_info, interface, Some(context), is_debug).await;
     if geom_info.is_err() {
         error!("{:?}",geom_info.as_ref().err());
         error!("{:?}",attr_map.to_string_hashmap());
@@ -165,6 +169,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     scom_info: &ScomInfo,
     interface: &T,
     context: Option<BTreeMap<SmolStr, SmolStr>>,
+    is_debug: bool,
 ) -> anyhow::Result<GeomsInfo> {
     let mut cur_context = context.unwrap_or_default();
     //默认值
@@ -193,14 +198,16 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         cur_context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
         cur_context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
     }
-    //求解AXIS的数据
-    // if scom_info.attr_map.get_refno_as_string().unwrap_or_default() == "15192/47225" {
-    //     dbg!(&scom_info);
-    // }
-    let axis_map = resolve_axis_params(scom_info, &cur_context);
-    // dbg!(&axis_map);
 
+    let axis_map = resolve_axis_params(scom_info, &cur_context);
+    if is_debug {
+        dbg!(&cur_context);
+        dbg!(&axis_map);
+    }
     let geometries = resolve_gms(&scom_info.gm_params, &cur_context, &axis_map);
+    if is_debug {
+        dbg!(&geometries);
+    }
     Ok(GeomsInfo {
         geometries,
         axis_map,

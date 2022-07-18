@@ -178,7 +178,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
     let mut i = 0;
     let mut new_vals = vec![];
     while i < p_vals.len() {
-        if p_vals[i] == "TWICE" {   //todo add function to eval
+        if p_vals[i] == "TWICE" {
             if i + 1 < p_vals.len() {
                 if let Ok(val) = p_vals[i + 1].parse::<f64>() {
                     let v = val * 2.0f64;
@@ -186,7 +186,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
                 }
             }
             i += 2;
-        } else if p_vals[i] == "TANF" {  //todo add function to eval
+        } else if p_vals[i] == "TANF" {
             if i + 2 < p_vals.len() {
                 if let Ok(val) = p_vals[i + 1].parse::<f64>() {
                     if let Ok(angle) = p_vals[i + 2].parse::<f64>() {

@@ -563,13 +563,18 @@ impl AiosDBManager {
 
     ///获取单个元件的模型数据
     pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64, branch_att: &AttrMap,
-                                       brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>) -> anyhow::Result<Vec3> {
+                                       brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
+                                       debug_refno: Option<RefU64>
+    ) -> anyhow::Result<Vec3> {
+        let is_debug = debug_refno.is_some();
         let mut center = Vec3::ZERO;
+        if is_debug && design_refno != debug_refno.unwrap() {
+            return Ok(center);
+        }
         let cur_ele = mgr.get_refno_basic(design_refno).unwrap();
         let type_name = cur_ele.get_type();
         let owner = mgr.get_owner_ref_basic(design_refno);
         if owner.is_none() {
-            // dbg!(design_refno);
             return Ok(center);
         }
         let owner = owner.unwrap();
@@ -583,7 +588,7 @@ impl AiosDBManager {
 
         let desi_att = mgr.get_attr(design_refno).await?;
 
-        let geoms = resolve_desi_comp(design_refno, mgr.as_ref()).await.unwrap_or_default();
+        let geoms = resolve_desi_comp(design_refno, mgr.as_ref(), is_debug).await.unwrap_or_default();
         if type_name == "SCTN" || type_name == "STWALL" || /*type_name == "GENSEC" ||*/ type_name == "WALL" {
             center = create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref()).await?;
             // dbg!(center);
@@ -607,7 +612,9 @@ impl AiosDBManager {
     ///记录点集的信息
     ///获得branch的模型数据
     async fn get_cata_auto_tubi_geoms(mgr: Arc<AiosDBManager>, group_refno: RefU64, group_att: &AttrMap,
-                                      brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>) -> anyhow::Result<bool> {
+                                      brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
+                                        debug_refno: Option<RefU64>) -> anyhow::Result<bool> {
+        let is_debug = debug_refno.is_some();
         let group_transform = mgr.get_world_transform(group_refno).await?.unwrap_or_default();
         let htube_pt = group_transform.transform_point3(group_att.get_vec3("HPOS")
             .ok_or(anyhow!("HPOS not exist".to_string()))?);
@@ -650,18 +657,17 @@ impl AiosDBManager {
             }
             return Ok(true);
         }
+
         //第一遍完成后，然后生成tubing
         let last_child = children.last().unwrap().clone();
         for refno in children {
-            // if refno != RefU64::from_two_nums(23584, 7410) {
-            //     continue;
-            // }
+            if is_debug && refno != debug_refno.unwrap() {
+                continue;
+            }
             let attr = mgr.get_attr(refno).await?;
             println!("正在处理元件{}: {}", attr.get_type(), refno.to_refno_string());
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
-            // let mut geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap_or_default();
-            let mut geoms = resolve_desi_comp(refno, mgr.as_ref()).await.unwrap();
-            // dbg!(&geoms);
+            let mut geoms = resolve_desi_comp(refno, mgr.as_ref(), is_debug).await.unwrap();
             //有隐含管段
             if has_tubi {
                 if let Some(arrive) = attr.get_i32("ARRI") {
@@ -723,7 +729,7 @@ impl AiosDBManager {
 
     /// 缓存使用元件库的几何体
     pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str, mdb: &str,
-                                 db_nos: Option<Vec<i32>>, debug_cata_refno: &Option<String>) -> anyhow::Result<bool> {
+                                 db_nos: Option<Vec<i32>>, db_option: &DbOption) -> anyhow::Result<bool> {
         let batch_size = mgr.db_option.gen_model_batch_size;
         let t = Instant::now();
         let mut att_types = vec!["BRAN", "HANG"];
@@ -747,7 +753,6 @@ impl AiosDBManager {
             "CABLE",
             "BATT",
             "CMFI",
-            // "CNODE",
             "SCOJ",
             "SEVE",
             "SBFI",
@@ -755,27 +760,21 @@ impl AiosDBManager {
         ]);
 
         let has_cata_refnos =
-            if let Some(debug_refno) = debug_cata_refno {
-                RefU64Vec(vec![RefU64::from_refno_str(debug_refno).unwrap_or_default()])
-            }else
-            {
+            if let Some(branch_refno) = &db_option.debug_branch_refno {
+                RefU64Vec(vec![RefU64::from_refno_str(branch_refno).unwrap_or_default()])
+            }else if let Some(design_refno) = &db_option.debug_desi_refno {
+                RefU64Vec(vec![RefU64::from_refno_str(design_refno).unwrap_or_default()])
+            }else {
                 mgr.get_refnos_by_types(project, &att_types, db_nos).await?
             };
-        let debug_refno = if let Some(debug_refno) = debug_cata_refno {
-            RefU64::from_refno_str(debug_refno).ok()
-        } else {
-            None
-        };
-        // let has_cata_refnos = RefU64Vec(vec![
-        //                                      RefU64::from_two_nums(23584, 6980),
-        //                                      // RefU64::from_two_nums(23584, 6975),
-        //                                      // RefU64::from_two_nums(23584, 6978),
-        //                                      // RefU64::from_two_nums(23584, 6979),
-        //                                      // RefU64::from_two_nums(23584, 6985),
-        //                                      // RefU64::from_two_nums(23584, 6987),
-        // ]);
+
+        dbg!(&has_cata_refnos);
+
 
         let has_cata_cnt = has_cata_refnos.len();
+        let target_debug_refno = db_option.debug_desi_refno.as_ref().map(
+            |x|RefU64::from_refno_str(x).unwrap_or_default());
+        dbg!(&target_debug_refno);
         println!("使用元件库的模型总数：{has_cata_cnt}");
 
         let batch_chunks_cnt = has_cata_cnt / batch_size + 1;
@@ -801,7 +800,6 @@ impl AiosDBManager {
                     let cached_mesh_mgr = &mgr.cached_mesh_mgr;
                     let level_shape_mgr = &instance_mgr.level_shape_mgr;
                     //在这里直接处理完所有需要处理的transform
-                    // let attr = mgr.get_implicit_attr(refno, None).await.unwrap_or_default();
                     let brep_shapes = CateBrepShapeMap::new();
                     let current_att = mgr.get_attr(refno).await.unwrap_or_default();
                     let mut refno_ptset_map = DashMap::new();
@@ -809,11 +807,14 @@ impl AiosDBManager {
                     let cur_type = current_att.get_type();
                     if cur_type == "BRAN" || cur_type == "HANG" {
                         is_auto_tubi = true;
+                        // if let Some(design_refno) = &db_option.debug_desi_refno {
+                        //     RefU64Vec(vec![RefU64::from_refno_str(design_refno).unwrap_or_default()])
+                        // }
                         Self::get_cata_auto_tubi_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
-                                                       &refno_ptset_map).await.unwrap_or_default();
+                                                       &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
                     } else {
                         let center = Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
-                                                                 &refno_ptset_map).await.unwrap_or_default();
+                                                                 &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
 
                         let jusl = current_att.get_as_string("JUSL").unwrap_or_default();
                         let h = center.length();
@@ -836,9 +837,9 @@ impl AiosDBManager {
                         // }
                         // dbg!(&jusl_translation);
                     }
-                    if debug_refno.is_some() && debug_refno.unwrap() == refno {
-                        dbg!(&brep_shapes);
-                    }
+                    // if debug_refno.is_some() && debug_refno.unwrap() == refno {
+                    //     dbg!(&brep_shapes);
+                    // }
                     for (child_refno, shapes) in brep_shapes {
                         let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
                         let ancestors = mgr.get_ancestors_refnos_without_world(child_refno);
@@ -1240,7 +1241,7 @@ impl AiosDBManager {
         let project = &db_option.project_name;
         let mdb = &db_option.mdb_name;
         let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
-        let debug_cata_refno = db_option.debug_cata_refnos;
+
         if db_nos.is_empty() {
             let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
             let info_pool = AiosDBManager::get_db_pool(
@@ -1263,18 +1264,17 @@ impl AiosDBManager {
 
             println!("开始处理db: {db_no}");
 
-            Self::cache_loop_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
-            Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
-            Self::cache_cata_geos(mgr.clone(), instance_mgr.clone(), project, mdb, Some(vec![db_no]), &debug_cata_refno).await?;
-            // if debug_cata_refno.is_none() {
+            Self::cache_cata_geos(mgr.clone(), instance_mgr.clone(), project, mdb, Some(vec![db_no]), &db_option).await?;
+            if db_option.debug_branch_refno.as_ref().is_none() && db_option.debug_desi_refno.as_ref().is_none() {
+                Self::cache_loop_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
+                Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
+            }
             // Self::cache_pohe_geos(mgr.clone(), project).await?;
-            // }
 
             mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
             instance_mgr.serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
             mgr.dbno_mgr.serialize_to_specify_file("./assets/instance/dbno_mgr.num");
 
-            // mgr.mesh_instance_mgr.insert(db_no, Arc::try_unwrap(instance_mgr).unwrap());
             println!("{db_no} 生成完毕。");
         }
 
