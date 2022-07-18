@@ -632,9 +632,7 @@ impl AiosDBManager {
         // dbg!(htube_ref);
         let mut bore = 0.0f32;
         if let Ok(h_att) = mgr.get_attr(h_ref).await {
-            // dbg!(&hstube_att);
             let h_cat_att = mgr.get_attr(h_att.get_foreign_refno("CATR").unwrap_or_default()).await?;
-            // dbg!(&hstube_cat_att);
             let params = h_cat_att.get_f64_vec("PARA").unwrap_or_default();
 
             if params.len() >= 2 {
@@ -669,7 +667,7 @@ impl AiosDBManager {
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
             let mut geoms = resolve_desi_comp(refno, mgr.as_ref(), is_debug).await.unwrap();
             //有隐含管段
-            if has_tubi {
+            if has_tubi && attr.get_type() != "ATTA"{
                 if let Some(arrive) = attr.get_i32("ARRI") {
                     if geoms.axis_map.contains_key(&arrive) {
                         let p = &geoms.axis_map[&arrive].pt;
