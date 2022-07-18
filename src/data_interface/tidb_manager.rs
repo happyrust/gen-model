@@ -46,7 +46,7 @@ use crate::cata::sctn::geo::create_profile_geos;
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::AIOSAxisMap;
-use crate::defines::AiosString;
+use crate::defines::{AiosString, CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP, PDMS_ATT_MAP_CACHE};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 

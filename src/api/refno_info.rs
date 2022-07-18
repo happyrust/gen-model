@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use aios_core::cache::mgr::CACHED_REFNO_BASIC_MAP;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::db_number::DbNumMgr;
 use aios_core::pdms_types::{NounHash, RefU64};
@@ -10,6 +9,7 @@ use dashmap::DashMap;
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
 use crate::helper::qualified_table_name;
+use crate::defines::CACHED_REFNO_BASIC_MAP;
 
 ///更新获得ref0->project 缓存
 pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, String>> {
