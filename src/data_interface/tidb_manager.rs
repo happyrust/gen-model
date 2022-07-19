@@ -665,7 +665,9 @@ impl AiosDBManager {
             if is_debug && refno != debug_refno.unwrap() {
                 continue;
             }
-            let attr = mgr.get_attr(refno).await?;
+            let attr = mgr.get_attr(refno).await;
+            if attr.is_err() { continue; }
+            let attr = attr.unwrap();
             println!("正在处理元件{}: {}", attr.get_type(), refno.to_refno_string());
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
             let mut geoms = resolve_desi_comp(refno, mgr.as_ref(), is_debug).await.unwrap();
