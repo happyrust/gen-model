@@ -97,9 +97,10 @@ pub fn resolve_gmse_params(
     for vert in &gm.verts {
         if vert[0].is_empty() || vert[1].is_empty() { continue; }
         if let Ok(f0) = eval_str_to_f32(vert[0].as_str(), context) &&
-        let Ok(f1) = eval_str_to_f32(vert[1].as_str(), context)
+        let Ok(f1) = eval_str_to_f32(vert[1].as_str(), context) &&
+        let Ok(f2) = eval_str_to_f32(vert[2].as_str(), context)
         {
-            verts.push([f0, f1]);
+            verts.push([f0, f1, f2]);
         }
     }
 

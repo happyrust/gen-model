@@ -616,11 +616,13 @@ impl AiosDBManager {
     ///获得branch的模型数据
     async fn get_cata_auto_tubi_geoms(mgr: Arc<AiosDBManager>, group_refno: RefU64, group_att: &AttrMap,
                                       brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
+                                      // anchor_ptset_map: &DashMap<RefU64, Vec<Option<i32>>>,
                                         debug_refno: Option<RefU64>) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
         let group_transform = mgr.get_world_transform(group_refno).await?.unwrap_or_default();
         let htube_pt = group_transform.transform_point3(group_att.get_vec3("HPOS")
             .ok_or(anyhow!("HPOS not exist".to_string()))?);
+        // anchor_ptset_map.entry(group_refno).or_insert(Vec::new()).push(Some());
         let bran_ttube_pt = group_transform.transform_point3(group_att.get_vec3("TPOS")
             .ok_or(anyhow!("TPOS not exist".to_string()))?);
 
@@ -632,7 +634,6 @@ impl AiosDBManager {
         if hconnect.as_str() == "DUCT" || is_debug{
             has_tubi = false;
         }
-        // dbg!(htube_ref);
         let mut bore = 0.0f32;
         if let Ok(h_att) = mgr.get_attr(h_ref).await {
             let h_cat_att = mgr.get_attr(h_att.get_foreign_refno("CATR").unwrap_or_default()).await?;
@@ -640,7 +641,6 @@ impl AiosDBManager {
 
             if params.len() >= 2 {
                 bore = params[if is_hang { 1 } else { 0 }] as f32;
-                // dbg!(bore);
             }
         }
         let mut current_tubing = PdmsTubing {
@@ -710,8 +710,6 @@ impl AiosDBManager {
                 geometries,
                 axis_map
             } = geoms;
-            let len = geometries.len();
-            // let pt_map = &geoms.axis_map;
             for (i, geom) in geometries.into_iter().enumerate() {
                 if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
                     brep_shape_map.entry(refno).or_insert(Vec::new()).push(cate_shape);
@@ -810,13 +808,11 @@ impl AiosDBManager {
                     let brep_shapes = CateBrepShapeMap::new();
                     let current_att = mgr.get_attr(refno).await.unwrap_or_default();
                     let mut refno_ptset_map = DashMap::new();
+                    // let mut anchor_ptset_map = DashMap::new();
                     let mut is_auto_tubi = false;
                     let cur_type = current_att.get_type();
                     if cur_type == "BRAN" || cur_type == "HANG" {
                         is_auto_tubi = true;
-                        // if let Some(design_refno) = &db_option.debug_desi_refno {
-                        //     RefU64Vec(vec![RefU64::from_refno_str(design_refno).unwrap_or_default()])
-                        // }
                         Self::get_cata_auto_tubi_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
                                                        &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
                     } else {
@@ -859,6 +855,8 @@ impl AiosDBManager {
                             generic_type: mgr.get_generic_type(child_refno),
                             world_transform: (trans_origin.rotation, trans_origin.translation, Vec3::ONE),
                             ptset_map: refno_ptset_map.remove(&child_refno).map(|x| x.1).unwrap_or_default(),
+                            //arrive: None,
+                            //leave: None
                         };
                         let mut geo_insts = &mut geos_info.data;
                         for shape in shapes {
@@ -965,6 +963,8 @@ impl AiosDBManager {
                         generic_type: mgr.get_generic_type(refno),
                         world_transform: (transform.rotation, transform.translation, Vec3::ONE),
                         ptset_map: default(),
+                        //arrive: None,
+                        //leave: None
                     };
                     let mut geo_insts = &mut geos_info.data;
                     let mut geo_hash = None;
@@ -1120,6 +1120,8 @@ impl AiosDBManager {
                         world_transform: (transform.rotation, transform.translation, Vec3::ONE),
                         generic_type: mgr.get_generic_type(refno),
                         ptset_map: default(),
+                        //arrive: None,
+                        //leave: None
                     };
                     let mut geo_insts = &mut geos_info.data;
 
