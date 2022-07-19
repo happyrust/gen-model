@@ -318,7 +318,7 @@ pub async fn query_gm_param(att_map: &AttrMap, interface: &dyn PdmsDataInterface
     let mut dxy = vec![];
     let refno = att_map.get_refno().unwrap_or_default();
     let type_name = att_map.get_type();
-    if type_name == "SEXT" {
+    if type_name == "SEXT" || type_name == "SREV" {
         //先暂时不考虑负实体
         let children = interface.get_children_attrs(refno).await.ok()?;
         for child in children {

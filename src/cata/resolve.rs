@@ -102,15 +102,6 @@ pub fn resolve_gmse_params(
             verts.push([f0, f1]);
         }
     }
-    // dbg!(&verts);
-    // let verts = gm.verts
-    //     .iter()
-    //     .try_fold::<_, _, anyhow::Result<_>>(vec![], |mut acc, exp| {
-    //         let f0 = eval_str_to_f32(exp[0].as_str(), context)? as f32;
-    //         let f1 = eval_str_to_f32(exp[1].as_str(), context)? as f32;
-    //         acc.push([f0, f1]);
-    //         Ok(acc)
-    //     })?;
 
     let phei = eval_str_to_f32(&gm.phei, context)?;
     let offset = eval_str_to_f32(&gm.offset, context)?;
