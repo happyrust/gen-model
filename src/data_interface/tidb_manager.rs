@@ -605,6 +605,9 @@ impl AiosDBManager {
             }
             refno_ptset_map.insert(design_refno, axis_map);
         }
+        // if is_debug {
+        //     dbg!(&brep_shape_map);
+        // }
 
         Ok(center)
     }
@@ -775,6 +778,8 @@ impl AiosDBManager {
         dbg!(&target_debug_refno);
         println!("使用元件库的模型总数：{has_cata_cnt}");
 
+        let is_debug = target_debug_refno.is_some();
+
         let batch_chunks_cnt = has_cata_cnt / batch_size + 1;
         let mut handles = vec![];
         let all_refnos = Arc::new(has_cata_refnos);
@@ -853,7 +858,6 @@ impl AiosDBManager {
                         };
                         let mut geo_insts = &mut geos_info.data;
                         for shape in shapes {
-                            //shape 的信息
                             let CateBrepShape {
                                 refno,
                                 brep_shape,
@@ -867,7 +871,13 @@ impl AiosDBManager {
                             if !brep_shape.check_valid() {
                                 continue;
                             }
+                            if is_debug {
+                                dbg!(&brep_shape);
+                            }
                             let geo_hash = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_shape);
+                            if is_debug {
+                                dbg!(geo_hash);
+                            }
                             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
                             bbox.scaled(&trans.scale);
                             //tubi 需要特殊处理
@@ -1194,11 +1204,6 @@ impl AiosDBManager {
                             let tr: TransformSRT = item_trans;
                             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
                             bbox.scaled(&tr.scale);
-
-                            // if parent_att.get_refno().is_none() {
-                            //    dbg!(refno);
-                            // }
-
                             let geom_inst = EleGeoInstance {
                                 geo_hash,
                                 refno,
@@ -1246,11 +1251,9 @@ impl AiosDBManager {
                 db_nos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned().unwrap_or_default();
             }
         }
-        // let db_nos = vec![7200];
         dbg!(&db_nos);
         std::fs::create_dir_all("./assets/mesh").unwrap();
         std::fs::create_dir_all("./assets/instance").unwrap();
-
 
         for db_no in db_nos {
             let instance_mgr = Arc::new(PdmsMeshInstanceMgr::default());
