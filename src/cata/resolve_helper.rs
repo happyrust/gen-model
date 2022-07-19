@@ -446,7 +446,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 CateGeoParam::Revolution(CateRevolutionParam {
                     pa: Some(gmse.paxises[0].clone()),
                     pb: Some(gmse.paxises[1].clone()),
-                    angle: gmse.angle,
+                    angle: gmse.pang,
                     verts: gmse.verts.clone(),
                     x: gmse.xyz[0],
                     y: gmse.xyz[1],
