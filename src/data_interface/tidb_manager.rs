@@ -849,14 +849,14 @@ impl AiosDBManager {
                         for p_refno in ancestors {
                             level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(child_refno);
                         }
+                        let child_att = mgr.get_attr(child_refno).await.unwrap_or_default();
                         let mut geos_info = EleGeosInfo {
                             data: vec![],
                             visible: true,
                             generic_type: mgr.get_generic_type(child_refno),
                             world_transform: (trans_origin.rotation, trans_origin.translation, Vec3::ONE),
                             ptset_map: refno_ptset_map.remove(&child_refno).map(|x| x.1).unwrap_or_default(),
-                            //arrive: None,
-                            //leave: None
+                            flow_pt_indexs: vec![child_att.get_i32("ARRI"), child_att.get_i32("LEAV")],
                         };
                         let mut geo_insts = &mut geos_info.data;
                         for shape in shapes {
@@ -963,8 +963,7 @@ impl AiosDBManager {
                         generic_type: mgr.get_generic_type(refno),
                         world_transform: (transform.rotation, transform.translation, Vec3::ONE),
                         ptset_map: default(),
-                        //arrive: None,
-                        //leave: None
+                        flow_pt_indexs: vec![]
                     };
                     let mut geo_insts = &mut geos_info.data;
                     let mut geo_hash = None;
@@ -1120,8 +1119,7 @@ impl AiosDBManager {
                         world_transform: (transform.rotation, transform.translation, Vec3::ONE),
                         generic_type: mgr.get_generic_type(refno),
                         ptset_map: default(),
-                        //arrive: None,
-                        //leave: None
+                        flow_pt_indexs: vec![]
                     };
                     let mut geo_insts = &mut geos_info.data;
 
