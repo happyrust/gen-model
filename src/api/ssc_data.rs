@@ -1,12 +1,26 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use aios_core::pdms_types::{EleTreeNode, RefU64};
+use aios_core::pdms_types::{EleTreeNode, RefI32Tuple, RefU64};
 use dashmap::{DashMap, DashSet};
-use sqlx::{MySql, Pool, Row};
+use lazy_static::lazy_static;
+use sqlx::{Error, Executor, MySql, Pool, Row};
 use crate::consts::ROOM_CODE;
 use serde::{Serialize, Deserialize};
+use sqlx::mysql::MySqlRow;
 use crate::consts::PDMS_SSC_ELEMENTS_TABLE;
+use std::collections::HashMap;
+use std::env;
+use std::fmt::format;
 use crate::api::element::{query_ele_node, query_elenode_without_children_count, query_elenodes_without_children_count};
+use crate::data_interface::tidb_manager::AiosDBManager;
+
+// 缓存该参考号的 owner 和 owner 的 type
+lazy_static! {
+    pub static ref SSC_OWNER_MAP: DashMap<RefU64,(RefU64,String)> = {
+        let mut s = DashMap::new();
+        s
+    };
+}
 
 #[derive(Debug, Default, Eq, PartialEq, Serialize, Deserialize, Hash)]
 pub struct SscEleNode {
@@ -128,6 +142,39 @@ pub async fn query_ssc_world(pool: &Pool<MySql>) -> anyhow::Result<Option<EleTre
     };
 }
 
+/// 查找ssc的owner
+pub async fn query_ssc_owner(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
+    let sql = gen_query_ssc_owner_sql(refno);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    return match result {
+        Ok(r) => {
+            Ok(Some(RefU64(r.get::<i64, _>("OWNER") as u64)))
+        }
+        Err(e) => {
+            dbg!(&sql);
+            dbg!(&e);
+            Ok(None)
+        }
+    };
+}
+
+/// 查找ssc的type
+pub async fn query_ssc_type(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<String>> {
+    let sql = gen_query_ssc_type_sql(refno);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    return match result {
+        Ok(r) => {
+            Ok(Some(r.get::<String, _>("TYPE")))
+        }
+        Err(e) => {
+            dbg!(&sql);
+            dbg!(&e);
+            Ok(None)
+        }
+    };
+}
+
+
 /// 获取children有那些tpe
 pub async fn query_ssc_children_contains_types(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<Vec<String>>> {
     if let Ok(children) = query_ssc_children_without_children_count(refno, pool).await {
@@ -154,7 +201,7 @@ pub async fn travel_ssc_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
     while deque.len() > 0 {
         let refno = deque.pop_front().unwrap();
         let children = query_ssc_children_without_children_count(refno, pool).await?;
-        for child in children{
+        for child in children {
             deque.push_back(child.refno);
             result.push(child.refno);
         }
@@ -162,6 +209,52 @@ pub async fn travel_ssc_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
     Ok(result)
 }
 
+pub async fn get_ancestor_till_type(mut refno: RefU64, att_type: Option<&str>, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
+    if let Some(att_type) = att_type {
+        let mut cur_owner_type = "".to_string();
+        while att_type != &cur_owner_type {
+            if let Some(v) = SSC_OWNER_MAP.get(&refno) {
+                refno = v.value().0;
+                cur_owner_type = v.value().1.to_string();
+            } else {
+                if let Some(owner) = query_ssc_owner(refno, pool).await? {
+                    if refno == owner {
+                        break;
+                    }
+                    if let Some(owner_type) = query_ssc_type(owner, pool).await? {
+                        SSC_OWNER_MAP.insert(refno, (owner, owner_type.clone()));
+                        refno = owner;
+                        cur_owner_type = owner_type;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        if att_type == cur_owner_type {
+            return Ok(Some(refno));
+        }
+    }
+    Ok(None)
+}
+
+pub async fn update_ssc_type(names: Vec<String>, pool: &Pool<MySql>) -> anyhow::Result<()> {
+    let mut insert_sql = String::new();
+    for name in names {
+        insert_sql.push_str(&format!("'{}',", name));
+    }
+    insert_sql.remove(insert_sql.len() - 1);
+    let sql = gen_update_ssc_type_sql(insert_sql, "SSC_ROOM");
+    let result = pool.execute(sql.as_str()).await;
+    match result {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(e);
+            dbg!(sql.as_str());
+        }
+    }
+    Ok(())
+}
 
 fn gen_query_ssc_children_count_sql(refno: RefU64) -> String {
     let mut sql = String::new();
@@ -185,4 +278,38 @@ fn gen_query_all_room_data_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!("select * from {ROOM_CODE}"));
     sql
+}
+
+fn gen_get_refno_by_name_sql(name: String) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT ID FROM {PDMS_SSC_ELEMENTS_TABLE} WHERE NAME = '{}' ", name));
+    sql
+}
+
+fn gen_query_ssc_owner_sql(refno: RefU64) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT OWNER FROM {PDMS_SSC_ELEMENTS_TABLE} WHERE ID = {} ", refno.0));
+    sql
+}
+
+fn gen_query_ssc_type_sql(refno: RefU64) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT TYPE FROM {PDMS_SSC_ELEMENTS_TABLE} WHERE ID = {} ", refno.0));
+    sql
+}
+
+fn gen_update_ssc_type_sql(name: String, change_type: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("UPDATE {PDMS_SSC_ELEMENTS_TABLE} SET TYPE = '{}' WHERE NAME IN ({})", change_type, name));
+    sql
+}
+
+#[tokio::test]
+async fn test_get_ancestor_refnos() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
+    let v = get_ancestor_till_type(RefI32Tuple((0, 6)).into(), Some("WORL"), &pool).await?;
+    println!("v={:?}", v);
+    Ok(())
 }

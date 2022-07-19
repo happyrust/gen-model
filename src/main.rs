@@ -1,18 +1,19 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::format;
 use std::fs;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use itertools::Itertools;
-use aios_core::pdms_types::{AttrMap, AttrVal, CachedMeshesMgr, DbAttributeType, NounHash, PdmsDatabaseInfo, RefI32Tuple, RefU64};
+use aios_core::pdms_types::{AttrMap, AttrVal, CachedMeshesMgr, DbAttributeType, NounHash, PdmsDatabaseInfo, PdmsMeshInstanceMgr, RefI32Tuple, RefU64};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_bin};
 use dashmap::DashMap;
 use futures::StreamExt;
+use nom_derive::Parse;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use regex::internal::Input;
 use aios_database::{BATCH_CHUNKS_CNT};
@@ -27,9 +28,11 @@ use sqlx::Executor;
 use aios_database::api::attr::insert_attr_info;
 use aios_database::api::element::*;
 use aios_database::api::project_mdb::insert_project_mdb;
+use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
+use aios_database::cata::resolve::parse_to_i32;
 use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
-use aios_database::ssc::async_total_ssc_data;
+use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::gen_create_attr_info_tables_sql;
 
 
@@ -106,30 +109,79 @@ async fn main() -> anyhow::Result<()> {
         }
         dbg!("SSC同步完成");
     }
+
+    if db_option.manual_db_nums.is_some() {
+        for (_project, project_db) in mgr.project_map.clone() {
+            let dir_path = "assets/instance";
+            let mut ssc_level_map: DashMap<RefU64, Vec<RefU64>> = DashMap::new();
+            let manual_db_nums = db_option.manual_db_nums.as_ref().unwrap();
+            let mut target_files = fs::read_dir(dir_path)?.into_iter().map(|entry| {
+                let entry = entry.unwrap();
+                entry.path()
+            }).collect::<Vec<PathBuf>>();
+
+            for path in target_files {
+                let mut file = std::fs::File::open(path.clone()).unwrap();
+                let file_name = path.file_name().unwrap().to_str().unwrap().split('.').collect::<Vec<_>>();
+                // manual_db_nums 指定的 numbdb才做处理
+                if let Some(db_number) = file_name.first() {
+                    let db_number = db_number.parse().unwrap_or(0);
+                    if !manual_db_nums.contains(&db_number) {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+                let mut data = vec![];
+                file.read_to_end(&mut data).unwrap_or_default();
+                if let Ok(mgr) = bincode::deserialize::<PdmsMeshInstanceMgr>(&data) {
+                    for v in mgr.inst_mgr.iter() {
+                        let refnos = get_ancestor_till_type(*v.key(), Some("SSC_ROOM"), &project_db).await?;
+                        if let Some(refnos) = refnos {
+                            ssc_level_map.entry(refnos).or_insert_with(Vec::new).push(v.key().clone());
+                        }
+                    }
+                }
+            }
+            dbg!(&ssc_level_map);
+            let mut write_file = std::fs::File::create(&format!("{}/room_level.bin", dir_path)).unwrap();
+            write_file.write_all(&bincode::serialize(&ssc_level_map).unwrap()).unwrap();
+        }
+    }
+
     let mut time = Instant::now();
     AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
 
-
-
-
+    std::fs::create_dir_all("./assets/mesh").unwrap();
+    mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
+    std::fs::create_dir_all("./assets/instance").unwrap();
+    for k in mgr.mesh_instance_mgr.iter() {
+        let db_no = *k.key();
+        k.value().serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
+        // k.value().level_shape_mgr.serialize_to_specify_file(&format!("instance/level_{db_no}.bin"));
+    }
+    mgr.dbno_mgr.serialize_to_specify_file("./assets/instance/dbno_mgr.num");
     println!("花费时间: {} ms", time.elapsed().as_millis());
-
     Ok(())
 }
 
 #[test]
 fn get_noun_hash() {
     let noun = "PIPCA";
-    let noun = "HROD";
+    let noun = "PTCA";
     let hash = db1_hash(noun);
     dbg!(hash);
 }
 
+
 #[test]
 fn read_info_bin() {
     let info_map = read_attr_info_config_from_bin("all_attr_info.bin");
-    let info = info_map.noun_attr_info_map;
-    if let Some(v) = info.get(&621602){
-        dbg!(&v.value());
-    };
+    let data = serde_json::to_string(&info_map).unwrap();
+    let mut file = File::create("all_attr_info_new.json").unwrap();
+    file.write(data.as_bytes()).unwrap();
+    // let info = info_map.noun_attr_info_map;
+    // if let Some(v) = info.get(&621602){
+    //     dbg!(&v.value());
+    // };
 }
