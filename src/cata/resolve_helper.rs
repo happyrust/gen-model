@@ -434,7 +434,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 })
             }
             "SLINE" => {
-                CateGeoParam::Sline(CateSlineParam {
+                CateGeoParam::Sline(CateSplineParam {
                     start_pt: vec![0.0; 3],
                     end_pt: vec![0.0; 3],
                     diameter: gmse.diameters[0],
