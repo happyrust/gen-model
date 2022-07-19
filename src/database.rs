@@ -539,7 +539,7 @@ pub async fn sync_total_async_single_thread(db_option: &options::DbOption, proje
     // let mut handles = vec![];
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
-    let mut result = vec![];
+    // let mut result = vec![];
     // let mut file = File::create("resource/room_code")?;
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
@@ -805,39 +805,38 @@ pub async fn sync_total_async_single_thread(db_option: &options::DbOption, proje
                     let mut project_conn = pool_clone.acquire().await.unwrap();
                     // 将带有 room_code 属性的保存下来
                     if !db_option_clone.only_rebuild_pdms_element {
-
                         for (room_name, refnos) in room_code_map.clone() {
-                            for refno in refnos {
-                                if let Some(att) = total_attr_map.get(&refno) {
-                                    let implicit = &att.value().implicit_attmap;
-                                    let refno = implicit.get_refno().unwrap();
-                                    let type_name = implicit.get_type();
-                                    let owner = implicit.get_owner().unwrap();
-                                    let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
-                                        .replace(r#"""#, r#"\""#);
-                                    result.push(SscEleNode {
-                                        refno,
-                                        noun: type_name.to_string(),
-                                        name,
-                                        owner,
-                                        room_code: room_name.to_string(),
-                                    })
+                            // for refno in refnos {
+                            //     if let Some(att) = total_attr_map.get(&refno) {
+                            //         let implicit = &att.value().implicit_attmap;
+                            //         let refno = implicit.get_refno().unwrap();
+                            //         let type_name = implicit.get_type();
+                            //         let owner = implicit.get_owner().unwrap();
+                            //         let name = get_name(&total_attr_map, &children_map, refno).replace(r#"'"#, r#"\'"#)
+                            //             .replace(r#"""#, r#"\""#);
+                            //         result.push(SscEleNode {
+                            //             refno,
+                            //             noun: type_name.to_string(),
+                            //             name,
+                            //             owner,
+                            //             room_code: room_name.to_string(),
+                            //         })
+                            //     }
+                            // }
+                            //     // 将room_code单独存放到room_code表中
+                            let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                            for refno in refnos.clone() {
+                                room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
+                            }
+                            room_code_sql.remove(room_code_sql.len() - 1);
+                            let result = project_conn.execute(room_code_sql.as_str()).await;
+                            match result {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    dbg!(&e);
+                                    dbg!(room_code_sql.as_str());
                                 }
                             }
-                            //     // 将room_code单独存放到room_code表中
-                            //     let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
-                            //     for refno in refnos.clone() {
-                            //         room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
-                            //     }
-                            //     room_code_sql.remove(room_code_sql.len() - 1);
-                            //     let result = project_conn.execute(room_code_sql.as_str()).await;
-                            //     match result {
-                            //         Ok(_) => {}
-                            //         Err(e) => {
-                            //             dbg!(&e);
-                            //             dbg!(room_code_sql.as_str());
-                            //         }
-                            //     }
                         }
                     }
                 }

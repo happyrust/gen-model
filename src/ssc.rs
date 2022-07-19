@@ -16,7 +16,7 @@ use serde::{Serialize, Deserialize};
 use sqlx::mysql::MySqlRow;
 use crate::api::children::{query_ancestor_of_type, query_ancestor_refnos_till_type, query_children_contains_types, query_owner_till_type, query_owner_type_from_id};
 use crate::api::element::{get_zone_divco, query_ele_node, query_name, query_owner_from_id, query_refno_type};
-use crate::api::ssc_data::{query_all_room_data, query_ssc_children, query_ssc_children_count, query_ssc_children_without_children_count, SscEleNode};
+use crate::api::ssc_data::{query_all_room_data, query_ssc_children, query_ssc_children_count, query_ssc_children_without_children_count, SscEleNode, travel_ssc_children};
 use crate::consts::PDMS_SSC_ELEMENTS_TABLE;
 use crate::tables;
 
@@ -28,6 +28,7 @@ pub struct SiteExcelData {
     pub name: String,
     pub att_type: String,
 }
+
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SiteExcelDataTest {
@@ -68,16 +69,10 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>) -> anyhow::Result<
     dbg!("SSC固定节点生成");
     let room_data = query_all_room_data(project_pool).await?;
 
-    // let mut file = File::open("resource/room_code")?;
-    // let mut data = vec![];
-    // file.read_to_end(&mut data)?;
-    // let room_data = bincode::deserialize::<Vec<SscEleNode>>(&data)?;
-    // dbg!(&room_data.len());
     let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
     let sql = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, project_pool).await;
     if sql != "" {
         let sql = format!("{} {}", insert_sql, sql);
-
         let result = conn.execute(sql.as_str()).await;
         match result {
             Ok(_) => {}
@@ -87,22 +82,7 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>) -> anyhow::Result<
             }
         }
     }
-    // let mut value_sql = insert_ssc_room_node(room_map, zone_code_map,
-    //                                          zone_map, zone_name_map, &project_pool).await;
-    // if value_sql.len() != 0 {
-    //     let mut project_conn = project_pool.acquire().await.unwrap();
-    //     let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
-    //     value_sql.remove(value_sql.len() - 1);
-    //     let insert_sql = format!("{}{} ;", insert_sql, value_sql);
-    //     let result = project_conn.execute(insert_sql.as_str()).await;
-    //     match result {
-    //         Ok(_) => {}
-    //         Err(e) => {
-    //             dbg!(&e);
-    //             dbg!(insert_sql.as_str());
-    //         }
-    //     }
-    // }
+
     Ok(())
 }
 
@@ -177,6 +157,23 @@ fn get_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i32, Ve
     Ok(r)
 }
 
+pub fn get_rooms_from_excel() -> anyhow::Result<Vec<String>> {
+    let mut r = vec![];
+    let mut workbook: Xlsx<_> = open_workbook("resource/test.xlsx")?;
+    let range = workbook.worksheet_range("Sheet1")
+        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+
+    let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
+
+    while let Some(result) = iter.next() {
+        let v: RoomExcelData = result?;
+        if let Some(workshop) = v.房间代码 {
+            r.push(workshop);
+        }
+    }
+    Ok(r)
+}
+
 /// 创建ssc固定节点
 pub async fn insert_set_ssc_node_sql(pool: &Pool<MySql>) -> anyhow::Result<(DashMap<String, RefU64>, DashMap<String, String>)> {
     // let insert_sql = "REPLACE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
@@ -206,6 +203,9 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
     let room_data_len = room_data.len();
     // 找到每个参考号的属于那个zone
     for (idx, room) in room_data.into_iter().enumerate() {
+        if room.noun == "EQUI" {
+            continue;
+        }
         let zone_name_map = zone_name_map.clone();
         let zone_level_map = zone_level_map.clone();
         let special_under_zone_map_clone = special_under_zone_map.clone();
@@ -355,7 +355,9 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
     for sql in sqls_clone {
         insert_sql.push_str(sql.as_str());
     }
-    insert_sql.remove(insert_sql.len() - 1);
+    if insert_sql.len() > 0 {
+        insert_sql.remove(insert_sql.len() - 1);
+    }
     insert_sql
 }
 
@@ -510,7 +512,7 @@ fn set_ssc_level_node(node_map: HashMap<String, BTreeMap<i32, Vec<String>>>, uni
                 let mut order = 0;
                 for room_name in rooms {
                     let room_refno = next_refno;
-                    let (refno, sql) = gen_insert_ssc_node_sql(next_refno, "SSC", leve_refno, room_name.as_str(), order);
+                    let (refno, sql) = gen_insert_ssc_node_sql(next_refno, "SSC_ROOM", leve_refno, room_name.as_str(), order);
                     insert_sql.push_str(sql.as_str());
                     next_refno = refno;
                     order += 1;
