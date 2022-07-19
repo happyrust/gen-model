@@ -325,7 +325,9 @@ pub async fn query_gm_param(att_map: &AttrMap, interface: &dyn PdmsDataInterface
             if let Some(r) = child.get_refno() && child.get_type() == "SLOO" {
                 for a in interface.get_children_attrs(r).await.unwrap_or_default() {
                     verts.push([SmolStr::new(a.get_as_string("PX").unwrap_or_default()),
-                        SmolStr::new(a.get_as_string("PY").unwrap_or_default())]);
+                        SmolStr::new(a.get_as_string("PY").unwrap_or_default()),
+                        SmolStr::new(att_map.get_as_string("PZ").unwrap_or_default())
+                    ]);
                     prads.push(SmolStr::new(a.get_as_string("PRAD").unwrap_or_default()));
                 }
             }
@@ -333,12 +335,17 @@ pub async fn query_gm_param(att_map: &AttrMap, interface: &dyn PdmsDataInterface
     } else {
         if has_chidren {
             for a in interface.get_children_attrs(refno).await.ok()? {
-                verts.push([SmolStr::new(a.get_as_string("PX").unwrap_or_default()), SmolStr::new(a.get_as_string("PY").unwrap_or_default())]);
+                verts.push([SmolStr::new(a.get_as_string("PX").unwrap_or_default())
+                    , SmolStr::new(a.get_as_string("PY").unwrap_or_default()),
+                    SmolStr::new(att_map.get_as_string("PZ").unwrap_or_default())
+                ]);
                 dxy.push([SmolStr::new(a.get_as_string("DX").unwrap_or_default()), SmolStr::new(a.get_as_string("DY").unwrap_or_default())]);
             }
         } else {
             verts.push([SmolStr::new(att_map.get_as_string("PX").unwrap_or_default()),
-                SmolStr::new(att_map.get_as_string("PY").unwrap_or_default())]);
+                SmolStr::new(att_map.get_as_string("PY").unwrap_or_default()),
+                SmolStr::new(att_map.get_as_string("PZ").unwrap_or_default())
+            ]);
             dxy.push([SmolStr::new(att_map.get_as_string("DX").unwrap_or_default()), SmolStr::new(att_map.get_as_string("DY").unwrap_or_default())]);
         }
     }
