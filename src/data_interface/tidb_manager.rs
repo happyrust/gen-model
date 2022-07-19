@@ -670,7 +670,9 @@ impl AiosDBManager {
             let attr = attr.unwrap();
             println!("正在处理元件{}: {}", attr.get_type(), refno.to_refno_string());
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
-            let mut geoms = resolve_desi_comp(refno, mgr.as_ref(), is_debug).await.unwrap();
+            let mut geoms = resolve_desi_comp(refno, mgr.as_ref(), is_debug).await;
+            if geoms.is_err() { continue; }
+            let mut geoms geoms = geoms.unwrap();
             //有隐含管段
             if has_tubi && attr.get_type() != "ATTA"{
                 if let Some(arrive) = attr.get_i32("ARRI") {
