@@ -178,7 +178,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
     let mut i = 0;
     let mut new_vals = vec![];
     while i < p_vals.len() {
-        if p_vals[i] == "TWICE" {   //todo add function to eval
+        if p_vals[i] == "TWICE" {
             if i + 1 < p_vals.len() {
                 if let Ok(val) = p_vals[i + 1].parse::<f64>() {
                     let v = val * 2.0f64;
@@ -186,7 +186,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
                 }
             }
             i += 2;
-        } else if p_vals[i] == "TANF" {  //todo add function to eval
+        } else if p_vals[i] == "TANF" {
             if i + 2 < p_vals.len() {
                 if let Ok(val) = p_vals[i + 1].parse::<f64>() {
                     if let Ok(angle) = p_vals[i + 2].parse::<f64>() {
@@ -434,7 +434,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 })
             }
             "SLINE" => {
-                CateGeoParam::Sline(CateSlineParam {
+                CateGeoParam::Sline(CateSplineParam {
                     start_pt: vec![0.0; 3],
                     end_pt: vec![0.0; 3],
                     diameter: gmse.diameters[0],
@@ -446,7 +446,8 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 CateGeoParam::Revolution(CateRevolutionParam {
                     pa: Some(gmse.paxises[0].clone()),
                     pb: Some(gmse.paxises[1].clone()),
-                    angel: gmse.angle,
+                    angle: gmse.pang,
+                    verts: gmse.verts.clone(),
                     x: gmse.xyz[0],
                     y: gmse.xyz[1],
                     z: gmse.xyz[2],
@@ -454,7 +455,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SRTO" => { // 如 =15192/210474
+            "SRTO" => {
                 // 截面为矩形的弯管
                 CateGeoParam::RectTorus(CateRectTorusParam {
                     pa: Some(gmse.paxises[0].clone()),
