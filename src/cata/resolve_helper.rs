@@ -295,6 +295,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             "SCYL" => {
                 // 圆柱体
                 CateGeoParam::SCylinder(CateSCylinderParam {
+                    refno: gmse.refno,
                     axis: Some(gmse.paxises[0].clone()),
                     dist_to_btm: gmse.distances[0],
                     height: gmse.phei,
@@ -305,6 +306,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             }
             "LINE" => {
                 CateGeoParam::Line(CateLineParam {
+                    refno: gmse.refno,
                     pa: Some(gmse.paxises[0].clone()),
                     pb: Some(gmse.paxises[1].clone()),
                     diameter: 0.0, //gmse.diameters[0],
@@ -313,8 +315,8 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 })
             }
             "LPYR" => {
-                // dbg!(&gmse.paxises);
                 CateGeoParam::Pyramid(CatePyramidParam {
+                    refno: gmse.refno,
                     pa: Some(gmse.paxises[0].clone()),
                     pb: Some(gmse.paxises[1].clone()),
                     pc: Some(gmse.paxises[2].clone()),
@@ -332,6 +334,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             }
             "SSLC" => {
                 CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam {
+                    refno: gmse.refno,
                     axis: Some(gmse.paxises[0].clone()),
                     height: gmse.phei,
                     diameter: gmse.diameters[0],
@@ -346,6 +349,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             }
             "LSNO" => {
                 CateGeoParam::Snout(CateSnoutParam {
+                    refno: gmse.refno,
                     pa: Some(gmse.paxises[0].clone()),
                     pb: Some(gmse.paxises[1].clone()),
                     dist_to_btm: gmse.distances[0],
@@ -360,6 +364,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             "SBOX" => {
                 if gmse.box_lengths.len() == 3 && gmse.xyz.len() == 3 {
                     CateGeoParam::Box(CateBoxParam {
+                        refno: gmse.refno,
                         size: vec![
                             gmse.box_lengths[0],
                             gmse.box_lengths[1],
@@ -380,6 +385,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             "SCON" => {
                 // 圆锥
                 CateGeoParam::Cone(CateConeParam {
+                    refno: gmse.refno,
                     axis: Some(gmse.paxises[0].clone()),
                     dist_to_btm: gmse.distances[0],
                     diameter: gmse.diameters[0],
@@ -390,6 +396,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             "SCTO" => {
                 // 弯管
                 CateGeoParam::Torus(CateTorusParam {
+                    refno: gmse.refno,
                     pa: Some(gmse.paxises[0].clone()),
                     pb: Some(gmse.paxises[1].clone()),
                     diameter: gmse.diameters[0],
@@ -409,6 +416,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             // }
             "SDSH" => {
                 CateGeoParam::Dish(CateDishParam {
+                    refno: gmse.refno,
                     axis: Some(gmse.paxises[0].clone()),
                     dist_to_btm: gmse.distances[0],
                     height: gmse.phei,
@@ -435,6 +443,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             }
             "SLINE" => {
                 CateGeoParam::Sline(CateSplineParam {
+                    refno: gmse.refno,
                     start_pt: vec![0.0; 3],
                     end_pt: vec![0.0; 3],
                     diameter: gmse.diameters[0],
@@ -444,6 +453,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             }
             "SREV" => {
                 CateGeoParam::Revolution(CateRevolutionParam {
+                    refno: gmse.refno,
                     pa: Some(gmse.paxises[0].clone()),
                     pb: Some(gmse.paxises[1].clone()),
                     angle: gmse.pang,
@@ -458,6 +468,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             "SRTO" => {
                 // 截面为矩形的弯管
                 CateGeoParam::RectTorus(CateRectTorusParam {
+                    refno: gmse.refno,
                     pa: Some(gmse.paxises[0].clone()),
                     pb: Some(gmse.paxises[1].clone()),
                     height: gmse.phei,
@@ -484,6 +495,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             "SSPH" => {
                 // 球
                 CateGeoParam::Sphere(CateSphereParam {
+                    refno: gmse.refno,
                     axis: Some(gmse.paxises[0].clone()),
                     dist_to_center: gmse.distances[0],
                     diameter: gmse.diameters[0],

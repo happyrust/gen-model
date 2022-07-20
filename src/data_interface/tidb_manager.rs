@@ -860,6 +860,9 @@ impl AiosDBManager {
                         };
                         let mut geo_insts = &mut geos_info.data;
                         for shape in shapes {
+                            if is_debug {
+                                dbg!(&shape);
+                            }
                             let CateBrepShape {
                                 refno,
                                 brep_shape,
@@ -872,9 +875,6 @@ impl AiosDBManager {
                             let trans = brep_shape.get_trans();
                             if !brep_shape.check_valid() {
                                 continue;
-                            }
-                            if is_debug {
-                                dbg!(&brep_shape);
                             }
                             let geo_hash = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_shape);
                             if is_debug {
@@ -1109,7 +1109,7 @@ impl AiosDBManager {
                 let level_shape_mgr = &instance_mgr.level_shape_mgr;
                 for j in start_idx..end_idx {
                     let refno = all_refnos[j];
-                    println!("正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}", j,
+                    println!("正在处理loops的模型，索引：{}, 当前参考号：{}, 剩余: {}", j,
                              refno.to_refno_string(), processed_cnt.lock().unwrap().to_owned());
                     let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
 
