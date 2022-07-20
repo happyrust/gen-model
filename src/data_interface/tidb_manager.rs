@@ -808,7 +808,6 @@ impl AiosDBManager {
                     let brep_shapes = CateBrepShapeMap::new();
                     let current_att = mgr.get_attr(refno).await.unwrap_or_default();
                     let mut refno_ptset_map = DashMap::new();
-                    // let mut anchor_ptset_map = DashMap::new();
                     let mut is_auto_tubi = false;
                     let cur_type = current_att.get_type();
                     if cur_type == "BRAN" || cur_type == "HANG" {
@@ -840,9 +839,6 @@ impl AiosDBManager {
                         // }
                         // dbg!(&jusl_translation);
                     }
-                    // if debug_refno.is_some() && debug_refno.unwrap() == refno {
-                    //     dbg!(&brep_shapes);
-                    // }
                     for (child_refno, shapes) in brep_shapes {
                         let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
                         let ancestors = mgr.get_ancestors_refnos_without_world(child_refno);
@@ -925,8 +921,6 @@ impl AiosDBManager {
         let t = Instant::now();
         let batch_size = mgr.db_option.gen_model_batch_size;
         let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
-        // let test_refno = RefU64::from_two_nums(17788, 18653);
-        // prim_refnos = RefU64Vec(vec![test_refno]);
         let prim_cnt = prim_refnos.len();
 
         let batch_chunks_cnt = prim_cnt / batch_size + 1;
