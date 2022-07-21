@@ -37,6 +37,9 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             scom_ref = spre.get_foreign_refno("CATR");
         }
     };
+    if is_debug {
+        dbg!(&scom_ref);
+    }
     let scom_ref = scom_ref.ok_or(anyhow!(format!("SCOM not exist in element: {}", refno.to_refno_str())))?;
     if !scom_ref.is_valid() {
         return Err(anyhow!("Scom ref is invalid".to_string()));
