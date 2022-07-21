@@ -97,7 +97,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     let mut axis_param_numbers = vec![];
     if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
         if let Ok(ptre_am) = interface.get_attr(ptre_refno).await {
-            let axis_param_map = query_axis_params(&ptre_am, interface).await.unwrap();
+            let axis_param_map = query_axis_params(&ptre_am, interface, is_debug).await.unwrap();
             if is_debug {
                 dbg!(&axis_param_map);
             }
@@ -136,14 +136,18 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
 pub async fn query_axis_params<T: PdmsDataInterface>(
     attr_map: &AttrMap,
     interface: &T,
+    is_debug: bool,
 ) -> anyhow::Result<BTreeMap<i32, AxisParam>> {
     // 查找ptse
     let mut map = BTreeMap::new();
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_children_attrs(refno).await?;
+    let children = interface.get_children_attrs(refno).await.unwrap();
 
     for child in children {
         let number = child.get_i32("NUMB").unwrap_or(-1);
+        if is_debug {
+            dbg!(&child);
+        }
         if let Some(axis) = get_axis_param(&child) {
             map.entry(number).or_insert(axis);
         }
