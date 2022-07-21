@@ -97,7 +97,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     let mut axis_param_numbers = vec![];
     if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
         if let Ok(ptre_am) = interface.get_attr(ptre_refno).await {
-            let axis_param_map = query_axis_params(&ptre_am, interface).await?;
+            let axis_param_map = query_axis_params(&ptre_am, interface).await.unwrap();
             if is_debug {
                 dbg!(&axis_param_map);
             }
