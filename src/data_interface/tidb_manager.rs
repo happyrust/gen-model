@@ -885,7 +885,7 @@ impl AiosDBManager {
                                     refno,
                                     pts,
                                     bbox,
-                                    transform: (trans.rotation, trans.translation + jusl_translation, trans.scale),
+                                    transform: (transform.rotation, transform.translation + jusl_translation, transform.scale),
                                     visible,
                                     is_tubi,
                                 };
