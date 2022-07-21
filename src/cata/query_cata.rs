@@ -44,7 +44,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     if !scom_ref.is_valid() {
         return Err(anyhow!("Scom ref is invalid".to_string()));
     }
-    let scom_info = query_scom_info(scom_ref, interface).await?;
+    let scom_info = query_scom_info(scom_ref, interface, is_debug).await?;
     if is_debug {
         dbg!(&scom_info);
     }
@@ -87,6 +87,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
 pub async fn query_scom_info<T: PdmsDataInterface>(
     refno: RefU64,
     interface: &T,
+    is_debug: bool,
 ) -> anyhow::Result<ScomInfo> {
     let attr_map = interface.get_attr(refno).await?;
     let type_noun = attr_map.get_type_cloned().ok_or(anyhow!("Scom att not correct".to_string()))?;
@@ -97,18 +98,21 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
         if let Ok(ptre_am) = interface.get_attr(ptre_refno).await {
             let axis_param_map = query_axis_params(&ptre_am, interface).await?;
+            if is_debug {
+                dbg!(&axis_param_map);
+            }
             axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
             axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
         }
-        // if ptre_refno.to_refno_str() == "15192/77158" {
-        //     dbg!(&axis_params);
-        // }
     }
     let gmref_name = if is_sprf { "GSTR" } else { "GMRE" };
     let mut gm_params = vec![];
     if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
         let gmse_am = interface.get_attr(gmse_refno).await?;
         gm_params = query_gm_params(&gmse_am, interface).await?;
+        if is_debug {
+            dbg!(&gm_params);
+        }
     } else {
         //没有geometry 的引用
         // dbg!(attr_map.to_string_hashmap());
