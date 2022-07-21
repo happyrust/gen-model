@@ -903,6 +903,9 @@ impl AiosDBManager {
                                 geo_insts.push(geom_inst);
                             }
                         }
+                        if is_debug {
+                            dbg!(&geos_info);
+                        }
                         inst_map.entry(child_refno).or_insert(geos_info);
                     }
                     *processed_cnt.lock().unwrap() -= 1;
