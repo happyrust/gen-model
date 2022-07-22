@@ -622,7 +622,6 @@ impl AiosDBManager {
         let group_transform = mgr.get_world_transform(group_refno).await?.unwrap_or_default();
         let htube_pt = group_transform.transform_point3(group_att.get_vec3("HPOS")
             .ok_or(anyhow!("HPOS not exist".to_string()))?);
-        // anchor_ptset_map.entry(group_refno).or_insert(Vec::new()).push(Some());
         let bran_ttube_pt = group_transform.transform_point3(group_att.get_vec3("TPOS")
             .ok_or(anyhow!("TPOS not exist".to_string()))?);
 
@@ -640,7 +639,7 @@ impl AiosDBManager {
             let params = h_cat_att.get_f64_vec("PARA").unwrap_or_default();
 
             if params.len() >= 2 {
-                bore = params[if is_hang { 1 } else { 0 }] as f32;
+                bore = params[1] as f32;
             }
         }
         let mut current_tubing = PdmsTubing {
