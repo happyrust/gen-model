@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     dbg!(&db_option);
 
     if db_option.total_sync {
-        sync_pdms(&db_option).await?;
+        sync_pdms(&db_option).await.unwrap();
     }
 
 

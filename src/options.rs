@@ -44,7 +44,7 @@ pub struct DbOption {
     #[clap(long)]
     pub port: String,
     #[clap(short)]
-    pub sql_batch_insert_chunk: u32,
+    pub sql_threads_number: u32,
     #[clap(short)]
     pub files_multi_thread: bool,
     #[clap(short)]
@@ -52,7 +52,7 @@ pub struct DbOption {
     #[clap(short)]
     pub rebuild_ssc_tree: bool,
     #[clap(short)]
-    pub batch_insert_handles_chunk: u32,
+    pub batch_insert_sql_cnt: u32,
     #[clap(skip)]
     pub only_save_types_db: Option<Vec<String>>,
 

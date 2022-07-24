@@ -25,3 +25,10 @@
 |   version    |     INT     | 当前最新大版本，方便给版本数据表赋值 |
 ### 4.疑问
 &emsp; (1) : 是否需要存放两个data，一个是原始的data，一个是发生修改后的data，这样方便切换版本 <br>
+
+
+## 编译
+
+### Centos 7的cross build：
+
+cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.17
