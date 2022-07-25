@@ -73,10 +73,9 @@ pub fn eval_str_to_f32(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
 pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -> anyhow::Result<f64> {
     let r = input_expr.trim().to_lowercase() ;
     if r.is_empty() || r == "unset" {
-        // return Err(anyhow!("字符串无法解析到f64".to_string()));
         return Ok(0.0);
     }
-    let re = Regex::new(r"([A-Z_]+[0-9]*)(\s*\[(\d+)\])?").unwrap();
+    let re = Regex::new(r"([A-Z_]+[0-9]*)(\s*\[\s*(\d+)\s*\])?").unwrap();
     let mut new_exp = input_expr.replace("ATTRIB", "");
     let rpro_re = Regex::new(r"(RPRO)\s+(\S+)").unwrap();
     if new_exp.contains("RPRO") {
@@ -599,6 +598,24 @@ fn parse_3_axis() {
     let r = eval_str_to_f64(str, &context);
     dbg!(r);
 }
+
+//AXIS -Y ( ATAN ( ( DESP[2 ] / 2 + DESP[10 ] ) / ( DESP[3 ] / 2 - DESP[11 ] ) ) ) X
+#[test]
+fn parse_axis() {
+    // let str = "X ( 45 )  Y ( 35 ) Z";
+    //-X (DESIGN PARAM 14 ) -Y
+    let mut context = BTreeMap::new();
+    context.insert("DESP2".into(), "800.0".into());
+    context.insert("DESP10".into(), "0.0".into());
+    context.insert("DESP3".into(), "500.0".into());
+    context.insert("DESP11".into(), "0.0".into());
+    // context.insert("RPRO_CPAR".into(), "DESIGN PARAM 14".into());
+    let str = "AXIS -Y ( ATAN ( ( DESP[2 ] / 2 + DESP[10 ] ) / ( DESP[3 ] / 2 - DESP[11 ] ) ) ) X";
+    let r = parse_str_axis_to_vec3(str, &context);
+    dbg!(r);
+}
+
+
 
 //[(.*[^-])([-?X|Y|Z])]?
 #[test]
