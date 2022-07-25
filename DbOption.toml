@@ -1,4 +1,4 @@
-total_sync = false
+total_sync = true
 incr_sync = false
 project_path = "/Volumes/DPC/12.1SP4Projects"
 included_projects = [ "Sample", "Master"]  #, "Sample",
@@ -19,7 +19,7 @@ user = "root"
 password = ""
 port = "4000"
 sql_threads_number = 50
-batch_insert_sql_cnt = 300
+batch_insert_sql_cnt = 800
 files_multi_thread = true
 types_multi_thread = true
 recreate_db = true

@@ -770,9 +770,7 @@ impl AiosDBManager {
                 mgr.get_refnos_by_types(project, &att_types, db_nos).await?
             };
 
-        dbg!(&has_cata_refnos);
-
-
+        // dbg!(&has_cata_refnos);
         let has_cata_cnt = has_cata_refnos.len();
         let target_debug_refno = db_option.debug_desi_refno.as_ref().map(
             |x|RefU64::from_refno_str(x).unwrap_or_default());
@@ -780,6 +778,9 @@ impl AiosDBManager {
         println!("使用元件库的模型总数：{has_cata_cnt}");
 
         let is_debug = target_debug_refno.is_some();
+        if is_debug {
+            println!("正在调试：{:?}", target_debug_refno.as_ref().unwrap());
+        }
 
         let batch_chunks_cnt = has_cata_cnt / batch_size + 1;
         let mut handles = vec![];
