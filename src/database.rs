@@ -303,6 +303,55 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                     AttrVal::StringHashType(_) => {}
                 }
             }
+        } else {
+            if let Some(info_att) = ATTR_INFO_MAP.get(&(db1_hash(&type_name) as i32)) {
+                if let Some(info_value) = info_att.get(&(**noun_hash as i32)) {
+                    match &info_value.default_val {
+                        AttrVal::InvalidType => {}
+                        AttrVal::IntegerType(d) => {
+                            table_vals_sql.push_str(&format!("{},", d.to_string()));
+                        }
+                        AttrVal::StringType(d) => {
+                            table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
+                        }
+                        AttrVal::DoubleType(d) => {
+                            table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
+                        }
+                        AttrVal::DoubleArrayType(d) => {
+                            table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap_or_default().as_slice())));
+                        }
+                        AttrVal::StringArrayType(d) => {
+                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                        }
+                        AttrVal::BoolArrayType(d) => {
+                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                        }
+                        AttrVal::IntArrayType(d) => {
+                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                        }
+                        AttrVal::BoolType(d) => {
+                            let b = if *d { 1 } else { 0 };
+                            table_vals_sql.push_str(&format!("{},", b));
+                        }
+                        AttrVal::Vec3Type(d) => {
+                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                        }
+                        AttrVal::ElementType(d) => {
+                            table_vals_sql.push_str(&format!(r#"'{}',"#, d));
+                        }
+                        AttrVal::WordType(d) => {
+                            table_vals_sql.push_str(&format!(r#"'{}',"#, d));
+                        }
+                        AttrVal::RefU64Type(d) => {
+                            table_vals_sql.push_str(&format!("{},", d.0));
+                        }
+                        AttrVal::RefU64Array(d) => {
+                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                        }
+                        AttrVal::StringHashType(_) => {}
+                    }
+                }
+            }
         }
     }
 
@@ -410,7 +459,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                     }
 
                     let type_handle = tokio::spawn(async move {
-
                         let refnos_cnt = type_refnos.len();
                         // 线程初步估计数量
                         let mut threads_cnt = refnos_cnt / (batch_insert_sql_cnt * 5) + 1;
@@ -496,7 +544,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                                     explicit_values_sql.clear();
                                     pdms_elements_sql.clear();
                                 }
-
                             });
                             handles.push(insert_handle);
                         }
