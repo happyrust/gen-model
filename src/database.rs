@@ -368,6 +368,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
     let project_dir = data_dir.join(&project);
     let max_sql_threads_number = db_option.sql_threads_number as usize;
     let batch_insert_sql_cnt = db_option.batch_insert_sql_cnt as usize;
+    let b_replace = db_option.only_save_types_db.is_some();
     if max_sql_threads_number * batch_insert_sql_cnt == 0 {
         return Err(anyhow!("batch_insert_sql_cnt 或者  sql_threads_number 不能为0"));
     }
@@ -485,7 +486,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                                 for j in (start_idx..end_idx).into_iter().step_by(batch_insert_sql_cnt) {
                                     let mut end = j + batch_insert_sql_cnt;
                                     if end > refnos_cnt { end = refnos_cnt; }
-                                    let implicit_columns_sql = gen_implicit_attr_insert_sql(type_hash, false);
+                                    let implicit_columns_sql = gen_implicit_attr_insert_sql(type_hash, b_replace);
                                     let column_hashs = &implicit_columns_sql.1;
                                     //合并sql语句
                                     for k in j..end {
@@ -517,6 +518,9 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
 
                                     //执行显示数据保存
                                     let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                    if b_replace {
+                                        sql = format!("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                    }
                                     sql.push_str(explicit_values_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     let result = project_conn.execute(sql.as_str()).await;
