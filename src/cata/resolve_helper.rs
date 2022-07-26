@@ -86,7 +86,6 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
     let mut result_exp = new_exp.clone();
     // dbg!(&result_exp);
     //默认两次
-    //let loop_cnt = if input_expr.contains("RPRO") { 2 } else { 1 };
     let mut found_replaced = false;
     for _ in 0..5 {
         for caps in re.captures_iter(&new_exp) {
@@ -563,7 +562,7 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) 
             for cap in re.captures_iter(&dir_str) {
                 if cap.len() == 4 {
                     let val_str= cap[2].to_string();
-                    // dbg!(&val_str);
+                    dbg!(&val_str);
                     let val_result = eval_str_to_f64(&val_str, context).unwrap_or_default().to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                     // dbg!(&new_dir_str);
@@ -571,6 +570,7 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) 
             }
         }
     }
+    // dbg!(&new_dir_str);
     let v = parse_expr_to_dir(&new_dir_str.replace(" ", ""));
     if not_single {
         // dbg!(&new_dir_str);
@@ -605,12 +605,16 @@ fn parse_axis() {
     // let str = "X ( 45 )  Y ( 35 ) Z";
     //-X (DESIGN PARAM 14 ) -Y
     let mut context = BTreeMap::new();
-    context.insert("DESP2".into(), "800.0".into());
-    context.insert("DESP10".into(), "0.0".into());
-    context.insert("DESP3".into(), "500.0".into());
+    context.insert("DESP4".into(), "800.0".into());
+    context.insert("DESP5".into(), "300.0".into());
+    context.insert("DESP10".into(), "200.0".into());
     context.insert("DESP11".into(), "0.0".into());
     // context.insert("RPRO_CPAR".into(), "DESIGN PARAM 14".into());
-    let str = "AXIS -Y ( ATAN ( ( DESP[2 ] / 2 + DESP[10 ] ) / ( DESP[3 ] / 2 - DESP[11 ] ) ) ) X";
+    // let str = "AXIS -Y ( ATAN ( ( DESP[2 ] / 2 + DESP[10 ] ) / ( DESP[3 ] / 2 - DESP[11 ] ) ) ) X";
+    // let r = parse_str_axis_to_vec3(str, &context);
+    // dbg!(r);
+    //AXIS -Y ( ATANT ( 0 - DESP[10 ] - ( DESP[4 ] - DESP[5 ] ) / 2 , 0 - DESP[11 ] ) ) -X
+    let str = "AXIS -Y (ATAN((DESP[10]-(DESP[4]-DESP[5])/2),(0-DESP[11]))) X";
     let r = parse_str_axis_to_vec3(str, &context);
     dbg!(r);
 }
