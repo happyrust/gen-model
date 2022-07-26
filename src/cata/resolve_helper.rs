@@ -562,7 +562,7 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) 
             for cap in re.captures_iter(&dir_str) {
                 if cap.len() == 4 {
                     let val_str= cap[2].to_string();
-                    dbg!(&val_str);
+                    // dbg!(&val_str);
                     let val_result = eval_str_to_f64(&val_str, context).unwrap_or_default().to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                     // dbg!(&new_dir_str);

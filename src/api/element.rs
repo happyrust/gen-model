@@ -355,7 +355,7 @@ pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>
         let mdb_name = query_name(mdb, &pool).await?;
         if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
             let mut map = HashMap::new();
-            let dbs = dbs.refu64_vec_value().unwrap();
+            let dbs = dbs.refu64_vec_value().unwrap_or_default();
             for db in dbs {
                 if let Some(dbno) = query_dbno_from_db(db, pool).await? {
                     if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool).await? {
