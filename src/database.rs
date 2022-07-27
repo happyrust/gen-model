@@ -221,7 +221,8 @@ pub fn gen_implicit_attr_insert_sql(hash: u32, b_replace: bool) -> (String, Vec<
     }
 
     let implicit_names = ATTR_INFO_MAP.get_type_implicit_att_names(type_name.as_str());
-    let column_hashs = implicit_names.iter().filter_map(|x| (x != "unset").then(|| NounHash(db1_hash(x.as_str())))).collect();
+    let column_hashs = implicit_names.iter().filter_map(|x| (x != "unset")
+        .then(|| NounHash(db1_hash(x.as_str())))).collect();
     let v_sql = implicit_names.iter().map(|x| qualified_column_name(x.as_str()))
         .join(",");
     // dbg!(&v_sql);
@@ -256,105 +257,58 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
     let owner = i_att.get_owner().unwrap();
     table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {},"#, refno.0, refno.to_refno_str(), type_name, owner.0));
     for noun_hash in column_hashes {
+        //如果没有这个属性，需要用unset顶上
+        //if noun_hash != &NounHash(UNSET_NOUN)
         if let Some(v) = i_att.get(noun_hash) {
-            if noun_hash != &NounHash(UNSET_NOUN) {
-                match v {
-                    AttrVal::InvalidType => {}
-                    AttrVal::IntegerType(d) => {
-                        table_vals_sql.push_str(&format!("{},", d.to_string()));
-                    }
-                    AttrVal::StringType(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
-                    }
-                    AttrVal::DoubleType(d) => {
-                        table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
-                    }
-                    AttrVal::DoubleArrayType(d) => {
-                        table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap_or_default().as_slice())));
-                    }
-                    AttrVal::StringArrayType(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
-                    }
-                    AttrVal::BoolArrayType(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
-                    }
-                    AttrVal::IntArrayType(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
-                    }
-                    AttrVal::BoolType(d) => {
-                        let b = if *d { 1 } else { 0 };
-                        table_vals_sql.push_str(&format!("{},", b));
-                    }
-                    AttrVal::Vec3Type(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
-                    }
-                    AttrVal::ElementType(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-                    }
-                    AttrVal::WordType(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-                    }
-                    AttrVal::RefU64Type(d) => {
-                        table_vals_sql.push_str(&format!("{},", d.0));
-                    }
-                    AttrVal::RefU64Array(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
-                    }
-                    AttrVal::StringHashType(_) => {}
+            match v {
+                AttrVal::InvalidType => {}
+                AttrVal::IntegerType(d) => {
+                    table_vals_sql.push_str(&format!("{},", d.to_string()));
                 }
+                AttrVal::StringType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
+                }
+                AttrVal::DoubleType(d) => {
+                    table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
+                }
+                AttrVal::DoubleArrayType(d) => {
+                    table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap_or_default().as_slice())));
+                }
+                AttrVal::StringArrayType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                }
+                AttrVal::BoolArrayType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                }
+                AttrVal::IntArrayType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                }
+                AttrVal::BoolType(d) => {
+                    let b = if *d { 1 } else { 0 };
+                    table_vals_sql.push_str(&format!("{},", b));
+                }
+                AttrVal::Vec3Type(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                }
+                AttrVal::ElementType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, d));
+                }
+                AttrVal::WordType(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, d));
+                }
+                AttrVal::RefU64Type(d) => {
+                    table_vals_sql.push_str(&format!("{},", d.0));
+                }
+                AttrVal::RefU64Array(d) => {
+                    table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                }
+                AttrVal::StringHashType(_) => {}
             }
         } else {
-            if let Some(info_att) = ATTR_INFO_MAP.get(&(db1_hash(&type_name) as i32)) {
-                if let Some(info_value) = info_att.get(&(**noun_hash as i32)) {
-                    match &info_value.default_val {
-                        AttrVal::InvalidType => {}
-                        AttrVal::IntegerType(d) => {
-                            table_vals_sql.push_str(&format!("{},", d.to_string()));
-                        }
-                        AttrVal::StringType(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
-                        }
-                        AttrVal::DoubleType(d) => {
-                            table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
-                        }
-                        AttrVal::DoubleArrayType(d) => {
-                            table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap_or_default().as_slice())));
-                        }
-                        AttrVal::StringArrayType(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
-                        }
-                        AttrVal::BoolArrayType(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
-                        }
-                        AttrVal::IntArrayType(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
-                        }
-                        AttrVal::BoolType(d) => {
-                            let b = if *d { 1 } else { 0 };
-                            table_vals_sql.push_str(&format!("{},", b));
-                        }
-                        AttrVal::Vec3Type(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
-                        }
-                        AttrVal::ElementType(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-                        }
-                        AttrVal::WordType(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, d));
-                        }
-                        AttrVal::RefU64Type(d) => {
-                            table_vals_sql.push_str(&format!("{},", d.0));
-                        }
-                        AttrVal::RefU64Array(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
-                        }
-                        AttrVal::StringHashType(_) => {}
-                    }
-                }
-            }
+            table_vals_sql.push_str(r#"'unset',"#);
+            dbg!("Found unset noun");
         }
     }
-
 
     table_vals_sql.remove(table_vals_sql.len() - 1);
     table_vals_sql.push_str("),");
@@ -483,11 +437,11 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                                     end_idx = refnos_cnt;
                                 }
 
+                                let implicit_columns_sql = gen_implicit_attr_insert_sql(type_hash, b_replace);
+                                let column_hashs = &implicit_columns_sql.1;
                                 for j in (start_idx..end_idx).into_iter().step_by(batch_insert_sql_cnt) {
                                     let mut end = j + batch_insert_sql_cnt;
                                     if end > refnos_cnt { end = refnos_cnt; }
-                                    let implicit_columns_sql = gen_implicit_attr_insert_sql(type_hash, b_replace);
-                                    let column_hashs = &implicit_columns_sql.1;
                                     //合并sql语句
                                     for k in j..end {
                                         let refno = all_refnos[k];
