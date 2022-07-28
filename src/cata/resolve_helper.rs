@@ -3,11 +3,11 @@ use std::{mem, panic};
 use aios_core::parsed_data::*;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::pdms_data::{AxisParam, ScomInfo};
+use aios_core::tiny_expr::expr_eval::interp;
+use aios_core::tool::float_tool::*;
 use anyhow::anyhow;
 use glam::Vec3;
 use itertools::any;
-use parse_pdms_db::tiny_expr::expr_eval::interp;
-use parse_pdms_db::tool::hash_tool::{f32_round_2, f64_round_2, f64_round_3};
 use nom::Parser;
 use regex::{Captures, NoExpand, Regex};
 use smol_str::SmolStr;
@@ -558,7 +558,6 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) 
         if !is_three {
             // dbg!(is_three);
             let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
-            // let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
             for cap in re.captures_iter(&dir_str) {
                 if cap.len() == 4 {
                     let val_str= cap[2].to_string();
@@ -610,11 +609,11 @@ fn parse_axis() {
     context.insert("DESP10".into(), "200.0".into());
     context.insert("DESP11".into(), "0.0".into());
     // context.insert("RPRO_CPAR".into(), "DESIGN PARAM 14".into());
-    // let str = "AXIS -Y ( ATAN ( ( DESP[2 ] / 2 + DESP[10 ] ) / ( DESP[3 ] / 2 - DESP[11 ] ) ) ) X";
-    // let r = parse_str_axis_to_vec3(str, &context);
-    // dbg!(r);
+    let str = "AXIS -Y ( ATAN ( ( DESP[2 ] / 2 + DESP[10 ] ) / ( DESP[3 ] / 2 - DESP[11 ] ) ) ) X";
+    let r = parse_str_axis_to_vec3(str, &context);
+    dbg!(r);
     //AXIS -Y ( ATANT ( 0 - DESP[10 ] - ( DESP[4 ] - DESP[5 ] ) / 2 , 0 - DESP[11 ] ) ) -X
-    let str = "AXIS -Y (ATAN((DESP[10]-(DESP[4]-DESP[5])/2),(0-DESP[11]))) X";
+    let str = "AXIS -Y (ATANT((DESP[10]-(DESP[4]-DESP[5])/2),(0-DESP[11]))) X";
     let r = parse_str_axis_to_vec3(str, &context);
     dbg!(r);
 }

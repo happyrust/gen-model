@@ -2,12 +2,12 @@ use glam::*;
 use nom::number::complete:: float;
 use nom::*;
 use std::collections::HashMap;
+use aios_core::tool::float_tool::vec3_round_2;
 use lazy_static::lazy_static;
 use nom::branch::alt;
 use nom::combinator::{opt, recognize, complete};
 use nom::sequence::{delimited, pair};
 use nom::bytes::complete::*;
-use parse_pdms_db::tool::hash_tool::{f32_round_3, vec3_round_2, vec3_round_3};
 
 lazy_static! {
     pub static ref AXISES_MAP: HashMap<&'static str, Vec3> = {
@@ -55,7 +55,7 @@ fn parse_axis_rotation(input: &str) -> IResult<&str, Rotation> {
     let (input, axis) = recognize(signed_axis)(input)?;
     Ok((input, Rotation{
         axis: *AXISES_MAP.get(axis).unwrap(),
-        angle,   //need panic here
+        angle,
     }))
 }
 

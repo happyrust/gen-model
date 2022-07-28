@@ -87,19 +87,15 @@ async fn main() -> anyhow::Result<()> {
     if db_option.total_sync {
         sync_pdms(&db_option).await.unwrap();
     }
-
-
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     if let Some(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file("./assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(cache_mesh);
         dbg!("read cached mesh ok.");
     }
-
     // dbg!(mgr.get_attr(RefU64::from_refno_str("15213/494985").unwrap()).await).expect("TODO: panic message");
     // dbg!(&mgr.dbno_mgr.ref0_dbnos_map.iter().filter(|x| x.1.len() == 1).collect_vec());
     // mgr.dbno_mgr.serialize_to_specify_file("instance/dbno_mgr.num");
     // return Ok(());
-
     let b_recreate_ssc = db_option.rebuild_ssc_tree;
     if b_recreate_ssc {
         dbg!("正在同步SSC");
