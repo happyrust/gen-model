@@ -74,9 +74,9 @@ pub fn gen_create_element_tables_sql() -> String {
     sql.push_str(&format!(r#"{} TINYINT(1) "#, "IS_DEL"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX  ELE_TYPE_IDX ON {PDMS_ELEMENTS_TABLE} (TYPE);"));
-    sql.push_str(&format!("CREATE INDEX  ELE_DBNO_IDX ON {PDMS_ELEMENTS_TABLE} (NUMBDB);"));
-    sql.push_str(&format!("CREATE INDEX  ELE_OWNER_IDX ON {PDMS_ELEMENTS_TABLE} (OWNER);"));
+    // sql.push_str(&format!("CREATE INDEX  ELE_TYPE_IDX ON {PDMS_ELEMENTS_TABLE} (TYPE);"));
+    // sql.push_str(&format!("CREATE INDEX  ELE_DBNO_IDX ON {PDMS_ELEMENTS_TABLE} (NUMBDB);"));
+    // sql.push_str(&format!("CREATE INDEX  ELE_OWNER_IDX ON {PDMS_ELEMENTS_TABLE} (OWNER);"));
     sql
 }
 
@@ -93,8 +93,8 @@ pub fn gen_create_ssc_element_tables_sql() -> String {
     sql.push_str(&format!(r#"{} INT"#, "ORDER_NUM"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX  ELE_TYPE_IDX ON {PDMS_SSC_ELEMENTS_TABLE} (TYPE);"));
-    sql.push_str(&format!("CREATE INDEX  ELE_OWNER_IDX ON {PDMS_SSC_ELEMENTS_TABLE} (OWNER);"));
+    // sql.push_str(&format!("CREATE INDEX  ELE_TYPE_IDX ON {PDMS_SSC_ELEMENTS_TABLE} (TYPE);"));
+    // sql.push_str(&format!("CREATE INDEX  ELE_OWNER_IDX ON {PDMS_SSC_ELEMENTS_TABLE} (OWNER);"));
     sql
 }
 
@@ -119,7 +119,7 @@ pub fn gen_create_attr_info_tables_sql(project_name: &str) -> String {
     sql.push_str(&format!(r#"{} BLOB "#, "INFO"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX REF0_TYPE_IDX ON {PDMS_REFNO_INFOS_TABLE}(TYPE);"));
+    // sql.push_str(&format!("CREATE INDEX REF0_TYPE_IDX ON {PDMS_REFNO_INFOS_TABLE}(TYPE);"));
     sql
 }
 
@@ -132,7 +132,7 @@ pub fn gen_create_project_mdb_sql() -> String {
     sql.push_str(&format!(r#"{} BLOB "#, "DATA"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX PROJ_MDB_DB_TYPE_IDX ON {PDMS_PROJECT_MDB_TABLE} (DB_TYPE);"));
+    // sql.push_str(&format!("CREATE INDEX PROJ_MDB_DB_TYPE_IDX ON {PDMS_PROJECT_MDB_TABLE} (DB_TYPE);"));
     sql
 }
 
@@ -145,7 +145,7 @@ pub fn gen_create_project_mdb_json_sql() -> String {
     sql.push_str(&format!(r#"{} VARCHAR(1000) "#, "DATA"));
     sql.push_str(");");
 
-    sql.push_str(&format!("CREATE INDEX PROJ_MDB_DB_TYPE_IDX ON {PDMS_PROJECT_MDB_TABLE_JSON} (DB_TYPE);"));
+    // sql.push_str(&format!("CREATE INDEX PROJ_MDB_DB_TYPE_IDX ON {PDMS_PROJECT_MDB_TABLE_JSON} (DB_TYPE);"));
     sql
 }
 
