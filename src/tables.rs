@@ -74,9 +74,9 @@ pub fn gen_create_element_tables_sql() -> String {
     sql.push_str(&format!(r#"{} TINYINT(1) "#, "IS_DEL"));
     sql.push_str(");");
 
-    // sql.push_str(&format!("CREATE INDEX  ELE_TYPE_IDX ON {PDMS_ELEMENTS_TABLE} (TYPE);"));
-    // sql.push_str(&format!("CREATE INDEX  ELE_DBNO_IDX ON {PDMS_ELEMENTS_TABLE} (NUMBDB);"));
-    // sql.push_str(&format!("CREATE INDEX  ELE_OWNER_IDX ON {PDMS_ELEMENTS_TABLE} (OWNER);"));
+    sql.push_str(&format!("CREATE INDEX  ELE_TYPE_IDX ON {PDMS_ELEMENTS_TABLE} (TYPE);"));
+    sql.push_str(&format!("CREATE INDEX  ELE_DBNO_IDX ON {PDMS_ELEMENTS_TABLE} (NUMBDB);"));
+    sql.push_str(&format!("CREATE INDEX  ELE_OWNER_IDX ON {PDMS_ELEMENTS_TABLE} (OWNER);"));
     sql
 }
 

@@ -351,11 +351,14 @@ pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>
     let mut mdb_map = HashMap::new();
     let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
     for mdb in mdbs {
+        // dbg!(mdb);
         let mdb_attr = query_explicit_attr(mdb, pool).await?;
         let mdb_name = query_name(mdb, &pool).await?;
-        if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
+        // dbg!(&mdb_name);
+        // dbg!(mdb_attr.to_string_hashmap());
+        if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
+            // dbg!(&dbs);
             let mut map = HashMap::new();
-            let dbs = dbs.refu64_vec_value().unwrap_or_default();
             for db in dbs {
                 if let Some(dbno) = query_dbno_from_db(db, pool).await? {
                     if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool).await? {

@@ -1288,7 +1288,6 @@ impl AiosDBManager {
             futures::future::join_all(take(&mut handles)).await;
             mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
             instance_mgr.serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
-            mgr.dbno_mgr.serialize_to_specify_file("./assets/instance/dbno_mgr.num");
 
             println!("{db_no} 生成完毕。");
         }
