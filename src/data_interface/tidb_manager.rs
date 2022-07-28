@@ -730,9 +730,10 @@ impl AiosDBManager {
     }
 
     /// 缓存使用元件库的几何体
-    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str, mdb: &str,
+    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str,
                                  db_nos: Option<Vec<i32>>, db_option: &DbOption) -> anyhow::Result<bool> {
         let batch_size = mgr.db_option.gen_model_batch_size;
+        let mdb = &db_option.mdb_name;
         let t = Instant::now();
         let mut att_types = vec!["BRAN", "HANG"];
         att_types.extend_from_slice(&vec![
@@ -1256,18 +1257,35 @@ impl AiosDBManager {
         std::fs::create_dir_all("./assets/mesh").unwrap();
         std::fs::create_dir_all("./assets/instance").unwrap();
 
+        let mut handles = vec![];
         for db_no in db_nos {
             let instance_mgr = Arc::new(PdmsMeshInstanceMgr::default());
+            let instance_mgr_clone = instance_mgr.clone();
+
+            let db_option_clone = db_option.clone();
+            let project = project.clone();
+            let mgr_clone = mgr.clone();
 
             println!("开始处理db: {db_no}");
+            let handle = tokio::spawn(async move {
+                Self::cache_cata_geos(mgr_clone, instance_mgr_clone.clone(), &project,
+                                      Some(vec![db_no]), &db_option_clone).await.unwrap();
+            });
+            handles.push(handle);
 
-            Self::cache_cata_geos(mgr.clone(), instance_mgr.clone(), project, mdb, Some(vec![db_no]), &db_option).await?;
-            if db_option.debug_branch_refno.as_ref().is_none() && db_option.debug_desi_refno.as_ref().is_none() {
-                Self::cache_loop_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
-                Self::cache_prim_geos(mgr.clone(), instance_mgr.clone(), project, Some(vec![db_no])).await?;
+            let instance_mgr_clone = instance_mgr.clone();
+            let db_option_clone = db_option.clone();
+            if db_option_clone.debug_branch_refno.as_ref().is_none() && db_option_clone.debug_desi_refno.as_ref().is_none() {
+                // let project = project.clone();
+                let mgr_clone = mgr.clone();
+                let handle = tokio::spawn(async move {
+                    Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
+                    Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
+                });
+                handles.push(handle);
             }
             // Self::cache_pohe_geos(mgr.clone(), project).await?;
-
+            futures::future::join_all(take(&mut handles)).await;
             mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
             instance_mgr.serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
             mgr.dbno_mgr.serialize_to_specify_file("./assets/instance/dbno_mgr.num");

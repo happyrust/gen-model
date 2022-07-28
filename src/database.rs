@@ -18,11 +18,11 @@ use dashmap::DashMap;
 use itertools::Itertools;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use parse_pdms_db::parse_file;
-use parse_pdms_db::tool::hash_tool::f64_round_3;
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::Executor;
 use sqlx::mysql::MySqlArguments;
 use sqlx::pool::PoolConnection;
+use aios_core::tool::float_tool::f64_round_3;
 
 use crate::{ATTR_INFO_MAP, options, tables};
 use crate::api::element::*;
@@ -347,12 +347,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
         }
         if need_parsing_files.is_none() || need_parsing_files.as_ref().unwrap().contains(&file_name) {
             println!("path={:?}", &file_name);
-            // let handle = tokio::spawn(async move {
-            // let project_clones = project_clone.clone();
-            //后面再考虑成不同的table，如显示属性和隐藏属性
-
             let project_1 = project.clone();
-
             if let Ok(Ok(PdmsDbData {
                              all_attr_map,
                              total_attr_map,
