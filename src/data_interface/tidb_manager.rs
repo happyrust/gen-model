@@ -1291,8 +1291,7 @@ impl AiosDBManager {
 
             println!("{db_no} 生成完毕。");
         }
-
-
+        mgr.dbno_mgr.serialize_to_specify_file("./assets/instance/dbno_mgr.num");
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
         Ok(true)
     }

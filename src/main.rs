@@ -146,9 +146,8 @@ async fn main() -> anyhow::Result<()> {
     // }
 
     let mut time = Instant::now();
-    // AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
+    AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
 
-    mgr.dbno_mgr.serialize_to_specify_file("./assets/instance/dbno_mgr.num");
     println!("花费时间: {} ms", time.elapsed().as_millis());
     Ok(())
 }
