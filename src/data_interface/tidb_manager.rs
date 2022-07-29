@@ -1257,7 +1257,7 @@ impl AiosDBManager {
         std::fs::create_dir_all("./assets/mesh").unwrap();
         std::fs::create_dir_all("./assets/instance").unwrap();
 
-        let mut handles = vec![];
+        // let mut handles = vec![];
         for db_no in db_nos {
             let instance_mgr = Arc::new(PdmsMeshInstanceMgr::default());
             let instance_mgr_clone = instance_mgr.clone();
@@ -1267,25 +1267,25 @@ impl AiosDBManager {
             let mgr_clone = mgr.clone();
 
             println!("开始处理db: {db_no}");
-            let handle = tokio::spawn(async move {
+            // let handle = tokio::spawn(async move {
                 Self::cache_cata_geos(mgr_clone, instance_mgr_clone.clone(), &project,
                                       Some(vec![db_no]), &db_option_clone).await.unwrap();
-            });
-            handles.push(handle);
+            // });
+            // handles.push(handle);
 
             let instance_mgr_clone = instance_mgr.clone();
             let db_option_clone = db_option.clone();
             if db_option_clone.debug_branch_refno.as_ref().is_none() && db_option_clone.debug_desi_refno.as_ref().is_none() {
-                // let project = project.clone();
+                let project = project.clone();
                 let mgr_clone = mgr.clone();
-                let handle = tokio::spawn(async move {
+                // let handle = tokio::spawn(async move {
                     Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
                     Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
-                });
-                handles.push(handle);
+                // });
+                // handles.push(handle);
             }
             // Self::cache_pohe_geos(mgr.clone(), project).await?;
-            futures::future::join_all(take(&mut handles)).await;
+            // futures::future::join_all(take(&mut handles)).await;
             mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
             instance_mgr.serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
 
