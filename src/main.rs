@@ -92,10 +92,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(cache_mesh);
         dbg!("read cached mesh ok.");
     }
-    // dbg!(mgr.get_attr(RefU64::from_refno_str("15213/494985").unwrap()).await).expect("TODO: panic message");
-    // dbg!(&mgr.dbno_mgr.ref0_dbnos_map.iter().filter(|x| x.1.len() == 1).collect_vec());
-    // mgr.dbno_mgr.serialize_to_specify_file("instance/dbno_mgr.num");
-    // return Ok(());
+
     let b_recreate_ssc = db_option.rebuild_ssc_tree;
     if b_recreate_ssc {
         dbg!("正在同步SSC");
@@ -106,49 +103,12 @@ async fn main() -> anyhow::Result<()> {
         dbg!("SSC同步完成");
     }
 
-    // if db_option.manual_db_nums.is_some() {
-    //     for (_project, project_db) in mgr.project_map.clone() {
-    //         let dir_path = "assets/instance";
-    //         let mut ssc_level_map: DashMap<RefU64, Vec<RefU64>> = DashMap::new();
-    //         let manual_db_nums = db_option.manual_db_nums.as_ref().unwrap();
-    //         let mut target_files = fs::read_dir(dir_path)?.into_iter().map(|entry| {
-    //             let entry = entry.unwrap();
-    //             entry.path()
-    //         }).collect::<Vec<PathBuf>>();
-    //
-    //         for path in target_files {
-    //             let mut file = std::fs::File::open(path.clone()).unwrap();
-    //             let file_name = path.file_name().unwrap().to_str().unwrap().split('.').collect::<Vec<_>>();
-    //             // manual_db_nums 指定的 numbdb才做处理
-    //             if let Some(db_number) = file_name.first() {
-    //                 let db_number = db_number.parse().unwrap_or(0);
-    //                 if !manual_db_nums.contains(&db_number) {
-    //                     continue;
-    //                 }
-    //             } else {
-    //                 continue;
-    //             }
-    //             let mut data = vec![];
-    //             file.read_to_end(&mut data).unwrap_or_default();
-    //             if let Ok(mgr) = bincode::deserialize::<PdmsMeshInstanceMgr>(&data) {
-    //                 for v in mgr.inst_mgr.iter() {
-    //                     let refnos = get_ancestor_till_type(*v.key(), Some("SSC_ROOM"), &project_db).await?;
-    //                     if let Some(refnos) = refnos {
-    //                         ssc_level_map.entry(refnos).or_insert_with(Vec::new).push(v.key().clone());
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //         dbg!(&ssc_level_map);
-    //         let mut write_file = std::fs::File::create(&format!("{}/room_level.bin", dir_path)).unwrap();
-    //         write_file.write_all(&bincode::serialize(&ssc_level_map).unwrap()).unwrap();
-    //     }
-    // }
 
-    let mut time = Instant::now();
-    AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
-
-    println!("花费时间: {} ms", time.elapsed().as_millis());
+    if db_option.gen_model_mesh {
+        let mut time = Instant::now();
+        AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
+        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+    }
     Ok(())
 }
 

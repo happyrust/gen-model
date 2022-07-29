@@ -13,6 +13,7 @@ use aios_core::consts::*;
 use aios_core::pdms_types::{AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
+use aios_core::tool::float_tool::f64_round_3;
 use anyhow::anyhow;
 use dashmap::DashMap;
 use itertools::Itertools;
@@ -22,7 +23,6 @@ use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::Executor;
 use sqlx::mysql::MySqlArguments;
 use sqlx::pool::PoolConnection;
-use aios_core::tool::float_tool::f64_round_3;
 
 use crate::{ATTR_INFO_MAP, options, tables};
 use crate::api::element::*;
@@ -50,8 +50,6 @@ pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()> {
         .await
         .unwrap();
     let mut pool = connection.try_acquire().unwrap();
-
-    // sqlx::query(&format!("DROP DATABASE IF EXISTS {project}")).execute(&mut pool).await?;
     sqlx::query(&format!("CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8")).execute(&mut pool).await?;
     Ok(())
 }
@@ -91,88 +89,84 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     let mut pdms_info_conn = pdms_info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
     for project in &db_option.included_projects {
-        if db_option.recreate_db {
-            init_database(project, &default_conn_str).await?;
-            let mut table_time = Instant::now();
-            let mut tables_sql = String::new();
-            if !db_option.only_rebuild_pdms_element {
-                if let Ok(db_info) = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")) {
-                    for (k, v) in db_info.noun_attr_info_map {
-                        let mut attr_map = BTreeMap::new();
-                        let type_name = db1_dehash(k as u32);
-                        if type_name.is_empty() {
-                            continue;
-                        }
-                        let mut tmp_sets = HashSet::new();
-                        for (kk, vv) in v {
-                            let att_name = vv.name.to_string();
-                            if &att_name != "unset" {
-                                if att_name.starts_with(":") || vv.offset == 0 {
-                                    continue;
-                                }
-                                if !tmp_sets.contains(&att_name) {
-                                    tmp_sets.insert(att_name.clone());
-                                } else {
-                                    continue;
-                                }
-                                if kk == *TYPE_HASH as i32 {
-                                    attr_map.insert(vv.offset, (att_name, StringType(db1_dehash(k as u32).into())));
-                                } else {
-                                    attr_map.insert(vv.offset, (att_name, vv.default_val));
-                                }
+        init_database(project, &default_conn_str).await?;
+        let mut table_time = Instant::now();
+        let mut tables_sql = String::new();
+        if !db_option.only_rebuild_pdms_element {
+            if let Ok(db_info) = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")) {
+                for (k, v) in db_info.noun_attr_info_map {
+                    let mut attr_map = BTreeMap::new();
+                    let type_name = db1_dehash(k as u32);
+                    if type_name.is_empty() {
+                        continue;
+                    }
+                    let mut tmp_sets = HashSet::new();
+                    for (kk, vv) in v {
+                        let att_name = vv.name.to_string();
+                        if &att_name != "unset" {
+                            if att_name.starts_with(":") || vv.offset == 0 {
+                                continue;
+                            }
+                            if !tmp_sets.contains(&att_name) {
+                                tmp_sets.insert(att_name.clone());
+                            } else {
+                                continue;
+                            }
+                            if kk == *TYPE_HASH as i32 {
+                                attr_map.insert(vv.offset, (att_name, StringType(db1_dehash(k as u32).into())));
+                            } else {
+                                attr_map.insert(vv.offset, (att_name, vv.default_val));
                             }
                         }
-                        tables_sql.push_str(&tables::gen_create_implicit_tables_sql(type_name.as_str(), &attr_map));
-                        tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
-                        tables_sql.push_str(&tables::gen_create_uda_tables_sql());
                     }
+                    tables_sql.push_str(&tables::gen_create_implicit_tables_sql(type_name.as_str(), &attr_map));
+                    tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
+                    tables_sql.push_str(&tables::gen_create_uda_tables_sql());
                 }
             }
+        }
 
-            let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
-            let mut conn = project_pool.acquire().await?;
-            tables_sql.push_str(&tables::gen_create_element_tables_sql());
-            if !db_option.only_rebuild_pdms_element {
-                tables_sql.push_str(&tables::gen_create_project_mdb_sql());
-                tables_sql.push_str(&gen_create_project_mdb_json_sql());
-                tables_sql.push_str(&gen_create_data_state_tables_sql());
-                tables_sql.push_str(&gen_create_pdms_version_table_sql());
-                tables_sql.push_str(&gen_create_room_code_table_sql());
+        let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
+        let mut conn = project_pool.acquire().await?;
+        tables_sql.push_str(&tables::gen_create_element_tables_sql());
+        if !db_option.only_rebuild_pdms_element {
+            tables_sql.push_str(&tables::gen_create_project_mdb_sql());
+            tables_sql.push_str(&gen_create_project_mdb_json_sql());
+            tables_sql.push_str(&gen_create_data_state_tables_sql());
+            tables_sql.push_str(&gen_create_pdms_version_table_sql());
+            tables_sql.push_str(&gen_create_room_code_table_sql());
+        }
+        let result = conn.execute(tables_sql.as_str()).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(&e);
+                dbg!(tables_sql.as_str());
             }
-            let result = conn.execute(tables_sql.as_str()).await;
-            match result {
-                Ok(_) => {}
-                Err(e) => {
-                    dbg!(&e);
-                    dbg!(tables_sql.as_str());
-                }
-            }
+        }
 
 
-            create_tables_elapse += table_time.elapsed().as_millis();
-            let result = pdms_info_conn.execute(tables::gen_create_dbno_infos_tables_sql().as_str()).await;
-            match result {
-                Ok(_) => {}
-                Err(e) => {
-                    dbg!(&e);
-                    dbg!(tables_sql.as_str());
-                }
+        create_tables_elapse += table_time.elapsed().as_millis();
+        let result = pdms_info_conn.execute(tables::gen_create_dbno_infos_tables_sql().as_str()).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(&e);
+                dbg!(tables_sql.as_str());
             }
-            let result = pdms_info_conn.execute(gen_creat_version_info_table_sql(&db_option.project_name).as_str()).await;
-            match result {
-                Ok(_) => {}
-                Err(e) => {
-                    dbg!(&e);
-                    dbg!(tables_sql.as_str());
-                }
+        }
+        let result = pdms_info_conn.execute(gen_creat_version_info_table_sql(&db_option.project_name).as_str()).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(&e);
+                dbg!(tables_sql.as_str());
             }
         }
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
-        if db_option.types_multi_thread {
-            dbg!("执行多线程解析");
-            sync_total_async_threaded(&db_option, project, project_pool.clone(),
-                                      pdms_info_pool.clone()).await.expect("同步数据失败");
-        }
+        dbg!("执行多线程解析");
+        sync_total_async_threaded(&db_option, project, project_pool.clone(),
+                                  pdms_info_pool.clone()).await.expect("同步数据失败");
         if !db_option.only_rebuild_pdms_element {
             insert_project_mdb(&project_pool, &pdms_info_pool).await?;
         }
@@ -205,15 +199,15 @@ pub fn gen_explicit_att_insert_sql(refno: RefU64, type_name: &str, owner: RefU64
 }
 
 /// 生成隐藏属性的插入语句的前面列名部分
-pub fn gen_implicit_attr_insert_sql(hash: u32, b_replace: bool) -> (String, Vec<NounHash>) {
+pub fn gen_implicit_attr_insert_sql(hash: u32) -> (String, Vec<NounHash>) {
     let type_name = db1_dehash(hash);
     let table_name = qualified_table_name(type_name.as_str());
     let mut table_columns_sql = String::new();
-    if b_replace {
-        table_columns_sql.push_str(&format!("REPLACE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
-    } else {
-        table_columns_sql.push_str(&format!("INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
-    }
+    // if b_replace {
+    //     table_columns_sql.push_str(&format!("REPLACE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
+    // } else {
+    table_columns_sql.push_str(&format!("INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
+    // }
 
     let implicit_names = ATTR_INFO_MAP.get_type_implicit_att_names(type_name.as_str());
     let column_hashs = implicit_names.iter().filter_map(|x| (x != "unset")
@@ -317,7 +311,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
     let project_dir = data_dir.join(&project);
     let max_sql_threads_number = db_option.sql_threads_number as usize;
     let batch_insert_sql_cnt = db_option.batch_insert_sql_cnt as usize;
-    let b_replace = db_option.only_save_types_db.is_some();
+    // let b_replace = db_option.only_save_types_db.is_some();
     if max_sql_threads_number * batch_insert_sql_cnt == 0 {
         return Err(anyhow!("batch_insert_sql_cnt 或者  sql_threads_number 不能为0"));
     }
@@ -333,6 +327,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
 
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
+    let is_replace = db_option.replace_dbs;
 
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
@@ -367,7 +362,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 for (type_hash, type_refnos) in type_ele_map {
                     let info_pool_clone = info_pool.clone();
                     let filename_clone = file_name_clone.clone();
-                    let db_option_clone = db_option.clone();
                     let project_clone = project.clone();
                     let total_attr_map_arc = total_attr_map_arc.clone();
                     let children_map_arc = children_map_arc.clone();
@@ -380,6 +374,9 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                     //保存dbno的信息表
                     let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
                     sql.push_str(dbno_filename_sql.as_str());
+                    if is_replace {
+                        sql = sql.replace("INSERT IGNORE", "REPLACE");
+                    }
                     let result = info_conn.execute(sql.as_str()).await;
                     match result {
                         Ok(_) => {}
@@ -394,6 +391,9 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                         sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, project_clone.as_str()));
                     }
                     sql.remove(sql.len() - 1);
+                    if is_replace {
+                        sql = sql.replace("INSERT IGNORE", "REPLACE");
+                    }
                     let result = info_conn.execute(sql.as_str()).await;
                     match result {
                         Ok(_) => {}
@@ -427,7 +427,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                                     end_idx = refnos_cnt;
                                 }
 
-                                let implicit_columns_sql = gen_implicit_attr_insert_sql(type_hash, b_replace);
+                                let implicit_columns_sql = gen_implicit_attr_insert_sql(type_hash);
                                 let column_hashs = &implicit_columns_sql.1;
                                 for j in (start_idx..end_idx).into_iter().step_by(batch_insert_sql_cnt) {
                                     let mut end = j + batch_insert_sql_cnt;
@@ -451,6 +451,9 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                                     sql.push_str(implicit_columns_sql.0.as_str());
                                     sql.push_str(implicit_values_sql.as_str());
                                     sql.remove(sql.len() - 1);
+                                    if is_replace {
+                                        sql = sql.replace("INSERT IGNORE", "REPLACE");
+                                    }
                                     let result = project_conn.execute(sql.as_str()).await;
                                     match result {
                                         Ok(_) => {}
@@ -462,11 +465,11 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
 
                                     //执行显示数据保存
                                     let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
-                                    if b_replace {
-                                        sql = format!("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
-                                    }
                                     sql.push_str(explicit_values_sql.as_str());
                                     sql.remove(sql.len() - 1);
+                                    if is_replace {
+                                        sql = sql.replace("INSERT IGNORE", "REPLACE");
+                                    }
                                     let result = project_conn.execute(sql.as_str()).await;
                                     match result {
                                         Ok(_) => {}
@@ -480,6 +483,9 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                                     let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
                                     sql.push_str(pdms_elements_sql.as_str());
                                     sql.remove(sql.len() - 1);
+                                    if is_replace {
+                                        sql = sql.replace("INSERT IGNORE", "REPLACE");
+                                    }
                                     let result = project_conn.execute(sql.as_str()).await;
                                     match result {
                                         Ok(_) => {}
@@ -512,6 +518,9 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                             room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
                         }
                         room_code_sql.remove(room_code_sql.len() - 1);
+                        if is_replace {
+                            room_code_sql = room_code_sql.replace("INSERT IGNORE", "REPLACE");
+                        }
                         let result = project_conn.execute(room_code_sql.as_str()).await;
                         match result {
                             Ok(_) => {}
