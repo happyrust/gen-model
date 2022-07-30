@@ -90,7 +90,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     is_debug: bool,
 ) -> anyhow::Result<ScomInfo> {
     let attr_map = interface.get_attr(refno).await.unwrap();
-    let type_noun = attr_map.get_type_cloned().ok_or(anyhow!("Scom att not correct".to_string())).unwrap();
+    let type_noun = attr_map.get_type_cloned().ok_or(anyhow!(format!("{:?} Scom att not correct", refno))).unwrap();
     let is_sprf = type_noun == "SPRF";
     let ptref_name = if is_sprf { "PSTR" } else { "PTRE" };
     let mut axis_params = vec![];

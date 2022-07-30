@@ -8,14 +8,15 @@ pub struct DbOption {
     #[clap(long)]
     pub incr_sync: bool,
     #[clap(long)]
-    pub recreate_db: bool,
+    pub replace_dbs: bool,
+    #[clap(long)]
+    pub gen_model_mesh: bool,
     #[clap(long, default_value = "12.1SP4Projects")]
     pub project_path: String,
     //#[clap(long, default_value = "MASTER", "SAMPLE")]
     pub included_projects: Vec<String>,
     #[clap(skip)]
     pub included_db_files: Option<Vec<String>>,
-    //if none all files parsed, if not, only included parsed
     #[clap(long)]
     pub mdb_name: String,
     #[clap(long)]
@@ -46,16 +47,9 @@ pub struct DbOption {
     #[clap(short)]
     pub sql_threads_number: u32,
     #[clap(short)]
-    pub files_multi_thread: bool,
-    #[clap(short)]
-    pub types_multi_thread: bool,
-    #[clap(short)]
     pub rebuild_ssc_tree: bool,
     #[clap(short)]
     pub batch_insert_sql_cnt: u32,
-    #[clap(skip)]
-    pub only_save_types_db: Option<Vec<String>>,
-
     #[clap(short)]
     pub gen_model_batch_size: usize,
 }

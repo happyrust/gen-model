@@ -9,8 +9,6 @@ use crate::api::element::query_mdb_module_worlds;
 
 pub async fn insert_project_mdb(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<()> {
     let project_mdb = query_mdb_module_worlds(pool, info_pool).await?;
-    dbg!(&project_mdb);
-    let project_mdb_len = project_mdb.len().clone();
     let sql = gen_insert_project_mdb_sql(project_mdb.clone());
     let json_sql = gen_insert_project_mdb_json_sql(project_mdb);
     if project_mdb_len != 0 {
