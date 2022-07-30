@@ -10,23 +10,26 @@ use crate::api::element::query_mdb_module_worlds;
 pub async fn insert_project_mdb(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<()> {
     let project_mdb = query_mdb_module_worlds(pool, info_pool).await?;
     dbg!(&project_mdb);
+    let project_mdb_len = project_mdb.len().clone();
     let sql = gen_insert_project_mdb_sql(project_mdb.clone());
     let json_sql = gen_insert_project_mdb_json_sql(project_mdb);
-    let mut conn = pool.acquire().await?;
-    let result = conn.execute(sql.as_str()).await;
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            dbg!(&e);
-            dbg!(sql.as_str());
+    if project_mdb_len != 0 {
+        let mut conn = pool.acquire().await?;
+        let result = conn.execute(sql.as_str()).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(&e);
+                dbg!(sql.as_str());
+            }
         }
-    }
-    let json_result = conn.execute(json_sql.as_str()).await;
-    match json_result {
-        Ok(_) => {}
-        Err(e) => {
-            dbg!(&e);
-            dbg!(json_sql.as_str());
+        let json_result = conn.execute(json_sql.as_str()).await;
+        match json_result {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(&e);
+                dbg!(json_sql.as_str());
+            }
         }
     }
     Ok(())

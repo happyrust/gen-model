@@ -249,3 +249,10 @@ pub fn gen_create_pdms_version_table_sql() -> String {
     sql.push_str(");");
     sql
 }
+
+#[test]
+fn test_replace() {
+    let mut r = "a '' b c a";
+    let  v = r.replace(r"'","e");
+    dbg!(&v);
+}

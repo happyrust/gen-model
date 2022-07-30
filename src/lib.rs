@@ -30,6 +30,7 @@ pub mod cata;
 pub mod ssc;
 pub mod defines;
 pub mod graph_db;
+pub mod data_to_file;
 
 #[macro_use]
 extern crate derive_more;
