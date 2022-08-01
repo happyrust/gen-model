@@ -140,45 +140,43 @@ pub fn resolve_gmse_params(
 
     let mut paxises: Vec<CateAxisParam> = Vec::new();
     // dbg!(&gm.paxises);
-    for name in gm.paxises.iter() {
-        if name != "" {
-            let (is_negative, name) = if name.starts_with('-') {
-                (true, &name[1..])
-            } else {
-                (false, &name[..])
-            };
-            match &name[0..1] {
-                "P" => {
-                    if let Ok(index) = name.trim()[1..].parse::<i32>() {
-                        if index == 0 {
-                            paxises.push(CateAxisParam::zero());
+    for axis_str in gm.paxises.iter() {
+        let mut axis = axis_str.trim();
+        if axis.is_empty() { continue; }
+        let p_axis = axis.starts_with("P");
+        let p_axis_neg = axis.starts_with("-P");
+        //针对P方向
+        if p_axis || p_axis_neg {
+            if p_axis_neg {
+                axis = &axis[1..];
+            }
+            if let Ok(index) = axis[1..].parse::<i32>() {
+                if index == 0 {
+                    paxises.push(CateAxisParam::zero());
+                } else {
+                    if axis_param_map.contains_key(&index) {
+                        paxises.push(if p_axis_neg {
+                            axis_param_map[&index].clone().neg()
                         } else {
-                            if axis_param_map.contains_key(&index) {
-                                paxises.push(if is_negative {
-                                    axis_param_map[&index].clone().neg()
-                                } else {
-                                    axis_param_map[&index].clone()
-                                });
-                            } else {
-                                return Err(anyhow!("Axis index not exist".to_string()));
-                            }
-                        }
+                            axis_param_map[&index].clone()
+                        });
+                    } else {
+                        return Err(anyhow!("Axis index not exist".to_string()));
                     }
                 }
-                "T" => {}
-                _ => {
-                    let dir = parse_str_axis_to_vec3(name, context);
-                    let axis = CateAxisParam {
-                        refno: Default::default(),
-                        number: 0,
-                        pt: Default::default(),
-                        dir,
-                        pconnect: "".to_string(),
-                        pbore: 0.0,
-                    };
-                    paxises.push(if is_negative { axis.neg() } else { axis });
-                }
             }
+
+        }else{
+            let dir = parse_str_axis_to_vec3(axis, context);
+            let axis = CateAxisParam {
+                refno: Default::default(),
+                number: 0,
+                pt: Default::default(),
+                dir,
+                pconnect: "".to_string(),
+                pbore: 0.0,
+            };
+            paxises.push( axis );
         }
     }
     let type_name = gm.gm_type.clone();
@@ -226,6 +224,7 @@ pub fn resolve_axis_param(
     match axis_param.type_name.as_str() {
         "PTAX" => {
             let d = eval_str_to_f32(&axis_param.distance, &context).unwrap_or_default();
+            dbg!(&axis_param);
             let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);
             Some(CateAxisParam {
                 refno: axis_param.refno,

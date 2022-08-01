@@ -531,6 +531,7 @@ pub fn resolve_dir_and_pos(axis: &AxisParam,
 }
 
 pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) -> [f32; 3] {
+    // dbg!(pdir);
     let dir_str = pdir.to_uppercase().replace("AXIS", "");
     let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();
     let mut new_dir_str = dir_str.clone();
