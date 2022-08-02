@@ -590,5 +590,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
 #[test]
 fn test_db_hash() {
     let hash = db1_hash("UTYP");
-    dbg!(&hash);
+    let de_hash = db1_dehash(230902453);
+    dbg!(&de_hash);
 }
