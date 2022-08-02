@@ -90,19 +90,20 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     is_debug: bool,
 ) -> anyhow::Result<ScomInfo> {
     let attr_map = interface.get_attr(refno).await.unwrap();
-    let type_noun = attr_map.get_type_cloned().ok_or(anyhow!(format!("{:?} Scom att not correct", refno))).unwrap();
+    let type_noun = attr_map.get_type_cloned().ok_or(anyhow!(format!("{:?} Scom att not correct", refno)))?;
     let is_sprf = type_noun == "SPRF";
     let ptref_name = if is_sprf { "PSTR" } else { "PTRE" };
     let mut axis_params = vec![];
     let mut axis_param_numbers = vec![];
     if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
         if let Ok(ptre_am) = interface.get_attr(ptre_refno).await {
-            let axis_param_map = query_axis_params(&ptre_am, interface, is_debug).await.unwrap();
-            if is_debug {
-                dbg!(&axis_param_map);
+            if let Ok(axis_param_map) = query_axis_params(&ptre_am, interface, is_debug).await{
+                if is_debug {
+                    dbg!(&axis_param_map);
+                }
+                axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
+                axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
             }
-            axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
-            axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
         }
     }
     let gmref_name = if is_sprf { "GSTR" } else { "GMRE" };
