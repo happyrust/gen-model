@@ -771,7 +771,7 @@ impl AiosDBManager {
                 mgr.get_refnos_by_types(project, &att_types, db_nos).await?
             };
 
-        // dbg!(&has_cata_refnos);
+        dbg!(&has_cata_refnos);
         let has_cata_cnt = has_cata_refnos.len();
         let target_debug_refno = db_option.debug_desi_refno.as_ref().map(
             |x|RefU64::from_refno_str(x).unwrap_or_default());
@@ -798,9 +798,11 @@ impl AiosDBManager {
                 if end_idx > has_cata_cnt as usize {
                     end_idx = has_cata_cnt as usize;
                 }
+                println!("当前范围: {start_idx} ~ {end_idx}");
                 for j in start_idx..end_idx {
                     let refno = all_refnos[j];
-                    println!("正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}", j, refno.to_refno_string(), processed_cnt.lock().unwrap().to_owned());
+                    println!("正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}", j, refno.to_refno_string(),
+                             processed_cnt.lock().unwrap().to_owned());
                     let inst_map = &instance_mgr.inst_mgr;
                     let mut jusl_translation = Vec3::ZERO;
                     let cached_mesh_mgr = &mgr.cached_mesh_mgr;

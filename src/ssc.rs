@@ -86,7 +86,8 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>) -> anyhow::Result<
     Ok(())
 }
 
-/// 解析 excel 表单， 获取房间下面的ZONE和SITE层级  返回值  1 : key : site 的 name (中文名) value : site 下对应的zone 的 name ; 2 : 英文 code 对应的中文名
+/// 解析 excel 表单， 获取房间下面的ZONE和SITE层级  返回值  1 : key : site 的 name (中文名) value : site 下对应的zone 的 name ;
+/// 2 : 英文 code 对应的中文名
 fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, DashMap<String, String>)> {
     let mut level: Vec<(String, Vec<String>)> = vec![];
     let mut name_map = DashMap::new();
@@ -363,8 +364,6 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
 
 /// 设置 ssc 的固定节点
 pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMap<String, String>)> {
-    // let mut zone_map = HashMap::new(); // 每个房间下对应的zone的refno key : zone_name + room_name
-    // let mut zone_name_map = HashMap::new(); // 存放 zone 属性 :CNPEdivco 属性对应的中文名
     let mut sql = String::new();
     let refno = RefU64(1);
     let mut owner_refno = RefU64(0);

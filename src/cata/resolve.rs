@@ -224,7 +224,6 @@ pub fn resolve_axis_param(
     match axis_param.type_name.as_str() {
         "PTAX" => {
             let d = eval_str_to_f32(&axis_param.distance, &context).unwrap_or_default();
-            dbg!(&axis_param);
             let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);
             Some(CateAxisParam {
                 refno: axis_param.refno,
