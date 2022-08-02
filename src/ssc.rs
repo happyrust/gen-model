@@ -70,15 +70,19 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>) -> anyhow::Result<
     let room_data = query_all_room_data(project_pool).await?;
 
     let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
-    let sql = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, project_pool).await;
-    if sql != "" {
-        let sql = format!("{} {}", insert_sql, sql);
-        let result = conn.execute(sql.as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(sql);
-                dbg!(&e);
+    let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, project_pool).await;
+    if sqls.len() != 0 {
+        for (idx, sql) in sqls.into_iter().enumerate() {
+            let sql = format!("{} {}", insert_sql, sql);
+            let result = conn.execute(sql.as_str()).await;
+            match result {
+                Ok(_) => {
+                    println!("第 {} 条 sql 保存完成", idx);
+                }
+                Err(e) => {
+                    dbg!(sql);
+                    dbg!(&e);
+                }
             }
         }
     }
@@ -194,7 +198,7 @@ pub async fn insert_set_ssc_node_sql(pool: &Pool<MySql>) -> anyhow::Result<(Dash
 
 /// 保存房间下的元件
 pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: DashMap<String, RefU64>,
-                                  zone_name_map: DashMap<String, String>, pool: &Pool<MySql>) -> String {
+                                  zone_name_map: DashMap<String, String>, pool: &Pool<MySql>) -> Vec<String> {
     let mut handles = vec![];
     let mut sqls = Arc::new(DashSet::new());
     let mut under_zone_map = Arc::new(DashSet::new());
@@ -355,14 +359,27 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
     }
     futures::future::join_all(handles).await;
     let mut insert_sql = String::new();
+    let mut insert_sql_vec = vec![];
     let sqls = Arc::try_unwrap(sqls).unwrap();
+    println!("一个生成了 {} 个 SSC非固定节点", sqls.len());
+    let mut i = 0;
     for sql in sqls {
+        if i == 1000 {
+            if insert_sql.len() > 0 {
+                insert_sql.remove(insert_sql.len() - 1);
+            }
+            insert_sql_vec.push(insert_sql.clone());
+            insert_sql.clear();
+        }
         insert_sql.push_str(sql.as_str());
+        i += 1;
     }
+    // 把剩余不满1000的sqls放到vec中
     if insert_sql.len() > 0 {
         insert_sql.remove(insert_sql.len() - 1);
     }
-    insert_sql
+    insert_sql_vec.push(insert_sql.clone());
+    insert_sql_vec
 }
 
 /// 设置 ssc 的固定节点
