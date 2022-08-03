@@ -92,8 +92,10 @@ fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, Da
     let mut level: Vec<(String, Vec<String>)> = vec![];
     let mut name_map = DashMap::new();
     let mut workbook: Xlsx<_> = open_workbook("resource/专业分类.xlsx")?;
+    dbg!("加载专业分类.xlsx 成功");
     let range = workbook.worksheet_range("Sheet2")
         .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+    dbg!("打开Sheet2成功");
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
     let mut zone_name = "".to_string();
@@ -102,7 +104,7 @@ fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, Da
     let mut zones = vec![];
     while let Some(result) = iter.next() {
         let v: SiteExcelDataTest = result?;
-
+        dbg!(&v);
         // site 的 name 、code 、att_type
         if v.code.is_some() && v.name.is_some() && v.att_type.is_some() {
             // 当zone_code和当前读取的值不相等时，就代表不是同一个层级了 （第一次除外,所以加了个b_first 排除第一次的情况）
@@ -177,7 +179,6 @@ pub fn get_rooms_from_excel() -> anyhow::Result<Vec<String>> {
 
 /// 创建ssc固定节点
 pub async fn insert_set_ssc_node_sql(pool: &Pool<MySql>) -> anyhow::Result<(DashMap<String, RefU64>, DashMap<String, String>)> {
-    // let insert_sql = "REPLACE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
     let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
     let (sql, zone_level_map, zone_name_map) = set_ssc_node()?;
     let sql = format!("{}{}", insert_sql, sql);

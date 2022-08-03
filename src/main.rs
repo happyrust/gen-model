@@ -32,6 +32,7 @@ use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
 use aios_database::cata::resolve::parse_to_i32;
 use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
+use aios_database::graph_db::arango::sync_graph_db;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::gen_create_attr_info_tables_sql;
 
@@ -93,6 +94,9 @@ async fn main() -> anyhow::Result<()> {
         dbg!("read cached mesh ok.");
     }
 
+    //同步到图数据库
+    sync_graph_db(mgr.clone(), db_option.clone()).await?;
+
     let b_recreate_ssc = db_option.rebuild_ssc_tree;
     if b_recreate_ssc {
         dbg!("正在同步SSC");
@@ -103,12 +107,13 @@ async fn main() -> anyhow::Result<()> {
         dbg!("SSC同步完成");
     }
 
-
     if db_option.gen_model_mesh {
         let mut time = Instant::now();
         AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
+
+
     Ok(())
 }
 
