@@ -85,7 +85,7 @@ pub fn gen_create_ssc_element_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_SSC_ELEMENTS_TABLE} ("#));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY,"#, "ID"));  //refno 的64位
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL ,"#, "ID"));  //refno 的64位
     sql.push_str(&format!(r#"{} VARCHAR(30),"#, "REFNO"));
     sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
     sql.push_str(&format!(r#"{} BIGINT,"#, "OWNER"));
