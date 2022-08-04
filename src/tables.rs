@@ -85,11 +85,12 @@ pub fn gen_create_ssc_element_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_SSC_ELEMENTS_TABLE} ("#));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL ,"#, "ID"));  //refno 的64位
+    sql.push_str(&format!(r#"{} BIGINT AUTO_INCREMENT PRIMARY KEY,"#, "ID"));  //refno 的64位
     sql.push_str(&format!(r#"{} VARCHAR(30),"#, "REFNO"));
     sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
     sql.push_str(&format!(r#"{} BIGINT,"#, "OWNER"));
     sql.push_str(&format!(r#"{} VARCHAR(100),"#, "NAME"));
+    sql.push_str(&format!(r#"{} BIGINT,"#, "REAL_PDMS_REFNO"));
     sql.push_str(&format!(r#"{} INT"#, "ORDER_NUM"));
     sql.push_str(");");
 
@@ -171,7 +172,7 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
             }
             AttrVal::StringType(_) => {
                 //根据不同类型优化一下string的大小
-                sql.push_str(&format!(r#"{} VARCHAR(300),"#, att_name));
+                sql.push_str(&format!(r#"{} VARCHAR(500),"#, att_name));
             }
             AttrVal::DoubleType(_) => {
                 sql.push_str(&format!(r#"{} DOUBLE,"#, att_name));
@@ -253,6 +254,6 @@ pub fn gen_create_pdms_version_table_sql() -> String {
 #[test]
 fn test_replace() {
     let mut r = "a '' b c a";
-    let  v = r.replace(r"'","e");
+    let v = r.replace(r"'", "e");
     dbg!(&v);
 }
