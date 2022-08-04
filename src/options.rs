@@ -52,4 +52,6 @@ pub struct DbOption {
     pub batch_insert_sql_cnt: u32,
     #[clap(short)]
     pub gen_model_batch_size: usize,
+    #[clap(long)]
+    pub arangodb_url:String,
 }

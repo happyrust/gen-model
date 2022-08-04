@@ -16,7 +16,7 @@ use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
-const URL: &str = "http://localhost:8529";
+pub const URL: &str = "http://localhost:8529";
 
 // #[cfg_attr(not(feature = "blocking"), tokio::main)]
 // #[cfg_attr(feature = "blocking", maybe_async::must_be_sync)]

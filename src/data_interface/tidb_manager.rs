@@ -23,6 +23,7 @@ use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
 use anyhow::anyhow;
 use append_only_vec::AppendOnlyVec;
 use approx::{abs_diff_eq, abs_diff_ne};
+use arangors_lite::{Connection, Database};
 use async_trait::async_trait;
 use config::{Config, ConfigError, Environment, File};
 use dashmap::{DashMap, DashSet};
@@ -108,6 +109,8 @@ pub struct AiosDBManager {
     pub cached_mesh_mgr: Arc<CachedMeshesMgr>,
 
     pub mesh_instance_mgr: Arc<DashMap<i32, PdmsMeshInstanceMgr>>,
+
+    pub arango_database: Database,
 
     cached_world_transforms_map: Arc<DashMap<RefU64, TransformRT>>,
 }
@@ -505,6 +508,12 @@ impl AiosDBManager {
                                                                            PDMS_INFO_DB, &db_option.project_name.to_uppercase())).await?;
         let ref0_map = get_ref0_map(&info_conn).await?;
         let projects = db_option.included_projects.clone();
+        // todo 用户名密码等先写死，后面再分一个toml出来
+        let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+            .await
+            .unwrap();
+
+        let database = conn.db("pdms").await.unwrap();
         Ok(
             Self {
                 project_map,
@@ -517,6 +526,7 @@ impl AiosDBManager {
                 dbno_mgr,
                 cached_mesh_mgr: Arc::new(Default::default()),
                 mesh_instance_mgr: Arc::new(Default::default()),
+                arango_database: database,
                 cached_world_transforms_map: Arc::new(Default::default()),
             }
         )
@@ -564,7 +574,7 @@ impl AiosDBManager {
     ///获取单个元件的模型数据
     pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64, branch_att: &AttrMap,
                                        brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
-                                       debug_refno: Option<RefU64>
+                                       debug_refno: Option<RefU64>,
     ) -> anyhow::Result<Vec3> {
         let is_debug = debug_refno.is_some();
         let mut center = Vec3::ZERO;
@@ -617,7 +627,7 @@ impl AiosDBManager {
     async fn get_cata_auto_tubi_geoms(mgr: Arc<AiosDBManager>, group_refno: RefU64, group_att: &AttrMap,
                                       brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
                                       // anchor_ptset_map: &DashMap<RefU64, Vec<Option<i32>>>,
-                                        debug_refno: Option<RefU64>) -> anyhow::Result<bool> {
+                                      debug_refno: Option<RefU64>) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
         let group_transform = mgr.get_world_transform(group_refno).await?.unwrap_or_default();
         let htube_pt = group_transform.transform_point3(group_att.get_vec3("HPOS")
@@ -630,7 +640,7 @@ impl AiosDBManager {
         let h_ref = group_att.get_foreign_refno(if is_hang { "HREF" } else { "HSTU" }).unwrap_or_default();
         let hconnect = group_att.get_as_string("HCON").unwrap_or_default();
         let mut has_tubi = true;
-        if hconnect.as_str() == "DUCT" || is_debug{
+        if hconnect.as_str() == "DUCT" || is_debug {
             has_tubi = false;
         }
         let mut bore = 0.0f32;
@@ -673,7 +683,7 @@ impl AiosDBManager {
             if geoms.is_err() { continue; }
             let mut geoms = geoms.unwrap();
             //有隐含管段
-            if has_tubi && attr.get_type() != "ATTA"{
+            if has_tubi && attr.get_type() != "ATTA" {
                 if let Some(arrive) = attr.get_i32("ARRI") {
                     if geoms.axis_map.contains_key(&arrive) {
                         let p = &geoms.axis_map[&arrive].pt;
@@ -765,16 +775,16 @@ impl AiosDBManager {
         let has_cata_refnos =
             if let Some(branch_refno) = &db_option.debug_branch_refno {
                 RefU64Vec(vec![RefU64::from_refno_str(branch_refno).unwrap_or_default()])
-            }else if let Some(design_refno) = &db_option.debug_desi_refno {
+            } else if let Some(design_refno) = &db_option.debug_desi_refno {
                 RefU64Vec(vec![RefU64::from_refno_str(design_refno).unwrap_or_default()])
-            }else {
+            } else {
                 mgr.get_refnos_by_types(project, &att_types, db_nos).await?
             };
 
         dbg!(&has_cata_refnos);
         let has_cata_cnt = has_cata_refnos.len();
         let target_debug_refno = db_option.debug_desi_refno.as_ref().map(
-            |x|RefU64::from_refno_str(x).unwrap_or_default());
+            |x| RefU64::from_refno_str(x).unwrap_or_default());
         dbg!(&target_debug_refno);
         println!("使用元件库的模型总数：{has_cata_cnt}");
 
@@ -787,7 +797,7 @@ impl AiosDBManager {
         let mut handles = vec![];
         let all_refnos = Arc::new(has_cata_refnos);
         let processed_cnt = Arc::new(Mutex::new(has_cata_cnt));
-        for i in 0..batch_chunks_cnt as usize{
+        for i in 0..batch_chunks_cnt as usize {
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
             let all_refnos = all_refnos.clone();
@@ -933,7 +943,7 @@ impl AiosDBManager {
         let mut handles = vec![];
         let all_refnos = Arc::new(prim_refnos);
         let processed_cnt = Arc::new(Mutex::new(prim_cnt));
-        for i in 0..batch_chunks_cnt as usize{
+        for i in 0..batch_chunks_cnt as usize {
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
 
@@ -963,7 +973,7 @@ impl AiosDBManager {
                         generic_type: mgr.get_generic_type(refno),
                         world_transform: (transform.rotation, transform.translation, Vec3::ONE),
                         ptset_map: default(),
-                        flow_pt_indexs: vec![]
+                        flow_pt_indexs: vec![],
                     };
                     let mut geo_insts = &mut geos_info.data;
                     let mut geo_hash = None;
@@ -1091,7 +1101,7 @@ impl AiosDBManager {
         let mut handles = vec![];
         let all_refnos = Arc::new(loop_refnos);
         let processed_cnt = Arc::new(Mutex::new(loop_cnt));
-        for i in 0..batch_chunks_cnt as usize{
+        for i in 0..batch_chunks_cnt as usize {
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
 
@@ -1119,7 +1129,7 @@ impl AiosDBManager {
                         world_transform: (transform.rotation, transform.translation, Vec3::ONE),
                         generic_type: mgr.get_generic_type(refno),
                         ptset_map: default(),
-                        flow_pt_indexs: vec![]
+                        flow_pt_indexs: vec![],
                     };
                     let mut geo_insts = &mut geos_info.data;
 
@@ -1270,8 +1280,8 @@ impl AiosDBManager {
 
             println!("开始处理db: {db_no}");
             // let handle = tokio::spawn(async move {
-                Self::cache_cata_geos(mgr_clone, instance_mgr_clone.clone(), &project,
-                                      Some(vec![db_no]), &db_option_clone).await.unwrap();
+            Self::cache_cata_geos(mgr_clone, instance_mgr_clone.clone(), &project,
+                                  Some(vec![db_no]), &db_option_clone).await.unwrap();
             // });
             // handles.push(handle);
 
@@ -1281,8 +1291,8 @@ impl AiosDBManager {
                 let project = project.clone();
                 let mgr_clone = mgr.clone();
                 // let handle = tokio::spawn(async move {
-                    Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
-                    Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
+                Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
+                Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
                 // });
                 // handles.push(handle);
             }

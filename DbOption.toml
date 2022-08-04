@@ -26,3 +26,4 @@ types_multi_thread = true
 recreate_db = true
 replace_dbs = false
 gen_model_mesh = false
+arangodb_url = "http://localhost:8529"

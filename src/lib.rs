@@ -25,6 +25,7 @@ pub mod consts;
 pub mod options;
 pub mod helper;
 pub mod api;
+pub mod aql_api;
 pub mod data_interface;
 pub mod cata;
 pub mod ssc;

@@ -145,7 +145,7 @@ pub async fn query_children_id_name_with_type(refno: RefU64, att_type: &str, poo
     Ok(result)
 }
 
-/// 模糊查询 类型为 att_type ，name 中包含指定值的所有 refno和 name
+/// 模糊查询 类型为 att_type ，name 中包含指定值 的所有 refno和 name
 pub async fn fuzzy_query_refnos_by_name(att_type: String, name: String, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = vec![];
     let sql = gen_fuzzy_query_refnos_by_name_sql(att_type, name);
