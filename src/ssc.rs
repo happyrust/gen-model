@@ -68,20 +68,21 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>) -> anyhow::Result<
     let (zone_level_map, zone_name_map) = insert_set_ssc_node_sql(project_pool).await?;
     dbg!("SSC固定节点生成");
     let room_data = query_all_room_data(project_pool).await?;
-
-    let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
-    let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, project_pool).await;
-    if sqls.len() != 0 {
-        for (idx, sql) in sqls.into_iter().enumerate() {
-            let sql = format!("{} {}", insert_sql, sql);
-            let result = conn.execute(sql.as_str()).await;
-            match result {
-                Ok(_) => {
-                    println!("第 {} 条 sql 保存完成", idx);
-                }
-                Err(e) => {
-                    dbg!(sql);
-                    dbg!(&e);
+    if room_data.len() != 0 {
+        let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
+        let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, project_pool).await;
+        if sqls.len() != 0 {
+            for (idx, sql) in sqls.into_iter().enumerate() {
+                let sql = format!("{} {}", insert_sql, sql);
+                let result = conn.execute(sql.as_str()).await;
+                match result {
+                    Ok(_) => {
+                        println!("第 {} 条 sql 保存完成", idx);
+                    }
+                    Err(e) => {
+                        dbg!(sql);
+                        dbg!(&e);
+                    }
                 }
             }
         }
@@ -108,7 +109,6 @@ fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, Da
     let mut zones = vec![];
     while let Some(result) = iter.next() {
         let v: SiteExcelDataTest = result?;
-        dbg!(&v);
         // site 的 name 、code 、att_type
         if v.code.is_some() && v.name.is_some() && v.att_type.is_some() {
             // 当zone_code和当前读取的值不相等时，就代表不是同一个层级了 （第一次除外,所以加了个b_first 排除第一次的情况）
@@ -286,7 +286,7 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
                                             }
                                         }
                                     } else if divco_name.contains("支架") || divco_name.contains("设备") {
-                                        if under_zone_map.contains(&(pdms_under_zone_refno, room.name.clone())) {
+                                        if under_zone_map.contains(&(pdms_under_zone_refno, room.room_code.clone())) {
                                             let (_, insert_sql) = gen_insert_ssc_node_sql(room.refno, &room.noun,
                                                                                           pdms_under_zone_refno, &room.name, 0);
                                             sqls_clone.insert(insert_sql);
@@ -295,7 +295,7 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
                                                 let (_, insert_sql) = gen_insert_ssc_node_sql(pdms_under_zone_refno, &pdms_under_zone_ele.noun,
                                                                                               *zone_level_refno, &pdms_under_zone_ele.name, 0);
                                                 sqls_clone.insert(insert_sql);
-                                                under_zone_map.insert((pdms_under_zone_refno, room.name.clone()));
+                                                under_zone_map.insert((pdms_under_zone_refno, room.room_code.clone()));
                                                 let (_, insert_sql) = gen_insert_ssc_node_sql(room.refno, &room.noun,
                                                                                               pdms_under_zone_refno, &room.name, 0);
                                                 sqls_clone.insert(insert_sql);
@@ -303,7 +303,7 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
                                         }
                                     } else {
                                         if let Some(pdms_under_bran_refno) = zone_refnos.pop() {
-                                            if under_zone_map.contains(&(pdms_under_bran_refno, room.name.clone())) {
+                                            if under_zone_map.contains(&(pdms_under_bran_refno, room.room_code.clone())) {
                                                 let (_, insert_sql) = gen_insert_ssc_node_sql(room.refno, &room.noun,
                                                                                               pdms_under_bran_refno, &room.name, 0);
                                                 sqls_clone.insert(insert_sql);
@@ -312,7 +312,7 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
                                                     let (_, insert_sql) = gen_insert_ssc_node_sql(pdms_under_bran_refno, &pdms_under_bran_ele.noun,
                                                                                                   *zone_level_refno, &pdms_under_bran_ele.name, 0);
                                                     sqls_clone.insert(insert_sql);
-                                                    under_zone_map.insert((pdms_under_bran_refno, room.name.clone()));
+                                                    under_zone_map.insert((pdms_under_bran_refno, room.room_code.clone()));
                                                     let (_, insert_sql) = gen_insert_ssc_node_sql(room.refno, &room.noun,
                                                                                                   pdms_under_bran_refno, &room.name, 0);
                                                     sqls_clone.insert(insert_sql);
@@ -451,6 +451,12 @@ pub fn gen_insert_ssc_node_sql(refno: RefU64, type_name: &str, owner: RefU64, na
     sql.push_str(&format!("({},'{refno_str}','{type_name}',{},'{name}',{order_num}),", refno.0, owner.0));
 
     (RefU64(refno.0 + 1), sql)
+}
+
+pub fn gen_insert_ssc_node_sql_without_refno(type_name: &str, owner: RefU64, name: &str, real_pdms_refno: RefU64, order_num: usize) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("('{type_name}',{},'{name}',{},{order_num}),", real_pdms_refno.0, owner.0));
+    sql
 }
 
 /// 将refno有那些children存放在hashmap中

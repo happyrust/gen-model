@@ -88,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
     if db_option.total_sync {
         sync_pdms(&db_option).await.unwrap();
     }
+
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     if let Some(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file("./assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(cache_mesh);
@@ -95,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     //同步到图数据库
-    sync_graph_db(mgr.clone(), db_option.clone()).await?;
+    // sync_graph_db(mgr.clone(), db_option.clone()).await?;
 
     let b_recreate_ssc = db_option.rebuild_ssc_tree;
     if b_recreate_ssc {
