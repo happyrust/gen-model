@@ -21,8 +21,7 @@ const URL: &str = "http://localhost:8529";
 // #[cfg_attr(not(feature = "blocking"), tokio::main)]
 // #[cfg_attr(feature = "blocking", maybe_async::must_be_sync)]
 pub async fn sync_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<()> {
-
-    let conn = Connection::establish_jwt(URL, "root", "test")
+    let conn = Connection::establish_jwt(URL, "root", "")
         .await
         .unwrap();
 
@@ -47,7 +46,7 @@ pub async fn sync_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyh
                 let mut eles = vec![];
                 let mut edges = vec![];
                 for val in val_chunk {
-                    let refno= (val.get::<i64, _>("ID") as u64).into();
+                    let refno = (val.get::<i64, _>("ID") as u64).into();
                     let owner = (val.get::<i64, _>("OWNER") as u64).into();
                     //spref 的关系也要提前同步过来
                     //先只保存基本信息
@@ -56,7 +55,7 @@ pub async fn sync_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyh
                     let dbnum = val.get::<i32, _>("NUMBDB");
                     let refno_str = RefU64(refno).to_refno_normal_string();
                     let owner_str = RefU64(owner).to_refno_normal_string();
-                    let element = PdmsEleGraphNode{
+                    let element = PdmsEleGraphNode {
                         _key: refno_str.clone(),
                         owner: owner_str.clone(),
                         name,
@@ -64,7 +63,7 @@ pub async fn sync_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyh
                         version: 0,
                         dbnum,
                     };
-                    let edge = PdmsEleGraphEdge{
+                    let edge = PdmsEleGraphEdge {
                         _from: format!("{}/{refno_str}", &collection),
                         _to: format!("{}/{owner_str}", &collection),
                     };
@@ -100,8 +99,6 @@ pub async fn sync_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyh
             // }
 
             //CACHED_REFNO_BASIC_MAP
-
-
         }
         Err(e) => {
             dbg!(&e);
