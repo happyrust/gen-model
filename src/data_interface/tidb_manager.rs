@@ -112,6 +112,16 @@ pub struct AiosDBManager {
     cached_world_transforms_map: Arc<DashMap<RefU64, TransformRT>>,
 }
 
+// 数据接口实现
+impl AiosDBManager {
+
+
+    pub fn get_refno_from_site_zone_name(){
+
+    }
+
+}
+
 #[async_trait]
 impl PdmsDataInterface for AiosDBManager {
     /// 获得最全的数据
