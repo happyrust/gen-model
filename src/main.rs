@@ -96,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     //同步到图数据库
-    // sync_graph_db(mgr.clone(), db_option.clone()).await?;
+    sync_graph_db(mgr.clone(), db_option.clone()).await?;
 
     let b_recreate_ssc = db_option.rebuild_ssc_tree;
     if b_recreate_ssc {
