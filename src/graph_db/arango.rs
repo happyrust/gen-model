@@ -11,6 +11,7 @@ use aios_core::pdms_types::{PdmsElement, RefU64};
 use anyhow::anyhow;
 use futures::future::ok;
 use crate::api::element::query_mdb_dbnos;
+use crate::api::project_mdb::query_mdb_contain_numbdb;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode};
 use crate::helper::qualified_table_name;
@@ -21,11 +22,12 @@ pub const URL: &str = "http://localhost:8529";
 // #[cfg_attr(not(feature = "blocking"), tokio::main)]
 // #[cfg_attr(feature = "blocking", maybe_async::must_be_sync)]
 pub async fn sync_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<()> {
-    let conn = Connection::establish_jwt(URL, "root", "")
-        .await
-        .unwrap();
-
-    let database = conn.db("pdms").await.unwrap();
+    // let conn = Connection::establish_jwt(&mgr.arango_, "root", "")
+    //     .await
+    //     .unwrap();
+    //
+    // let database = conn.db("pdms").await.unwrap();
+    let database = mgr.arango_database.clone();
     let mut time = Instant::now();
     let project = &db_option.project_name;
     let mdb = &db_option.mdb_name;
@@ -33,7 +35,15 @@ pub async fn sync_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyh
 
     let default_conn = AiosDBManager::get_default_conn_str(&db_option);
     let pool = AiosDBManager::get_db_pool(&default_conn, project).await.unwrap();
-    let sql = format!("SELECT ID, OWNER, TYPE, NAME, NUMBDB  FROM {PDMS_ELEMENTS_TABLE}");
+    // 只保存 指定mdb的desi的numbdb
+    let numbdbs = query_mdb_contain_numbdb(&format!("/{}", db_option.mdb_name), &db_option.module, &pool).await?;
+    let mut numbdbs_sql = String::new();
+    for numbdb in numbdbs {
+        numbdbs_sql.push_str(&format!("{} ,", numbdb));
+    }
+    numbdbs_sql.remove(numbdbs_sql.len() - 1);
+
+    let sql = format!("SELECT ID, OWNER, TYPE, NAME, NUMBDB  FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB IN ({})", numbdbs_sql);
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     let collection = "pdms_eles";
     let pdms_edge_collection = "pdms_edges";

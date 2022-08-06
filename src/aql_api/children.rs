@@ -1,7 +1,14 @@
 use std::collections::HashMap;
-use aios_core::pdms_types::{PdmsElement, RefU64};
+use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
 use arangors_lite::{AqlQuery, Connection, Database};
 use crate::graph_db::arango::URL;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PdmsRefnoNameAql {
+    pub refno: String,
+    pub name: String,
+}
 
 /// todo 需要放到 RefU64的 成员方法中
 pub fn convert_refno_vec_from_vec_string(string_vec: Vec<String>) -> Vec<RefU64> {
@@ -24,20 +31,27 @@ pub async fn query_children_with_name_aql(arango_database: &Database, refno: Ref
         'name':z.name,
         }
     ").bind_var("id", refno_aql);
-    let mut result: Vec<HashMap<String, String>> = arango_database.aql_query(aql).await?;
-    for mut v in result {
-        if let Some(refno_url) = v.remove("refno") {
-            if let Some(refno) = RefU64::from_url_refno(refno_url) {
-                if let Some(name) = v.remove("name") {
-                    r.push((refno, name));
-                }
-            }
+    let mut result: Vec<PdmsRefnoNameAql> = arango_database.aql_query(aql).await?;
+    for v in result {
+        if let Some(refno) = RefU64::from_url_refno(v.refno) {
+            r.push((refno, v.name));
         }
     }
     Ok(r)
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct PdmsElementAql {
+    pub refno: String,
+    pub owner: String,
+    pub name: String,
+    pub noun: String,
+    pub version: u32,
+    pub children_count: usize,
+}
+
 pub async fn query_travel_children_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
+    let mut r = vec![];
     let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
     FOR z in 1..10 INBOUND @id pdms_edges
@@ -46,36 +60,57 @@ pub async fn query_travel_children_aql(arango_database: &Database, refno: RefU64
         'owner':z.owner,
         'name':z.name,
         'noun':z.noun,
+        'version':0,
+        'children_count':0,
     }
     ").bind_var("id", refno_aql);
-    let result: Vec<HashMap<String, String>> = arango_database.aql_query(aql).await?;
-    let r = convert_string_vec_to_pdms_ele(result);
+    let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
+    for v in result {
+        if let Some(refno) = RefU64::from_url_refno(v.refno) {
+            if RefU64::from_url_refno(v.owner.clone()).is_none() { continue; }
+            r.push(PdmsElement {
+                refno: refno.to_refno_string(),
+                owner: RefU64::from_url_refno(v.owner).unwrap(),
+                name: v.name,
+                noun: v.noun,
+                version: 0,
+                children_count: 0,
+            })
+        }
+    }
     Ok(r)
 }
 
-pub fn convert_string_vec_to_pdms_ele(mut input: Vec<HashMap<String, String>>) -> Vec<PdmsElement> {
-    let mut result = vec![];
-    for mut v in input {
-        let mut ele = PdmsElement::default();
-        if let Some(refno_url) = v.remove("refno") {
-            if let Some(refno) = RefU64::from_url_refno(refno_url) {
-                ele.refno = refno.to_refno_string();
-            }
+pub async fn query_travel_children_with_type_aql(arango_database: &Database, refno: RefU64, att_type: &str) -> anyhow::Result<Vec<EleTreeNode>> {
+    let mut r = vec![];
+    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let aql = AqlQuery::new("\
+    FOR z in 1..10 INBOUND @id pdms_edges
+    Filter z.noun == @noun
+    return {
+        'refno':z._key,
+        'owner':z.owner,
+        'name':z.name,
+        'noun':z.noun,
+        'version':0,
+        'children_count':0,
+    }")
+        .bind_var("id", refno_aql)
+        .bind_var("noun", att_type);
+    let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
+    for v in result {
+        if let Some(refno) = RefU64::from_url_refno(v.refno) {
+            if RefU64::from_url_refno(v.owner.clone()).is_none() { continue; }
+            r.push(EleTreeNode {
+                refno,
+                owner: RefU64::from_url_refno(v.owner).unwrap(),
+                name: v.name,
+                noun: v.noun,
+                children_count: 0,
+            })
         }
-        if let Some(owner_url) = v.remove("owner") {
-            if let Some(owner) = RefU64::from_url_refno(owner_url) {
-                ele.owner = owner;
-            }
-        }
-        if let Some(noun) = v.remove("noun") {
-            ele.noun = noun;
-        }
-        if let Some(name) = v.remove("name") {
-            ele.name = name;
-        }
-        result.push(ele);
     }
-    result
+    Ok(r)
 }
 
 pub async fn query_refno_from_site_zone_name(arango_database: &Database, site_name: String, zone_name: String, att_type: String) -> anyhow::Result<Vec<RefU64>> {
@@ -131,6 +166,9 @@ async fn test_query_travel_children_aql() -> anyhow::Result<()> {
     let result = query_travel_children_aql(&database, RefU64::from_refno_str("23584/5562").unwrap()).await?;
     dbg!(&result);
     dbg!(&result.len());
+    let r = query_travel_children_with_type_aql(&database,RefU64::from_refno_str("23584/5562").unwrap(),"FLAN").await?;
+    dbg!(&r);
+    dbg!(&r.len());
     Ok(())
 }
 

@@ -362,7 +362,7 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
     let mut insert_sql = String::new();
     let mut insert_sql_vec = vec![];
     let sqls = Arc::try_unwrap(sqls).unwrap();
-    println!("一个生成了 {} 个 SSC非固定节点", sqls.len());
+    println!("一共生成了 {} 个 SSC非固定节点", sqls.len());
     let mut i = 0;
     for sql in sqls {
         if i == 1000 {

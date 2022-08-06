@@ -1,11 +1,14 @@
 use std::collections::HashMap;
+use std::env;
 use aios_core::pdms_types::RefU64;
 use sqlx::{MySql, Pool, Row};
 use sqlx::Executor;
 use anyhow::Result;
 use futures::poll;
+use crate::api::children::query_numbdb_by_refno;
 use crate::consts::*;
 use crate::api::element::query_mdb_module_worlds;
+use crate::data_interface::tidb_manager::AiosDBManager;
 
 pub async fn insert_project_mdb(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<()> {
     let project_mdb = query_mdb_module_worlds(pool, info_pool).await?;
@@ -40,6 +43,18 @@ pub async fn query_world_data(mdb: &str, module: &str, pool: &Pool<MySql>) -> an
     Ok(result.get::<Vec<u8>, _>(0))
 }
 
+/// 查询 mdb 和module 包含了哪些 numdb
+pub async fn query_mdb_contain_numbdb(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<i32>> {
+    let mut r = vec![];
+    let numbdb_worlds = query_world_data(mdb, module, pool).await?;
+    let refnos = bincode::deserialize::<Vec<RefU64>>(&numbdb_worlds)?;
+    for refno in refnos {
+        let numbdb = query_numbdb_by_refno(refno, pool).await?;
+        r.push(numbdb);
+    }
+    Ok(r)
+}
+
 pub fn gen_insert_project_mdb_sql(mdbs: HashMap<String, HashMap<String, Vec<RefU64>>>) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("INSERT IGNORE INTO {PDMS_PROJECT_MDB_TABLE} (MDB_NAME,DB_TYPE,DATA) VALUES "));
@@ -71,4 +86,14 @@ fn gen_query_world_sql(mdb: &str, module: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT DATA FROM {PDMS_PROJECT_MDB_TABLE} WHERE MDB_NAME = '{}' and db_type = '{}' ;", mdb, module));
     sql
+}
+
+#[tokio::test]
+async fn test_query_mdb_contain_numbdb() -> anyhow::Result<()>{
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
+    let numbdbs = query_mdb_contain_numbdb("/SAMPLE","DESI",&pool).await?;
+    println!("{:?}",numbdbs);
+    Ok(())
 }
