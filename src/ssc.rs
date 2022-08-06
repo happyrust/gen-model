@@ -6,6 +6,7 @@ use std::mem::transmute;
 use std::sync::Arc;
 use aios_core::pdms_types::{AttrVal, EleTreeNode, RefU64, RefU64Vec};
 use anyhow::anyhow;
+use arangors_lite::Database;
 use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::{DashMap, DashSet};
 use futures::future::OkInto;
@@ -17,6 +18,7 @@ use sqlx::mysql::MySqlRow;
 use crate::api::children::*;
 use crate::api::element::*;
 use crate::api::ssc_data::*;
+use crate::aql_api::children::query_ancestor_till_type_aql;
 use crate::consts::PDMS_SSC_ELEMENTS_TABLE;
 use crate::tables;
 
@@ -54,7 +56,7 @@ pub struct RoomExcelData {
     pub 序号: Option<u32>,
 }
 
-pub async fn async_total_ssc_data(project_pool: &Pool<MySql>) -> anyhow::Result<()> {
+pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, arango_database: &Database) -> anyhow::Result<()> {
     let mut conn = project_pool.acquire().await?;
     // 创建 ssc 表
     let result = conn.execute(tables::gen_create_ssc_element_tables_sql().as_str()).await;
@@ -70,7 +72,7 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>) -> anyhow::Result<
     let room_data = query_all_room_data(project_pool).await?;
     if room_data.len() != 0 {
         let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
-        let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, project_pool).await;
+        let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, project_pool, arango_database).await;
         if sqls.len() != 0 {
             for (idx, sql) in sqls.into_iter().enumerate() {
                 let sql = format!("{} {}", insert_sql, sql);
@@ -199,7 +201,7 @@ pub async fn insert_set_ssc_node_sql(pool: &Pool<MySql>) -> anyhow::Result<(Dash
 
 /// 保存房间下的元件
 pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: DashMap<String, RefU64>,
-                                  zone_name_map: DashMap<String, String>, pool: &Pool<MySql>) -> Vec<String> {
+                                  zone_name_map: DashMap<String, String>, pool: &Pool<MySql>, arango_database: &Database) -> Vec<String> {
     let mut handles = vec![];
     let mut sqls = Arc::new(DashSet::new());
     let mut under_zone_map = Arc::new(DashSet::new());
@@ -219,10 +221,12 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
         let under_zone_map = under_zone_map.clone();
         let pool = pool.clone();
         let room = Arc::new(room_ori).clone();
+        let arango_database = arango_database.clone();
 
         let handle = tokio::spawn(async move {
             let room_name = format!("1{}", room.room_code); // 默认都是 1号机组
-            if let Ok(mut zone_refnos) = query_ancestor_refnos_till_type(room.refno, "ZONE", &pool).await {
+            if let Ok(Some(mut zone_refnos)) = query_ancestor_till_type_aql(&arango_database,room.refno, "ZONE").await {
+                // 想拿到 zone的参考号
                 if let Some(zone_refno) = zone_refnos.pop() {
                     let divco = get_zone_divco(zone_refno, &pool).await;
                     if divco != "" {

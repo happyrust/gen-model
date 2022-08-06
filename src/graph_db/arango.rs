@@ -41,6 +41,7 @@ pub async fn sync_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyh
     for numbdb in numbdbs {
         numbdbs_sql.push_str(&format!("{} ,", numbdb));
     }
+    // numbdbs_sql.push_str("250204 ,"); // 测试ssc ，该numbdb不在12.1里面
     numbdbs_sql.remove(numbdbs_sql.len() - 1);
 
     let sql = format!("SELECT ID, OWNER, TYPE, NAME, NUMBDB  FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB IN ({})", numbdbs_sql);
