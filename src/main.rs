@@ -96,16 +96,18 @@ async fn main() -> anyhow::Result<()> {
     }
 
     //同步到图数据库
-    dbg!("正在同步图数据库");
-    // sync_graph_db(mgr.clone(), db_option.clone()).await?;
-    dbg!("图数据库同步完成");
+    if db_option.rebuild_arangodb {
+        dbg!("正在同步图数据库");
+        sync_graph_db(mgr.clone(), db_option.clone()).await?;
+        dbg!("图数据库同步完成");
+    }
 
     let b_recreate_ssc = db_option.rebuild_ssc_tree;
     if b_recreate_ssc {
         dbg!("正在同步SSC");
         for project_db in mgr.project_map.iter() {
             // 保存ssc
-            async_total_ssc_data(&project_db.value(),&mgr.arango_database).await?;
+            async_total_ssc_data(&project_db.value(), &mgr.arango_database).await?;
         }
         dbg!("SSC同步完成");
     }
