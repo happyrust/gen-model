@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::env;
 use std::fmt::format;
 use aios_core::pdms_types::*;
+use arangors_lite::{Connection, Database};
 use calamine::Error::De;
 use dashmap::DashSet;
 use sqlx::{MySql, Pool, Row};
@@ -9,7 +10,9 @@ use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::api::element::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};
+use crate::aql_api::children::query_owner_with_type_aql;
 use crate::defines::{AiosString, CACHED_MDB_SITE_MAP};
+use crate::graph_db::arango::URL;
 
 /// 遍历该节点下的 children (包含自己)
 pub async fn travel_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
@@ -185,9 +188,9 @@ pub async fn query_ancestor_of_type(mut refno: RefU64, att_type: &str, pool: &Po
     Ok(Some(refno))
 }
 
-pub async fn query_ancestor_refnos_till_type(mut refno: RefU64, att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
+pub async fn query_ancestor_refnos_till_type(mut refno: RefU64, att_type: &str, database:&Database) -> anyhow::Result<Vec<RefU64>> {
     let mut result = vec![];
-    while let Some((owner_refno, owner_type)) = query_owner_type_from_id(refno, pool).await? {
+    while let Some((owner_refno, owner_type)) = query_owner_with_type_aql(database,refno).await? {
         result.push(refno);
         refno = owner_refno;
         if owner_type == att_type {
@@ -366,10 +369,12 @@ async fn test_query_contain_noun_refnos() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_ancestor_refnos_till_type() -> anyhow::Result<()> {
-    let _ = dotenv::dotenv();
-    let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let v = query_ancestor_refnos_till_type(RefI32Tuple((23584, 5454)).into(), "ZONE", &pool).await?;
+    let conn = Connection::establish_jwt(URL, "root", "")
+        .await
+        .unwrap();
+
+    let database = conn.db("pdms").await.unwrap();
+    let v = query_ancestor_refnos_till_type(RefI32Tuple((23584, 5454)).into(), "ZONE", &database).await?;
     println!("v={:?}", v);
     Ok(())
 }

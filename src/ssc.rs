@@ -2,25 +2,26 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::hash::Hash;
 use std::io::{Read, Write};
-use std::mem::{take, transmute};
+use std::mem::transmute;
 use std::sync::Arc;
-
 use aios_core::pdms_types::{AttrVal, EleTreeNode, RefU64, RefU64Vec};
 use anyhow::anyhow;
+use arangors_lite::Database;
 use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::{DashMap, DashSet};
 use futures::future::OkInto;
-use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use sqlx::{Acquire, Error, MySql, Pool, Row};
 use sqlx::Executor;
+use serde::{Serialize, Deserialize};
 use sqlx::mysql::MySqlRow;
-
 use crate::api::children::*;
 use crate::api::element::*;
 use crate::api::ssc_data::*;
+use crate::aql_api::children::query_ancestor_till_type_aql;
 use crate::consts::PDMS_SSC_ELEMENTS_TABLE;
 use crate::tables;
+
 
 /// site 和 zone 分类 excel 字段
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -55,7 +56,7 @@ pub struct RoomExcelData {
     pub 序号: Option<u32>,
 }
 
-pub async fn async_total_ssc_data(project_pool: &Pool<MySql>) -> anyhow::Result<()> {
+pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, arango_database: &Database) -> anyhow::Result<()> {
     let mut conn = project_pool.acquire().await?;
     // 创建 ssc 表
     let result = conn.execute(tables::gen_create_ssc_element_tables_sql().as_str()).await;
@@ -71,7 +72,7 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>) -> anyhow::Result<
     let room_data = query_all_room_data(project_pool).await?;
     if room_data.len() != 0 {
         let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
-        let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, project_pool).await;
+        let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, project_pool, arango_database).await;
         if sqls.len() != 0 {
             for (idx, sql) in sqls.into_iter().enumerate() {
                 let sql = format!("{} {}", insert_sql, sql);
@@ -198,19 +199,16 @@ pub async fn insert_set_ssc_node_sql(pool: &Pool<MySql>) -> anyhow::Result<(Dash
     Ok((zone_level_map, zone_name_map))
 }
 
-pub const SSC_INST_SUBJECT_NAMES: [&'static str; 3] = ["工艺支架", "仪表架", "仪表管支吊架"];
-
 /// 保存房间下的元件
 pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: DashMap<String, RefU64>,
-                                  zone_name_map: DashMap<String, String>, pool: &Pool<MySql>) -> Vec<String> {
-    let mut handles = vec![];
-    let mut nodes_sql = Arc::new(DashSet::new());
+                                  zone_name_map: DashMap<String, String>, pool: &Pool<MySql>, arango_database: &Database) -> Vec<String> {
+    // let mut handles = vec![];
+    let mut sqls = Arc::new(DashSet::new());
     let mut under_zone_map = Arc::new(DashSet::new());
     let mut special_under_zone_map: Arc<DashMap<String, RefU64>> = Arc::new(DashMap::new());
     let zone_name_map = Arc::new(zone_name_map);
     let zone_level_map = Arc::new(zone_level_map);
     let room_data_len = room_data.len();
-    dbg!(room_data_len);
     // 找到每个参考号的属于那个zone
     for (idx, room_ori) in room_data.into_iter().enumerate() {
         if room_ori.noun == "EQUI" {
@@ -219,26 +217,30 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
         let zone_name_map = zone_name_map.clone();
         let zone_level_map = zone_level_map.clone();
         let special_under_zone_map_clone = special_under_zone_map.clone();
-        let sqls_clone = nodes_sql.clone();
+        let sqls_clone = sqls.clone();
         let under_zone_map = under_zone_map.clone();
         let pool = pool.clone();
         let room = Arc::new(room_ori).clone();
+        let arango_database = arango_database.clone();
 
-        let handle = tokio::spawn(async move {
-            let room_name = format!("1{}", room.room_code); // 默认都是 1号机组
-            if let Ok(mut zone_refnos) = query_ancestor_refnos_till_type(room.refno, "ZONE", &pool).await {
-                if let Some(zone_refno) = zone_refnos.pop() {
-                    let divco = get_zone_divco(zone_refno, &pool).await;
-                    if divco.is_empty() { return ; }
+        // let handle = tokio::spawn(async move {
+        let room_name = format!("1{}", room.room_code); // 默认都是 1号机组
+        if let Ok(Some(mut zone_refnos)) = query_ancestor_till_type_aql(&arango_database, room.refno, "ZONE").await {
+            // 想拿到 zone的参考号
+            if let Some(zone_refno) = zone_refnos.pop() {
+                let divco = get_zone_divco(zone_refno, &pool).await;
+                if divco != "" {
                     // 找到专业属性对应的中文名称
                     if let Some(divco_name) = zone_name_map.get(&divco) {
                         let divco_name = divco_name.trim();
                         let room_divco_name = format!("{}_{}", room_name, divco_name);
+                        dbg!(&room_divco_name);
                         // 一个房间下只有一个专业的子类，所以直接通过name获取参考号
-                        if let Some(zone_level_refno) = zone_level_map.get(&room_divco_name)                             // 找到 pdms 树 zone 下的层级放到ssc下面
-                            && let Some(pdms_under_zone_refno) = zone_refnos.pop() {
+                        if let Some(zone_level_refno) = zone_level_map.get(&room_divco_name) {
+                            // 找到 pdms 树 zone 下的层级放到ssc下面
+                            if let Some(pdms_under_zone_refno) = zone_refnos.pop() {
                                 // 特殊处理 将zone下的节点拆成两层，房间号+流水号 和 type名
-                                if SSC_INST_SUBJECT_NAMES.contains(&divco_name) {
+                                if divco_name == "工艺支架" || divco_name == "仪表架" || divco_name == "仪表管支吊架" {
                                     if let Ok(pdms_under_zone_ele) = query_ele_node(pdms_under_zone_refno, &pool).await {
                                         // 找到 name 中房间的流水号
                                         if let Some(room_serial_number) = pdms_under_zone_ele.name.find('.') {
@@ -324,57 +326,58 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
                                     }
                                 }
                             }
-
+                        }
                     }
                 }
             }
-            // if sqls_clone.len() > 1000 {
-            //     let mut sql = String::new();
-            //     for s in sqls_clone.iter() {
-            //         sql.push_str(s.as_str());
-            //     }
-            //     sql.remove(sql.len() - 1);
-            //     let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
-            //     let sql = format!("{} {}", insert_sql, sql);
-            //     if let Ok(mut conn) = pool.acquire().await {
-            //         let result = conn.execute(sql.as_str()).await;
-            //         match result {
-            //             Ok(_) => {
-            //                 dbg!("保存成功");
-            //                 sqls_clone.clear();
-            //             }
-            //             Err(e) => {
-            //                 let path = format!("resource/{}", idx);
-            //                 if let Ok(mut file) = File::create(path) {
-            //                     if let Ok(_) = file.write(sql.as_bytes()) {
-            //                         sqls_clone.clear();
-            //                     }
-            //                 }
-            //                 dbg!(sql);
-            //                 dbg!(&e);
-            //             }
-            //         }
-            //     }
-            // }
-            println!("生成SSC,已生成 {} 总共 {} ", idx, room_data_len);
-        });
-        handles.push(handle);
+        }
+        if sqls_clone.len() > 100 {
+            let mut sql = String::new();
+            for s in sqls_clone.iter() {
+                sql.push_str(s.as_str());
+            }
+            sql.remove(sql.len() - 1);
+            let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, ORDER_NUM) VALUES ";
+            let sql = format!("{} {}", insert_sql, sql);
+            if let Ok(mut conn) = pool.acquire().await {
+                let result = conn.execute(sql.as_str()).await;
+                match result {
+                    Ok(_) => {
+                        dbg!("保存成功");
+                        sqls_clone.clear();
+                    }
+                    Err(e) => {
+                        let path = format!("resource/{}", idx);
+                        if let Ok(mut file) = File::create(path) {
+                            if let Ok(_) = file.write(sql.as_bytes()) {
+                                sqls_clone.clear();
+                            }
+                        }
+                        dbg!(sql);
+                        dbg!(&e);
+                    }
+                }
+            }
+        }
+        println!("生成SSC,已生成 {} 总共 {} ", idx, room_data_len);
+        // });
+        // handles.push(handle);
     }
-    futures::future::join_all(handles).await;
+    // futures::future::join_all(handles).await;
     let mut insert_sql = String::new();
     let mut insert_sql_vec = vec![];
-    // let sqls = Arc::try_unwrap(non_fixed_nodes).unwrap();
-    println!("一个生成了 {} 个 SSC非固定节点 sql 语句", nodes_sql.len());
+    let sqls = Arc::try_unwrap(sqls).unwrap();
+    println!("一共生成了 {} 个 SSC非固定节点", sqls.len());
     let mut i = 0;
-    let batch_insert_cnt = 1000;
-    for node_sql in nodes_sql.iter() {
-        if i % batch_insert_cnt == 0 {
+    for sql in sqls {
+        if i == 100 {
             if insert_sql.len() > 0 {
                 insert_sql.remove(insert_sql.len() - 1);
             }
-            insert_sql_vec.push(take(&mut insert_sql));
+            insert_sql_vec.push(insert_sql.clone());
+            insert_sql.clear();
         }
-        insert_sql.push_str(node_sql.as_str());
+        insert_sql.push_str(sql.as_str());
         i += 1;
     }
     // 把剩余不满1000的sqls放到vec中
@@ -382,7 +385,6 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
         insert_sql.remove(insert_sql.len() - 1);
     }
     insert_sql_vec.push(insert_sql.clone());
-    dbg!(insert_sql_vec.len());
     insert_sql_vec
 }
 
@@ -438,8 +440,7 @@ pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMa
     let mut zone_level_map = DashMap::new();
     let mut zone_name_map = DashMap::new();
     if let Ok(map) = get_room_info_from_excel() {
-        let (zone_level_map_r, zone_name_map_r) =
-            set_ssc_level_node(map, (three_refno, n_refno), two_level_refno, &mut sql)?;
+        let (zone_level_map_r, zone_name_map_r) = set_ssc_level_node(map, (three_refno, n_refno), two_level_refno, &mut sql)?;
         zone_level_map = zone_level_map_r;
         zone_name_map = zone_name_map_r;
     }
