@@ -438,7 +438,8 @@ pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMa
     let mut zone_level_map = DashMap::new();
     let mut zone_name_map = DashMap::new();
     if let Ok(map) = get_room_info_from_excel() {
-        let (zone_level_map_r, zone_name_map_r) = set_ssc_level_node(map, (three_refno, n_refno), two_level_refno, &mut sql)?;
+        let (zone_level_map_r, zone_name_map_r) =
+            set_ssc_level_node(map, (three_refno, n_refno), two_level_refno, &mut sql)?;
         zone_level_map = zone_level_map_r;
         zone_name_map = zone_name_map_r;
     }
