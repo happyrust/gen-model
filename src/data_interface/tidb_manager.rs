@@ -1309,6 +1309,10 @@ impl AiosDBManager {
             // Self::cache_pohe_geos(mgr.clone(), project).await?;
             // futures::future::join_all(take(&mut handles)).await;
             mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
+
+            //todo save to graph db
+
+
             instance_mgr.serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
 
             println!("{db_no} 生成完毕。");
