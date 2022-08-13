@@ -32,7 +32,7 @@ use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
 use aios_database::cata::resolve::parse_to_i32;
 use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
-use aios_database::graph_db::arango::sync_graph_db;
+use aios_database::graph_db::pdms_arango::sync_pdms_to_graph_db;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::gen_create_attr_info_tables_sql;
 
@@ -98,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     //同步到图数据库
     if db_option.rebuild_arangodb {
         dbg!("正在同步图数据库");
-        sync_graph_db(mgr.clone(), db_option.clone()).await?;
+        sync_pdms_to_graph_db(mgr.clone(), db_option.clone()).await?;
         dbg!("图数据库同步完成");
     }
 

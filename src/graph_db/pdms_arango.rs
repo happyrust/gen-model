@@ -17,11 +17,10 @@ use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
-pub const URL: &str = "http://localhost:8529";
 
-// #[cfg_attr(not(feature = "blocking"), tokio::main)]
-// #[cfg_attr(feature = "blocking", maybe_async::must_be_sync)]
-pub async fn sync_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<()> {
+
+// todo 改成多线程
+pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<()> {
     // let conn = Connection::establish_jwt(&mgr.arango_, "root", "")
     //     .await
     //     .unwrap();
@@ -48,7 +47,6 @@ pub async fn sync_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyh
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     let collection = "pdms_eles";
     let pdms_edge_collection = "pdms_edges";
-    let ssc_edge_collection = "ssc_edges";
     match results {
         Ok(vals) => {
             //需不需要按照db numbder 来分别去生成
@@ -97,19 +95,6 @@ pub async fn sync_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyh
                     .bind_var("edges", json);
                 let result: Vec<()> = database.aql_query(aql).await.unwrap();
             }
-
-            //db worlds
-            // let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
-            // let info_pool = AiosDBManager::get_db_pool(
-            //     &url, format!("PDMS_INFO_DB_{}", mgr.db_option.project_name.to_uppercase()).as_str()).await?;
-            // let pool = AiosDBManager::get_db_pool(&url, project).await?;
-            // let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
-            // let key_str = format!("/{mdb}");
-            // if mdb_dbnos_map.contains_key(&key_str) {
-            //     db_nos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned().unwrap_or_default();
-            // }
-
-            //CACHED_REFNO_BASIC_MAP
         }
         Err(e) => {
             dbg!(&e);

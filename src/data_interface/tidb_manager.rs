@@ -48,6 +48,7 @@ use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::AIOSAxisMap;
 use crate::defines::{AiosString, CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP, PDMS_ATT_MAP_CACHE};
+use crate::graph_db::pdms_inst_arango::sync_instance_to_graph_db;
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
@@ -1290,7 +1291,7 @@ impl AiosDBManager {
 
             println!("开始处理db: {db_no}");
             // let handle = tokio::spawn(async move {
-            Self::cache_cata_geos(mgr_clone, instance_mgr_clone.clone(), &project,
+            Self::cache_cata_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &project,
                                   Some(vec![db_no]), &db_option_clone).await.unwrap();
             // });
             // handles.push(handle);
@@ -1311,7 +1312,7 @@ impl AiosDBManager {
             mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
 
             //todo save to graph db
-
+            sync_instance_to_graph_db(mgr_clone.clone(), instance_mgr_clone.clone()).await?;
 
             instance_mgr.serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
 

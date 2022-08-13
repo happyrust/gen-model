@@ -8,12 +8,19 @@ pub struct PdmsEleGraphNode {
     pub noun: String,
     pub version: u32,
     pub dbnum: i32,
+    // pub has_instance: String,
     // pub attr_key: String,
     // pub children_count: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct PdmsEleGraphEdge {
+    pub _from: String,
+    pub _to: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct PdmsInstanceGraphEdge {
     pub _from: String,
     pub _to: String,
 }
