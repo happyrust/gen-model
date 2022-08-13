@@ -48,7 +48,6 @@ pub async fn sync_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyh
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     let collection = "pdms_eles";
     let pdms_edge_collection = "pdms_edges";
-    let ssc_edge_collection = "ssc_edges";
     match results {
         Ok(vals) => {
             //需不需要按照db numbder 来分别去生成

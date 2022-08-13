@@ -17,3 +17,12 @@ pub struct PdmsEleGraphEdge {
     pub _from: String,
     pub _to: String,
 }
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct SSCEleGraphNode {
+    pub _key: String,
+    pub owner: String,
+    pub name: String,
+    pub noun: String,
+    pub real_pdms_refno: String,
+}
