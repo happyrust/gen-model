@@ -85,7 +85,8 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     let mut time = Instant::now();
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
     init_info_database(&default_conn_str, &db_option.project_name).await?;
-    let pdms_info_pool = AiosDBManager::get_db_pool(&default_conn_str, &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name)).await?;
+    let pdms_info_pool = AiosDBManager::get_db_pool(&default_conn_str, &format!("{}_{}",
+                                                                                PDMS_INFO_DB, &db_option.project_name)).await?;
     let mut pdms_info_conn = pdms_info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
     for project in &db_option.included_projects {
