@@ -118,12 +118,7 @@ pub struct AiosDBManager {
 
 // 数据接口实现
 impl AiosDBManager {
-
-
-    pub fn get_refno_from_site_zone_name(){
-
-    }
-
+    pub fn get_refno_from_site_zone_name() {}
 }
 
 #[async_trait]
@@ -871,6 +866,7 @@ impl AiosDBManager {
                         }
                         let child_att = mgr.get_attr(child_refno).await.unwrap_or_default();
                         let mut geos_info = EleGeosInfo {
+                            _key: child_refno.to_refno_normal_string(),
                             data: vec![],
                             visible: true,
                             generic_type: mgr.get_generic_type(child_refno),
@@ -979,6 +975,7 @@ impl AiosDBManager {
                         level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(refno);
                     }
                     let mut geos_info = EleGeosInfo {
+                        _key: refno.to_refno_normal_string(),
                         data: vec![],
                         visible: true,
                         generic_type: mgr.get_generic_type(refno),
@@ -1135,6 +1132,7 @@ impl AiosDBManager {
                     let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
 
                     let mut geos_info = EleGeosInfo {
+                        _key:refno.to_refno_normal_string(),
                         data: vec![],
                         visible: true,
                         world_transform: (transform.rotation, transform.translation, Vec3::ONE),
@@ -1311,8 +1309,11 @@ impl AiosDBManager {
             // futures::future::join_all(take(&mut handles)).await;
             mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
 
-            //todo save to graph db
+            // 将 instance 保存到图数据库
+            dbg!("正在保存图数据库");
+            dbg!(&instance_mgr.inst_mgr.inst_map.len());
             sync_instance_to_graph_db(mgr_clone.clone(), instance_mgr_clone.clone()).await?;
+            dbg!("图数据库保存完成");
 
             instance_mgr.serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
 

@@ -69,7 +69,6 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, arango_database: &
     }
     dbg!("创建SSC表完成");
     let (zone_level_map, zone_name_map, next_refno) = insert_set_ssc_node_sql(project_pool).await?;
-    // set_arangodb_all_ssc_fixed_nodes(project_pool, arango_database).await?;
     dbg!("SSC固定节点生成");
     let room_data = query_all_room_data(project_pool).await?;
     if room_data.len() != 0 {
@@ -392,6 +391,7 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
 
 /// 设置 ssc 的固定节点
 pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
+    let mut next_refno = RefU64(0);
     let mut sql = String::new();
     let refno = RefU64(1);
     let mut owner_refno = RefU64(0);
@@ -437,12 +437,14 @@ pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMa
     sql.push_str(insert_sql.as_str());
     // 安装分区
     let (two_level_refno, insert_sql) = gen_insert_ssc_node_sql(one_level_refno, "SSC", one_n_refno, "安装分区", RefU64(0), 1);
+    next_refno = two_level_refno;
     sql.push_str(insert_sql.as_str());
     // 一号机组的子节点
     let mut zone_level_map = DashMap::new();
     let mut zone_name_map = DashMap::new();
     if let Ok(map) = get_room_info_from_excel() {
-        let (zone_level_map_r, zone_name_map_r, next_refno) = set_ssc_level_node(map, (three_refno, n_refno), two_level_refno, &mut sql)?;
+        let (zone_level_map_r, zone_name_map_r, next_refno_level) = set_ssc_level_node(map, (three_refno, n_refno), two_level_refno, &mut sql)?;
+        next_refno = next_refno_level;
         zone_level_map = zone_level_map_r;
         zone_name_map = zone_name_map_r;
     }
@@ -581,61 +583,7 @@ fn set_ssc_level_node(node_map: HashMap<String, BTreeMap<i32, Vec<String>>>, uni
     Ok((zone_level_map, zone_name_map, next_refno))
 }
 
-/// 将 ssc固定节点保存到图数据库（zone下面的层级除外）
-pub async fn set_arangodb_all_ssc_fixed_nodes(pool: &Pool<MySql>, database: &Database) -> anyhow::Result<()> {
-    let sql = gen_query_all_ssc_fixed_nodes_sql();
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
-    let collection = "ssc_eles";
-    let ssc_edge_collection = "ssc_edges";
-    for result_chunk in results.chunks(1000) {
-        let mut ssc_eles = vec![];
-        let mut ssc_ele_edges = vec![];
-        for val in result_chunk {
-            let refno = RefU64(val.get::<i64, _>("ID") as u64);
-            let owner = RefU64(val.get::<i64, _>("OWNER") as u64);
-            let name = val.get::<String, _>("NAME");
-            let type_name = val.get::<String, _>("TYPE");
-            let refno_str = RefU64::to_refno_normal_string(&refno);
-            let owner_str = RefU64::to_refno_normal_string(&owner);
-            let ssc_ele = SSCEleGraphNode {
-                _key: refno_str.clone(),
-                owner: owner_str.clone(),
-                name,
-                noun: type_name,
-                real_pdms_refno: "0/0".to_string(),
-            };
-            let edge = PdmsEleGraphEdge {
-                _from: format!("{}/{refno_str}", &collection),
-                _to: format!("{}/{owner_str}", &collection),
-            };
-            ssc_eles.push(ssc_ele);
-            ssc_ele_edges.push(edge);
-        }
-        let json = serde_json::to_value(&ssc_eles).unwrap();
-        let aql = AqlQuery::new("LET data = @elements
-                    FOR d IN data
-                        INSERT d INTO @@collection")
-            .bind_var("@collection", collection)
-            .bind_var("elements", json);
-        let _result: Vec<()> = database.aql_query(aql).await.unwrap();
 
-        let json = serde_json::to_value(&ssc_ele_edges).unwrap();
-        let aql = AqlQuery::new("LET data = @edges
-                    FOR d IN data
-                        INSERT d INTO @@collection")
-            .bind_var("@collection", ssc_edge_collection)
-            .bind_var("edges", json);
-        let _result: Vec<()> = database.aql_query(aql).await.unwrap();
-    }
-
-    Ok(())
-}
-
-fn gen_query_all_ssc_fixed_nodes_sql() -> String {
-    let mut sql = String::new();
-    sql.push_str(&format!("SELECT ID, OWNER, TYPE, NAME, REAL_PDMS_REFNO FROM PDMS_SSC_ELEMENTS WHERE REAL_PDMS_REFNO = 0"));
-    sql
-}
 
 
 #[test]

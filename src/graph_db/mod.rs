@@ -5,4 +5,4 @@ pub mod structs;
 pub mod ssc_arango;
 pub mod query;
 
-pub const URL: &str = "http://localhost:8529";
+pub const ARANGODB_URL: &str = "http://localhost:8529";

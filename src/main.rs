@@ -33,6 +33,7 @@ use aios_database::cata::resolve::parse_to_i32;
 use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::graph_db::pdms_arango::sync_pdms_to_graph_db;
+use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_fixed_nodes;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::gen_create_attr_info_tables_sql;
 
@@ -107,7 +108,8 @@ async fn main() -> anyhow::Result<()> {
         dbg!("正在同步SSC");
         for project_db in mgr.project_map.iter() {
             // 保存ssc
-            async_total_ssc_data(&project_db.value(), &mgr.arango_database).await?;
+            // async_total_ssc_data(&project_db.value(), &mgr.arango_database).await?;
+            set_arangodb_all_ssc_fixed_nodes(&project_db.value(), &mgr.arango_database).await?;
         }
         dbg!("SSC同步完成");
     }
