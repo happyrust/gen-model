@@ -18,8 +18,9 @@ use sqlx::mysql::MySqlRow;
 use crate::api::children::*;
 use crate::api::element::*;
 use crate::api::ssc_data::*;
-use crate::aql_api::children::query_ancestor_till_type_aql;
+use crate::aql_api::children::{query_ancestor_till_type_aql, query_travel_children_aql};
 use crate::consts::PDMS_SSC_ELEMENTS_TABLE;
+use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::structs::{PdmsEleGraphEdge, SSCEleGraphNode};
 use crate::tables;
 
@@ -57,7 +58,7 @@ pub struct RoomExcelData {
     pub 序号: Option<u32>,
 }
 
-pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, arango_database: &Database) -> anyhow::Result<()> {
+pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
     let mut conn = project_pool.acquire().await?;
     // 创建 ssc 表
     let result = conn.execute(tables::gen_create_ssc_element_tables_sql().as_str()).await;
@@ -72,8 +73,8 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, arango_database: &
     dbg!("SSC固定节点生成");
     let room_data = query_all_room_data(project_pool).await?;
     if room_data.len() != 0 {
-        let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ";
-        let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, next_refno, project_pool, arango_database).await;
+        let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
+        let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, next_refno, project_pool, mgr).await;
         if sqls.len() != 0 {
             for (idx, sql) in sqls.into_iter().enumerate() {
                 let sql = format!("{} {}", insert_sql, sql);
@@ -186,7 +187,7 @@ pub fn get_rooms_from_excel() -> anyhow::Result<Vec<String>> {
 
 /// 创建ssc固定节点
 pub async fn insert_set_ssc_node_sql(pool: &Pool<MySql>) -> anyhow::Result<(DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
-    let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ";
+    let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
     let (sql, zone_level_map, zone_name_map, next_refno) = set_ssc_node()?;
     let sql = format!("{}{}", insert_sql, sql);
     let mut conn = pool.acquire().await?;
@@ -201,33 +202,38 @@ pub async fn insert_set_ssc_node_sql(pool: &Pool<MySql>) -> anyhow::Result<(Dash
 }
 
 /// 保存房间下的元件
-pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: DashMap<String, RefU64>,
-                                  zone_name_map: DashMap<String, String>, next_refno: RefU64,
-                                  pool: &Pool<MySql>, arango_database: &Database) -> Vec<String> {
+pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zone_level_map: DashMap<String, RefU64>,
+                                  zone_name_map: DashMap<String, String>, mut next_refno: RefU64,
+                                  pool: &Pool<MySql>, mgr: Arc<AiosDBManager>) -> Vec<String> {
     // let mut handles = vec![];
     let mut sqls = Arc::new(DashSet::new());
-    let mut under_zone_map = Arc::new(DashSet::new());
+    let mut under_zone_map = DashMap::new();
+    // 工艺支架等特殊的层级  key: 专业下细分类名称 + 房间号.流水号 + "REST"/"STRU" value : fake_refno
     let mut special_under_zone_map: Arc<DashMap<String, RefU64>> = Arc::new(DashMap::new());
     let zone_name_map = Arc::new(zone_name_map);
     let zone_level_map = Arc::new(zone_level_map);
-    let room_data_len = room_data.len();
+    let mut room_data_len = room_data.len();
+    let mut undefined_zone_refno = DashSet::new();
     // 找到每个参考号的属于那个zone
-    for (idx, room_ori) in room_data.into_iter().enumerate() {
-        if room_ori.noun == "EQUI" {
+    for (idx, (_room_refno, room_ori)) in room_data.iter().enumerate() {
+        // let room_ori = room_ori.value();
+        if room_ori.noun == "EQUI" { continue; }
+        // 该房间号所在的zone没有对应的uda，直接跳过
+        if undefined_zone_refno.contains(&room_ori.refno.to_refno_string()) {
+            room_data_len -= 1;
             continue;
         }
+
         let zone_name_map = zone_name_map.clone();
         let zone_level_map = zone_level_map.clone();
         let special_under_zone_map_clone = special_under_zone_map.clone();
         let sqls_clone = sqls.clone();
-        let under_zone_map = under_zone_map.clone();
         let pool = pool.clone();
         let room = Arc::new(room_ori).clone();
-        let arango_database = arango_database.clone();
 
         // let handle = tokio::spawn(async move {
         let room_name = format!("1{}", room.room_code); // 默认都是 1号机组
-        if let Ok(Some(mut zone_refnos)) = query_ancestor_till_type_aql(&arango_database, room.refno, "ZONE").await {
+        if let Ok(mut zone_refnos) = query_ancestor_refnos_till_type(room.refno, "ZONE", &pool).await {
             // 想拿到 zone的参考号
             if let Some(zone_refno) = zone_refnos.pop() {
                 let divco = get_zone_divco(zone_refno, &pool).await;
@@ -243,40 +249,38 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
                                 // 特殊处理 将zone下的节点拆成两层，房间号+流水号 和 type名
                                 if divco_name == "工艺支架" || divco_name == "仪表架" || divco_name == "仪表管支吊架" {
                                     if let Ok(pdms_under_zone_ele) = query_ele_node(pdms_under_zone_refno, &pool).await {
-                                        // 找到 name 中房间的流水号
+                                        // zone下面 不为 STRU 和 REST 的直接跳过
+                                        if pdms_under_zone_ele.noun != "STRU" && pdms_under_zone_ele.noun != "REST" { continue; }
+                                        // 找到 name 中房间号+流水号
                                         if let Some(room_serial_number) = pdms_under_zone_ele.name.find('.') {
                                             let room_serial_name = pdms_under_zone_ele.name[room_serial_number - 4..room_serial_number + 4].to_string();
-                                            // let special_room_name = format!("{}_{}", room_serial_name, pdms_under_zone_ele.noun);
-                                            if let Some(special_refno) = special_under_zone_map_clone.get(&room_serial_name) {
+                                            if let Some(special_refno) = special_under_zone_map_clone.get(&format!("{}_{}_{}", divco, room_serial_name, pdms_under_zone_ele.noun)) {
                                                 // 房间层级
-                                                // STRU/REST层级 直接给两个默认的
-                                                if pdms_under_zone_ele.noun == "STRU" {
-                                                    let special_refno = RefU64(**special_refno + 100000);
-                                                    let (_, insert_sql) = gen_insert_ssc_node_sql(room.refno, &room.noun,
-                                                                                                  special_refno, &room.name, room.refno, 0);
-                                                    sqls_clone.insert(insert_sql);
-                                                } else if pdms_under_zone_ele.noun == "REST" {
-                                                    let special_refno = RefU64(**special_refno + 100001);
-                                                    let (_, insert_sql) = gen_insert_ssc_node_sql(room.refno, &room.noun,
-                                                                                                  special_refno, &room.name, room.refno, 0);
-                                                    sqls_clone.insert(insert_sql);
-                                                }
+                                                let (_, insert_sql) = gen_insert_ssc_node_sql(room.refno, &room.noun,
+                                                                                              *special_refno.value(), &room.name, room.refno, 0);
+                                                sqls_clone.insert(insert_sql);
                                             } else {
                                                 // 房间号+流水号层级
-                                                let (_, insert_sql) = gen_insert_ssc_node_sql(pdms_under_zone_refno, "SSC",
-                                                                                              *zone_level_refno, &room_serial_name, RefU64(0), 0);
+                                                let (next_refno_n, insert_sql) = gen_insert_ssc_node_sql(next_refno, "SSC",
+                                                                                                         *zone_level_refno, &room_serial_name, RefU64(0), 0);
+                                                // 房间号 + 流水号 参考号 ，STRU 和 REST 的 owner
+                                                let room_level_refno = next_refno;
                                                 sqls_clone.insert(insert_sql);
-                                                special_under_zone_map_clone.insert(room_serial_name, pdms_under_zone_refno);
-
+                                                next_refno = next_refno_n;
                                                 // STRU/REST层级 直接给两个默认的
-                                                let special_stru_refno = RefU64(*pdms_under_zone_refno + 100000); // 给的自定义参考号
-                                                let (_, insert_sql) = gen_insert_ssc_node_sql(special_stru_refno, "STRU",
-                                                                                              pdms_under_zone_refno, "STRU", RefU64(0), 0);
+                                                let (next_refno_n, insert_sql) = gen_insert_ssc_node_sql(next_refno, "STRU",
+                                                                                                         room_level_refno, "STRU", RefU64(0), 0);
                                                 sqls_clone.insert(insert_sql);
-                                                let special_rest_refno = RefU64(*pdms_under_zone_refno + 100001);
-                                                let (_, insert_sql) = gen_insert_ssc_node_sql(special_rest_refno, "REST",
-                                                                                              pdms_under_zone_refno, "REST", RefU64(0), 0);
+                                                special_under_zone_map_clone.insert(format!("{}_{}_{}", divco, room_serial_name, "STRU"), next_refno);
+                                                let special_stru_refno = next_refno;
+                                                next_refno = next_refno_n;
+
+                                                let (next_refno_n, insert_sql) = gen_insert_ssc_node_sql(next_refno, "REST",
+                                                                                                         room_level_refno, "REST", RefU64(0), 0);
                                                 sqls_clone.insert(insert_sql);
+                                                special_under_zone_map_clone.insert(format!("{}_{}_{}", divco, room_serial_name, "REST"), next_refno);
+                                                let special_rest_refno = next_refno;
+                                                next_refno = next_refno_n;
 
                                                 // 房间层级
                                                 if pdms_under_zone_ele.noun == "STRU" {
@@ -292,41 +296,55 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
                                         }
                                     }
                                 } else if divco_name.contains("支架") || divco_name.contains("设备") {
-                                    if under_zone_map.contains(&(pdms_under_zone_refno, room.room_code.clone())) {
+                                    if let Some(under_zone_refno) = under_zone_map.get(&format!("{}_{}", pdms_under_zone_refno.0, room.room_code.clone())) {
                                         let (_, insert_sql) = gen_insert_ssc_node_sql(room.refno, &room.noun,
-                                                                                      pdms_under_zone_refno, &room.name, room.refno, 0);
+                                                                                      *under_zone_refno, &room.name, room.refno, 0);
                                         sqls_clone.insert(insert_sql);
                                     } else {
                                         if let Ok(pdms_under_zone_ele) = query_ele_node(pdms_under_zone_refno, &pool).await {
-                                            let (_, insert_sql) = gen_insert_ssc_node_sql(pdms_under_zone_refno, &pdms_under_zone_ele.noun,
-                                                                                          *zone_level_refno, &pdms_under_zone_ele.name, RefU64(0), 0);
+                                            let (next_refno_n, insert_sql) = gen_insert_ssc_node_sql(next_refno, &pdms_under_zone_ele.noun,
+                                                                                                     *zone_level_refno, &pdms_under_zone_ele.name, RefU64(0), 0);
                                             sqls_clone.insert(insert_sql);
-                                            under_zone_map.insert((pdms_under_zone_refno, room.room_code.clone()));
+                                            under_zone_map.insert(format!("{}_{}", pdms_under_zone_refno.0, room.room_code.clone()), next_refno);
+
                                             let (_, insert_sql) = gen_insert_ssc_node_sql(room.refno, &room.noun,
-                                                                                          pdms_under_zone_refno, &room.name, room.refno, 0);
+                                                                                          next_refno, &room.name, room.refno, 0);
                                             sqls_clone.insert(insert_sql);
+                                            next_refno = next_refno_n;
                                         }
                                     }
                                 } else {
                                     if let Some(pdms_under_bran_refno) = zone_refnos.pop() {
-                                        if under_zone_map.contains(&(pdms_under_bran_refno, room.room_code.clone())) {
+                                        if let Some(under_bran_refno) = under_zone_map.get(&format!("{}_{}", pdms_under_bran_refno.0, room.room_code.clone())) {
                                             let (_, insert_sql) = gen_insert_ssc_node_sql(room.refno, &room.noun,
-                                                                                          pdms_under_bran_refno, &room.name, room.refno, 0);
+                                                                                          *under_bran_refno, &room.name, room.refno, 0);
                                             sqls_clone.insert(insert_sql);
                                         } else {
                                             if let Ok(pdms_under_bran_ele) = query_ele_node(pdms_under_bran_refno, &pool).await {
-                                                let (_, insert_sql) = gen_insert_ssc_node_sql(pdms_under_bran_refno, &pdms_under_bran_ele.noun,
-                                                                                              *zone_level_refno, &pdms_under_bran_ele.name, RefU64(0), 0);
+                                                let (next_refno_n, insert_sql) = gen_insert_ssc_node_sql(next_refno, &pdms_under_bran_ele.noun,
+                                                                                                         *zone_level_refno, &pdms_under_bran_ele.name, RefU64(0), 0);
                                                 sqls_clone.insert(insert_sql);
-                                                under_zone_map.insert((pdms_under_bran_refno, room.room_code.clone()));
+                                                under_zone_map.insert(format!("{}_{}", pdms_under_bran_refno.0, room.room_code.clone()), next_refno);
                                                 let (_, insert_sql) = gen_insert_ssc_node_sql(room.refno, &room.noun,
-                                                                                              pdms_under_bran_refno, &room.name, room.refno, 0);
+                                                                                              next_refno, &room.name, room.refno, 0);
                                                 sqls_clone.insert(insert_sql);
+                                                next_refno = next_refno_n;
                                             }
                                         }
                                     }
                                 }
                             }
+                        }
+                    }
+                } else {
+                    // 如果发现该zone下 :CNPE_divco 没有值，直接把整个zone下的refno全部移除
+                    if mgr.get_arangodb_conn().await.is_err() { continue; }
+                    let database = mgr.get_arangodb_conn().await.unwrap();
+                    if let Ok(children) = query_travel_children_aql(&database, zone_refno).await {
+                        let children_len = children.len();
+                        println!("删除不符合条件的 zone {:?} 下的所有参考号,共有{}条", zone_refno, children_len);
+                        for child in children.into_iter() {
+                            undefined_zone_refno.insert(child.refno);
                         }
                     }
                 }
@@ -338,7 +356,7 @@ pub async fn insert_ssc_room_node(room_data: Vec<SscEleNode>, zone_level_map: Da
                 sql.push_str(s.as_str());
             }
             sql.remove(sql.len() - 1);
-            let insert_sql = "INSERT IGNORE INTO PDMS_SSC_ELEMENTS (ID, REFNO, TYPE, OWNER, NAME,REAL_PDMS_REFNO,ORDER_NUM) VALUES ";
+            let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME,REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
             let sql = format!("{} {}", insert_sql, sql);
             if let Ok(mut conn) = pool.acquire().await {
                 let result = conn.execute(sql.as_str()).await;
@@ -584,8 +602,6 @@ fn set_ssc_level_node(node_map: HashMap<String, BTreeMap<i32, Vec<String>>>, uni
 }
 
 
-
-
 #[test]
 fn test_set_ssc_tree() {
     let sql = set_ssc_node().unwrap();
@@ -609,4 +625,13 @@ fn test_split_name() {
     let room_name = "R101";
     let room_split_name = room_name.split("-").collect::<Vec<_>>();
     println!("name={:?}", room_split_name.last());
+}
+
+#[test]
+fn test_foreach() {
+    let result = vec![1, 2, 3, 4, 5];
+    for r in result {
+        if r != 3 { continue; }
+        dbg!(r);
+    }
 }

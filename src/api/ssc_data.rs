@@ -32,7 +32,7 @@ pub struct SscEleNode {
 }
 
 /// 获取所有带有房间号的节点属性
-pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<Vec<SscEleNode>> {
+pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<HashMap<RefU64,SscEleNode>> {
     let sql = gen_query_all_room_data_sql();
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     let mut refno_room_map = DashMap::new();
@@ -45,22 +45,22 @@ pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<Vec<SscEl
         sqls.push(refno);
     }
     if let Ok(elenodes) = query_elenodes_without_children_count(sqls, &pool).await {
-        let mut result = vec![];
+        let mut result = HashMap::new();
         for ele in elenodes {
             if let Some(room_name) = refno_room_map.get(&ele.refno) {
-                result.push(SscEleNode {
+                result.insert(ele.refno,SscEleNode {
                     refno: ele.refno,
                     noun: ele.noun,
                     name: ele.name,
                     owner: ele.owner,
                     room_code: room_name.value().to_string(),
-                })
+                });
             }
         }
         println!("总共有{}房间元件", result.len());
         return Ok(result);
     }
-    Ok(vec![])
+    Ok(HashMap::default())
 }
 
 pub async fn query_ssc_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {

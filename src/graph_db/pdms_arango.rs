@@ -29,8 +29,6 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
     let database = mgr.arango_database.clone();
     let mut time = Instant::now();
     let project = &db_option.project_name;
-    let mdb = &db_option.mdb_name;
-    let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
 
     let default_conn = AiosDBManager::get_default_conn_str(&db_option);
     let pool = AiosDBManager::get_db_pool(&default_conn, project).await.unwrap();

@@ -14,6 +14,7 @@ use sqlx::Row;
 
 use crate::api::element::query_mdb_dbnos;
 use crate::api::project_mdb::query_mdb_contain_numbdb;
+use crate::aql_api::children::convert_refno_vec_from_vec_string;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::ARANGODB_URL;
@@ -82,13 +83,58 @@ pub async fn query_instance_with_refno_in_arangodb(refno: RefU64, database: &Dat
     Ok(Some(result))
 }
 
+pub async fn query_instance_level_with_refno_in_arangodb(refno: RefU64, database: &Database) -> anyhow::Result<Vec<RefU64>> {
+    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let pdms_instances = "pdms_instances";
+    let aql = AqlQuery::new("
+    FOR c IN 1..15 inbound @refno pdms_edges
+        PRUNE document(@collection,c._key) != null
+        Filter document(@collection,c._key) != null
+        let f = document(@collection,c._key)
+        return f._key")
+        .bind_var("refno", refno_aql)
+        .bind_var("collection", pdms_instances);
+    let result: Vec<String> = database.aql_query(aql).await.unwrap();
+    if result.is_empty() { return Ok(vec![]); }
+    let result = convert_refno_vec_from_vec_string(result);
+    Ok(result)
+}
+
+pub async fn query_instance_level_with_ssc_refno_in_arangodb(refno: RefU64, database: &Database) -> anyhow::Result<Vec<RefU64>> {
+    let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
+    let pdms_instances = "pdms_instances";
+    let aql = AqlQuery::new("
+    FOR c IN 1..20 inbound @refno ssc_edges
+        PRUNE document(@collection,c._key) != null
+        Filter document(@collection,c._key) != null
+        let f = document(@collection,c._key)
+        return f._key")
+        .bind_var("refno", refno_aql)
+        .bind_var("collection", pdms_instances);
+    let result: Vec<String> = database.aql_query(aql).await?;
+    if result.is_empty() { return Ok(vec![]); }
+    let result = convert_refno_vec_from_vec_string(result);
+    Ok(result)
+}
+
 #[tokio::test]
-async fn test_query_instance_with_refno_in_arangodb() -> anyhow::Result<()>{
+async fn test_query_instance_with_refno_in_arangodb() -> anyhow::Result<()> {
     let conn = Connection::establish_jwt(ARANGODB_URL, "root", "")
         .await
         .unwrap();
     let database = conn.db("pdms").await.unwrap();
-    let result = query_instance_with_refno_in_arangodb(RefU64::from_refno_str("23584/5441").unwrap(),&database).await?.unwrap();
+    let result = query_instance_with_refno_in_arangodb(RefU64::from_refno_str("23584/5441").unwrap(), &database).await?.unwrap();
+    dbg!(&result);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_instance_level_with_refno_in_arangodb() -> anyhow::Result<()> {
+    let conn = Connection::establish_jwt(ARANGODB_URL, "root", "")
+        .await
+        .unwrap();
+    let database = conn.db("pdms").await.unwrap();
+    let result = query_instance_level_with_refno_in_arangodb(RefU64::from_refno_str("23584/5441").unwrap(), &database).await?;
     dbg!(&result);
     Ok(())
 }

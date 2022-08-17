@@ -108,8 +108,8 @@ async fn main() -> anyhow::Result<()> {
         dbg!("正在同步SSC");
         for project_db in mgr.project_map.iter() {
             // 保存ssc
-            // async_total_ssc_data(&project_db.value(), &mgr.arango_database).await?;
-            set_arangodb_all_ssc_fixed_nodes(&project_db.value(), &mgr.arango_database).await?;
+            async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
+            // set_arangodb_all_ssc_fixed_nodes(&project_db.value(), &mgr.arango_database).await?;
         }
         dbg!("SSC同步完成");
     }

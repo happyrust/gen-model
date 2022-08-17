@@ -55,7 +55,6 @@ use crate::options::DbOption;
 pub const TUBI_TOL: f32 = 10.0f32;
 // pub const batch_size: usize = 50;
 
-
 pub type CateBrepShapeMap = DashMap<RefU64, Vec<CateBrepShape>>;
 // static GLOBAL_COLLISION_WORLD: Lazy<Mutex<CollisionWorld<f32, (RefU64, RefU64)>>> = Lazy::new(|| {
 //     let mut world = CollisionWorld::<f32, (RefU64, RefU64)>::new(0.001f32);
@@ -460,6 +459,14 @@ impl AiosDBManager {
                 |x| anyhow!(x.to_string())
             }
         )
+    }
+
+    #[inline]
+    pub async fn get_arangodb_conn(&self) -> anyhow::Result<Database> {
+        let conn = Connection::establish_jwt(&self.db_option.arangodb_url, "root", "")
+            .await?;
+
+        Ok(conn.db("pdms").await?)
     }
 
     pub fn gen_pool_from_refno(self, refno: RefU64) -> anyhow::Result<Option<Pool<MySql>>> {
@@ -1132,7 +1139,7 @@ impl AiosDBManager {
                     let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
 
                     let mut geos_info = EleGeosInfo {
-                        _key:refno.to_refno_normal_string(),
+                        _key: refno.to_refno_normal_string(),
                         data: vec![],
                         visible: true,
                         world_transform: (transform.rotation, transform.translation, Vec3::ONE),

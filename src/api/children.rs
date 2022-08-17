@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::env;
 use std::fmt::format;
+use std::sync::Arc;
 use aios_core::pdms_types::*;
 use arangors_lite::{Connection, Database};
 use calamine::Error::De;
@@ -188,9 +189,23 @@ pub async fn query_ancestor_of_type(mut refno: RefU64, att_type: &str, pool: &Po
     Ok(Some(refno))
 }
 
-pub async fn query_ancestor_refnos_till_type(mut refno: RefU64, att_type: &str, database:&Database) -> anyhow::Result<Vec<RefU64>> {
+pub async fn query_ancestor_refnos_till_type(mut refno: RefU64, att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
     let mut result = vec![];
-    while let Some((owner_refno, owner_type)) = query_owner_with_type_aql(database,refno).await? {
+    while let Some((owner_refno, owner_type)) = query_owner_type_from_id(refno, pool).await? {
+        result.push(refno);
+        refno = owner_refno;
+        if owner_type == att_type {
+            result.push(owner_refno);
+            break;
+        }
+    }
+    Ok(result)
+}
+
+pub async fn query_ancestor_refnos_till_type_aql(mut refno: RefU64, att_type: &str, mgr:Arc<AiosDBManager>) -> anyhow::Result<Vec<RefU64>> {
+    let database = mgr.get_arangodb_conn().await?;
+    let mut result = vec![];
+    while let Some((owner_refno, owner_type)) = query_owner_with_type_aql(&database,refno).await? {
         result.push(refno);
         refno = owner_refno;
         if owner_type == att_type {
@@ -374,7 +389,7 @@ async fn test_query_ancestor_refnos_till_type() -> anyhow::Result<()> {
         .unwrap();
 
     let database = conn.db("pdms").await.unwrap();
-    let v = query_ancestor_refnos_till_type(RefI32Tuple((23584, 5454)).into(), "ZONE", &database).await?;
+    let v = query_ancestor_refnos_till_type_aql(RefI32Tuple((23584, 5454)).into(), "ZONE", &database).await?;
     println!("v={:?}", v);
     Ok(())
 }
