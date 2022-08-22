@@ -1,15 +1,17 @@
 use std::env;
 use aios_core::pdms_types::{DataScope, DataScopeVec, DataState, DataStateVec, RefI32Tuple, RefU64};
+use arangors_lite::Database;
 use sqlx::{Error, Executor, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
 use crate::api::children::{travel_children_eles, travel_children_without_leaf};
+use crate::aql_api::children::query_travel_children_with_out_leaf_aql;
 use crate::consts::PDMS_DATA_STATE;
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 查找该节点下的所有子节点的data_state数据
-pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<DataStateVec> {
-    let refnos = travel_children_without_leaf(refno, pool).await?;
+pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>, arango_database: &Database) -> anyhow::Result<DataStateVec> {
+    let refnos = query_travel_children_with_out_leaf_aql(arango_database, refno).await?;
     let mut r = vec![];
     let sql = gen_query_refnos_state_sql(refnos);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
@@ -92,17 +94,6 @@ fn gen_insert_refnos_state_sql(vals: DataScopeVec, state: String) -> String {
     sql.push_str(";");
     sql
 }
-
-// fn gen_query_refnos_state_sql(refnos: Vec<RefU64>) -> String {
-//     let mut sql = String::new();
-//     let mut refnos_sql = String::new();
-//     for refno in refnos {
-//         refnos_sql.push_str(&format!("{} ,", refno.0));
-//     }
-//     refnos_sql.remove(refnos_sql.len() - 1);
-//     sql.push_str(&format!("SELECT * FROM {PDMS_DATA_STATE} WHERE ID IN ({})", refnos_sql));
-//     sql
-// }
 
 fn gen_query_refnos_state_sql(refnos: Vec<RefU64>) -> String {
     let mut sql = String::new();

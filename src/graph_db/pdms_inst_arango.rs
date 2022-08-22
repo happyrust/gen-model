@@ -14,10 +14,9 @@ use sqlx::Row;
 
 use crate::api::element::query_mdb_dbnos;
 use crate::api::project_mdb::query_mdb_contain_numbdb;
-use crate::aql_api::children::convert_refno_vec_from_vec_string;
+use crate::aql_api::convert_refno_vec_from_vec_string;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::ARANGODB_URL;
 use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode, PdmsInstanceGraphEdge};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;

@@ -13,7 +13,6 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};
 use crate::aql_api::children::query_owner_with_type_aql;
 use crate::defines::{AiosString, CACHED_MDB_SITE_MAP};
-use crate::graph_db::ARANGODB_URL;
 
 /// 遍历该节点下的 children (包含自己)
 pub async fn travel_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {

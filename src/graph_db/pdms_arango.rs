@@ -21,11 +21,6 @@ use crate::options::DbOption;
 
 // todo 改成多线程
 pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<()> {
-    // let conn = Connection::establish_jwt(&mgr.arango_, "root", "")
-    //     .await
-    //     .unwrap();
-    //
-    // let database = conn.db("pdms").await.unwrap();
     let database = mgr.arango_database.clone();
     let mut time = Instant::now();
     let project = &db_option.project_name;
@@ -103,3 +98,4 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
     println!("sync graph db costs: {}ms", time.elapsed().as_millis());
     Ok(())
 }
+
