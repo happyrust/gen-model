@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use itertools::Itertools;
-use aios_core::pdms_types::{AttrMap, AttrVal, CachedMeshesMgr, DbAttributeType, NounHash, PdmsDatabaseInfo, PdmsMeshInstanceMgr, RefI32Tuple, RefU64};
+use aios_core::pdms_types::{AttrMap, AttrVal, CachedMeshesMgr, DbAttributeType, EleGeosInfo, NounHash, PdmsDatabaseInfo, PdmsMeshInstanceMgr, PdmsMeshInstanceMgrOld, RefI32Tuple, RefU64, ShapeInstancesMgr};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_bin};
 use dashmap::DashMap;
@@ -32,8 +32,9 @@ use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
 use aios_database::cata::resolve::parse_to_i32;
 use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
-use aios_database::graph_db::pdms_arango::sync_pdms_to_graph_db;
-use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_fixed_nodes;
+use aios_database::graph_db::pdms_arango::{sync_foreign_refno_to_graph_db, sync_pdms_level_edges_to_graph_db, sync_pdms_to_graph_db};
+use aios_database::graph_db::pdms_inst_arango::sync_instance_to_graph_db;
+use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::gen_create_attr_info_tables_sql;
 
@@ -99,30 +100,68 @@ async fn main() -> anyhow::Result<()> {
     //同步到图数据库
     if db_option.rebuild_arangodb {
         dbg!("正在同步图数据库");
-        sync_pdms_to_graph_db(mgr.clone(), db_option.clone()).await?;
+        // sync_pdms_to_graph_db(mgr.clone(), db_option.clone()).await?;
+        // sync_pdms_level_edges_to_graph_db(mgr.clone()).await?;
+        sync_foreign_refno_to_graph_db(mgr.clone()).await?;
         dbg!("图数据库同步完成");
     }
 
-    let b_recreate_ssc = db_option.rebuild_ssc_tree;
-    if b_recreate_ssc {
+    if db_option.rebuild_ssc_tree {
         dbg!("正在同步SSC");
         for project_db in mgr.project_map.iter() {
             // 保存ssc
             // async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
-            set_arangodb_all_ssc_fixed_nodes(&project_db.value(), &mgr.arango_database).await?;
+            set_arangodb_all_ssc_nodes(&project_db.value(), &mgr.arango_database).await?;
         }
         dbg!("SSC同步完成");
     }
 
     if db_option.gen_model_mesh {
-        dbg!("正在生成模型");
-        let mut time = Instant::now();
-        AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
-        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+        // dbg!("正在生成模型");
+        // let mut time = Instant::now();
+        // AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
+        // println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+
+        // 将 instance 保存到图数据库
+        dbg!("正在保存图数据库");
+        let children_files = fs::read_dir("assets/instance/")?;
+        for path in children_files {
+            let path = path?.path();
+            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+            dbg!(&filename);
+            let mut file = fs::File::open(path)?;
+            let mut data = vec![];
+            file.read_to_end(&mut data)?;
+            let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgrOld>(&data)?;
+            let instance_mgr = Arc::new(change_instance_mgr_old_into_new(instance_mgr));
+            dbg!(&instance_mgr.inst_mgr.inst_map.len());
+            sync_instance_to_graph_db(mgr.clone(), instance_mgr).await?;
+        }
+        dbg!("图数据库保存完成");
     }
 
 
     Ok(())
+}
+
+fn change_instance_mgr_old_into_new(instance_mgr: PdmsMeshInstanceMgrOld) -> PdmsMeshInstanceMgr {
+    let inst_mgr = DashMap::new();
+    for (k, v) in instance_mgr.inst_mgr.inst_map {
+        inst_mgr.insert(k, EleGeosInfo {
+            _key: k.to_url_refno(),
+            data: v.data,
+            visible: v.visible,
+            generic_type: v.generic_type,
+            world_transform: v.world_transform,
+            ptset_map: v.ptset_map,
+            flow_pt_indexs: v.flow_pt_indexs,
+        });
+    }
+    let inst_mgr = ShapeInstancesMgr { inst_map: inst_mgr };
+    PdmsMeshInstanceMgr {
+        inst_mgr,
+        level_shape_mgr: instance_mgr.level_shape_mgr,
+    }
 }
 
 #[test]

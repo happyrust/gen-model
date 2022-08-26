@@ -89,11 +89,11 @@ fn gen_query_world_sql(mdb: &str, module: &str) -> String {
 }
 
 #[tokio::test]
-async fn test_query_mdb_contain_numbdb() -> anyhow::Result<()>{
+async fn test_query_mdb_contain_numbdb() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let numbdbs = query_mdb_contain_numbdb("/SAMPLE","DESI",&pool).await?;
-    println!("{:?}",numbdbs);
+    let numbdbs = query_mdb_contain_numbdb("/SAMPLE", "DESI", &pool).await?;
+    println!("{:?}", numbdbs);
     Ok(())
 }

@@ -107,16 +107,6 @@ fn gen_query_refnos_state_sql(refnos: Vec<RefU64>) -> String {
     sql
 }
 
-#[tokio::test]
-async fn test_query_refnos_state() -> anyhow::Result<()> {
-    let _ = dotenv::dotenv();
-    let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let refno: RefU64 = RefI32Tuple((23584, 1)).into();
-    let v = query_refnos_state(refno, &pool).await?;
-    dbg!(&v);
-    Ok(())
-}
 
 #[test]
 fn test_gen_query_refnos_state_sql() {

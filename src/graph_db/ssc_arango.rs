@@ -1,10 +1,10 @@
-use aios_core::pdms_types::RefU64;
+use aios_core::pdms_types::{EleGeosInfo, RefU64};
 use arangors_lite::{AqlQuery, Database};
 use sqlx::{MySql, Pool, Row};
 use crate::graph_db::structs::{PdmsEleGraphEdge, SSCEleGraphNode};
 
 /// 将 ssc固定节点保存到图数据库（zone下面的层级除外）
-pub async fn set_arangodb_all_ssc_fixed_nodes(pool: &Pool<MySql>, database: &Database) -> anyhow::Result<()> {
+pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &Database) -> anyhow::Result<()> {
     let sql = gen_query_all_ssc_fixed_nodes_sql();
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     let collection = "ssc_eles";
@@ -39,7 +39,7 @@ pub async fn set_arangodb_all_ssc_fixed_nodes(pool: &Pool<MySql>, database: &Dat
                         INSERT d INTO @@collection")
             .bind_var("@collection", collection)
             .bind_var("elements", json);
-        let _result: Vec<()> = database.aql_query(aql).await.unwrap();
+        let _result: Vec<()> = database.aql_query(aql).await?;
 
         let json = serde_json::to_value(&ssc_ele_edges).unwrap();
         let aql = AqlQuery::new("LET data = @edges
@@ -47,11 +47,37 @@ pub async fn set_arangodb_all_ssc_fixed_nodes(pool: &Pool<MySql>, database: &Dat
                         INSERT d INTO @@collection")
             .bind_var("@collection", ssc_edge_collection)
             .bind_var("edges", json);
-        let _result: Vec<()> = database.aql_query(aql).await.unwrap();
+        let _result: Vec<()> = database.aql_query(aql).await?;
     }
 
     Ok(())
 }
+
+/// 传入ssc参考号，返回该参考号下面的模型数据
+pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: &Database) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
+    let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
+    let pdms_instances = "pdms_instances";
+    let aql = AqlQuery::new("
+    FOR c IN 1..10 inbound @refno ssc_edges
+        PRUNE document(@collection,c._key) != null
+        Filter document(@collection,c._key) != null
+        let f = document(@collection,c._key)
+        return {
+            '_key':f._key,
+            'data':f.data,
+            'visible':f.visible,
+            'generic_type':f.generic_type,
+            'world_transform':f.world_transform,
+            'ptset_map':f.ptset_map,
+            'flow_pt_indexs':f.flow_pt_indexs
+        }")
+        .bind_var("refno", refno_aql)
+        .bind_var("collection", pdms_instances);
+    let result: Vec<EleGeosInfo> = database.aql_query(aql).await?;
+    if result.is_empty() { return Ok(None); }
+    Ok(Some(result))
+}
+
 
 fn gen_query_all_ssc_fixed_nodes_sql() -> String {
     let mut sql = String::new();

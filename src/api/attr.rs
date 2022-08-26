@@ -148,6 +148,27 @@ pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic, pool
     Ok(r)
 }
 
+/// 查找整张表的 外键 refno 返回自身 refno + foreign refno
+pub async fn query_foreign_refnos_from_table(noun: &str, table_name: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, RefU64)>> {
+    let mut r = vec![];
+    let sql = gen_query_value_from_table(noun, table_name);
+    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    match results {
+        Ok(results) => {
+            for result in results {
+                let refno = RefU64(result.get::<i64,_>("ID") as u64);
+                let foreign = RefU64(result.get::<i64, _>(noun) as u64);
+                r.push((refno,foreign));
+            }
+        }
+        Err(err) => {
+            dbg!(sql);
+            dbg!(err);
+        }
+    }
+    Ok(r)
+}
+
 pub async fn query_explicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
     let sql = gen_query_explicit_attr_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
@@ -289,6 +310,11 @@ fn gen_position_from_id(refno: RefU64, type_name: &str) -> String {
     sql
 }
 
+fn gen_query_value_from_table(noun: &str, table_name: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT ID , {} FROM {}", noun, table_name));
+    sql
+}
 
 #[tokio::test]
 async fn test_query_foreign_refno() -> anyhow::Result<()> {

@@ -56,4 +56,6 @@ pub struct DbOption {
     pub arangodb_url:String,
     #[clap(long)]
     pub rebuild_arangodb :bool,
+    #[clap(long)]
+    pub server_release_ip :String,
 }

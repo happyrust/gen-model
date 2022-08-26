@@ -380,15 +380,3 @@ async fn test_query_contain_noun_refnos() -> anyhow::Result<()> {
     println!("v={:?}", v);
     Ok(())
 }
-
-#[tokio::test]
-async fn test_query_ancestor_refnos_till_type() -> anyhow::Result<()> {
-    let conn = Connection::establish_jwt(ARANGODB_URL, "root", "")
-        .await
-        .unwrap();
-
-    let database = conn.db("pdms").await.unwrap();
-    let v = query_ancestor_refnos_till_type_aql(RefI32Tuple((23584, 5454)).into(), "ZONE", &database).await?;
-    println!("v={:?}", v);
-    Ok(())
-}
