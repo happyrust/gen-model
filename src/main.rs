@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
         dbg!("正在同步SSC");
         for project_db in mgr.project_map.iter() {
             // 保存ssc
-            // async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
+            async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
             set_arangodb_all_ssc_nodes(&project_db.value(), &mgr.arango_database).await?;
         }
         dbg!("SSC同步完成");
@@ -183,4 +183,19 @@ fn read_info_bin() {
     // if let Some(v) = info.get(&621602){
     //     dbg!(&v.value());
     // };
+}
+
+#[test]
+fn write_info_bin() -> anyhow::Result<()>{
+    // let hello_world = "hello_world";
+    // let mut data = bincode::serialize(&hello_world).unwrap_or(vec![]);
+    // let mut file = fs::File::create("hello_world.bin")?;
+    // file.write_all(&mut data)?;
+
+    let mut file = fs::File::open("hello_world.bin")?;
+    let mut result = vec![];
+    file.read_to_end(&mut result)?;
+    let data = bincode::deserialize::<&str>(&result)?;
+    dbg!(&data);
+    Ok(())
 }

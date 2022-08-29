@@ -201,10 +201,10 @@ pub async fn query_ancestor_refnos_till_type(mut refno: RefU64, att_type: &str, 
     Ok(result)
 }
 
-pub async fn query_ancestor_refnos_till_type_aql(mut refno: RefU64, att_type: &str, mgr:Arc<AiosDBManager>) -> anyhow::Result<Vec<RefU64>> {
+pub async fn query_ancestor_refnos_till_type_aql(mut refno: RefU64, att_type: &str, mgr: Arc<AiosDBManager>) -> anyhow::Result<Vec<RefU64>> {
     let database = mgr.get_arangodb_conn().await?;
     let mut result = vec![];
-    while let Some((owner_refno, owner_type)) = query_owner_with_type_aql(&database,refno).await? {
+    while let Some((owner_refno, owner_type)) = query_owner_with_type_aql(&database, refno).await? {
         result.push(refno);
         refno = owner_refno;
         if owner_type == att_type {
@@ -275,6 +275,19 @@ pub async fn query_contain_noun_refnos(noun: String, pool: &Pool<MySql>) -> anyh
     Ok(result)
 }
 
+/// 查找整张表的外键属性 返回值 ； 0 ： 自身 refno   1： 外键 refno
+pub async fn query_foreign_refnos_from_table(foreign_type: &str, table_name: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, RefU64)>> {
+    let mut result = Vec::new();
+    let sql = gen_query_foreign_refnos_from_table_sql(foreign_type, table_name);
+    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    for val in vals {
+        let refno = RefU64(val.get::<i64, _>("ID") as u64);
+        let foreign_refno = RefU64(val.get::<i64, _>(foreign_type) as u64);
+        result.push((refno, foreign_refno));
+    }
+    Ok(result)
+}
+
 
 fn gen_query_names_from_refnos_with_type_sql(refnos: Vec<RefU64>, att_type: String) -> String {
     let mut sql = String::new();
@@ -312,6 +325,11 @@ fn gen_query_names_from_refnos_with_name_sql(refnos: Vec<RefU64>, name: String) 
     sql
 }
 
+fn gen_query_foreign_refnos_from_table_sql(foreign_type: &str, table_name: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT ID,{} FROM {}", foreign_type, table_name));
+    sql
+}
 
 fn gen_query_children_id_name_with_type_sql(refno: RefU64, att_type: &str) -> String {
     let mut sql = String::new();

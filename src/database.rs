@@ -15,7 +15,7 @@ use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::tool::float_tool::f64_round_3;
 use anyhow::anyhow;
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use itertools::Itertools;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use parse_pdms_db::parse_file;
@@ -30,6 +30,8 @@ use crate::api::project_mdb::insert_project_mdb;
 use crate::api::ssc_data::SscEleNode;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::ForeignEdges;
+use crate::graph_db::pdms_arango::save_arangodb_with_db_option;
 use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
@@ -296,7 +298,6 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                     AttrVal::StringHashType(_) => {}
                 }
             } else {
-
                 if let Some(info) = info_map.get(&(**noun_hash as i32)) {
                     // todo 和上面的 math 合并为一个
 
@@ -347,7 +348,6 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                 } else {
                     table_vals_sql.push_str(r#"'unset',"#);
                 }
-
             }
         }
     }
@@ -358,6 +358,8 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
 }
 
 pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
+    let mut foreign_edges = vec![];
+    let mut foreign_edges_refnos = DashSet::new(); // 防止edges重复
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
@@ -393,9 +395,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
             if let Ok(Ok(PdmsDbData {
                              all_attr_map,
                              total_attr_map,
-                             ele_id_tree,
                              type_ele_map,
-                             refno_node_id_map,
                              refno_info_map,
                              children_map,
                              db_type,
@@ -403,6 +403,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                              field_no,
                              version,
                              room_code_map,
+                             foreign_refnos_map,
                              ..
                          })) = tokio::task::spawn_blocking(move || {
                 parse_file(&path, &None, &file_name, project_1.as_str(), "")
@@ -582,6 +583,24 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                         }
                     }
                 }
+                // 将外键属性保存到图数据库
+                for foreign_refnos in foreign_refnos_map.into_iter() {
+                    let refno = foreign_refnos.0;
+                    if foreign_edges_refnos.contains(&refno) { continue; }
+                    foreign_edges_refnos.insert(refno);
+                    for (foreign_type, foreign_refno) in foreign_refnos.1 {
+                        if foreign_refno == RefU64(0) { continue; }
+                        foreign_edges.push(ForeignEdges {
+                            _from: format!("{}/{}", "pdms_eles", refno.to_url_refno()),
+                            _to: format!("{}/{}", "pdms_eles", foreign_refno.to_url_refno()),
+                            foreign_type,
+                        })
+                    }
+                }
+                if foreign_edges.len() > 0 {
+                    let json = serde_json::to_value(&take(&mut foreign_edges))?;
+                    save_arangodb_with_db_option(json, &db_option, "foreign_edges").await.unwrap();
+                }
             }
         }
     }
@@ -591,6 +610,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
 #[test]
 fn test_db_hash() {
     let hash = db1_hash("UTYP");
-    let de_hash = db1_dehash(230902453);
+    let de_hash = db1_dehash(808220);
     dbg!(&de_hash);
 }
