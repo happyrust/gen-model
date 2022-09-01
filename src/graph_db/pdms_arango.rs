@@ -28,9 +28,9 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
     for project in &db_option.included_projects {
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         let pool = AiosDBManager::get_db_pool(&default_conn, project).await.unwrap();
-        let include_module = vec!["DESI", "CATA"];
+        let include_module = vec!["CATA"];
         for module in include_module {
-            let mut handles = vec![];
+            // let mut handles = vec![];
             // 只保存 指定mdb的desi的numbdb
             let numbdbs = query_mdb_contain_numbdb(&format!("/{}", db_option.mdb_name), module, &pool).await?;
             let mut numbdbs_sql = String::new();
@@ -73,26 +73,26 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
                             edges.push(edge);
                         }
                         let database_clone = mgr.get_arangodb_conn().await?;
-                        let handle = tokio::spawn(async move {
-                            let json = serde_json::to_value(&eles).unwrap();
-                            let aql = AqlQuery::new("LET data = @elements
+                        // let handle = tokio::spawn(async move {
+                        let json = serde_json::to_value(&take(&mut eles))?;
+                        let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection")
-                                .bind_var("@collection", collection)
-                                .bind_var("elements", json);
-                            let result: Vec<()> = database_clone.aql_query(aql).await.unwrap();
+                            .bind_var("@collection", collection)
+                            .bind_var("elements", json);
+                        let _result: Vec<()> = database_clone.aql_query(aql).await?;
 
-                            let json = serde_json::to_value(&edges).unwrap();
-                            let aql = AqlQuery::new("LET data = @edges
+                        let json = serde_json::to_value(&take(&mut edges))?;
+                        let aql = AqlQuery::new("LET data = @edges
                     FOR d IN data
                         INSERT d INTO @@collection")
-                                .bind_var("@collection", pdms_edge_collection)
-                                .bind_var("edges", json);
-                            let result: Vec<()> = database_clone.aql_query(aql).await.unwrap();
-                        });
-                        handles.push(handle);
+                            .bind_var("@collection", pdms_edge_collection)
+                            .bind_var("edges", json);
+                        let _result: Vec<()> = database_clone.aql_query(aql).await?;
+                        // });
+                        // handles.push(handle);
                     }
-                    futures::future::join_all(take(&mut handles)).await;
+                    // futures::future::join_all(take(&mut handles)).await;
                 }
                 Err(e) => {
                     dbg!(&e);
@@ -247,6 +247,7 @@ pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::
     save_arangodb(json, mgr.clone(), edges_collection).await?;
     Ok(())
 }
+
 
 pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &str) -> anyhow::Result<()> {
     let database = mgr.get_arangodb_conn().await?;

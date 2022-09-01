@@ -28,6 +28,7 @@ use crate::{ATTR_INFO_MAP, options, tables};
 use crate::api::element::*;
 use crate::api::project_mdb::insert_project_mdb;
 use crate::api::ssc_data::SscEleNode;
+use crate::aql_api::PdmsPLINAttrAql;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::ForeignEdges;
@@ -358,8 +359,8 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
 }
 
 pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
-    let mut foreign_edges = vec![];
-    let mut foreign_edges_refnos = DashSet::new(); // 防止edges重复
+    // let mut foreign_edges = vec![];
+    // let mut foreign_edges_refnos = DashSet::new(); // 防止edges重复
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
@@ -412,7 +413,11 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 let total_attr_map_arc = Arc::new(total_attr_map);
                 let children_map_arc = Arc::new(children_map);
                 let mut type_handles = vec![];
+                // 单独保存plin
+                save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+
                 for (type_hash, type_refnos) in type_ele_map {
+                    continue;
                     let info_pool_clone = info_pool.clone();
                     let filename_clone = file_name_clone.clone();
                     let project_clone = project.clone();
@@ -563,45 +568,69 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
 
                 let mut project_conn = pool.acquire().await.unwrap();
                 // 将带有 room_code 属性的保存下来
-                if !db_option.only_rebuild_pdms_element {
-                    for (room_name, refnos) in room_code_map.clone() {
-                        let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
-                        for refno in refnos.clone() {
-                            room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
-                        }
-                        room_code_sql.remove(room_code_sql.len() - 1);
-                        if is_replace {
-                            room_code_sql = room_code_sql.replace("INSERT IGNORE", "REPLACE");
-                        }
-                        let result = project_conn.execute(room_code_sql.as_str()).await;
-                        match result {
-                            Ok(_) => {}
-                            Err(e) => {
-                                dbg!(&e);
-                                dbg!(room_code_sql.as_str());
-                            }
-                        }
-                    }
-                }
+                // if !db_option.only_rebuild_pdms_element {
+                //     for (room_name, refnos) in room_code_map.clone() {
+                //         let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                //         for refno in refnos.clone() {
+                //             room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
+                //         }
+                //         room_code_sql.remove(room_code_sql.len() - 1);
+                //         if is_replace {
+                //             room_code_sql = room_code_sql.replace("INSERT IGNORE", "REPLACE");
+                //         }
+                //         let result = project_conn.execute(room_code_sql.as_str()).await;
+                //         match result {
+                //             Ok(_) => {}
+                //             Err(e) => {
+                //                 dbg!(&e);
+                //                 dbg!(room_code_sql.as_str());
+                //             }
+                //         }
+                //     }
+                // }
+
                 // 将外键属性保存到图数据库
-                for foreign_refnos in foreign_refnos_map.into_iter() {
-                    let refno = foreign_refnos.0;
-                    if foreign_edges_refnos.contains(&refno) { continue; }
-                    foreign_edges_refnos.insert(refno);
-                    for (foreign_type, foreign_refno) in foreign_refnos.1 {
-                        if foreign_refno == RefU64(0) { continue; }
-                        foreign_edges.push(ForeignEdges {
-                            _from: format!("{}/{}", "pdms_eles", refno.to_url_refno()),
-                            _to: format!("{}/{}", "pdms_eles", foreign_refno.to_url_refno()),
-                            foreign_type,
-                        })
-                    }
-                }
-                if foreign_edges.len() > 0 {
-                    let json = serde_json::to_value(&take(&mut foreign_edges))?;
-                    save_arangodb_with_db_option(json, &db_option, "foreign_edges").await.unwrap();
-                }
+                // for foreign_refnos in foreign_refnos_map.into_iter() {
+                //     let refno = foreign_refnos.0;
+                //     if foreign_edges_refnos.contains(&refno) { continue; }
+                //     foreign_edges_refnos.insert(refno);
+                //     for (foreign_type, foreign_refno) in foreign_refnos.1 {
+                //         if foreign_refno == RefU64(0) { continue; }
+                //         foreign_edges.push(ForeignEdges {
+                //             _from: format!("{}/{}", "pdms_eles", refno.to_url_refno()),
+                //             _to: format!("{}/{}", "pdms_eles", foreign_refno.to_url_refno()),
+                //             foreign_type,
+                //         })
+                //     }
+                //     // dbg!(&cache_data.finished);
+                // }
+                // if foreign_edges.len() > 0 {
+                //     let json = serde_json::to_value(&take(&mut foreign_edges))?;
+                //     save_arangodb_with_db_option(json, &db_option, "foreign_edges").await?;
+                // }
             }
+        }
+    }
+    Ok(())
+}
+
+/// 将部分type的数据单独保存到图数据库中
+async fn save_plin_attr_arangodb(db_option: &DbOption, type_ele_map: &DashMap<u32,
+    HashSet<RefU64>>, total_attr_map: &DashMap<RefU64, WholeAttMap>) -> anyhow::Result<()> {
+    let mut refno_attrs = vec![];
+    if let Some(refnos) = &type_ele_map.get(&db1_hash("PLIN")) {
+        for refno in refnos.value() {
+            let whole_attr = total_attr_map.get(refno);
+            if whole_attr.is_none() { continue; }
+            // 暂时只要 p_key 和 plaxis
+            refno_attrs.push(PdmsPLINAttrAql {
+                _key: refno.to_url_refno(),
+                attr: whole_attr.unwrap().clone().change_implicit_explicit_into_attr(),
+            })
+        }
+        if refno_attrs.len() > 0 {
+            let json = serde_json::to_value(&take(&mut refno_attrs))?;
+            save_arangodb_with_db_option(json, &db_option, "plin_eles").await?;
         }
     }
     Ok(())

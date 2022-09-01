@@ -1317,10 +1317,10 @@ impl AiosDBManager {
             mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
 
             // 将 instance 保存到图数据库
-            dbg!("正在保存图数据库");
-            dbg!(&instance_mgr.inst_mgr.inst_map.len());
-            sync_instance_to_graph_db(mgr_clone.clone(), instance_mgr_clone.clone()).await?;
-            dbg!("图数据库保存完成");
+            // dbg!("正在保存图数据库");
+            // dbg!(&instance_mgr.inst_mgr.inst_map.len());
+            // sync_instance_to_graph_db(mgr_clone.clone(), instance_mgr_clone.clone()).await?;
+            // dbg!("图数据库保存完成");
 
             instance_mgr.serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
 

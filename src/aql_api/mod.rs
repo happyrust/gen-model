@@ -1,24 +1,34 @@
-use aios_core::pdms_types::{PdmsElement, RefU64};
+use aios_core::pdms_types::{AttrMap, PdmsElement, RefU64};
 use serde::{Serialize, Deserialize};
 
 pub mod children;
 pub mod ssc_children;
 pub mod query_transform;
+pub mod foreign_refnos;
+pub mod plin_attr;
+
+/// 存放在图数据库的attr
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PdmsPLINAttrAql {
+    // 参考号的 url 形式
+    pub _key: String,
+    pub attr: AttrMap,
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub (crate) struct PdmsRefnoNameAql {
+pub(crate) struct PdmsRefnoNameAql {
     pub refno: String,
     pub name: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub (crate) struct PdmsRefnoTypeAql {
+pub(crate) struct PdmsRefnoTypeAql {
     pub refno: String,
     pub noun: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub (crate) struct PdmsElementAql {
+pub(crate) struct PdmsElementAql {
     pub refno: String,
     pub owner: String,
     pub name: String,
