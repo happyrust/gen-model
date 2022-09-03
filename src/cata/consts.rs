@@ -1,4 +1,12 @@
-pub const BANG_TYPES: [&'static str; 5] = [
+// has posl attribute
+pub const FITTING_TYPES:  [&'static str; 2] = [
+    "CMPF",
+    "FITT",
+];
+
+
+
+pub const BANG_WIT_EXTRU_TYPES: [&'static str; 5] = [
     "GENSEC",
     // "SJOI",
     // "PAVE",

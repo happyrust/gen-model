@@ -75,7 +75,8 @@ async fn test_get_att() -> anyhow::Result<()> {
 
 #[test]
 fn test_hash() {
-    dbg!(db1_dehash(612916));
+    // dbg!(db1_dehash(612916));
+    println!(db1_dehash(0xDEAF1));
 }
 
 #[tokio::main]
