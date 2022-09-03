@@ -88,7 +88,6 @@ async fn query_plin_attrs_with_refnos(refnos: Vec<RefU64>, database: &Database) 
     refnos.into_iter().for_each(|refno| {
         children.push(RefU64::to_url_refno(&refno))
     });
-    // let json = serde_json::to_string(&children).unwrap_or("[]".to_string());
     let aql = AqlQuery::new("
     let data = @element
     for v in data

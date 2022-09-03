@@ -12,7 +12,7 @@ use std::time::Instant;
 use aios_core::consts::*;
 use aios_core::pdms_types::{AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec};
 use aios_core::pdms_types::AttrVal::StringType;
-use aios_core::tool::db_tool::{db1_dehash, db1_hash};
+use aios_core::tool::db_tool::{convert_to_hash, db1_dehash, db1_hash};
 use aios_core::tool::float_tool::f64_round_3;
 use anyhow::anyhow;
 use arangors_lite::collection::CollectionType::Document;
@@ -33,7 +33,7 @@ use crate::aql_api::PdmsPLINAttrAql;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{ForeignEdges, ParaDocument};
-use crate::graph_db::pdms_arango::{save_arangodb_with_db_option, save_arangodb_with_db_option_create_collection};
+use crate::graph_db::pdms_arango::{save_arangodb_with_db_option, save_arangodb_with_db_option_create_collection, save_dtse_value_to_arangodb};
 use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
@@ -172,9 +172,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         dbg!("执行多线程解析");
         sync_total_async_threaded(&db_option, project, project_pool.clone(),
                                   pdms_info_pool.clone()).await.expect("同步数据失败");
-        if !db_option.only_rebuild_pdms_element {
-            insert_project_mdb(&project_pool, &pdms_info_pool).await?;
-        }
+        // if !db_option.only_rebuild_pdms_element {
+        //     insert_project_mdb(&project_pool, &pdms_info_pool).await?;
+        // }
     }
 
     println!("创建表花费时间: {} ms", create_tables_elapse);
@@ -414,10 +414,15 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 let total_attr_map_arc = Arc::new(total_attr_map);
                 let children_map_arc = Arc::new(children_map);
                 let mut type_handles = vec![];
-                // 单独保存plin
-                save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
-                // 将 para 和 des_para保存的图数据库中
-                save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
+                // 将部分数据保存到图数据库
+                {
+                    // 单独保存plin
+                    // save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                    // 将 para 和 des_para保存的图数据库中
+                    // save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
+                    // 将 dtse下的data部分数据保存到图数据库
+                    save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                }
                 for (type_hash, type_refnos) in type_ele_map {
                     continue;
                     let info_pool_clone = info_pool.clone();
@@ -670,6 +675,7 @@ async fn save_paras_into_arangodb(db_option: &DbOption, total_attr_map: &DashMap
 #[test]
 fn test_db_hash() {
     let hash = db1_hash("UTYP");
-    let de_hash = db1_dehash(808220);
+    let hash = convert_to_hash(&0xFFF32DCC_u32.to_be_bytes());
+    let de_hash = db1_dehash(hash);
     dbg!(&de_hash);
 }
