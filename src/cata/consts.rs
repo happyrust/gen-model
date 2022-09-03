@@ -1,3 +1,11 @@
+// has posl attribute
+pub const FITTING_TYPES:  [&'static str; 2] = [
+    "CMPF",
+    "FITT",
+];
+
+
+
 pub const BANG_WIT_EXTRU_TYPES: [&'static str; 5] = [
     "GENSEC",
     // "SJOI",
@@ -9,7 +17,7 @@ pub const BANG_WIT_EXTRU_TYPES: [&'static str; 5] = [
     // "CWBRAN",
     "SCTN",
     // "CMPF",
-    // "FITT",
+    // "FITT",  //todo
     // "SUBJ",
     // "SEVE",
     // "SCOJ",

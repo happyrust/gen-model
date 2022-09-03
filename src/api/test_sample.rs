@@ -1,6 +1,7 @@
 use std::env;
 use std::time::Instant;
 use aios_core::pdms_types::{RefI32Tuple, RefU64};
+use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use sqlx::{MySql, Pool};
 use crate::api::attr;
 use crate::api::element::*;
@@ -19,6 +20,46 @@ pub async fn get_test_info_pool() -> Pool<MySql> {
     AiosDBManager::get_db_pool(&conn_str, PDMS_INFO_DB).await.unwrap()
 }
 
+#[test]
+fn test_hash_name() {
+    // dbg!(db1_dehash(0xF8BEF));
+    println!("{}",db1_dehash(0x0009CCA7));
+    println!("{}",db1_dehash(0x000853B1));
+    println!("{}",db1_dehash(0xDEAF1));
+    println!("{}",db1_dehash(0xC89B3));
+    println!("{}",db1_dehash(0x000E088A));
+    println!("{}",db1_dehash(0x0009DBA0));
+
+    println!("{}",db1_dehash(0xE579A));
+    // println!("{}",db1_dehash(0x9CCA7));
+    // println!("{}",db1_dehash(0xAD7E9));
+    // println!("{}",db1_dehash(0xAFBC1));
+    // println!("{}",db1_dehash(0xB24CB));
+    // println!("{}",db1_dehash(0xAE264));
+    // println!("{}",db1_dehash(0x9C628));
+    // println!("{}",db1_dehash(0xDFA92));
+    // println!("{}",db1_dehash(0xAE264));
+    println!("{}",db1_dehash(0x9BBDAC));
+    println!("{}",db1_dehash(0x82DA0));
+    println!("{}",db1_dehash(0x81C1A));
+    // println!("{}",db1_dehash(0xB47E7));
+    // println!("{}",db1_dehash(0x0A5E21));
+    //
+    // println!("{}",db1_dehash(0x9CCA7));
+    //
+    // println!("{}",db1_dehash(0x557F908));
+    // println!("{}",db1_dehash(0x9D165));
+    //
+    // println!("{}",db1_dehash(0x97BC1));
+    // println!("{}",db1_dehash(0xAFBC4));
+    // println!("{}",db1_dehash(0xB47EA));
+    println!("{}", db1_hash("DBWRIT"));
+}
+
+#[test]
+fn test_function() {
+    
+}
 
 #[cfg(test)]
 mod tests {

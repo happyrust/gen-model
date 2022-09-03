@@ -1,14 +1,19 @@
 use std::collections::{BTreeMap, HashMap};
+use std::default::default;
 use std::ops::Neg;
+use std::sync::Arc;
 use aios_core::parsed_data::{CateAxisParam, GmseParamData};
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::pdms_data::{AxisParam, GmParam, ScomInfo};
 use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
+use glam::Vec3;
 use smol_str::SmolStr;
 use crate::cata::query_cata::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
 use crate::cata::resolve_helper::*;
+use crate::data_interface::interface::PdmsDataInterface;
+use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 求解axis的数值, 得到 {num:  }
 pub fn resolve_axis_params(
@@ -34,7 +39,7 @@ pub fn resolve_gms(
         .iter()
         .filter_map(|g| {
             if g.visible_flag {
-                if g.gm_type == SmolStr::new("SPRO") && g.verts.len() == 0 {
+                if g.gm_type == ("SPRO") && g.verts.len() == 0 {
                     return None;
                 }
                 let r = resolve_paragon_gm_params(&g, context, axis_params);
@@ -60,15 +65,83 @@ pub fn resolve_paragon_gm_params(
     context: &BTreeMap<SmolStr, SmolStr>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
 ) -> anyhow::Result<CateGeoParam> {
-    // if gm_param.refno != RefU64::from_two_nums(15194, 4258) {
-    //     return Ok(CateGeoParam::Unknown);
-    // }
     if let Ok(gm_data) = resolve_gmse_params(gm_param, context, axis_params) {
         resolve_to_cate_geo_params(&gm_data)
     } else {
         Err(anyhow!(format!("几何数据解析失败: {:?}", gm_param)))
     }
 }
+
+/// 元件库表达式相关的参数
+#[derive(Debug, Default, Clone)]
+pub struct CataExprContext {
+    pub params: Vec<f64>,
+    pub dtse_expr_map: HashMap<String, String>,
+    pub dtse_default_map: HashMap<String, String>,
+    // pub context: HashMap<SmolStr, SmolStr>,
+}
+
+impl CataExprContext {
+    //需要获取design的数据
+    pub async fn build(&self, mgr: &AiosDBManager, des_refno: RefU64) -> BTreeMap<SmolStr, SmolStr>{
+        let mut context : BTreeMap<SmolStr, SmolStr> = Default::default();
+        if let Ok(attr_map) = mgr.get_attr(des_refno).await{
+            let mut desp = attr_map.get_f64_vec("DESP").unwrap_or_default();
+            for i in 0..desp.len() {
+                context.insert(
+                    format!("DESI{}", i + 1).into(),
+                    desp[i].to_string().into(),
+                );
+                context.insert(
+                    format!("DDES{}", i + 1).into(),
+                    desp[i].to_string().into(),
+                );
+                context.insert(
+                    format!("DESP{}", i + 1).into(),
+                    desp[i].to_string().into(),
+                );
+            }
+            let height: SmolStr = attr_map.get_as_string("HEIG").unwrap_or("0.0".into()).into();
+            context.insert(DDHEIGHT_STR.into(), height.clone());
+            context.insert("HEIG".into(), height);
+            let angle: SmolStr = attr_map.get_as_string("ANGL").unwrap_or("0.0".into()).into();
+            context.insert(DDANGLE_STR.into(), angle.clone());
+            context.insert("ANGL".into(), angle);
+            let radi: SmolStr = attr_map.get_as_string("RADI").unwrap_or("0.0".into()).into();
+            context.insert(DDRADIUS_STR.into(), radi.clone());
+            context.insert("RADI".into(), radi);
+        }else{
+            //默认值
+            context
+                .entry(DDHEIGHT_STR.into())
+                .or_insert("0.0".into());
+            context
+                .entry(DDRADIUS_STR.into())
+                .or_insert("0.0".into());
+            context
+                .entry(DDANGLE_STR.into())
+                .or_insert("0.0".into());
+        }
+
+        //获取DTSE的expression
+        // process_dtse_params(&scom_info.attr_map, interface, &mut cur_context).await;
+
+        //保温层厚度
+        context.insert("IPARA0".into(), "0".into());
+        context.insert("IPARA".into(), "0".into());
+        for i in 0..self.params.len() {
+            context.insert(format!("OPAR{}", i + 1).into(), self.params[i].to_string().into());
+            context.insert(format!("APAR{}", i + 1).into(), self.params[i].to_string().into());
+            context.insert(format!("CPAR{}", i + 1).into(), self.params[i].to_string().into());
+            context.insert(format!("PARA{}", i + 1).into(), self.params[i].to_string().into());
+            context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
+            context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
+        }
+        context
+    }
+}
+
+
 
 pub fn resolve_gmse_params(
     gm: &GmParam,
