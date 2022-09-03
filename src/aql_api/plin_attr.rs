@@ -1,13 +1,16 @@
-use aios_core::pdms_types::{AttrMap, RefU64};
+use std::ops::Neg;
+use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
 use arangors_lite::{AqlQuery, Connection, Database};
 use dashmap::{DashMap, DashSet};
+use glam::Vec3;
+use smol_str::SmolStr;
 use crate::aql_api::children::{query_children_aql, query_owner_with_type_aql};
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::PdmsPLINAttrAql;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::options::DbOption;
 
-/// 传入desi的参考号，返回该参考号对应的plin attr_map
+/// 传入desi的参考号，返回该参考号对应的plin attr_map 和 wall 引用的 NA 等对应的数值
 pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &Database) -> anyhow::Result<DashMap<RefU64, String>> {
     let mut result = DashMap::new();
     // 存 wall下的所有p_key以及对应的值
@@ -53,10 +56,35 @@ pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &Database
     Ok(result)
 }
 
-/// 传入plin参考号集合，返回集合中的所有plin的attr_map
-pub async fn query_plin_attrs_with_refnos(refnos: Vec<RefU64>, database: &Database) -> anyhow::Result<Vec<PdmsPLINAttrAql>> {
+pub async fn query_wall_jusl_value(refno: RefU64, jusl: &str, database: &Database) -> anyhow::Result<Option<String>> {
+    let pstr = query_foreign_refno_aql(refno, vec!["SPRE", "PSTR"], database).await?;
+    if pstr.is_none() { return Ok(None); }
+    let pstr_children = query_children_aql(database, pstr.unwrap()).await?;
     let mut children = vec![];
-    let collection = "plin_eles";
+    pstr_children.into_iter().for_each(|ele| {
+        let refno = RefU64::from_refno_string(ele.refno);
+        if let Ok(refno) = refno {
+            children.push(refno);
+        }
+    });
+    let plin_attrs = query_plin_attrs_with_refnos(children, database).await?;
+    for plin_attr in plin_attrs {
+        let plin_refno = RefU64::from_url_refno(plin_attr._key);
+        if plin_refno.is_none() { continue; }
+        let attr = plin_attr.attr;
+        let p_key = attr.get_val("PKEY");
+        let px = attr.get_val("PX");
+        if p_key.is_none() { continue; }
+        if p_key.unwrap().string_value() == jusl {
+            return Ok(Some(px.unwrap_or(&AttrVal::StringType(SmolStr::new("0"))).string_value()));
+        }
+    }
+    Ok(None)
+}
+
+/// 传入plin参考号集合，返回集合中的所有plin的attr_map
+async fn query_plin_attrs_with_refnos(refnos: Vec<RefU64>, database: &Database) -> anyhow::Result<Vec<PdmsPLINAttrAql>> {
+    let mut children = vec![];
     refnos.into_iter().for_each(|refno| {
         children.push(RefU64::to_url_refno(&refno))
     });
@@ -74,6 +102,26 @@ pub async fn query_plin_attrs_with_refnos(refnos: Vec<RefU64>, database: &Databa
     Ok(result)
 }
 
+async fn query_plin_attrs_with_refno(refno: RefU64, database: &Database) -> anyhow::Result<Vec<PdmsPLINAttrAql>> {
+    let aql = AqlQuery::new("
+    let e = document('plin_eles',@refno)
+        return {
+            '_key':e._key,
+            'attr':e.attr
+        } "
+    ).bind_var("refno", refno.to_url_refno());
+    let result: Vec<PdmsPLINAttrAql> = database.aql_query(aql).await?;
+    Ok(result)
+}
+
+pub fn match_jusline_attr(exp: String, para: Vec<f64>) -> f64 {
+    match exp.as_str() {
+        "DESP[1]" => para[0],
+        "DESP[2]" => para[1],
+        _ => 0.0,
+    }
+}
+
 #[tokio::test]
 async fn test_query_plin_attrs() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
@@ -88,6 +136,21 @@ async fn test_query_plin_attrs() -> anyhow::Result<()> {
                        (RefU64::from_refno_str("23584/5935").unwrap(), "IBOW".to_string()),
                        (RefU64::from_refno_str("23584/5936").unwrap(), "OBOW".to_string())];
     let result = query_plin_attrs(request, &database).await?;
+    dbg!(&result);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_wall_jusl_value() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+        .await?;
+    let database = conn.db("pdms").await?;
+    let result = query_wall_jusl_value(RefU64::from_refno_str("23584/5931").unwrap(), "NA", &database).await?;
     dbg!(&result);
     Ok(())
 }

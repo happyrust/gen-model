@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use aios_core::pdms_types::{PdmsElement, RefU64};
 use anyhow::anyhow;
+use arangors_lite::collection::CollectionType;
 use dashmap::DashSet;
 use futures::future::ok;
 use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
@@ -18,7 +19,7 @@ use crate::api::element::{query_children, query_children_eles, query_mdb_dbnos, 
 use crate::api::project_mdb::query_mdb_contain_numbdb;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::ForeignEdges;
+use crate::graph_db::{ForeignEdges};
 use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
@@ -248,6 +249,8 @@ pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::
     Ok(())
 }
 
+pub async fn save_dtse_value_to_arangodb(db_option:&DbOption)
+
 
 pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &str) -> anyhow::Result<()> {
     let database = mgr.get_arangodb_conn().await?;
@@ -264,6 +267,27 @@ pub async fn save_arangodb_with_db_option(json: Value, db_option: &DbOption, col
     let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
         .await?;
     let database = conn.db("pdms").await?;
+    let aql = AqlQuery::new("LET data = @elements
+                    FOR d IN data
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }" )
+        .bind_var("@collection", collection)
+        .bind_var("elements", json);
+    let _result: Vec<()> = database.aql_query(aql).await?;
+    Ok(())
+}
+
+pub async fn save_arangodb_with_db_option_create_collection(json: Value, db_option: &DbOption, collection: &str, collection_type:CollectionType ) -> anyhow::Result<()> {
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+        .await?;
+    let database = conn.db("pdms").await?;
+    match collection_type {
+        CollectionType::Document => {
+            database.create_collection(collection).await?;
+        }
+        CollectionType::Edge => {
+            database.create_edge_collection(collection).await?;
+        }
+    }
     let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection")

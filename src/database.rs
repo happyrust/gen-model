@@ -15,6 +15,7 @@ use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::tool::float_tool::f64_round_3;
 use anyhow::anyhow;
+use arangors_lite::collection::CollectionType::Document;
 use dashmap::{DashMap, DashSet};
 use itertools::Itertools;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
@@ -31,8 +32,8 @@ use crate::api::ssc_data::SscEleNode;
 use crate::aql_api::PdmsPLINAttrAql;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::ForeignEdges;
-use crate::graph_db::pdms_arango::save_arangodb_with_db_option;
+use crate::graph_db::{ForeignEdges, ParaDocument};
+use crate::graph_db::pdms_arango::{save_arangodb_with_db_option, save_arangodb_with_db_option_create_collection};
 use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
@@ -415,7 +416,8 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 let mut type_handles = vec![];
                 // 单独保存plin
                 save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
-
+                // 将 para 和 des_para保存的图数据库中
+                save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
                 for (type_hash, type_refnos) in type_ele_map {
                     continue;
                     let info_pool_clone = info_pool.clone();
@@ -633,6 +635,35 @@ async fn save_plin_attr_arangodb(db_option: &DbOption, type_ele_map: &DashMap<u3
             save_arangodb_with_db_option(json, &db_option, "plin_eles").await?;
         }
     }
+    Ok(())
+}
+
+async fn save_paras_into_arangodb(db_option: &DbOption, total_attr_map: &DashMap<RefU64, WholeAttMap>) -> anyhow::Result<()> {
+    let mut para_map = Vec::new();
+    let mut des_para_map = Vec::new();
+    for v in total_attr_map.iter() {
+        // para 和 des_para 都存在显示属性里
+        let explicit_map = &v.explicit_attmap;
+        if let Some(para) = explicit_map.get_val("PARA") {
+            let paras = para.dvec_value();
+            if paras.is_none() { continue; }
+            para_map.push(ParaDocument {
+                _key: v.key().to_url_refno(),
+                para: paras.unwrap(),
+            })
+        } else if let Some(des_para) = explicit_map.get_val("DESP") {
+            let paras = des_para.dvec_value();
+            if paras.is_none() { continue; }
+            des_para_map.push(ParaDocument {
+                _key: v.key().to_url_refno(),
+                para: paras.unwrap(),
+            })
+        }
+    }
+    let para_json = serde_json::to_value(&para_map)?;
+    let des_para_json = serde_json::to_value(&des_para_map)?;
+    save_arangodb_with_db_option(para_json, db_option, "para_eles").await?;
+    save_arangodb_with_db_option(des_para_json, db_option, "despara_eles").await?;
     Ok(())
 }
 

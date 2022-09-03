@@ -12,3 +12,9 @@ pub struct ForeignEdges{
     // 外键的种类, catr,gmre等
     pub foreign_type:String,
 }
+
+#[derive(Debug,Clone,Serialize,Deserialize)]
+pub struct ParaDocument{
+    pub _key:String,
+    pub para:Vec<f64>,
+}

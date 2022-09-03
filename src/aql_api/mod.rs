@@ -6,6 +6,7 @@ pub mod ssc_children;
 pub mod query_transform;
 pub mod foreign_refnos;
 pub mod plin_attr;
+pub mod para_value;
 
 /// 存放在图数据库的attr
 #[derive(Debug, Default, Serialize, Deserialize)]

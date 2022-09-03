@@ -1,4 +1,4 @@
-pub const BANG_TYPES: [&'static str; 5] = [
+pub const BANG_WIT_EXTRU_TYPES: [&'static str; 5] = [
     "GENSEC",
     // "SJOI",
     // "PAVE",
@@ -9,7 +9,7 @@ pub const BANG_TYPES: [&'static str; 5] = [
     // "CWBRAN",
     "SCTN",
     // "CMPF",
-    // "FITT",  //todo
+    // "FITT",
     // "SUBJ",
     // "SEVE",
     // "SCOJ",

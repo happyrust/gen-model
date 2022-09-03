@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use config::{Config, ConfigError, Environment, File};
 use dashmap::{DashMap, DashSet};
 use dashmap::mapref::one::Ref;
-use glam::{Quat, quat, TransformRT, TransformSRT, Vec3};
+use glam::{Quat, quat, TransformRT, TransformSRT, Vec2, Vec3};
 use id_tree::{Node, NodeId};
 use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
@@ -38,9 +38,12 @@ use sqlx::{MySql, MySqlPool, Pool};
 use crate::api::attr::*;
 use crate::api::children::cache_site_node;
 use crate::api::element::*;
-use crate::api::refno_info::{get_ref0_map, sync_refno_basic_map};
+use crate::api::refno_info::{cache_plin_plax, get_ref0_map, sync_refno_basic_map};
+use crate::aql_api::para_value::query_des_para_value;
+use crate::aql_api::plin_attr::{match_jusline_attr, query_plin_attrs, query_wall_jusl_value};
 use crate::ATTR_INFO_MAP;
-use crate::cata::consts::{BANG_TYPES, JUSLINE_TYPES};
+use crate::cata::consts::{BANG_WIT_EXTRU_TYPES, JUSLINE_TYPES};
+use crate::cata::direction_parse::parse_expr_to_dir;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn;
 use crate::cata::sctn::geo::create_profile_geos;
@@ -113,6 +116,8 @@ pub struct AiosDBManager {
     pub arango_database: Database,
 
     cached_world_transforms_map: Arc<DashMap<RefU64, TransformRT>>,
+
+    pub plin_cache_mgr: DashMap<RefU64, String>,
 }
 
 // 数据接口实现
@@ -356,53 +361,82 @@ impl PdmsDataInterface for AiosDBManager {
             ancestors.push_front((cur_refno, ref_basic));
             cur_refno = tmp_owner;
         }
-        // dbg!(&new_ancestors);
+
+        let mut jusl_vec = Vec3::new(0.0, 0.0, 0.0);
         for (refno, ref_basic) in ancestors {
             let type_name = ref_basic.get_type();
-            // dbg!(type_name);
-            let (quat, pos) =
-                if BANG_TYPES.contains(&type_name) {
-                    let mut quat = Quat::IDENTITY;
-                    let att = self.get_implicit_attr(refno, Some(vec!["POSS", "POSE", "BANG", "POS"])).await?;
-                    let extru_dir: Vec3 = if let Some(poss) = att.get_poss() &&
-                    let Some(pose) = att.get_pose()
-                    {
-                        (pose - poss).normalize()
-                    } else{
-                        Vec3::Z
-                    };
-                    let bangle = att.get_f32("BANG").unwrap_or_default();
-                    // dbg!(bangle);
-                    //如果和Z轴平行，需要使用Y轴作为参考轴
-                    let d = extru_dir.dot(Vec3::Z).abs();
 
-                    let mut ref_axis = if abs_diff_eq!(1.0, d) {
-                        Vec3::Y
-                    } else { Vec3::Z };
+            let att = self.get_attr(refno).await?;
+            let pos = att.get_position().unwrap_or_default();
 
-                    let p_axis = ref_axis.cross(extru_dir).normalize();
-                    let y_axis = extru_dir.cross(p_axis).normalize();
-                    quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
-                        &[p_axis.to_array(), y_axis.to_array(), extru_dir.to_array()]
-                    )) * Quat::from_rotation_z(bangle.to_radians());
-                    let pos = att.get_position().unwrap_or_default();
-                    (quat, pos)
-                } else {
-                    //这里可以直接判断有没有这两个属性，没有就直接返回
-                    let mut quat = Quat::IDENTITY;
-                    let mut pos = Vec3::default();
-                    let att_names = vec!["ORI", "POSS", "POS"];
-                    if ATTR_INFO_MAP.exist_least_one_att_by_names(type_name, &att_names) {
-                        if let Ok(att) = self.get_implicit_attr(refno, Some(vec!["ORI", "POS", "POSS"])).await {
-                            pos = att.get_position().unwrap_or_default();
-                            quat = att.get_rotation().unwrap_or_default();
-                        }
-                    }
-                    (quat, pos)
+            if let Some(jusl) = att.get_str("JUSL") {
+                let jusl = "IBOW";
+                let exp = query_wall_jusl_value(refno, jusl, &self.arango_database).await?;
+                if exp.is_none() { continue; }
+                let exp = exp.unwrap();
+                if exp.contains("DESP") {
+                    let des_para = query_des_para_value(refno, &self.arango_database).await?;
+                    if des_para.is_none() { continue; }
+                    let value = match_jusline_attr(exp, des_para.unwrap());
+                    jusl_vec = Vec3::new(value as f32, 0.0, 0.0);
+                }
+            }
+
+            let mut quat = att.get_rotation().unwrap_or_default();
+            if BANG_WIT_EXTRU_TYPES.contains(&type_name) {
+                let bangle = att.get_f32("BANG").unwrap_or_default();
+                //如果是有poss pose
+                let extru_dir: Vec3 = if let Some(poss) = att.get_poss() &&
+                let Some(pose) = att.get_pose()
+                {
+                    (pose - poss).normalize()
+                } else{
+                    Vec3::Z
                 };
-            translation = translation + rotation * pos;
-            rotation = rotation * quat;
-            // println!("{} : {:?}", refno.to_refno_str(), (translation, rotation));
+                let d = extru_dir.dot(Vec3::Z).abs();
+                let mut ref_axis = if abs_diff_eq!(1.0, d) {
+                    Vec3::Y
+                } else { Vec3::Z };
+
+                let p_axis = ref_axis.cross(extru_dir).normalize();
+                let y_axis = extru_dir.cross(p_axis).normalize();
+                quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
+                    &[p_axis.to_array(), y_axis.to_array(), extru_dir.to_array()]
+                )) * Quat::from_rotation_z(bangle.to_radians());
+            }
+
+            if type_name == "FITT" {
+                //plin里的位置偏移
+                let plin_pos = Vec3::new(100.0, 0.0, 0.0);
+                let mut pline_plax = Vec3::X;
+
+                let delta_vec = att.get_vec3("DELP").unwrap_or_default() /*+ plin_pos*/;
+                let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
+
+                let bangle = att.get_f32("BANG").unwrap_or_default();
+                // 获取fitt posline对应的值
+                if let Some(v) = self.plin_cache_mgr.get(&refno) {
+                    pline_plax = parse_expr_to_dir(v.value());
+                }
+                let bangle: f32 = 0.0;
+                let delta_dist = Vec2::new(delta_vec.x, delta_vec.y).length();
+                let bangle_rot = Quat::from_axis_angle(Vec3::Z, bangle.to_radians());
+
+                let y_axis = Vec3::Z;
+                let z_axis = pline_plax;
+                let x_axis = y_axis.cross(z_axis).normalize();
+                let quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
+                    &[x_axis.to_array(), y_axis.to_array(), z_axis.to_array()]
+                ));
+
+                dbg!(jusl_vec);
+                translation = translation + rotation * (zdis + plin_pos - jusl_vec) + rotation * quat * bangle_rot * delta_vec;
+                dbg!(translation);
+                rotation = rotation * quat * bangle_rot;
+            } else {
+                translation = translation + rotation * pos + rotation * quat * (-jusl_vec);
+                rotation = rotation * quat;
+            }
             self.cached_world_transforms_map.entry(refno).or_insert(TransformRT {
                 rotation,
                 translation,
@@ -521,12 +555,14 @@ impl AiosDBManager {
                                                                            PDMS_INFO_DB, &db_option.project_name.to_uppercase())).await?;
         let ref0_map = get_ref0_map(&info_conn).await?;
         let projects = db_option.included_projects.clone();
+
         // todo 用户名密码等先写死，后面再分一个toml出来
         let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
             .await
             .unwrap();
 
         let database = conn.db("pdms").await.unwrap();
+        let plin_cache_mgr = cache_plin_plax(&project_map.get(&db_option.project_name).unwrap(), (&db_option.manual_db_nums).clone(), &database).await?;
         Ok(
             Self {
                 project_map,
@@ -541,6 +577,7 @@ impl AiosDBManager {
                 mesh_instance_mgr: Arc::new(Default::default()),
                 arango_database: database,
                 cached_world_transforms_map: Arc::new(Default::default()),
+                plin_cache_mgr,
             }
         )
     }
@@ -783,6 +820,7 @@ impl AiosDBManager {
             "SEVE",
             "SBFI",
             "SCTN",
+            "FITT",
         ]);
 
         let has_cata_refnos =
@@ -884,7 +922,7 @@ impl AiosDBManager {
                         let mut geo_insts = &mut geos_info.data;
                         for shape in shapes {
                             if is_debug {
-                                dbg!(&shape);
+                                // dbg!(&shape);
                             }
                             let CateBrepShape {
                                 refno,
