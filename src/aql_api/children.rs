@@ -220,29 +220,3 @@ async fn test_query_travel_children_aql() -> anyhow::Result<()> {
     dbg!(&r.len());
     Ok(())
 }
-
-#[tokio::test]
-async fn test_query_refno_from_site_zone_name() -> anyhow::Result<()> {
-    let conn = Connection::establish_jwt(URL, "root", "")
-        .await
-        .unwrap();
-
-    let database = conn.db("pdms").await.unwrap();
-    let site_name = "STABILIZER";
-    let result = query_refno_from_site_zone_name(&database, site_name.to_string(), "PIPE".to_string(), "ELBO".to_string()).await?;
-    dbg!(&result);
-    dbg!(&result.len());
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_query_ancestor_till_type() -> anyhow::Result<()> {
-    let conn = Connection::establish_jwt(URL, "root", "")
-        .await
-        .unwrap();
-
-    let database = conn.db("pdms").await.unwrap();
-    let result = query_ancestor_till_type_aql(&database, RefU64::from_refno_str("23584/5506").unwrap(), "ZONE").await?;
-    dbg!(&result);
-    Ok(())
-}

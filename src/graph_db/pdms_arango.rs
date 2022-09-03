@@ -26,6 +26,12 @@ use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
+pub fn get_arangodb_conn_from_db_option(db_option:&DbOption) -> anyhow::Result<Database> {
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+        .await?;
+    Ok(conn.db("pdms").await?)
+}
+
 pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<()> {
     let mut time = Instant::now();
     for project in &db_option.included_projects {
