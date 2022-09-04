@@ -172,9 +172,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         dbg!("执行多线程解析");
         sync_total_async_threaded(&db_option, project, project_pool.clone(),
                                   pdms_info_pool.clone()).await.expect("同步数据失败");
-        // if !db_option.only_rebuild_pdms_element {
-        //     insert_project_mdb(&project_pool, &pdms_info_pool).await?;
-        // }
+        if !db_option.only_rebuild_pdms_element {
+            insert_project_mdb(&project_pool, &pdms_info_pool).await?;
+        }
     }
 
     println!("创建表花费时间: {} ms", create_tables_elapse);
@@ -421,10 +421,10 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                     // 将 para 和 des_para保存的图数据库中
                     // save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
                     // 将 dtse下的data部分数据保存到图数据库
-                    save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                    // save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
                 }
                 for (type_hash, type_refnos) in type_ele_map {
-                    continue;
+                    // continue;
                     let info_pool_clone = info_pool.clone();
                     let filename_clone = file_name_clone.clone();
                     let project_clone = project.clone();

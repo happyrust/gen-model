@@ -26,7 +26,7 @@ use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
-pub fn get_arangodb_conn_from_db_option(db_option:&DbOption) -> anyhow::Result<Database> {
+pub async fn get_arangodb_conn_from_db_option(db_option:&DbOption) -> anyhow::Result<Database> {
     let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
         .await?;
     Ok(conn.db("pdms").await?)

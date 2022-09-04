@@ -56,7 +56,7 @@ pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &Database
     Ok(result)
 }
 
-pub async fn query_wall_jusl_value(refno: RefU64, jusl: &str, database: &Database) -> anyhow::Result<Option<String>> {
+pub async fn query_wall_jusl_value(refno: RefU64, jusl: &str, database: &Database) -> anyhow::Result<Option<[String; 3]>> {
     let pstr = query_foreign_refno_aql(refno, vec!["SPRE", "PSTR"], database).await?;
     if pstr.is_none() { return Ok(None); }
     let pstr_children = query_children_aql(database, pstr.unwrap()).await?;
@@ -74,9 +74,14 @@ pub async fn query_wall_jusl_value(refno: RefU64, jusl: &str, database: &Databas
         let attr = plin_attr.attr;
         let p_key = attr.get_val("PKEY");
         let px = attr.get_val("PX");
+        let py = attr.get_val("PY");
+        let pz = attr.get_val("PZ");
         if p_key.is_none() { continue; }
         if p_key.unwrap().string_value() == jusl {
-            return Ok(Some(px.unwrap_or(&AttrVal::StringType(SmolStr::new("0"))).string_value()));
+            let px = px.unwrap_or(&AttrVal::StringType(SmolStr::new("0"))).string_value();
+            let py = py.unwrap_or(&AttrVal::StringType(SmolStr::new("0"))).string_value();
+            let pz = pz.unwrap_or(&AttrVal::StringType(SmolStr::new("0"))).string_value();
+            return Ok(Some([px, py, pz]));
         }
     }
     Ok(None)
