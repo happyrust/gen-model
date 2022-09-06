@@ -22,7 +22,6 @@ use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
 
-
 // todo 改成多线程
 pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>) -> anyhow::Result<()> {
     let mut time = Instant::now();
@@ -44,14 +43,14 @@ pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: Ar
         }
         let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
             .bind_var("@collection", collection)
             .bind_var("elements", take(&mut instances));
         database.aql_query::<Vec<()>>(aql).await?;
 
         let aql = AqlQuery::new("LET data = @edges
                     FOR d IN data
-                        INSERT d INTO @@collection")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
             .bind_var("@collection", edge_collection)
             .bind_var("edges", take(&mut edges));
         database.aql_query::<Vec<()>>(aql).await?;

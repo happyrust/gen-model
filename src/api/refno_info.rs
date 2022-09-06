@@ -75,7 +75,7 @@ pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: Option<Vec<i32>>, databa
         let pos_line = result.get::<String, _>("POSL");
         fitt_map.push((refno, pos_line));
     }
-    let result = query_plin_attrs(fitt_map, database).await?;
+    let result = query_plin_attrs(fitt_map, database).await.unwrap_or(DashMap::new());
     Ok(result)
 }
 

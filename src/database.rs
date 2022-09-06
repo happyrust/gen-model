@@ -417,14 +417,13 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 // 将部分数据保存到图数据库
                 {
                     // 单独保存plin
-                    // save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                    save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
                     // 将 para 和 des_para保存的图数据库中
-                    // save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
+                    save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
                     // 将 dtse下的data部分数据保存到图数据库
-                    // save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                    save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
                 }
                 for (type_hash, type_refnos) in type_ele_map {
-                    // continue;
                     let info_pool_clone = info_pool.clone();
                     let filename_clone = file_name_clone.clone();
                     let project_clone = project.clone();

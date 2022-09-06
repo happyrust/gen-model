@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use itertools::Itertools;
-use aios_core::pdms_types::{AttrMap, AttrVal, CachedMeshesMgr, DbAttributeType, EleGeosInfo, NounHash, PdmsDatabaseInfo, PdmsMeshInstanceMgr, PdmsMeshInstanceMgrOld, RefI32Tuple, RefU64, ShapeInstancesMgr};
+use aios_core::pdms_types::*;
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_bin};
 use dashmap::DashMap;
@@ -32,11 +32,12 @@ use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
 use aios_database::cata::resolve::parse_to_i32;
 use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
-use aios_database::graph_db::pdms_arango::{sync_foreign_refno_to_graph_db, sync_pdms_level_edges_to_graph_db, sync_pdms_to_graph_db};
+use aios_database::graph_db::pdms_arango::*;
 use aios_database::graph_db::pdms_inst_arango::sync_instance_to_graph_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::gen_create_attr_info_tables_sql;
+use arangors_lite::collection::CollectionType::{Document, Edge};
 
 
 #[macro_use]
@@ -166,6 +167,25 @@ fn change_instance_mgr_old_into_new(instance_mgr: PdmsMeshInstanceMgrOld) -> Pdm
     }
 }
 
+/// 提前创建图数据库需要的几个collection
+async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
+    let database = get_arangodb_conn_from_db_option(db_option).await?;
+    create_arangodb_conn(&database, "data_eles", Document).await?;
+    create_arangodb_conn(&database, "despara_eles", Document).await?;
+    create_arangodb_conn(&database, "foreign_edges", Edge).await?;
+    create_arangodb_conn(&database, "instance_edges", Edge).await?;
+    create_arangodb_conn(&database, "para_eles", Document).await?;
+    create_arangodb_conn(&database, "pdms_edges", Edge).await?;
+    create_arangodb_conn(&database, "pdms_eles", Document).await?;
+    create_arangodb_conn(&database, "pdms_instances", Edge).await?;
+    create_arangodb_conn(&database, "plin_eles", Document).await?;
+    create_arangodb_conn(&database, "sibl_edges", Edge).await?;
+    create_arangodb_conn(&database, "ssc_edges", Edge).await?;
+    create_arangodb_conn(&database, "ssc_eles", Document).await?;
+    create_arangodb_conn(&database, "tubi_edges", Edge).await?;
+    Ok(())
+}
+
 #[test]
 fn get_noun_hash() {
     let noun = "PIPCA";
@@ -188,7 +208,7 @@ fn read_info_bin() {
 }
 
 #[test]
-fn write_info_bin() -> anyhow::Result<()>{
+fn write_info_bin() -> anyhow::Result<()> {
     // let hello_world = "hello_world";
     // let mut data = bincode::serialize(&hello_world).unwrap_or(vec![]);
     // let mut file = fs::File::create("hello_world.bin")?;

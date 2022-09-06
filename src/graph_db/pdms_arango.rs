@@ -3,7 +3,7 @@ use sqlx::Row;
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
 use crate::consts::*;
-use arangors_lite::{AqlQuery, ClientError, Connection, Database};
+use arangors_lite::{AqlQuery, ClientError, Collection, Connection, Database};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::take;
 use std::sync::{Arc, Mutex};
@@ -26,10 +26,30 @@ use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
-pub async fn get_arangodb_conn_from_db_option(db_option:&DbOption) -> anyhow::Result<Database> {
+pub async fn get_arangodb_conn_from_db_option(db_option: &DbOption) -> anyhow::Result<Database> {
     let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
         .await?;
     Ok(conn.db("pdms").await?)
+}
+
+pub async fn create_arangodb_conn(database: &Database, collection_name: &str, collection_type: CollectionType) -> anyhow::Result<()> {
+    match collection_type {
+        CollectionType::Document => {
+            let database = database.create_collection(collection_name).await;
+            match database {
+                Ok(_v) => {}
+                Err(_e) => { println!("collection 已存在") }
+            }
+        }
+        CollectionType::Edge => {
+            let database = database.create_edge_collection(collection_name).await;
+            match database {
+                Ok(_v) => {}
+                Err(_e) => { println!("collection 已存在") }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<()> {
@@ -86,7 +106,7 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
                         let json = serde_json::to_value(&take(&mut eles))?;
                         let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true } ")
                             .bind_var("@collection", collection)
                             .bind_var("elements", json);
                         let _result: Vec<()> = database_clone.aql_query(aql).await?;
@@ -94,7 +114,7 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
                         let json = serde_json::to_value(&take(&mut edges))?;
                         let aql = AqlQuery::new("LET data = @edges
                     FOR d IN data
-                        INSERT d INTO @@collection")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
                             .bind_var("@collection", pdms_edge_collection)
                             .bind_var("edges", json);
                         let _result: Vec<()> = database_clone.aql_query(aql).await?;
@@ -288,7 +308,7 @@ pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &st
     let database = mgr.get_arangodb_conn().await?;
     let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
         .bind_var("@collection", collection)
         .bind_var("elements", json);
     let _result: Vec<()> = database.aql_query(aql).await?;
@@ -322,7 +342,7 @@ pub async fn save_arangodb_with_db_option_create_collection(json: Value, db_opti
     }
     let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
         .bind_var("@collection", collection)
         .bind_var("elements", json);
     let _result: Vec<()> = database.aql_query(aql).await?;
