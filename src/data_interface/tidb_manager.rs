@@ -823,32 +823,32 @@ impl AiosDBManager {
         let batch_size = mgr.db_option.gen_model_batch_size;
         let mdb = &db_option.mdb_name;
         let t = Instant::now();
-        let mut att_types = vec![/*"BRAN", "HANG"*/];
+        let mut att_types = vec!["BRAN", "HANG"];
         att_types.extend_from_slice(&vec![
-            // "ELCONN",
-            // "CMPF",
+            "ELCONN",
+            "CMPF",
             "WALL",
-            // "STWALL",
-            // "GWALL",
-            // "FIXING",
-            // "PJOI",
-            // "PFIT",
-            // "GENSEC",
-            // "RNODE",
-            // "PRTELE",
-            // "GPART",
-            // "SCREED",
-            // "NOZZ",
-            // "PALJ",
-            // "SUBJ",
-            // "CABLE",
-            // "BATT",
-            // "CMFI",
-            // "SCOJ",
-            // "SEVE",
-            // "SBFI",
-            // "SCTN",
-            // "FITT",
+            "STWALL",
+            "GWALL",
+            "FIXING",
+            "PJOI",
+            "PFIT",
+            "GENSEC",
+            "RNODE",
+            "PRTELE",
+            "GPART",
+            "SCREED",
+            "NOZZ",
+            "PALJ",
+            "SUBJ",
+            "CABLE",
+            "BATT",
+            "CMFI",
+            "SCOJ",
+            "SEVE",
+            "SBFI",
+            "SCTN",
+            "FITT",
         ]);
 
         let has_cata_refnos =
@@ -860,11 +860,9 @@ impl AiosDBManager {
                 mgr.get_refnos_by_types(project, &att_types, db_nos).await?
             };
 
-        dbg!(&has_cata_refnos);
         let has_cata_cnt = has_cata_refnos.len();
         let target_debug_refno = db_option.debug_desi_refno.as_ref().map(
             |x| RefU64::from_refno_str(x).unwrap_or_default());
-        dbg!(&target_debug_refno);
         println!("使用元件库的模型总数：{has_cata_cnt}");
 
         let is_debug = target_debug_refno.is_some();
@@ -1371,8 +1369,8 @@ impl AiosDBManager {
                 let project = project.clone();
                 let mgr_clone = mgr.clone();
                 // let handle = tokio::spawn(async move {
-                // Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
-                // Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
+                Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
+                Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
                 // });
                 // handles.push(handle);
             }

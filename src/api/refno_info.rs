@@ -68,6 +68,7 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>, dbno_mgr: &mut DbNumMgr) -
 pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: Option<Vec<i32>>, database: &Database) -> anyhow::Result<DashMap<RefU64, String>> {
     let mut fitt_map = vec![];
     let fitt_refnos = query_types_refnos(&vec!["FITT"], pool, dbnos).await?;
+    if fitt_refnos.len() == 0 { return Ok(DashMap::new()); }
     let sql = gen_query_refnos_implicit_string_attr("FITT", vec!["POSL"], fitt_refnos);
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     for result in results {

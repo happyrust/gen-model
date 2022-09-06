@@ -35,9 +35,8 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                 continue;
             }
             let refs = interface.get_children_refs(*x).await?;
-
             if (refs.len() - 1) % 2 == 0 {
-                for i in 0..refs.len() - 1 / 2 {
+                for i in 0..(refs.len() - 1 ) / 2 {
                     let att1: AttrMap = interface.get_attr(refs[2 * i]).await?;
                     let att2 = interface.get_attr(refs[2 * i + 1]).await?;
                     let att3 = interface.get_attr(refs[2 * i + 2]).await?;
