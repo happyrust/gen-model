@@ -212,14 +212,14 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     }
 
     let axis_map = resolve_axis_params(scom_info, &cur_context);
-    if is_debug {
-        dbg!(&cur_context);
-        dbg!(&axis_map);
-    }
+    // if is_debug {
+    //     dbg!(&cur_context);
+    //     dbg!(&axis_map);
+    // }
     let geometries = resolve_gms(&scom_info.gm_params, &cur_context, &axis_map);
-    if is_debug {
-        dbg!(&geometries);
-    }
+    // if is_debug {
+    //     dbg!(&geometries);
+    // }
     Ok(GeomsInfo {
         geometries,
         axis_map,

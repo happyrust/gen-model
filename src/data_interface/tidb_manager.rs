@@ -823,32 +823,32 @@ impl AiosDBManager {
         let batch_size = mgr.db_option.gen_model_batch_size;
         let mdb = &db_option.mdb_name;
         let t = Instant::now();
-        let mut att_types = vec!["BRAN", "HANG"];
+        let mut att_types = vec![/*"BRAN", "HANG"*/];
         att_types.extend_from_slice(&vec![
-            "ELCONN",
-            "CMPF",
+            // "ELCONN",
+            // "CMPF",
             "WALL",
             "STWALL",
             "GWALL",
-            "FIXING",
-            "PJOI",
-            "PFIT",
-            "GENSEC",
-            "RNODE",
-            "PRTELE",
-            "GPART",
-            "SCREED",
-            "NOZZ",
-            "PALJ",
-            "SUBJ",
-            "CABLE",
-            "BATT",
-            "CMFI",
-            "SCOJ",
-            "SEVE",
-            "SBFI",
-            "SCTN",
-            "FITT",
+            // "FIXING",
+            // "PJOI",
+            // "PFIT",
+            // "GENSEC",
+            // "RNODE",
+            // "PRTELE",
+            // "GPART",
+            // "SCREED",
+            // "NOZZ",
+            // "PALJ",
+            // "SUBJ",
+            // "CABLE",
+            // "BATT",
+            // "CMFI",
+            // "SCOJ",
+            // "SEVE",
+            // "SBFI",
+            // "SCTN",
+            // "FITT",
         ]);
 
         let has_cata_refnos =
@@ -946,13 +946,10 @@ impl AiosDBManager {
                         };
                         let mut geo_insts = &mut geos_info.data;
                         for shape in shapes {
-                            if is_debug {
-                                dbg!(&shape);
-                            }
                             let CateBrepShape {
                                 refno,
                                 brep_shape,
-                                mut transform,
+                                transform,
                                 visible,
                                 is_tubi,
                                 pts,
@@ -963,9 +960,9 @@ impl AiosDBManager {
                                 continue;
                             }
                             let geo_hash = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_shape);
-                            if is_debug {
-                                dbg!(geo_hash);
-                            }
+                            // if is_debug {
+                            //     dbg!(geo_hash);
+                            // }
                             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
                             bbox.scaled(&trans.scale);
                             //tubi 需要特殊处理
@@ -993,9 +990,9 @@ impl AiosDBManager {
                                 geo_insts.push(geom_inst);
                             }
                         }
-                        if is_debug {
-                            dbg!(&geos_info);
-                        }
+                        // if is_debug {
+                        //     dbg!(&geos_info);
+                        // }
                         inst_map.entry(child_refno).or_insert(geos_info);
                     }
                     *processed_cnt.lock().unwrap() -= 1;
@@ -1369,8 +1366,8 @@ impl AiosDBManager {
                 let project = project.clone();
                 let mgr_clone = mgr.clone();
                 // let handle = tokio::spawn(async move {
-                Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
-                Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
+                // Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
+                // Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
                 // });
                 // handles.push(handle);
             }

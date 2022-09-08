@@ -57,7 +57,7 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
     for project in &db_option.included_projects {
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         let pool = AiosDBManager::get_db_pool(&default_conn, project).await.unwrap();
-        let include_module = vec!["CATA"];
+        let include_module = vec!["DESI", "CATA"];
         for module in include_module {
             // let mut handles = vec![];
             // 只保存 指定mdb的desi的numbdb
@@ -171,11 +171,12 @@ pub async fn sync_pdms_level_edges_to_graph_db(mgr: Arc<AiosDBManager>) -> anyho
                     }
                 }
                 if sibl_edges.len() > 1000 {
+                    let database = mgr.get_arangodb_conn().await?;
                     let json = serde_json::to_value(&take(&mut sibl_edges))?;
-                    save_arangodb(json, mgr.clone(), sibl_collection).await?;
+                    save_arangodb_with_database(json,  sibl_collection,&database).await?;
                     if tubi_edges.len() != 0 {
                         let tubi_json = serde_json::to_value(&take(&mut tubi_edges))?;
-                        save_arangodb(tubi_json, mgr.clone(), tubi_collection).await?;
+                        save_arangodb_with_database(tubi_json, tubi_collection,&database).await?;
                     }
                 }
             }
@@ -319,6 +320,16 @@ pub async fn save_arangodb_with_db_option(json: Value, db_option: &DbOption, col
     let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
         .await?;
     let database = conn.db("pdms").await?;
+    let aql = AqlQuery::new("LET data = @elements
+                    FOR d IN data
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
+        .bind_var("@collection", collection)
+        .bind_var("elements", json);
+    let _result: Vec<()> = database.aql_query(aql).await?;
+    Ok(())
+}
+
+pub async fn save_arangodb_with_database(json: Value, collection: &str, database: &Database) -> anyhow::Result<()> {
     let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")

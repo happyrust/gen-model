@@ -36,7 +36,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
             }
             let refs = interface.get_children_refs(*x).await?;
             if (refs.len() - 1) % 2 == 0 {
-                for i in 0..(refs.len() - 1 ) / 2 {
+                for i in 0..(refs.len() - 1) / 2 {
                     let att1: AttrMap = interface.get_attr(refs[2 * i]).await?;
                     let att2 = interface.get_attr(refs[2 * i + 1]).await?;
                     let att3 = interface.get_attr(refs[2 * i + 2]).await?;
@@ -49,8 +49,6 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
         }
         res
     } else { vec![] };
-
-
     let mut height = 0.0;
     if arc_paths.len() == 0 {
         if let Some(poss) = att.get_poss() &&
@@ -65,7 +63,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
 
     let drns = att.get_vec3("DRNS").unwrap_or_default();
     let drne = att.get_vec3("DRNE").unwrap_or_default();
-    for arc_path in arc_paths {
+    for arc_path in arc_paths.clone() {
         for (i, geom) in geoms.iter().enumerate() {
             if let CateGeoParam::Profile(profile) = geom {
                 if let CateProfileParam::SPRO(spro) = profile {
@@ -103,6 +101,5 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
             }
         }
     }
-
     Ok(center)
 }

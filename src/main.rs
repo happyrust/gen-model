@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, UNIX_EPOCH};
 use itertools::Itertools;
 use aios_core::pdms_types::*;
 use aios_core::pdms_types::AttrVal::StringType;
@@ -38,6 +38,7 @@ use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::gen_create_attr_info_tables_sql;
 use arangors_lite::collection::CollectionType::{Document, Edge};
+use chrono::{Datelike, Timelike};
 
 
 #[macro_use]
@@ -73,12 +74,6 @@ async fn test_get_att() -> anyhow::Result<()> {
     Ok(())
 }
 
-
-#[test]
-fn test_hash() {
-    // dbg!(db1_dehash(612916));
-    println!(db1_dehash(0xDEAF1));
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -194,30 +189,10 @@ fn get_noun_hash() {
     dbg!(hash);
 }
 
-
 #[test]
-fn read_info_bin() {
-    let info_map = read_attr_info_config_from_bin("all_attr_info.bin");
-    let data = serde_json::to_string(&info_map).unwrap();
-    let mut file = File::create("all_attr_info_new.json").unwrap();
-    file.write(data.as_bytes()).unwrap();
-    // let info = info_map.noun_attr_info_map;
-    // if let Some(v) = info.get(&621602){
-    //     dbg!(&v.value());
-    // };
-}
-
-#[test]
-fn write_info_bin() -> anyhow::Result<()> {
-    // let hello_world = "hello_world";
-    // let mut data = bincode::serialize(&hello_world).unwrap_or(vec![]);
-    // let mut file = fs::File::create("hello_world.bin")?;
-    // file.write_all(&mut data)?;
-
-    let mut file = fs::File::open("hello_world.bin")?;
-    let mut result = vec![];
-    file.read_to_end(&mut result)?;
-    let data = bincode::deserialize::<&str>(&result)?;
-    dbg!(&data);
-    Ok(())
+fn test_time() {
+    use chrono::prelude::*;
+    let local: DateTime<Local> = Local::now();
+    println!("year:{} , month: {} , day: {}, week_day:{},hour:{} , min: {} , sec:{}", local.year(), local.month(), local.day(),local.weekday(),
+             local.hour(),local.minute(),local.second());
 }

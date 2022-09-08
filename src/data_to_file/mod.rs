@@ -3,6 +3,7 @@ use serde::{Serialize,Deserialize};
 mod modify;
 // mod increment;
 mod create_att;
+mod session_page;
 
 
 /// 修改属性后，该文件的所有数据页
