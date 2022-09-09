@@ -186,7 +186,9 @@ fn get_noun_hash() {
     let noun = "PIPCA";
     let noun = "PTCA";
     let hash = db1_hash(noun);
+    let str = db1_dehash(13387743);
     dbg!(hash);
+    dbg!(str);
 }
 
 #[test]
