@@ -403,6 +403,15 @@ pub fn parse_to_u32(input: &[u8]) -> u32 {
     u32::from_be_bytes(input.try_into().unwrap())
 }
 
+#[inline]
+pub fn parse_to_u64(input: &[u8]) -> u64 {
+    u64::from_be_bytes(input.try_into().unwrap())
+}
+
+#[inline]
+pub fn parse_to_i64(input: &[u8]) -> i64 {
+    i64::from_be_bytes(input.try_into().unwrap())
+}
 
 #[inline]
 pub fn parse_to_f32(input: &[u8]) -> f32 {
