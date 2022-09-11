@@ -6,9 +6,9 @@ use std::io::{Read, Write};
 use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, UNIX_EPOCH};
 use itertools::Itertools;
-use aios_core::pdms_types::{AttrMap, AttrVal, CachedMeshesMgr, DbAttributeType, EleGeosInfo, NounHash, PdmsDatabaseInfo, PdmsMeshInstanceMgr, PdmsMeshInstanceMgrOld, RefI32Tuple, RefU64, ShapeInstancesMgr};
+use aios_core::pdms_types::*;
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_bin};
 use dashmap::DashMap;
@@ -32,11 +32,13 @@ use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
 use aios_database::cata::resolve::parse_to_i32;
 use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
-use aios_database::graph_db::pdms_arango::{sync_foreign_refno_to_graph_db, sync_pdms_level_edges_to_graph_db, sync_pdms_to_graph_db};
+use aios_database::graph_db::pdms_arango::*;
 use aios_database::graph_db::pdms_inst_arango::sync_instance_to_graph_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::gen_create_attr_info_tables_sql;
+use arangors_lite::collection::CollectionType::{Document, Edge};
+use chrono::{Datelike, Timelike};
 
 
 #[macro_use]
@@ -72,12 +74,6 @@ async fn test_get_att() -> anyhow::Result<()> {
     Ok(())
 }
 
-
-#[test]
-fn test_hash() {
-    // dbg!(db1_dehash(612916));
-    println!(db1_dehash(0xDEAF1));
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -166,38 +162,39 @@ fn change_instance_mgr_old_into_new(instance_mgr: PdmsMeshInstanceMgrOld) -> Pdm
     }
 }
 
+/// 提前创建图数据库需要的几个collection
+async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
+    let database = get_arangodb_conn_from_db_option(db_option).await?;
+    create_arangodb_conn(&database, "data_eles", Document).await?;
+    create_arangodb_conn(&database, "despara_eles", Document).await?;
+    create_arangodb_conn(&database, "foreign_edges", Edge).await?;
+    create_arangodb_conn(&database, "instance_edges", Edge).await?;
+    create_arangodb_conn(&database, "para_eles", Document).await?;
+    create_arangodb_conn(&database, "pdms_edges", Edge).await?;
+    create_arangodb_conn(&database, "pdms_eles", Document).await?;
+    create_arangodb_conn(&database, "pdms_instances", Edge).await?;
+    create_arangodb_conn(&database, "plin_eles", Document).await?;
+    create_arangodb_conn(&database, "sibl_edges", Edge).await?;
+    create_arangodb_conn(&database, "ssc_edges", Edge).await?;
+    create_arangodb_conn(&database, "ssc_eles", Document).await?;
+    create_arangodb_conn(&database, "tubi_edges", Edge).await?;
+    Ok(())
+}
+
 #[test]
 fn get_noun_hash() {
     let noun = "PIPCA";
     let noun = "PTCA";
     let hash = db1_hash(noun);
+    let str = db1_dehash(13387743);
     dbg!(hash);
-}
-
-
-#[test]
-fn read_info_bin() {
-    let info_map = read_attr_info_config_from_bin("all_attr_info.bin");
-    let data = serde_json::to_string(&info_map).unwrap();
-    let mut file = File::create("all_attr_info_new.json").unwrap();
-    file.write(data.as_bytes()).unwrap();
-    // let info = info_map.noun_attr_info_map;
-    // if let Some(v) = info.get(&621602){
-    //     dbg!(&v.value());
-    // };
+    dbg!(str);
 }
 
 #[test]
-fn write_info_bin() -> anyhow::Result<()>{
-    // let hello_world = "hello_world";
-    // let mut data = bincode::serialize(&hello_world).unwrap_or(vec![]);
-    // let mut file = fs::File::create("hello_world.bin")?;
-    // file.write_all(&mut data)?;
-
-    let mut file = fs::File::open("hello_world.bin")?;
-    let mut result = vec![];
-    file.read_to_end(&mut result)?;
-    let data = bincode::deserialize::<&str>(&result)?;
-    dbg!(&data);
-    Ok(())
+fn test_time() {
+    use chrono::prelude::*;
+    let local: DateTime<Local> = Local::now();
+    println!("year:{} , month: {} , day: {}, week_day:{},hour:{} , min: {} , sec:{}", local.year(), local.month(), local.day(),local.weekday(),
+             local.hour(),local.minute(),local.second());
 }

@@ -3,32 +3,61 @@ use sqlx::Row;
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
 use crate::consts::*;
-use arangors_lite::{AqlQuery, ClientError, Connection, Database};
-use std::collections::{HashMap, VecDeque};
+use arangors_lite::{AqlQuery, ClientError, Collection, Connection, Database};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use aios_core::pdms_types::{PdmsElement, RefU64};
+use aios_core::tool::db_tool::db1_hash;
 use anyhow::anyhow;
-use dashmap::DashSet;
+use arangors_lite::collection::CollectionType;
+use dashmap::{DashMap, DashSet};
 use futures::future::ok;
+use parse_pdms_db::parse::WholeAttMap;
 use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
 use crate::api::children::query_contain_noun_refnos;
 use crate::api::element::{query_children, query_children_eles, query_mdb_dbnos, query_types_refnos, query_world, query_world_children_eles};
 use crate::api::project_mdb::query_mdb_contain_numbdb;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::ForeignEdges;
+use crate::graph_db::{DataDocument, ForeignEdges};
 use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
+
+pub async fn get_arangodb_conn_from_db_option(db_option: &DbOption) -> anyhow::Result<Database> {
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+        .await?;
+    Ok(conn.db("pdms").await?)
+}
+
+pub async fn create_arangodb_conn(database: &Database, collection_name: &str, collection_type: CollectionType) -> anyhow::Result<()> {
+    match collection_type {
+        CollectionType::Document => {
+            let database = database.create_collection(collection_name).await;
+            match database {
+                Ok(_v) => {}
+                Err(_e) => { println!("collection 已存在") }
+            }
+        }
+        CollectionType::Edge => {
+            let database = database.create_edge_collection(collection_name).await;
+            match database {
+                Ok(_v) => {}
+                Err(_e) => { println!("collection 已存在") }
+            }
+        }
+    }
+    Ok(())
+}
 
 pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<()> {
     let mut time = Instant::now();
     for project in &db_option.included_projects {
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         let pool = AiosDBManager::get_db_pool(&default_conn, project).await.unwrap();
-        let include_module = vec!["CATA"];
+        let include_module = vec!["DESI", "CATA"];
         for module in include_module {
             // let mut handles = vec![];
             // 只保存 指定mdb的desi的numbdb
@@ -77,7 +106,7 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
                         let json = serde_json::to_value(&take(&mut eles))?;
                         let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true } ")
                             .bind_var("@collection", collection)
                             .bind_var("elements", json);
                         let _result: Vec<()> = database_clone.aql_query(aql).await?;
@@ -85,7 +114,7 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
                         let json = serde_json::to_value(&take(&mut edges))?;
                         let aql = AqlQuery::new("LET data = @edges
                     FOR d IN data
-                        INSERT d INTO @@collection")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
                             .bind_var("@collection", pdms_edge_collection)
                             .bind_var("edges", json);
                         let _result: Vec<()> = database_clone.aql_query(aql).await?;
@@ -142,11 +171,12 @@ pub async fn sync_pdms_level_edges_to_graph_db(mgr: Arc<AiosDBManager>) -> anyho
                     }
                 }
                 if sibl_edges.len() > 1000 {
+                    let database = mgr.get_arangodb_conn().await?;
                     let json = serde_json::to_value(&take(&mut sibl_edges))?;
-                    save_arangodb(json, mgr.clone(), sibl_collection).await?;
+                    save_arangodb_with_database(json,  sibl_collection,&database).await?;
                     if tubi_edges.len() != 0 {
                         let tubi_json = serde_json::to_value(&take(&mut tubi_edges))?;
-                        save_arangodb(tubi_json, mgr.clone(), tubi_collection).await?;
+                        save_arangodb_with_database(tubi_json, tubi_collection,&database).await?;
                     }
                 }
             }
@@ -248,12 +278,38 @@ pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::
     Ok(())
 }
 
+/// 将dtse下的data中的dkey和ppro保存到图数据库中
+pub async fn save_dtse_value_to_arangodb(db_option: &DbOption, type_ele_map: &DashMap<u32,
+    HashSet<RefU64>>, total_attr_map: &DashMap<RefU64, WholeAttMap>) -> anyhow::Result<()> {
+    if let Some(data_refnos) = type_ele_map.get(&db1_hash("DATA")) {
+        let mut result = vec![];
+        for data_refno in data_refnos.value() {
+            let whole_attr = total_attr_map.get(data_refno);
+            if whole_attr.is_none() { continue; }
+            let implicit_attr = &whole_attr.unwrap().implicit_attmap;
+            let d_key = implicit_attr.get_str("DKEY");
+            let ppro = implicit_attr.get_str("PPRO");
+            let dpro = implicit_attr.get_str("DPRO");
+            if d_key.is_none() || ppro.is_none() { continue; }
+            result.push(DataDocument {
+                _key: data_refno.to_url_refno(),
+                dkey: d_key.unwrap().to_string(),
+                ppro: ppro.unwrap().to_string(),
+                dpro: dpro.unwrap().to_string(),
+            })
+        }
+        let json = serde_json::to_value(&result)?;
+        save_arangodb_with_db_option(json, db_option, "data_eles").await?;
+    }
+    Ok(())
+}
+
 
 pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &str) -> anyhow::Result<()> {
     let database = mgr.get_arangodb_conn().await?;
     let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
         .bind_var("@collection", collection)
         .bind_var("elements", json);
     let _result: Vec<()> = database.aql_query(aql).await?;
@@ -266,7 +322,38 @@ pub async fn save_arangodb_with_db_option(json: Value, db_option: &DbOption, col
     let database = conn.db("pdms").await?;
     let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
+        .bind_var("@collection", collection)
+        .bind_var("elements", json);
+    let _result: Vec<()> = database.aql_query(aql).await?;
+    Ok(())
+}
+
+pub async fn save_arangodb_with_database(json: Value, collection: &str, database: &Database) -> anyhow::Result<()> {
+    let aql = AqlQuery::new("LET data = @elements
+                    FOR d IN data
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
+        .bind_var("@collection", collection)
+        .bind_var("elements", json);
+    let _result: Vec<()> = database.aql_query(aql).await?;
+    Ok(())
+}
+
+pub async fn save_arangodb_with_db_option_create_collection(json: Value, db_option: &DbOption, collection: &str, collection_type: CollectionType) -> anyhow::Result<()> {
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+        .await?;
+    let database = conn.db("pdms").await?;
+    match collection_type {
+        CollectionType::Document => {
+            database.create_collection(collection).await?;
+        }
+        CollectionType::Edge => {
+            database.create_edge_collection(collection).await?;
+        }
+    }
+    let aql = AqlQuery::new("LET data = @elements
+                    FOR d IN data
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
         .bind_var("@collection", collection)
         .bind_var("elements", json);
     let _result: Vec<()> = database.aql_query(aql).await?;

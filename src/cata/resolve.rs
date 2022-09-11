@@ -8,8 +8,13 @@ use aios_core::pdms_data::{AxisParam, GmParam, ScomInfo};
 use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
+use arangors_lite::Database;
 use glam::Vec3;
+use sea_orm::sea_query::IndexType::Hash;
 use smol_str::SmolStr;
+use crate::aql_api::dtse_attr::query_dtse_ppro_from_catr_refno;
+use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
+use crate::aql_api::para_value::query_para_value;
 use crate::cata::query_cata::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
 use crate::cata::resolve_helper::*;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -82,10 +87,30 @@ pub struct CataExprContext {
 }
 
 impl CataExprContext {
+    pub async fn new(des_refno: RefU64, database: &Database) -> anyhow::Result<Option<Self>> {
+        let catr_refno = query_foreign_refno_aql(des_refno, vec!["SPRE", "CATR"], database).await?;
+        if catr_refno.is_none() { return Ok(None); }
+        let catr_refno = catr_refno.unwrap();
+        let params = query_para_value(catr_refno, database).await?;
+        if params.is_none() { return Ok(None); }
+        let dtse_map = query_dtse_ppro_from_catr_refno(catr_refno, database).await?;
+        if dtse_map.is_none() { return Ok(None); }
+        let mut dtse_expr_map = HashMap::new();
+        let mut dtse_default_map = HashMap::new();
+        for (k, v) in dtse_map.unwrap().into_iter() {
+            dtse_expr_map.entry(k.clone()).or_insert(v.ppro);
+            dtse_default_map.entry(k).or_insert(v.dpro);
+        }
+        Ok(Some(Self {
+            params: params.unwrap(),
+            dtse_expr_map,
+            dtse_default_map,
+        }))
+    }
     //需要获取design的数据
-    pub async fn build(&self, mgr: &AiosDBManager, des_refno: RefU64) -> BTreeMap<SmolStr, SmolStr>{
-        let mut context : BTreeMap<SmolStr, SmolStr> = Default::default();
-        if let Ok(attr_map) = mgr.get_attr(des_refno).await{
+    pub async fn build(&self, mgr: &AiosDBManager, des_refno: RefU64) -> BTreeMap<SmolStr, SmolStr> {
+        let mut context: BTreeMap<SmolStr, SmolStr> = Default::default();
+        if let Ok(attr_map) = mgr.get_attr(des_refno).await {
             let mut desp = attr_map.get_f64_vec("DESP").unwrap_or_default();
             for i in 0..desp.len() {
                 context.insert(
@@ -110,7 +135,7 @@ impl CataExprContext {
             let radi: SmolStr = attr_map.get_as_string("RADI").unwrap_or("0.0".into()).into();
             context.insert(DDRADIUS_STR.into(), radi.clone());
             context.insert("RADI".into(), radi);
-        }else{
+        } else {
             //默认值
             context
                 .entry(DDHEIGHT_STR.into())
@@ -140,7 +165,6 @@ impl CataExprContext {
         context
     }
 }
-
 
 
 pub fn resolve_gmse_params(
@@ -238,8 +262,7 @@ pub fn resolve_gmse_params(
                     }
                 }
             }
-
-        }else{
+        } else {
             let dir = parse_str_axis_to_vec3(axis, context);
             let axis = CateAxisParam {
                 refno: Default::default(),
@@ -249,7 +272,7 @@ pub fn resolve_gmse_params(
                 pconnect: "".to_string(),
                 pbore: 0.0,
             };
-            paxises.push( axis );
+            paxises.push(axis);
         }
     }
     let type_name = gm.gm_type.clone();
@@ -380,6 +403,15 @@ pub fn parse_to_u32(input: &[u8]) -> u32 {
     u32::from_be_bytes(input.try_into().unwrap())
 }
 
+#[inline]
+pub fn parse_to_u64(input: &[u8]) -> u64 {
+    u64::from_be_bytes(input.try_into().unwrap())
+}
+
+#[inline]
+pub fn parse_to_i64(input: &[u8]) -> i64 {
+    i64::from_be_bytes(input.try_into().unwrap())
+}
 
 #[inline]
 pub fn parse_to_f32(input: &[u8]) -> f32 {

@@ -6,6 +6,8 @@ pub mod ssc_children;
 pub mod query_transform;
 pub mod foreign_refnos;
 pub mod plin_attr;
+pub mod para_value;
+pub mod dtse_attr;
 
 /// 存放在图数据库的attr
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -63,4 +65,12 @@ pub fn convert_refno_vec_from_vec_string(string_vec: Vec<String>) -> Vec<RefU64>
         }
     }
     result
+}
+
+pub fn change_vec_refnos_into_vec_string(refnos: Vec<RefU64>) -> Vec<String> {
+    let mut children = vec![];
+    refnos.into_iter().for_each(|refno| {
+        children.push(RefU64::to_url_refno(&refno))
+    });
+    children
 }

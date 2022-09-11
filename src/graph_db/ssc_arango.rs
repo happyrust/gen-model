@@ -36,7 +36,7 @@ pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &Database)
         let json = serde_json::to_value(&ssc_eles).unwrap();
         let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
             .bind_var("@collection", collection)
             .bind_var("elements", json);
         let _result: Vec<()> = database.aql_query(aql).await?;
@@ -44,7 +44,7 @@ pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &Database)
         let json = serde_json::to_value(&ssc_ele_edges).unwrap();
         let aql = AqlQuery::new("LET data = @edges
                     FOR d IN data
-                        INSERT d INTO @@collection")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
             .bind_var("@collection", ssc_edge_collection)
             .bind_var("edges", json);
         let _result: Vec<()> = database.aql_query(aql).await?;

@@ -74,7 +74,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     let radi = attr_map.get_as_string("RADI").unwrap_or("0.0".into());
     context.insert(DDRADIUS_STR.into(), SmolStr::new(radi.clone()));
     context.insert("RADI".into(), SmolStr::new(radi));
-    let mut geom_info = resolve_cata_comp(&scom_info, interface, Some(context), is_debug).await;
+    let geom_info = resolve_cata_comp(&scom_info, interface, Some(context), is_debug).await;
     if geom_info.is_err() {
         error!("{:?}",geom_info.as_ref().err());
         error!("{:?}",attr_map.to_string_hashmap());
@@ -97,7 +97,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     let mut axis_param_numbers = vec![];
     if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
         if let Ok(ptre_am) = interface.get_attr(ptre_refno).await {
-            if let Ok(axis_param_map) = query_axis_params(&ptre_am, interface, is_debug).await{
+            if let Ok(axis_param_map) = query_axis_params(&ptre_am, interface, is_debug).await {
                 if is_debug {
                     dbg!(&axis_param_map);
                 }
@@ -147,7 +147,7 @@ pub async fn query_axis_params<T: PdmsDataInterface>(
     for child in children {
         let number = child.get_i32("NUMB").unwrap_or(-1);
         if is_debug {
-            dbg!(&child);
+            // dbg!(&child);
         }
         if let Some(axis) = get_axis_param(&child) {
             map.entry(number).or_insert(axis);
@@ -212,14 +212,14 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     }
 
     let axis_map = resolve_axis_params(scom_info, &cur_context);
-    if is_debug {
-        dbg!(&cur_context);
-        dbg!(&axis_map);
-    }
+    // if is_debug {
+    //     dbg!(&cur_context);
+    //     dbg!(&axis_map);
+    // }
     let geometries = resolve_gms(&scom_info.gm_params, &cur_context, &axis_map);
-    if is_debug {
-        dbg!(&geometries);
-    }
+    // if is_debug {
+    //     dbg!(&geometries);
+    // }
     Ok(GeomsInfo {
         geometries,
         axis_map,

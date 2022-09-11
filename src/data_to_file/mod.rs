@@ -1,9 +1,24 @@
-use serde::{Serialize,Deserialize};
+use aios_core::helper::parse_to_u32;
+use memchr::memmem::rfind_iter;
+use serde::{Serialize, Deserialize};
 
 mod modify;
 // mod increment;
 mod create_att;
+mod claim_page;
+mod session_page;
 
+const INDEX_PAGE: [u8; 8] = [0x0, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF];
+const CLAIM_PAGE: [u8; 8] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0x74, 0x3F, 0x49];
+
+pub enum PageType {
+    // 数据页
+    DataPage,
+    // 索引页
+    IndexPage,
+    ClaimPage,
+    SessionPage,
+}
 
 /// 修改属性后，该文件的所有数据页
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -42,7 +57,6 @@ pub struct DataPage {
 }
 
 impl DataPage {
-
     pub fn turn_self_into_vec(self) -> Vec<u8> {
         [self.implicit_data, self.children, self.explicit_data].concat()
     }
@@ -55,3 +69,24 @@ impl DataPage {
     }
 }
 
+/// 从pdms文件中，获得 pdms 最新的 page_no
+pub fn get_last_page_no(input: &[u8]) -> u32 {
+    parse_to_u32(&input[40..44])
+}
+
+/// 指定page的类型，通过该类型最后出现的位置,返回该类型的page_num
+pub fn get_page_no(input: &[u8], page_type: PageType) -> Option<u32> {
+    let index = match page_type {
+        PageType::IndexPage => {
+            INDEX_PAGE.to_vec()
+        }
+        PageType::ClaimPage => {
+            CLAIM_PAGE.to_vec()
+        }
+        _ => { return None; }
+    };
+    if let Some(position) = rfind_iter(input, &index).next() {
+        return Some((position / 0x800) as u32);
+    }
+    None
+}
