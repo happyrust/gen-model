@@ -21,10 +21,9 @@ pub struct ProfileGeosPoints {
 
 pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, geom_info: &GeomsInfo,
                                                        brep_shapes_map: &CateBrepShapeMap, interface: &T) -> anyhow::Result<bool> {
-                                                       brep_shapes_map: &CateBrepShapeMap, interface: &T) -> anyhow::Result<Vec3> {
     let mut center = Vec3::ZERO;
     let geoms = &geom_info.geometries;
-    if geoms.len() == 0 { return Ok(center); }
+    if geoms.len() == 0 { return Ok(false); }
     let type_name = att.get_type();
     let mut plane_normal = Vec3::Z;
     let mut extrude_dir = Vec3::Z;
@@ -55,8 +54,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
     let mut height = 0.0;
     if arc_paths.len() == 0 {
         if let Some(poss) = att.get_poss() &&
-        let Some(pose) = att.get_pose()
-        {
+        let Some(pose) = att.get_pose(){
             height = pose.distance(poss);
             extrude_dir = pose - poss;
             // center = extrude_dir/ 2.0;
@@ -104,5 +102,5 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
             }
         }
     }
-    Ok(center)
+    Ok(true)
 }

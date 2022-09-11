@@ -11,7 +11,7 @@ fn get_last_claim_page(input: &[u8], refno: RefU64, page_no: [u8; 12]) -> Option
     let mut rfind_iter = rfind_iter(input, &page_no[..]);
     while let Some(pos) = rfind_iter.next() {
         if pos + 0x800 > input.len() { return None; }
-        let claim_page = input[pos..pos + 0x800];
+        let claim_page = &input[pos..pos + 0x800];
         // 找到存在修改的参考号所在的 claim_page
         if let Some(_refno_pos) = find_iter(&claim_page, &refno.to_be_bytes()).next() {
             return Some(input[pos..pos + 0x800].to_vec());

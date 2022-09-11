@@ -642,7 +642,6 @@ impl AiosDBManager {
         let geoms = resolve_desi_comp(design_refno, mgr.as_ref(), is_debug).await.unwrap_or_default();
         if type_name == "SCTN" || type_name == "STWALL" || /*type_name == "GENSEC" ||*/ type_name == "WALL" {
             create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref()).await?;
-            center = create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref()).await?;
         } else {
             let GeomsInfo {
                 geometries,
@@ -893,28 +892,8 @@ impl AiosDBManager {
                         Self::get_cata_auto_tubi_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
                                                        &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
                     } else {
-                        let center = Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
+                        Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
                                                                  &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
-                        let jusl = current_att.get_as_string("JUSL").unwrap_or_default();
-                        let h = center.length();
-                        //todo need fix out jusline
-                        // if JUSLINE_TYPES.contains(&cur_type) {
-                        //     jusl_translation = match jusl.as_str() {
-                        //         "OBOW" => {
-                        //             Vec3::new(0.0, 0.0, h * 2.0)
-                        //         }
-                        //         "LTOC" => {
-                        //             Vec3::new(0.0, 0.0, h)
-                        //         }
-                        //         "IBOW" => {
-                        //             Vec3::new(0.0, 0.0, h)
-                        //         }
-                        //         _ => {
-                        //             Vec3::ZERO
-                        //         }
-                        //     };
-                        // }
-                        // dbg!(&jusl_translation);
                     }
                     for (child_refno, shapes) in brep_shapes {
                         let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
