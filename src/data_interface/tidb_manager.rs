@@ -118,8 +118,6 @@ pub struct AiosDBManager {
 }
 
 
-
-
 #[async_trait]
 impl PdmsDataInterface for AiosDBManager {
     /// 获得最全的数据
@@ -353,15 +351,9 @@ impl PdmsDataInterface for AiosDBManager {
         }
         for (refno, ref_basic) in ancestors {
             let type_name = ref_basic.get_type();
-
             let att = self.get_attr(refno).await?;
             let pos = att.get_position().unwrap_or_default();
-            let mut jusl_vec = Vec3::new(0.0, 0.0, 0.0);
-            if let Some(jusl) = att.get_str("JUSL") {
-                if refno == RefU64::from_two_nums(23584, 5931) {
-                    jusl_vec.x = 100.0;
-                }
-            }
+            // let mut jusl_vec = Vec3::new(0.0, 0.0, 0.0);
 
             let mut quat = att.get_rotation().unwrap_or_default();
             if BANG_WIT_EXTRU_TYPES.contains(&type_name) {
@@ -384,44 +376,8 @@ impl PdmsDataInterface for AiosDBManager {
                     &[p_axis.to_array(), y_axis.to_array(), extru_dir.to_array()]
                 )) * Quat::from_rotation_z(bangle.to_radians());
             }
-
-            if type_name == "FITT" {
-                //plin里的位置偏移
-                let plin_pos = Vec3::new(100.0, 0.0, 0.0);
-                let pline_plax = -Vec3::X;
-                // let pline_plax = Vec3::Y;
-
-                let delta_vec = att.get_vec3("DELP").unwrap_or_default() /*+ plin_pos*/;
-                let zdis =  (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
-
-                let bangle = att.get_f32("BANG").unwrap_or_default();
-                // let bangle: f32 = 0.0;
-                // let delta_dist = Vec2::new(delta_vec.x, delta_vec.y).length();
-                let bangle_rot = Quat::from_axis_angle(Vec3::Z, bangle.to_radians());
-
-                let y_axis = Vec3::Z;
-                let z_axis = pline_plax;
-                let x_axis = y_axis.cross(z_axis).normalize();
-                let quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
-                    &[x_axis.to_array(), y_axis.to_array(), z_axis.to_array()]
-                ));
-
-                dbg!(delta_vec);
-                translation = translation + rotation * (zdis + plin_pos - Vec3::new(100.0, 0.0, 0.0) ) + rotation * quat *  bangle_rot * delta_vec;
-                dbg!(translation);
-                if refno == RefU64::from_two_nums(23584, 5932) {
-                    println!("Jusl offset is {:?}, Translation is {:?}", jusl_vec, translation);
-                }
-                rotation = rotation * quat * bangle_rot;
-            }else{
-                translation = translation + rotation * pos + rotation * quat * (-jusl_vec) ;
-                if refno == RefU64::from_two_nums(23584, 5931) {
-                    println!("Jusl offset is {:?}, Translation is {:?}", jusl_vec, translation);
-                }
-                rotation = rotation * quat;
-            }
-
-            // println!("{} : {:?}", refno.to_refno_str(), (translation, rotation));
+            translation = translation + rotation * pos;
+            rotation = rotation * quat;
             self.cached_world_transforms_map.entry(refno).or_insert(TransformRT {
                 rotation,
                 translation,
@@ -432,9 +388,6 @@ impl PdmsDataInterface for AiosDBManager {
             translation,
         }))
     }
-
-
-
 }
 
 
@@ -610,33 +563,21 @@ impl AiosDBManager {
     pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64, branch_att: &AttrMap,
                                        brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
                                        debug_refno: Option<RefU64>,
-    ) -> anyhow::Result<Vec3> {
+    ) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
-        let mut center = Vec3::ZERO;
         if is_debug && design_refno != debug_refno.unwrap() {
-            return Ok(center);
+            return Ok(false);
         }
         let cur_ele = mgr.get_refno_basic(design_refno).unwrap();
         let type_name = cur_ele.get_type();
         let owner = mgr.get_owner_ref_basic(design_refno);
         if owner.is_none() {
-            return Ok(center);
+            return Ok(false);
         }
-        let owner = owner.unwrap();
-        if type_name == "BRAN" {
-            return Ok(center);
-        }
-        if owner.get_type() == "BRAN" || owner.get_type() == "HANG" {
-            dbg!(design_refno);
-            return Ok(center);
-        }
-
         let desi_att = mgr.get_attr(design_refno).await?;
-
         let geoms = resolve_desi_comp(design_refno, mgr.as_ref(), is_debug).await.unwrap_or_default();
         if type_name == "SCTN" || type_name == "STWALL" || /*type_name == "GENSEC" ||*/ type_name == "WALL" {
-            center = create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref()).await?;
-            // dbg!(center);
+            create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref()).await?;
         } else {
             let GeomsInfo {
                 geometries,
@@ -650,11 +591,7 @@ impl AiosDBManager {
             }
             refno_ptset_map.insert(design_refno, axis_map);
         }
-        // if is_debug {
-        //     dbg!(&brep_shape_map);
-        // }
-
-        Ok(center)
+        Ok(true)
     }
 
     ///记录点集的信息
@@ -776,9 +713,9 @@ impl AiosDBManager {
 
     /// 通用的解析表达式的方法, 解析desi参考号下的 表达式值
     /// 如果 desi_refno 为空，代表design的数据不需要参与计算
-    pub async fn resolve_expression_to_f32(&self, expr: &str, desi_refno: RefU64) -> anyhow::Result<f32>{
+    pub async fn resolve_expression_to_f32(&self, expr: &str, desi_refno: RefU64) -> anyhow::Result<f32> {
         //todo 需要通过图数据库去获取这些数据
-        let cata_context = CataExprContext{
+        let cata_context = CataExprContext {
             ..default()
         };
         let context = cata_context.build(self, desi_refno).await;
@@ -786,9 +723,9 @@ impl AiosDBManager {
         eval_str_to_f32(expr, &context)
     }
 
-    pub async fn resolve_expression_to_dir(&self, expr: &str, desi_refno: RefU64) -> anyhow::Result<Vec3>{
+    pub async fn resolve_expression_to_dir(&self, expr: &str, desi_refno: RefU64) -> anyhow::Result<Vec3> {
         //todo 需要通过图数据库去获取这些数据
-        let cata_context = CataExprContext{
+        let cata_context = CataExprContext {
             ..default()
         };
         let context = cata_context.build(self, desi_refno).await;
@@ -803,34 +740,33 @@ impl AiosDBManager {
         let batch_size = mgr.db_option.gen_model_batch_size;
         let mdb = &db_option.mdb_name;
         let t = Instant::now();
-        let mut att_types = vec![/*"BRAN", "HANG"*/];
-        att_types.extend_from_slice(&vec![
-            // "ELCONN",
-            // "CMPF",
-            // "WALL",
-            "STWALL",
-            // "GWALL",
-            // "FIXING",
-            // "PJOI",
-            // "PFIT",
-            // "GENSEC",
-            // "RNODE",
-            // "PRTELE",
-            // "GPART",
-            // "SCREED",
-            // "NOZZ",
-            // "PALJ",
-            // "SUBJ",
-            // "CABLE",
-            // "BATT",
-            // "CMFI",
-            // "SCOJ",
-            // "SEVE",
-            // "SBFI",
-            // "SCTN",
-
-            "FITT",
-        ]);
+        let mut att_types = vec!["BRAN", "HANG"];
+        // att_types.extend_from_slice(&vec![
+        //     "ELCONN",
+        //     "CMPF",
+        //     "WALL",
+        //     "STWALL",
+        //     "GWALL",
+        //     "FIXING",
+        //     "PJOI",
+        //     "PFIT",
+        //     "GENSEC",
+        //     // "RNODE",
+        //     "PRTELE",
+        //     "GPART",
+        //     "SCREED",
+        //     "NOZZ",
+        //     "PALJ",
+        //     "SUBJ",
+        //     "CABLE",
+        //     "BATT",
+        //     "CMFI",
+        //     "SCOJ",
+        //     "SEVE",
+        //     "SBFI",
+        //     "SCTN",
+        //     // "FITT",
+        // ]);
 
         let has_cata_refnos =
             if let Some(branch_refno) = &db_option.debug_branch_refno {
@@ -888,29 +824,8 @@ impl AiosDBManager {
                         Self::get_cata_auto_tubi_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
                                                        &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
                     } else {
-                        let center = Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
-                                                                 &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
-
-                        let jusl = current_att.get_as_string("JUSL").unwrap_or_default();
-                        let h = center.length();
-                        //todo need fix out jusline
-                        // if JUSLINE_TYPES.contains(&cur_type) {
-                        //     jusl_translation = match jusl.as_str() {
-                        //         "OBOW" => {
-                        //             Vec3::new(0.0, 0.0, h * 2.0)
-                        //         }
-                        //         "LTOC" => {
-                        //             Vec3::new(0.0, 0.0, h)
-                        //         }
-                        //         "IBOW" => {
-                        //             Vec3::new(0.0, 0.0, h)
-                        //         }
-                        //         _ => {
-                        //             Vec3::ZERO
-                        //         }
-                        //     };
-                        // }
-                        // dbg!(&jusl_translation);
+                        let success = Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
+                                                                  &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
                     }
                     for (child_refno, shapes) in brep_shapes {
                         let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
@@ -953,29 +868,16 @@ impl AiosDBManager {
                             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
                             bbox.scaled(&trans.scale);
                             //tubi 需要特殊处理
-                            if JUSLINE_TYPES.contains(&cur_type) {
-                                let geom_inst = EleGeoInstance {
-                                    geo_hash,
-                                    refno,
-                                    pts,
-                                    bbox,
-                                    transform: (transform.rotation, transform.translation + jusl_translation, trans.scale),
-                                    visible,
-                                    is_tubi,
-                                };
-                                geo_insts.push(geom_inst);
-                            } else {
-                                let geom_inst = EleGeoInstance {
-                                    geo_hash,
-                                    refno,
-                                    pts,
-                                    bbox,
-                                    transform: (transform.rotation, transform.translation, trans.scale),
-                                    visible,
-                                    is_tubi,
-                                };
-                                geo_insts.push(geom_inst);
-                            }
+                            let geom_inst = EleGeoInstance {
+                                geo_hash,
+                                refno,
+                                pts,
+                                bbox,
+                                transform: (transform.rotation, transform.translation, trans.scale),
+                                visible,
+                                is_tubi,
+                            };
+                            geo_insts.push(geom_inst);
                         }
                         if is_debug {
                             dbg!(&geos_info);
@@ -1353,8 +1255,8 @@ impl AiosDBManager {
                 let project = project.clone();
                 let mgr_clone = mgr.clone();
                 // let handle = tokio::spawn(async move {
-                // Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
-                // Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
+                Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
+                Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
                 // });
                 // handles.push(handle);
             }
