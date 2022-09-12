@@ -6,6 +6,7 @@ use crate::aql_api::children::query_children_aql;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::para_value::query_des_para_value;
 use crate::graph_db::DataDocument;
+use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::options::DbOption;
 
 /// 查询 catr refno引用的 dtse下 data 的 ppro和 dpro数据
@@ -52,9 +53,7 @@ async fn test_query_dtse_ppro_from_catr_refno() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
-        .await?;
-    let database = conn.db("pdms").await?;
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let refno = RefU64::from_refno_str("15193/14606").unwrap();
     let result = query_dtse_ppro_from_catr_refno(refno, &database).await?;
     dbg!(&result);

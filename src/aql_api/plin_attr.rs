@@ -8,6 +8,7 @@ use crate::aql_api::children::{query_children_aql, query_owner_with_type_aql};
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::PdmsPLINAttrAql;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::options::DbOption;
 
 /// 传入desi的参考号，返回该参考号对应的plin attr_map 和 wall 引用的 NA 等对应的数值
@@ -133,9 +134,7 @@ async fn test_query_plin_attrs() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
-        .await?;
-    let database = conn.db("pdms").await?;
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let request = vec![(RefU64::from_refno_str("23584/5934").unwrap(), "IBOW".to_string()),
                        (RefU64::from_refno_str("23584/5935").unwrap(), "IBOW".to_string()),
                        (RefU64::from_refno_str("23584/5936").unwrap(), "OBOW".to_string())];
@@ -151,9 +150,7 @@ async fn test_query_wall_jusl_value() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
-        .await?;
-    let database = conn.db("pdms").await?;
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let result = query_wall_jusl_value(RefU64::from_refno_str("23584/5931").unwrap(), "NA", &database).await?;
     dbg!(&result);
     Ok(())

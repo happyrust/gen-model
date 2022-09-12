@@ -85,6 +85,7 @@ async fn main() -> anyhow::Result<()> {
     dbg!(&db_option);
 
     if db_option.total_sync {
+        create_arangodb_conns(&db_option).await?;
         // 把pdms数据同步到mysql
         sync_pdms(&db_option).await.unwrap();
     }

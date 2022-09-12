@@ -242,7 +242,6 @@ impl ModifyNewData {
 fn modify_bool_implicit_data(input: &[u8], offset: u32, value: bool) -> u32 {
     let val_off = offset & 0xFFFFF;
     let index = (val_off >> 0x14) as usize;
-    println!("index={}", index);
     let pos = (val_off * 4) as usize;
     let mut val = parse_to_u32(&input[pos..pos + 4]);
     let mut bits = val.view_bits_mut::<Lsb0>();
@@ -370,12 +369,6 @@ fn convert_new_data_page(mut page: DataPage, data: ModifyNewData, version: u32) 
                 if noun_pos + len < origin_len {
                     new_data = [new_data, page.implicit_data[len + noun_pos + 4..].to_vec()].concat(); // +4是因为 data前面还有个 007
                 }
-                // let path = r"data_implicit_page.txt";
-                // fs::write(path, DataPage {
-                //     implicit_data: new_data.clone(),
-                //     children: page.children.clone(),
-                //     explicit_data: page.explicit_data.clone(),
-                // }.convert_new_data_page());
                 Some(DataPage {
                     implicit_data: new_data,
                     children: page.children,
