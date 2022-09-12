@@ -55,6 +55,7 @@ use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::AIOSAxisMap;
 use crate::defines::{AiosString, CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP, PDMS_ATT_MAP_CACHE};
+use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::graph_db::pdms_inst_arango::sync_instance_to_graph_db;
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
@@ -560,12 +561,7 @@ impl AiosDBManager {
                                                                            PDMS_INFO_DB, &db_option.project_name.to_uppercase())).await?;
         let ref0_map = get_ref0_map(&info_conn).await?;
         let projects = db_option.included_projects.clone();
-        // todo 用户名密码等先写死，后面再分一个toml出来
-        let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "test")
-            .await
-            .unwrap();
-
-        let database = conn.db("pdms").await.unwrap();
+        let database = get_arangodb_conn_from_db_option(&db_option).await?;
         println!("正在缓存plin");
         let plin_cache_mgr = cache_plin_plax(&project_map.get(&db_option.project_name).unwrap(), (&db_option.manual_db_nums).clone(), &database).await.unwrap_or(DashMap::new());
         dbg!("Cache Ok");

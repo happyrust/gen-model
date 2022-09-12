@@ -1,10 +1,13 @@
 use aios_core::helper::parse_to_u32;
-use memchr::memmem::rfind_iter;
+use aios_core::pdms_types::RefU64;
+use memchr::memmem::{find_iter, rfind_iter};
 use serde::{Serialize, Deserialize};
 
 mod modify;
 // mod increment;
 mod create_att;
+mod data_page;
+mod index_page;
 mod claim_page;
 mod session_page;
 
@@ -89,4 +92,28 @@ pub fn get_page_no(input: &[u8], page_type: PageType) -> Option<u32> {
         return Some((position / 0x800) as u32);
     }
     None
+}
+
+/// 获得最后一个存在该参考号的 page
+pub fn get_last_page(input: &[u8], refno: RefU64, page_no: [u8; 12]) -> Option<Vec<u8>> {
+    // 从下往上找到所有的 page
+    let mut rfind_iter = rfind_iter(input, &page_no[..]);
+    while let Some(pos) = rfind_iter.next() {
+        if pos + 0x800 > input.len() { return None; }
+        let claim_page = &input[pos..pos + 0x800];
+        // 找到存在修改的参考号所在的 claim_page
+        if let Some(_refno_pos) = find_iter(&claim_page, &refno.to_be_bytes()).next() {
+            return Some(input[pos..pos + 0x800].to_vec());
+        }
+    }
+    None
+}
+
+/// 返回参考号在该数据页中的位置
+pub fn get_refno_position_in_page(input: &[u8], refno: RefU64) -> Option<usize> {
+    return if let Some(position) = find_iter(input, &refno.0.to_be_bytes()).next() {
+        Some(position)
+    } else {
+        None
+    }
 }
