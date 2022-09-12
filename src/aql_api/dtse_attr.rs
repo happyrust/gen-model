@@ -52,7 +52,7 @@ async fn test_query_dtse_ppro_from_catr_refno() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "test")
         .await?;
     let database = conn.db("pdms").await?;
     let refno = RefU64::from_refno_str("15193/14606").unwrap();

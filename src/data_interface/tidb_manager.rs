@@ -5,7 +5,7 @@ use std::env;
 use std::f32::EPSILON;
 use std::mem::take;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use aios_core::cache::mgr::*;
 use aios_core::cache::refno::*;
@@ -34,6 +34,7 @@ use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
 use smol_str::SmolStr;
 use sqlx::{MySql, MySqlPool, Pool};
+use sqlx::pool::PoolOptions;
 
 use crate::api::attr::*;
 use crate::api::children::cache_site_node;
@@ -488,7 +489,11 @@ impl AiosDBManager {
     /// 获得pool
     #[inline]
     pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
-        MySqlPool::connect(&format!("{connection_str}/{}", project)).await.map_err(
+
+        // MySqlPool::connect_with()
+
+        let url = &format!("{connection_str}/{}", project);
+        PoolOptions::new().max_connections(500).acquire_timeout(Duration::from_secs(10 * 60)).connect(url).await.map_err(
             {
                 |x| anyhow!(x.to_string())
             }
@@ -497,7 +502,7 @@ impl AiosDBManager {
 
     #[inline]
     pub async fn get_arangodb_conn(&self) -> anyhow::Result<Database> {
-        let conn = Connection::establish_jwt(&self.db_option.arangodb_url, "root", "")
+        let conn = Connection::establish_jwt(&self.db_option.arangodb_url, "root", "test")
             .await?;
 
         Ok(conn.db("pdms").await?)
@@ -556,7 +561,7 @@ impl AiosDBManager {
         let ref0_map = get_ref0_map(&info_conn).await?;
         let projects = db_option.included_projects.clone();
         // todo 用户名密码等先写死，后面再分一个toml出来
-        let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+        let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "test")
             .await
             .unwrap();
 

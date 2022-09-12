@@ -133,7 +133,7 @@ async fn test_query_plin_attrs() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "test")
         .await?;
     let database = conn.db("pdms").await?;
     let request = vec![(RefU64::from_refno_str("23584/5934").unwrap(), "IBOW".to_string()),
@@ -151,7 +151,7 @@ async fn test_query_wall_jusl_value() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "test")
         .await?;
     let database = conn.db("pdms").await?;
     let result = query_wall_jusl_value(RefU64::from_refno_str("23584/5931").unwrap(), "NA", &database).await?;

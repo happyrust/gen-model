@@ -27,7 +27,7 @@ use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
 pub async fn get_arangodb_conn_from_db_option(db_option: &DbOption) -> anyhow::Result<Database> {
-    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "test")
         .await?;
     Ok(conn.db("pdms").await?)
 }
@@ -317,7 +317,7 @@ pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &st
 }
 
 pub async fn save_arangodb_with_db_option(json: Value, db_option: &DbOption, collection: &str) -> anyhow::Result<()> {
-    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "test")
         .await?;
     let database = conn.db("pdms").await?;
     let aql = AqlQuery::new("LET data = @elements
@@ -340,7 +340,7 @@ pub async fn save_arangodb_with_database(json: Value, collection: &str, database
 }
 
 pub async fn save_arangodb_with_db_option_create_collection(json: Value, db_option: &DbOption, collection: &str, collection_type: CollectionType) -> anyhow::Result<()> {
-    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "test")
         .await?;
     let database = conn.db("pdms").await?;
     match collection_type {

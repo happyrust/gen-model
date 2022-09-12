@@ -34,7 +34,7 @@ async fn test_query_para_from_desi_refno() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "")
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, "root", "test")
         .await?;
     let database = conn.db("pdms").await?;
     let result = query_para_from_desi_refno(RefU64::from_refno_str("23584/5931").unwrap(),&database).await?;
