@@ -36,7 +36,7 @@ chrono = "0.4.22"
 
 
 parse_pdms_db = { path = "../aios-parse-pdms" }
-aios_core = { path = "../aios-core"}
+aios_core = { path = "../aios_core"}
 #arangors_lite = { path = "../arangors-lite" }
 #parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms" }
 #aios_core = { git = "https://gitee.com/happydpc/aios-core" }
@@ -61,7 +61,7 @@ sea-orm = { version = "0.8.0", features = ["default", "runtime-tokio"]}
 cc = { version = "1.0", features = ["parallel"] }
 
 [dependencies.sqlx]
-version = "0.6.0"
+version = "0.6.1"
 default-features = false
 features = [
 #    "runtime-async-std-native-tls",

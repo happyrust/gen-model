@@ -20,6 +20,7 @@ use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
 use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::PdmsTubing;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
+use aios_core::tool::math_tool;
 use anyhow::anyhow;
 use append_only_vec::AppendOnlyVec;
 use approx::{abs_diff_eq, abs_diff_ne};
@@ -28,7 +29,7 @@ use async_trait::async_trait;
 use config::{Config, ConfigError, Environment, File};
 use dashmap::{DashMap, DashSet};
 use dashmap::mapref::one::Ref;
-use glam::{Quat, quat, TransformRT, TransformSRT, Vec2, Vec3};
+use glam::{EulerRot, Mat3, Quat, quat, TransformRT, TransformSRT, Vec2, Vec3};
 use id_tree::{Node, NodeId};
 use lazy_static::lazy_static;
 use once_cell::sync::Lazy;
@@ -141,7 +142,7 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_full_attr(refno, ref_basic.value(), &project_pool, None).await?;
-                PDMS_ATT_MAP_CACHE.insert(refno, attr.clone());
+                PDMS_ATT_MAP_CACHE.insert(refno, attr.clone()).expect("PDMS_ATT_MAP_CACHE save error.");
                 return Ok(attr);
             }
         }
@@ -363,47 +364,54 @@ impl PdmsDataInterface for AiosDBManager {
             ancestors.push_front((cur_refno, ref_basic));
             cur_refno = tmp_owner;
         }
-        let mut jusl_vec = Vec3::new(0.0, 0.0, 0.0);
+        // dbg!(&ancestors);
         for (refno, ref_basic) in ancestors {
-            let type_name = ref_basic.get_type();
-
+            let mut jusl_vec = Vec3::new(0.0, 0.0, 0.0);
             let att = self.get_attr(refno).await?;
             let pos = att.get_position().unwrap_or_default();
-
             if let Some(jusl) = att.get_str("JUSL") {
+                // dbg!(&jusl);
                 if let Some(exps) = query_wall_jusl_value(refno, jusl, &self.arango_database).await? {
                     let x = self.resolve_expression_to_f32(&exps[0], refno).await?;
                     let y = self.resolve_expression_to_f32(&exps[1], refno).await?;
                     jusl_vec = Vec3::new(x, y, 0.0);
+                    // dbg!(&jusl_vec);
                 }
             }
 
             let mut quat = att.get_rotation().unwrap_or_default();
             if let Some(bangle) = att.get_f32("BANG") {
                 //如果是有poss pose
+                let mut need_bangle = false;
                 let extru_dir: Vec3 = if let Some(poss) = att.get_poss() &&
                 let Some(pose) = att.get_pose()
                 {
+                    need_bangle = true;
                     (pose - poss).normalize()
                 } else{
                     Vec3::Z
                 };
-                let d = extru_dir.dot(Vec3::Z).abs();
-                let mut ref_axis = if abs_diff_eq!(1.0, d) {
-                    Vec3::Y
-                } else { Vec3::Z };
+                // dbg!(&extru_dir);
+                if need_bangle {
+                    let d = extru_dir.dot(Vec3::Z).abs();
+                    let mut ref_axis = if abs_diff_eq!(1.0, d) {
+                        Vec3::Y
+                    } else { Vec3::Z };
 
-                let p_axis = ref_axis.cross(extru_dir).normalize();
-                let y_axis = extru_dir.cross(p_axis).normalize();
-                quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
-                    &[p_axis.to_array(), y_axis.to_array(), extru_dir.to_array()]
-                )) * Quat::from_rotation_z(bangle.to_radians());
+                    let p_axis = ref_axis.cross(extru_dir).normalize();
+                    let y_axis = extru_dir.cross(p_axis).normalize();
+                    quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
+                        &[p_axis.to_array(), y_axis.to_array(), extru_dir.to_array()]
+                    )) * Quat::from_rotation_z(bangle.to_radians());
+                    // dbg!(&quat);
+                    println!("{} Bangle {} : {:?}", refno.to_refno_string(), bangle, quat);
+                }
+
             }
             if let Some(pos_line) = att.get_str("POSL") {
                 //plin里的位置偏移
                 let mut plin_pos = Vec3::new(0.0, 0.0, 0.0);
                 let mut pline_plax = -Vec3::X;
-                // let pline_plax = Vec3::Y;
 
                 let delta_vec = att.get_vec3("DELP").unwrap_or_default() /*+ plin_pos*/;
                 let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
@@ -418,27 +426,31 @@ impl PdmsDataInterface for AiosDBManager {
                 if let Some(v) = self.plin_cache_mgr.get(&refno) {
                     pline_plax = parse_expr_to_dir(v.value());
                 }
-                // let bangle: f32 = 0.0;
-                // let delta_dist = Vec2::new(delta_vec.x, delta_vec.y).length();
-                let bangle_rot = Quat::from_axis_angle(Vec3::Z, bangle.to_radians());
-
+                let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
                 let y_axis = Vec3::Z;
                 let z_axis = pline_plax;
                 let x_axis = y_axis.cross(z_axis).normalize();
                 let quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
                     &[x_axis.to_array(), y_axis.to_array(), z_axis.to_array()]
                 ));
+                // dbg!(bangle);
                 // dbg!(&refno);
                 // dbg!(&plin_pos);
                 // dbg!(&jusl_vec);
-                translation = translation + rotation * (zdis + plin_pos /*- jusl_vec*/) + rotation * quat * bangle_rot * delta_vec;
+                // dbg!(bangle_rot);
+                translation = translation + rotation * (zdis + plin_pos) + rotation * quat * bangle_rot * delta_vec;
                 rotation = rotation * quat * bangle_rot;
             } else {
                 translation = translation + rotation * pos + rotation * quat * (-jusl_vec);
                 rotation = rotation * quat;
             }
 
-            // println!("{} : {:?}", refno.to_refno_str() (translation, rotation));
+            //将rotation 还原为角度
+            let angles = rotation.to_euler(EulerRot::XYZ);
+            let rot_mat = Mat3::from_quat(rotation);
+            let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
+
+            println!("{} : {:?}, ori: {:?}", refno.to_refno_str(), (translation, rotation), ori_str);
             self.cached_world_transforms_map.entry(refno).or_insert(TransformRT {
                 rotation,
                 translation,
@@ -563,7 +575,11 @@ impl AiosDBManager {
         let projects = db_option.included_projects.clone();
         let database = get_arangodb_conn_from_db_option(&db_option).await?;
         println!("正在缓存plin");
-        let plin_cache_mgr = cache_plin_plax(&project_map.get(&db_option.project_name).unwrap(), (&db_option.manual_db_nums).clone(), &database).await.unwrap_or(DashMap::new());
+        let plin_cache_mgr  = if let Some(pool) = project_map.get(&db_option.project_name){
+            cache_plin_plax(&project_map.get(&db_option.project_name).unwrap(), (&db_option.manual_db_nums).clone(), &database).await.unwrap_or(DashMap::new())
+        } else {
+            DashMap::new()
+        };
         dbg!("Cache Ok");
         Ok(
             Self {
@@ -624,8 +640,9 @@ impl AiosDBManager {
     }
 
     ///获取单个元件的模型数据
-    pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64, branch_att: &AttrMap,
-                                       brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
+    pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64,
+                                       brep_shape_map: &CateBrepShapeMap,
+                                       refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
                                        debug_refno: Option<RefU64>,
     ) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
@@ -641,6 +658,8 @@ impl AiosDBManager {
         }
         let desi_att = mgr.get_attr(design_refno).await?;
         let geoms = resolve_desi_comp(design_refno, mgr.as_ref(), is_debug).await.unwrap_or_default();
+        // dbg!(&geoms);
+        // dbg!(type_name);
         if type_name == "SCTN" || type_name == "STWALL" || /*type_name == "GENSEC" ||*/ type_name == "WALL" {
             create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref()).await?;
         } else {
@@ -835,8 +854,8 @@ impl AiosDBManager {
             // "SCOJ",
             // "SEVE",
             // "SBFI",
-            // "SCTN",
-            // "FITT",
+            "SCTN",
+            "FITT",
         ]);
 
         let has_cata_refnos =
@@ -879,24 +898,22 @@ impl AiosDBManager {
                     println!("正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}", j, refno.to_refno_string(),
                              processed_cnt.lock().unwrap().to_owned());
                     let inst_map = &instance_mgr.inst_mgr;
-                    let mut jusl_translation = Vec3::ZERO;
                     let cached_mesh_mgr = &mgr.cached_mesh_mgr;
                     let level_shape_mgr = &instance_mgr.level_shape_mgr;
                     //在这里直接处理完所有需要处理的transform
-                    let brep_shapes = CateBrepShapeMap::new();
+                    let brep_shapes_map = CateBrepShapeMap::new();
                     let current_att = mgr.get_attr(refno).await.unwrap_or_default();
                     let mut refno_ptset_map = DashMap::new();
-                    let mut is_auto_tubi = false;
                     let cur_type = current_att.get_type();
                     if cur_type == "BRAN" || cur_type == "HANG" {
-                        is_auto_tubi = true;
-                        Self::get_cata_auto_tubi_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
+                        Self::get_cata_auto_tubi_geoms(mgr.clone(), refno, &current_att, &brep_shapes_map,
                                                        &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
                     } else {
-                        Self::get_cata_single_geoms(mgr.clone(), refno, &current_att, &brep_shapes,
-                                                                 &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
+                        Self::get_cata_single_geoms(mgr.clone(), refno, &brep_shapes_map,
+                                                    &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
                     }
-                    for (child_refno, shapes) in brep_shapes {
+                    // dbg!(&brep_shapes_map);
+                    for (child_refno, shapes) in brep_shapes_map {
                         let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
                         let ancestors = mgr.get_ancestors_refnos_without_world(child_refno);
                         for p_refno in ancestors {
@@ -924,14 +941,16 @@ impl AiosDBManager {
                             } = shape;
                             if !visible || !brep_shape.check_valid() { continue; }
                             let trans = brep_shape.get_trans();
-                            if !brep_shape.check_valid() {
-                                continue;
-                            }
-                            let geo_hash = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_shape);
+                            let geo_hash = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_shape.clone());
                             // if is_debug {
                             //     dbg!(geo_hash);
                             // }
-                            let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
+                            let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
+                            if bbox.is_none() {
+                                dbg!(geo_hash);
+                                dbg!(&brep_shape);
+                            }
+                            let mut bbox = bbox.unwrap_or_default();
                             bbox.scaled(&trans.scale);
                             //tubi 需要特殊处理
                             let geom_inst = EleGeoInstance {
