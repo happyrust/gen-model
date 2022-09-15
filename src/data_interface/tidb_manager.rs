@@ -43,7 +43,7 @@ use crate::api::element::*;
 use crate::api::refno_info::{cache_plin_plax, get_ref0_map, sync_refno_basic_map};
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::para_value::{query_des_para_value, query_para_from_desi_refno};
-use crate::aql_api::plin_attr::{match_jusline_attr, query_plin_attrs, query_wall_jusl_value};
+use crate::aql_api::plin_attr::{match_jusline_attr, query_plin_attrs, query_pline_value};
 use crate::ATTR_INFO_MAP;
 use crate::cata::consts::{BANG_WIT_EXTRU_TYPES, JUSLINE_TYPES};
 use crate::cata::direction_parse::parse_expr_to_dir;
@@ -370,15 +370,14 @@ impl PdmsDataInterface for AiosDBManager {
             let att = self.get_attr(refno).await?;
             let pos = att.get_position().unwrap_or_default();
             if let Some(jusl) = att.get_str("JUSL") {
-                // dbg!(&jusl);
-                if let Some(exps) = query_wall_jusl_value(refno, jusl, &self.arango_database).await? {
+                dbg!(&jusl);
+                if let Some(exps) = query_pline_value(refno, jusl, &self.arango_database).await? {
                     let x = self.resolve_expression_to_f32(&exps[0], refno).await?;
                     let y = self.resolve_expression_to_f32(&exps[1], refno).await?;
                     jusl_vec = Vec3::new(x, y, 0.0);
-                    // dbg!(&jusl_vec);
+                    dbg!(&jusl_vec);
                 }
             }
-
             let mut quat = att.get_rotation().unwrap_or_default();
             if let Some(bangle) = att.get_f32("BANG") {
                 //如果是有poss pose
@@ -391,7 +390,6 @@ impl PdmsDataInterface for AiosDBManager {
                 } else{
                     Vec3::Z
                 };
-                // dbg!(&extru_dir);
                 if need_bangle {
                     let d = extru_dir.dot(Vec3::Z).abs();
                     let mut ref_axis = if abs_diff_eq!(1.0, d) {
@@ -409,23 +407,27 @@ impl PdmsDataInterface for AiosDBManager {
 
             }
             if let Some(pos_line) = att.get_str("POSL") {
+                dbg!(pos_line);
                 //plin里的位置偏移
                 let mut plin_pos = Vec3::new(0.0, 0.0, 0.0);
                 let mut pline_plax = -Vec3::X;
 
                 let delta_vec = att.get_vec3("DELP").unwrap_or_default() /*+ plin_pos*/;
                 let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
-
+                dbg!(zdis);
                 let bangle = att.get_f32("BANG").unwrap_or_default();
-                let pos_line = query_wall_jusl_value(att.get_owner().unwrap(), pos_line, &self.arango_database).await?;
+                let pos_line = query_pline_value(att.get_owner().unwrap(), pos_line, &self.arango_database).await?;
                 if let Some(pos_line) = pos_line {
                     let x = self.resolve_expression_to_f32(&pos_line[0], refno).await?;
                     let y = self.resolve_expression_to_f32(&pos_line[1], refno).await?;
                     plin_pos = Vec3::new(x, y, 0.0);
                 }
+                // dbg!(plin_pos);
                 if let Some(v) = self.plin_cache_mgr.get(&refno) {
+                    // dbg!(&v);
                     pline_plax = parse_expr_to_dir(v.value());
                 }
+                // dbg!(pline_plax);
                 let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
                 let y_axis = Vec3::Z;
                 let z_axis = pline_plax;
@@ -576,7 +578,8 @@ impl AiosDBManager {
         let database = get_arangodb_conn_from_db_option(&db_option).await?;
         println!("正在缓存plin");
         let plin_cache_mgr  = if let Some(pool) = project_map.get(&db_option.project_name){
-            cache_plin_plax(&project_map.get(&db_option.project_name).unwrap(), (&db_option.manual_db_nums).clone(), &database).await.unwrap_or(DashMap::new())
+            cache_plin_plax(&project_map.get(&db_option.project_name).unwrap(),
+                            (&db_option.manual_db_nums).clone(), &database).await.unwrap_or(DashMap::new())
         } else {
             DashMap::new()
         };

@@ -100,8 +100,8 @@ async fn main() -> anyhow::Result<()> {
     if db_option.rebuild_arangodb {
         dbg!("正在同步图数据库");
         sync_pdms_to_graph_db(mgr.clone(), db_option.clone()).await?;
-        sync_pdms_level_edges_to_graph_db(mgr.clone()).await?;
-        sync_foreign_refno_to_graph_db(mgr.clone()).await?;
+        // sync_pdms_level_edges_to_graph_db(mgr.clone()).await?;
+        // sync_foreign_refno_to_graph_db(mgr.clone()).await?;
         dbg!("图数据库同步完成");
     }
 

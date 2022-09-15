@@ -360,8 +360,8 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
 }
 
 pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
-    // let mut foreign_edges = vec![];
-    // let mut foreign_edges_refnos = DashSet::new(); // 防止edges重复
+    let mut foreign_edges = vec![];
+    let mut foreign_edges_refnos = DashSet::new(); // 防止edges重复
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
@@ -595,24 +595,24 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 // }
 
                 // 将外键属性保存到图数据库
-                // for foreign_refnos in foreign_refnos_map.into_iter() {
-                //     let refno = foreign_refnos.0;
-                //     if foreign_edges_refnos.contains(&refno) { continue; }
-                //     foreign_edges_refnos.insert(refno);
-                //     for (foreign_type, foreign_refno) in foreign_refnos.1 {
-                //         if foreign_refno == RefU64(0) { continue; }
-                //         foreign_edges.push(ForeignEdges {
-                //             _from: format!("{}/{}", "pdms_eles", refno.to_url_refno()),
-                //             _to: format!("{}/{}", "pdms_eles", foreign_refno.to_url_refno()),
-                //             foreign_type,
-                //         })
-                //     }
-                //     // dbg!(&cache_data.finished);
-                // }
-                // if foreign_edges.len() > 0 {
-                //     let json = serde_json::to_value(&take(&mut foreign_edges))?;
-                //     save_arangodb_with_db_option(json, &db_option, "foreign_edges").await?;
-                // }
+                for foreign_refnos in foreign_refnos_map.into_iter() {
+                    let refno = foreign_refnos.0;
+                    if foreign_edges_refnos.contains(&refno) { continue; }
+                    foreign_edges_refnos.insert(refno);
+                    for (foreign_type, foreign_refno) in foreign_refnos.1 {
+                        if foreign_refno == RefU64(0) { continue; }
+                        foreign_edges.push(ForeignEdges {
+                            _from: format!("{}/{}", "pdms_eles", refno.to_url_refno()),
+                            _to: format!("{}/{}", "pdms_eles", foreign_refno.to_url_refno()),
+                            foreign_type,
+                        })
+                    }
+                    // dbg!(&cache_data.finished);
+                }
+                if foreign_edges.len() > 0 {
+                    let json = serde_json::to_value(&take(&mut foreign_edges))?;
+                    save_arangodb_with_db_option(json, &db_option, "foreign_edges").await?;
+                }
             }
         }
     }

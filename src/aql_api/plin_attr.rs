@@ -57,7 +57,7 @@ pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &Database
     Ok(result)
 }
 
-pub async fn query_wall_jusl_value(refno: RefU64, jusl: &str, database: &Database) -> anyhow::Result<Option<[String; 3]>> {
+pub async fn query_pline_value(refno: RefU64, jusl: &str, database: &Database) -> anyhow::Result<Option<[String; 3]>> {
     let pstr = query_foreign_refno_aql(refno, vec!["SPRE", "PSTR"], database).await?;
     if pstr.is_none() { return Ok(None); }
     let pstr_children = query_children_aql(database, pstr.unwrap()).await?;
@@ -151,7 +151,7 @@ async fn test_query_wall_jusl_value() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
-    let result = query_wall_jusl_value(RefU64::from_refno_str("23584/5931").unwrap(), "NA", &database).await?;
+    let result = query_pline_value(RefU64::from_refno_str("23584/5931").unwrap(), "NA", &database).await?;
     dbg!(&result);
     Ok(())
 }
