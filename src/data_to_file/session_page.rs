@@ -13,8 +13,8 @@ use crate::data_to_file::PageType::{ClaimPage, IndexPage};
 pub struct SessionPage {
     /// 修改之前最后的page_number
     pub last_page_num: u32,
-    /// 新生成的session_page_num
-    pub new_session_page_num: u32,
+    /// 新生成的最后的page_num
+    pub new_latest_page_num: u32,
     /// 新生成的index表的 page_num
     pub index_page_num: u32,
     /// 新生成的claim表的 page_num
@@ -31,16 +31,16 @@ impl SessionPage {
     /// increment_page_no : 新生成数据的page的数量
     pub fn convert_session_page(self, input: &[u8]) -> Vec<u8> {
         let mut new_session_page = vec![0u8, 0, 0, 3];
-        let mut last_session_page = get_last_session_page(input, self.last_page_num);
+        let mut last_session_page = get_latest_session_page(input, self.last_page_num);
         // 获取修改之前最新的 session_page 的 page_number
-        let last_session_page_num = parse_to_u32(&last_session_page[20..24]);
-        new_session_page.append(&mut last_session_page_num.to_be_bytes()[..4].to_vec());
+        // let last_page_num = parse_to_u32(&last_session_page[20..24]);
+        new_session_page.append(&mut self.last_page_num.to_be_bytes()[..4].to_vec());
         // 获取修改之前最新的session_no
         let session_no = parse_to_u32(&last_session_page[12..16]);
-        let mut new_session_no = [vec![0u8, 0, 0, 1], session_no.to_be_bytes()[..4].to_vec()].concat();
+        let mut new_session_no = [vec![0u8, 0, 0, 1], (session_no + 1).to_be_bytes()[..4].to_vec()].concat();
         new_session_page.append(&mut new_session_no);
         // 当前的 session_page_num
-        let mut new_session_page_num = [vec![0xFF; 4], (self.new_session_page_num + self.last_page_num).to_be_bytes()[..4].to_vec()].concat();
+        let mut new_session_page_num = [vec![0xFF; 4], (self.new_latest_page_num + 1).to_be_bytes()[..4].to_vec()].concat();
         new_session_page.append(&mut new_session_page_num);
         // 获取新生成的 index_page_num
         // let index_page_num = get_page_no(input, IndexPage).unwrap_or(parse_to_u32(&last_session_page[28..32]));
@@ -65,13 +65,13 @@ impl SessionPage {
         new_session_page.append(&mut comment);
         // 其余数据都使用上一个session_page的旧数据
         last_session_page.splice(..new_session_page.len(), new_session_page);
-        last_session_page.splice(last_session_page.len() - 16..last_session_page.len() - 12, (session_no - 1).to_be_bytes().to_vec());
+        last_session_page.splice(last_session_page.len() - 16..last_session_page.len() - 12, session_no.to_be_bytes().to_vec());
         last_session_page
     }
 }
 
 /// 获得修改之前，最新的session_page的0x800的数据
-pub fn get_last_session_page(input: &[u8], last_page_no: u32) -> Vec<u8> {
+pub fn get_latest_session_page(input: &[u8], last_page_no: u32) -> Vec<u8> {
     let last_page_position = (last_page_no * 0x800) as usize;
     input[last_page_position..last_page_position + 0x800].to_vec()
 }
@@ -120,14 +120,14 @@ fn test_convert_session_page() {
     file.read_to_end(&mut input).unwrap();
     let session_page = SessionPage {
         last_page_num: 0xF23,
-        new_session_page_num: 5,
+        new_latest_page_num: 5,
         index_page_num: 0xF16,
         claim_page_num: 0xF24,
         user_name: "JBpeople".to_string(),
         commit_comment: "Default session comment".to_string(),
     };
     let data = SessionPage::convert_session_page(session_page, &input);
-    let mut file = fs::File::create("resource/sam7200_0001_test").unwrap();
+    let mut file = fs::File::create("resource/sam7200_0001_test_session").unwrap();
     file.write_all(&data).unwrap();
 }
 
@@ -143,7 +143,7 @@ fn test_get_last_session_page() {
     let mut input = vec![];
     file.read_to_end(&mut input).unwrap();
     let page_no = get_last_page_no(&input);
-    let data = get_last_session_page(&input, page_no);
+    let data = get_latest_session_page(&input, page_no);
     let mut file = fs::File::create("resource/sam7200_0001_test").unwrap();
     file.write_all(&data).unwrap();
 }

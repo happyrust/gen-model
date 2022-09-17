@@ -10,6 +10,7 @@ mod data_page;
 mod index_page;
 mod claim_page;
 mod session_page;
+mod name_page;
 
 const INDEX_PAGE: [u8; 8] = [0x0, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF];
 const CLAIM_PAGE: [u8; 8] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0x74, 0x3F, 0x49];
@@ -50,7 +51,7 @@ impl NewPage {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct DataPage {
+pub struct OldDataPage {
     /// 隐式属性
     pub implicit_data: Vec<u8>,
     /// 子节点
@@ -59,7 +60,7 @@ pub struct DataPage {
     pub explicit_data: Vec<u8>,
 }
 
-impl DataPage {
+impl OldDataPage {
     pub fn turn_self_into_vec(self) -> Vec<u8> {
         [self.implicit_data, self.children, self.explicit_data].concat()
     }
@@ -94,8 +95,8 @@ pub fn get_page_no(input: &[u8], page_type: PageType) -> Option<u32> {
     None
 }
 
-/// 获得最后一个存在该参考号的 page
-pub fn get_last_page(input: &[u8], refno: RefU64, page_no: [u8; 12]) -> Option<Vec<u8>> {
+/// 获得最后一个存在该参考号的 page,并返回他开始的position
+pub fn get_latest_page(input: &[u8], refno: RefU64, page_no: [u8; 12]) -> Option<(Vec<u8>,usize)> {
     // 从下往上找到所有的 page
     let mut rfind_iter = rfind_iter(input, &page_no[..]);
     while let Some(pos) = rfind_iter.next() {
@@ -103,7 +104,7 @@ pub fn get_last_page(input: &[u8], refno: RefU64, page_no: [u8; 12]) -> Option<V
         let claim_page = &input[pos..pos + 0x800];
         // 找到存在修改的参考号所在的 claim_page
         if let Some(_refno_pos) = find_iter(&claim_page, &refno.to_be_bytes()).next() {
-            return Some(input[pos..pos + 0x800].to_vec());
+            return Some((input[pos..pos + 0x800].to_vec(),pos));
         }
     }
     None

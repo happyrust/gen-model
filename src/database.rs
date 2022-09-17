@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::hash_map::DefaultHasher;
 use std::default::default;
 use std::fmt::format;
 use std::fs;
@@ -6,6 +7,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::mem::take;
 use std::path::{Path, PathBuf};
+use std::ptr::hash;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -18,6 +20,7 @@ use anyhow::anyhow;
 use arangors_lite::collection::CollectionType::Document;
 use dashmap::{DashMap, DashSet};
 use itertools::Itertools;
+use nom::character::complete::u64;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use parse_pdms_db::parse_file;
 use sqlx::{Connection, MySql, MySqlPool, Pool};
@@ -33,7 +36,7 @@ use crate::aql_api::PdmsPLINAttrAql;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{ForeignEdges, ParaDocument};
-use crate::graph_db::pdms_arango::{save_arangodb_with_db_option, save_arangodb_with_db_option_create_collection, save_dtse_value_to_arangodb};
+use crate::graph_db::pdms_arango::{save_arangodb_with_db_option, save_arangodb_with_db_option_create_collection, save_dtse_value_to_arangodb, save_pdms_element_in_sync, save_pdms_level_edges_in_sync};
 use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
@@ -360,8 +363,8 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
 }
 
 pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
-    // let mut foreign_edges = vec![];
-    // let mut foreign_edges_refnos = DashSet::new(); // 防止edges重复
+    let mut foreign_edges = vec![];
+    let mut foreign_edges_refnos = DashSet::new(); // 防止edges重复
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
@@ -416,14 +419,21 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 let mut type_handles = vec![];
                 // 将部分数据保存到图数据库
                 {
-                    // 单独保存plin
-                    save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
-                    // 将 para 和 des_para保存的图数据库中
-                    save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
-                    // 将 dtse下的data部分数据保存到图数据库
-                    save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                    if db_type == "CATA" || db_type == "DESI" {
+                        // 将 pdms_element 部分数据保存到图数据库中
+                        save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
+                        // 将兄弟关系保存到图数据库中
+                        save_pdms_level_edges_in_sync(&db_option,&children_map_arc).await?;
+                        // 单独保存plin
+                        // save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                        // 将 para 和 des_para保存的图数据库中
+                        // save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
+                        // 将 dtse下的data部分数据保存到图数据库
+                        // save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                    }
                 }
                 for (type_hash, type_refnos) in type_ele_map {
+                    continue;
                     let info_pool_clone = info_pool.clone();
                     let filename_clone = file_name_clone.clone();
                     let project_clone = project.clone();
@@ -596,24 +606,25 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 // }
 
                 // 将外键属性保存到图数据库
-                // for foreign_refnos in foreign_refnos_map.into_iter() {
-                //     let refno = foreign_refnos.0;
-                //     if foreign_edges_refnos.contains(&refno) { continue; }
-                //     foreign_edges_refnos.insert(refno);
-                //     for (foreign_type, foreign_refno) in foreign_refnos.1 {
-                //         if foreign_refno == RefU64(0) { continue; }
-                //         foreign_edges.push(ForeignEdges {
-                //             _from: format!("{}/{}", "pdms_eles", refno.to_url_refno()),
-                //             _to: format!("{}/{}", "pdms_eles", foreign_refno.to_url_refno()),
-                //             foreign_type,
-                //         })
-                //     }
-                //     // dbg!(&cache_data.finished);
-                // }
-                // if foreign_edges.len() > 0 {
-                //     let json = serde_json::to_value(&take(&mut foreign_edges))?;
-                //     save_arangodb_with_db_option(json, &db_option, "foreign_edges").await?;
-                // }
+                for foreign_refnos in foreign_refnos_map.into_iter() {
+                    let refno = foreign_refnos.0;
+                    if foreign_edges_refnos.contains(&refno) { continue; }
+                    foreign_edges_refnos.insert(refno);
+                    for (foreign_type, foreign_refno) in foreign_refnos.1 {
+                        if foreign_refno == RefU64(0) { continue; }
+                        let key = refno.hash_with_another_refno(foreign_refno);
+                        foreign_edges.push(ForeignEdges {
+                            _key: key,
+                            _from: format!("{}/{}", "pdms_eles", refno.to_url_refno()),
+                            _to: format!("{}/{}", "pdms_eles", foreign_refno.to_url_refno()),
+                            foreign_type,
+                        })
+                    }
+                }
+                if foreign_edges.len() > 0 {
+                    let json = serde_json::to_value(&take(&mut foreign_edges))?;
+                    save_arangodb_with_db_option(json, &db_option, "foreign_edges").await?;
+                }
             }
         }
     }

@@ -23,7 +23,9 @@ pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> an
     let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
     for v in result {
         if let Some(pdms_element) = v.change_to_pdms_element() {
-            r.push(pdms_element);
+            if !r.contains(&pdms_element) {
+                r.push(pdms_element);
+            }
         }
     }
     Ok(r)
@@ -163,13 +165,13 @@ pub async fn query_travel_children_with_type_aql(arango_database: &Database, ref
 }
 
 pub async fn query_refno_from_site_zone_name(arango_database: &Database, site_name: String, zone_name: String, att_type: String) -> anyhow::Result<Vec<RefU64>> {
-    return if zone_name != "" {
+    return if zone_name != "\"\"" {
         let aql = AqlQuery::new(r"
         FOR site IN pdms_eles
             FILTER site.noun == 'SITE' AND Contains(site.name , @site_name)
             FOR c IN 1 INBOUND site pdms_edges
                 Filter Contains(c.name, @zone_name)
-                FOR z in 3..4 INBOUND c pdms_edges
+                FOR z in 1..4 INBOUND c pdms_edges
                     Filter z.noun == @noun
                     RETURN z._key")
             .bind_var("site_name", site_name)
@@ -181,7 +183,7 @@ pub async fn query_refno_from_site_zone_name(arango_database: &Database, site_na
         let aql = AqlQuery::new(r"
         FOR site IN pdms_eles
             FILTER site.noun == 'SITE' AND Contains(site.name , @site_name)
-                FOR c IN 4..5 INBOUND site pdms_edges
+                FOR c IN 1..5 INBOUND site pdms_edges
                     FILTER c.noun == @noun
                     RETURN c._key")
             .bind_var("site_name", site_name)

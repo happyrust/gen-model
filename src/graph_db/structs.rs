@@ -20,6 +20,13 @@ pub struct PdmsEleGraphEdge {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct PdmsEleGraphEdgeWithKey {
+    pub _key: u64,
+    pub _from: String,
+    pub _to: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct SSCEleGraphNode {
     pub _key: String,
     pub owner: String,

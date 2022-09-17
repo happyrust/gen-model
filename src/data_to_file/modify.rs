@@ -1,9 +1,11 @@
 use std::{env, fs};
 use std::fs::File;
 use std::io::{Read, Write};
+use std::mem::take;
 use aios_core::helper::{parse_to_i32, parse_to_u16, parse_to_u32};
-use aios_core::pdms_types::{AttrInfo, AttrVal, RefI32Tuple, RefU64};
-use aios_core::pdms_types::AttrVal::BoolType;
+use aios_core::pdms_types::{AttrInfo, AttrVal, PdmsDatabaseInfo, RefI32Tuple, RefU64};
+use aios_core::pdms_types::AttrVal::{BoolType, DoubleArrayType};
+use aios_core::pdms_types::DbAttributeType::Vec3Type;
 use aios_core::tool::db_tool::{db1_hash, read_attr_info_config_from_json};
 use bitvec::field::BitField;
 use bitvec::prelude::Lsb0;
@@ -17,7 +19,11 @@ use sqlx::{MySql, Pool};
 use crate::api::children::query_owner_till_type;
 use crate::api::element::query_owner_from_id;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::data_to_file::{DataPage, NewPage};
+use crate::data_to_file::{OldDataPage, NewPage, get_latest_page};
+use crate::data_to_file::claim_page::ClaimPage;
+use crate::data_to_file::data_page::DataPage;
+use crate::data_to_file::index_page::IndexPage;
+use crate::data_to_file::session_page::{get_latest_session_page, SessionPage};
 
 const FIRST_VERSION_PAGE: [u8; 20] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x2];
 const SECOND_VERSION_PAGE: [u8; 20] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x2];
@@ -249,36 +255,6 @@ fn modify_bool_implicit_data(input: &[u8], offset: u32, value: bool) -> u32 {
     bits.load_be()
 }
 
-#[test]
-fn modify_bool_implicit_data_test() {
-    let input = "00 00 00 00 00 00 00 00";
-    let data = convert_str_to_bytes(input);
-    let r = modify_bool_implicit_data(&data, 1, true);
-    println!("r={}", r);
-}
-
-#[test]
-fn test_convert_explicit_data_to_vec() {
-    let new_data = ModifyNewData {
-        refno: RefU64::from_refno_str("23984/1046").unwrap(),
-        attr_type: "SBOX".to_string(),
-        noun_type: "NAPP".to_string(),
-        data: AttrVal::RefU64Type(RefU64::from_refno_str("23984/1046").unwrap()),
-    }.convert_explicit_data_to_vec(false);
-    println!("new_data={:#4X?}", new_data);
-}
-
-#[test]
-fn test_convert_implicit_data_to_vec() {
-    let new_data = ModifyNewData {
-        refno: RefU64::from_refno_str("23984/1046").unwrap(),
-        attr_type: "SBOX".to_string(),
-        noun_type: "NAPP".to_string(),
-        data: AttrVal::RefU64Type(RefU64::from_refno_str("23984/1046").unwrap()),
-    }.convert_implicit_data_to_vec(false);
-    println!("new_data={:#4X?}", new_data);
-}
-
 /// 读取原文件，返回新的版本号和原数据
 pub fn change_origin_file(path: &str) -> (u32, Vec<u8>) {
     let mut file = fs::File::open(path).unwrap();
@@ -291,49 +267,13 @@ pub fn change_origin_file(path: &str) -> (u32, Vec<u8>) {
     (new_version_u32, buf)
 }
 
-pub async fn convert_new_pdms_file(path: &str, new_data: ModifyNewData, filename: &str) -> anyhow::Result<()> {
-    // todo 先暂时这么获取pool，后面再考虑获取数据的方式
-    let _ = dotenv::dotenv();
-    let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-
-    let (version, input) = change_origin_file(path);
-    let second_version_refno = &[0x0u8, 0x0, 0x5D, 0xB0, 0x0, 0x0, 0x3, 0xB0];
-    if let Some(origin_data_page) = find_data_in_origin_file(&new_data.get_refno_and_type_bytes(), &input) {
-        let refno_bytes = new_data.get_refno_bytes();
-        let refno = new_data.refno.clone();
-        if let Some(new_data_page) = convert_new_data_page(origin_data_page, new_data, version) {
-            if let Some(first_version_page) = convert_first_version_page(&input, &refno_bytes, version) {
-                if let Some(second_version_page) = convert_second_version_page(&input, second_version_refno, version) {
-                    if let Some((change_times_page, change_times)) = convert_change_times_page(&input, refno, &pool).await? {
-                        if let Some(conversion_page) = convert_conversation_page(&input, version, &change_times) {
-                            let new_file = NewPage {
-                                origin_file: input,
-                                data_page: new_data_page,
-                                first_version_page,
-                                second_version_page,
-                                change_times_page,
-                                conversion_page,
-                            }.convert_into_one_page();
-                            let path = filename;
-                            fs::write(path, new_file)?;
-                            println!("写入文件成功");
-                        }
-                    }
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 /// 传入 refno + type 返回该数据在pdms文件中的位置
-pub fn find_data_in_origin_file(input: &[u8], buf: &[u8]) -> Option<DataPage> {
-    if let Some(pos) = rfind_iter(&buf, input).next() {
-        let implicit_data_len = (u32::from_be_bytes(buf[pos - 4..pos].try_into().unwrap()) * 4 - 4) as usize;
-        let implicit_data = [vec![0x0, 0x0, 0x0, 0x7], buf[pos - 4..pos + implicit_data_len].to_vec()].concat();
-        let (children_data, explicit_data) = get_origin_children_and_explicit_data(&buf, pos + implicit_data_len);
-        return Some(DataPage {
+pub fn find_data_in_origin_file(input: &[u8], buf: &[u8]) -> Option<OldDataPage> {
+    if let Some(pos) = rfind_iter(&input, buf).next() {
+        let implicit_data_len = (u32::from_be_bytes(input[pos - 4..pos].try_into().unwrap()) * 4 - 4) as usize;
+        let implicit_data = [vec![0x0, 0x0, 0x0, 0x7], input[pos - 4..pos + implicit_data_len].to_vec()].concat();
+        let (children_data, explicit_data) = get_origin_children_and_explicit_data(&input, pos + implicit_data_len);
+        return Some(OldDataPage {
             implicit_data,
             children: children_data,
             explicit_data,
@@ -343,19 +283,26 @@ pub fn find_data_in_origin_file(input: &[u8], buf: &[u8]) -> Option<DataPage> {
 }
 
 /// 将修改的值写入到 DataPage中
-fn convert_new_data_page(mut page: DataPage, data: ModifyNewData, version: u32) -> Option<Vec<u8>> {
+pub fn convert_new_data_page(mut page: OldDataPage, data: ModifyNewData, pdms_database_info: PdmsDatabaseInfo, latest_page_no: u32) -> Option<Vec<u8>> {
     let mut new_data = vec![];
-    let pdms_database_info = read_attr_info_config_from_json("all_attr_info.json"); //todo 不应该每次调用这个方法都读取一边 先写在这里，后面再改
     let attr_type = data.get_type_hash_u32();
     let noun = data.get_noun_hash_u32();
+    // 检测修改的属性是否是该类型存在的属性
+    let b_type_value = check_b_type_value(&pdms_database_info.noun_attr_info_map, attr_type as i32, noun as i32);
+    if !b_type_value { return None; }
+    // 修改隐式属性中的 page_no
+    let new_page_no = latest_page_no + 1;
+    page.implicit_data.splice(0x1C..0x20, new_page_no.to_be_bytes()[..4].to_vec());
+    page.implicit_data.splice(0x24..0x28, new_page_no.to_be_bytes()[..4].to_vec());
     // 修改的内容为隐式属性
     if let Some((noun_pos, offset)) = check_b_implicit_data(&pdms_database_info.noun_attr_info_map, attr_type as i32, noun as i32) {
         return match data.data {
             BoolType(value) => {
-                let mut r = modify_bool_implicit_data(&page.implicit_data, offset, value);
-                new_data.append(&mut r.to_be_bytes().to_vec());
-                Some(DataPage {
-                    implicit_data: new_data,
+                let r = modify_bool_implicit_data(&page.implicit_data, offset, value);
+                let position = ((offset + 1) * 4) as usize;
+                page.implicit_data.splice(position..position + 4, r.to_be_bytes()[..4].to_vec());
+                Some(OldDataPage {
+                    implicit_data: page.implicit_data,
                     children: page.children,
                     explicit_data: page.explicit_data,
                 }.convert_new_data_page())
@@ -369,7 +316,7 @@ fn convert_new_data_page(mut page: DataPage, data: ModifyNewData, version: u32) 
                 if noun_pos + len < origin_len {
                     new_data = [new_data, page.implicit_data[len + noun_pos + 4..].to_vec()].concat(); // +4是因为 data前面还有个 007
                 }
-                Some(DataPage {
+                Some(OldDataPage {
                     implicit_data: new_data,
                     children: page.children,
                     explicit_data: page.explicit_data,
@@ -378,10 +325,9 @@ fn convert_new_data_page(mut page: DataPage, data: ModifyNewData, version: u32) 
         };
         // 修改的内容为显示属性
     } else {
+        // 如果已存在该显示属性，则在原来的基础上修改
         if let Some(pos) = find_iter(&page.explicit_data, &noun.to_be_bytes()[..]).next() {
             let data = data.convert_explicit_data_to_vec(true);
-            let new_version = (version - 4).to_be_bytes()[..4].to_vec(); // 大版本 - 4
-            page.implicit_data.splice(0x1C..0x20, new_version);
             // 未修改的属性直接复制到new_data中
             new_data = page.explicit_data[..pos].to_vec();
             new_data = [new_data, data].concat();
@@ -390,11 +336,17 @@ fn convert_new_data_page(mut page: DataPage, data: ModifyNewData, version: u32) 
             if pos + 8 + attr_len < *&page.explicit_data.len() {
                 new_data = [new_data, page.explicit_data[pos + 8 + attr_len..].to_vec()].concat();
             }
+        } else {
+            // 若不存在则在后面新增
+            let mut data = data.convert_explicit_data_to_vec(true);
+            new_data = [page.explicit_data, take(&mut data)].concat();
         }
+
+
         let len = (*&new_data.len() as u16 / 4).to_be_bytes();
         new_data.splice(2..4, len); // 修改显示属性 01 后的长度
 
-        Some(DataPage {
+        Some(OldDataPage {
             implicit_data: page.implicit_data,
             children: page.children,
             explicit_data: new_data,
@@ -405,7 +357,6 @@ fn convert_new_data_page(mut page: DataPage, data: ModifyNewData, version: u32) 
 #[inline]
 fn check_b_implicit_data(map: &DashMap<i32, DashMap<i32, AttrInfo>>, attr_type: i32, noun_hash: i32) -> Option<(usize, u32)> {
     if let Some(info_map) = map.get(&attr_type) {
-        // //dbg!(&info_map.value());
         if let Some(info) = info_map.get(&noun_hash) {
             if info.offset != 0 {
                 return Some(((info.offset as usize) * 4, info.offset));
@@ -413,6 +364,14 @@ fn check_b_implicit_data(map: &DashMap<i32, DashMap<i32, AttrInfo>>, attr_type: 
         }
     }
     None
+}
+
+/// 检测该type中是否存在某属性
+fn check_b_type_value(map: &DashMap<i32, DashMap<i32, AttrInfo>>, attr_type: i32, noun_hash: i32) -> bool {
+    if let Some(info_map) = map.get(&attr_type) {
+        return info_map.get(&noun_hash).is_some();
+    }
+    false
 }
 
 /// 获取该节点的 children 或者 显示属性
@@ -423,7 +382,7 @@ pub fn get_origin_children_and_explicit_data(input: &[u8], mut pos: usize) -> (V
     if &input[pos..pos + 2] == &[0x0, 0x2] {
         let data_len = (parse_to_u16(&input[pos + 2..pos + 4]) * 4) as usize;
         children_data = input[pos..pos + data_len].to_vec();
-        pos = pos + 4 + data_len;
+        pos = pos + data_len;
     }
 
     if &input[pos..pos + 2] == &[0x0, 0x1] {
@@ -550,54 +509,120 @@ pub fn convert_conversation_page(input: &[u8], version: u32, change_times: &[u8]
     None
 }
 
-#[tokio::test]
-async fn convert_new_pdms_file_modify_heig_test() -> anyhow::Result<()> {
-    let new_data = ModifyNewData {
-        refno: RefU64::from_refno_str("23584/5444").unwrap(),
-        attr_type: "GASK".to_string(),
-        noun_type: "HEIG".to_string(),
-        data: AttrVal::DoubleType(1.0),
-    };
-    let path = r"E:\AVEVA\Plant\Projects12.1.SP4\Sample\sam000\sam7200_0001";
-    convert_new_pdms_file(path, new_data, "sam7200_0001_new").await?;
-    Ok(())
+pub struct ModifyData {
+    // 修改之前源 pdms 文件
+    pub old_file: Vec<u8>,
+    pub refno: RefU64,
+    pub attr_type: String,
+    pub noun_type: String,
+    pub data: AttrVal,
+    /// 用户名
+    pub user_name: String,
+    /// 提交说明
+    pub commit_comment: String,
 }
 
-#[tokio::test]
-async fn convert_new_pdms_file_modify_pos_test() -> anyhow::Result<()> {
-    let new_data = ModifyNewData {
-        refno: RefU64::from_refno_str("3584/5451").unwrap(),
-        attr_type: "VALV".to_string(),
-        noun_type: "POS".to_string(),
-        data: AttrVal::Vec3Type([0.0, 0.0, 0.0]),
-    };
-    let path = r"E:\AVEVA\Plant\Projects12.1.SP4\Sample\sam000\sam7200_0001";
-    convert_new_pdms_file(path, new_data, "sam7200_0001_new").await?;
-    Ok(())
+impl ModifyData {
+    pub fn convert_new_modify_data(self) -> Option<Vec<u8>> {
+        // 读取info文件
+        let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../all_attr_info.json")).unwrap();
+        // 获得最新的session_page_num
+        let latest_session_page_num = parse_to_u32(&self.old_file[40..44]);
+        // 获得最新的page_num
+        let latest_session_page = get_latest_session_page(&self.old_file, latest_session_page_num);
+        let latest_page_num = parse_to_u32(&latest_session_page[20..24]);
+        let session_no = parse_to_u32(&latest_session_page[12..16]);
+        let mut current_page_num = latest_page_num;
+        // 生成属性页
+        let data_page = DataPage {
+            last_page_no: latest_page_num,
+            refno: self.refno,
+            attr_type: self.attr_type,
+            noun_type: self.noun_type,
+            data: self.data,
+            info_map: info,
+        };
+        let data_page = data_page.convert_new_data_page(&self.old_file);
+        if data_page.is_none() { return None; }
+        current_page_num += 1;
+        // 生成 index_page
+        let index_page = IndexPage {
+            refno: self.refno,
+            data_page_num: current_page_num,
+        };
+        let index_page = index_page.convert_new_index_page(&self.old_file);
+        if index_page.is_none() { return None; }
+        let index_page = index_page.unwrap();
+        current_page_num += (index_page.len() / 0x800) as u32; // index_page 是两页
+        let current_index_page = current_page_num;
+        // 生成 claim_page
+        let claim_page = ClaimPage {
+            last_page_no: session_no,
+            refno: self.refno,
+            world_claim_page_num: 0,
+            index_page_num: current_index_page + 1,
+        };
+        let claim_page = claim_page.convert_new_claim_page(&self.old_file);
+        if claim_page.is_none() { return None; }
+        let claim_page = claim_page.unwrap();
+        current_page_num += (claim_page.len() / 0x800) as u32;
+        let current_claim_page = current_page_num;
+        // 生成 session_page
+        let current_session_page = current_page_num;
+        let session_page = SessionPage {
+            last_page_num: latest_session_page_num,
+            new_latest_page_num: current_page_num,
+            index_page_num: current_index_page,
+            claim_page_num: current_claim_page,
+            user_name: self.user_name,
+            commit_comment: self.commit_comment,
+        };
+        let session_page = session_page.convert_session_page(&self.old_file);
+        // 修改文件头上的page_num
+        let mut new_file = self.old_file;
+        new_file.splice(40..44, (current_page_num + 1).to_be_bytes()[..4].to_vec());
+        Some([new_file, data_page.unwrap(), index_page, claim_page, session_page].concat())
+    }
 }
 
-#[tokio::test]
-async fn convert_new_pdms_file_modify_pres_test() -> anyhow::Result<()> {
-    let new_data = ModifyNewData {
-        refno: RefU64::from_refno_str("23584/197").unwrap(),
-        attr_type: "NOZZ".to_string(),
-        noun_type: "PRES".to_string(),
-        data: AttrVal::DoubleType(100.0),
+#[test]
+fn test_convert_new_modify_data() {
+    let mut file = fs::File::open("resource/sam7200_0001").unwrap();
+    let mut input = vec![];
+    file.read_to_end(&mut input).unwrap();
+
+    let modify_data = ModifyData {
+        old_file: input,
+        refno: RefU64::from_refno_str("23584/5931").unwrap(),
+        attr_type: "STWALL".to_string(),
+        noun_type: "POSS".to_string(),
+        data: AttrVal::Vec3Type([13898.39, -1534.99, 0.0]),
+        user_name: "admin".to_string(),
+        commit_comment: "Default session comment".to_string(),
     };
-    let path = r"E:\AVEVA\Plant\Projects12.1.SP4\Sample\sam000\sam7200_0001";
-    convert_new_pdms_file(path, new_data, "sam7200_0001_new").await?;
-    Ok(())
+    let data = modify_data.convert_new_modify_data().unwrap();
+
+    let mut file = fs::File::create("resource/sam7200_0001_test").unwrap();
+    file.write_all(&data).unwrap();
 }
 
-#[tokio::test]
-async fn convert_new_pdms_file_modify_angl_test() -> anyhow::Result<()> {
-    let new_data = ModifyNewData {
-        refno: RefU64::from_refno_str("23584/5552").unwrap(),
-        attr_type: "ELBO".to_string(),
-        noun_type: "ANGL".to_string(),
-        data: AttrVal::DoubleType(45.0),
+#[test]
+fn test_convert_new_modify_data_explict_data() {
+    let mut file = fs::File::open("resource/sam7200_0001").unwrap();
+    let mut input = vec![];
+    file.read_to_end(&mut input).unwrap();
+
+    let modify_data = ModifyData {
+        old_file: input,
+        refno: RefU64::from_refno_str("23584/5931").unwrap(),
+        attr_type: "STWALL".to_string(),
+        noun_type: "DRGP".to_string(),
+        data: AttrVal::IntegerType(100),
+        user_name: "admin".to_string(),
+        commit_comment: "Default session comment".to_string(),
     };
-    let path = r"E:\AVEVA\Plant\Projects12.1.SP4\Sample\sam000\sam7200_0001";
-    convert_new_pdms_file(path, new_data, "sam7200_0001_new").await?;
-    Ok(())
+    let data = modify_data.convert_new_modify_data().unwrap();
+
+    let mut file = fs::File::create("resource/sam7200_0001_test").unwrap();
+    file.write_all(&data).unwrap();
 }
