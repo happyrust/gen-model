@@ -10,7 +10,7 @@ use crate::data_to_file::PageType::{ClaimPage, IndexPage};
 
 /// 生成 session_page 需要的数据
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct SessionPage {
+pub struct SessionPageModify {
     /// 修改之前最后的page_number
     pub last_page_num: u32,
     /// 新生成的最后的page_num
@@ -25,7 +25,7 @@ pub struct SessionPage {
     pub commit_comment: String,
 }
 
-impl SessionPage {
+impl SessionPageModify {
     /// 通过旧的session_page数据 ，生成新的session_page
     ///
     /// increment_page_no : 新生成数据的page的数量
@@ -118,7 +118,7 @@ fn test_convert_session_page() {
     let mut file = fs::File::open("resource/sam7200_0001").unwrap();
     let mut input = vec![];
     file.read_to_end(&mut input).unwrap();
-    let session_page = SessionPage {
+    let session_page = SessionPageModify {
         last_page_num: 0xF23,
         new_latest_page_num: 5,
         index_page_num: 0xF16,
@@ -126,7 +126,7 @@ fn test_convert_session_page() {
         user_name: "JBpeople".to_string(),
         commit_comment: "Default session comment".to_string(),
     };
-    let data = SessionPage::convert_session_page(session_page, &input);
+    let data = SessionPageModify::convert_session_page(session_page, &input);
     let mut file = fs::File::create("resource/sam7200_0001_test_session").unwrap();
     file.write_all(&data).unwrap();
 }

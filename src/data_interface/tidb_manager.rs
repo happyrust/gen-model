@@ -20,7 +20,6 @@ use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
 use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::PdmsTubing;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
-use aios_core::tool::math_tool;
 use anyhow::anyhow;
 use append_only_vec::AppendOnlyVec;
 use approx::{abs_diff_eq, abs_diff_ne};

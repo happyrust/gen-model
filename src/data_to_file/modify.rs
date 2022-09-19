@@ -20,10 +20,10 @@ use crate::api::children::query_owner_till_type;
 use crate::api::element::query_owner_from_id;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_to_file::{OldDataPage, NewPage, get_latest_page};
-use crate::data_to_file::claim_page::ClaimPage;
-use crate::data_to_file::data_page::DataPage;
+use crate::data_to_file::claim_page::ClaimPageModify;
+use crate::data_to_file::data_page::DataPageModify;
 use crate::data_to_file::index_page::IndexPage;
-use crate::data_to_file::session_page::{get_latest_session_page, SessionPage};
+use crate::data_to_file::session_page::{get_latest_session_page, SessionPageModify};
 
 const FIRST_VERSION_PAGE: [u8; 20] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x2];
 const SECOND_VERSION_PAGE: [u8; 20] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x2];
@@ -534,7 +534,7 @@ impl ModifyData {
         let session_no = parse_to_u32(&latest_session_page[12..16]);
         let mut current_page_num = latest_page_num;
         // 生成属性页
-        let data_page = DataPage {
+        let data_page = DataPageModify {
             last_page_no: latest_page_num,
             refno: self.refno,
             attr_type: self.attr_type,
@@ -556,7 +556,7 @@ impl ModifyData {
         current_page_num += (index_page.len() / 0x800) as u32; // index_page 是两页
         let current_index_page = current_page_num;
         // 生成 claim_page
-        let claim_page = ClaimPage {
+        let claim_page = ClaimPageModify {
             last_page_no: session_no,
             refno: self.refno,
             world_claim_page_num: 0,
@@ -569,7 +569,7 @@ impl ModifyData {
         let current_claim_page = current_page_num;
         // 生成 session_page
         let current_session_page = current_page_num;
-        let session_page = SessionPage {
+        let session_page = SessionPageModify {
             last_page_num: latest_session_page_num,
             new_latest_page_num: current_page_num,
             index_page_num: current_index_page,

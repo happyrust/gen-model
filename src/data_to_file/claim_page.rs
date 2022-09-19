@@ -8,7 +8,7 @@ use crate::data_to_file::{get_latest_page, get_refno_position_in_page};
 const CLAIM_PAGE_ONE: [u8; 12] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0x74, 0x3F, 0x49, 0, 0, 0, 0];
 const CLAIM_PAGE_TWO: [u8; 12] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0x74, 0x3F, 0x49, 0, 0, 0, 1];
 
-pub struct ClaimPage {
+pub struct ClaimPageModify {
     /// 修改之前最后的page_number
     pub last_page_no: u32,
     /// 修改的参考号
@@ -19,7 +19,7 @@ pub struct ClaimPage {
     pub index_page_num:u32,
 }
 
-impl ClaimPage {
+impl ClaimPageModify {
     /// 生成新的claim_page，需要传入pdms数据文件和修改的参考号
     pub fn convert_new_claim_page(self, input: &[u8]) -> Option<Vec<u8>> {
         // 找到修改前 存在 将要修改的refno 的claim_page
@@ -68,7 +68,7 @@ fn test_convert_new_claim_page() {
     let mut input = vec![];
     file.read_to_end(&mut input).unwrap();
 
-    let data = ClaimPage{
+    let data = ClaimPageModify {
         last_page_no: 0x25,
         refno: RefU64::from_refno_str("23584/5931").unwrap(),
         world_claim_page_num: 0xF2B,

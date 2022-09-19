@@ -17,7 +17,7 @@ use nom_derive::Parse;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use regex::internal::Input;
 use aios_database::{BATCH_CHUNKS_CNT};
-use sqlx::{MySql, MySqlPool, Pool};
+use sqlx::{MySql, MySqlPool, Pool, Row};
 use sqlx::pool::PoolConnection;
 use aios_database::database::*;
 use aios_database::helper::{qualified_column_name, qualified_table_name};
@@ -39,6 +39,7 @@ use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::gen_create_attr_info_tables_sql;
 use arangors_lite::collection::CollectionType::{Document, Edge};
 use chrono::{Datelike, Timelike};
+use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
 
 
 #[macro_use]

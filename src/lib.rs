@@ -31,6 +31,7 @@ pub mod cata;
 pub mod ssc;
 pub mod defines;
 pub mod graph_db;
+pub mod plot_data;
 pub mod data_to_file;
 
 #[macro_use]

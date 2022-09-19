@@ -7,7 +7,7 @@ use memchr::memmem::rfind_iter;
 use crate::data_to_file::modify::{convert_new_data_page, find_data_in_origin_file, ModifyNewData};
 use crate::data_to_file::OldDataPage;
 
-pub struct DataPage {
+pub struct DataPageModify {
     pub last_page_no: u32,
     pub refno: RefU64,
     pub attr_type: String,
@@ -17,7 +17,7 @@ pub struct DataPage {
     pub info_map: PdmsDatabaseInfo,
 }
 
-impl DataPage {
+impl DataPageModify {
     pub fn convert_new_data_page(self, input: &[u8]) -> Option<Vec<u8>> {
         let latest_data_page = get_latest_data_page(input, self.refno, self.attr_type.clone());
         if latest_data_page.is_none() { return None; };
@@ -48,7 +48,7 @@ fn test_convert_new_data_page() {
 
     let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../all_attr_info.json")).unwrap();
 
-    let data_page = DataPage {
+    let data_page = DataPageModify {
         last_page_no: 0xF29,
         refno: RefU64::from_refno_str("23584/5931").unwrap(),
         attr_type: "STWALL".to_string(),
@@ -70,7 +70,7 @@ fn test_convert_new_data_page_explicit_data() {
 
     let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../all_attr_info.json")).unwrap();
 
-    let data_page = DataPage {
+    let data_page = DataPageModify {
         last_page_no: 0xF29,
         refno: RefU64::from_refno_str("23584/5931").unwrap(),
         attr_type: "STWALL".to_string(),
