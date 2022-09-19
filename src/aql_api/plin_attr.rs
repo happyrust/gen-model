@@ -59,6 +59,7 @@ pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &Database
 
 pub async fn query_pline_value(refno: RefU64, jusl: &str, database: &Database) -> anyhow::Result<Option<[String; 3]>> {
     let pstr = query_foreign_refno_aql(refno, vec!["SPRE", "PSTR"], database).await?;
+    // dbg!(pstr);
     if pstr.is_none() { return Ok(None); }
     let pstr_children = query_children_aql(database, pstr.unwrap()).await?;
     let mut children = vec![];
@@ -68,20 +69,23 @@ pub async fn query_pline_value(refno: RefU64, jusl: &str, database: &Database) -
             children.push(refno);
         }
     });
+    // dbg!(&children);
     let plin_attrs = query_plin_attrs_with_refnos(children, database).await?;
     for plin_attr in plin_attrs {
         let plin_refno = RefU64::from_url_refno(plin_attr._key);
+        // dbg!(&plin_refno);
         if plin_refno.is_none() { continue; }
         let attr = plin_attr.attr;
-        let p_key = attr.get_val("PKEY");
-        let px = attr.get_val("PX");
-        let py = attr.get_val("PY");
-        let pz = attr.get_val("PZ");
+        // dbg!(attr.to_string_hashmap());
+        let p_key = attr.get_as_string("PKEY");
+        let px = attr.get_as_string("PX");
+        let py = attr.get_as_string("PY");
+        let pz = attr.get_as_string("PZ");
         if p_key.is_none() { continue; }
-        if p_key.unwrap().string_value() == jusl {
-            let px = px.unwrap_or(&AttrVal::StringType(SmolStr::new("0"))).string_value();
-            let py = py.unwrap_or(&AttrVal::StringType(SmolStr::new("0"))).string_value();
-            let pz = pz.unwrap_or(&AttrVal::StringType(SmolStr::new("0"))).string_value();
+        if p_key.unwrap() == jusl {
+            let px = px.unwrap_or("0".to_string());
+            let py = py.unwrap_or("0".to_string());
+            let pz = pz.unwrap_or("0".to_string());
             return Ok(Some([px, py, pz]));
         }
     }
