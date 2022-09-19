@@ -22,6 +22,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     is_debug: bool,
 ) -> anyhow::Result<GeomsInfo> {
     let attr_map = interface.get_attr(refno).await?;
+    // dbg!(attr_map.to_string_hashmap());
     let mut scom_ref = None;
     if let Some(catref) = attr_map.get_foreign_refno("CATR") {
         let c_att = interface.get_attr(catref).await?;
@@ -33,6 +34,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     } else {
         let spre_ref = attr_map.get_foreign_refno("SPRE").unwrap_or_default();
         let spre = interface.get_attr(spre_ref).await?;
+        // dbg!(spre.to_string_hashmap());
         if spre.contains_attr_name("CATR") {
             scom_ref = spre.get_foreign_refno("CATR");
         }

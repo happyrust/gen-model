@@ -85,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     dbg!(&db_option);
 
     if db_option.total_sync {
-        create_arangodb_conns(&db_option).await?;
+        create_arangodb_conns(&db_option).await.expect("Failed to create arangodb conns");
         // 把pdms数据同步到mysql
         sync_pdms(&db_option).await.unwrap();
     }
@@ -130,10 +130,10 @@ async fn main() -> anyhow::Result<()> {
         //     let mut file = fs::File::open(path)?;
         //     let mut data = vec![];
         //     file.read_to_end(&mut data)?;
-        //     let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgrOld>(&data)?;
-        //     let instance_mgr = Arc::new(change_instance_mgr_old_into_new(instance_mgr));
+        //     let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
+        //     // let instance_mgr = Arc::new(change_instance_mgr_old_into_new(instance_mgr));
         //     dbg!(&instance_mgr.inst_mgr.inst_map.len());
-        //     sync_instance_to_graph_db(mgr.clone(), instance_mgr).await?;
+        //     sync_instance_to_graph_db(mgr.clone(), Arc::new(instance_mgr)).await?;
         // }
         // dbg!("图数据库保存完成");
     }

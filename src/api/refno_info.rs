@@ -70,13 +70,15 @@ pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: Option<Vec<i32>>, databa
     let fitt_refnos = query_types_refnos(&vec!["FITT"], pool, dbnos).await?;
     if fitt_refnos.len() == 0 { return Ok(DashMap::new()); }
     let sql = gen_query_refnos_implicit_string_attr("FITT", vec!["POSL"], fitt_refnos);
+    dbg!(&sql);
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     for result in results {
         let refno = RefU64(result.get::<i64, _>("ID") as u64);
         let pos_line = result.get::<String, _>("POSL");
         fitt_map.push((refno, pos_line));
     }
-    let result = query_plin_attrs(fitt_map, database).await.unwrap_or(DashMap::new());
+    let result = query_plin_attrs(fitt_map, database).await.unwrap_or_default();
+    dbg!(result.len());
     Ok(result)
 }
 

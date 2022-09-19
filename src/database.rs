@@ -370,7 +370,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
     let project_dir = data_dir.join(&project);
     let max_sql_threads_number = db_option.sql_threads_number as usize;
     let batch_insert_sql_cnt = db_option.batch_insert_sql_cnt as usize;
-    // let b_replace = db_option.only_save_types_db.is_some();
     if max_sql_threads_number * batch_insert_sql_cnt == 0 {
         return Err(anyhow!("batch_insert_sql_cnt 或者  sql_threads_number 不能为0"));
     }
