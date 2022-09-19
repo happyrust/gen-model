@@ -4,12 +4,12 @@ use std::ops::Neg;
 use std::sync::Arc;
 use aios_core::parsed_data::{CateAxisParam, GmseParamData};
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
-use aios_core::pdms_data::{AxisParam, GmParam, ScomInfo};
+use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
 use arangors_lite::Database;
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use sea_orm::sea_query::IndexType::Hash;
 use smol_str::SmolStr;
 use crate::aql_api::dtse_attr::query_dtse_ppro_from_catr_refno;
@@ -37,6 +37,7 @@ pub fn resolve_axis_params(
 ///求解几何体，允许出错的情况，出错的需要跳过
 pub fn resolve_gms(
     gmse_raw_paras: &[GmParam],
+    jusl_param: &Option<PlinParam>,
     context: &BTreeMap<SmolStr, SmolStr>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
 ) -> Vec<CateGeoParam> {
@@ -47,7 +48,7 @@ pub fn resolve_gms(
                 if g.gm_type == ("SPRO") && g.verts.len() == 0 {
                     return None;
                 }
-                let r = resolve_paragon_gm_params(&g, context, axis_params);
+                let r = resolve_paragon_gm_params(&g, jusl_param, context, axis_params);
                 return match r {
                     Ok(v) => {
                         Some(v)
@@ -67,10 +68,11 @@ pub fn resolve_gms(
 /// 解析gmes的参数
 pub fn resolve_paragon_gm_params(
     gm_param: &GmParam,
+    jusl_param: &Option<PlinParam>,
     context: &BTreeMap<SmolStr, SmolStr>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
 ) -> anyhow::Result<CateGeoParam> {
-    if let Ok(gm_data) = resolve_gmse_params(gm_param, context, axis_params) {
+    if let Ok(gm_data) = resolve_gmse_params(gm_param, jusl_param, context, axis_params) {
         resolve_to_cate_geo_params(&gm_data)
     } else {
         Err(anyhow!(format!("几何数据解析失败: {:?}", gm_param)))
@@ -87,7 +89,7 @@ pub struct CataExprContext {
 }
 
 impl CataExprContext {
-    pub async fn new(des_refno: RefU64, database: &Database) -> anyhow::Result<Option<Self>> {
+    pub async fn create(des_refno: RefU64, database: &Database) -> anyhow::Result<Option<Self>> {
         let catr_refno = query_foreign_refno_aql(des_refno, vec!["SPRE", "CATR"], database).await?;
         if catr_refno.is_none() { return Ok(None); }
         let catr_refno = catr_refno.unwrap();
@@ -169,6 +171,7 @@ impl CataExprContext {
 
 pub fn resolve_gmse_params(
     gm: &GmParam,
+    jusl_param: &Option<PlinParam>,
     context: &BTreeMap<SmolStr, SmolStr>,
     axis_param_map: &BTreeMap<i32, CateAxisParam>,
 ) -> anyhow::Result<GmseParamData> {
@@ -192,7 +195,6 @@ pub fn resolve_gmse_params(
 
     let mut verts = vec![];
     for vert in &gm.verts {
-        // if vert[0].is_empty() || vert[1].is_empty() { continue; }
         if let Ok(f0) = eval_str_to_f32(vert[0].as_str(), context) &&
         let Ok(f1) = eval_str_to_f32(vert[1].as_str(), context) &&
         let Ok(f2) = eval_str_to_f32(vert[2].as_str(), context)
@@ -275,6 +277,19 @@ pub fn resolve_gmse_params(
             paxises.push(axis);
         }
     }
+    let mut plin_verts = Vec2::ZERO;
+    // let mut plin_dxy = Vec2::ZERO;
+    let mut plin_plax = Vec3::X;
+    if let Some(jusl) = jusl_param {
+        //直接把 jusl_dxy加上
+        plin_verts = Vec2::new(eval_str_to_f32(&jusl.vxy[0], context).unwrap_or(0.0),
+                               eval_str_to_f32(&jusl.vxy[1], context).unwrap_or(0.0))
+            + Vec2::new(eval_str_to_f32(&jusl.dxy[0], context).unwrap_or(0.0),
+                        eval_str_to_f32(&jusl.dxy[1], context).unwrap_or(0.0));
+
+        plin_plax = parse_str_axis_to_vec3(&jusl.plax, context);
+    }
+
     let type_name = gm.gm_type.clone();
     Ok(GmseParamData {
         refno: gm.refno,
@@ -284,6 +299,7 @@ pub fn resolve_gmse_params(
         height,
         pwid,
         prad,
+        plin_verts,
         prads,
         pang,
         diameters,
@@ -300,6 +316,7 @@ pub fn resolve_gmse_params(
         paxises,
         centre_line_flag: gm.centre_line_flag,
         tube_flag: gm.visible_flag,
+        plin_plax,
     })
 }
 
@@ -324,7 +341,7 @@ pub fn resolve_axis_param(
             Some(CateAxisParam {
                 refno: axis_param.refno,
                 number,
-                pt: [d * dir[0] + pos[0], d * dir[1] + pos[1], d * dir[2] + pos[2]],
+                pt: Vec3::new(d * dir[0] + pos[0], d * dir[1] + pos[1], d * dir[2] + pos[2]),
                 dir,
                 pconnect,
                 pbore,
@@ -335,7 +352,7 @@ pub fn resolve_axis_param(
             let y = eval_str_to_f32(&axis_param.y, &context).unwrap_or_default();
             let z = eval_str_to_f32(&axis_param.z, &context).unwrap_or_default();
             let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);
-            Some(CateAxisParam { refno: axis_param.refno, number, pt: [pos[0] + x, pos[1] + y, pos[2] + z], dir, pconnect, pbore })
+            Some(CateAxisParam { refno: axis_param.refno, number, pt: Vec3::new(pos[0] + x, pos[1] + y, pos[2] + z), dir, pconnect, pbore })
         }
         "PTPOS" => {
             let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);

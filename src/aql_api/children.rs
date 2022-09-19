@@ -10,7 +10,7 @@ pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> an
     let mut r = vec![];
     let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
-    For z in 1 inbound @id pdms_edges
+    for z in 1 inbound @id pdms_edges
         return {
         'refno':z._key,
         'owner':z.owner,

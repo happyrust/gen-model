@@ -1,11 +1,12 @@
 use dashmap::DashMap;
 use std::collections::{BTreeMap, HashMap};
 use aios_core::parsed_data::GeomsInfo;
-use aios_core::pdms_data::{AxisParam, GmParam, ScomInfo};
+use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::{AttrMap, RefU64};
 use aios_core::pdms_types::AttrVal::IntArrayType;
 use anyhow::anyhow;
 use log::{error, info};
+use sled::pin;
 use smol_str::SmolStr;
 use crate::cata::resolve::{resolve_axis_params, resolve_gms};
 use crate::data_interface::interface::PdmsDataInterface;
@@ -21,10 +22,10 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     interface: &T,
     is_debug: bool,
 ) -> anyhow::Result<GeomsInfo> {
-    let attr_map = interface.get_attr(refno).await?;
+    let desi_att = interface.get_attr(refno).await?;
     // dbg!(attr_map.to_string_hashmap());
     let mut scom_ref = None;
-    if let Some(catref) = attr_map.get_foreign_refno("CATR") {
+    if let Some(catref) = desi_att.get_foreign_refno("CATR") {
         let c_att = interface.get_attr(catref).await?;
         if c_att.contains_attr_name("CATR") {
             scom_ref = c_att.get_foreign_refno("CATR");
@@ -32,7 +33,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             scom_ref = Some(catref);
         }
     } else {
-        let spre_ref = attr_map.get_foreign_refno("SPRE").unwrap_or_default();
+        let spre_ref = desi_att.get_foreign_refno("SPRE").unwrap_or_default();
         let spre = interface.get_attr(spre_ref).await?;
         // dbg!(spre.to_string_hashmap());
         if spre.contains_attr_name("CATR") {
@@ -46,13 +47,17 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     if !scom_ref.is_valid() {
         return Err(anyhow!("Scom ref is invalid".to_string()));
     }
+    //todo scom_info 可以缓存
     let scom_info = query_scom_info(scom_ref, interface, is_debug).await?;
     if is_debug {
         dbg!(&scom_info);
     }
     let mut context: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
+    if let Some(v) =  desi_att.get_as_string("JUSL"){
+        context.insert("JUSL".into(), v.into());
+    }
     context.insert("DESI_REFNO".into(), refno.to_refno_str());
-    let mut desp = attr_map.get_f64_vec("DESP").unwrap_or_default();
+    let mut desp = desi_att.get_f64_vec("DESP").unwrap_or_default();
     for i in 0..desp.len() {
         context.insert(
             format!("DESI{}", i + 1).into(),
@@ -67,19 +72,19 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             desp[i].to_string().into(),
         );
     }
-    let height = attr_map.get_as_string("HEIG").unwrap_or("0.0".into());
+    let height = desi_att.get_as_string("HEIG").unwrap_or("0.0".into());
     context.insert(DDHEIGHT_STR.into(), SmolStr::new(height.clone()));
     context.insert("HEIG".into(), SmolStr::new(height));
-    let angle = attr_map.get_as_string("ANGL").unwrap_or("0.0".into());
+    let angle = desi_att.get_as_string("ANGL").unwrap_or("0.0".into());
     context.insert(DDANGLE_STR.into(), SmolStr::new(angle.clone()));
     context.insert("ANGL".into(), SmolStr::new(angle));
-    let radi = attr_map.get_as_string("RADI").unwrap_or("0.0".into());
+    let radi = desi_att.get_as_string("RADI").unwrap_or("0.0".into());
     context.insert(DDRADIUS_STR.into(), SmolStr::new(radi.clone()));
     context.insert("RADI".into(), SmolStr::new(radi));
     let geom_info = resolve_cata_comp(&scom_info, interface, Some(context), is_debug).await;
     if geom_info.is_err() {
         error!("{:?}",geom_info.as_ref().err());
-        error!("{:?}",attr_map.to_string_hashmap());
+        error!("{:?}",desi_att.to_string_hashmap());
     }
     geom_info
 }
@@ -116,10 +121,27 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
         if is_debug {
             dbg!(&gm_params);
         }
-    } else {
-        //没有geometry 的引用
-        // dbg!(attr_map.to_string_hashmap());
     }
+
+    let mut plin_map =  HashMap::new();
+    if let Some(pstr_refno) = attr_map.get_foreign_refno("PSTR") {
+        let pstr_am = interface.get_children_attrs(pstr_refno).await?;
+        for a in pstr_am {
+            if let Some(k) = a.get_as_string("PKEY") {
+                plin_map.insert(
+                    k,
+                    PlinParam{
+                        vxy: [a.get_as_string("PX").unwrap_or("0".to_string()), a.get_as_string("PY").unwrap_or("0".to_string())],
+                        dxy: [a.get_as_string("DX").unwrap_or("0".to_string()), a.get_as_string("DY").unwrap_or("0".to_string())],
+                        plax: a.get_as_string("PLAX").unwrap_or("unset".to_string())
+                    }
+                );
+            }
+        }
+    }
+
+    // dbg!(&plin_map);
+
     Ok(ScomInfo {
         gtype: SmolStr::new(attr_map.get_as_string("GTYP").unwrap_or("unset".into())),
         dtse_params: vec![],
@@ -132,6 +154,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
             .replace("  ", " ").into(),
         axis_param_numbers,
         attr_map,
+        plin_map,
     })
 }
 
@@ -218,7 +241,18 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     //     dbg!(&cur_context);
     //     dbg!(&axis_map);
     // }
-    let geometries = resolve_gms(&scom_info.gm_params, &cur_context, &axis_map);
+    let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
+        if scom_info.plin_map.contains_key(plin.as_str()) {
+            Some(scom_info.plin_map.get(plin.as_str()).unwrap().clone())
+        }else if scom_info.plin_map.contains_key("NA") {
+            Some(scom_info.plin_map.get("NA").unwrap().clone())
+        }else{
+            None
+        }
+    }else{
+        None
+    };
+    let geometries = resolve_gms(&scom_info.gm_params, &jusl_param, &cur_context, &axis_map);
     // if is_debug {
     //     dbg!(&geometries);
     // }

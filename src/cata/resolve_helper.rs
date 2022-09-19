@@ -70,10 +70,16 @@ pub fn eval_str_to_f32(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
     eval_str_to_f64(input_expr, context).map(|x| x as f32)
 }
 
+///评估表达式的值
 pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -> anyhow::Result<f64> {
-    let r = input_expr.trim().to_lowercase() ;
-    if r.is_empty() || r == "unset" {
+    let input_expr = input_expr.trim().to_uppercase() ;
+    // dbg!(&input_expr);
+    if input_expr.is_empty() || input_expr == "UNSET" {
         return Ok(0.0);
+    }
+    //处理简单情况
+    if let Ok(val) = interp(&input_expr.to_lowercase()) {
+        return Ok(f64_round_3(val).into());
     }
     let re = Regex::new(r"([A-Z_]+[0-9]*)(\s*\[\s*(\d+)\s*\])?").unwrap();
     let mut new_exp = input_expr.replace("ATTRIB", "");
@@ -232,12 +238,12 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
         Ok(f64_round_3(val).into())
     } else {
         if let Ok(mut stack) = Stack::init(&result_string) {
-            return stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", input_expr)));
+            return stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", &input_expr)));
         } else {
             dbg!(&context);
-            dbg!(input_expr);
+            dbg!(&input_expr);
             dbg!(&result_string);
-            return Err(anyhow!(format!("求解失败 {}", input_expr)));
+            return Err(anyhow!(format!("求解失败 {}", &input_expr)));
         }
     }
 }
@@ -261,7 +267,9 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             "SPRO" => {   //structural profile
                 CateGeoParam::Profile(CateProfileParam::SPRO(SProfileData {
                     verts: gmse.verts.clone(),
-                    normal_axis: Vec3::from(gmse.paxises[0].dir)
+                    normal_axis: Vec3::from(gmse.paxises[0].dir),
+                    plin_pos: gmse.plin_verts,
+                    plin_axis: gmse.plin_plax,
                 }))
             }
             "BOXI" => {
@@ -510,10 +518,10 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
 
 pub fn resolve_dir_and_pos(axis: &AxisParam,
                            scom: &ScomInfo,
-                           context: &BTreeMap<SmolStr, SmolStr>) -> ([f32; 3], [f32; 3]) {
+                           context: &BTreeMap<SmolStr, SmolStr>) -> (Vec3, Vec3) {
     let mut dir_str = axis.direction.trim();
-    let mut dir = [0.0f32; 3];
-    let mut pos = [0.0f32; 3];
+    let mut dir = Vec3::ZERO;
+    let mut pos = Vec3::ZERO;
 
     let re = Regex::new(r"^P\d+$").unwrap();
     if re.is_match(dir_str) {
@@ -530,7 +538,7 @@ pub fn resolve_dir_and_pos(axis: &AxisParam,
     return (dir, pos);
 }
 
-pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) -> [f32; 3] {
+pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) -> Vec3 {
     // dbg!(pdir);
     let dir_str = pdir.to_uppercase().replace("AXIS", "");
     let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();
@@ -576,7 +584,7 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) 
         // dbg!(&new_dir_str);
         // dbg!(&v);
     }
-    [f32_round_2(v[0]), f32_round_2(v[1]), f32_round_2(v[2])]
+    Vec3::new(f32_round_2(v[0]), f32_round_2(v[1]), f32_round_2(v[2]))
 }
 
 

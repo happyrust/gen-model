@@ -22,6 +22,7 @@ pub struct ProfileGeosPoints {
 pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, geom_info: &GeomsInfo,
                                                        brep_shapes_map: &CateBrepShapeMap, interface: &T) -> anyhow::Result<bool> {
     let geoms = &geom_info.geometries;
+    dbg!(geoms.len());
     if geoms.len() == 0 { return Ok(false); }
     let type_name = att.get_type();
     let mut plane_normal = Vec3::Z;
@@ -62,6 +63,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
 
     let drns = att.get_vec3("DRNS").unwrap_or_default();
     let drne = att.get_vec3("DRNE").unwrap_or_default();
+    let jusl_values = att.get_as_string("JUSL").unwrap_or("NA".to_string());
     for arc_path in arc_paths {
         for (i, geom) in geoms.iter().enumerate() {
             if let CateGeoParam::Profile(profile) = geom {
@@ -77,7 +79,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                     height,
                     arc_path,
                 };
-                // dbg!(&loft);
+                dbg!(&loft);
                 brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
                     refno,
                     brep_shape: Box::new(loft),
