@@ -23,6 +23,7 @@ use itertools::Itertools;
 use nom::character::complete::u64;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use parse_pdms_db::parse_file;
+use smol_str::SmolStr;
 use sqlx::{Connection, MySql, MySqlPool, Pool};
 use sqlx::Executor;
 use sqlx::mysql::MySqlArguments;
@@ -36,7 +37,7 @@ use crate::aql_api::PdmsPLINAttrAql;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{ForeignEdges, ParaDocument};
-use crate::graph_db::pdms_arango::{save_arangodb_with_db_option, save_arangodb_with_db_option_create_collection, save_dtse_value_to_arangodb, save_pdms_element_in_sync, save_pdms_level_edges_in_sync};
+use crate::graph_db::pdms_arango::{save_arangodb_with_db_option, save_arangodb_with_db_option_create_collection, save_dtse_value_to_arangodb, save_foreign_refno_edges_in_sync, save_pdms_element_in_sync, save_pdms_level_edges_in_sync};
 use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
@@ -233,6 +234,19 @@ pub fn gen_implicit_attr_insert_sql(hash: u32) -> (String, Vec<NounHash>) {
 }
 
 #[inline]
+pub fn gen_uda_attr_value_sql(att: &WholeAttMap) -> String {
+    let mut table_vals_sql = String::new();
+    let i_att = &att.implicit_attmap;
+    let refno = i_att.get_refno().unwrap();
+    let type_name = i_att.get_type();
+    let owner = i_att.get_owner().unwrap();
+    let data = hex::encode(att.uda_attmap.into_compress_bytes());
+    table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {}, 0x{}),"#, refno.0, refno.to_refno_str(), type_name, owner.0, data));
+
+    table_vals_sql
+}
+
+#[inline]
 pub fn gen_explicit_attr_value_sql(att: &WholeAttMap) -> String {
     let mut table_vals_sql = String::new();
     let i_att = &att.implicit_attmap;
@@ -363,8 +377,6 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
 }
 
 pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
-    let mut foreign_edges = vec![];
-    let mut foreign_edges_refnos = DashSet::new(); // 防止edges重复
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
@@ -398,7 +410,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
             let project_1 = project.clone();
             if let Ok(Ok(PdmsDbData {
                              all_attr_map,
-                             total_attr_map,
+                             mut total_attr_map,
                              type_ele_map,
                              refno_info_map,
                              children_map,
@@ -412,6 +424,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                          })) = tokio::task::spawn_blocking(move || {
                 parse_file(&path, &None, &file_name, project_1.as_str(), "")
             }).await {
+                set_uda_attr(&type_ele_map, &mut total_attr_map)?;
                 //类型暂时不多线程
                 let total_attr_map_arc = Arc::new(total_attr_map);
                 let children_map_arc = Arc::new(children_map);
@@ -420,9 +433,10 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 {
                     if db_type == "CATA" || db_type == "DESI" {
                         // 将 pdms_element 部分数据保存到图数据库中
-                        save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
+                        // save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
                         // 将兄弟关系保存到图数据库中
-                        save_pdms_level_edges_in_sync(&db_option,&children_map_arc).await?;
+                        // save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
+                        // save_foreign_refno_edges_in_sync(&db_option,foreign_refnos_map).await?;
                         // 单独保存plin
                         // save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
                         // 将 para 和 des_para保存的图数据库中
@@ -432,7 +446,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                     }
                 }
                 for (type_hash, type_refnos) in type_ele_map {
-                    continue;
                     let info_pool_clone = info_pool.clone();
                     let filename_clone = file_name_clone.clone();
                     let project_clone = project.clone();
@@ -491,6 +504,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                             let pool_clone = pool_clone.clone();
                             let mut implicit_values_sql = String::new();
                             let mut explicit_values_sql = String::new();
+                            let mut uda_values_sql = String::new();
                             let mut pdms_elements_sql = String::new();
                             let insert_handle = tokio::spawn(async move {
                                 let start_idx = i * thread_chunks_cnt;
@@ -511,6 +525,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
 
                                         implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), column_hashs));
                                         explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
+                                        uda_values_sql.push_str(&gen_uda_attr_value_sql(att.value()));
                                         let name = get_name(&total_attr_map_arc_clone, &children_map_arc_clone, refno).replace(r#"'"#, r#"\'"#)
                                             .replace(r#"""#, r#"\""#);
                                         let order = get_order(&total_attr_map_arc_clone, &children_map_arc_clone, refno);
@@ -538,6 +553,22 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                                     //执行显示数据保存
                                     let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
                                     sql.push_str(explicit_values_sql.as_str());
+                                    sql.remove(sql.len() - 1);
+                                    if is_replace {
+                                        sql = sql.replace("INSERT IGNORE", "REPLACE");
+                                    }
+                                    let result = project_conn.execute(sql.as_str()).await;
+                                    match result {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            dbg!(&e);
+                                            dbg!(sql.as_str());
+                                        }
+                                    }
+
+                                    //执行uda数据保存
+                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_UDA_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                    sql.push_str(uda_values_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     if is_replace {
                                         sql = sql.replace("INSERT IGNORE", "REPLACE");
@@ -603,26 +634,44 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 //         }
                 //     }
                 // }
+            }
+        }
+    }
+    Ok(())
+}
 
-                // 将外键属性保存到图数据库
-                for foreign_refnos in foreign_refnos_map.into_iter() {
-                    let refno = foreign_refnos.0;
-                    if foreign_edges_refnos.contains(&refno) { continue; }
-                    foreign_edges_refnos.insert(refno);
-                    for (foreign_type, foreign_refno) in foreign_refnos.1 {
-                        if foreign_refno == RefU64(0) { continue; }
-                        let key = refno.hash_with_another_refno(foreign_refno);
-                        foreign_edges.push(ForeignEdges {
-                            _key: key,
-                            _from: format!("{}/{}", "pdms_eles", refno.to_url_refno()),
-                            _to: format!("{}/{}", "pdms_eles", foreign_refno.to_url_refno()),
-                            foreign_type,
-                        })
+/// 给对应类型的参考号赋上 uda 默认值
+fn set_uda_attr(type_ele_map: &DashMap<u32, HashSet<RefU64>>, total_attr_map: &mut DashMap<RefU64, WholeAttMap>) -> anyhow::Result<()> {
+    let mut uda_map: HashMap<u32, HashMap<String, String>> = HashMap::new();
+    if let Some(uda_refnos) = type_ele_map.get(&db1_hash("UDA")) {
+        // 获取每个 uda 的 ELEL , DFLT , UDNA属性
+        for uda_refno in uda_refnos.value() {
+            let uda_att = total_attr_map.get(uda_refno);
+            if uda_att.is_none() { continue; }
+            let uda_att = uda_att.unwrap();
+            let uda_implicit_att = &uda_att.implicit_attmap;
+            let uda_explicit_att = &uda_att.explicit_attmap;
+
+            let udna = uda_implicit_att.get_str("UDNA");
+            let elel = uda_explicit_att.get_i32_vec("ELEL");
+            let dflt = uda_explicit_att.get_str("UDNA");
+            if udna.is_none() || elel.is_none() || dflt.is_none() { continue; }
+            let udna = udna.unwrap();
+            let elel = elel.unwrap();
+            let dflt = dflt.unwrap();
+            for noun in elel {
+                uda_map.entry(noun as u32).or_insert_with(HashMap::new).entry(udna.to_string()).or_insert(dflt.to_string());
+            }
+        }
+        // 给对应的 type 赋上 uda 的默认值
+        for (noun, value_map) in uda_map {
+            if let Some(refnos) = type_ele_map.get(&noun) {
+                for refno in refnos.value() {
+                    if let Some(mut att) = total_attr_map.get_mut(refno) {
+                        for (udna, dflt) in value_map.clone() {
+                            att.uda_attmap.insert(NounHash(db1_hash(&udna)), AttrVal::StringType(SmolStr::new(dflt)))
+                        }
                     }
-                }
-                if foreign_edges.len() > 0 {
-                    let json = serde_json::to_value(&take(&mut foreign_edges))?;
-                    save_arangodb_with_db_option(json, &db_option, "foreign_edges").await?;
                 }
             }
         }

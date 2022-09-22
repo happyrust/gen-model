@@ -39,7 +39,9 @@ pub async fn query_foreign_name_aql(refno:RefU64,foreign_types:Vec<&str>,arango_
         .bind_var("id", id)
         .bind_var("foreign_type_first", foreign_types[0])
         .bind_var("final_type", foreign_types[foreign_types.len() - 1]);
-    let mut results: Vec<String> = arango_database.aql_query(aql).await?;
+    let results: Result<Vec<String>, _> = arango_database.aql_query(aql).await;
+    if results.is_err() { return Ok(None); }
+    let mut results = results.unwrap();
     if results.len() == 0 { return Ok(None); }
     Ok(Some(results.remove(0)))
 }

@@ -100,8 +100,8 @@ async fn main() -> anyhow::Result<()> {
     //同步到图数据库
     if db_option.rebuild_arangodb {
         dbg!("正在同步图数据库");
-        sync_pdms_level_edges_to_graph_db(mgr.clone()).await?;
-        // sync_foreign_refno_to_graph_db(mgr.clone()).await?;
+        // sync_pdms_to_graph_db(mgr.clone(),db_option.clone()).await?;
+        // sync_pdms_level_edges_to_graph_db(mgr.clone()).await?;
         dbg!("图数据库同步完成");
     }
 
@@ -184,7 +184,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "STWALL";
+    let noun = "UDA";
     let hash = db1_hash(noun);
     let str = db1_dehash(537231362);
     dbg!(hash);

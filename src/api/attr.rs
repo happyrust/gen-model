@@ -156,9 +156,9 @@ pub async fn query_foreign_refnos_from_table(noun: &str, table_name: &str, pool:
     match results {
         Ok(results) => {
             for result in results {
-                let refno = RefU64(result.get::<i64,_>("ID") as u64);
+                let refno = RefU64(result.get::<i64, _>("ID") as u64);
                 let foreign = RefU64(result.get::<i64, _>(noun) as u64);
-                r.push((refno,foreign));
+                r.push((refno, foreign));
             }
         }
         Err(err) => {
@@ -176,11 +176,22 @@ pub async fn query_explicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
     Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
 }
 
+pub async fn query_uda_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
+    let sql = gen_query_uda_attr_sql(refno);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let val = result.get::<Vec<u8>, _>("DATA");
+    Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
+}
+
 pub async fn query_full_attr(refno: RefU64, ref_basic: &CachedRefBasic, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
     let mut attr = query_implicit_attr(refno, ref_basic, pool, column_names).await?;
     let explicit_attr = query_explicit_attr(refno, pool).await?;
+    let uda_attr = query_uda_attr(refno, pool).await?;
     let ele = query_ele_node(refno, pool).await?;
     for (k, v) in explicit_attr.map {
+        attr.entry(k).or_insert(v);
+    }
+    for (k, v) in uda_attr.map {
         attr.entry(k).or_insert(v);
     }
     // 赋默认值
@@ -288,7 +299,13 @@ pub fn gen_query_implicit_attr_sql_by_owner(owner: RefU64, type_name: &str, colu
 
 pub fn gen_query_explicit_attr_sql(refno: RefU64) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT * FROM {PDMS_EXPLICIT_TABLE} WHERE ID = {} ;", refno.0));
+    sql.push_str(&format!("SELECT DATA FROM {PDMS_EXPLICIT_TABLE} WHERE ID = {} ;", refno.0));
+    sql
+}
+
+pub fn gen_query_uda_attr_sql(refno: RefU64) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT DATA FROM {PDMS_UDA_TABLE} WHERE ID = {} ;", refno.0));
     sql
 }
 

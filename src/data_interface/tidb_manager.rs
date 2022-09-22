@@ -20,6 +20,7 @@ use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
 use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::PdmsTubing;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
+use aios_core::tool::math_tool;
 use anyhow::anyhow;
 use append_only_vec::AppendOnlyVec;
 use approx::{abs_diff_eq, abs_diff_ne};
@@ -489,7 +490,7 @@ impl PdmsDataInterface for AiosDBManager {
             let rot_mat = Mat3::from_quat(rotation);
             let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
 
-            println!("{} : {:?}, ori: {:?}", refno.to_refno_str(), (translation, rotation), ori_str);
+            // println!("{} : {:?}, ori: {:?}", refno.to_refno_str(), (translation, rotation), ori_str);
             self.cached_world_transforms_map.entry(refno).or_insert(TransformRT {
                 rotation,
                 translation,
@@ -554,7 +555,7 @@ impl AiosDBManager {
 
     #[inline]
     pub async fn get_arangodb_conn(&self) -> anyhow::Result<Database> {
-        let conn = Connection::establish_jwt(&self.db_option.arangodb_url, "root", "test")
+        let conn = Connection::establish_jwt(&self.db_option.arangodb_url, &self.db_option.arangodb_user, &self.db_option.arangodb_password)
             .await?;
 
         Ok(conn.db("pdms").await?)

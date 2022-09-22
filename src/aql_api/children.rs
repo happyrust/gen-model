@@ -21,13 +21,28 @@ pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> an
                             return 1 ),
     }").bind_var("id", refno_aql);
     let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
-    for v in result {
-        if let Some(pdms_element) = v.change_to_pdms_element() {
-            if !r.contains(&pdms_element) {
-                r.push(pdms_element);
-            }
+    // 对获取到的children进行排序
+    let first_refno = RefU64::from_refno_str(&result[0].refno)?;
+    let mut children_map = HashMap::new();
+    for r in result {
+        if let Ok(refno) = RefU64::from_refno_str(&r.refno) {
+            children_map.entry(refno).or_insert(r);
         }
     }
+    // 获取有顺序的children
+    let sibl_refnos = query_sibl_level_refnos(first_refno, arango_database).await?;
+    for sibl_refno in sibl_refnos {
+        if let Some(v) = children_map.remove(&sibl_refno) {
+            r.push(PdmsElement {
+                refno: sibl_refno.to_refno_string(),
+                noun: v.noun,
+                name: v.name,
+                owner: RefU64::from_url_refno(v.owner).unwrap(),
+                children_count: v.children_count,
+                version: 0,
+            })
+        }
+    } 
     Ok(r)
 }
 
@@ -191,4 +206,25 @@ pub async fn query_refno_from_site_zone_name(arango_database: &Database, site_na
         let result: Vec<String> = arango_database.aql_query(aql).await?;
         Ok(convert_refno_vec_from_vec_string(result))
     };
+}
+
+/// 返回同层级的所有参考号，并按照 pdms 树的顺序排序
+pub async fn query_sibl_level_refnos(refno:RefU64,database:&Database) -> anyhow::Result<Vec<RefU64>> {
+    let refno_url = format!("pdms_eles/{}", refno.to_url_refno());
+    // in 是该 refno 下面
+    let aql_in = AqlQuery::new(r"
+        for v in 1..1000 inbound @id sibl_edges
+            return v._key")
+        .bind_var("id", refno_url.clone());
+    let result: Vec<String> = database.aql_query(aql_in).await?;
+    let in_refnos = convert_refno_vec_from_vec_string(result);
+    // out 是该 refno 上面
+    let aql_out = AqlQuery::new(r"
+        for v in 1..1000 outbound @id sibl_edges
+            return v._key")
+        .bind_var("id", refno_url);
+    let result: Vec<String> = database.aql_query(aql_out).await?;
+    let mut out_refnos = convert_refno_vec_from_vec_string(result);
+    out_refnos.push(refno);
+    Ok([out_refnos,in_refnos].concat())
 }

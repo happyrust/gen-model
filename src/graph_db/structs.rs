@@ -21,7 +21,7 @@ pub struct PdmsEleGraphEdge {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct PdmsEleGraphEdgeWithKey {
-    pub _key: u64,
+    pub _key: String, // from -> to
     pub _from: String,
     pub _to: String,
 }
