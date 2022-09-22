@@ -211,7 +211,7 @@ pub fn resolve_gmse_params(
     let drad = eval_str_to_f32(&gm.drad, context)?;
     let dwid = eval_str_to_f32(&gm.dwid, context)?;
 
-    let mut prads = gm.prads
+    let mut frads = gm.frads
         .iter()
         .map(|exp| eval_str_to_f32(&exp, context))
         .collect::<anyhow::Result<_>>()?;
@@ -300,7 +300,7 @@ pub fn resolve_gmse_params(
         pwid,
         prad,
         plin_verts,
-        prads,
+        frads,
         pang,
         diameters,
         distances,

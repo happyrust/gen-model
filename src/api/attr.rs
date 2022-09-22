@@ -88,7 +88,7 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &Vec<
                             r.entry(hash).or_insert(AttrVal::IntArrayType(v))
                         })?;
                     }
-                    DbAttributeType::Vec3Type | DbAttributeType::ORIENTATION | DbAttributeType::POSITION => {
+                    DbAttributeType::Vec3Type | DbAttributeType::ORIENTATION | DbAttributeType::POSITION | DbAttributeType::DIRECTION  => {
                         row.try_get::<String, _>(t).map(|v| {
                             let v = serde_json::from_str::<[f64; 3]>(&v).unwrap_or_default();
                             r.entry(hash).or_insert(AttrVal::Vec3Type(v))
@@ -274,6 +274,7 @@ fn gen_insert_attr_info_sql(attr_info: &DashMap<i32, DashMap<i32, AttrInfo>>) ->
     sql
 }
 
+#[inline]
 pub fn gen_query_implicit_attr_sql(refno: RefU64, table_name: &str, columns: &Vec<&str>) -> String {
     let mut sql = String::new();
     let cols_sql = if columns.len() == 0 {
