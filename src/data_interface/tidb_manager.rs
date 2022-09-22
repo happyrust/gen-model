@@ -15,7 +15,7 @@ use aios_core::parsed_data::{CateAxisParam, GeomsInfo};
 // use simple_process_stats::ProcessStats;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::category::{CateBrepShape, convert_to_brep_shapes};
-use aios_core::prim_geo::extrusion::{CurveType, Extrusion};
+use aios_core::prim_geo::extrusion::Extrusion;
 use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
 use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::PdmsTubing;
@@ -36,6 +36,7 @@ use once_cell::sync::Lazy;
 use smol_str::SmolStr;
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolOptions;
+use aios_core::prim_geo::wire::CurveType;
 
 use crate::api::attr::*;
 use crate::api::children::cache_site_node;
@@ -380,37 +381,6 @@ impl PdmsDataInterface for AiosDBManager {
                     jusl_vec = Vec3::new(x, y, 0.0);
                     dbg!(&jusl_vec);
                 }
-                //针对弧墙的处理
-                // if ref_basic.get_type() == "WALL" {
-                //     let desps = att.get_f64_vec("DESP").unwrap_or_default();
-                //     if !desps.is_empty() {
-                //         let thick = desps[0] as f32;
-                //         let child = self.get_children_refs(refno).await?;
-                //         if !child.is_empty() {
-                //             let spine_pts = self.get_children_attrs(child[0]).await?;
-                //             if spine_pts.len() >= 3 {
-                //                 let p0 = spine_pts[0].get_position().unwrap_or_default();
-                //                 let p1 = spine_pts[1].get_position().unwrap_or_default();
-                //                 let p2 = spine_pts[2].get_position().unwrap_or_default();
-                //                 let v1 = (p1 - p0).normalize_or_zero();
-                //                 let v2 = (p2 - p0).normalize_or_zero();
-                //                 use_scale = true;
-                //
-                //                 let r = p0.length();
-                //                 let s = if (v1.cross(v2)).dot(Vec3::Z) < 0.0 {
-                //                     (thick - jusl_vec.x + r) / r
-                //                 }else{
-                //                     (jusl_vec.x + r) / r
-                //                 };
-                //                 //只有上下的偏移，x方向需要转换为拉伸
-                //                 jusl_vec.x = 0.0;
-                //                 scale = Vec3::new(s, s, 1.0);
-                //                 dbg!(scale);
-                //             }
-                //         }
-                //     }
-                // }
-
             }
             let mut quat = att.get_rotation().unwrap_or_default();
             if let Some(bangle) = att.get_f32("BANG") {
@@ -475,8 +445,8 @@ impl PdmsDataInterface for AiosDBManager {
                 ));
                 // dbg!(bangle);
                 // dbg!(&refno);
-                dbg!(&plin_pos);
-                dbg!(&jusl_vec);
+                // dbg!(&plin_pos);
+                // dbg!(&jusl_vec);
                 // dbg!(bangle_rot);
                 translation = translation + rotation * (zdis + plin_pos - jusl_vec) + rotation * quat * bangle_rot * delta_vec;
                 rotation = rotation * quat * bangle_rot;
@@ -485,17 +455,17 @@ impl PdmsDataInterface for AiosDBManager {
                 rotation = rotation * quat;
             }
 
-            //将rotation 还原为角度
-            let angles = rotation.to_euler(EulerRot::XYZ);
-            let rot_mat = Mat3::from_quat(rotation);
-            let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
-
-            println!("{} : {:?}, ori: {:?}", refno.to_refno_str(), (translation, rotation), ori_str);
             self.cached_world_transforms_map.entry(refno).or_insert(TransformRT {
                 rotation,
                 translation,
             });
         }
+        //将rotation 还原为角度
+        let angles = rotation.to_euler(EulerRot::XYZ);
+        let rot_mat = Mat3::from_quat(rotation);
+        let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
+
+        println!("{} : {:?}, ori: {:?}", refno.to_refno_str(), (translation, rotation), ori_str);
         Ok(Some(glam::TransformRT {
             rotation,
             translation,
@@ -873,30 +843,30 @@ impl AiosDBManager {
         let batch_size = mgr.db_option.gen_model_batch_size;
         let mdb = &db_option.mdb_name;
         let t = Instant::now();
-        let mut att_types = vec![/*"BRAN", "HANG"*/];
+        let mut att_types = vec!["BRAN", "HANG"];
         att_types.extend_from_slice(&vec![
             // "ELCONN",
-            // "CMPF",
+            "CMPF",
             "WALL",
             "STWALL",
             "GWALL",
-            // "FIXING",
-            // "PJOI",
-            // "PFIT",
-            // "GENSEC",
-            // "RNODE",
-            // "PRTELE",
-            // "GPART",
-            // "SCREED",
-            // "NOZZ",
-            // "PALJ",
+            "FIXING",
+            "PJOI",
+            "PFIT",
+            "GENSEC",
+            "RNODE",
+            "PRTELE",
+            "GPART",
+            "SCREED",
+            "NOZZ",
+            "PALJ",
             // "SUBJ",
-            // "CABLE",
-            // "BATT",
-            // "CMFI",
-            // "SCOJ",
-            // "SEVE",
-            // "SBFI",
+            "CABLE",
+            "BATT",
+            "CMFI",
+            "SCOJ",
+            "SEVE",
+            "SBFI",
             "SCTN",
             "FITT",
         ]);
@@ -1024,10 +994,10 @@ impl AiosDBManager {
     }
 
     /// 生成基本体的几何数据
-    pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
+    pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, db_option: &DbOption, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let batch_size = mgr.db_option.gen_model_batch_size;
-        let mut prim_refnos = mgr.get_refnos_by_types(project, &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
+        let mut prim_refnos = mgr.get_refnos_by_types(db_option.project_name.as_str(), &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
         let prim_cnt = prim_refnos.len();
 
         let batch_chunks_cnt = prim_cnt / batch_size + 1;
@@ -1181,7 +1151,7 @@ impl AiosDBManager {
     // }
     //
 
-    pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, db_option: DbOption, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
+    pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, db_option: &DbOption, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let batch_size = mgr.db_option.gen_model_batch_size;
         let target_debug_refno = db_option.debug_desi_refno.as_ref().map(
@@ -1190,9 +1160,11 @@ impl AiosDBManager {
             mgr.get_refnos_by_types(&db_option.project_name, &vec!["PLOO", "LOOP"], db_nos).await?
         }else{
             println!("正在调试loop构件: {}", target_debug_refno.unwrap().to_refno_string());
-            RefU64Vec(vec![target_debug_refno.unwrap()])
+            // RefU64Vec(vec![target_debug_refno.unwrap()])
+            mgr.get_refnos_by_types(&db_option.project_name, &vec!["PLOO", "LOOP"], db_nos).await?
         };
         let loop_cnt = loop_refnos.len();
+        dbg!(loop_cnt);
         //处理loop elements
         let batch_chunks_cnt = loop_cnt / batch_size + 1;
         dbg!(batch_chunks_cnt);
@@ -1224,7 +1196,7 @@ impl AiosDBManager {
                     let mut geos_info = EleGeosInfo {
                         _key: refno.to_refno_normal_string(),
                         data: vec![],
-                        visible: true,
+                        visible: false,
                         world_transform: (transform.rotation, transform.translation, Vec3::ONE),
                         generic_type: mgr.get_generic_type(refno),
                         ptset_map: default(),
@@ -1256,8 +1228,8 @@ impl AiosDBManager {
                                     }
                                 }
                             }
-                            dbg!(&loop_verts);
-                            dbg!(&fradius_vec);
+                            // dbg!(&loop_verts);
+                            // dbg!(&fradius_vec);
                         }
                         let mut parent_att = AttrMap::default();
                         let mut geo_hash = None;
@@ -1269,6 +1241,7 @@ impl AiosDBManager {
                                 if angle >= f32::EPSILON {
                                     let revo = Box::new(Revolution {
                                         verts: loop_verts,
+                                        fradius_vec,
                                         angle,
                                         ..Default::default()
                                     });
@@ -1280,6 +1253,9 @@ impl AiosDBManager {
                             }
                             //todo 关于justline，可能需要jusline的信息才能判断中心点
                             "AEXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
+                                if parent_type == "FLOOR" {
+                                    println!("Floor : {}", refno.to_refno_string());
+                                }
                                 let attr = mgr.get_attr(refno).await.unwrap_or_default();
                                 parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
                                 target_refno = parent_refno;
@@ -1291,7 +1267,6 @@ impl AiosDBManager {
                                     fradius_vec,
                                     ..Default::default()
                                 });
-                                // dbg!(&extrusion);
                                 if extrusion.check_valid() {
                                     item_trans = extrusion.get_trans();
                                     // item_trans.translation += origin_pt;
@@ -1310,18 +1285,21 @@ impl AiosDBManager {
                         if let Some(geo_hash) = geo_hash {
                             let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
                             let tr: TransformSRT = item_trans;
-                            let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
-                            bbox.scaled(&tr.scale);
-                            let geom_inst = EleGeoInstance {
-                                geo_hash,
-                                refno,
-                                pts: Default::default(),
-                                bbox,
-                                transform: (tr.rotation, tr.translation, tr.scale),
-                                visible,
-                                is_tubi: false,
-                            };
-                            geo_insts.push(geom_inst);
+                            if let Some(mut bbox) = cached_mesh_mgr.get_bbox(&geo_hash){
+                                bbox.scaled(&tr.scale);
+                                let geom_inst = EleGeoInstance {
+                                    geo_hash,
+                                    refno,
+                                    pts: Default::default(),
+                                    bbox,
+                                    transform: (tr.rotation, tr.translation, tr.scale),
+                                    visible,
+                                    is_tubi: false,
+                                };
+                                geo_insts.push(geom_inst);
+                            }else{
+                                println!("楼板有问题：{} ", refno.to_refno_string());
+                            }
                         }
                         let ancestors = mgr.get_ancestors_refnos_without_world(refno);
                         for p_refno in ancestors {
@@ -1374,18 +1352,18 @@ impl AiosDBManager {
 
             println!("开始处理db: {db_no}");
             // let handle = tokio::spawn(async move {
-            // Self::cache_cata_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &project,
-            //                       Some(vec![db_no]), &db_option_clone).await.unwrap();
+            Self::cache_cata_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &project,
+                                  Some(vec![db_no]), &db_option_clone).await.unwrap();
             // });
             // handles.push(handle);
             let instance_mgr_clone = instance_mgr.clone();
-            let db_option_clone = db_option.clone();
+            // let db_option_clone = db_option.clone();
             // if db_option_clone.debug_branch_refno.as_ref().is_none() && db_option_clone.debug_desi_refno.as_ref().is_none() {
                 let project = project.clone();
                 let mgr_clone = mgr.clone();
                 // let handle = tokio::spawn(async move {
-                Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), db_option_clone, Some(vec![db_no])).await.unwrap();
-                // Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone.project_name, Some(vec![db_no])).await.unwrap();
+                Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option, Some(vec![db_no])).await.unwrap();
+                Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option, Some(vec![db_no])).await.unwrap();
                 // });
                 // handles.push(handle);
             // }

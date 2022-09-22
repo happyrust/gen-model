@@ -267,6 +267,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             "SPRO" => {   //structural profile
                 CateGeoParam::Profile(CateProfileParam::SPRO(SProfileData {
                     verts: gmse.verts.clone(),
+                    frads: gmse.frads.clone(),
                     normal_axis: Vec3::from(gmse.paxises[0].dir),
                     plin_pos: gmse.plin_verts,
                     plin_axis: gmse.plin_plax,
@@ -442,7 +443,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     y: gmse.xyz[1],
                     z: gmse.xyz[2],
                     verts: gmse.verts.clone(),
-                    prads: gmse.prads.clone(),
+                    frads: gmse.frads.clone(),
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
                 })
