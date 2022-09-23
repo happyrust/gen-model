@@ -871,15 +871,19 @@ impl AiosDBManager {
             "FITT",
         ]);
 
-        let has_cata_refnos =
-            if let Some(branch_refno) = &db_option.debug_branch_refno {
-                RefU64Vec(vec![RefU64::from_refno_str(branch_refno).unwrap_or_default()])
-            } else if let Some(design_refno) = &db_option.debug_desi_refno {
-                RefU64Vec(vec![RefU64::from_refno_str(design_refno).unwrap_or_default()])
-            } else {
-                mgr.get_refnos_by_types(project, &att_types, db_nos).await?
-            };
+        let mut has_cata_refnos = RefU64Vec::default();
 
+        if let Some(debug_type) = &db_option.debug_refno_type{
+            if debug_type == "CATA" {
+                if let Some(branch_refno) = &db_option.debug_branch_refno {
+                    has_cata_refnos = RefU64Vec(vec![RefU64::from_refno_str(branch_refno).unwrap_or_default()]);
+                } else if let Some(design_refno) = &db_option.debug_desi_refno {
+                    has_cata_refnos = RefU64Vec(vec![RefU64::from_refno_str(design_refno).unwrap_or_default()]);
+                }
+            }
+        }else {
+            has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, db_nos).await?;
+        }
         let has_cata_cnt = has_cata_refnos.len();
         let target_debug_refno = db_option.debug_desi_refno.as_ref().map(
             |x| RefU64::from_refno_str(x).unwrap_or_default());
@@ -997,7 +1001,19 @@ impl AiosDBManager {
     pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, db_option: &DbOption, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let batch_size = mgr.db_option.gen_model_batch_size;
-        let mut prim_refnos = mgr.get_refnos_by_types(db_option.project_name.as_str(), &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
+        let mut prim_refnos = RefU64Vec::default();
+        if let Some(debug_type) = &db_option.debug_refno_type {
+            if debug_type == "PRIM" {
+                let target_debug_refno = db_option.debug_desi_refno.as_ref().map(
+                    |x| RefU64::from_refno_str(x).unwrap_or_default());
+                if target_debug_refno.is_some() {
+                    prim_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
+                }
+            }
+        }else{
+            prim_refnos = mgr.get_refnos_by_types(db_option.project_name.as_str(), &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
+        }
+        // let mut prim_refnos = mgr.get_refnos_by_types(db_option.project_name.as_str(), &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
         let prim_cnt = prim_refnos.len();
 
         let batch_chunks_cnt = prim_cnt / batch_size + 1;
@@ -1154,15 +1170,25 @@ impl AiosDBManager {
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, db_option: &DbOption, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let batch_size = mgr.db_option.gen_model_batch_size;
-        let target_debug_refno = db_option.debug_desi_refno.as_ref().map(
-            |x| RefU64::from_refno_str(x).unwrap_or_default());
-        let loop_refnos = if target_debug_refno.is_none() {
-            mgr.get_refnos_by_types(&db_option.project_name, &vec!["PLOO", "LOOP"], db_nos).await?
+
+        let mut loop_refnos = RefU64Vec::default();
+        if let Some(debug_type) = &db_option.debug_refno_type {
+            if debug_type == "LOOP" {
+                let target_debug_refno = db_option.debug_desi_refno.as_ref().map(
+                    |x| RefU64::from_refno_str(x).unwrap_or_default());
+                if target_debug_refno.is_some() {
+                    loop_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
+                }
+            }
         }else{
-            println!("正在调试loop构件: {}", target_debug_refno.unwrap().to_refno_string());
-            // RefU64Vec(vec![target_debug_refno.unwrap()])
-            mgr.get_refnos_by_types(&db_option.project_name, &vec!["PLOO", "LOOP"], db_nos).await?
-        };
+            loop_refnos = mgr.get_refnos_by_types(&db_option.project_name, &vec!["PLOO", "LOOP"], db_nos).await?;
+        }
+        // let loop_refnos = if target_debug_refno.is_none() {
+        //     mgr.get_refnos_by_types(&db_option.project_name, &vec!["PLOO", "LOOP"], db_nos).await?
+        // }else{
+        //     println!("正在调试loop构件: {}", target_debug_refno.unwrap().to_refno_string());
+        //
+        // };
         let loop_cnt = loop_refnos.len();
         dbg!(loop_cnt);
         //处理loop elements
