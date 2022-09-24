@@ -984,7 +984,8 @@ impl AiosDBManager {
                         // if is_debug {
                         //     dbg!(&geos_info);
                         // }
-                        inst_map.entry(child_refno).or_insert(geos_info);
+                        // inst_map.entry(child_refno).or_insert(geos_info);
+                        inst_map.insert(child_refno, geos_info);
                     }
                     *processed_cnt.lock().unwrap() -= 1;
                 }
@@ -1190,7 +1191,6 @@ impl AiosDBManager {
         //
         // };
         let loop_cnt = loop_refnos.len();
-        dbg!(loop_cnt);
         //处理loop elements
         let batch_chunks_cnt = loop_cnt / batch_size + 1;
         dbg!(batch_chunks_cnt);
@@ -1369,7 +1369,10 @@ impl AiosDBManager {
 
         // let mut handles = vec![];
         for db_no in db_nos {
-            let instance_mgr = Arc::new(PdmsMeshInstanceMgr::default());
+            let instance_mgr =
+                PdmsMeshInstanceMgr::deserialize_from_bin_file(&format!("./assets/instance/{db_no}.inst")).unwrap_or_default();
+            dbg!(instance_mgr.inst_mgr.len());
+            let instance_mgr = Arc::new(instance_mgr);
             let instance_mgr_clone = instance_mgr.clone();
 
             let db_option_clone = db_option.clone();

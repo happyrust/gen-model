@@ -465,6 +465,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     pb: Some(gmse.paxises[1].clone()),
                     angle: gmse.pang,
                     verts: gmse.verts.clone(),
+                    frads: gmse.frads.clone(),
                     x: gmse.xyz[0],
                     y: gmse.xyz[1],
                     z: gmse.xyz[2],
