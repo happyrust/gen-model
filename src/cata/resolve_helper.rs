@@ -345,7 +345,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     axis: Some(gmse.paxises[0].clone()),
                     height: gmse.phei,
                     diameter: gmse.diameters[0],
-                    distance: gmse.distances[0],
+                    dist_to_btm: gmse.distances[0],
                     x_shear: gmse.shears[0],
                     y_shear: gmse.shears[1],
                     alt_x_shear: gmse.shears[2],

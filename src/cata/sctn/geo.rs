@@ -5,7 +5,7 @@ use aios_core::parsed_data::{CateProfileParam, GeomsInfo};
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::pdms_types::{AttrMap, RefU64};
 use aios_core::prim_geo::category::CateBrepShape;
-use aios_core::prim_geo::loft::SctnSolid;
+use aios_core::prim_geo::loft::LoftSolid;
 use anyhow::anyhow;
 use append_only_vec::AppendOnlyVec;
 use dashmap::{DashMap, DashSet};
@@ -70,7 +70,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                 if let CateProfileParam::SPRO(spro) = profile {
                     plane_normal = spro.normal_axis.normalize();
                 }
-                let loft = SctnSolid {
+                let loft = LoftSolid {
                     profile: profile.clone(),
                     drns,
                     drne,

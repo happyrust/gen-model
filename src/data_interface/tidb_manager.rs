@@ -742,6 +742,7 @@ impl AiosDBManager {
                 continue;
             }
             let attr = mgr.get_attr(refno).await;
+            dbg!(&attr);
             if attr.is_err() { continue; }
             let attr = attr.unwrap();
             println!("正在处理元件{}: {}", attr.get_type(), refno.to_refno_string());
