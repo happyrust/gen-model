@@ -142,7 +142,7 @@ impl PdmsDataInterface for AiosDBManager {
         }
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
-                let attr = query_full_attr(refno, ref_basic.value(), &project_pool, None).await?;
+                let attr = query_full_attr(refno, self, None).await?;
                 PDMS_ATT_MAP_CACHE.insert(refno, attr.clone()).expect("PDMS_ATT_MAP_CACHE save error.");
                 return Ok(attr);
             }
@@ -955,9 +955,6 @@ impl AiosDBManager {
                             if !visible || !brep_shape.check_valid() { continue; }
                             let trans = brep_shape.get_trans();
                             let geo_hash = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_shape.clone());
-                            // if is_debug {
-                            //     dbg!(geo_hash);
-                            // }
                             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
                             if bbox.is_none() {
                                 dbg!(geo_hash);
@@ -1164,10 +1161,8 @@ impl AiosDBManager {
             mgr.get_refnos_by_types(&db_option.project_name, &vec!["PLOO", "LOOP"], db_nos).await?
         };
         let loop_cnt = loop_refnos.len();
-        dbg!(loop_cnt);
         //处理loop elements
         let batch_chunks_cnt = loop_cnt / batch_size + 1;
-        dbg!(batch_chunks_cnt);
         let mut handles = vec![];
         let all_refnos = Arc::new(loop_refnos);
         let processed_cnt = Arc::new(Mutex::new(loop_cnt));

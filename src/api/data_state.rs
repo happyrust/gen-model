@@ -12,6 +12,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 /// 查找该节点下的所有子节点的data_state数据
 pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>, arango_database: &Database) -> anyhow::Result<DataStateVec> {
     let refnos = query_travel_children_with_out_leaf_aql(arango_database, refno).await?;
+    if refnos.len() == 0 { return Ok(DataStateVec::default()); }
     let mut r = vec![];
     let sql = gen_query_refnos_state_sql(refnos);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;

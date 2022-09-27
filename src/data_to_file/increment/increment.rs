@@ -2,150 +2,69 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
 use aios_core::helper::{parse_to_u16, parse_to_u32};
-use aios_core::pdms_types::{AttrVal, RefI32Tuple, RefU64};
+use aios_core::pdms_types::{AttrMap, AttrVal, PdmsDatabaseInfo, RefI32Tuple, RefU64};
 use aios_core::tool::db_tool::db1_hash;
 use dashmap::DashMap;
 use memchr::memmem::{find_iter, rfind_iter};
+use parse_pdms_db::EXPR_ATT_SET;
 use smol_str::SmolStr;
-use crate::data_to_file::DataPage;
-use crate::data_to_file::modify::{find_data_in_origin_file, get_origin_children_and_explicit_data, ModifyNewData};
-use crate::EXPR_ATT_SET;
-use crate::test_cases::convert_str_to_bytes;
+use serde::{Serialize, Deserialize};
+use crate::cata::resolve::parse_to_u64;
+use crate::data_to_file::modify::data_page::get_latest_data_page;
+use crate::data_to_file::modify::modify::ModifyNewData;
+use crate::data_to_file::OldDataPage;
 
-pub struct IncrementDataPage {
-    pub father_data: DataPage,
-    pub child_data: DataPage,
-}
-
-impl IncrementDataPage {
-    pub fn convert_new_data_page(self) -> Vec<u8> {
-        let mut result = vec![0; 0x800];
-        let f = self.father_data.turn_self_into_vec();
-        let f_len = f.len();
-        let s = self.child_data.turn_self_into_vec();
-        let s_len = s.len();
-
-        result.splice(..f_len, f);
-        result.splice(f_len..s_len, s);
-        result
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 pub struct IncrementNewData {
-    pub refno: RefU64,
+    pub old_file: Vec<u8>,
+    // 新增的节点所在的文件
     pub attr_type: String,
+    // 新增的参考号的 attr_map
+    pub attr: AttrMap,
+    // 新增节点在当前层级中的位置
+    pub order: usize,
     pub owner_refno: RefU64,
     pub owner_type: String,
+    // pdms all_attr_info.json文件中的值
+    pub info_map: PdmsDatabaseInfo,
 }
 
-#[tokio::test]
-async fn convert_new_node_data_test() -> anyhow::Result<()> {
-    let data = IncrementNewData {
-        refno: Refi32Tuple((23984, 1068)).into(),
-        attr_type: "SCYL".to_string(),
-        owner_refno: Refi32Tuple((23984, 1041)).into(),
-        owner_type: "GMSE".to_string(),
-    };
-    let mut file = fs::File::open(r"E:\AVEVA\Plant\PDMS12.0.SP4\project\Sample\sam000\sam7600_0001").unwrap();
-    let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok();
-    let mut interface = PdmsInterface::new("mongodb://localhost:27017");
-    if let Some(owner) = get_owner_data(&buf, data.clone()) {
-        if let Some(mut version) = interface.get_file_version_with_refno(data.owner_refno.clone()).await? {
-            version +=5;
-            if let Some(r) = convert_first_version_page_increment(&buf,data.owner_refno,data.refno,version){
-                fs::write("increment_version_page", r);
-            }
-            // let child_data = convert_new_node_data(data, version).await?;
-            // let owner = owner.turn_self_into_vec();
-            // let mut r = [owner, child_data].concat();
-            // fs::write("increment", r);
-        }
+impl IncrementNewData {
+    pub fn convert_new_increment_data_file(self) -> Option<Vec<u8>> {
+        // 获得最新得参考号
+        let refno = RefU64(parse_to_u64(&self.old_file[0x80C..0x814]));
+        // 找到 owner 的数据页
+        let owner_data_page = get_latest_data_page(&self.old_file, self.owner_refno, &self.owner_type);
+        if owner_data_page.is_none() { return None; }
+        let owner_data_page = owner_data_page.unwrap();
+        // 修改 owner 新增变化的数据(主要是children)
+        let data_page = change_owner_data(owner_data_page, self.order, refno);
+        let owner_data_bytes = data_page.convert_new_data_page();
+        // 生成新节点的数据
+
+        None
     }
-    Ok(())
 }
 
-/// 找到owner的原数据并新增一个节点
-fn get_owner_data(input: &[u8], node: IncrementNewData) -> Option<DataPage> {
-    let node_bytes = get_refno_types_bytes(node.owner_refno, node.owner_type);
-    if let Some(origin_data) = find_data_in_origin_file(&node_bytes, &input) {
-        let new_owner = change_owner_children_data(origin_data.children, node.refno);
-        return Some(DataPage {
-            implicit_data: origin_data.implicit_data,
-            children: new_owner,
-            explicit_data: origin_data.explicit_data,
-        });
+/// 修改 owner data_page 中的数据
+fn change_owner_data(mut owner_data: OldDataPage, order: usize, refno: RefU64) -> OldDataPage {
+    // 根据 order 确定 在 owner 的 children 中排在第几个位置
+    let children_len = (owner_data.children.len() - 20) / 8; // 20为长度和自身参考号 + 8个 0
+    if order < children_len {
+        // 在中间插入该参考号的数据
+        let refno_position = order * 8 + 20;
+        let before_refno_bytes = owner_data.children[..refno_position].to_vec();
+        let refno_bytes = refno.0.to_be_bytes()[..8].to_vec();
+        let after_bytes = owner_data.children[refno_position..].to_vec();
+        owner_data.children = [before_refno_bytes, refno_bytes, after_bytes].concat();
+    } else {
+        // 在最后插入数据
+        owner_data.children.append(&mut refno.0.to_be_bytes()[..8].to_vec());
     }
-    None
+    owner_data.children.splice(2..4, ((owner_data.children.len() / 4) as u16).to_be_bytes()[..2].to_vec());
+    owner_data
 }
 
-/// 生成新增节点的数据
-async fn convert_new_node_data(node: IncrementNewData, version: u32) -> MResult<Vec<u8>> {
-    let node_bytes = get_refno_types_bytes(node.refno.clone(), node.attr_type);
-    let owner_byte = node.owner_refno.0.to_be_bytes()[..8].to_vec(); // owner 不需要type
-    let version = version.to_be_bytes()[..4].to_vec();
-    let unknown_byte = vec![0, 9, 0x20, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0x20, 0, 0xC0, 0]; // 版本号之后 隐式属性之前有16个byte未知含义的数据
-
-    let mut interface = PdmsInterface::new("mongodb://localhost:27017");
-    let default_val_map = interface.get_type_default_value(SmolStr::new("SCYL")).await?.unwrap();
-    let (explicit, implicit) = sort_default_value(default_val_map);
-
-    let implicit_data = convert_new_node_default_data_implicit(implicit, true);
-    let implicit_len = ((implicit_data.len() as u32) / 4 + 0xB).to_be_bytes().to_vec();
-    let explicit_value = convert_new_node_default_data_explicit(explicit, true);
-    let explicit_data = get_explicit_data(explicit_value, node.refno);
-    Ok([implicit_len, node_bytes, owner_byte, version, unknown_byte, implicit_data, explicit_data].concat())
-}
-
-fn get_refno_types_bytes(refno: RefU64, att_type: String) -> Vec<u8> {
-    let r = refno.0.to_be_bytes()[..8].to_vec();
-    let a = db1_hash(att_type.as_str()).to_be_bytes()[..4].to_vec();
-    [r, a].concat()
-}
-
-fn get_explicit_data(input: Vec<u8>, refno: RefU64) -> Vec<u8> {
-    let mut r = refno.0.to_be_bytes()[..8].to_vec();
-    r.append(&mut vec![0, 0, 0, 0, 0, 0, 0, 0]);
-    let len = (input.len() as u16).to_be_bytes().to_vec();
-    [vec![0, 1], len, r, input].concat()
-}
-
-#[test]
-fn change_owner_data_test() {
-    let input = "
-00 02 00 1D 00 00 5D B0 00 00 04 11 00 00 00 00
-00 00 00 00 00 00 5D B0 00 00 04 2C 00 00 5D B0 00 00 04 29
-00 00 5D B0 00 00 04 23 00 00 5D B0 00 00 04 21
-00 00 5D B0 00 00 04 20 00 00 5D B0 00 00 04 1F
-00 00 5D B0 00 00 04 1C 00 00 5D B0 00 00 04 1A
-00 00 5D B0 00 00 04 17 00 00 5D B0 00 00 04 16
-00 00 5D B0 00 00 04 13 00 00 5D B0 00 00 04 12";
-    let input = convert_str_to_bytes(input);
-    let owner = change_owner_children_data(input, RefI32Tuple((23984, 1068)).into());
-    println!("owner={:#4X?}", owner);
-}
-
-fn change_owner_children_data(mut input: Vec<u8>, refno: RefU64) -> Vec<u8> {
-    let old_len = parse_to_u16(&input[2..4]);
-    let new_len = (old_len + 2).to_be_bytes().to_vec();
-    input.splice(2..4, new_len);
-    let refno_byte = refno.0.to_be_bytes()[..8].to_vec();
-    [input, refno_byte].concat()
-}
-
-#[tokio::test]
-async fn convert_new_node_default_data_test() {
-    let pdms_database_info = read_attr_info_config("all_attr_info.bin");
-    let mut interface = PdmsInterface::new("mongodb://localhost:27017");
-    let default_val_map = interface.get_type_default_value(SmolStr::new("SCYL")).await.unwrap().unwrap();
-    let (explicit, implicit) = sort_default_value(default_val_map);
-    println!("explicit={:?}", implicit);
-    let r = convert_new_node_default_data_explicit(explicit, true);
-    println!("r={:#4X?}", r);
-    let r = convert_new_node_default_data_implicit(implicit, true);
-    println!("r={:#4X?}", r);
-}
 
 fn convert_new_node_default_data_explicit(default_map: DashMap<SmolStr, AttrVal>, b_f64: bool) -> Vec<u8> {
     let mut r = vec![];
@@ -244,15 +163,15 @@ fn convert_new_node_default_data_explicit(default_map: DashMap<SmolStr, AttrVal>
 }
 
 /// 生成新增节点的默认隐式属性属性值
-fn convert_new_node_default_data_implicit(default_map: BTreeMap<u32, (SmolStr, AttrVal)>, _b_f64: bool) -> Vec<u8> {
+fn convert_new_node_default_data_implicit(attr_map: AttrMap, _b_f64: bool) -> Vec<u8> {
     let mut values = vec![];
-    for (_, (noun, val)) in default_map {
+    for (noun, val) in attr_map.map {
         match &val {
             AttrVal::IntegerType(val) => {
                 values.push(val.to_be_bytes()[..4].to_vec());
             }
             AttrVal::StringType(val) => {
-                if !EXPR_ATT_SET.contains(&(db1_hash(noun.as_str()) as i32)) {
+                if !EXPR_ATT_SET.contains(&(noun.0 as i32)) {
                     let v = val.as_str().as_bytes().to_vec();
                     let len = v.len() as f32;
                     let l = (((len / 4.0).ceil() + 1.0) as u16).to_be_bytes().to_vec();
@@ -271,7 +190,7 @@ fn convert_new_node_default_data_implicit(default_map: BTreeMap<u32, (SmolStr, A
             // bool 先不管
             AttrVal::BoolType(v) => {
                 // 这个noun是bool 但是默认值是 0C 不知道怎么搞的
-                if noun == SmolStr::new("CLFL") {
+                if noun.0 == db1_hash("CLFL") {
                     values.push(vec![0, 0, 0, 0xC]);
                 }
             }
@@ -314,42 +233,9 @@ fn convert_new_node_default_data_implicit(default_map: BTreeMap<u32, (SmolStr, A
     values.into_iter().flatten().collect()
 }
 
-/// 根据pos获取到节点的隐式属性、children、显示属性
-pub fn get_data_page_with_pos(input: &[u8], pos: usize) -> DataPage {
-    let mut implicit_pos = pos - 4 + (parse_to_u32(&input[pos - 4..pos]) as usize) * 4;
-    let implicit_data = input[pos - 4..implicit_pos].to_vec();
-    let (children_data, explicit_data) = get_origin_children_and_explicit_data(input, implicit_pos);
-    DataPage {
-        implicit_data,
-        children: children_data,
-        explicit_data,
-    }
-}
-
-/// 生成 refno + type 在 pdms中的数据
-pub fn convert_refno_type_hash(refno: RefU64, attr_type: String) -> Vec<u8> {
-    let mut refno = refno.0.to_be_bytes().to_vec();
-    let attr_type = db1_hash(attr_type.as_str()).to_be_bytes().to_vec();
-    [refno, attr_type].concat()
-}
-
-/// 返回排序后的显示属性和隐式属性的默认值
-fn sort_default_value(map: DashMap<SmolStr, DefaultValue>) -> (DashMap<SmolStr, AttrVal>, BTreeMap<u32, (SmolStr, AttrVal)>) {
-    let mut explicit_map = DashMap::new(); // 显示属性只需要存 noun和默认值 不需要管顺序
-    let mut implicit_map = BTreeMap::new(); // 隐式属性存offset和 默认值，noun只是方便调试
-    for (key, val) in map {
-        // bool 先不管
-        if val.offset == 0 {
-            explicit_map.insert(key, val.value);
-        } else if val.offset < 0xFFF {
-            implicit_map.insert(val.offset, (key, val.value));
-        }
-    }
-    (explicit_map, implicit_map)
-}
 
 /// 生成新增节点的参考号 + 版本号
-fn convert_first_version_page_increment(input: &[u8], owner_refno: RefU64,refno:RefU64, version: u32) -> Option<Vec<u8>>{
+fn convert_first_version_page_increment(input: &[u8], owner_refno: RefU64, refno: RefU64, version: u32) -> Option<Vec<u8>> {
     let version_start = &[0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x2];
     let mut iter = rfind_iter(input, version_start);
     while let Some(pos) = iter.next() {
@@ -358,16 +244,34 @@ fn convert_first_version_page_increment(input: &[u8], owner_refno: RefU64,refno:
         let owner_refno = &owner_refno.0.to_be_bytes()[..];
         if let Some(_r_pos) = find_iter(&input[pos..pos + 0x800], owner_refno).next() {
             // 找到 page末尾数据为 0 的地方
-            if let Some(zero_pos) = find_iter(&version_data,&vec![0,0,0,0,0,0,0,0]).next() {
+            if let Some(zero_pos) = find_iter(&version_data, &vec![0, 0, 0, 0, 0, 0, 0, 0]).next() {
                 let refno = refno.0.to_be_bytes()[..8].to_vec();
                 let new_version = (version - 4).to_be_bytes()[..4].to_vec();
-                let unknown_bytes = vec![0 ,0x5 ,0xA0 ,0x1]; // 也是不知道是什么含义
-                let new_data = [refno,new_version,unknown_bytes].concat();
-                version_data.splice(zero_pos..zero_pos + 16,new_data);
+                let unknown_bytes = vec![0, 0x5, 0xA0, 0x1]; // 也是不知道是什么含义
+                let new_data = [refno, new_version, unknown_bytes].concat();
+                version_data.splice(zero_pos..zero_pos + 16, new_data);
                 version_page.splice(0..0x800, version_data);
             }
             return Some(version_page);
         }
     }
     None
+}
+
+#[test]
+fn test_convert_new_increment_data_file() {
+    let mut file = fs::File::open("resource/sam7200_0001").unwrap();
+    let mut input = vec![];
+    file.read_to_end(&mut input).unwrap();
+
+    let increment_new_data = IncrementNewData {
+        old_file: input,
+        attr_type: "".to_string(),
+        owner_refno: RefU64::from_refno_str("23584/16355").unwrap(),
+        owner_type: "BRAN".to_string(),
+        attr: Default::default(),
+        info_map: Default::default(),
+        order: 0,
+    };
+    let data = increment_new_data.convert_new_increment_data_file();
 }

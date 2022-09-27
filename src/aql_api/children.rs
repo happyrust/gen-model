@@ -21,11 +21,34 @@ pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> an
                             return 1 ),
     }").bind_var("id", refno_aql);
     let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
+    for v in result {
+        if let Some(pdms_element) = v.change_to_pdms_element() {
+            r.push(pdms_element);
+        }
+    }
+    Ok(r)
+}
+
+pub async fn query_children_aql_order(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
+    let mut r = vec![];
+    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let aql = AqlQuery::new("\
+    for z in 1 inbound @id pdms_edges
+        return {
+        'refno':z._key,
+        'owner':z.owner,
+        'name':z.name,
+        'noun':z.noun,
+        'version':0,
+        'children_count':length(for c in 1 inbound z._id pdms_edges
+                            return 1 ),
+    }").bind_var("id", refno_aql);
+    let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
     // 对获取到的children进行排序
-    let first_refno = RefU64::from_refno_str(&result[0].refno)?;
+    let first_refno = RefU64::from_url_refno(result[0].refno.to_string()).unwrap();
     let mut children_map = HashMap::new();
     for r in result {
-        if let Ok(refno) = RefU64::from_refno_str(&r.refno) {
+        if let Some(refno) = RefU64::from_url_refno(r.refno.to_string()) {
             children_map.entry(refno).or_insert(r);
         }
     }
@@ -42,7 +65,7 @@ pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> an
                 version: 0,
             })
         }
-    } 
+    }
     Ok(r)
 }
 
@@ -209,7 +232,7 @@ pub async fn query_refno_from_site_zone_name(arango_database: &Database, site_na
 }
 
 /// 返回同层级的所有参考号，并按照 pdms 树的顺序排序
-pub async fn query_sibl_level_refnos(refno:RefU64,database:&Database) -> anyhow::Result<Vec<RefU64>> {
+pub async fn query_sibl_level_refnos(refno: RefU64, database: &Database) -> anyhow::Result<Vec<RefU64>> {
     let refno_url = format!("pdms_eles/{}", refno.to_url_refno());
     // in 是该 refno 下面
     let aql_in = AqlQuery::new(r"
@@ -226,5 +249,5 @@ pub async fn query_sibl_level_refnos(refno:RefU64,database:&Database) -> anyhow:
     let result: Vec<String> = database.aql_query(aql_out).await?;
     let mut out_refnos = convert_refno_vec_from_vec_string(result);
     out_refnos.push(refno);
-    Ok([out_refnos,in_refnos].concat())
+    Ok([out_refnos, in_refnos].concat())
 }

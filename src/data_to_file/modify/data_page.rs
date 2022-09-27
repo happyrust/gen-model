@@ -4,7 +4,7 @@ use aios_core::pdms_types::{AttrVal, PdmsDatabaseInfo, RefU64};
 use aios_core::pdms_types::AttrVal::{BoolType, DoubleArrayType};
 use aios_core::tool::db_tool::db1_hash;
 use memchr::memmem::rfind_iter;
-use crate::data_to_file::modify::{convert_new_data_page, find_data_in_origin_file, ModifyNewData};
+use crate::data_to_file::modify::modify::{convert_new_data_page, find_data_in_origin_file, ModifyNewData};
 use crate::data_to_file::OldDataPage;
 
 pub struct DataPageModify {
@@ -18,8 +18,8 @@ pub struct DataPageModify {
 }
 
 impl DataPageModify {
-    pub fn convert_new_data_page(self, input: &[u8]) -> Option<Vec<u8>> {
-        let latest_data_page = get_latest_data_page(input, self.refno, self.attr_type.clone());
+    pub fn convert_new_data_page_modify(self, input: &[u8]) -> Option<Vec<u8>> {
+        let latest_data_page = get_latest_data_page(input, self.refno, &self.attr_type.clone());
         if latest_data_page.is_none() { return None; };
         let latest_data_page = latest_data_page.unwrap();
         // 通过旧的属性页 修改对应的属性
@@ -33,9 +33,10 @@ impl DataPageModify {
     }
 }
 
-fn get_latest_data_page(input: &[u8], refno: RefU64, att_type: String) -> Option<OldDataPage> {
+/// 根据 refno + type 找到在文件中最新的数据
+pub fn get_latest_data_page(input: &[u8], refno: RefU64, att_type: &str) -> Option<OldDataPage> {
     let mut refno_bytes = refno.0.to_be_bytes()[..8].to_vec();
-    let mut type_hash = db1_hash(&att_type).to_be_bytes()[..4].to_vec();
+    let mut type_hash = db1_hash(att_type).to_be_bytes()[..4].to_vec();
     refno_bytes.append(&mut type_hash);
     find_data_in_origin_file(input, &refno_bytes)
 }
@@ -46,7 +47,7 @@ fn test_convert_new_data_page() {
     let mut input = vec![];
     file.read_to_end(&mut input).unwrap();
 
-    let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../all_attr_info.json")).unwrap();
+    let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../../all_attr_info.json")).unwrap();
 
     let data_page = DataPageModify {
         last_page_no: 0xF29,
@@ -57,7 +58,7 @@ fn test_convert_new_data_page() {
         info_map: info,
     };
 
-    let result = data_page.convert_new_data_page(&input).unwrap();
+    let result = data_page.convert_new_data_page_modify(&input).unwrap();
     let mut file = fs::File::create("resource/sam7200_0001_test_data").unwrap();
     file.write_all(&result).unwrap();
 }
@@ -68,7 +69,7 @@ fn test_convert_new_data_page_explicit_data() {
     let mut input = vec![];
     file.read_to_end(&mut input).unwrap();
 
-    let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../all_attr_info.json")).unwrap();
+    let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../../all_attr_info.json")).unwrap();
 
     let data_page = DataPageModify {
         last_page_no: 0xF29,
@@ -79,7 +80,7 @@ fn test_convert_new_data_page_explicit_data() {
         info_map: info,
     };
 
-    let result = data_page.convert_new_data_page(&input).unwrap();
+    let result = data_page.convert_new_data_page_modify(&input).unwrap();
     let mut file = fs::File::create("resource/sam7200_0001_test_data").unwrap();
     file.write_all(&result).unwrap();
 }

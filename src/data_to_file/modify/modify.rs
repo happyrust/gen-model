@@ -15,15 +15,17 @@ use lazy_static::lazy_static;
 use memchr::memmem::{find_iter, rfind_iter};
 use parse_pdms_db::test_cases::convert_str_to_bytes;
 use serde::{Serialize, Deserialize};
+use smol_str::SmolStr;
 use sqlx::{MySql, Pool};
 use crate::api::children::query_owner_till_type;
 use crate::api::element::query_owner_from_id;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_to_file::{OldDataPage, NewPage, get_latest_page};
-use crate::data_to_file::claim_page::ClaimPageModify;
-use crate::data_to_file::data_page::DataPageModify;
-use crate::data_to_file::index_page::IndexPage;
-use crate::data_to_file::session_page::{get_latest_session_page, SessionPageModify};
+use crate::data_to_file::modify::claim_page::ClaimPageModify;
+use crate::data_to_file::modify::data_page::DataPageModify;
+use crate::data_to_file::modify::index_page::IndexPage;
+use crate::data_to_file::modify::name_page::NamePageModify;
+use crate::data_to_file::modify::session_page::{get_latest_session_page, SessionPageModify};
 
 const FIRST_VERSION_PAGE: [u8; 20] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x2];
 const SECOND_VERSION_PAGE: [u8; 20] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x2];
@@ -410,27 +412,6 @@ pub fn convert_first_version_page(input: &[u8], refno: &[u8], version: u32) -> O
     None
 }
 
-/// 修改第二个 参考号 + 版本号
-pub fn convert_second_version_page(input: &[u8], refno: &[u8], version: u32) -> Option<Vec<u8>> {
-    let version_start = &SECOND_VERSION_PAGE;
-
-    let mut iter = rfind_iter(input, version_start);
-    // todo 和修改次数问题相同，不知道修改refno ，另一个毫无相关的参考号的版本也会发生变化
-    // while let Some(pos) = iter.next() {
-    //     let mut version_page = vec![0u8; 0x800];
-    //     let mut version_data = input[pos..pos + 0x800].to_vec();
-    //     if let Some(r_pos) = find_iter(&input[pos..pos + 0x800], refno).next() {
-    //         let new_version = (version - 3).to_be_bytes()[..4].to_vec(); // 在大版本 +5 的基础上 -3
-    //         version_data.splice(r_pos + 8..r_pos + 8 + 4, new_version);
-    //         version_page.splice(0..0x800, version_data);
-    //         return Some(version_page);
-    //     }
-    // }
-    if let Some(pos) = iter.next() {
-        return Some(input[pos..pos + 0x800].to_vec());
-    }
-    None
-}
 
 /// 修改次数页
 pub async fn convert_change_times_page(input: &[u8], refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>> {
@@ -455,27 +436,6 @@ pub async fn convert_change_times_page(input: &[u8], refno: RefU64, pool: &Pool<
         }
     }
     Ok(None)
-}
-
-#[tokio::test]
-async fn test_convert_change_times_page() -> anyhow::Result<()> {
-    let mut file = File::open(r"E:\AVEVA\Plant\Projects12.1.SP4\Sample\sam000\sam7200_0001")?;
-    let mut buf = vec![];
-    file.read_to_end(&mut buf)?;
-
-    let _ = dotenv::dotenv();
-    let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-
-    let refno = RefU64::from_refno_str("23584/5444")?;
-
-    if let Some((data, _)) = convert_change_times_page(&buf, refno, &pool).await? {
-        let mut file = File::create("change_times_page.bin")?;
-        file.write_all(&data)?;
-        dbg!("生成成功!");
-    }
-
-    Ok(())
 }
 
 /// 会话页
@@ -516,16 +476,28 @@ pub struct ModifyData {
     pub attr_type: String,
     pub noun_type: String,
     pub data: AttrVal,
+    pub old_data: AttrVal,
     /// 用户名
     pub user_name: String,
     /// 提交说明
     pub commit_comment: String,
 }
 
+/// 存放全局的 name_page type_page等
+#[derive(Debug, Serialize, Deserialize)]
+pub enum GlobalPage {
+    // 0x9C18E
+    NamePage(u32),
+    // 0xCC6B3F
+    TypePage(u32),
+    None,
+}
+
+
 impl ModifyData {
     pub fn convert_new_modify_data(self) -> Option<Vec<u8>> {
         // 读取info文件
-        let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../all_attr_info.json")).unwrap();
+        let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../../all_attr_info.json")).unwrap();
         // 获得最新的session_page_num
         let latest_session_page_num = parse_to_u32(&self.old_file[40..44]);
         // 获得最新的page_num
@@ -533,18 +505,20 @@ impl ModifyData {
         let latest_page_num = parse_to_u32(&latest_session_page[20..24]);
         let session_no = parse_to_u32(&latest_session_page[12..16]);
         let mut current_page_num = latest_page_num;
+
         // 生成属性页
         let data_page = DataPageModify {
             last_page_no: latest_page_num,
             refno: self.refno,
-            attr_type: self.attr_type,
-            noun_type: self.noun_type,
-            data: self.data,
+            attr_type: self.attr_type.clone(),
+            noun_type: self.noun_type.clone(),
+            data: self.data.clone(),
             info_map: info,
         };
-        let data_page = data_page.convert_new_data_page(&self.old_file);
+        let data_page = data_page.convert_new_data_page_modify(&self.old_file);
         if data_page.is_none() { return None; }
         current_page_num += 1;
+
         // 生成 index_page
         let index_page = IndexPage {
             refno: self.refno,
@@ -553,26 +527,48 @@ impl ModifyData {
         let index_page = index_page.convert_new_index_page(&self.old_file);
         if index_page.is_none() { return None; }
         let index_page = index_page.unwrap();
-        current_page_num += (index_page.len() / 0x800) as u32; // index_page 是两页
+        current_page_num += (index_page.len() / 0x800) as u32; // index_page 是两页或三页
         let current_index_page = current_page_num;
+        // 检测是否需要修改全局信息的 page ,如果需要则添加该部分数据
+        let mut global_page = vec![];
+        let b_change_global_page = self.check_b_global_page(current_page_num + 1);
+        match b_change_global_page {
+            GlobalPage::NamePage(_) => {
+                let name_page = NamePageModify {
+                    refno: self.refno,
+                    old_name: self.old_data.string_value(),
+                    new_name: self.data.string_value(),
+                    latest_page_num: current_page_num,
+                };
+                let new_name_bytes = name_page.convert_new_name_page(&self.old_file);
+                if let Some(new_name_bytes) = new_name_bytes {
+                    global_page = new_name_bytes;
+                    current_page_num += 2; // name_page 是两页
+                }
+            }
+            _ => {}
+        }
+
         // 生成 claim_page
         let claim_page = ClaimPageModify {
             last_page_no: session_no,
             refno: self.refno,
             world_claim_page_num: 0,
-            index_page_num: current_index_page + 1,
+            index_page_num: current_page_num + 1,
         };
         let claim_page = claim_page.convert_new_claim_page(&self.old_file);
         if claim_page.is_none() { return None; }
         let claim_page = claim_page.unwrap();
         current_page_num += (claim_page.len() / 0x800) as u32;
         let current_claim_page = current_page_num;
+
         // 生成 session_page
         let current_session_page = current_page_num;
         let session_page = SessionPageModify {
             last_page_num: latest_session_page_num,
             new_latest_page_num: current_page_num,
             index_page_num: current_index_page,
+            global_page_num: b_change_global_page,
             claim_page_num: current_claim_page,
             user_name: self.user_name,
             commit_comment: self.commit_comment,
@@ -581,7 +577,14 @@ impl ModifyData {
         // 修改文件头上的page_num
         let mut new_file = self.old_file;
         new_file.splice(40..44, (current_page_num + 1).to_be_bytes()[..4].to_vec());
-        Some([new_file, data_page.unwrap(), index_page, claim_page, session_page].concat())
+        Some([new_file, data_page.unwrap(), index_page, global_page, claim_page, session_page].concat())
+    }
+
+    fn check_b_global_page(&self, current_page_num: u32) -> GlobalPage {
+        match self.noun_type.as_str() {
+            "NAME" => { GlobalPage::NamePage(current_page_num) }
+            _ => { GlobalPage::None }
+        }
     }
 }
 
@@ -597,6 +600,7 @@ fn test_convert_new_modify_data() {
         attr_type: "STWALL".to_string(),
         noun_type: "POSS".to_string(),
         data: AttrVal::Vec3Type([13898.39, -1534.99, 0.0]),
+        old_data: Default::default(),
         user_name: "admin".to_string(),
         commit_comment: "Default session comment".to_string(),
     };
@@ -618,6 +622,29 @@ fn test_convert_new_modify_data_explict_data() {
         attr_type: "STWALL".to_string(),
         noun_type: "DRGP".to_string(),
         data: AttrVal::IntegerType(100),
+        old_data: Default::default(),
+        user_name: "admin".to_string(),
+        commit_comment: "Default session comment".to_string(),
+    };
+    let data = modify_data.convert_new_modify_data().unwrap();
+
+    let mut file = fs::File::create("resource/sam7200_0001_test").unwrap();
+    file.write_all(&data).unwrap();
+}
+
+#[test]
+fn test_convert_new_modify_name_data() {
+    let mut file = fs::File::open("resource/sam7200_0001").unwrap();
+    let mut input = vec![];
+    file.read_to_end(&mut input).unwrap();
+
+    let modify_data = ModifyData {
+        old_file: input,
+        refno: RefU64::from_refno_str("23584/5931").unwrap(),
+        attr_type: "STWALL".to_string(),
+        noun_type: "NAME".to_string(),
+        data: AttrVal::StringType(SmolStr::new("/Test/WALL/Write")),
+        old_data: AttrVal::StringType(SmolStr::new("/Test/WALL")),
         user_name: "admin".to_string(),
         commit_comment: "Default session comment".to_string(),
     };

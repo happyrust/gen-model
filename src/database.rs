@@ -398,6 +398,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
     let is_replace = db_option.replace_dbs;
+    let mut uda_map = HashMap::new();
 
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
@@ -407,10 +408,10 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
         }
         if need_parsing_files.is_none() || need_parsing_files.as_ref().unwrap().contains(&file_name) {
             println!("path={:?}", &file_name);
-            let project_1 = project.clone();
+            let project_clone = project.clone();
             if let Ok(Ok(PdmsDbData {
                              all_attr_map,
-                             mut total_attr_map,
+                             total_attr_map,
                              type_ele_map,
                              refno_info_map,
                              children_map,
@@ -422,9 +423,10 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                              foreign_refnos_map,
                              ..
                          })) = tokio::task::spawn_blocking(move || {
-                parse_file(&path, &None, &file_name, project_1.as_str(), "")
+                parse_file(&path, &None, &file_name, project_clone.as_str(), "")
             }).await {
-                set_uda_attr(&type_ele_map, &mut total_attr_map)?;
+                set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
+                continue;
                 //类型暂时不多线程
                 let total_attr_map_arc = Arc::new(total_attr_map);
                 let children_map_arc = Arc::new(children_map);
@@ -504,7 +506,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                             let pool_clone = pool_clone.clone();
                             let mut implicit_values_sql = String::new();
                             let mut explicit_values_sql = String::new();
-                            let mut uda_values_sql = String::new();
                             let mut pdms_elements_sql = String::new();
                             let insert_handle = tokio::spawn(async move {
                                 let start_idx = i * thread_chunks_cnt;
@@ -525,7 +526,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
 
                                         implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), column_hashs));
                                         explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
-                                        uda_values_sql.push_str(&gen_uda_attr_value_sql(att.value()));
                                         let name = get_name(&total_attr_map_arc_clone, &children_map_arc_clone, refno).replace(r#"'"#, r#"\'"#)
                                             .replace(r#"""#, r#"\""#);
                                         let order = get_order(&total_attr_map_arc_clone, &children_map_arc_clone, refno);
@@ -553,22 +553,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                                     //执行显示数据保存
                                     let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
                                     sql.push_str(explicit_values_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    if is_replace {
-                                        sql = sql.replace("INSERT IGNORE", "REPLACE");
-                                    }
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            dbg!(&e);
-                                            dbg!(sql.as_str());
-                                        }
-                                    }
-
-                                    //执行uda数据保存
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_UDA_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
-                                    sql.push_str(uda_values_sql.as_str());
                                     sql.remove(sql.len() - 1);
                                     if is_replace {
                                         sql = sql.replace("INSERT IGNORE", "REPLACE");
@@ -637,12 +621,31 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
             }
         }
     }
+    dbg!(&uda_map.len());
+    // 保存 uda_map
+    if uda_map.len() > 0 {
+        let mut uda_sql = format!("INSERT IGNORE INTO {PDMS_UDA_TABLE} (TYPE,DATA) VALUES");
+        for (noun, value) in uda_map.into_iter() {
+            let data = value.into_compress_bytes();
+            uda_sql.push_str(&format!("('{}',0x{}),", noun, hex::encode(data)))
+        }
+        let mut project_conn = pool.acquire().await.unwrap();
+        uda_sql.remove(uda_sql.len() - 1);
+        let result = project_conn.execute(uda_sql.as_str()).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(&e);
+                dbg!(uda_sql.as_str());
+            }
+        }
+    }
     Ok(())
 }
 
 /// 给对应类型的参考号赋上 uda 默认值
-fn set_uda_attr(type_ele_map: &DashMap<u32, HashSet<RefU64>>, total_attr_map: &mut DashMap<RefU64, WholeAttMap>) -> anyhow::Result<()> {
-    let mut uda_map: HashMap<u32, HashMap<String, String>> = HashMap::new();
+fn set_uda_attr(type_ele_map: &DashMap<u32, HashSet<RefU64>>, total_attr_map: &DashMap<RefU64, WholeAttMap>, uda_map: &mut HashMap<String, AttrMap>) -> anyhow::Result<()> {
+    // let mut uda_map: HashMap<String, HashMap<String, String>> = HashMap::new();
     if let Some(uda_refnos) = type_ele_map.get(&db1_hash("UDA")) {
         // 获取每个 uda 的 ELEL , DFLT , UDNA属性
         for uda_refno in uda_refnos.value() {
@@ -652,27 +655,18 @@ fn set_uda_attr(type_ele_map: &DashMap<u32, HashSet<RefU64>>, total_attr_map: &m
             let uda_implicit_att = &uda_att.implicit_attmap;
             let uda_explicit_att = &uda_att.explicit_attmap;
 
-            let udna = uda_implicit_att.get_str("UDNA");
+            let mut udna = uda_implicit_att.get_str("UDNA");
+            if udna == Some("unset") {
+                udna = uda_explicit_att.get_str("DYUDNA");
+            }
             let elel = uda_explicit_att.get_i32_vec("ELEL");
-            let dflt = uda_explicit_att.get_str("UDNA");
+            let dflt = uda_explicit_att.get_val("DFLT");
             if udna.is_none() || elel.is_none() || dflt.is_none() { continue; }
             let udna = udna.unwrap();
             let elel = elel.unwrap();
             let dflt = dflt.unwrap();
             for noun in elel {
-                uda_map.entry(noun as u32).or_insert_with(HashMap::new).entry(udna.to_string()).or_insert(dflt.to_string());
-            }
-        }
-        // 给对应的 type 赋上 uda 的默认值
-        for (noun, value_map) in uda_map {
-            if let Some(refnos) = type_ele_map.get(&noun) {
-                for refno in refnos.value() {
-                    if let Some(mut att) = total_attr_map.get_mut(refno) {
-                        for (udna, dflt) in value_map.clone() {
-                            att.uda_attmap.insert(NounHash(db1_hash(&udna)), AttrVal::StringType(SmolStr::new(dflt)))
-                        }
-                    }
-                }
+                uda_map.entry(db1_dehash(noun as u32)).or_insert_with(AttrMap::default).entry(NounHash(db1_hash(udna))).or_insert(dflt.clone());
             }
         }
     }
@@ -730,10 +724,21 @@ async fn save_paras_into_arangodb(db_option: &DbOption, total_attr_map: &DashMap
     Ok(())
 }
 
-#[test]
-fn test_db_hash() {
-    let hash = db1_hash("UTYP");
-    let hash = convert_to_hash(&0xFFF32DCC_u32.to_be_bytes());
-    let de_hash = db1_dehash(hash);
-    dbg!(&de_hash);
+#[tokio::test]
+async fn test_threads() {
+    let mut map = Arc::new(DashSet::new());
+    let mut handles = vec![];
+    for i in 0..10 {
+        let map_clone = map.clone();
+        let handle = tokio::spawn(async move {
+            map_clone.insert(i);
+        });
+        handles.push(handle);
+    }
+    futures::future::join_all(take(&mut handles)).await;
+    dbg!(&map.len());
+    for v in Arc::try_unwrap(map).unwrap() {
+        dbg!(v);
+    }
 }
+

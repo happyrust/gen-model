@@ -1,15 +1,19 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::mem::take;
+use aios_core::helper::parse_to_u32;
 use chrono::{Datelike, DateTime, Local, Timelike};
 use itertools::Itertools;
-use crate::cata::resolve::parse_to_u32;
-use crate::data_to_file::{get_last_page_no, get_page_no};
+use memchr::memmem::find_iter;
+use crate::data_to_file::get_last_page_no;
+use crate::data_to_file::modify::modify::GlobalPage;
 use serde::{Serialize, Deserialize};
-use crate::data_to_file::PageType::{ClaimPage, IndexPage};
+
+const NAME_PAGE_BYTES: [u8; 4] = [0, 0x9, 0xC1, 0x8E];
+const TYPE_PAGE_BYTES: [u8; 4] = [0, 0xCC, 0x6B, 0x3F];
 
 /// 生成 session_page 需要的数据
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct SessionPageModify {
     /// 修改之前最后的page_number
     pub last_page_num: u32,
@@ -17,6 +21,8 @@ pub struct SessionPageModify {
     pub new_latest_page_num: u32,
     /// 新生成的index表的 page_num
     pub index_page_num: u32,
+    /// 新生成的 global_page 的 page_num
+    pub global_page_num: GlobalPage,
     /// 新生成的claim表的 page_num
     pub claim_page_num: u32,
     /// 用户名
@@ -62,7 +68,21 @@ impl SessionPageModify {
         new_session_page.append(&mut data);
         // 提交描述
         let mut comment = convert_commit_comment_bytes(self.commit_comment);
+        let comment_len = comment.len();
         new_session_page.append(&mut comment);
+        new_session_page.append(&mut vec![0; 0x270 - comment_len + 12]); // 提交描述开头到 global_page 的 page_num 开头有0x270个0 ,+12是 global_page_num 开头有 3 * 4个 byte 0
+        // global_page_num
+        let global_page_num_len = parse_to_u32(&last_session_page[0x31C..0x320]) as usize * 12;
+        let mut global_page_data = last_session_page[0x31C..0x31C + global_page_num_len].to_vec();
+        match self.global_page_num {
+            GlobalPage::NamePage(name_page_num) => {
+                if let Some(position) = find_iter(&global_page_data, &NAME_PAGE_BYTES).next() {
+                    global_page_data.splice(position + 4..position + 8, name_page_num.to_be_bytes());
+                }
+            }
+            _ => {}
+        }
+        new_session_page.append(&mut global_page_data);
         // 其余数据都使用上一个session_page的旧数据
         last_session_page.splice(..new_session_page.len(), new_session_page);
         last_session_page.splice(last_session_page.len() - 16..last_session_page.len() - 12, session_no.to_be_bytes().to_vec());
@@ -108,7 +128,8 @@ fn convert_user_name_bytes(name: String) -> Vec<u8> {
 }
 
 fn convert_commit_comment_bytes(comment: String) -> Vec<u8> {
-    let data = comment.into_bytes();
+    let mut data = comment.into_bytes();
+    if data.len() > 0x270 { data = data[..0x270].to_vec() } // 0x270应该是 commit_comment 的最大长度
     let len = if data.len() % 4 == 0 { data.len() / 4 } else { data.len() / 4 + 1 } as u32;
     [len.to_be_bytes()[..4].to_vec(), data].concat()
 }
@@ -122,6 +143,7 @@ fn test_convert_session_page() {
         last_page_num: 0xF23,
         new_latest_page_num: 5,
         index_page_num: 0xF16,
+        global_page_num: GlobalPage::NamePage(0x1205),
         claim_page_num: 0xF24,
         user_name: "JBpeople".to_string(),
         commit_comment: "Default session comment".to_string(),

@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use aios_core::pdms_types::RefU64;
 use memchr::memmem::rfind_iter;
 use crate::cata::resolve::parse_to_u64;
-use crate::data_to_file::{get_latest_page, get_page_no, get_refno_position_in_page};
+use crate::data_to_file::{get_latest_page, get_refno_position_in_page};
 
 const INDEX_PAGE_ONE: [u8; 12] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0, 0, 0, 0];
 const INDEX_PAGE_TWO: [u8; 12] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0, 0, 0, 1];
