@@ -281,6 +281,9 @@ pub fn convert_new_node_data_implicit(attr_map: BTreeMap<u32, (NounHash, AttrVal
                 let value = r.into_iter().flatten().collect();
                 values.push(value);
             }
+            AttrVal::ElementType(value) => {
+
+            }
             _ => {}
         }
     }

@@ -426,7 +426,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 parse_file(&path, &None, &file_name, project_clone.as_str(), "")
             }).await {
                 set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
-                continue;
                 //类型暂时不多线程
                 let total_attr_map_arc = Arc::new(total_attr_map);
                 let children_map_arc = Arc::new(children_map);
@@ -435,16 +434,16 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 {
                     if db_type == "CATA" || db_type == "DESI" {
                         // 将 pdms_element 部分数据保存到图数据库中
-                        // save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
+                        save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
                         // 将兄弟关系保存到图数据库中
-                        // save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
-                        // save_foreign_refno_edges_in_sync(&db_option,foreign_refnos_map).await?;
+                        save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
+                        save_foreign_refno_edges_in_sync(&db_option, foreign_refnos_map).await?;
                         // 单独保存plin
-                        // save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                        save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
                         // 将 para 和 des_para保存的图数据库中
-                        // save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
+                        save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
                         // 将 dtse下的data部分数据保存到图数据库
-                        // save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                        save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
                     }
                 }
                 for (type_hash, type_refnos) in type_ele_map {
@@ -598,26 +597,26 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
 
                 let mut project_conn = pool.acquire().await.unwrap();
                 // 将带有 room_code 属性的保存下来
-                // if !db_option.only_rebuild_pdms_element {
-                //     for (room_name, refnos) in room_code_map.clone() {
-                //         let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
-                //         for refno in refnos.clone() {
-                //             room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
-                //         }
-                //         room_code_sql.remove(room_code_sql.len() - 1);
-                //         if is_replace {
-                //             room_code_sql = room_code_sql.replace("INSERT IGNORE", "REPLACE");
-                //         }
-                //         let result = project_conn.execute(room_code_sql.as_str()).await;
-                //         match result {
-                //             Ok(_) => {}
-                //             Err(e) => {
-                //                 dbg!(&e);
-                //                 dbg!(room_code_sql.as_str());
-                //             }
-                //         }
-                //     }
-                // }
+                if !db_option.only_rebuild_pdms_element {
+                    for (room_name, refnos) in room_code_map.clone() {
+                        let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                        for refno in refnos.clone() {
+                            room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
+                        }
+                        room_code_sql.remove(room_code_sql.len() - 1);
+                        if is_replace {
+                            room_code_sql = room_code_sql.replace("INSERT IGNORE", "REPLACE");
+                        }
+                        let result = project_conn.execute(room_code_sql.as_str()).await;
+                        match result {
+                            Ok(_) => {}
+                            Err(e) => {
+                                dbg!(&e);
+                                dbg!(room_code_sql.as_str());
+                            }
+                        }
+                    }
+                }
             }
         }
     }
