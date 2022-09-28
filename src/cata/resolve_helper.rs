@@ -240,7 +240,7 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
         if let Ok(mut stack) = Stack::init(&result_string) {
             return stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", &input_expr)));
         } else {
-            dbg!(&context);
+            // dbg!(&context);
             dbg!(&input_expr);
             dbg!(&result_string);
             return Err(anyhow!(format!("求解失败 {}", &input_expr)));
@@ -345,7 +345,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     axis: Some(gmse.paxises[0].clone()),
                     height: gmse.phei,
                     diameter: gmse.diameters[0],
-                    distance: gmse.distances[0],
+                    dist_to_btm: gmse.distances[0],
                     x_shear: gmse.shears[0],
                     y_shear: gmse.shears[1],
                     alt_x_shear: gmse.shears[2],
@@ -465,6 +465,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     pb: Some(gmse.paxises[1].clone()),
                     angle: gmse.pang,
                     verts: gmse.verts.clone(),
+                    frads: gmse.frads.clone(),
                     x: gmse.xyz[0],
                     y: gmse.xyz[1],
                     z: gmse.xyz[2],

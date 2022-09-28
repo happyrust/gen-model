@@ -63,9 +63,9 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         dbg!("缓存命中");
     }
     let scom_info = CACHED_SCOM_INFO_MAP.get(&scom_ref).unwrap();
-    if is_debug {
-        dbg!(&scom_info);
-    }
+    // if is_debug {
+    //     dbg!(&scom_info);
+    // }
     let mut context: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
     if let Some(v) =  desi_att.get_as_string("JUSL"){
         context.insert("JUSL".into(), v.into());

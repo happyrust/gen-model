@@ -30,9 +30,10 @@ pub struct DbOption {
 
     #[clap(skip)]
     pub debug_branch_refno: Option<String>,
-
     #[clap(skip)]
     pub debug_desi_refno: Option<String>,
+    #[clap(skip)]
+    pub debug_refno_type: Option<String>,
 
     #[clap(long)]
     pub only_rebuild_pdms_element: bool,
