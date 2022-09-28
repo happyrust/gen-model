@@ -960,7 +960,7 @@ impl AiosDBManager {
                             } = shape;
                             if !visible || !brep_shape.check_valid() { continue; }
                             let trans = brep_shape.get_trans();
-                            let geo_hash = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_shape.clone(), replace_mesh);
+                            let geo_hash = cached_mesh_mgr.gen_pdms_mesh(brep_shape.clone(), replace_mesh);
                             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
                             if bbox.is_none() {
                                 dbg!(geo_hash);
