@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::consts::*;
 use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64};
@@ -15,6 +17,7 @@ use sqlx::mysql::MySqlRow;
 use crate::api::element::{query_ele_node, query_owner_from_id, query_pdms_elements_type_name, query_refno_type, query_types_refnos};
 use crate::ATTR_INFO_MAP;
 use crate::consts::*;
+use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::helper::qualified_table_name;
 
@@ -88,7 +91,7 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &Vec<
                             r.entry(hash).or_insert(AttrVal::IntArrayType(v))
                         })?;
                     }
-                    DbAttributeType::Vec3Type | DbAttributeType::ORIENTATION | DbAttributeType::POSITION | DbAttributeType::DIRECTION  => {
+                    DbAttributeType::Vec3Type | DbAttributeType::ORIENTATION | DbAttributeType::POSITION | DbAttributeType::DIRECTION => {
                         row.try_get::<String, _>(t).map(|v| {
                             let v = serde_json::from_str::<[f64; 3]>(&v).unwrap_or_default();
                             r.entry(hash).or_insert(AttrVal::Vec3Type(v))
@@ -156,9 +159,9 @@ pub async fn query_foreign_refnos_from_table(noun: &str, table_name: &str, pool:
     match results {
         Ok(results) => {
             for result in results {
-                let refno = RefU64(result.get::<i64,_>("ID") as u64);
+                let refno = RefU64(result.get::<i64, _>("ID") as u64);
                 let foreign = RefU64(result.get::<i64, _>(noun) as u64);
-                r.push((refno,foreign));
+                r.push((refno, foreign));
             }
         }
         Err(err) => {
@@ -176,27 +179,50 @@ pub async fn query_explicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
     Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
 }
 
-pub async fn query_full_attr(refno: RefU64, ref_basic: &CachedRefBasic, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
-    let mut attr = query_implicit_attr(refno, ref_basic, pool, column_names).await?;
-    let explicit_attr = query_explicit_attr(refno, pool).await?;
-    // if refno == RefU64::from_two_nums(23584, 6615) {
-    //     dbg!(attr.to_string_hashmap());
-    //     dbg!(explicit_attr.to_string_hashmap());
-    // }
-    let ele = query_ele_node(refno, pool).await?;
-    for (k, v) in explicit_attr.map {
-        attr.entry(k).or_insert(v);
-    }
-    // 赋默认值
-    if let Some(map) = ATTR_INFO_MAP.map.get(&(db1_hash(&ele.noun) as i32)) {
-        for values in map.value() {
-            attr.entry(NounHash(*values.key() as u32)).or_insert(values.default_val.clone());
+pub async fn query_uda_attr(att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
+    let sql = gen_query_uda_attr_sql(att_type);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    if result.is_err() { return Ok(AttrMap::default()); }
+    let result = result.unwrap();
+    let val = result.get::<Vec<u8>, _>("DATA");
+    Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
+}
+
+pub async fn query_full_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
+    if let Some(project) = aios_mgr.ref0_map.get(&refno.get_0()) {
+        let pool = aios_mgr.project_map.get(project.value());
+        if pool.is_none() { return Ok(AttrMap::default()); }
+        let pool = pool.unwrap();
+        let ref_basic = aios_mgr.get_refno_basic(refno);
+        if ref_basic.is_none() { return Ok(AttrMap::default()); }
+        let ref_basic = ref_basic.unwrap();
+
+        let mut attr = query_implicit_attr(refno, ref_basic.value(), pool.value(), column_names).await?;
+        let att_type = attr.get_type().to_string();
+        let explicit_attr = query_explicit_attr(refno, pool.value()).await?;
+        let ele = query_ele_node(refno, pool.value()).await?;
+        for (k, v) in explicit_attr.map {
+            attr.entry(k).or_insert(v);
         }
+        for pool in &aios_mgr.project_map {
+            // uda 赋值需要加上元件库
+            let uda_attr = query_uda_attr(&att_type, pool.value()).await?;
+            for (k, v) in uda_attr.map {
+                attr.entry(k).or_insert(v);
+            }
+        }
+        // 赋默认值
+        if let Some(map) = ATTR_INFO_MAP.map.get(&(db1_hash(&ele.noun) as i32)) {
+            for values in map.value() {
+                attr.entry(NounHash(*values.key() as u32)).or_insert(values.default_val.clone());
+            }
+        }
+        attr.insert(REFNO_HASH, AttrVal::RefU64Type(ele.refno));
+        attr.insert(NAME_HASH, AttrVal::StringType(ele.name.into()));
+        attr.insert(OWNER_HASH, AttrVal::RefU64Type(ele.owner));
+        return Ok(attr);
     }
-    attr.insert(REFNO_HASH, AttrVal::RefU64Type(ele.refno));
-    attr.insert(NAME_HASH, AttrVal::StringType(ele.name.into()));
-    attr.insert(OWNER_HASH, AttrVal::RefU64Type(ele.owner));
-    Ok(attr)
+    Ok(AttrMap::default())
 }
 
 
@@ -293,7 +319,13 @@ pub fn gen_query_implicit_attr_sql_by_owner(owner: RefU64, type_name: &str, colu
 
 pub fn gen_query_explicit_attr_sql(refno: RefU64) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT * FROM {PDMS_EXPLICIT_TABLE} WHERE ID = {} ;", refno.0));
+    sql.push_str(&format!("SELECT DATA FROM {PDMS_EXPLICIT_TABLE} WHERE ID = {} ;", refno.0));
+    sql
+}
+
+pub fn gen_query_uda_attr_sql(att_type: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT DATA FROM {PDMS_UDA_TABLE} WHERE TYPE = '{}' ;", att_type));
     sql
 }
 

@@ -21,7 +21,7 @@ use nom_derive::Parse;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use regex::internal::Input;
 use aios_database::{BATCH_CHUNKS_CNT};
-use sqlx::{MySql, MySqlPool, Pool};
+use sqlx::{MySql, MySqlPool, Pool, Row};
 use sqlx::pool::PoolConnection;
 use aios_database::database::*;
 use aios_database::helper::{qualified_column_name, qualified_table_name};
@@ -43,6 +43,7 @@ use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::gen_create_attr_info_tables_sql;
 use arangors_lite::collection::CollectionType::{Document, Edge};
 use chrono::{Datelike, Timelike};
+use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
 
 
 #[macro_use]
@@ -81,7 +82,6 @@ async fn test_get_att() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    dbg!(db1_hash("SCTN"));
     use config::{Config, ConfigError, Environment, File};
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
@@ -104,9 +104,8 @@ async fn main() -> anyhow::Result<()> {
     //同步到图数据库
     if db_option.rebuild_arangodb {
         dbg!("正在同步图数据库");
-        sync_pdms_to_graph_db(mgr.clone(), db_option.clone()).await?;
+        // sync_pdms_to_graph_db(mgr.clone(),db_option.clone()).await?;
         // sync_pdms_level_edges_to_graph_db(mgr.clone()).await?;
-        // sync_foreign_refno_to_graph_db(mgr.clone()).await?;
         dbg!("图数据库同步完成");
     }
 
@@ -189,10 +188,9 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "PIPCA";
-    let noun = "PTCA";
+    let noun = "ELBO";
     let hash = db1_hash(noun);
-    let str = db1_dehash(13387743);
+    let str = db1_dehash(0xDC34AB5);
     dbg!(hash);
     dbg!(str);
 }

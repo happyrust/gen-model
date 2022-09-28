@@ -142,7 +142,7 @@ impl PdmsDataInterface for AiosDBManager {
         }
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
-                let attr = query_full_attr(refno, ref_basic.value(), &project_pool, None).await?;
+                let attr = query_full_attr(refno, self, None).await?;
                 PDMS_ATT_MAP_CACHE.insert(refno, attr.clone()).expect("PDMS_ATT_MAP_CACHE save error.");
                 return Ok(attr);
             }
@@ -525,7 +525,7 @@ impl AiosDBManager {
 
     #[inline]
     pub async fn get_arangodb_conn(&self) -> anyhow::Result<Database> {
-        let conn = Connection::establish_jwt(&self.db_option.arangodb_url, "root", "test")
+        let conn = Connection::establish_jwt(&self.db_option.arangodb_url, &self.db_option.arangodb_user, &self.db_option.arangodb_password)
             .await?;
 
         Ok(conn.db("pdms").await?)
@@ -960,10 +960,7 @@ impl AiosDBManager {
                             } = shape;
                             if !visible || !brep_shape.check_valid() { continue; }
                             let trans = brep_shape.get_trans();
-                            let geo_hash = cached_mesh_mgr.gen_pdms_mesh(brep_shape.clone(), replace_mesh);
-                            // if is_debug {
-                            //     dbg!(geo_hash);
-                            // }
+                            let geo_hash = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_shape.clone(), replace_mesh);
                             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
                             if bbox.is_none() {
                                 dbg!(geo_hash);
@@ -1390,7 +1387,7 @@ impl AiosDBManager {
             // });
             // handles.push(handle);
             let instance_mgr_clone = instance_mgr.clone();
-            // let db_option_clone = db_option.clone();
+            let db_option_clone = db_option.clone();
             // if db_option_clone.debug_branch_refno.as_ref().is_none() && db_option_clone.debug_desi_refno.as_ref().is_none() {
                 let project = project.clone();
                 let mgr_clone = mgr.clone();

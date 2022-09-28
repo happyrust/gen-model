@@ -7,6 +7,7 @@ use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForeignEdges {
+    pub _key: String,
     pub _from: String,
     pub _to: String,
     // 外键的种类, catr,gmre等

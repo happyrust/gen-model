@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use aios_core::pdms_types::{PdmsElement, RefU64};
+use aios_core::pdms_types::{PdmsElement, RefU64, RefU64Vec};
 use aios_core::tool::db_tool::db1_hash;
 use anyhow::anyhow;
 use arangors_lite::collection::CollectionType;
@@ -17,12 +17,12 @@ use futures::future::ok;
 use parse_pdms_db::parse::WholeAttMap;
 use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
 use crate::api::children::query_contain_noun_refnos;
-use crate::api::element::{query_children, query_children_eles, query_mdb_dbnos, query_types_refnos, query_world, query_world_children_eles};
+use crate::api::element::{get_name, query_children, query_children_eles, query_mdb_dbnos, query_types_refnos, query_world, query_world_children_eles};
 use crate::api::project_mdb::query_mdb_contain_numbdb;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{DataDocument, ForeignEdges};
-use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode};
+use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphEdgeWithKey, PdmsEleGraphNode};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
@@ -49,6 +49,43 @@ pub async fn create_arangodb_conn(database: &Database, collection_name: &str, co
             }
         }
     }
+    Ok(())
+}
+
+/// 在同步的时候就将 pdms_element 保存到图数据库
+pub async fn save_pdms_element_in_sync(db_option: &DbOption, total_attr_map: &DashMap<RefU64, WholeAttMap>
+                                       , children_map: &HashMap<RefU64, RefU64Vec>, dbnum: i32) -> anyhow::Result<()> {
+    let mut result = Vec::new();
+    let mut edges = Vec::new();
+    for (refno, whole_attr) in total_attr_map.clone() {
+        let owner = whole_attr.implicit_attmap.get_owner();
+        if owner.is_none() { continue; }
+        let owner = owner.unwrap();
+        let owner_str = owner.to_url_refno();
+        let name = get_name(total_attr_map, &children_map, refno);
+        let noun = whole_attr.implicit_attmap.get_type();
+        let pdms_element = PdmsEleGraphNode {
+            _key: refno.to_url_refno(),
+            owner: owner_str.clone(),
+            name,
+            noun: noun.to_string(),
+            version: 0,
+            dbnum,
+        };
+        let key = refno.hash_with_another_refno(owner);
+        let pdms_edges = PdmsEleGraphEdgeWithKey {
+            _key: key.to_string(),
+            _from: format!("{}/{}", "pdms_eles", refno.to_url_refno()),
+            _to: format!("{}/{}", "pdms_eles", owner_str),
+        };
+        result.push(pdms_element);
+        edges.push(pdms_edges);
+    }
+    let json = serde_json::to_value(&take(&mut result))?;
+    save_arangodb_with_db_option(json, db_option, "pdms_eles").await?;
+    dbg!(&edges.len());
+    let json = serde_json::to_value(&take(&mut edges))?;
+    save_arangodb_with_db_option(json, db_option, "pdms_edges").await?;
     Ok(())
 }
 
@@ -94,7 +131,9 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
                                 version: 0,
                                 dbnum,
                             };
-                            let edge = PdmsEleGraphEdge {
+                            let key = RefU64(refno).hash_with_another_refno(RefU64(owner));
+                            let edge = PdmsEleGraphEdgeWithKey {
+                                _key: key.to_string(),
                                 _from: format!("{}/{refno_str}", &collection),
                                 _to: format!("{}/{owner_str}", &collection),
                             };
@@ -104,12 +143,12 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
                         let database_clone = mgr.get_arangodb_conn().await?;
                         // let handle = tokio::spawn(async move {
                         let json = serde_json::to_value(&take(&mut eles))?;
-                        let aql = AqlQuery::new("LET data = @elements
-                    FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true } ")
-                            .bind_var("@collection", collection)
-                            .bind_var("elements", json);
-                        let _result: Vec<()> = database_clone.aql_query(aql).await?;
+                        //     let aql = AqlQuery::new("LET data = @elements
+                        // FOR d IN data
+                        //     INSERT d INTO @@collection OPTIONS { ignoreErrors: true } ")
+                        //         .bind_var("@collection", collection)
+                        //         .bind_var("elements", json);
+                        //     let _result: Vec<()> = database_clone.aql_query(aql).await?;
 
                         let json = serde_json::to_value(&take(&mut edges))?;
                         let aql = AqlQuery::new("LET data = @edges
@@ -132,6 +171,54 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
         }
     }
     println!("sync graph db costs: {}ms", time.elapsed().as_millis());
+    Ok(())
+}
+
+pub async fn save_pdms_level_edges_in_sync(db_option: &DbOption, children_map: &HashMap<RefU64, RefU64Vec>) -> anyhow::Result<()> {
+    let mut result = vec![];
+    for (_refno, children_map) in children_map {
+        if children_map.len() == 0 { continue; }
+        for i in 1..children_map.len() {
+            let from_refno = children_map[i];
+            let to_refno = children_map[i - 1];
+            let edge = PdmsEleGraphEdgeWithKey {
+                _key: from_refno.hash_with_another_refno(to_refno).to_string(),
+                _from: format!("{}/{}", "pdms_eles", from_refno.to_url_refno()),
+                _to: format!("{}/{}", "pdms_eles", to_refno.to_url_refno()),
+            };
+            result.push(edge);
+        }
+    }
+    if !result.is_empty() {
+        let json = serde_json::to_value(&take(&mut result))?;
+        save_arangodb_with_db_option(json, db_option, "sibl_edges").await?;
+    }
+    Ok(())
+}
+
+/// 将外部引用的参考号保存到图数据库中
+pub async fn save_foreign_refno_edges_in_sync(db_option: &DbOption, foreign_refnos_map: DashMap<RefU64, DashMap<String, RefU64>>) -> anyhow::Result<()> {
+    let mut foreign_edges = vec![];
+    let mut foreign_edges_refnos = DashSet::new(); // 防止edges重复
+    for foreign_refnos in foreign_refnos_map.into_iter() {
+        let refno = foreign_refnos.0;
+        if foreign_edges_refnos.contains(&refno) { continue; }
+        foreign_edges_refnos.insert(refno);
+        for (foreign_type, foreign_refno) in foreign_refnos.1 {
+            if foreign_refno == RefU64(0) { continue; }
+            let key = refno.hash_with_another_refno(foreign_refno);
+            foreign_edges.push(ForeignEdges {
+                _key: key.to_string(),
+                _from: format!("{}/{}", "pdms_eles", refno.to_url_refno()),
+                _to: format!("{}/{}", "pdms_eles", foreign_refno.to_url_refno()),
+                foreign_type,
+            })
+        }
+    }
+    if foreign_edges.len() > 0 {
+        let json = serde_json::to_value(&take(&mut foreign_edges))?;
+        save_arangodb_with_db_option(json, &db_option, "foreign_edges").await?;
+    }
     Ok(())
 }
 
@@ -173,10 +260,10 @@ pub async fn sync_pdms_level_edges_to_graph_db(mgr: Arc<AiosDBManager>) -> anyho
                 if sibl_edges.len() > 1000 {
                     let database = mgr.get_arangodb_conn().await?;
                     let json = serde_json::to_value(&take(&mut sibl_edges))?;
-                    save_arangodb_with_database(json,  sibl_collection,&database).await?;
+                    save_arangodb_with_database(json, sibl_collection, &database).await?;
                     if tubi_edges.len() != 0 {
                         let tubi_json = serde_json::to_value(&take(&mut tubi_edges))?;
-                        save_arangodb_with_database(tubi_json, tubi_collection,&database).await?;
+                        save_arangodb_with_database(tubi_json, tubi_collection, &database).await?;
                     }
                 }
             }
@@ -240,6 +327,7 @@ pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::
                 // spre 到 catr 的边
                 spre_edges.push(
                     ForeignEdges {
+                        _key: spre.hash_with_another_refno(catr).to_string(),
                         _from: format!("{}/{}", collection, spre.to_url_refno()),
                         _to: format!("{}/{}", collection, catr.to_url_refno()),
                         foreign_type: "CATR".to_string(),
@@ -256,6 +344,7 @@ pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::
                                 let ptre_refno = ptre.refno_value().unwrap_or(RefU64(0));
                                 if *ptre_refno == 0 { continue; }
                                 spre_edges.push(ForeignEdges {
+                                    _key: catr.hash_with_another_refno(ptre_refno).to_string(),
                                     _from: format!("{}/{}", collection, catr.to_url_refno()),
                                     _to: format!("{}/{}", collection, ptre_refno.to_url_refno()),
                                     foreign_type: catr_foreign_type.to_string(),
