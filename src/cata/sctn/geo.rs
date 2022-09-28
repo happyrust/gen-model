@@ -64,6 +64,15 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
     dbg!(att.to_string_hashmap());
     let drns = att.get_vec3("DRNS").unwrap_or_default();
     let drne = att.get_vec3("DRNE").unwrap_or_default();
+    //需要转换成局部坐标系的drns 和 drne
+    let t = interface.get_world_transform(refno).await.unwrap().unwrap();
+    let rot = t.rotation.inverse();
+    let drns = rot * drns;
+    let drne = rot * drne;
+    // dbg!(&drns);
+    // dbg!(drns.angle_between(Vec3::Z).to_degrees());
+    // dbg!(&drne);
+    // dbg!(drne.angle_between(-Vec3::Z).to_degrees());
     for arc_path in arc_paths {
         for (i, geom) in geoms.iter().enumerate() {
             if let CateGeoParam::Profile(profile) = geom {

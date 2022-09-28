@@ -899,6 +899,7 @@ impl AiosDBManager {
         let mut handles = vec![];
         let all_refnos = Arc::new(has_cata_refnos);
         let processed_cnt = Arc::new(Mutex::new(has_cata_cnt));
+        let replace_mesh = db_option.replace_mesh;
         for i in 0..batch_chunks_cnt as usize {
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
@@ -959,7 +960,7 @@ impl AiosDBManager {
                             } = shape;
                             if !visible || !brep_shape.check_valid() { continue; }
                             let trans = brep_shape.get_trans();
-                            let geo_hash = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_shape.clone());
+                            let geo_hash = cached_mesh_mgr.gen_pdms_mesh(brep_shape.clone(), replace_mesh);
                             // if is_debug {
                             //     dbg!(geo_hash);
                             // }
@@ -1022,6 +1023,7 @@ impl AiosDBManager {
         let mut handles = vec![];
         let all_refnos = Arc::new(prim_refnos);
         let processed_cnt = Arc::new(Mutex::new(prim_cnt));
+        let replace_mesh = db_option.replace_mesh;
         for i in 0..batch_chunks_cnt as usize {
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
@@ -1062,7 +1064,7 @@ impl AiosDBManager {
                     if let Some(brep_obj) = attr.create_brep_shape() {
                         if brep_obj.check_valid() {
                             item_trans = brep_obj.get_trans();
-                            let r = cached_mesh_mgr.get_pdms_mesh_hash_key(brep_obj);
+                            let r = cached_mesh_mgr.gen_pdms_mesh(brep_obj, replace_mesh);
                             geo_hash = Some(r);
                         }
                     }
@@ -1198,6 +1200,7 @@ impl AiosDBManager {
         let mut handles = vec![];
         let all_refnos = Arc::new(loop_refnos);
         let processed_cnt = Arc::new(Mutex::new(loop_cnt));
+        let replace_mesh = db_option.replace_mesh;
         for i in 0..batch_chunks_cnt as usize {
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
@@ -1274,7 +1277,7 @@ impl AiosDBManager {
                                     });
                                     if revo.check_valid() {
                                         item_trans = revo.get_trans();
-                                        geo_hash = Some(cached_mesh_mgr.get_pdms_mesh_hash_key(revo));
+                                        geo_hash = Some(cached_mesh_mgr.gen_pdms_mesh(revo, replace_mesh));
                                     }
                                 }
                             }
@@ -1302,7 +1305,7 @@ impl AiosDBManager {
                                             item_trans.translation = item_trans.translation + Vec3::new(0.0, 0.0, -height);
                                         }
                                     }
-                                    let r = cached_mesh_mgr.get_pdms_mesh_hash_key(extrusion);
+                                    let r = cached_mesh_mgr.gen_pdms_mesh(extrusion, replace_mesh);
                                     geo_hash = Some(r);
                                 }
                             }

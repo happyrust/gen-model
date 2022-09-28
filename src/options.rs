@@ -34,7 +34,8 @@ pub struct DbOption {
     pub debug_desi_refno: Option<String>,
     #[clap(skip)]
     pub debug_refno_type: Option<String>,
-
+    #[clap(long)]
+    pub replace_mesh: bool,
     #[clap(long)]
     pub only_rebuild_pdms_element: bool,
     #[clap(long)]

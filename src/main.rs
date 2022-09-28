@@ -1,3 +1,7 @@
+#![feature(drain_filter)]
+#![feature(let_chains)]
+#![feature(default_free_fn)]
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::format;
 use std::fs;
