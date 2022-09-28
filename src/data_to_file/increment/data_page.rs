@@ -281,9 +281,18 @@ pub fn convert_new_node_data_implicit(attr_map: BTreeMap<u32, (NounHash, AttrVal
                 let value = r.into_iter().flatten().collect();
                 values.push(value);
             }
+            // ElementType除了是refno，忘了还可能是什么情况，暂时只考虑了refno的情况
             AttrVal::ElementType(value) => {
-
+                if let Ok(refno) = RefU64::from_refno_string(value.to_string()) {
+                    values.push(refno.0.to_be_bytes().to_vec());
+                } else {
+                    values.push(vec![0; 8]);
+                }
             }
+            AttrVal::RefU64Type(value) => {
+                values.push(value.0.to_be_bytes().to_vec());
+            }
+
             _ => {}
         }
     }

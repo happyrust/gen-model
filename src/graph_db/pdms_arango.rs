@@ -81,8 +81,8 @@ pub async fn save_pdms_element_in_sync(db_option: &DbOption, total_attr_map: &Da
         result.push(pdms_element);
         edges.push(pdms_edges);
     }
-    // let json = serde_json::to_value(&take(&mut result))?;
-    // save_arangodb_with_db_option(json, db_option, "pdms_eles").await?;
+    let json = serde_json::to_value(&take(&mut result))?;
+    save_arangodb_with_db_option(json, db_option, "pdms_eles").await?;
     dbg!(&edges.len());
     let json = serde_json::to_value(&take(&mut edges))?;
     save_arangodb_with_db_option(json, db_option, "pdms_edges").await?;
