@@ -243,7 +243,7 @@ pub fn convert_new_node_data_implicit(attr_map: BTreeMap<u32, (NounHash, AttrVal
                 if noun.0 == db1_hash("CLFL") {
                     values.push(vec![0, 0, 0, 0xC]);
                 } else {
-                    if v {
+                    if *v {
                         values.push(vec![0, 0, 0, 1]);
                     } else {
                         values.push(vec![0, 0, 0, 0]);
