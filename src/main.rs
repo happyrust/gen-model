@@ -184,7 +184,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "UDA";
+    let noun = "ELBO";
     let hash = db1_hash(noun);
     let str = db1_dehash(0xDC34AB5);
     dbg!(hash);
