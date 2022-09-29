@@ -22,11 +22,13 @@ pub struct ProfileGeosPoints {
 pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, geom_info: &GeomsInfo,
                                                        brep_shapes_map: &CateBrepShapeMap, interface: &T) -> anyhow::Result<bool> {
     let geoms = &geom_info.geometries;
-    dbg!(geoms.len());
+    // dbg!(geoms.len());
     if geoms.len() == 0 { return Ok(false); }
     let type_name = att.get_type();
     let mut plane_normal = Vec3::Z;
     let mut extrude_dir = Vec3::Z;
+    let mut drns = att.get_vec3("DRNS").unwrap_or_default();
+    let mut drne = att.get_vec3("DRNE").unwrap_or_default();
     let mut arc_paths = if type_name == "GENSEC" || type_name == "WALL" {
         let children_refs = interface.get_children_refs(refno).await?;
         let mut arc_paths = vec![];
@@ -36,6 +38,9 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
             if type_name != "SPINE" {
                 continue;
             }
+            let spine_att = interface.get_attr(*x).await?;
+            drns = spine_att.get_vec3("DRNS").unwrap_or_default();
+            drne = spine_att.get_vec3("DRNE").unwrap_or_default();
             let refs = interface.get_children_refs(*x).await?;
             if (refs.len() - 1) % 2 == 0 {
                 for i in 0..(refs.len() - 1) / 2 {
@@ -61,18 +66,14 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
         }
     }
 
-    dbg!(att.to_string_hashmap());
-    let drns = att.get_vec3("DRNS").unwrap_or_default();
-    let drne = att.get_vec3("DRNE").unwrap_or_default();
+    // dbg!(att.to_string_hashmap());
+
+    //检查child是否是spine
     //需要转换成局部坐标系的drns 和 drne
     let t = interface.get_world_transform(refno).await.unwrap().unwrap();
     let rot = t.rotation.inverse();
     let drns = rot * drns;
     let drne = rot * drne;
-    // dbg!(&drns);
-    // dbg!(drns.angle_between(Vec3::Z).to_degrees());
-    // dbg!(&drne);
-    // dbg!(drne.angle_between(-Vec3::Z).to_degrees());
     for arc_path in arc_paths {
         for (i, geom) in geoms.iter().enumerate() {
             if let CateGeoParam::Profile(profile) = geom {

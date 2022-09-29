@@ -1081,7 +1081,8 @@ impl AiosDBManager {
                             is_tubi: false,
                         };
                         geo_insts.push(geom_inst);
-                        inst_map.entry(refno).or_insert(geos_info);
+                        // inst_map.entry(refno).or_insert(geos_info);
+                        inst_map.insert(refno, geos_info);
                     }
                 }
             });
@@ -1332,7 +1333,7 @@ impl AiosDBManager {
                         for p_refno in ancestors {
                             level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(target_refno);
                         }
-                        inst_map.entry(target_refno).or_insert(geos_info);
+                        inst_map.insert(target_refno, geos_info);
                     }
                     *processed_cnt.lock().unwrap() -= 1;
                 }
