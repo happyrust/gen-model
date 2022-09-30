@@ -791,11 +791,24 @@ impl AiosDBManager {
                         // let lstube_cat_att = mgr.get_attr(lstube_att.get_foreign_refno("CATR").unwrap_or_default()).await?;
                         let lstube_cat_refno = lstube_att.get_foreign_refno("CATR").unwrap_or_default();
                         //todo check how to get the bore value
-                        let tubi_geoms = resolve_desi_comp(refno, Some(lstube_cat_refno), mgr.as_ref(), is_debug).await?;
-                        for tubi_geom in tubi_geoms.geometries {
+                        let tubi_geoms_info = resolve_desi_comp(refno, Some(lstube_cat_refno), mgr.as_ref(), is_debug).await?;
+                        let mut has_tube_geom = false;
+                        for tubi_geom in &tubi_geoms_info.geometries {
                             if let TubeImplied (d) = tubi_geom{
-                                current_tubing.bore = d.diameter;
+                                bore = d.diameter;
+                                has_tube_geom = true;
                                 break;
+                            }else{
+
+                            }
+                        }
+
+                        if !has_tube_geom {
+                            if !tubi_geoms_info.axis_map.is_empty() {
+                                for (k, v) in &tubi_geoms_info.axis_map {
+                                    bore = v.pbore;
+                                    break;
+                                }
                             }
                         }
                     }

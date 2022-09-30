@@ -15,7 +15,7 @@ pub async fn query_latest_data(pool:&Pool<MySql>) -> anyhow::Result<Vec<Incremen
         result.push(IncrementData{
             refno,
             attr_data_map: AttrMap::from_bincode_bytes(&data).unwrap(),
-            state: NewDataState::from(operate),
+            state: NewDataOperate::from(operate),
             version,
         });
     }
