@@ -36,12 +36,12 @@ chrono = "0.4.22"
 geo = "0.23"
 
 
-#parse_pdms_db = { path = "../aios-parse-pdms" }
-#aios_core = { path = "../aios_core"}
-#rscsg = {path = "../rscsg"}
+parse_pdms_db = { path = "../aios-parse-pdms" }
+aios_core = { path = "../aios_core"}
+rscsg = {path = "../rscsg"}
 #arangors_lite = { path = "../arangors-lite" }
-parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms" }
-aios_core = { git = "https://gitee.com/happydpc/aios-core" }
+#parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms" }
+#aios_core = { git = "https://gitee.com/happydpc/aios-core" }
 arangors_lite = "0.2.0"
 
 

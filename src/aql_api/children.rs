@@ -169,12 +169,45 @@ pub async fn query_travel_children_with_out_leaf_aql(arango_database: &Database,
     Ok(refnos)
 }
 
+/// 遍历refno只获取指定类型数组的refnos
+pub async fn query_travel_children_with_types_aql(arango_database: &Database, refno: RefU64, att_types: Vec<&str>) -> anyhow::Result<Vec<EleTreeNode>> {
+    let mut r = vec![];
+    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let aql = AqlQuery::new("\
+    FOR z in 0..10 INBOUND @id pdms_edges
+    Filter z.noun in @nouns
+    return {
+        'refno':z._key,
+        'owner':z.owner,
+        'name':z.name,
+        'noun':z.noun,
+        'version':0,
+        'children_count':0,
+    }")
+        .bind_var("id", refno_aql)
+        .bind_var("nouns", att_types);
+    let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
+    for v in result {
+        if let Some(refno) = RefU64::from_url_refno(v.refno) {
+            if RefU64::from_url_refno(v.owner.clone()).is_none() { continue; }
+            r.push(EleTreeNode {
+                refno,
+                owner: RefU64::from_url_refno(v.owner).unwrap(),
+                name: v.name,
+                noun: v.noun,
+                children_count: 0,
+            })
+        }
+    }
+    Ok(r)
+}
+
 /// 遍历refno只获取指定类型的refno
 pub async fn query_travel_children_with_type_aql(arango_database: &Database, refno: RefU64, att_type: &str) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
-    FOR z in 1..10 INBOUND @id pdms_edges
+    FOR z in 0..10 INBOUND @id pdms_edges
     Filter z.noun == @noun
     return {
         'refno':z._key,

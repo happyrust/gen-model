@@ -21,27 +21,30 @@ pub const DDANGLE_STR: &'static str = "DDANGLE";
 ///求解design component
 pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     refno: RefU64,
+    mut scom_ref: Option<RefU64>,
     interface: &T,
     is_debug: bool,
 ) -> anyhow::Result<GeomsInfo> {
     let desi_att = interface.get_attr(refno).await?;
     // dbg!(attr_map.to_string_hashmap());
-    let mut scom_ref = None;
-    if let Some(catref) = desi_att.get_foreign_refno("CATR") {
-        let c_att = interface.get_attr(catref).await?;
-        if c_att.contains_attr_name("CATR") {
-            scom_ref = c_att.get_foreign_refno("CATR");
+    if scom_ref.is_none() {
+        if let Some(catref) = desi_att.get_foreign_refno("CATR") {
+            let c_att = interface.get_attr(catref).await?;
+            if c_att.contains_attr_name("CATR") {
+                scom_ref = c_att.get_foreign_refno("CATR");
+            } else {
+                scom_ref = Some(catref);
+            }
         } else {
-            scom_ref = Some(catref);
+            let spre_ref = desi_att.get_foreign_refno("SPRE").unwrap_or_default();
+            let spre = interface.get_attr(spre_ref).await?;
+            // dbg!(spre.to_string_hashmap());
+            if spre.contains_attr_name("CATR") {
+                scom_ref = spre.get_foreign_refno("CATR");
+            }
         }
-    } else {
-        let spre_ref = desi_att.get_foreign_refno("SPRE").unwrap_or_default();
-        let spre = interface.get_attr(spre_ref).await?;
-        // dbg!(spre.to_string_hashmap());
-        if spre.contains_attr_name("CATR") {
-            scom_ref = spre.get_foreign_refno("CATR");
-        }
-    };
+    }
+
     if is_debug {
         dbg!(&scom_ref);
     }

@@ -1,6 +1,6 @@
 use aios_core::pdms_types::{AttrMap, RefU64};
 use sqlx::{MySql, Pool, Row};
-use aios_core::pdms_data::{IncrementData, NewDataState};
+use aios_core::pdms_data::{IncrementData, NewDataOperate};
 use crate::consts::INCREMENT_DATA;
 
 pub async fn query_latest_data(pool:&Pool<MySql>) -> anyhow::Result<Vec<IncrementData>> {

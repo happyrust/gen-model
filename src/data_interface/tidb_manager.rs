@@ -12,6 +12,7 @@ use aios_core::cache::refno::*;
 use aios_core::consts::*;
 use aios_core::db_number::DbNumMgr;
 use aios_core::parsed_data::{CateAxisParam, GeomsInfo};
+use aios_core::parsed_data::geo_params_data::CateGeoParam::TubeImplied;
 // use simple_process_stats::ProcessStats;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::category::{CateBrepShape, convert_to_brep_shapes};
@@ -19,6 +20,7 @@ use aios_core::prim_geo::extrusion::Extrusion;
 use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
 use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::PdmsTubing;
+use aios_core::prim_geo::wire::CurveType;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
 use aios_core::tool::math_tool;
 use anyhow::anyhow;
@@ -36,12 +38,12 @@ use once_cell::sync::Lazy;
 use smol_str::SmolStr;
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolOptions;
-use aios_core::prim_geo::wire::CurveType;
 
 use crate::api::attr::*;
 use crate::api::children::cache_site_node;
 use crate::api::element::*;
 use crate::api::refno_info::{cache_plin_plax, get_ref0_map, sync_refno_basic_map};
+use crate::aql_api::children::{query_travel_children_aql, query_travel_children_with_type_aql, query_travel_children_with_types_aql};
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::para_value::{query_des_para_value, query_para_from_desi_refno};
 use crate::aql_api::plin_attr::{match_jusline_attr, query_plin_attrs, query_pline_value};
@@ -408,7 +410,6 @@ impl PdmsDataInterface for AiosDBManager {
                     // dbg!(&quat);
                     println!("{} Bangle {} : {:?}", refno.to_refno_string(), bangle, quat);
                 }
-
             }
             //弧墙下方没有fitt
             if let Some(pos_line) = att.get_str("POSL") {
@@ -585,7 +586,7 @@ impl AiosDBManager {
         let projects = db_option.included_projects.clone();
         let database = get_arangodb_conn_from_db_option(&db_option).await?;
         println!("正在缓存plin");
-        let plin_cache_mgr  = if let Some(pool) = project_map.get(&db_option.project_name){
+        let plin_cache_mgr = if let Some(pool) = project_map.get(&db_option.project_name) {
             cache_plin_plax(&project_map.get(&db_option.project_name).unwrap(),
                             (&db_option.manual_db_nums).clone(), &database).await.unwrap_or(DashMap::new())
         } else {
@@ -668,7 +669,7 @@ impl AiosDBManager {
         }
         let desi_att = mgr.get_attr(design_refno).await?;
         dbg!(&desi_att);
-        let geoms = resolve_desi_comp(design_refno, mgr.as_ref(), is_debug).await.unwrap_or_default();
+        let geoms = resolve_desi_comp(design_refno, None, mgr.as_ref(), is_debug).await.unwrap_or_default();
         // dbg!(&geoms);
         // dbg!(type_name);
         if type_name == "SCTN" || type_name == "STWALL" || /*type_name == "GENSEC" ||*/ type_name == "WALL" {
@@ -691,12 +692,11 @@ impl AiosDBManager {
 
     ///记录点集的信息
     ///获得branch的模型数据
-    async fn get_cata_auto_tubi_geoms(mgr: Arc<AiosDBManager>, group_refno: RefU64, group_att: &AttrMap,
+    async fn get_cata_auto_tubi_geoms(mgr: Arc<AiosDBManager>, branch_refno: RefU64, group_att: &AttrMap,
                                       brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
-                                      // anchor_ptset_map: &DashMap<RefU64, Vec<Option<i32>>>,
                                       debug_refno: Option<RefU64>) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
-        let group_transform = mgr.get_world_transform(group_refno).await?.unwrap_or_default();
+        let group_transform = mgr.get_world_transform(branch_refno).await?.unwrap_or_default();
         let htube_pt = group_transform.transform_point3(group_att.get_vec3("HPOS")
             .ok_or(anyhow!("HPOS not exist".to_string()))?);
         let bran_ttube_pt = group_transform.transform_point3(group_att.get_vec3("TPOS")
@@ -707,17 +707,31 @@ impl AiosDBManager {
         let h_ref = group_att.get_foreign_refno(if is_hang { "HREF" } else { "HSTU" }).unwrap_or_default();
         let hconnect = group_att.get_as_string("HCON").unwrap_or_default();
         let mut has_tubi = true;
-        if hconnect.as_str() == "DUCT" || is_debug {
-            has_tubi = false;
-        }
+        // if hconnect.as_str() == "DUCT" || is_debug {
+        //     has_tubi = false;
+        // }
         let mut bore = 0.0f32;
         if let Ok(h_att) = mgr.get_attr(h_ref).await {
-            let h_cat_att = mgr.get_attr(h_att.get_foreign_refno("CATR").unwrap_or_default()).await?;
-            let params = h_cat_att.get_f64_vec("PARA").unwrap_or_default();
-
-            if params.len() >= 2 {
-                bore = params[1] as f32;
+            let h_cat_ref = h_att.get_foreign_refno("CATR").unwrap_or_default();
+            let tubi_geoms_info = resolve_desi_comp(branch_refno, Some(h_cat_ref), mgr.as_ref(), is_debug).await?;
+            let mut has_tube_geom = false;
+            for tubi_geom in &tubi_geoms_info.geometries {
+                if let TubeImplied (d) = tubi_geom{
+                    bore = d.diameter;
+                    has_tube_geom = true;
+                    break;
+                }
             }
+
+            if !has_tube_geom {
+                if !tubi_geoms_info.axis_map.is_empty() {
+                    for (k, v) in &tubi_geoms_info.axis_map {
+                        bore = v.pbore;
+                        break;
+                    }
+                }
+            }
+
         }
         let mut current_tubing = PdmsTubing {
             start_pt: htube_pt,
@@ -725,12 +739,12 @@ impl AiosDBManager {
             bore,
             finished: false,
         };
-        let children = mgr.get_children_refs(group_refno).await.unwrap_or_default();
+        let children = mgr.get_children_refs(branch_refno).await.unwrap_or_default();
         if children.len() == 0 {
             if !current_tubing.finished && bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL {
                 current_tubing.end_pt = bran_ttube_pt;
                 current_tubing.finished = true;
-                brep_shape_map.entry(group_refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                brep_shape_map.entry(branch_refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
             }
             return Ok(true);
         }
@@ -747,7 +761,7 @@ impl AiosDBManager {
             let attr = attr.unwrap();
             println!("正在处理元件{}: {}", attr.get_type(), refno.to_refno_string());
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
-            let mut geoms = resolve_desi_comp(refno, mgr.as_ref(), is_debug).await;
+            let mut geoms = resolve_desi_comp(refno, None, mgr.as_ref(), is_debug).await;
             if geoms.is_err() { continue; }
             let mut geoms = geoms.unwrap();
             //有隐含管段
@@ -759,16 +773,30 @@ impl AiosDBManager {
                         if !current_tubing.finished && a_pos.distance(current_tubing.start_pt) > TUBI_TOL {
                             current_tubing.end_pt = a_pos;
                             current_tubing.finished = true;
-                            brep_shape_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                            dbg!(&current_tubing);
+                            //todo add direction check or spref not compatiable
+                            if abs_diff_eq!(current_tubing.end_pt.length(), 0.0) ||
+                                abs_diff_eq!(current_tubing.start_pt.length(), 0.0)
+                            {
+                                println!("Tubi is wrong: {}", refno.to_refno_string());
+                                //todo add 说明
+                            } else {
+                                brep_shape_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                            }
                         }
                     }
                 }
                 if let Some(lstube) = attr.get_foreign_refno(if is_hang { "LSRO" } else { "LSTU" }) {
                     if let Ok(lstube_att) = mgr.get_attr(lstube).await {
-                        let lstube_cat_att = mgr.get_attr(lstube_att.get_foreign_refno("CATR").unwrap_or_default()).await?;
-                        let params = lstube_cat_att.get_f64_vec("PARA").unwrap_or_default();
-                        if params.len() >= 2 {
-                            current_tubing.bore = params[if is_hang { 0 } else { 1 }] as f32;
+                        // let lstube_cat_att = mgr.get_attr(lstube_att.get_foreign_refno("CATR").unwrap_or_default()).await?;
+                        let lstube_cat_refno = lstube_att.get_foreign_refno("CATR").unwrap_or_default();
+                        //todo check how to get the bore value
+                        let tubi_geoms = resolve_desi_comp(refno, Some(lstube_cat_refno), mgr.as_ref(), is_debug).await?;
+                        for tubi_geom in tubi_geoms.geometries {
+                            if let TubeImplied (d) = tubi_geom{
+                                current_tubing.bore = d.diameter;
+                                break;
+                            }
                         }
                     }
                 }
@@ -797,9 +825,17 @@ impl AiosDBManager {
             if has_tubi {
                 if refno == last_child {
                     if !current_tubing.finished && bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL {
+                        //检查是否有一端是世界坐标原点
                         current_tubing.end_pt = bran_ttube_pt;
                         current_tubing.finished = true;
-                        brep_shape_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                        if abs_diff_eq!(current_tubing.end_pt.length(), 0.0) ||
+                            abs_diff_eq!(current_tubing.start_pt.length(), 0.0)
+                        {
+                            println!("Tubi is wrong: {}", refno.to_refno_string());
+                            //todo add 说明
+                        } else {
+                            brep_shape_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                        }
                     }
                 }
             }
@@ -873,8 +909,7 @@ impl AiosDBManager {
         ]);
 
         let mut has_cata_refnos = RefU64Vec::default();
-
-        if let Some(debug_type) = &db_option.debug_refno_type{
+        if let Some(debug_type) = &db_option.debug_refno_type {
             if debug_type == "CATA" {
                 if let Some(branch_refno) = &db_option.debug_branch_refno {
                     has_cata_refnos = RefU64Vec(vec![RefU64::from_refno_str(branch_refno).unwrap_or_default()]);
@@ -882,8 +917,16 @@ impl AiosDBManager {
                     has_cata_refnos = RefU64Vec(vec![RefU64::from_refno_str(design_refno).unwrap_or_default()]);
                 }
             }
-        }else {
-            has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, db_nos).await?;
+        } else {
+            if let Some(root_refno_str) = &db_option.debug_root_refno {
+                if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
+                    has_cata_refnos =
+                        query_travel_children_with_types_aql(&mgr.arango_database, root_refno, att_types.clone()).await?
+                            .iter().map(|x| x.refno).collect::<Vec<_>>().into();
+                }
+            } else {
+                has_cata_refnos = mgr.get_refnos_by_types(project, &att_types, db_nos).await?;
+            }
         }
         let has_cata_cnt = has_cata_refnos.len();
         let target_debug_refno = db_option.debug_desi_refno.as_ref().map(
@@ -1010,12 +1053,18 @@ impl AiosDBManager {
                     prim_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
                 }
             }
-        }else{
-            prim_refnos = mgr.get_refnos_by_types(db_option.project_name.as_str(), &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
+        } else {
+            if let Some(root_refno_str) = &db_option.debug_root_refno {
+                if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
+                    prim_refnos =
+                        query_travel_children_with_types_aql(&mgr.arango_database, root_refno, GNERAL_PRIM_NOUN_NAMES.clone()).await?
+                            .iter().map(|x| x.refno).collect::<Vec<_>>().into();
+                }
+            } else {
+                prim_refnos = mgr.get_refnos_by_types(db_option.project_name.as_str(), &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
+            }
         }
-        // let mut prim_refnos = mgr.get_refnos_by_types(db_option.project_name.as_str(), &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
         let prim_cnt = prim_refnos.len();
-
         let batch_chunks_cnt = prim_cnt / batch_size + 1;
         let mut handles = vec![];
         let all_refnos = Arc::new(prim_refnos);
@@ -1182,8 +1231,16 @@ impl AiosDBManager {
                     loop_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
                 }
             }
-        }else{
-            loop_refnos = mgr.get_refnos_by_types(&db_option.project_name, &vec!["PLOO", "LOOP"], db_nos).await?;
+        } else {
+            if let Some(root_refno_str) = &db_option.debug_root_refno {
+                if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
+                    loop_refnos =
+                        query_travel_children_with_types_aql(&mgr.arango_database, root_refno, vec!["PLOO", "LOOP"]).await?
+                            .iter().map(|x| x.refno).collect::<Vec<_>>().into();
+                }
+            } else {
+                loop_refnos = mgr.get_refnos_by_types(&db_option.project_name, &vec!["PLOO", "LOOP"], db_nos).await?;
+            }
         }
         // let loop_refnos = if target_debug_refno.is_none() {
         //     mgr.get_refnos_by_types(&db_option.project_name, &vec!["PLOO", "LOOP"], db_nos).await?
@@ -1313,7 +1370,7 @@ impl AiosDBManager {
                         if let Some(geo_hash) = geo_hash {
                             let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
                             let tr: TransformSRT = item_trans;
-                            if let Some(mut bbox) = cached_mesh_mgr.get_bbox(&geo_hash){
+                            if let Some(mut bbox) = cached_mesh_mgr.get_bbox(&geo_hash) {
                                 bbox.scaled(&tr.scale);
                                 let geom_inst = EleGeoInstance {
                                     geo_hash,
@@ -1325,7 +1382,7 @@ impl AiosDBManager {
                                     is_tubi: false,
                                 };
                                 geo_insts.push(geom_inst);
-                            }else{
+                            } else {
                                 println!("楼板有问题：{} ", refno.to_refno_string());
                             }
                         }
@@ -1390,13 +1447,13 @@ impl AiosDBManager {
             let instance_mgr_clone = instance_mgr.clone();
             let db_option_clone = db_option.clone();
             // if db_option_clone.debug_branch_refno.as_ref().is_none() && db_option_clone.debug_desi_refno.as_ref().is_none() {
-                let project = project.clone();
-                let mgr_clone = mgr.clone();
-                // let handle = tokio::spawn(async move {
-                Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option, Some(vec![db_no])).await.unwrap();
-                Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option, Some(vec![db_no])).await.unwrap();
-                // });
-                // handles.push(handle);
+            let project = project.clone();
+            let mgr_clone = mgr.clone();
+            // let handle = tokio::spawn(async move {
+            Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option, Some(vec![db_no])).await.unwrap();
+            Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option, Some(vec![db_no])).await.unwrap();
+            // });
+            // handles.push(handle);
             // }
             // Self::cache_pohe_geos(mgr.clone(), project).await?;
             // futures::future::join_all(take(&mut handles)).await;

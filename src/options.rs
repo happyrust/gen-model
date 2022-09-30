@@ -29,6 +29,8 @@ pub struct DbOption {
     pub manual_db_nums: Option<Vec<i32>>,
 
     #[clap(skip)]
+    pub debug_root_refno: Option<String>,
+    #[clap(skip)]
     pub debug_branch_refno: Option<String>,
     #[clap(skip)]
     pub debug_desi_refno: Option<String>,

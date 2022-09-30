@@ -511,6 +511,14 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
+            "TUBE" => {
+                CateGeoParam::TubeImplied(CateTubeImpliedParam{
+                    axis: None,
+                    diameter: gmse.diameters[0],
+                    centre_line_flag: gmse.centre_line_flag,
+                    tube_flag: gmse.tube_flag,
+                })
+            }
             _ => CateGeoParam::Unknown,
         }
     });
