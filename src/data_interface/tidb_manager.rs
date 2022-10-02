@@ -375,6 +375,7 @@ impl PdmsDataInterface for AiosDBManager {
             let mut use_scale = false;
             let att = self.get_attr(refno).await?;
             let pos = att.get_position().unwrap_or_default();
+            let mut quat = Quat::IDENTITY;
             if let Some(jusl) = att.get_str("JUSL") {
                 dbg!(&jusl);
                 if let Some(exps) = query_pline_value(refno, jusl, &self.arango_database).await? {
@@ -384,10 +385,11 @@ impl PdmsDataInterface for AiosDBManager {
                     dbg!(&jusl_vec);
                 }
             }
-            let mut quat = att.get_rotation().unwrap_or_default();
-            if let Some(bangle) = att.get_f32("BANG") {
-                //如果是有poss pose
-                let mut need_bangle = false;
+            let mut quat_v = att.get_rotation();
+            let mut need_bangle = false;
+            if quat_v.is_some(){
+                quat = quat_v.unwrap();
+            }else{
                 let extru_dir: Vec3 = if let Some(poss) = att.get_poss() &&
                 let Some(pose) = att.get_pose()
                 {
@@ -396,17 +398,22 @@ impl PdmsDataInterface for AiosDBManager {
                 } else{
                     Vec3::Z
                 };
-                if need_bangle {
-                    let d = extru_dir.dot(Vec3::Z).abs();
-                    let mut ref_axis = if abs_diff_eq!(1.0, d) {
-                        Vec3::Y
-                    } else { Vec3::Z };
+                let d = extru_dir.dot(Vec3::Z).abs();
+                let mut ref_axis = if abs_diff_eq!(1.0, d) {
+                    Vec3::Y
+                } else { Vec3::Z };
 
-                    let p_axis = ref_axis.cross(extru_dir).normalize();
-                    let y_axis = extru_dir.cross(p_axis).normalize();
-                    quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
-                        &[p_axis.to_array(), y_axis.to_array(), extru_dir.to_array()]
-                    )) * Quat::from_rotation_z(bangle.to_radians());
+                let p_axis = ref_axis.cross(extru_dir).normalize();
+                let y_axis = extru_dir.cross(p_axis).normalize();
+                quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
+                    &[p_axis.to_array(), y_axis.to_array(), extru_dir.to_array()]
+                ));
+            }
+
+
+            if let Some(bangle) = att.get_f32("BANG") {
+                if need_bangle {
+                    quat = quat * Quat::from_rotation_z(bangle.to_radians());
                     // dbg!(&quat);
                     println!("{} Bangle {} : {:?}", refno.to_refno_string(), bangle, quat);
                 }
@@ -672,7 +679,7 @@ impl AiosDBManager {
         let geoms = resolve_desi_comp(design_refno, None, mgr.as_ref(), is_debug).await.unwrap_or_default();
         // dbg!(&geoms);
         // dbg!(type_name);
-        if type_name == "SCTN" || type_name == "STWALL" || /*type_name == "GENSEC" ||*/ type_name == "WALL" {
+        if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" {
             create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref()).await?;
         } else {
             let GeomsInfo {
@@ -724,11 +731,10 @@ impl AiosDBManager {
             }
 
             if !has_tube_geom {
-                if !tubi_geoms_info.axis_map.is_empty() {
-                    for (k, v) in &tubi_geoms_info.axis_map {
-                        bore = v.pbore;
-                        break;
-                    }
+                let h_cat_att = mgr.get_attr(h_cat_ref).await?;
+                let params = h_cat_att.get_f64_vec("PARA").unwrap_or_default();
+                if params.len() >= 2 {
+                    bore = params[if is_hang { 0 } else { 1 }] as f32;
                 }
             }
 
@@ -788,7 +794,7 @@ impl AiosDBManager {
                 }
                 if let Some(lstube) = attr.get_foreign_refno(if is_hang { "LSRO" } else { "LSTU" }) {
                     if let Ok(lstube_att) = mgr.get_attr(lstube).await {
-                        // let lstube_cat_att = mgr.get_attr(lstube_att.get_foreign_refno("CATR").unwrap_or_default()).await?;
+                        //
                         let lstube_cat_refno = lstube_att.get_foreign_refno("CATR").unwrap_or_default();
                         //todo check how to get the bore value
                         let tubi_geoms_info = resolve_desi_comp(refno, Some(lstube_cat_refno), mgr.as_ref(), is_debug).await?;
@@ -802,13 +808,11 @@ impl AiosDBManager {
 
                             }
                         }
-
                         if !has_tube_geom {
-                            if !tubi_geoms_info.axis_map.is_empty() {
-                                for (k, v) in &tubi_geoms_info.axis_map {
-                                    bore = v.pbore;
-                                    break;
-                                }
+                            let lstube_cat_att = mgr.get_attr(lstube_cat_refno).await?;
+                            let params = lstube_cat_att.get_f64_vec("PARA").unwrap_or_default();
+                            if params.len() >= 2 {
+                                current_tubing.bore = params[if is_hang { 0 } else { 1 }] as f32;
                             }
                         }
                     }
@@ -1023,6 +1027,7 @@ impl AiosDBManager {
                                 dbg!(&brep_shape);
                             }
                             let mut bbox = bbox.unwrap_or_default();
+                            //todo 需要处理一下
                             bbox.scaled(&trans.scale);
                             //tubi 需要特殊处理
                             let geom_inst = EleGeoInstance {
@@ -1030,7 +1035,7 @@ impl AiosDBManager {
                                 refno,
                                 pts,
                                 bbox,
-                                transform: (transform.rotation, transform.translation, trans.scale),
+                                transform: (transform.rotation, transform.translation + transform.rotation * trans.translation, trans.scale),
                                 visible,
                                 is_tubi,
                             };
@@ -1367,7 +1372,6 @@ impl AiosDBManager {
                                 });
                                 if extrusion.check_valid() {
                                     item_trans = extrusion.get_trans();
-                                    // item_trans.translation += origin_pt;
                                     if let Some(sjus) = attr.get_str("SJUS") {
                                         if sjus == "UTOP" || sjus == "DTOP" {
                                             item_trans.translation = item_trans.translation + Vec3::new(0.0, 0.0, -height);

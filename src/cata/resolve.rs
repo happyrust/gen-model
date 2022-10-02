@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::default::default;
 use std::ops::Neg;
+use std::panic;
 use std::sync::Arc;
 use aios_core::parsed_data::{CateAxisParam, GmseParamData};
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
@@ -73,7 +74,9 @@ pub fn resolve_paragon_gm_params(
     axis_params: &BTreeMap<i32, CateAxisParam>,
 ) -> anyhow::Result<CateGeoParam> {
     if let Ok(gm_data) = resolve_gmse_params(gm_param, jusl_param, context, axis_params) {
-        resolve_to_cate_geo_params(&gm_data)
+        panic::catch_unwind(|| {
+            resolve_to_cate_geo_params(&gm_data).expect("resolve geom failed")
+        }).map_err(|e| anyhow!("Resolve error."))
     } else {
         Err(anyhow!(format!("几何数据解析失败: {:?}", gm_param)))
     }
@@ -299,7 +302,7 @@ pub fn resolve_gmse_params(
         height,
         pwid,
         prad,
-        plin_verts,
+        plin_pos: plin_verts,
         frads,
         pang,
         diameters,

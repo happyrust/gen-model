@@ -6,7 +6,7 @@ use aios_core::pdms_data::{AxisParam, ScomInfo};
 use aios_core::tiny_expr::expr_eval::interp;
 use aios_core::tool::float_tool::*;
 use anyhow::anyhow;
-use glam::Vec3;
+use glam::{Vec2, Vec3};
 use itertools::any;
 use nom::Parser;
 use regex::{Captures, NoExpand, Regex};
@@ -254,14 +254,16 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
         match &gmse.type_name[..] {
             "SANN" => {
                 CateGeoParam::Profile(CateProfileParam::SANN(SannData {
-                    xy: [gmse.verts[0][0], gmse.verts[0][1]],
-                    dxy: [gmse.dxy[0][0], gmse.dxy[0][1]],
-                    ptaxis: Some(gmse.paxises[0].clone()),
+                    xy: Vec2::new(gmse.verts[0][0], gmse.verts[0][1]),
+                    dxy: Vec2::new(gmse.dxy[0][0], gmse.dxy[0][1]),
+                    paxis: Some(gmse.paxises[0].clone()),
                     pangle: gmse.pang as f32,
                     pradius: gmse.prad as f32,
                     pwidth: gmse.pwid as f32,
                     drad: gmse.drad as f32,
                     dwid: gmse.dwid as f32,
+                    plin_pos: gmse.plin_pos,
+                    plin_axis: gmse.plin_plax,
                 }))
             }
             "SPRO" => {   //structural profile
@@ -269,7 +271,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     verts: gmse.verts.clone(),
                     frads: gmse.frads.clone(),
                     normal_axis: Vec3::from(gmse.paxises[0].dir),
-                    plin_pos: gmse.plin_verts,
+                    plin_pos: gmse.plin_pos,
                     plin_axis: gmse.plin_plax,
                 }))
             }
@@ -306,7 +308,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     axis: Some(gmse.paxises[0].clone()),
                     dist_to_btm: gmse.distances[0],
                     height: gmse.phei,
-                    diameter: gmse.diameters[0],
+                    diameter: gmse.diameters.get(0).map(|x| *x).unwrap_or_default(),
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
                 })
@@ -522,8 +524,8 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             _ => CateGeoParam::Unknown,
         }
     });
-    Ok(geo.expect(&format!("几何体生成出错, 数据: {:?}", &gmse)))
-    // geo.map_err(|x| anyhow!(format!("几何体生成出错, 数据: {:?}", &gmse)))
+    // Ok(geo.expect(&format!("几何体生成出错, 数据: {:?}", &gmse)))
+    geo.map_err(|x| anyhow!(format!("几何体生成出错, 数据: {:?}", &gmse)))
 }
 
 pub fn resolve_dir_and_pos(axis: &AxisParam,

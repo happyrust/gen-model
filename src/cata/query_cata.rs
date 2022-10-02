@@ -41,6 +41,9 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             // dbg!(spre.to_string_hashmap());
             if spre.contains_attr_name("CATR") {
                 scom_ref = spre.get_foreign_refno("CATR");
+            }else{
+                //SFIT 的scom 和 spre 是同一个
+                scom_ref = Some(spre_ref);
             }
         }
     }
@@ -62,8 +65,6 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             println!("{}", &error_info);
             return Err(anyhow!(error_info));
         };
-    }else{
-        dbg!("缓存命中");
     }
     let scom_info = CACHED_SCOM_INFO_MAP.get(&scom_ref).unwrap();
     // if is_debug {
@@ -270,12 +271,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     }else{
         None
     };
-    // dbg!(&jusl_param);
-    // dbg!(&cur_context);
     let geometries = resolve_gms(&scom_info.gm_params, &jusl_param, &cur_context, &axis_map);
-    // if is_debug {
-    //     dbg!(&geometries);
-    // }
     Ok(GeomsInfo {
         geometries,
         axis_map,

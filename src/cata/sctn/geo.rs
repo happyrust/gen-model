@@ -50,7 +50,9 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                     let pt1 = att1.get_position().unwrap_or_default();
                     let pt2 = att2.get_position().unwrap_or_default();
                     let pt3 = att3.get_position().unwrap_or_default();
-                    arc_paths.push(Some((pt1, pt2, pt3)));
+                    // dbg!(att2.to_string_hashmap());
+                    let is_center = att2.get_str("CURTYP").and_then(|x| Some(x == "CENT")).unwrap_or(false);
+                    arc_paths.push(Some((pt1, pt2, pt3, is_center)));
                 }
             }
         }
@@ -80,10 +82,14 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                 if let CateProfileParam::SPRO(spro) = profile {
                     plane_normal = spro.normal_axis.normalize();
                 }
+                if let CateProfileParam::SANN (s) = profile{
+                    plane_normal = s.paxis.as_ref().map(|x| x.dir).unwrap_or(Vec3::Y);
+                }
                 let loft = LoftSolid {
                     profile: profile.clone(),
                     drns,
                     drne,
+                    bangle: att.get_f32("BANG").unwrap_or_default(),
                     plane_normal,
                     extrude_dir,
                     height,
