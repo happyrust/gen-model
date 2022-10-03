@@ -1,22 +1,10 @@
-use aios_core::pdms_types::{AttrMap, RefU64};
+use aios_core::pdms_types::{AttrMap, IncrementDataSql, RefU64, WholeAttMap};
 use sqlx::{Error, MySql, Pool, Row};
 use aios_core::pdms_data::{NewDataOperate};
 use chrono::DateTime;
-use parse_pdms_db::parse::WholeAttMap;
 use sqlx::mysql::MySqlRow;
 use crate::consts::INCREMENT_DATA;
 use serde::{Serialize, Deserialize};
-
-pub struct IncrementDataSql {
-    pub id: String,
-    pub refno: RefU64,
-    pub operate: NewDataOperate,
-    pub version: u32,
-    pub user: String,
-    pub old_data: WholeAttMap,
-    pub new_data: WholeAttMap,
-    pub time: String,
-}
 
 
 pub async fn query_latest_data(pool: &Pool<MySql>) -> anyhow::Result<Vec<IncrementDataSql>> {
