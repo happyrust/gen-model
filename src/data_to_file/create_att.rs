@@ -1,9 +1,9 @@
 use std::env;
 use std::io::Write;
+use aios_core::consts::EXPR_ATT_SET;
 use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
 use aios_core::tool::db_tool::db1_hash;
 use futures::future::ok;
-use parse_pdms_db::EXPR_ATT_SET;
 use parse_pdms_db::test_cases::convert_str_to_bytes;
 use serde::{Serialize, Deserialize};
 use crate::api::attr::query_implicit_attr;

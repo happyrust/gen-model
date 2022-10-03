@@ -4,6 +4,7 @@ pub const PDMS_INFO_DB: &'static str = "PDMS_INFO_DB";
 
 pub const PDMS_EXPLICIT_TABLE: &'static str = "EXPLICIT_ATT";
 pub const PDMS_UDA_TABLE: &'static str = "UDA_ATT";
+pub const PDMS_FILE_VERSION_TABLE: &'static str = "FILE_VERSION";
 pub const PDMS_ELEMENTS_TABLE: &'static str = "PDMS_ELEMENTS";
 pub const PDMS_SSC_ELEMENTS_TABLE: &'static str = "PDMS_SSC_ELEMENTS";
 pub const PDMS_REFNO_INFOS_TABLE: &'static str = "REFNO_INFOS";

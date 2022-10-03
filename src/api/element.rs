@@ -247,13 +247,16 @@ pub async fn query_owner_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
 }
 
 /// 通过 name 获取 refno （pdms）
-pub async fn query_id_from_name(name: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
-    let sql = gen_query_id_from_name_sql(name);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
-    match result {
-        Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>(0) as u64))) }
-        Err(_) => { Ok(None) }
+pub async fn query_id_from_name(name: &str, att_type: Option<String>, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
+    let mut r = vec![];
+    let sql = gen_query_id_from_name_sql(name, att_type);
+    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    if let Ok(results) = results {
+        for result in results {
+            r.push(RefU64(result.get::<i64, _>(0) as u64))
+        }
     }
+    Ok(r)
 }
 
 /// 通过 name 获取 refno （ssc）
@@ -281,9 +284,12 @@ fn gen_query_owner_from_id(refno: RefU64) -> String {
     sql
 }
 
-fn gen_query_id_from_name_sql(name: &str) -> String {
+fn gen_query_id_from_name_sql(name: &str, att_type: Option<String>) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID FROM {PDMS_ELEMENTS_TABLE} WHERE NAME like '%{}%' ", name));
+    if let Some(att_type) = att_type {
+        sql.push_str(&format!("AND TYPE = '{}' ", att_type));
+    }
     sql
 }
 
