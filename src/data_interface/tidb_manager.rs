@@ -368,22 +368,44 @@ impl PdmsDataInterface for AiosDBManager {
             ancestors.push_front((cur_refno, ref_basic));
             cur_refno = tmp_owner;
         }
-        // dbg!(&ancestors);
         //需要判断owner 下是不是有spine，如wall，顺时针逆时针会影响plin的方向
         for (refno, ref_basic) in ancestors {
             let mut jusl_vec = Vec3::new(0.0, 0.0, 0.0);
             let att = self.get_attr(refno).await?;
-            let pos = att.get_position().unwrap_or_default();
+            let mut pos = att.get_position().unwrap_or_default();
             let mut quat = Quat::IDENTITY;
+            let type_name = att.get_type();
             if let Some(jusl) = att.get_str("JUSL") {
-                dbg!(&jusl);
+                // dbg!(&jusl);
                 if let Some(exps) = query_pline_value(refno, jusl, &self.arango_database).await? {
                     let x = self.resolve_expression_to_f32(&exps[0], refno).await?;
                     let y = self.resolve_expression_to_f32(&exps[1], refno).await?;
                     jusl_vec = Vec3::new(x, y, 0.0);
-                    dbg!(&jusl_vec);
+                    // dbg!(&jusl_vec);
                 }
             }
+            //先获得下面的PLOO
+            let owner = ref_basic.owner;
+            if let Some(owner_basic) = self.get_refno_basic(owner) && owner_basic.get_type() == "FLOOR"{
+                let sjus = att.get_str("JUSL").unwrap_or("unset");
+                let children = self.get_children_refs(owner).await?;
+                let mut off_z = 0.0;
+                for c in children {
+                    let b = self.get_refno_basic(c).unwrap();
+                    if b.get_type() == "PLOO" {
+                        let height = self.get_attr(*b.key()).await?.get_f32("HEIG").unwrap_or_default();
+                        off_z = if sjus == "UTOP" || sjus == "DTOP" {
+                            -height
+                        }else if sjus == "UCEN" || sjus == "DCEN"{
+                            -height/2.0
+                        }else{
+                            0.0
+                        }
+                    }
+                }
+                pos.z += off_z;
+            }
+
             let mut quat_v = att.get_rotation();
             let mut need_bangle = false;
             if quat_v.is_some(){
@@ -409,28 +431,29 @@ impl PdmsDataInterface for AiosDBManager {
                 ));
             }
 
-            // if let Some(bangle) = att.get_f32("BANG") {
-            //     dbg!(need_bangle);
-            //     if need_bangle {
-            //         quat = quat * Quat::from_rotation_z(bangle.to_radians());
-            //         // dbg!(&quat);
-            //         println!("{} Bangle {} : {:?}", refno.to_refno_string(), bangle, quat);
-            //     }
-            // }
+            if let Some(bangle) = att.get_f32("BANG") {
+                need_bangle |= type_name == "PFIT";
+                // dbg!(need_bangle);
+                if need_bangle {
+                    quat = quat * Quat::from_rotation_z(bangle.to_radians());
+                    // dbg!(&quat);
+                    // println!("{} Bangle {} : {:?}", refno.to_refno_string(), bangle, quat);
+                }
+            }
             //弧墙下方没有fitt
             if let Some(pos_line) = att.get_str("POSL") {
-                dbg!(pos_line);
+                // dbg!(pos_line);
                 //plin里的位置偏移
                 let mut plin_pos = Vec3::new(0.0, 0.0, 0.0);
                 let mut pline_plax = -Vec3::X;
 
                 let delta_vec = att.get_vec3("DELP").unwrap_or_default() /*+ plin_pos*/;
                 let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
-                dbg!(zdis);
+                // dbg!(zdis);
                 let bangle = att.get_f32("BANG").unwrap_or_default();
                 let pos_line = query_pline_value(att.get_owner().unwrap(), pos_line, &self.arango_database).await?;
                 if let Some(pos_line) = pos_line {
-                    dbg!(&pos_line);
+                    // dbg!(&pos_line);
                     let owner = ref_basic.owner;
                     //对于fitting这种，需要取parent的值
                     let x = self.resolve_expression_to_f32(&pos_line[0], owner).await?;
@@ -464,7 +487,7 @@ impl PdmsDataInterface for AiosDBManager {
         let rot_mat = Mat3::from_quat(rotation);
         let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
 
-        println!("{} : {:?}, ori: {:?}", refno.to_refno_str(), (translation, rotation), ori_str);
+        // println!("{} : {:?}, ori: {:?}", refno.to_refno_str(), (translation, rotation), ori_str);
         Ok(Some(glam::TransformRT {
             rotation,
             translation,
@@ -770,7 +793,7 @@ impl AiosDBManager {
                         if !current_tubing.finished && a_pos.distance(current_tubing.start_pt) > TUBI_TOL {
                             current_tubing.end_pt = a_pos;
                             current_tubing.finished = true;
-                            dbg!(&current_tubing);
+                            // dbg!(&current_tubing);
                             //todo add direction check or spref not compatiable
                             if abs_diff_eq!(current_tubing.end_pt.length(), 0.0) ||
                                 abs_diff_eq!(current_tubing.start_pt.length(), 0.0)
@@ -1347,9 +1370,6 @@ impl AiosDBManager {
                             }
                             //todo 关于justline，可能需要jusline的信息才能判断中心点
                             "AEXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
-                                if parent_type == "FLOOR" {
-                                    println!("Floor : {}", refno.to_refno_string());
-                                }
                                 let attr = mgr.get_attr(refno).await.unwrap_or_default();
                                 parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
                                 target_refno = parent_refno;
@@ -1364,9 +1384,14 @@ impl AiosDBManager {
                                 if extrusion.check_valid() {
                                     item_trans = extrusion.get_trans();
                                     if let Some(sjus) = attr.get_str("SJUS") {
-                                        if sjus == "UTOP" || sjus == "DTOP" {
-                                            item_trans.translation = item_trans.translation + Vec3::new(0.0, 0.0, -height);
-                                        }
+                                        let off_z = if sjus == "UTOP" || sjus == "DTOP" {
+                                            -height
+                                        }else if sjus == "UCEN" || sjus == "DCEN"{
+                                            -height/2.0
+                                        }else{
+                                            0.0
+                                        };
+                                        item_trans.translation = item_trans.translation + Vec3::new(0.0, 0.0, off_z);
                                     }
                                     let r = cached_mesh_mgr.gen_pdms_mesh(extrusion, replace_mesh);
                                     geo_hash = Some(r);

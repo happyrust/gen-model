@@ -44,7 +44,6 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
             drns = spine_att.get_vec3("DRNS").unwrap_or_default();
             drne = spine_att.get_vec3("DRNE").unwrap_or_default();
             let refs = interface.get_children_refs(*x).await?;
-            dbg!(spine_att.to_string_hashmap());
             if (refs.len() - 1) % 2 == 0 {
                 for i in 0..(refs.len() - 1) / 2 {
                     let att1: AttrMap = interface.get_attr(refs[2 * i]).await?;
@@ -53,7 +52,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                     let pt0 = att1.get_position().unwrap_or_default();
                     let pt1 = att3.get_position().unwrap_or_default();
                     let mid_pt = att2.get_position().unwrap_or_default();
-                    dbg!(att2.to_string_hashmap());
+                    // dbg!(att2.to_string_hashmap());
                     let cur_type_str = att2.get_str("CURTYP").unwrap_or("unset");
                     let curve_type = match cur_type_str {
                         "CENT" => { SpineCurveType::CENT }
@@ -90,7 +89,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
         paths
     } else { vec![] };
 
-    dbg!(&spine_paths);
+    // dbg!(&spine_paths);
 
     let mut height = 0.0;
 
@@ -131,7 +130,6 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                             is_spine: true,
                         }),
                     };
-                    dbg!(&solid);
                     brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
                         refno,
                         brep_shape: Box::new(solid),
@@ -153,10 +151,10 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                     if let CateProfileParam::SANN (s) = profile{
                         plane_normal = s.paxis.as_ref().map(|x| x.dir).unwrap_or(Vec3::Y);
                     }
-                    dbg!(&spine);
+                    // dbg!(&spine);
                     let (paths, transform) = spine.generate_paths();
                     // dbg!(&paths);
-                    dbg!(&transform);
+                    // dbg!(&transform);
                     // let transform = transform.inverse();
                     // let transform = spine.get_coord_transform();
                     let bangle = att.get_f32("BANG").unwrap_or_default();
