@@ -144,6 +144,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             tables_sql.push_str(&gen_create_data_state_tables_sql());
             tables_sql.push_str(&gen_create_pdms_version_table_sql());
             tables_sql.push_str(&gen_create_room_code_table_sql());
+            tables_sql.push_str(&gen_create_file_version_table_sql());
         }
         let result = conn.execute(tables_sql.as_str()).await;
         match result {
@@ -399,6 +400,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
     let db_option = Arc::new(db_option.clone());
     let is_replace = db_option.replace_dbs;
     let mut uda_map = HashMap::new();
+    let mut version_map = HashMap::new();
 
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
@@ -425,6 +427,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                          })) = tokio::task::spawn_blocking(move || {
                 parse_file(&path, &None, &file_name, project_clone.as_str(), "")
             }).await {
+                version_map.entry(file_name_clone.clone()).or_insert(version);
                 set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
                 //类型暂时不多线程
                 let total_attr_map_arc = Arc::new(total_attr_map);
@@ -432,21 +435,22 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 let mut type_handles = vec![];
                 // 将部分数据保存到图数据库
                 {
-                    if db_type == "CATA" || db_type == "DESI" {
-                        // 将 pdms_element 部分数据保存到图数据库中
-                        save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
-                        // 将兄弟关系保存到图数据库中
-                        save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
-                        save_foreign_refno_edges_in_sync(&db_option, foreign_refnos_map).await?;
-                        // 单独保存plin
-                        save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
-                        // 将 para 和 des_para保存的图数据库中
-                        save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
-                        // 将 dtse下的data部分数据保存到图数据库
-                        save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
-                    }
+                    // if db_type == "CATA" || db_type == "DESI" {
+                    //     // 将 pdms_element 部分数据保存到图数据库中
+                    //     save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
+                    //     // 将兄弟关系保存到图数据库中
+                    //     save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
+                    //     save_foreign_refno_edges_in_sync(&db_option, foreign_refnos_map).await?;
+                    //     // 单独保存plin
+                    //     save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                    //     // 将 para 和 des_para保存的图数据库中
+                    //     save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
+                    //     // 将 dtse下的data部分数据保存到图数据库
+                    //     save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                    // }
                 }
                 for (type_hash, type_refnos) in type_ele_map {
+                    continue;
                     let info_pool_clone = info_pool.clone();
                     let filename_clone = file_name_clone.clone();
                     let project_clone = project.clone();
@@ -636,6 +640,32 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
             Err(e) => {
                 dbg!(&e);
                 dbg!(uda_sql.as_str());
+            }
+        }
+    }
+    // 保存每个file最新的page_num
+    if version_map.len() > 0 {
+        let table_sql = gen_create_file_version_table_sql();
+        let mut version_sql = format!("INSERT IGNORE INTO {PDMS_FILE_VERSION_TABLE} (FILENAME,VERSION) VALUES");
+        for (file_name, version) in version_map.into_iter() {
+            version_sql.push_str(&format!("('{}',{}),", file_name, version.0))
+        }
+        let mut project_conn = pool.acquire().await.unwrap();
+        version_sql.remove(version_sql.len() - 1);
+        let result = project_conn.execute(table_sql.as_str()).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(&e);
+                dbg!(table_sql.as_str());
+            }
+        }
+        let result = project_conn.execute(version_sql.as_str()).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(&e);
+                dbg!(version_sql.as_str());
             }
         }
     }

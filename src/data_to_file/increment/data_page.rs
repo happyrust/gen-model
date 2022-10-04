@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
+use aios_core::consts::EXPR_ATT_SET;
 use aios_core::helper::{parse_to_u16, parse_to_u32};
 use aios_core::pdms_types::{AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, RefI32Tuple, RefU64};
 use aios_core::tool::db_tool::db1_hash;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use memchr::memmem::{find_iter, rfind_iter};
-use parse_pdms_db::EXPR_ATT_SET;
 use smol_str::SmolStr;
 use serde::{Serialize, Deserialize};
 use crate::cata::resolve::parse_to_u64;

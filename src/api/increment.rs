@@ -1,29 +1,43 @@
-use aios_core::pdms_types::{AttrMap, RefU64};
-use sqlx::{MySql, Pool, Row};
-use aios_core::pdms_data::{IncrementData, NewDataOperate};
+use aios_core::pdms_types::{AttrMap, IncrementDataSql, RefU64, WholeAttMap};
+use sqlx::{Error, MySql, Pool, Row};
+use aios_core::pdms_data::{NewDataOperate};
+use chrono::DateTime;
+use sqlx::mysql::MySqlRow;
 use crate::consts::INCREMENT_DATA;
+use serde::{Serialize, Deserialize};
 
-pub async fn query_latest_data(pool:&Pool<MySql>) -> anyhow::Result<Vec<IncrementData>> {
+
+pub async fn query_latest_data(pool: &Pool<MySql>) -> anyhow::Result<Vec<IncrementDataSql>> {
     let mut result = vec![];
     let sql = gen_query_latest_data_sql();
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
-    for val in vals {
-        let refno = RefU64(val.get::<i64, _>("REFNO") as u64);
-        let operate = val.get::<i32, _>("OPERATE");
-        let version = val.get::<i32, _>("VERSION") as u32;
-        let data = val.get::<Vec<u8>,_>("DATA");
-        result.push(IncrementData{
-            refno,
-            attr_data_map: AttrMap::from_bincode_bytes(&data).unwrap(),
-            state: NewDataOperate::from(operate),
-            version,
-        });
+    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    if let Ok(vals) = vals {
+        for val in vals {
+            let id = val.get::<String, _>("ID");
+            let refno = RefU64(val.get::<i64, _>("REFNO") as u64);
+            let operate = val.get::<i32, _>("OPERATE");
+            let version = val.get::<i32, _>("VERSION") as u32;
+            let user = val.get::<String, _>("USER");
+            let old_data: WholeAttMap = bincode::deserialize(&val.get::<Vec<u8>, _>("OLD_DATA"))?;
+            let new_data: WholeAttMap = bincode::deserialize(&val.get::<Vec<u8>, _>("NEW_DATA"))?;
+            // let time = val.get::<String, _>("TIME");
+            result.push(IncrementDataSql {
+                id,
+                refno,
+                operate: NewDataOperate::from(operate),
+                version,
+                user,
+                old_data,
+                new_data,
+                time: "".to_string(),
+            });
+        }
     }
     Ok(result)
 }
 
 fn gen_query_latest_data_sql() -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT REFNO,OPERATE,VERSION,DATA FROM {INCREMENT_DATA}"));
+    sql.push_str(&format!("SELECT * FROM {INCREMENT_DATA}"));
     sql
 }

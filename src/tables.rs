@@ -248,6 +248,16 @@ pub fn gen_create_pdms_version_table_sql() -> String {
     sql
 }
 
+/// 创建存储每个文件的版本号表
+pub fn gen_create_file_version_table_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {PDMS_FILE_VERSION_TABLE} ("));
+    sql.push_str(&format!("{} VARCHAR(20) ,", "FILENAME"));
+    sql.push_str(&format!("{} INT", "VERSION"));
+    sql.push_str(");");
+    sql
+}
+
 #[test]
 fn test_replace() {
     let mut r = "a '' b c a";
