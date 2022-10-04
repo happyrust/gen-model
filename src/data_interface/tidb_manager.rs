@@ -372,7 +372,6 @@ impl PdmsDataInterface for AiosDBManager {
         //需要判断owner 下是不是有spine，如wall，顺时针逆时针会影响plin的方向
         for (refno, ref_basic) in ancestors {
             let mut jusl_vec = Vec3::new(0.0, 0.0, 0.0);
-            let mut use_scale = false;
             let att = self.get_attr(refno).await?;
             let pos = att.get_position().unwrap_or_default();
             let mut quat = Quat::IDENTITY;
@@ -410,14 +409,14 @@ impl PdmsDataInterface for AiosDBManager {
                 ));
             }
 
-
-            if let Some(bangle) = att.get_f32("BANG") {
-                if need_bangle {
-                    quat = quat * Quat::from_rotation_z(bangle.to_radians());
-                    // dbg!(&quat);
-                    println!("{} Bangle {} : {:?}", refno.to_refno_string(), bangle, quat);
-                }
-            }
+            // if let Some(bangle) = att.get_f32("BANG") {
+            //     dbg!(need_bangle);
+            //     if need_bangle {
+            //         quat = quat * Quat::from_rotation_z(bangle.to_radians());
+            //         // dbg!(&quat);
+            //         println!("{} Bangle {} : {:?}", refno.to_refno_string(), bangle, quat);
+            //     }
+            // }
             //弧墙下方没有fitt
             if let Some(pos_line) = att.get_str("POSL") {
                 dbg!(pos_line);
@@ -438,12 +437,9 @@ impl PdmsDataInterface for AiosDBManager {
                     let y = self.resolve_expression_to_f32(&pos_line[1], owner).await?;
                     plin_pos = Vec3::new(x, y, 0.0);
                 }
-                // dbg!(plin_pos);
                 if let Some(v) = self.plin_cache_mgr.get(&refno) {
-                    // dbg!(&v);
                     pline_plax = parse_expr_to_dir(v.value());
                 }
-                // dbg!(pline_plax);
                 let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
                 let y_axis = Vec3::Z;
                 let z_axis = pline_plax;
@@ -451,11 +447,6 @@ impl PdmsDataInterface for AiosDBManager {
                 let quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
                     &[x_axis.to_array(), y_axis.to_array(), z_axis.to_array()]
                 ));
-                // dbg!(bangle);
-                // dbg!(&refno);
-                // dbg!(&plin_pos);
-                // dbg!(&jusl_vec);
-                // dbg!(bangle_rot);
                 translation = translation + rotation * (zdis + plin_pos - jusl_vec) + rotation * quat * bangle_rot * delta_vec;
                 rotation = rotation * quat * bangle_rot;
             } else {
