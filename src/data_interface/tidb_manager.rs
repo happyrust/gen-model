@@ -376,12 +376,10 @@ impl PdmsDataInterface for AiosDBManager {
             let mut quat = Quat::IDENTITY;
             let type_name = att.get_type();
             if let Some(jusl) = att.get_str("JUSL") {
-                // dbg!(&jusl);
                 if let Some(exps) = query_pline_value(refno, jusl, &self.arango_database).await? {
                     let x = self.resolve_expression_to_f32(&exps[0], refno).await?;
                     let y = self.resolve_expression_to_f32(&exps[1], refno).await?;
                     jusl_vec = Vec3::new(x, y, 0.0);
-                    // dbg!(&jusl_vec);
                 }
             }
             //先获得下面的PLOO
@@ -433,11 +431,8 @@ impl PdmsDataInterface for AiosDBManager {
 
             if let Some(bangle) = att.get_f32("BANG") {
                 need_bangle |= type_name == "PFIT";
-                // dbg!(need_bangle);
                 if need_bangle {
                     quat = quat * Quat::from_rotation_z(bangle.to_radians());
-                    // dbg!(&quat);
-                    // println!("{} Bangle {} : {:?}", refno.to_refno_string(), bangle, quat);
                 }
             }
             //弧墙下方没有fitt
@@ -734,7 +729,7 @@ impl AiosDBManager {
         let mut bore = 0.0f32;
         if let Ok(h_att) = mgr.get_attr(h_ref).await {
             let h_cat_ref = h_att.get_foreign_refno("CATR").unwrap_or_default();
-            let tubi_geoms_info = resolve_desi_comp(branch_refno, Some(h_cat_ref), mgr.as_ref(), is_debug).await?;
+            let tubi_geoms_info = resolve_desi_comp(branch_refno, Some(h_cat_ref), mgr.as_ref(), is_debug).await.unwrap_or_default();
             let mut has_tube_geom = false;
             for tubi_geom in &tubi_geoms_info.geometries {
                 if let TubeImplied (d) = tubi_geom{
@@ -751,7 +746,7 @@ impl AiosDBManager {
                     bore = params[if is_hang { 0 } else { 1 }] as f32;
                 }
             }
-
+            // dbg!(bore);
         }
         let mut current_tubing = PdmsTubing {
             start_pt: htube_pt,
@@ -811,7 +806,7 @@ impl AiosDBManager {
                         //
                         let lstube_cat_refno = lstube_att.get_foreign_refno("CATR").unwrap_or_default();
                         //todo check how to get the bore value
-                        let tubi_geoms_info = resolve_desi_comp(refno, Some(lstube_cat_refno), mgr.as_ref(), is_debug).await?;
+                        let tubi_geoms_info = resolve_desi_comp(refno, Some(lstube_cat_refno), mgr.as_ref(), is_debug).await.unwrap_or_default();
                         let mut has_tube_geom = false;
                         for tubi_geom in &tubi_geoms_info.geometries {
                             if let TubeImplied (d) = tubi_geom{
@@ -829,6 +824,8 @@ impl AiosDBManager {
                                 current_tubing.bore = params[if is_hang { 0 } else { 1 }] as f32;
                             }
                         }
+
+                        // dbg!(current_tubing.bore);
                     }
                 }
                 // dbg!(&current_tubing);
