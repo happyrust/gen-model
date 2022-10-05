@@ -21,6 +21,12 @@ pub struct ProfileGeosPoints {
     pub points: Vec<(Vec3, Vec3, Vec3)>,
 }
 
+//todo 解决spine的问题，直接求解出wire最好
+//通过wire，可以定位位置，获取得到wire
+pub fn get_spine_geoms() -> bool {
+    true
+}
+
 pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, geom_info: &GeomsInfo,
                                                        brep_shapes_map: &CateBrepShapeMap, interface: &T) -> anyhow::Result<bool> {
     let geoms = &geom_info.geometries;
@@ -127,7 +133,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                         path: SweepPath3D::Line(Line3D{
                             start: Default::default(),
                             end: pose - poss,
-                            is_spine: true,
+                            is_spine: false,
                         }),
                     };
                     brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {

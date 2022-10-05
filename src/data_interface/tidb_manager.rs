@@ -384,24 +384,38 @@ impl PdmsDataInterface for AiosDBManager {
             }
             //先获得下面的PLOO
             let owner = ref_basic.owner;
-            if let Some(owner_basic) = self.get_refno_basic(owner) && owner_basic.get_type() == "FLOOR"{
-                let sjus = att.get_str("JUSL").unwrap_or("unset");
-                let children = self.get_children_refs(owner).await?;
-                let mut off_z = 0.0;
-                for c in children {
-                    let b = self.get_refno_basic(c).unwrap();
-                    if b.get_type() == "PLOO" {
-                        let height = self.get_attr(*b.key()).await?.get_f32("HEIG").unwrap_or_default();
-                        off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                            -height
-                        }else if sjus == "UCEN" || sjus == "DCEN"{
-                            -height/2.0
-                        }else{
-                            0.0
+            let owner_basic = self.get_refno_basic(owner).unwrap();
+            //特殊情况的一些处理
+            match owner_basic.get_type() {
+                "FLOOR" => {
+                    let sjus = att.get_str("JUSL").unwrap_or("unset");
+                    let children = self.get_children_refs(owner).await?;
+                    let mut off_z = 0.0;
+                    for c in children {
+                        let b = self.get_refno_basic(c).unwrap();
+                        if b.get_type() == "PLOO" {
+                            let height = self.get_attr(*b.key()).await?.get_f32("HEIG").unwrap_or_default();
+                            off_z = if sjus == "UTOP" || sjus == "DTOP" {
+                                -height
+                            }else if sjus == "UCEN" || sjus == "DCEN"{
+                                -height/2.0
+                            }else{
+                                0.0
+                            }
                         }
                     }
+                    pos.z += off_z;
                 }
-                pos.z += off_z;
+                "PLDATU" => {
+                    let grand = owner_basic.owner;
+                    let grand_att = self.get_attr(grand).await?;
+                    let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
+                    let pkdi = att.get_f32("PKDI").unwrap_or_default();
+                    //获取比例的位置
+                    pos = pos + zdis;
+                    // let pkdi_pos =
+                }
+                _ => {}
             }
 
             let mut quat_v = att.get_rotation();
@@ -444,7 +458,6 @@ impl PdmsDataInterface for AiosDBManager {
 
                 let delta_vec = att.get_vec3("DELP").unwrap_or_default() /*+ plin_pos*/;
                 let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
-                // dbg!(zdis);
                 let bangle = att.get_f32("BANG").unwrap_or_default();
                 let pos_line = query_pline_value(att.get_owner().unwrap(), pos_line, &self.arango_database).await?;
                 if let Some(pos_line) = pos_line {
@@ -465,10 +478,10 @@ impl PdmsDataInterface for AiosDBManager {
                 let quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(
                     &[x_axis.to_array(), y_axis.to_array(), z_axis.to_array()]
                 ));
-                translation = translation + rotation * (zdis + plin_pos - jusl_vec) + rotation * quat * bangle_rot * delta_vec;
+                translation = translation + rotation * (pos + zdis + plin_pos - jusl_vec) + rotation * quat * bangle_rot * delta_vec;
                 rotation = rotation * quat * bangle_rot;
             } else {
-                translation = translation + rotation * pos /*+ rotation * quat * (-jusl_vec)*/;
+                translation = translation + rotation * pos;
                 rotation = rotation * quat;
             }
 
