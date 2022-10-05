@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, VecDeque};
 use aios_core::pdms_types::{AttrMap, IncrementDataSql, RefU64, WholeAttMap};
 use sqlx::{Error, MySql, Pool, Row};
 use aios_core::pdms_data::{NewDataOperate};
@@ -7,9 +8,10 @@ use crate::consts::INCREMENT_DATA;
 use serde::{Serialize, Deserialize};
 
 
-pub async fn query_latest_data(pool: &Pool<MySql>) -> anyhow::Result<Vec<IncrementDataSql>> {
-    let mut result = vec![];
-    let sql = gen_query_latest_data_sql();
+pub async fn query_latest_data(version: u32, pool: &Pool<MySql>) -> anyhow::Result<Vec<IncrementDataSql>> {
+    let mut result = VecDeque::new();
+    let mut order_map = BTreeMap::new();
+    let sql = gen_query_latest_data_sql(version);
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     if let Ok(vals) = vals {
         for val in vals {
@@ -20,8 +22,8 @@ pub async fn query_latest_data(pool: &Pool<MySql>) -> anyhow::Result<Vec<Increme
             let user = val.get::<String, _>("USER");
             let old_data: WholeAttMap = bincode::deserialize(&val.get::<Vec<u8>, _>("OLD_DATA"))?;
             let new_data: WholeAttMap = bincode::deserialize(&val.get::<Vec<u8>, _>("NEW_DATA"))?;
-            // let time = val.get::<String, _>("TIME");
-            result.push(IncrementDataSql {
+            let time = val.get::<String, _>("TIME");
+            order_map.insert(version, IncrementDataSql {
                 id,
                 refno,
                 operate: NewDataOperate::from(operate),
@@ -29,15 +31,18 @@ pub async fn query_latest_data(pool: &Pool<MySql>) -> anyhow::Result<Vec<Increme
                 user,
                 old_data,
                 new_data,
-                time: "".to_string(),
+                time,
             });
         }
     }
-    Ok(result)
+    for order in order_map {
+        result.push_front(order.1);
+    }
+    Ok(result.into_iter().collect())
 }
 
-fn gen_query_latest_data_sql() -> String {
+fn gen_query_latest_data_sql(version: u32) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT * FROM {INCREMENT_DATA}"));
+    sql.push_str(&format!("SELECT * FROM {INCREMENT_DATA} WHERE VERSION > {}", version));
     sql
 }
