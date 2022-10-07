@@ -384,38 +384,40 @@ impl PdmsDataInterface for AiosDBManager {
             }
             //先获得下面的PLOO
             let owner = ref_basic.owner;
-            let owner_basic = self.get_refno_basic(owner).unwrap();
-            //特殊情况的一些处理
-            match owner_basic.get_type() {
-                "FLOOR" => {
-                    let sjus = att.get_str("JUSL").unwrap_or("unset");
-                    let children = self.get_children_refs(owner).await?;
-                    let mut off_z = 0.0;
-                    for c in children {
-                        let b = self.get_refno_basic(c).unwrap();
-                        if b.get_type() == "PLOO" {
-                            let height = self.get_attr(*b.key()).await?.get_f32("HEIG").unwrap_or_default();
-                            off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                                -height
-                            }else if sjus == "UCEN" || sjus == "DCEN"{
-                                -height/2.0
-                            }else{
-                                0.0
+            if let Some(owner_basic) = self.get_refno_basic(owner){
+                //特殊情况的一些处理
+                match owner_basic.get_type() {
+                    "FLOOR" => {
+                        let sjus = att.get_str("JUSL").unwrap_or("unset");
+                        let children = self.get_children_refs(owner).await?;
+                        let mut off_z = 0.0;
+                        for c in children {
+                            let b = self.get_refno_basic(c).unwrap();
+                            if b.get_type() == "PLOO" {
+                                let height = self.get_attr(*b.key()).await?.get_f32("HEIG").unwrap_or_default();
+                                off_z = if sjus == "UTOP" || sjus == "DTOP" {
+                                    -height
+                                }else if sjus == "UCEN" || sjus == "DCEN"{
+                                    -height/2.0
+                                }else{
+                                    0.0
+                                }
                             }
                         }
+                        pos.z += off_z;
                     }
-                    pos.z += off_z;
+                    "PLDATU" => {
+                        let grand = owner_basic.owner;
+                        let grand_att = self.get_attr(grand).await?;
+                        let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
+                        let pkdi = att.get_f32("PKDI").unwrap_or_default();
+                        //获取比例的位置
+                        pos = pos + zdis;
+                        // let pkdi_pos =
+                    }
+                    _ => {}
                 }
-                "PLDATU" => {
-                    let grand = owner_basic.owner;
-                    let grand_att = self.get_attr(grand).await?;
-                    let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
-                    let pkdi = att.get_f32("PKDI").unwrap_or_default();
-                    //获取比例的位置
-                    pos = pos + zdis;
-                    // let pkdi_pos =
-                }
-                _ => {}
+
             }
 
             let mut quat_v = att.get_rotation();
