@@ -94,16 +94,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
         }
         paths
     } else { vec![] };
-
-    // dbg!(&spine_paths);
-
     let mut height = 0.0;
-
-
-    // dbg!(att.to_string_hashmap());
-
-    //检查child是否是spine
-    //需要转换成局部坐标系的drns 和 drne
     let t = interface.get_world_transform(refno).await.unwrap().unwrap();
     let rot = t.rotation.inverse();
     let drns = rot * drns;
@@ -112,7 +103,8 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
         if let Some(poss) = att.get_poss() &&
         let Some(pose) = att.get_pose(){
             height = pose.distance(poss);
-            extrude_dir = (pose - poss).normalize();
+            //还原成相对坐标系下的拉升方向
+            extrude_dir = rot * ((pose - poss).normalize());
             for (i, geom) in geoms.iter().enumerate() {
                 if let CateGeoParam::Profile(profile) = geom {
                     if let CateProfileParam::SPRO(spro) = profile {
@@ -136,12 +128,14 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                             is_spine: false,
                         }),
                     };
+                    // dbg!(&solid);
                     brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
                         refno,
                         brep_shape: Box::new(solid),
                         transform: TransformSRT::IDENTITY,
                         visible: true,
                         is_tubi: false,
+                        shape_err: None,
                         pts: Default::default(),
                     });
                 }
@@ -181,6 +175,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                             transform,
                             visible: true,
                             is_tubi: false,
+                            shape_err: None,
                             pts: Default::default(),
                         });
                     }

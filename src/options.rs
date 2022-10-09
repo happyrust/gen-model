@@ -28,6 +28,8 @@ pub struct DbOption {
     #[clap(skip)]
     pub manual_db_nums: Option<Vec<i32>>,
 
+    #[clap(long)]
+    pub debug_print_world_transform: bool,
     #[clap(skip)]
     pub debug_root_refno: Option<String>,
     #[clap(skip)]

@@ -349,7 +349,6 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
-    /// todo 增加是否考虑 jusl，返回值的情况，需要和pdms保持一致性
     async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>> {
         let mut ancestors = VecDeque::new();
         let mut rotation = Quat::IDENTITY;
@@ -389,21 +388,31 @@ impl PdmsDataInterface for AiosDBManager {
                 match owner_basic.get_type() {
                     "FLOOR" => {
                         let sjus = att.get_str("JUSL").unwrap_or("unset");
-                        let children = self.get_children_refs(owner).await?;
-                        let mut off_z = 0.0;
-                        for c in children {
-                            let b = self.get_refno_basic(c).unwrap();
-                            if b.get_type() == "PLOO" {
-                                let height = self.get_attr(*b.key()).await?.get_f32("HEIG").unwrap_or_default();
-                                off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                                    -height
-                                }else if sjus == "UCEN" || sjus == "DCEN"{
-                                    -height/2.0
-                                }else{
-                                    0.0
-                                }
-                            }
-                        }
+                        // let children = self.get_children_refs(owner).await?;
+                        let height = self.get_attr(refno).await?.get_f32("HEIG").unwrap_or_default();
+                        let mut off_z = if sjus == "UTOP" || sjus == "DTOP" {
+                            -height
+                        }else if sjus == "UCEN" || sjus == "DCEN"{
+                            -height / 2.0
+                        }else{
+                            0.0
+                        };
+                        dbg!(height);
+                        dbg!(off_z);
+                        // for c in children {
+                        //     let b = self.get_refno_basic(c).unwrap();
+                        //     if b.get_type() == "PLOO" {
+                        //         let height = self.get_attr(*b.key()).await?.get_f32("HEIG").unwrap_or_default();
+                        //         dbg!(height);
+                        //         off_z = if sjus == "UTOP" || sjus == "DTOP" {
+                        //             -height
+                        //         }else if sjus == "UCEN" || sjus == "DCEN"{
+                        //             -height/2.0
+                        //         }else{
+                        //             0.0
+                        //         }
+                        //     }
+                        // }
                         pos.z += off_z;
                     }
                     "PLDATU" => {
@@ -493,11 +502,12 @@ impl PdmsDataInterface for AiosDBManager {
             });
         }
         //将rotation 还原为角度
-        let angles = rotation.to_euler(EulerRot::XYZ);
-        let rot_mat = Mat3::from_quat(rotation);
-        let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
-
-        // println!("{} : {:?}, ori: {:?}", refno.to_refno_str(), (translation, rotation), ori_str);
+        // let angles = rotation.to_euler(EulerRot::XYZ);
+        if self.db_option.debug_print_world_transform {
+            let rot_mat = Mat3::from_quat(rotation);
+            let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
+            println!("{} : {:?}", refno.to_refno_str(), (translation, ori_str));
+        }
         Ok(Some(glam::TransformRT {
             rotation,
             translation,
@@ -730,6 +740,10 @@ impl AiosDBManager {
         let group_transform = mgr.get_world_transform(branch_refno).await?.unwrap_or_default();
         let htube_pt = group_transform.transform_point3(group_att.get_vec3("HPOS")
             .ok_or(anyhow!("HPOS not exist".to_string()))?);
+        let hdir = group_transform.transform_vector3(group_att.get_vec3("HDIR")
+            .ok_or(anyhow!("HDIR not exist".to_string()))?).normalize_or_zero();
+        dbg!(math_tool::to_pdms_vec_str(&hdir));
+
         let bran_ttube_pt = group_transform.transform_point3(group_att.get_vec3("TPOS")
             .ok_or(anyhow!("TPOS not exist".to_string()))?);
 
@@ -766,15 +780,23 @@ impl AiosDBManager {
         let mut current_tubing = PdmsTubing {
             start_pt: htube_pt,
             end_pt: Vec3::ZERO,
+            desire_leave_dir: hdir,
+            desire_arrive_dir: Default::default(),
             bore,
             finished: false,
         };
+        // let mut cur_leave_dir = None;
         let children = mgr.get_children_refs(branch_refno).await.unwrap_or_default();
         if children.len() == 0 {
             if !current_tubing.finished && bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL {
                 current_tubing.end_pt = bran_ttube_pt;
                 current_tubing.finished = true;
-                brep_shape_map.entry(branch_refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                //需要检查href的方位
+                current_tubing.desire_arrive_dir = -current_tubing.get_dir();
+                //检查一下方向是否一致，不一致的，不显示，或者加标记味
+                if current_tubing.is_dir_ok() {
+                    brep_shape_map.entry(branch_refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                }
             }
             return Ok(true);
         }
@@ -800,17 +822,14 @@ impl AiosDBManager {
                     if geoms.axis_map.contains_key(&arrive) {
                         let p = &geoms.axis_map[&arrive].pt;
                         let a_pos = world_trans.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
+                        let dir = geoms.axis_map[&arrive].dir;
+                        let a_dir = world_trans.transform_vector3(dir).normalize_or_zero();
                         if !current_tubing.finished && a_pos.distance(current_tubing.start_pt) > TUBI_TOL {
                             current_tubing.end_pt = a_pos;
+                            current_tubing.desire_arrive_dir = a_dir;
                             current_tubing.finished = true;
-                            // dbg!(&current_tubing);
-                            //todo add direction check or spref not compatiable
-                            if abs_diff_eq!(current_tubing.end_pt.length(), 0.0) ||
-                                abs_diff_eq!(current_tubing.start_pt.length(), 0.0)
-                            {
-                                println!("Tubi is wrong: {}", refno.to_refno_string());
-                                //todo add 说明
-                            } else {
+                            if current_tubing.is_dir_ok() {
+                                // dbg!(&current_tubing);
                                 brep_shape_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
                             }
                         }
@@ -818,18 +837,15 @@ impl AiosDBManager {
                 }
                 if let Some(lstube) = attr.get_foreign_refno(if is_hang { "LSRO" } else { "LSTU" }) {
                     if let Ok(lstube_att) = mgr.get_attr(lstube).await {
-                        //
                         let lstube_cat_refno = lstube_att.get_foreign_refno("CATR").unwrap_or_default();
                         //todo check how to get the bore value
                         let tubi_geoms_info = resolve_desi_comp(refno, Some(lstube_cat_refno), mgr.as_ref(), is_debug).await.unwrap_or_default();
                         let mut has_tube_geom = false;
                         for tubi_geom in &tubi_geoms_info.geometries {
                             if let TubeImplied (d) = tubi_geom{
-                                bore = d.diameter;
+                                current_tubing.bore = d.diameter;
                                 has_tube_geom = true;
                                 break;
-                            }else{
-
                             }
                         }
                         if !has_tube_geom {
@@ -839,16 +855,16 @@ impl AiosDBManager {
                                 current_tubing.bore = params[if is_hang { 0 } else { 1 }] as f32;
                             }
                         }
-
-                        // dbg!(current_tubing.bore);
                     }
                 }
-                // dbg!(&current_tubing);
                 if let Some(leave) = attr.get_i32("LEAV") {
                     if geoms.axis_map.contains_key(&leave) {
                         let p = &geoms.axis_map[&leave].pt;
+                        let dir = geoms.axis_map[&leave].dir;
+                        let l_dir = world_trans.transform_vector3(dir).normalize_or_zero();
                         let l_pos = world_trans.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
                         current_tubing.start_pt = l_pos;
+                        current_tubing.desire_leave_dir = l_dir;
                         current_tubing.finished = false;
                     }
                 }
@@ -871,12 +887,10 @@ impl AiosDBManager {
                         //检查是否有一端是世界坐标原点
                         current_tubing.end_pt = bran_ttube_pt;
                         current_tubing.finished = true;
-                        if abs_diff_eq!(current_tubing.end_pt.length(), 0.0) ||
-                            abs_diff_eq!(current_tubing.start_pt.length(), 0.0)
-                        {
-                            println!("Tubi is wrong: {}", refno.to_refno_string());
-                            //todo add 说明
-                        } else {
+                        //todo 需要取得连接到的，tref的点对应的arrive方向
+                        current_tubing.desire_arrive_dir = -current_tubing.desire_leave_dir;
+
+                        if current_tubing.is_dir_ok() {
                             brep_shape_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
                         }
                     }
@@ -930,7 +944,7 @@ impl AiosDBManager {
             "WALL",
             "STWALL",
             "GWALL",
-            "FIXING",
+            // "FIXING",
             "PJOI",
             "PFIT",
             "GENSEC",
@@ -1043,6 +1057,7 @@ impl AiosDBManager {
                                 visible,
                                 is_tubi,
                                 pts,
+                                ..
                             } = shape;
                             if !visible || !brep_shape.check_valid() { continue; }
                             let trans = brep_shape.get_trans();
