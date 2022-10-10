@@ -782,6 +782,8 @@ impl AiosDBManager {
             end_pt: Vec3::ZERO,
             desire_leave_dir: hdir,
             desire_arrive_dir: Default::default(),
+            from: Default::default(),
+            to: Default::default(),
             bore,
             finished: false,
         };
