@@ -435,22 +435,21 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 let mut type_handles = vec![];
                 // 将部分数据保存到图数据库
                 {
-                    // if db_type == "CATA" || db_type == "DESI" {
-                    //     // 将 pdms_element 部分数据保存到图数据库中
-                    //     save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
-                    //     // 将兄弟关系保存到图数据库中
-                    //     save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
-                    //     save_foreign_refno_edges_in_sync(&db_option, foreign_refnos_map).await?;
-                    //     // 单独保存plin
-                    //     save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
-                    //     // 将 para 和 des_para保存的图数据库中
-                    //     save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
-                    //     // 将 dtse下的data部分数据保存到图数据库
-                    //     save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
-                    // }
+                    if db_type == "CATA" || db_type == "DESI" {
+                        // 将 pdms_element 部分数据保存到图数据库中
+                        save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
+                        // 将兄弟关系保存到图数据库中
+                        save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
+                        save_foreign_refno_edges_in_sync(&db_option, foreign_refnos_map).await?;
+                        // 单独保存plin
+                        save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                        // 将 para 和 des_para保存的图数据库中
+                        save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
+                        // 将 dtse下的data部分数据保存到图数据库
+                        save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                    }
                 }
                 for (type_hash, type_refnos) in type_ele_map {
-                    continue;
                     let info_pool_clone = info_pool.clone();
                     let filename_clone = file_name_clone.clone();
                     let project_clone = project.clone();
