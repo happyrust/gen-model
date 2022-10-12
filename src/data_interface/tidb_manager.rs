@@ -724,8 +724,6 @@ impl AiosDBManager {
             .ok_or(anyhow!("HPOS not exist".to_string()))?);
         let hdir = group_transform.transform_vector3(group_att.get_vec3("HDIR")
             .ok_or(anyhow!("HDIR not exist".to_string()))?).normalize_or_zero();
-        // dbg!(math_tool::to_pdms_vec_str(&hdir));
-
         let bran_ttube_pt = group_transform.transform_point3(group_att.get_vec3("TPOS")
             .ok_or(anyhow!("TPOS not exist".to_string()))?);
 
