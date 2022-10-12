@@ -104,8 +104,6 @@ async fn main() -> anyhow::Result<()> {
     //同步到图数据库
     if db_option.rebuild_arangodb {
         dbg!("正在同步图数据库");
-        // sync_pdms_to_graph_db(mgr.clone(),db_option.clone()).await?;
-        // sync_pdms_level_edges_to_graph_db(mgr.clone()).await?;
         dbg!("图数据库同步完成");
     }
 
@@ -121,26 +119,26 @@ async fn main() -> anyhow::Result<()> {
 
     if db_option.gen_model_mesh {
         // dbg!("正在生成模型");
-        let mut time = Instant::now();
-        AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
-        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+        // let mut time = Instant::now();
+        // AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
+        // println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
 
         // 将 instance 保存到图数据库
-        // dbg!("正在保存图数据库");
-        // let children_files = fs::read_dir("assets/instance/")?;
-        // for path in children_files {
-        //     let path = path?.path();
-        //     let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-        //     dbg!(&filename);
-        //     let mut file = fs::File::open(path)?;
-        //     let mut data = vec![];
-        //     file.read_to_end(&mut data)?;
-        //     let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
-        //     // let instance_mgr = Arc::new(change_instance_mgr_old_into_new(instance_mgr));
-        //     dbg!(&instance_mgr.inst_mgr.inst_map.len());
-        //     sync_instance_to_graph_db(mgr.clone(), Arc::new(instance_mgr)).await?;
-        // }
-        // dbg!("图数据库保存完成");
+        dbg!("正在保存图数据库");
+        let children_files = fs::read_dir("assets/instance/")?;
+        for path in children_files {
+            let path = path?.path();
+            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+            dbg!(&filename);
+            let mut file = fs::File::open(path)?;
+            let mut data = vec![];
+            file.read_to_end(&mut data)?;
+            let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
+            // let instance_mgr = Arc::new(change_instance_mgr_old_into_new(instance_mgr));
+            dbg!(&instance_mgr.inst_mgr.inst_map.len());
+            sync_instance_to_graph_db(mgr.clone(), Arc::new(instance_mgr)).await?;
+        }
+        dbg!("图数据库保存完成");
     }
 
 
@@ -199,6 +197,6 @@ fn get_noun_hash() {
 fn test_time() {
     use chrono::prelude::*;
     let local: DateTime<Local> = Local::now();
-    println!("year:{} , month: {} , day: {}, week_day:{},hour:{} , min: {} , sec:{}", local.year(), local.month(), local.day(),local.weekday(),
-             local.hour(),local.minute(),local.second());
+    println!("year:{} , month: {} , day: {}, week_day:{},hour:{} , min: {} , sec:{}", local.year(), local.month(), local.day(), local.weekday(),
+             local.hour(), local.minute(), local.second());
 }

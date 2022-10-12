@@ -1,4 +1,4 @@
-use aios_core::pdms_types::{EleGeosInfo, RefU64};
+use aios_core::pdms_types::{EleGeosInfo, EleGeosInfoJson, RefU64};
 use arangors_lite::{AqlQuery, Database};
 use sqlx::{MySql, Pool, Row};
 use crate::graph_db::structs::{PdmsEleGraphEdge, SSCEleGraphNode};
@@ -58,7 +58,7 @@ pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: 
     let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
     let pdms_instances = "pdms_instances";
     let aql = AqlQuery::new("
-    FOR c IN 1..10 inbound @refno ssc_edges
+    FOR c IN 0..10 inbound @refno ssc_edges
         PRUNE document(@collection,c._key) != null
         Filter document(@collection,c._key) != null
         let f = document(@collection,c._key)
@@ -73,9 +73,10 @@ pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: 
         }")
         .bind_var("refno", refno_aql)
         .bind_var("collection", pdms_instances);
-    let result: Vec<EleGeosInfo> = database.aql_query(aql).await?;
+    let result: Vec<EleGeosInfoJson> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }
-    Ok(Some(result))
+    let r  = result.into_iter().map(|x| { EleGeosInfo::from_json_type(x)}).collect::<Vec<_>>();
+    Ok(Some(r))
 }
 
 

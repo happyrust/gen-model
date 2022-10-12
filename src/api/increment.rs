@@ -9,8 +9,7 @@ use serde::{Serialize, Deserialize};
 
 
 pub async fn query_latest_data(version: u32, pool: &Pool<MySql>) -> anyhow::Result<Vec<IncrementDataSql>> {
-    let mut result = VecDeque::new();
-    let mut order_map = BTreeMap::new();
+    let mut result = Vec::new();
     let sql = gen_query_latest_data_sql(version);
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     if let Ok(vals) = vals {
@@ -23,7 +22,7 @@ pub async fn query_latest_data(version: u32, pool: &Pool<MySql>) -> anyhow::Resu
             let old_data: WholeAttMap = bincode::deserialize(&val.get::<Vec<u8>, _>("OLD_DATA"))?;
             let new_data: WholeAttMap = bincode::deserialize(&val.get::<Vec<u8>, _>("NEW_DATA"))?;
             let time = val.get::<String, _>("TIME");
-            order_map.insert(version, IncrementDataSql {
+            result.push(IncrementDataSql {
                 id,
                 refno,
                 operate: NewDataOperate::from(operate),
@@ -35,10 +34,7 @@ pub async fn query_latest_data(version: u32, pool: &Pool<MySql>) -> anyhow::Resu
             });
         }
     }
-    for order in order_map {
-        result.push_front(order.1);
-    }
-    Ok(result.into_iter().collect())
+    Ok(result)
 }
 
 fn gen_query_latest_data_sql(version: u32) -> String {

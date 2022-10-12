@@ -6,11 +6,12 @@ use aios_core::pdms_types::*;
 use arangors_lite::{Connection, Database};
 use calamine::Error::De;
 use dashmap::DashSet;
-use sqlx::{MySql, Pool, Row};
+use sqlx::{Error, MySql, Pool, Row};
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::api::element::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};
+use sqlx::mysql::MySqlRow;
 use crate::aql_api::children::query_owner_with_type_aql;
 use crate::defines::{AiosString, CACHED_MDB_SITE_MAP};
 
@@ -151,6 +152,7 @@ pub async fn query_children_id_name_with_type(refno: RefU64, att_type: &str, poo
 /// 模糊查询 类型为 att_type ，name 中包含指定值 的所有 refno和 name
 pub async fn fuzzy_query_refnos_by_name(att_type: String, name: String, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = vec![];
+    let att_type = if att_type == "\"\"" { None } else { Some(att_type) };
     let sql = gen_fuzzy_query_refnos_by_name_sql(att_type, name);
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     for val in vals {
@@ -159,6 +161,38 @@ pub async fn fuzzy_query_refnos_by_name(att_type: String, name: String, pool: &P
         result.push((refno, name));
     }
     Ok(result)
+}
+
+pub async fn fuzzy_query_refnos_by_name_limit(name: String, numbdbs: &Vec<i32>, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
+    let mut result = vec![];
+    let sql = gen_fuzzy_query_refnos_by_name_sql_limit(name, numbdbs);
+    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    for val in vals {
+        let refno = RefU64(val.get::<i64, _>("ID") as u64);
+        let name = val.get::<String, _>("NAME");
+        result.push((refno, name));
+    }
+    Ok(result)
+}
+
+/// 获取参考号集合属于哪些 numbdb
+pub async fn query_numbdb_from_refnos(refnos: Vec<RefU64>, pool: &Pool<MySql>) -> anyhow::Result<Vec<i32>> {
+    if refnos.is_empty() { return Ok(vec![]); }
+    let sql = gen_query_numbdb_from_refnos(refnos);
+    let val = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    return match val {
+        Ok(vals) => {
+            let mut result = vec![];
+            for val in vals {
+                result.push(val.get::<i32, _>("NUMBDB"));
+            }
+            Ok(result)
+        }
+        Err(e) => {
+            dbg!(&e);
+            Ok(vec![])
+        }
+    };
 }
 
 /// 获取参考号属于那个dbnum
@@ -252,6 +286,19 @@ pub async fn cache_site_node(mdb: &str, module: &str, pool: &Pool<MySql>) {
     }
 }
 
+pub async fn cache_mdb_module_numbdbs(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<i32>> {
+    if let Ok(world) = query_world(mdb, module, pool).await {
+        if CACHED_MDB_SITE_MAP.contains_key(&world.refno) {
+            let children = CACHED_MDB_SITE_MAP.get(&world.refno).unwrap();
+            let children = children.value().iter()
+                .map(|x| RefU64::from_refno_str(&x.refno).unwrap_or(RefU64(0))).collect::<Vec<RefU64>>();
+            let result = query_numbdb_from_refnos(children, pool).await?;
+            return Ok(result);
+        }
+    }
+    Ok(vec![])
+}
+
 /// 找到某numbdb下的所有指定类型的参考号
 pub async fn query_type_refnos_by_numbdb(numbdb: i32, att_type: String, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
     let mut result = vec![];
@@ -337,9 +384,29 @@ fn gen_query_children_id_name_with_type_sql(refno: RefU64, att_type: &str) -> St
     sql
 }
 
-fn gen_fuzzy_query_refnos_by_name_sql(att_type: String, name: String) -> String {
+fn gen_fuzzy_query_refnos_by_name_sql(att_type: Option<String>, name: String) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND NAME LIKE '%{}%'", att_type, name));
+    sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE NAME LIKE '%{}%' ", name));
+    if att_type.is_some() {
+        sql.push_str(&format!("AND TYPE = '{}' ", att_type.unwrap()))
+    }
+    sql
+}
+
+fn gen_fuzzy_query_refnos_by_name_sql_limit(name: String, numbdbs: &Vec<i32>) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE NAME LIKE '%{}%' ", name));
+    if !numbdbs.is_empty() {
+        sql.push_str("AND NUMBDB IN (");
+    }
+    for numbdb in numbdbs {
+        sql.push_str(&format!("{} ,", numbdb.to_string()));
+    }
+    if !numbdbs.is_empty() {
+        sql.remove(sql.len() - 1);
+        sql.push_str(")");
+    }
+    sql.push_str("LIMIT 10");
     sql
 }
 
@@ -358,6 +425,17 @@ fn gen_query_refnos_by_numbdb(numbdb: i32, att_type: String) -> String {
 fn gen_query_contain_noun_refnos(noun: String) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT TABLE_NAME FROM information_schema.columns WHERE column_name='{}'", noun));
+    sql
+}
+
+fn gen_query_numbdb_from_refnos(refnos: Vec<RefU64>) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT NUMBDB FROM {PDMS_ELEMENTS_TABLE} WHERE ID IN (", ));
+    for refno in refnos {
+        sql.push_str(&format!("{} ,", refno.0.to_string()));
+    }
+    sql.remove(sql.len() - 1);
+    sql.push_str(")");
     sql
 }
 
