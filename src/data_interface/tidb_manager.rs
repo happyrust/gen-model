@@ -388,7 +388,6 @@ impl PdmsDataInterface for AiosDBManager {
                 match owner_basic.get_type() {
                     "FLOOR" => {
                         let sjus = att.get_str("JUSL").unwrap_or("unset");
-                        // let children = self.get_children_refs(owner).await?;
                         let height = self.get_attr(refno).await?.get_f32("HEIG").unwrap_or_default();
                         let mut off_z = if sjus == "UTOP" || sjus == "DTOP" {
                             -height
@@ -397,22 +396,6 @@ impl PdmsDataInterface for AiosDBManager {
                         }else{
                             0.0
                         };
-                        dbg!(height);
-                        dbg!(off_z);
-                        // for c in children {
-                        //     let b = self.get_refno_basic(c).unwrap();
-                        //     if b.get_type() == "PLOO" {
-                        //         let height = self.get_attr(*b.key()).await?.get_f32("HEIG").unwrap_or_default();
-                        //         dbg!(height);
-                        //         off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                        //             -height
-                        //         }else if sjus == "UCEN" || sjus == "DCEN"{
-                        //             -height/2.0
-                        //         }else{
-                        //             0.0
-                        //         }
-                        //     }
-                        // }
                         pos.z += off_z;
                     }
                     "PLDATU" => {
@@ -422,7 +405,6 @@ impl PdmsDataInterface for AiosDBManager {
                         let pkdi = att.get_f32("PKDI").unwrap_or_default();
                         //获取比例的位置
                         pos = pos + zdis;
-                        // let pkdi_pos =
                     }
                     _ => {}
                 }
@@ -742,7 +724,7 @@ impl AiosDBManager {
             .ok_or(anyhow!("HPOS not exist".to_string()))?);
         let hdir = group_transform.transform_vector3(group_att.get_vec3("HDIR")
             .ok_or(anyhow!("HDIR not exist".to_string()))?).normalize_or_zero();
-        dbg!(math_tool::to_pdms_vec_str(&hdir));
+        // dbg!(math_tool::to_pdms_vec_str(&hdir));
 
         let bran_ttube_pt = group_transform.transform_point3(group_att.get_vec3("TPOS")
             .ok_or(anyhow!("TPOS not exist".to_string()))?);
@@ -1066,7 +1048,7 @@ impl AiosDBManager {
                             let geo_hash = cached_mesh_mgr.gen_pdms_mesh(brep_shape.clone(), replace_mesh);
                             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
                             if bbox.is_none() {
-                                dbg!(geo_hash);
+                                dbg!(refno.to_refno_string());
                                 dbg!(&brep_shape);
                             }
                             let mut bbox = bbox.unwrap_or_default();
@@ -1303,12 +1285,6 @@ impl AiosDBManager {
                 loop_refnos = mgr.get_refnos_by_types(&db_option.project_name, &vec!["PLOO", "LOOP"], db_nos).await?;
             }
         }
-        // let loop_refnos = if target_debug_refno.is_none() {
-        //     mgr.get_refnos_by_types(&db_option.project_name, &vec!["PLOO", "LOOP"], db_nos).await?
-        // }else{
-        //     println!("正在调试loop构件: {}", target_debug_refno.unwrap().to_refno_string());
-        //
-        // };
         let loop_cnt = loop_refnos.len();
         //处理loop elements
         let batch_chunks_cnt = loop_cnt / batch_size + 1;
