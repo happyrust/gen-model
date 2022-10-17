@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use aios_core::consts::*;
-use aios_core::pdms_types::{AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec};
+use aios_core::pdms_types::{AttrMap, AttrVal, CachedMeshesMgr, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{convert_to_hash, db1_dehash, db1_hash};
 use aios_core::tool::float_tool::f64_round_3;
@@ -187,7 +187,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
 
     Ok(())
 }
-
 
 pub fn gen_explicit_att_insert_sql(refno: RefU64, type_name: &str, owner: RefU64, e_att: &AttrMap) -> String {
     let mut sql = String::new();
@@ -695,6 +694,25 @@ fn set_uda_attr(type_ele_map: &DashMap<u32, HashSet<RefU64>>, total_attr_map: &D
             let dflt = dflt.unwrap();
             for noun in elel {
                 uda_map.entry(db1_dehash(noun as u32)).or_insert_with(AttrMap::default).entry(NounHash(db1_hash(udna))).or_insert(dflt.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn save_pdms_mesh_tidb(mgr: CachedMeshesMgr, pool: &Pool<MySql>) -> anyhow::Result<()> {
+    for chunks in &mgr.meshes.iter().chunks(1000) {
+        let mut sql = format!("INSERT IGNORE INTO {PDMS_MESH} (HASH,MESH) VALUES ");
+        for map in chunks.into_iter() {
+            sql.push_str(&format!("( {}, 0x{}) ,", map.key(), hex::encode(&map.value().into_compress_bytes())));
+        }
+        sql.remove(sql.len() - 1);
+        let result = pool.execute(sql.as_str()).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(e);
+                dbg!(sql.as_str());
             }
         }
     }
