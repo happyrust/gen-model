@@ -121,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
     if db_option.gen_model_mesh {
         dbg!("正在生成模型");
         let mut time = Instant::now();
-        AiosDBManager::cache_geos_data(mgr.clone(), db_option).await?;
+        AiosDBManager::cache_geos_data(mgr.clone(), db_option.clone()).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
 
         // 将 instance 保存到图数据库
