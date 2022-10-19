@@ -138,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
             let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
             // let instance_mgr = Arc::new(change_instance_mgr_old_into_new(instance_mgr));
             dbg!(&instance_mgr.inst_mgr.inst_map.len());
-            sync_instance_to_graph_db(mgr.clone(), Arc::new(instance_mgr)).await?;
+            // sync_instance_to_graph_db(mgr.clone(), Arc::new(instance_mgr)).await?;
         }
         dbg!("正在保存mesh");
         if let Some(project_pool) = mgr.project_map.get(&db_option.project_name) {
@@ -162,7 +162,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut data = vec![];
                 file.read_to_end(&mut data)?;
                 let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-                save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
+                // save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
             }
         }
         dbg!("图数据库保存完成");

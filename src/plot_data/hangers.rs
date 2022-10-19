@@ -3,7 +3,9 @@ use std::env;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
-use arangors_lite::Database;
+use aios_core::plot_struct::hanger::*;
+use arangors_lite::{AqlQuery, Database};
+use arangors_lite::collection::CollectionType::{Edge, Document};
 use calamine::{Error, open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::DashMap;
 use glam::{Vec2, Vec3};
@@ -21,78 +23,12 @@ use crate::api::attr::{query_explicit_attr, query_implicit_attr};
 use crate::api::element::query_name;
 use crate::api::ssc_data::travel_ssc_children;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_db_option};
+use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, save_arangodb_with_db_option};
 use crate::options::DbOption;
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::interface::PdmsDataInterface;
 
-/// 支吊架出图所需的所有数据
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HangerData {
-    // 支吊架名称
-    pub name: String,
-    // 支吊架下面的所有参考号
-    pub refnos: Vec<RefU64>,
-    // 支吊架对应的 atta的名称 和 管道 bran 参考号
-    pub bran_refno: Vec<(String, RefU64)>,
-    // 管道的数据以及物项编码
-    pub pipe_datas: Vec<PipeData>,
-    // 支吊架中图签 pcla 需要的数据
-    pub pcla_datas: Vec<PclaData>,
-    // 支吊架中图签 sctn 需要的数据
-    pub sctn_datas: Vec<SctnData>,
-    // 支吊架中图签 pfit 需要的数据
-    pub pfit_datas: Vec<PfitData>,
-    // 支吊架中图签 pane 需要的数据
-    pub pave_datas: Vec<PaneData>,
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PipeData {
-    pub mark: String,
-    // atta name 的 最后一位
-    pub number: String,
-    // pipe的编号
-    pub elevation: i32,
-    // atta 世界坐标的 z坐标
-    // 物项编码
-    pub item_code: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PclaData {
-    pub spre_name: String,
-    pub count: u32,
-    pub unit_weight: u32,
-    pub total_weight: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SctnData {
-    /// 截面尺寸
-    pub across_section: String,
-    // spref name 的 "/" 分割的最后一个
-    /// 长度
-    pub length: i32,
-    /// 数量
-    pub count: u32,
-    pub unit_weight: u32,
-    pub total_weight: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PfitData {
-    pub spre_name: String,
-    pub count: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PaneData {
-    pub func_name: String,
-    pub count: u32,
-    pub unit_weight: f32,
-    pub total_weight: f32,
-}
 
 /// 提前将支吊架出图需要的数据存储在图数据库中
 pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option<HangerData>> {
@@ -111,7 +47,7 @@ pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option
     for (mut atta_name, atta_refno) in atta_refnos {
         let bran = mgr.get_owner(atta_refno);
         let bran_name = query_name(bran, pool.value()).await?;
-        bran_refnos.push((atta_name.clone(),bran));
+        bran_refnos.push((atta_name.clone(), bran));
         // 获取 bran_name 按 "-" 分割的前两个
         let bran_name_split = bran_name.split('-').map(|x| x.to_string()).collect::<Vec<_>>();
         if bran_name_split.len() < 3 { continue; }
@@ -129,7 +65,7 @@ pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option
         let elevation = mgr.get_world_transform(atta_refno).await?;
         if elevation.is_none() { continue; }
         let elevation = elevation.unwrap().translation.z as i32;
-        pipe_datas.push(PipeData {
+        pipe_datas.push(HangerPipeData {
             mark,
             number,
             elevation,
@@ -165,9 +101,9 @@ pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option
     // 统计 pave 的数据
     let pave_datas = get_pane_data(&stru_children, database, pool.value()).await?;
     let hangers_data = HangerData {
-        name: atta_name.to_string(),
+        _key: atta_name.to_string(),
         refnos,
-        bran_refno:bran_refnos,
+        bran_refno: bran_refnos,
         pipe_datas,
         pcla_datas: pcla_data,
         sctn_datas,
@@ -200,7 +136,7 @@ async fn get_all_hangers_with_atta(atta_name: &str, pool: &Pool<MySql>) -> anyho
 }
 
 /// 获取需要的 pcla 的数据
-async fn get_pcla_data(pcla_refnos: Vec<PdmsElement>, database: &Database) -> anyhow::Result<Vec<PclaData>> {
+async fn get_pcla_data(pcla_refnos: Vec<PdmsElement>, database: &Database) -> anyhow::Result<Vec<HangerPclaData>> {
     let mut pcla_datas = vec![];
     let mut pcla_map = HashMap::new(); // pcla 只记录 spre的 name 和 相同 spre的数量
     for pcla_refno in pcla_refnos {
@@ -218,7 +154,7 @@ async fn get_pcla_data(pcla_refnos: Vec<PdmsElement>, database: &Database) -> an
         *count += 1;
     }
     for pcla_data in pcla_map {
-        pcla_datas.push(PclaData {
+        pcla_datas.push(HangerPclaData {
             spre_name: pcla_data.0,
             count: pcla_data.1,
             unit_weight: 0,
@@ -229,7 +165,7 @@ async fn get_pcla_data(pcla_refnos: Vec<PdmsElement>, database: &Database) -> an
 }
 
 /// 获取 sctn 的数据
-async fn get_sctn_data(stru_children: &Vec<PdmsElement>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<Vec<SctnData>> {
+async fn get_sctn_data(stru_children: &Vec<PdmsElement>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<Vec<HangerSctnData>> {
     let mut result = vec![];
     let mut sctn_map = HashMap::new();
     for child in stru_children {
@@ -260,7 +196,7 @@ async fn get_sctn_data(stru_children: &Vec<PdmsElement>, database: &Database, po
         *count += 1;
     }
     for ((across_section, distance), count) in sctn_map.into_iter() {
-        result.push(SctnData {
+        result.push(HangerSctnData {
             across_section: across_section.to_string(),
             length: distance,
             count,
@@ -272,7 +208,7 @@ async fn get_sctn_data(stru_children: &Vec<PdmsElement>, database: &Database, po
 }
 
 /// 获取 pfit 的数据
-async fn get_pfit_data(stru_children: &Vec<PdmsElement>, database: &Database) -> anyhow::Result<Vec<PfitData>> {
+async fn get_pfit_data(stru_children: &Vec<PdmsElement>, database: &Database) -> anyhow::Result<Vec<HangerPfitData>> {
     let mut result = Vec::new();
     let mut pfit_map = HashMap::new();
     for stru_child in stru_children {
@@ -290,7 +226,7 @@ async fn get_pfit_data(stru_children: &Vec<PdmsElement>, database: &Database) ->
         *count += 1;
     }
     for (spre_name, count) in pfit_map.into_iter() {
-        result.push(PfitData {
+        result.push(HangerPfitData {
             spre_name,
             count,
         })
@@ -299,7 +235,7 @@ async fn get_pfit_data(stru_children: &Vec<PdmsElement>, database: &Database) ->
 }
 
 /// 获取 pane 的数据
-async fn get_pane_data(stru_children: &Vec<PdmsElement>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<Vec<PaneData>> {
+async fn get_pane_data(stru_children: &Vec<PdmsElement>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<Vec<HangerPaneData>> {
     let mut result = vec![];
     let mut pane_map = HashMap::new();
     for stru_child in stru_children {
@@ -321,10 +257,7 @@ async fn get_pane_data(stru_children: &Vec<PdmsElement>, database: &Database, po
         for child in pane_children {
             // 获取 ploo 的 heig
             if child.noun == "PLOO" {
-                // let ploo_refno = RefU64::from_refno_str(&child.refno);
                 let ploo_refno = child.refno;
-                // if ploo_refno.is_err() { continue; }
-                // let ploo_refno = ploo_refno.unwrap();
                 let ref_basic = CachedRefBasic { owner: child.owner, table: child.noun.to_string() };
                 let implicit_attr = query_implicit_attr(ploo_refno, &ref_basic, pool, Some(vec!["HEIG"])).await?;
                 let heig_opt = implicit_attr.get_f64("HEIG");
@@ -361,7 +294,7 @@ async fn get_pane_data(stru_children: &Vec<PdmsElement>, database: &Database, po
     }
     for ((func_name, unit_weight), count) in pane_map {
         let unit_weight = (unit_weight as f32 / 100.0 * 10.0).trunc() / 10.0; // 保留 1位 小数 ，
-        result.push(PaneData {
+        result.push(HangerPaneData {
             func_name,
             count,
             unit_weight,
@@ -375,6 +308,15 @@ fn gen_query_stru_and_rest_with_atta_name_sql(atta_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID,TYPE,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE NAME LIKE '%{}%' AND TYPE IN ( 'STRU','REST','ATTA')", atta_name));
     sql
+}
+
+/// 从图数据库获取单个hanger需要的数据
+pub async fn query_hangers_element(atta_name: &str, database: &Database) -> anyhow::Result<Vec<HangerData>> {
+    let aql = AqlQuery::new("\
+        return document('hanger_data',@name)
+    ").bind_var("name", atta_name);
+    let result: Vec<HangerData> = database.aql_query(aql).await?;
+    Ok(result)
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -438,13 +380,16 @@ async fn test_save_hangers_data() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
+
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    create_arangodb_conn(&database, "hanger_data", Document).await?;
+    create_arangodb_conn(&database, "hanger_edges", Edge).await?;
 
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
     let data = save_hangers_data(mgr.clone()).await?;
     if let Some(data) = data {
         let json = serde_json::to_value(&vec![data]).unwrap();
-        save_arangodb_with_db_option(json,&mgr.db_option,"hanger_data").await?;
+        save_arangodb_with_db_option(json, &mgr.db_option, "hanger_data").await?;
     }
     Ok(())
 }
