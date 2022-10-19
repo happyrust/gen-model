@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
 use arangors_lite::{AqlQuery, Connection, Database};
 use serde::{Serialize, Deserialize};
-use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsElementAql, PdmsRefnoNameAql, PdmsRefnoTypeAql};
+use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsElementAql, PdmsPLINAttrAql, PdmsRefnoNameAql, PdmsRefnoTypeAql};
 use crate::consts::URL;
 
 
@@ -67,6 +67,21 @@ pub async fn query_children_aql_order(arango_database: &Database, refno: RefU64)
         }
     }
     Ok(r)
+}
+
+/// 找到该节点同级的上一个节点
+pub async fn query_brother_node_front(refno: RefU64, database: &Database) -> anyhow::Result<Option<(RefU64, String)>> {
+    let key = format!("pdms_eles/{}", refno.to_url_refno());
+    let aql = AqlQuery::new("\
+        for v in 1 outbound @key sibl_edges
+            return { '_key' : v._key, 'noun': v.noun }
+    ").bind_var("key", key);
+    let mut result: Vec<PdmsRefnoTypeAql> = database.aql_query(aql).await?;
+    if result.is_empty() { return Ok(None); }
+    let result = result.remove(0);
+    let refno = RefU64::from_url_refno(result.refno);
+    if refno.is_none() { return Ok(None); }
+    return Ok(Some((refno.unwrap(), result.noun)));
 }
 
 /// 获取refno的children，返回Vec<(RefU64, String)>

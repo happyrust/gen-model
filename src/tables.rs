@@ -258,6 +258,15 @@ pub fn gen_create_file_version_table_sql() -> String {
     sql
 }
 
+pub fn gen_create_pdms_mesh_table_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {PDMS_MESH} ("));
+    sql.push_str(&format!("{} BIGINT UNSIGNED  PRIMARY KEY ,", "HASH"));
+    sql.push_str(&format!("{} BLOB ", "MESH"));
+    sql.push_str(");");
+    sql
+}
+
 #[test]
 fn test_replace() {
     let mut r = "a '' b c a";

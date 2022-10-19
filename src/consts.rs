@@ -16,6 +16,7 @@ pub const PDMS_PROJECT_MDB_TABLE_JSON: &'static str = "PROJECT_MDB_JSON";
 pub const ROOM_CODE: &'static str = "ROOM_CODE";
 pub const VERSION_DATA: &'static str = "VERSION_DATA";
 pub const PDMS_VERSION: &'static str = "PDMS_VERSION";
+pub const PDMS_MESH: &'static str = "PDMS_MESH";
 // project_mdb
 // 专业表单
 pub const PROFESSION_TX_XT: &'static str = "TX_XT";

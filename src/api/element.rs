@@ -12,6 +12,7 @@ use itertools::Itertools;
 use sea_orm::sea_query::any;
 use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use crate::api::attr::{query_explicit_attr, query_implicit_attr};
+use crate::api::children::{query_numbdb_by_refno, query_numbdb_from_refnos};
 use crate::api::dbno_filename::{query_dbtype_from_dbno, query_dbtype_from_dbno_count};
 use crate::api::project_mdb::query_world_data;
 use crate::api::test_sample::{get_test_info_pool, get_test_sample_pool};
@@ -51,18 +52,6 @@ pub async fn query_world_children(mdb: &str, model: &str, pool: &Pool<MySql>) ->
 
 /// 获取world下的pdms elements
 pub async fn query_world_children_eles(mdb: &str, model: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
-    let mut result = vec![];
-    let mdb = format!("/{mdb}");
-    let world_data = query_world_data(&mdb, model, pool).await?;
-    let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
-    for world in data {
-        let children = query_children_eles(world, pool).await?;
-        result.push(children);
-    }
-    Ok(result.into_iter().flatten().collect())
-}
-
-pub async fn query_world_children_elenode(mdb: &str, model: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
     let mut result = vec![];
     let mdb = format!("/{mdb}");
     let world_data = query_world_data(&mdb, model, pool).await?;
@@ -607,6 +596,7 @@ pub fn gen_query_name_sql(refno: RefU64) -> String {
     sql.push_str(&format!("SELECT NAME FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND IS_DEL = 0;", refno.0));
     sql
 }
+
 
 #[tokio::test]
 async fn test_get_mdb_type() -> anyhow::Result<()> {

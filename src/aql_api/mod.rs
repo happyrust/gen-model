@@ -8,6 +8,7 @@ pub mod foreign_refnos;
 pub mod plin_attr;
 pub mod para_value;
 pub mod dtse_attr;
+pub mod pdms_mesh;
 
 /// 存放在图数据库的attr
 #[derive(Debug, Default, Serialize, Deserialize)]

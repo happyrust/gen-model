@@ -4,11 +4,20 @@ use aios_core::pdms_types::RefU64;
 use sqlx::{MySql, Pool, Row};
 use sqlx::Executor;
 use anyhow::Result;
+use dashmap::DashMap;
 use futures::poll;
+use lazy_static::lazy_static;
 use crate::api::children::query_numbdb_by_refno;
 use crate::consts::*;
 use crate::api::element::query_mdb_module_worlds;
 use crate::data_interface::tidb_manager::AiosDBManager;
+
+lazy_static! {
+    pub static ref MDB_MODULE_NUMBDBS: Vec<i32> = {
+        let mut result = vec![];
+        result
+    };
+}
 
 pub async fn insert_project_mdb(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<()> {
     let project_mdb = query_mdb_module_worlds(pool, info_pool).await?;

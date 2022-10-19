@@ -33,7 +33,7 @@ pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: Ar
     let mut edges = vec![];
     for chunk in &instance_mgr.clone().inst_mgr.inst_map.clone().into_iter().chunks(1000) {
         for k in chunk {
-            let json = serde_json::to_value(k.1).unwrap();
+            let json = serde_json::to_value(k.1.to_json_type()).unwrap();
             instances.push(json);
             let edge = PdmsInstanceGraphEdge {
                 _from: format!("pdms_eles/{}", k.0.to_refno_normal_string()),
@@ -43,7 +43,7 @@ pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: Ar
         }
         let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
+                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true }")
             .bind_var("@collection", collection)
             .bind_var("elements", take(&mut instances));
         database.aql_query::<Vec<()>>(aql).await?;

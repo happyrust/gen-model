@@ -41,7 +41,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             // dbg!(spre.to_string_hashmap());
             if spre.contains_attr_name("CATR") {
                 scom_ref = spre.get_foreign_refno("CATR");
-            }else{
+            } else {
                 //SFIT 的scom 和 spre 是同一个
                 scom_ref = Some(spre_ref);
             }
@@ -60,7 +60,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     if !CACHED_SCOM_INFO_MAP.contains_key(&scom_ref) {
         if let Ok(mut scom_info) = query_scom_info(scom_ref, interface, is_debug).await {
             CACHED_SCOM_INFO_MAP.insert(scom_ref, scom_info).unwrap();
-        }else{
+        } else {
             let error_info = format!("元件库: {} 解析出错", scom_ref.to_refno_string());
             println!("{}", &error_info);
             return Err(anyhow!(error_info));
@@ -71,7 +71,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     //     dbg!(&scom_info);
     // }
     let mut context: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
-    if let Some(v) =  desi_att.get_as_string("JUSL"){
+    if let Some(v) = desi_att.get_as_string("JUSL") {
         context.insert("JUSL".into(), v.into());
     }
     context.insert("DESI_REFNO".into(), refno.to_refno_str());
@@ -141,18 +141,18 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
         }
     }
 
-    let mut plin_map =  HashMap::new();
+    let mut plin_map = HashMap::new();
     if let Some(pstr_refno) = attr_map.get_foreign_refno("PSTR") {
         let pstr_am = interface.get_children_attrs(pstr_refno).await?;
         for a in pstr_am {
             if let Some(k) = a.get_as_string("PKEY") {
                 plin_map.insert(
                     k,
-                    PlinParam{
+                    PlinParam {
                         vxy: [a.get_as_string("PX").unwrap_or("0".to_string()), a.get_as_string("PY").unwrap_or("0".to_string())],
                         dxy: [a.get_as_string("DX").unwrap_or("0".to_string()), a.get_as_string("DY").unwrap_or("0".to_string())],
-                        plax: a.get_as_string("PLAX").unwrap_or("unset".to_string())
-                    }
+                        plax: a.get_as_string("PLAX").unwrap_or("unset".to_string()),
+                    },
                 );
             }
         }
@@ -263,12 +263,12 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         if scom_info.plin_map.contains_key(plin.as_str()) {
             // dbg!(&scom_info.plin_map);
             Some(scom_info.plin_map.get(plin.as_str()).unwrap().clone())
-        }else if scom_info.plin_map.contains_key("NA") {
+        } else if scom_info.plin_map.contains_key("NA") {
             Some(scom_info.plin_map.get("NA").unwrap().clone())
-        }else{
+        } else {
             None
         }
-    }else{
+    } else {
         None
     };
     let geometries = resolve_gms(&scom_info.gm_params, &jusl_param, &cur_context, &axis_map);
