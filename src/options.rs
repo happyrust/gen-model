@@ -68,4 +68,6 @@ pub struct DbOption {
     pub arangodb_user: String,
     #[clap(long)]
     pub arangodb_password: String,
+    #[clap(long)]
+    pub arangodb_database: String,
 }

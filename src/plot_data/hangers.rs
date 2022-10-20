@@ -28,8 +28,6 @@ use crate::options::DbOption;
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::interface::PdmsDataInterface;
 
-
-
 /// 提前将支吊架出图需要的数据存储在图数据库中
 pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option<HangerData>> {
     let project_map = &mgr.project_map;
