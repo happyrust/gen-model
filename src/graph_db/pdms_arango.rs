@@ -29,7 +29,7 @@ use crate::options::DbOption;
 pub async fn get_arangodb_conn_from_db_option(db_option: &DbOption) -> anyhow::Result<Database> {
     let conn = Connection::establish_jwt(&db_option.arangodb_url, &db_option.arangodb_user, &db_option.arangodb_password)
         .await?;
-    Ok(conn.db("pdms").await?)
+    Ok(conn.db(&db_option.arangodb_database).await?)
 }
 
 pub async fn create_arangodb_conn(database: &Database, collection_name: &str, collection_type: CollectionType) -> anyhow::Result<()> {

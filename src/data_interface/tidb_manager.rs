@@ -553,7 +553,7 @@ impl AiosDBManager {
         let conn = Connection::establish_jwt(&self.db_option.arangodb_url, &self.db_option.arangodb_user, &self.db_option.arangodb_password)
             .await?;
 
-        Ok(conn.db("pdms").await?)
+        Ok(conn.db(&self.db_option.arangodb_database).await?)
     }
 
     pub fn gen_pool_from_refno(self, refno: RefU64) -> anyhow::Result<Option<Pool<MySql>>> {
@@ -1587,8 +1587,8 @@ impl AiosDBManager {
 
             println!("开始处理db: {db_no}");
             // let handle = tokio::spawn(async move {
-            Self::cache_cata_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &project,
-                                  Some(vec![db_no]), &db_option_clone).await.unwrap();
+                Self::cache_cata_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &project,
+                                      Some(vec![db_no]), &db_option_clone).await.unwrap();
             // });
             // handles.push(handle);
             let instance_mgr_clone = instance_mgr.clone();
@@ -1597,8 +1597,8 @@ impl AiosDBManager {
             let project = project.clone();
             let mgr_clone = mgr.clone();
             // let handle = tokio::spawn(async move {
-            // Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option, Some(vec![db_no])).await.unwrap();
-            // Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option, Some(vec![db_no])).await.unwrap();
+                Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option, Some(vec![db_no])).await.unwrap();
+                Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option, Some(vec![db_no])).await.unwrap();
             // });
             // handles.push(handle);
             // }
