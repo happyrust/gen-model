@@ -167,30 +167,10 @@ async fn main() -> anyhow::Result<()> {
         }
         dbg!("图数据库保存完成");
     }
-
-
     Ok(())
 }
 
-fn change_instance_mgr_old_into_new(instance_mgr: PdmsMeshInstanceMgrOld) -> PdmsMeshInstanceMgr {
-    let inst_mgr = DashMap::new();
-    for (k, v) in instance_mgr.inst_mgr.inst_map {
-        inst_mgr.insert(k, EleGeosInfo {
-            _key: k.to_url_refno(),
-            data: v.data,
-            visible: v.visible,
-            generic_type: v.generic_type,
-            world_transform: v.world_transform,
-            ptset_map: v.ptset_map,
-            flow_pt_indexs: v.flow_pt_indexs,
-        });
-    }
-    let inst_mgr = ShapeInstancesMgr { inst_map: inst_mgr };
-    PdmsMeshInstanceMgr {
-        inst_mgr,
-        level_shape_mgr: instance_mgr.level_shape_mgr,
-    }
-}
+
 
 /// 提前创建图数据库需要的几个collection
 async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
