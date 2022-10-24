@@ -1135,6 +1135,7 @@ impl AiosDBManager {
                             world_transform: (trans_origin.rotation, trans_origin.translation, Vec3::ONE),
                             ptset_map: refno_ptset_map.remove(&child_refno).map(|x| x.1).unwrap_or_default(),
                             flow_pt_indexs: vec![child_att.get_i32("ARRI"), child_att.get_i32("LEAV")],
+                            ..default()
                         };
                         let mut geo_insts = &mut geos_info.data;
                         for shape in shapes {
@@ -1158,6 +1159,7 @@ impl AiosDBManager {
                             }
                             let mut aabb = bbox.unwrap();
                             aabb.scaled(&Vector::new(trans.scale.x, trans.scale.y, trans.scale.z));
+
                             //tubi 需要特殊处理
                             let geom_inst = EleGeoInstance {
                                 geo_hash,
@@ -1255,6 +1257,7 @@ impl AiosDBManager {
                         world_transform: (transform.rotation, transform.translation, Vec3::ONE),
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
+                        ..default()
                     };
                     let mut geo_insts = &mut geos_info.data;
                     let mut geo_hash = None;
@@ -1435,6 +1438,7 @@ impl AiosDBManager {
                         generic_type: mgr.get_generic_type(refno),
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
+                        ..default()
                     };
                     let mut geo_insts = &mut geos_info.data;
 
