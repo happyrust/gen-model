@@ -38,6 +38,7 @@ use once_cell::sync::Lazy;
 use smol_str::SmolStr;
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolOptions;
+use parry3d::math::Vector;
 
 use crate::api::attr::*;
 use crate::api::children::{cache_mdb_module_numbdbs, cache_site_node};
@@ -147,7 +148,7 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(project_pool) = self.get_project_pool(refno) {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_full_attr(refno, self, None).await?;
-                PDMS_ATT_MAP_CACHE.insert(refno, attr.clone()).expect("PDMS_ATT_MAP_CACHE save error.");
+                PDMS_ATT_MAP_CACHE.insert(refno, &attr).expect("PDMS_ATT_MAP_CACHE save error.");
                 return Ok(attr);
             }
         }
@@ -1153,16 +1154,16 @@ impl AiosDBManager {
                             if bbox.is_none() {
                                 dbg!(refno.to_refno_string());
                                 dbg!(&brep_shape);
+                                continue;
                             }
-                            let mut bbox = bbox.unwrap_or_default();
-                            //todo 需要处理一下
-                            bbox.scaled(&trans.scale);
+                            let mut aabb = bbox.unwrap();
+                            aabb.scaled(&Vector::new(trans.scale.x, trans.scale.y, trans.scale.z));
                             //tubi 需要特殊处理
                             let geom_inst = EleGeoInstance {
                                 geo_hash,
                                 refno,
                                 pts,
-                                bbox,
+                                aabb,
                                 transform: (transform.rotation, transform.translation + transform.rotation * trans.translation, trans.scale),
                                 visible,
                                 is_tubi,
@@ -1270,13 +1271,14 @@ impl AiosDBManager {
                     if let Some(geo_hash) = geo_hash {
                         let visible = attr.is_visible_by_level(None).unwrap_or(true);
                         let tr: TransformSRT = item_trans;
-                        let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
-                        bbox.scaled(&tr.scale);
+                        let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
+                        let mut aabb = bbox.unwrap();
+                        aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
                         let geom_inst = EleGeoInstance {
                             geo_hash,
                             refno,
                             pts: Default::default(),
-                            bbox,
+                            aabb,
                             transform: (tr.rotation, tr.translation, tr.scale),
                             visible,
                             is_tubi: false,
@@ -1294,81 +1296,82 @@ impl AiosDBManager {
         println!("处理常规基本几何体: {} 花费时间: {} ms", prim_cnt, t.elapsed().as_millis());
         Ok(true)
     }
-    // pub async fn cache_pohe_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
-    //     let t = Instant::now();
-    //     let pohe_refnos = mgr.get_refnos_by_types(project, &vec!["POHE"], Option::from(vec![1])).await?;
-    //     let pohe_cnt = pohe_refnos.len();
-    //     let mut handles = vec![];
-    //     for (i, refno) in pohe_refnos.into_iter().enumerate() {
-    //         let mgr = mgr.clone();
-    //         let handle = tokio::spawn(async move {
-    //             let inst_map = &mgr.mesh_mgr.inst_mgr;
-    //             let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
-    //             //在这里直接处理完所有需要处理的transform
-    //             let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
-    //             let mut geo_hash = None;
-    //             let mut item_trans = TransformSRT::default();
-    //             let mut facet = Facet::default();
-    //             if let Ok(children_refs) = mgr.get_children_refs(refno).await {
-    //                 for pogo_ref in children_refs {
-    //                     let mut vertices: Vec<[f32; 3]> = vec![];
-    //                     let mut tv = vec![];
-    //                     if let Ok(p_refs) = mgr.get_children_refs(pogo_ref).await {
-    //                         let v_cnt = p_refs.len();
-    //                         if v_cnt >= 3 {
-    //                             for x in p_refs {
-    //                                 //todo 后面需要做错误处理
-    //                                 let v = mgr.get_implicit_attr(x, Some(vec!["POS"])).await.unwrap_or_default().get_position().unwrap_or_default();
-    //                                 vertices.push([v[0], v[1], v[2]]);
-    //                                 if tv.len() < 3 {
-    //                                     tv.push(v);
-    //                                 }
-    //                             }
-    //                             let n = (tv[1] - tv[0]).cross(tv[2] - tv[1]).normalize();
-    //                             let mut polygon = Polygon {
-    //                                 contours: vec![Contour {
-    //                                     vertices,
-    //                                     normals: vec![n.into(); v_cnt],
-    //                                 }]
-    //                             };
-    //                             facet.polygons.push(polygon);
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //             if facet.check_valid() {
-    //                 item_trans = facet.get_trans();
-    //                 let r = cached_mesh_mgr.get_pdms_mesh_hash_key(Box::new(facet));
-    //                 geo_hash = Some(r);
-    //             }
-    //
-    //             let parent_refno = mgr.get_owner(refno);
-    //             let mut parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["LEVE"])).await.unwrap_or_default();
-    //             if let Some(geo_hash) = geo_hash {
-    //                 let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
-    //                 let tr: TransformSRT = item_trans * transform;
-    //                 let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
-    //                 bbox.scaled(&tr.scale);
-    //                 let geom_data = EleGeoInstance {
-    //                     geo_hash,
-    //                     bbox,
-    //                     global_transform: (tr.rotation, tr.translation, tr.scale),
-    //                     visible,
-    //                     generic_type: "STRU".to_string(),  //todo add generic type
-    //                     zone_refno: refno,
-    //                 };
-    //                 inst_map.entry(parent_refno).or_insert(Vec::new()).push(geom_data);
-    //             }
-    //         });
-    //         handles.push(handle);
-    //         if i == pohe_cnt - 1 || handles.len() == 100 {
-    //             futures::future::join_all(take(&mut handles)).await;
-    //         }
-    //     }
-    //     println!("处理POHE几何体: {} 花费时间: {} ms", pohe_cnt, t.elapsed().as_millis());
-    //     Ok(true)
-    // }
-    //
+
+    pub async fn cache_pohe_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
+        let pohe_refnos = mgr.get_refnos_by_types(project, &vec!["POHE"], Option::from(vec![1])).await?;
+        let pohe_cnt = pohe_refnos.len();
+        dbg!(pohe_cnt);
+        // let mut handles = vec![];
+        // for (i, refno) in pohe_refnos.into_iter().enumerate() {
+        //     let mgr = mgr.clone();
+        //     let handle = tokio::spawn(async move {
+        //         let inst_map = &mgr.mesh_mgr.inst_mgr;
+        //         let cached_mesh_mgr = &mgr.mesh_mgr.cached_mesh_mgr;
+        //         //在这里直接处理完所有需要处理的transform
+        //         let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
+        //         let mut geo_hash = None;
+        //         let mut item_trans = TransformSRT::default();
+        //         let mut facet = Facet::default();
+        //         if let Ok(children_refs) = mgr.get_children_refs(refno).await {
+        //             for pogo_ref in children_refs {
+        //                 let mut vertices: Vec<[f32; 3]> = vec![];
+        //                 let mut tv = vec![];
+        //                 if let Ok(p_refs) = mgr.get_children_refs(pogo_ref).await {
+        //                     let v_cnt = p_refs.len();
+        //                     if v_cnt >= 3 {
+        //                         for r in p_refs {
+        //                             let att = mgr.get_attr(r).await.unwrap_or_default();
+        //                             let v = att.get_position().unwrap_or_default();
+        //                             vertices.push([v[0], v[1], v[2]]);
+        //                             if tv.len() < 3 {
+        //                                 tv.push(v);
+        //                             }
+        //                         }
+        //                         let n = (tv[1] - tv[0]).cross(tv[2] - tv[1]).normalize();
+        //                         let mut polygon = Polygon {
+        //                             contours: vec![Contour {
+        //                                 vertices,
+        //                                 normals: vec![n.into(); v_cnt],
+        //                             }]
+        //                         };
+        //                         facet.polygons.push(polygon);
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //         if facet.check_valid() {
+        //             item_trans = facet.get_trans();
+        //             let r = cached_mesh_mgr.get_pdms_mesh_hash_key(Box::new(facet));
+        //             geo_hash = Some(r);
+        //         }
+        //
+        //         let parent_refno = mgr.get_owner(refno);
+        //         let mut parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["LEVE"])).await.unwrap_or_default();
+        //         if let Some(geo_hash) = geo_hash {
+        //             let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
+        //             let tr: TransformSRT = item_trans * transform;
+        //             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
+        //             bbox.scaled(&tr.scale);
+        //             let geom_data = EleGeoInstance {
+        //                 geo_hash,
+        //                 bbox,
+        //                 global_transform: (tr.rotation, tr.translation, tr.scale),
+        //                 visible,
+        //                 generic_type: "STRU".to_string(),  //todo add generic type
+        //                 zone_refno: refno,
+        //             };
+        //             inst_map.entry(parent_refno).or_insert(Vec::new()).push(geom_data);
+        //         }
+        //     });
+        //     handles.push(handle);
+        //     if i == pohe_cnt - 1 || handles.len() == 100 {
+        //         futures::future::join_all(take(&mut handles)).await;
+        //     }
+        // }
+        // println!("处理POHE几何体: {} 花费时间: {} ms", pohe_cnt, t.elapsed().as_millis());
+        Ok(true)
+    }
+
 
     pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, db_option: &DbOption, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
@@ -1517,13 +1520,13 @@ impl AiosDBManager {
                         if let Some(geo_hash) = geo_hash {
                             let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
                             let tr: TransformSRT = item_trans;
-                            if let Some(mut bbox) = cached_mesh_mgr.get_bbox(&geo_hash) {
-                                bbox.scaled(&tr.scale);
+                            if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
+                                aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
                                 let geom_inst = EleGeoInstance {
                                     geo_hash,
                                     refno,
                                     pts: Default::default(),
-                                    bbox,
+                                    aabb,
                                     transform: (tr.rotation, tr.translation, tr.scale),
                                     visible,
                                     is_tubi: false,
@@ -1602,7 +1605,7 @@ impl AiosDBManager {
             // });
             // handles.push(handle);
             // }
-            // Self::cache_pohe_geos(mgr.clone(), project).await?;
+            Self::cache_pohe_geos(mgr.clone(), &project).await?;
             // futures::future::join_all(take(&mut handles)).await;
             mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
 

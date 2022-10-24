@@ -280,7 +280,7 @@ pub async fn cache_site_node(mdb: &str, module: &str, pool: &Pool<MySql>) {
                 for mut child in &mut children {
                     child.owner = world.refno;
                 }
-                CACHED_MDB_SITE_MAP.insert(world.refno, PdmsElementVec(children));
+                CACHED_MDB_SITE_MAP.insert(world.refno, &PdmsElementVec(children));
             }
         }
     }

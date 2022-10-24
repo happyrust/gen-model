@@ -35,6 +35,10 @@ bitvec = "1.0.0"
 chrono = "0.4.22"
 geo = "0.23.0"
 
+nalgebra = { version = "0.31.2", features = ["serde"] }
+nalgebra-glm = "0.17.0"
+parry3d = { version = "0.10.0", features = ["serde-serialize"] }
+
 #parse_pdms_db = { path = "../aios-parse-pdms" }
 #aios_core = { path = "../aios-core"}
 #arangors_lite = { path = "../arangors-lite" }

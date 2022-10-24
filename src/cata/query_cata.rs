@@ -59,7 +59,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     //缓存备用
     if !CACHED_SCOM_INFO_MAP.contains_key(&scom_ref) {
         if let Ok(mut scom_info) = query_scom_info(scom_ref, interface, is_debug).await {
-            CACHED_SCOM_INFO_MAP.insert(scom_ref, scom_info).unwrap();
+            CACHED_SCOM_INFO_MAP.insert(scom_ref, &scom_info).unwrap();
         } else {
             let error_info = format!("元件库: {} 解析出错", scom_ref.to_refno_string());
             println!("{}", &error_info);
