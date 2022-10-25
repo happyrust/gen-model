@@ -342,36 +342,45 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 })
             }
             "SSLC" => {
-                CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam {
-                    refno: gmse.refno,
-                    axis: Some(gmse.paxises[0].clone()),
-                    height: gmse.phei,
-                    diameter: gmse.diameters[0],
-                    dist_to_btm: gmse.distances[0],
-                    x_shear: gmse.shears[0],
-                    y_shear: gmse.shears[1],
-                    alt_x_shear: gmse.shears[2],
-                    alt_y_shear: gmse.shears[3],
-                    centre_line_flag: gmse.centre_line_flag,
-                    tube_flag: gmse.tube_flag,
-                })
+                if gmse.paxises.len() >= 1 && gmse.diameters.len() >= 1 && gmse.shears.len() >= 4 {
+                    CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam {
+                        refno: gmse.refno,
+                        axis: Some(gmse.paxises[0].clone()),
+                        height: gmse.phei,
+                        diameter: gmse.diameters[0],
+                        dist_to_btm: gmse.distances[0],
+                        x_shear: gmse.shears[0],
+                        y_shear: gmse.shears[1],
+                        alt_x_shear: gmse.shears[2],
+                        alt_y_shear: gmse.shears[3],
+                        centre_line_flag: gmse.centre_line_flag,
+                        tube_flag: gmse.tube_flag,
+                    })
+                }else{
+                    CateGeoParam::Unknown
+                }
+
             }
             "LSNO" => {
-                CateGeoParam::Snout(CateSnoutParam {
-                    refno: gmse.refno,
-                    pa: Some(gmse.paxises[0].clone()),
-                    pb: Some(gmse.paxises[1].clone()),
-                    dist_to_btm: gmse.distances[0],
-                    dist_to_top: gmse.distances[1],
-                    btm_diameter: gmse.diameters[0],
-                    top_diameter: gmse.diameters[1],
-                    offset: gmse.offset,
-                    centre_line_flag: gmse.centre_line_flag,
-                    tube_flag: gmse.tube_flag,
-                })
+                if gmse.paxises.len() >= 2 && gmse.diameters.len() >= 2 && gmse.distances.len() >= 2 {
+                    CateGeoParam::Snout(CateSnoutParam {
+                        refno: gmse.refno,
+                        pa: Some(gmse.paxises[0].clone()),
+                        pb: Some(gmse.paxises[1].clone()),
+                        dist_to_btm: gmse.distances[0],
+                        dist_to_top: gmse.distances[1],
+                        btm_diameter: gmse.diameters[0],
+                        top_diameter: gmse.diameters[1],
+                        offset: gmse.offset,
+                        centre_line_flag: gmse.centre_line_flag,
+                        tube_flag: gmse.tube_flag,
+                    })
+                }else{
+                    CateGeoParam::Unknown
+                }
             }
             "SBOX" => {
-                if gmse.box_lengths.len() == 3 && gmse.xyz.len() == 3 {
+                if gmse.box_lengths.len() >= 3 && gmse.xyz.len() >= 3 {
                     CateGeoParam::Box(CateBoxParam {
                         refno: gmse.refno,
                         size: vec![

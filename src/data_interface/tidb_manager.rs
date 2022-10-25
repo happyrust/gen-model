@@ -34,11 +34,13 @@ use dashmap::mapref::one::Ref;
 use glam::{EulerRot, Mat3, Quat, quat, TransformRT, TransformSRT, Vec2, Vec3};
 use id_tree::{Node, NodeId};
 use lazy_static::lazy_static;
+use nalgebra::{Quaternion, UnitQuaternion};
 use once_cell::sync::Lazy;
+use parry3d::bounding_volume::{AABB, BoundingVolume};
 use smol_str::SmolStr;
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolOptions;
-use parry3d::math::Vector;
+use parry3d::math::{Isometry, Vector};
 
 use crate::api::attr::*;
 use crate::api::children::{cache_mdb_module_numbdbs, cache_site_node};
@@ -1093,7 +1095,7 @@ impl AiosDBManager {
             let processed_cnt = processed_cnt.clone();
             // let mut tubi_result_clone = tubi_result.clone();
             let handle = tokio::spawn(async move {
-                let arango_database = mgr.clone().get_arangodb_conn().await.unwrap();
+                // let arango_database = mgr.clone().get_arangodb_conn().await.unwrap();
                 let start_idx = i * batch_size;
                 let mut end_idx = start_idx + batch_size;
                 if end_idx > has_cata_cnt as usize {
@@ -1119,7 +1121,6 @@ impl AiosDBManager {
                         Self::get_cata_single_geoms(mgr.clone(), refno, &brep_shapes_map,
                                                     &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
                     }
-                    // dbg!(&brep_shapes_map);
                     for (child_refno, shapes) in brep_shapes_map {
                         let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
                         let ancestors = mgr.get_ancestors_refnos_without_world(child_refno);
@@ -1132,10 +1133,10 @@ impl AiosDBManager {
                             data: vec![],
                             visible: true,
                             generic_type: mgr.get_generic_type(child_refno),
+                            aabb: AABB::new_invalid(),
                             world_transform: (trans_origin.rotation, trans_origin.translation, Vec3::ONE),
                             ptset_map: refno_ptset_map.remove(&child_refno).map(|x| x.1).unwrap_or_default(),
                             flow_pt_indexs: vec![child_att.get_i32("ARRI"), child_att.get_i32("LEAV")],
-                            ..default()
                         };
                         let mut geo_insts = &mut geos_info.data;
                         for shape in shapes {
@@ -1159,6 +1160,11 @@ impl AiosDBManager {
                             }
                             let mut aabb = bbox.unwrap();
                             aabb.scaled(&Vector::new(trans.scale.x, trans.scale.y, trans.scale.z));
+                            let transformed_aabb = aabb.transform_by(&Isometry {
+                                rotation: UnitQuaternion::from_quaternion(Quaternion::new(trans.rotation.w, trans.rotation.x, trans.rotation.y, trans.rotation.z)),
+                                translation: Vector::new(trans.translation.x, trans.translation.y, trans.translation.z).into(),
+                            });
+                            geos_info.aabb.merge(&transformed_aabb);
 
                             //tubi 需要特殊处理
                             let geom_inst = EleGeoInstance {
@@ -1175,9 +1181,9 @@ impl AiosDBManager {
                         // if is_debug {
                         //     dbg!(&geos_info);
                         // }
-                        // inst_map.entry(child_refno).or_insert(geos_info);
                         inst_map.insert(child_refno, geos_info);
                     }
+                    
                     *processed_cnt.lock().unwrap() -= 1;
                 }
             });
@@ -1254,10 +1260,10 @@ impl AiosDBManager {
                         data: vec![],
                         visible: true,
                         generic_type: mgr.get_generic_type(refno),
+                        aabb: AABB::new_invalid(),
                         world_transform: (transform.rotation, transform.translation, Vec3::ONE),
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
-                        ..default()
                     };
                     let mut geo_insts = &mut geos_info.data;
                     let mut geo_hash = None;
@@ -1276,7 +1282,13 @@ impl AiosDBManager {
                         let tr: TransformSRT = item_trans;
                         let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
                         let mut aabb = bbox.unwrap();
+                        //todo 去掉重复的代码
                         aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
+                        let transformed_aabb = aabb.transform_by(&Isometry {
+                            rotation: UnitQuaternion::from_quaternion(Quaternion::new(tr.rotation.w, tr.rotation.x, tr.rotation.y, tr.rotation.z)),
+                            translation: Vector::new(tr.translation.x, tr.translation.y, tr.translation.z).into(),
+                        });
+                        geos_info.aabb.merge(&transformed_aabb);
                         let geom_inst = EleGeoInstance {
                             geo_hash,
                             refno,
@@ -1287,7 +1299,6 @@ impl AiosDBManager {
                             is_tubi: false,
                         };
                         geo_insts.push(geom_inst);
-                        // inst_map.entry(refno).or_insert(geos_info);
                         inst_map.insert(refno, geos_info);
                     }
                 }
@@ -1438,7 +1449,7 @@ impl AiosDBManager {
                         generic_type: mgr.get_generic_type(refno),
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
-                        ..default()
+                        aabb: AABB::new_invalid(),
                     };
                     let mut geo_insts = &mut geos_info.data;
 
@@ -1450,7 +1461,6 @@ impl AiosDBManager {
                         let mut loop_verts: Vec<Vec3> = vec![];
                         let mut fradius_vec: Vec<f32> = vec![];
 
-                        // let mut origin_pt = Vec3::ZERO;
                         if let Ok(children_refs) = mgr.get_children_refs(refno).await {
                             for x in children_refs {
                                 if let Ok(a) = mgr.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
@@ -1526,6 +1536,11 @@ impl AiosDBManager {
                             let tr: TransformSRT = item_trans;
                             if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
                                 aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
+                                let transformed_aabb = aabb.transform_by(&Isometry {
+                                    rotation: UnitQuaternion::from_quaternion(Quaternion::new(tr.rotation.w, tr.rotation.x, tr.rotation.y, tr.rotation.z)),
+                                    translation: Vector::new(tr.translation.x, tr.translation.y, tr.translation.z).into(),
+                                });
+                                geos_info.aabb.merge(&transformed_aabb);
                                 let geom_inst = EleGeoInstance {
                                     geo_hash,
                                     refno,
@@ -1609,7 +1624,7 @@ impl AiosDBManager {
             // });
             // handles.push(handle);
             // }
-            Self::cache_pohe_geos(mgr.clone(), &project).await?;
+            // Self::cache_pohe_geos(mgr.clone(), &project).await?;
             // futures::future::join_all(take(&mut handles)).await;
             mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
 
