@@ -11,6 +11,8 @@ pub struct DbOption {
     pub replace_dbs: bool,
     #[clap(long)]
     pub gen_model_mesh: bool,
+    #[clap(long)]
+    pub gen_spatial_tree: bool,
     #[clap(long, default_value = "12.1SP4Projects")]
     pub project_path: String,
     //#[clap(long, default_value = "MASTER", "SAMPLE")]

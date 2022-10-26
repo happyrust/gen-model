@@ -2,6 +2,11 @@
 #![feature(let_chains)]
 #![feature(default_free_fn)]
 
+#[macro_use]
+extern crate clap;
+#[macro_use]
+extern crate nom;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::format;
 use std::fs;
@@ -11,46 +16,45 @@ use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
-use itertools::Itertools;
+
+use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
 use aios_core::pdms_types::*;
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_bin};
+use arangors_lite::collection::CollectionType::{Document, Edge};
+use chrono::{Datelike, Timelike};
 use dashmap::DashMap;
 use futures::StreamExt;
+use itertools::Itertools;
+use nalgebra::{Quaternion, UnitQuaternion};
 use nom_derive::Parse;
+use parry3d::math::{Isometry, Vector};
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use regex::internal::Input;
-use aios_database::{BATCH_CHUNKS_CNT};
 use sqlx::{Acquire, MySql, MySqlPool, Pool, Row};
-use sqlx::pool::PoolConnection;
-use aios_database::database::*;
-use aios_database::helper::{qualified_column_name, qualified_table_name};
-use aios_database::options::DbOption;
-use aios_database::consts::*;
-
 use sqlx::Executor;
+use sqlx::pool::PoolConnection;
+
+use aios_database::BATCH_CHUNKS_CNT;
 use aios_database::api::attr::insert_attr_info;
 use aios_database::api::element::*;
 use aios_database::api::project_mdb::insert_project_mdb;
 use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
+use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
 use aios_database::cata::resolve::parse_to_i32;
+use aios_database::consts::*;
 use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
+use aios_database::database::*;
 use aios_database::graph_db::pdms_arango::*;
-use aios_database::graph_db::pdms_inst_arango::sync_instance_to_graph_db;
+use aios_database::graph_db::pdms_inst_arango::{query_instance_with_refno_in_arangodb, sync_instance_to_graph_db};
+use aios_database::graph_db::pdms_mesh_arango::sync_mesh_to_graph_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
+use aios_database::helper::{qualified_column_name, qualified_table_name};
+use aios_database::options::DbOption;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::{gen_create_attr_info_tables_sql, gen_create_pdms_mesh_table_sql};
-use arangors_lite::collection::CollectionType::{Document, Edge};
-use chrono::{Datelike, Timelike};
-use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
-use aios_database::graph_db::pdms_mesh_arango::sync_mesh_to_graph_db;
 
-
-#[macro_use]
-extern crate clap;
-#[macro_use]
-extern crate nom;
 
 pub async fn test_batch_insert(url: &str) {
     let connection = MySqlPool::connect(&url)
@@ -167,9 +171,50 @@ async fn main() -> anyhow::Result<()> {
         }
         dbg!("图数据库保存完成");
     }
+
+    //生成rtree 结构
+    if db_option.gen_spatial_tree {
+        let dir_path = "assets/instance";
+        let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
+        let mut timer = Instant::now();
+        let mut rstar_objs = vec![];
+        for db_no in db_nos {
+            let mut file = fs::File::open(format!("{}/{}.inst", dir_path, db_no))?;
+            let mut data = vec![];
+            file.read_to_end(&mut data)?;
+            let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
+            dbg!(&instance_mgr.inst_mgr.inst_map.len());
+            for kv in &instance_mgr.inst_mgr.inst_map {
+                let ele_trans = kv.world_transform;
+                let trans = &ele_trans.1;
+                let scale = &ele_trans.2;
+                let rot = &ele_trans.0;
+
+                let aabb = kv.value().aabb;
+                let mut aabb = aabb.scaled(
+                    &Vector::new(scale.x, scale.y, scale.z));
+                let ele_aabb = aabb.transform_by(&Isometry {
+                    rotation: UnitQuaternion::from_quaternion(Quaternion::new(rot.w, rot.x, rot.y, rot.z)),
+                    translation: Vector::new(trans.x, trans.y, trans.z).into(),
+                });
+                if ele_aabb.extents().magnitude().is_finite() {
+                    rstar_objs.push(RStarBoundingBox::from_aabb(&ele_aabb, *kv.key()));
+                } else {
+                    // println!("AABB {:?} is not ok : {:?}", kv.key(), &ele_aabb);
+                }
+            }
+        }
+        println!("收集空间包围盒时间: {}s", timer.elapsed().as_secs_f32());
+        timer = Instant::now();
+        let rtree = AccelerationTree::load(rstar_objs);
+        println!("生成空间树费时: {}s", timer.elapsed().as_secs_f32());
+        let mut file = fs::File::create("accel.tree").unwrap();
+        let serialized = bincode::serialize(&rtree).unwrap();
+        file.write_all(serialized.as_slice()).unwrap();
+    }
+
     Ok(())
 }
-
 
 
 /// 提前创建图数据库需要的几个collection

@@ -540,9 +540,6 @@ impl AiosDBManager {
     /// 获得pool
     #[inline]
     pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
-
-        // MySqlPool::connect_with()
-
         let url = &format!("{connection_str}/{}", project);
         PoolOptions::new().max_connections(500).acquire_timeout(Duration::from_secs(10 * 60)).connect(url).await.map_err(
             {
@@ -593,17 +590,21 @@ impl AiosDBManager {
         let need_sync = true;
         for project in &db_option.included_projects {
             let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
+            println!("正在创建数据库连接 {project}");
             match project_pool {
                 Ok(pool) => {
                     //暂时保存在内存，需要序列化到heed LMDB数据库
                     if need_sync {
                         sync_refno_basic_map(&pool, &mut dbno_mgr).await.unwrap();
+                        println!("sync_refno_basic_map");
                     }
                     project_map.entry(project.clone()).or_insert(pool.clone());
                     // 将树节点的site层提前缓存下来
                     cache_site_node(&db_option.mdb_name, &db_option.module, &pool).await;
+                    println!("cache_site_node");
                     // 将 mdb对应的 module 下的所有 numbdb保存下来
                     let results = cache_mdb_module_numbdbs(&db_option.mdb_name, &db_option.module, &pool).await?;
+                    println!("cache_mdb_module_numbdbs");
                     for r in results {
                         numbdbs.push(r);
                     }
