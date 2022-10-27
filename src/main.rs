@@ -185,22 +185,11 @@ async fn main() -> anyhow::Result<()> {
             let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
             dbg!(&instance_mgr.inst_mgr.inst_map.len());
             for kv in &instance_mgr.inst_mgr.inst_map {
-                let ele_trans = kv.world_transform;
-                let trans = &ele_trans.1;
-                let scale = &ele_trans.2;
-                let rot = &ele_trans.0;
-
                 let aabb = kv.value().aabb;
-                let mut aabb = aabb.scaled(
-                    &Vector::new(scale.x, scale.y, scale.z));
-                let ele_aabb = aabb.transform_by(&Isometry {
-                    rotation: UnitQuaternion::from_quaternion(Quaternion::new(rot.w, rot.x, rot.y, rot.z)),
-                    translation: Vector::new(trans.x, trans.y, trans.z).into(),
-                });
-                if ele_aabb.extents().magnitude().is_finite() {
-                    rstar_objs.push(RStarBoundingBox::from_aabb(&ele_aabb, *kv.key()));
+                if aabb.extents().magnitude().is_finite() {
+                    rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, *kv.key()));
                 } else {
-                    // println!("AABB {:?} is not ok : {:?}", kv.key(), &ele_aabb);
+                    // println!("AABB {:?} is not ok : {:?}", kv.key(), &aabb);
                 }
             }
         }

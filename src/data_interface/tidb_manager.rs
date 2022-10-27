@@ -1165,14 +1165,14 @@ impl AiosDBManager {
                             let translation = transform.translation + transform.rotation * trans.translation;
                             let scale = trans.scale;
                             aabb = aabb.scaled(&Vector::new(trans.scale.x, trans.scale.y, trans.scale.z));
+                            let transformed_aabb = aabb.transform_by(&Isometry {
+                                rotation: UnitQuaternion::from_quaternion(Quaternion::new(rot.w, rot.x, rot.y, rot.z)),
+                                translation: Vector::new(translation.x, translation.y, translation.z).into(),
+                            });
                             if is_tubi {
                                 has_tubi = true;
-                                tubi_aabb.merge(&aabb);
+                                tubi_aabb.merge(&transformed_aabb);
                             }else{
-                                let transformed_aabb = aabb.transform_by(&Isometry {
-                                    rotation: UnitQuaternion::from_quaternion(Quaternion::new(rot.w, rot.x, rot.y, rot.z)),
-                                    translation: Vector::new(translation.x, translation.y, translation.z).into(),
-                                });
                                 ele_aabb.merge(&transformed_aabb);
                             }
 
@@ -1199,11 +1199,10 @@ impl AiosDBManager {
                             geos_info.aabb.merge(&tubi_aabb);
                         }
                         // dbg!(&tubi_aabb);
-
-
-                        if is_debug {
-                            dbg!(&geos_info);
-                        }
+                        // if is_debug {
+                        // println!("{:?} center: {:?}, 包围盒: {:?}", refno, geos_info.aabb.center(), &geos_info.aabb);
+                            // dbg!(&geos_info);
+                        // }
 
                         inst_map.insert(child_refno, geos_info);
                     }
@@ -1274,7 +1273,7 @@ impl AiosDBManager {
                 for j in start_idx..end_idx {
                     let refno = all_refnos[j];
 
-                    let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
+                    let trans_origin = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
                     let ancestors = mgr.get_ancestors_refnos_without_world(refno);
                     for p_refno in ancestors {
                         level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(refno);
@@ -1285,7 +1284,7 @@ impl AiosDBManager {
                         visible: true,
                         generic_type: mgr.get_generic_type(refno),
                         aabb: AABB::new_invalid(),
-                        world_transform: (transform.rotation, transform.translation, Vec3::ONE),
+                        world_transform: (trans_origin.rotation, trans_origin.translation, Vec3::ONE),
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
                     };
@@ -1307,12 +1306,12 @@ impl AiosDBManager {
                         let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
                         let mut aabb = bbox.unwrap();
                         //todo 去掉重复的代码
-                        aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
-                        let transformed_aabb = aabb.transform_by(&Isometry {
+                        aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
+                        let ele_aabb = aabb.transform_by(&Isometry {
                             rotation: UnitQuaternion::from_quaternion(Quaternion::new(tr.rotation.w, tr.rotation.x, tr.rotation.y, tr.rotation.z)),
                             translation: Vector::new(tr.translation.x, tr.translation.y, tr.translation.z).into(),
                         });
-                        geos_info.aabb.merge(&transformed_aabb);
+                        // geos_info.aabb.merge(&transformed_aabb);
                         let geom_inst = EleGeoInstance {
                             geo_hash,
                             refno,
@@ -1323,6 +1322,11 @@ impl AiosDBManager {
                             is_tubi: false,
                         };
                         geo_insts.push(geom_inst);
+                        geos_info.aabb = ele_aabb.transform_by(&Isometry {
+                            rotation: UnitQuaternion::from_quaternion(Quaternion::new(trans_origin.rotation.w, trans_origin.rotation.x,
+                                                                                      trans_origin.rotation.y, trans_origin.rotation.z)),
+                            translation: Vector::new(trans_origin.translation.x, trans_origin.translation.y, trans_origin.translation.z).into(),
+                        });
                         inst_map.insert(refno, geos_info);
                     }
                 }
@@ -1463,13 +1467,13 @@ impl AiosDBManager {
                     let refno = all_refnos[j];
                     println!("正在处理loops的模型，索引：{}, 当前参考号：{}, 剩余: {}", j,
                              refno.to_refno_string(), processed_cnt.lock().unwrap().to_owned());
-                    let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
+                    let trans_origin = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
 
                     let mut geos_info = EleGeosInfo {
                         _key: refno.to_refno_normal_string(),
                         data: vec![],
                         visible: false,
-                        world_transform: (transform.rotation, transform.translation, Vec3::ONE),
+                        world_transform: (trans_origin.rotation, trans_origin.translation, Vec3::ONE),
                         generic_type: mgr.get_generic_type(refno),
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
@@ -1559,12 +1563,12 @@ impl AiosDBManager {
                             let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
                             let tr: TransformSRT = item_trans;
                             if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
-                                aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
-                                let transformed_aabb = aabb.transform_by(&Isometry {
+                                aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
+                                let ele_aabb = aabb.transform_by(&Isometry {
                                     rotation: UnitQuaternion::from_quaternion(Quaternion::new(tr.rotation.w, tr.rotation.x, tr.rotation.y, tr.rotation.z)),
                                     translation: Vector::new(tr.translation.x, tr.translation.y, tr.translation.z).into(),
                                 });
-                                geos_info.aabb.merge(&transformed_aabb);
+                                // geos_info.aabb.merge(&transformed_aabb);
                                 let geom_inst = EleGeoInstance {
                                     geo_hash,
                                     refno,
@@ -1575,6 +1579,12 @@ impl AiosDBManager {
                                     is_tubi: false,
                                 };
                                 geo_insts.push(geom_inst);
+                                geos_info.aabb = ele_aabb.transform_by(&Isometry {
+                                    rotation: UnitQuaternion::from_quaternion(Quaternion::new(trans_origin.rotation.w, trans_origin.rotation.x,
+                                                                                              trans_origin.rotation.y, trans_origin.rotation.z)),
+                                    translation: Vector::new(trans_origin.translation.x, trans_origin.translation.y, trans_origin.translation.z).into(),
+                                });
+                                // dbg!(&geos_info.aabb);
                             } else {
                                 println!("楼板有问题：{} ", refno.to_refno_string());
                             }
