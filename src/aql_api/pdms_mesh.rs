@@ -50,7 +50,7 @@ pub async fn query_pdms_mesh_from_refno_aql(refno: RefU64, database: &Database) 
     let results: Vec<PdmsMeshAql> = database.aql_query(aql).await?;
     for result in results {
         let hash = result.hash.parse().unwrap_or(0);
-        let refno = RefU64::from_url_refno(result.refno);
+        let refno = RefU64::from_url_refno(&result.refno);
         if refno.is_none() { continue; }
         let refno = refno.unwrap();
         instances.entry(refno).or_insert_with(Vec::new).push(hash);

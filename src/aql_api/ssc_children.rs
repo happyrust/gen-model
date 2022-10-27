@@ -20,11 +20,11 @@ pub async fn query_ssc_children_aql(refno: RefU64, database: &Database) -> anyho
     ").bind_var("id", refno_aql);
     let result: Vec<PdmsElementAql> = database.aql_query(aql).await?;
     for v in result {
-        if let Some(refno) = RefU64::from_url_refno(v.refno) {
-            if RefU64::from_url_refno(v.owner.clone()).is_none() { continue; }
+        if let Some(refno) = RefU64::from_url_refno(&v.refno) {
+            if RefU64::from_url_refno(&v.owner).is_none() { continue; }
             r.push(EleTreeNode {
                 refno,
-                owner: RefU64::from_url_refno(v.owner).unwrap(),
+                owner: RefU64::from_url_refno(&v.owner).unwrap(),
                 name: v.name,
                 noun: v.noun,
                 children_count: v.children_count,

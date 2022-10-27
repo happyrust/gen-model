@@ -596,15 +596,12 @@ impl AiosDBManager {
                     //暂时保存在内存，需要序列化到heed LMDB数据库
                     if need_sync {
                         sync_refno_basic_map(&pool, &mut dbno_mgr).await.unwrap();
-                        println!("sync_refno_basic_map");
                     }
                     project_map.entry(project.clone()).or_insert(pool.clone());
                     // 将树节点的site层提前缓存下来
                     cache_site_node(&db_option.mdb_name, &db_option.module, &pool).await;
-                    println!("cache_site_node");
                     // 将 mdb对应的 module 下的所有 numbdb保存下来
                     let results = cache_mdb_module_numbdbs(&db_option.mdb_name, &db_option.module, &pool).await?;
-                    println!("cache_mdb_module_numbdbs");
                     for r in results {
                         numbdbs.push(r);
                     }
@@ -1140,6 +1137,9 @@ impl AiosDBManager {
                             flow_pt_indexs: vec![child_att.get_i32("ARRI"), child_att.get_i32("LEAV")],
                         };
                         let mut geo_insts = &mut geos_info.data;
+                        let mut ele_aabb = AABB::new_invalid();
+                        let mut tubi_aabb = AABB::new_invalid();
+                        let mut has_tubi = false;
                         for shape in shapes {
                             let CateBrepShape {
                                 refno,
@@ -1160,12 +1160,22 @@ impl AiosDBManager {
                                 continue;
                             }
                             let mut aabb = bbox.unwrap();
-                            aabb.scaled(&Vector::new(trans.scale.x, trans.scale.y, trans.scale.z));
-                            let transformed_aabb = aabb.transform_by(&Isometry {
-                                rotation: UnitQuaternion::from_quaternion(Quaternion::new(trans.rotation.w, trans.rotation.x, trans.rotation.y, trans.rotation.z)),
-                                translation: Vector::new(trans.translation.x, trans.translation.y, trans.translation.z).into(),
-                            });
-                            geos_info.aabb.merge(&transformed_aabb);
+
+                            let rot = transform.rotation;
+                            let translation = transform.translation + transform.rotation * trans.translation;
+                            let scale = trans.scale;
+                            aabb = aabb.scaled(&Vector::new(trans.scale.x, trans.scale.y, trans.scale.z));
+                            if is_tubi {
+                                has_tubi = true;
+                                tubi_aabb.merge(&aabb);
+                            }else{
+                                let transformed_aabb = aabb.transform_by(&Isometry {
+                                    rotation: UnitQuaternion::from_quaternion(Quaternion::new(rot.w, rot.x, rot.y, rot.z)),
+                                    translation: Vector::new(translation.x, translation.y, translation.z).into(),
+                                });
+                                ele_aabb.merge(&transformed_aabb);
+                            }
+
 
                             //tubi 需要特殊处理
                             let geom_inst = EleGeoInstance {
@@ -1173,15 +1183,28 @@ impl AiosDBManager {
                                 refno,
                                 pts,
                                 aabb,
-                                transform: (transform.rotation, transform.translation + transform.rotation * trans.translation, trans.scale),
+                                transform: (rot, translation, scale),
                                 visible,
                                 is_tubi,
                             };
                             geo_insts.push(geom_inst);
                         }
-                        // if is_debug {
-                        //     dbg!(&geos_info);
-                        // }
+                        geos_info.aabb = ele_aabb.transform_by(&Isometry {
+                            rotation: UnitQuaternion::from_quaternion(Quaternion::new(trans_origin.rotation.w, trans_origin.rotation.x,
+                                                                                      trans_origin.rotation.y, trans_origin.rotation.z)),
+                            translation: Vector::new(trans_origin.translation.x, trans_origin.translation.y, trans_origin.translation.z).into(),
+                        });
+
+                        if has_tubi {
+                            geos_info.aabb.merge(&tubi_aabb);
+                        }
+                        // dbg!(&tubi_aabb);
+
+
+                        if is_debug {
+                            dbg!(&geos_info);
+                        }
+
                         inst_map.insert(child_refno, geos_info);
                     }
                     

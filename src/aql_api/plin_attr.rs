@@ -35,7 +35,7 @@ pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &Database
         });
         let plin_attrs = query_plin_attrs_with_refnos(children, database).await?;
         for plin_attr in plin_attrs {
-            let plin_refno = RefU64::from_url_refno(plin_attr._key);
+            let plin_refno = RefU64::from_url_refno(&plin_attr._key);
             if plin_refno.is_none() { continue; }
             let attr = plin_attr.attr;
             let p_key = attr.get_val("PKEY");
@@ -72,7 +72,7 @@ pub async fn query_pline_value(refno: RefU64, jusl: &str, database: &Database) -
     // dbg!(&children);
     let plin_attrs = query_plin_attrs_with_refnos(children, database).await?;
     for plin_attr in plin_attrs {
-        let plin_refno = RefU64::from_url_refno(plin_attr._key);
+        let plin_refno = RefU64::from_url_refno(&plin_attr._key);
         // dbg!(&plin_refno);
         if plin_refno.is_none() { continue; }
         let attr = plin_attr.attr;

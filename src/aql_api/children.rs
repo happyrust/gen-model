@@ -45,10 +45,10 @@ pub async fn query_children_aql_order(arango_database: &Database, refno: RefU64)
     }").bind_var("id", refno_aql);
     let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
     // 对获取到的children进行排序
-    let first_refno = RefU64::from_url_refno(result[0].refno.to_string()).unwrap();
+    let first_refno = RefU64::from_url_refno(&result[0].refno).unwrap();
     let mut children_map = HashMap::new();
     for r in result {
-        if let Some(refno) = RefU64::from_url_refno(r.refno.to_string()) {
+        if let Some(refno) = RefU64::from_url_refno(&r.refno) {
             children_map.entry(refno).or_insert(r);
         }
     }
@@ -60,7 +60,7 @@ pub async fn query_children_aql_order(arango_database: &Database, refno: RefU64)
                 refno: sibl_refno.to_refno_string(),
                 noun: v.noun,
                 name: v.name,
-                owner: RefU64::from_url_refno(v.owner).unwrap(),
+                owner: RefU64::from_url_refno(&v.owner).unwrap(),
                 children_count: v.children_count,
                 version: 0,
             })
@@ -79,7 +79,7 @@ pub async fn query_brother_node_front(refno: RefU64, database: &Database) -> any
     let mut result: Vec<PdmsRefnoTypeAql> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }
     let result = result.remove(0);
-    let refno = RefU64::from_url_refno(result.refno);
+    let refno = RefU64::from_url_refno(&result.refno);
     if refno.is_none() { return Ok(None); }
     return Ok(Some((refno.unwrap(), result.noun)));
 }
@@ -97,7 +97,7 @@ pub async fn query_children_with_name_aql(arango_database: &Database, refno: Ref
     ").bind_var("id", refno_aql);
     let result: Vec<PdmsRefnoNameAql> = arango_database.aql_query(aql).await?;
     for v in result {
-        if let Some(refno) = RefU64::from_url_refno(v.refno) {
+        if let Some(refno) = RefU64::from_url_refno(&v.refno) {
             r.push((refno, v.name));
         }
     }
@@ -117,7 +117,7 @@ pub async fn query_owner_with_type_aql(arango_database: &Database, refno: RefU64
         }").bind_var("id", refno_aql);
     let result: Vec<PdmsRefnoTypeAql> = arango_database.aql_query(aql).await?;
     for v in result {
-        if let Some(refno) = RefU64::from_url_refno(v.refno) {
+        if let Some(refno) = RefU64::from_url_refno(&v.refno) {
             r.push((refno, v.noun));
         }
     }
@@ -203,11 +203,11 @@ pub async fn query_travel_children_with_types_aql(arango_database: &Database, re
         .bind_var("nouns", att_types);
     let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
     for v in result {
-        if let Some(refno) = RefU64::from_url_refno(v.refno) {
-            if RefU64::from_url_refno(v.owner.clone()).is_none() { continue; }
+        if let Some(refno) = RefU64::from_url_refno(&v.refno) {
+            if RefU64::from_url_refno(&v.owner).is_none() { continue; }
             r.push(EleTreeNode {
                 refno,
-                owner: RefU64::from_url_refno(v.owner).unwrap(),
+                owner: RefU64::from_url_refno(&v.owner).unwrap(),
                 name: v.name,
                 noun: v.noun,
                 children_count: 0,
@@ -236,11 +236,11 @@ pub async fn query_travel_children_with_type_aql(arango_database: &Database, ref
         .bind_var("noun", att_type);
     let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
     for v in result {
-        if let Some(refno) = RefU64::from_url_refno(v.refno) {
-            if RefU64::from_url_refno(v.owner.clone()).is_none() { continue; }
+        if let Some(refno) = RefU64::from_url_refno(&v.refno) {
+            if RefU64::from_url_refno(&v.owner).is_none() { continue; }
             r.push(EleTreeNode {
                 refno,
-                owner: RefU64::from_url_refno(v.owner).unwrap(),
+                owner: RefU64::from_url_refno(&v.owner).unwrap(),
                 name: v.name,
                 noun: v.noun,
                 children_count: 0,

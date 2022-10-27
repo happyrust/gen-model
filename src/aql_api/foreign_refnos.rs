@@ -18,7 +18,7 @@ pub async fn query_foreign_refno_aql(refno: RefU64, foreign_types: Vec<&str>, ar
         .bind_var("final_type", foreign_types[foreign_types.len() - 1]);
     let results: Vec<String> = arango_database.aql_query(aql).await?;
     for result in results {
-        if let Some(refno) = RefU64::from_url_refno(result) {
+        if let Some(refno) = RefU64::from_url_refno(&result) {
             return Ok(Some(refno));
         }
     }
