@@ -26,10 +26,11 @@ use chrono::{Datelike, Timelike};
 use dashmap::DashMap;
 use futures::StreamExt;
 use itertools::Itertools;
-use nalgebra::{Quaternion, UnitQuaternion};
+use nalgebra::{max, Quaternion, UnitQuaternion};
 use nom_derive::Parse;
 use parry3d::bounding_volume::AABB;
 use parry3d::math::{Isometry, Vector, Point};
+use parry3d::shape::ConvexPolyhedron;
 use parry3d::transformation::vhacd;
 use parry3d::transformation::vhacd::VHACD;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
@@ -160,7 +161,6 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let children_files = fs::read_dir("assets/mesh/")?;
-            let params = vhacd::VHACDParameters::default();
             for path in children_files {
                 let path = path?.path();
                 let filename = path.file_name().unwrap().to_str().unwrap().to_string();
@@ -170,18 +170,43 @@ async fn main() -> anyhow::Result<()> {
                 let mut data = vec![];
                 file.read_to_end(&mut data)?;
                 let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-                for m in &mesh_mgr.meshes{
-                    let points = m.vertices.iter().map(|x| Point::from_slice(x)).collect::<Vec<Point<f32>>>();
-                    let indices: Vec<[u32; 3]> = m.indices.chunks(3).map(|x| [x[0], x[1], x[2]]).collect();
-                    let vhacd = VHACD::decompose(&params, &points, &indices, false);
-                    // let convex_hulls = vhacd.compute_convex_hulls(1);
-                }
-
                 save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
             }
         }
         dbg!("图数据库保存完成");
     }
+
+
+    let children_files = fs::read_dir("assets/mesh/")?;
+    let params = vhacd::VHACDParameters::default();
+    let mut convex_mgr = CachedConvexPolyheronMgr::default();
+    for path in children_files {
+        let path = path?.path();
+        let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+        if !filename.ends_with("bin") { continue; }
+        dbg!(&filename);
+        let mut file = fs::File::open(path)?;
+        let mut data = vec![];
+        file.read_to_end(&mut data)?;
+        let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
+        let mut max_indices = 0;
+        for m in &mesh_mgr.meshes {
+            let points = m.vertices.iter().map(|x| Point::from_slice(x)).collect::<Vec<Point<f32>>>();
+            let indices: Vec<[u32; 3]> = m.indices.chunks(3).map(|x| [x[0], x[1], x[2]]).collect();
+            // dbg!(indices.len());
+            max_indices = indices.len().max(max_indices);
+            // let vhacd = VHACD::decompose(&params, &points, &indices, false);
+            // let convex_hulls = vhacd.compute_convex_hulls(1);
+            // let convex_polyhedron = convex_hulls
+            //     .into_iter()
+            //     .map(|h| ConvexPolyhedron::from_convex_mesh(h.0, &h.1).unwrap())
+            //     .collect::<Vec<_>>();
+            // dbg!(convex_polyhedron.len());
+            // convex_mgr.convex_shapes_map.entry(*m.key()).or_insert(convex_polyhedron);
+        }
+        dbg!(max_indices);
+    }
+    // convex_mgr.serialize_to_bin_file();
 
     //生成rtree 结构
     if db_option.gen_spatial_tree {
@@ -196,11 +221,12 @@ async fn main() -> anyhow::Result<()> {
             let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
             dbg!(&instance_mgr.inst_mgr.inst_map.len());
             for kv in &instance_mgr.inst_mgr.inst_map {
-                let aabb = kv.value().aabb;
-                if aabb.extents().magnitude().is_finite() {
-                    rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, *kv.key()));
-                } else {
-                    // println!("AABB {:?} is not ok : {:?}", kv.key(), &aabb);
+                if let Some(aabb) = kv.value().aabb{
+                    if aabb.extents().magnitude().is_finite() {
+                        rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, *kv.key()));
+                    } else {
+                        // println!("AABB {:?} is not ok : {:?}", kv.key(), &aabb);
+                    }
                 }
             }
         }
@@ -212,7 +238,7 @@ async fn main() -> anyhow::Result<()> {
                                   Point::new(12735.623, 10239.798, 12397.0));
         let target_refnos = rtree
             .locate_intersecting_bounds(&test_aabb).collect::<Vec<_>>();
-        dbg!(target_refnos);
+        // dbg!(target_refnos);
 
         println!("生成空间树费时: {}s", timer.elapsed().as_secs_f32());
         let mut file = fs::File::create("accel.spa").unwrap();
