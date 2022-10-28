@@ -63,7 +63,7 @@ pub async fn query_instance_with_refno_in_arangodb(refno: RefU64, database: &Dat
     let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
     let pdms_instances = "pdms_instances";
     let aql = AqlQuery::new("
-    FOR c IN 1..10 inbound @refno pdms_edges
+    FOR c IN 0..10 inbound @refno pdms_edges
         PRUNE document(@collection,c._key) != null
         Filter document(@collection,c._key) != null
         let f = document(@collection,c._key)
@@ -72,6 +72,7 @@ pub async fn query_instance_with_refno_in_arangodb(refno: RefU64, database: &Dat
             'data':f.data,
             'visible':f.visible,
             'generic_type':f.generic_type,
+            'aabb':f.aabb,
             'world_transform':f.world_transform,
             'ptset_map':f.ptset_map,
             'flow_pt_indexs':f.flow_pt_indexs

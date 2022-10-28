@@ -71,7 +71,7 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
     dbg!("创建SSC表完成");
     let (zone_level_map, zone_name_map, next_refno) = insert_set_ssc_node_sql(project_pool).await?;
     dbg!("SSC固定节点生成");
-    let room_data = query_all_room_data(project_pool).await?;
+    let room_data = query_all_room_data_aql(&mgr.get_arangodb_conn().await?,project_pool).await?;
     if room_data.len() != 0 {
         let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
         let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, next_refno, project_pool, mgr).await;
@@ -143,7 +143,7 @@ fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, Da
 }
 
 /// 解析 excel 表单 ，找到每一层下面所有的房间号 返回所有的安装厂房下对应的层位，层位下对应的房间
-fn get_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i32, Vec<String>>>> {
+pub fn get_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i32, Vec<String>>>> {
     let mut r = HashMap::new();
     let mut workbook: Xlsx<_> = open_workbook("resource/test.xlsx")?;
     let range = workbook.worksheet_range("Sheet1")
@@ -232,16 +232,19 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
         let room = Arc::new(room_ori).clone();
 
         // let handle = tokio::spawn(async move {
-        let room_name = format!("1{}", room.room_code); // 默认都是 1号机组
+        // let room_name = format!("1{}", room.room_code); // 默认都是 1号机组
+        let room_name = room.room_code.to_string();
         if let Ok(mut zone_refnos) = query_ancestor_refnos_till_type(room.refno, "ZONE", &pool).await {
             // 想拿到 zone的参考号
             if let Some(zone_refno) = zone_refnos.pop() {
-                let divco = get_zone_divco(zone_refno, &pool).await;
+                let mut divco = get_zone_divco(zone_refno, &pool).await;
+                if divco == "" { divco = "PIPEP".to_string() }
                 if divco != "" {
                     // 找到专业属性对应的中文名称
                     if let Some(divco_name) = zone_name_map.get(&divco) {
                         let divco_name = divco_name.trim();
                         let room_divco_name = format!("{}_{}", room_name, divco_name);
+                        dbg!(&room_divco_name);
                         // 一个房间下只有一个专业的子类，所以直接通过name获取参考号
                         if let Some(zone_level_refno) = zone_level_map.get(&room_divco_name) {
                             // 找到 pdms 树 zone 下的层级放到ssc下面
@@ -350,7 +353,7 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
                 }
             }
         }
-        if sqls_clone.len() > 100 {
+        if sqls_clone.len() > 1000 {
             let mut sql = String::new();
             for s in sqls_clone.iter() {
                 sql.push_str(s.as_str());

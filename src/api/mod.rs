@@ -12,6 +12,8 @@ pub mod children;
 pub mod increment;
 pub mod ssc_data;
 pub mod room_code;
+// pdms admin 模块
+pub mod admin;
 
 pub mod test_sample;
 pub mod data_state;

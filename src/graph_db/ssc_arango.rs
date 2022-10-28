@@ -67,6 +67,7 @@ pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: 
             'data':f.data,
             'visible':f.visible,
             'generic_type':f.generic_type,
+            'aabb':f.aabb,
             'world_transform':f.world_transform,
             'ptset_map':f.ptset_map,
             'flow_pt_indexs':f.flow_pt_indexs

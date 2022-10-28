@@ -109,17 +109,11 @@ async fn main() -> anyhow::Result<()> {
         dbg!("read cached mesh ok.");
     }
 
-    //同步到图数据库
-    if db_option.rebuild_arangodb {
-        dbg!("正在同步图数据库");
-        dbg!("图数据库同步完成");
-    }
-
     if db_option.rebuild_ssc_tree {
         dbg!("正在同步SSC");
         for project_db in mgr.project_map.iter() {
             // 保存ssc
-            async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
+            // async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
             set_arangodb_all_ssc_nodes(&project_db.value(), &mgr.arango_database).await?;
         }
         dbg!("SSC同步完成");
@@ -170,12 +164,12 @@ async fn main() -> anyhow::Result<()> {
                 let mut data = vec![];
                 file.read_to_end(&mut data)?;
                 let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-                for m in &mesh_mgr.meshes{
-                    let points = m.vertices.iter().map(|x| Point::from_slice(x)).collect::<Vec<Point<f32>>>();
-                    let indices: Vec<[u32; 3]> = m.indices.chunks(3).map(|x| [x[0], x[1], x[2]]).collect();
-                    let vhacd = VHACD::decompose(&params, &points, &indices, false);
+                // for m in &mesh_mgr.meshes{
+                //     let points = m.vertices.iter().map(|x| Point::from_slice(x)).collect::<Vec<Point<f32>>>();
+                //     let indices: Vec<[u32; 3]> = m.indices.chunks(3).map(|x| [x[0], x[1], x[2]]).collect();
+                //     let vhacd = VHACD::decompose(&params, &points, &indices, false);
                     // let convex_hulls = vhacd.compute_convex_hulls(1);
-                }
+                // }
 
                 save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
             }
@@ -208,11 +202,11 @@ async fn main() -> anyhow::Result<()> {
         timer = Instant::now();
         let rtree = AccelerationTree::load(rstar_objs);
 
-        let test_aabb = AABB::new(Point::new(7699.416, 1889.874, 8962.0),
-                                  Point::new(12735.623, 10239.798, 12397.0));
+        let test_aabb = AABB::new(Point::new(-20221.703,-5851.465,-3200.0),
+                                  Point::new(21765.613,31888.738,-599.9999));
         let target_refnos = rtree
             .locate_intersecting_bounds(&test_aabb).collect::<Vec<_>>();
-        dbg!(target_refnos);
+        // dbg!(target_refnos.len());
 
         println!("生成空间树费时: {}s", timer.elapsed().as_secs_f32());
         let mut file = fs::File::create("accel.spa").unwrap();
@@ -245,7 +239,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "ELBO";
+    let noun = "DB";
     let hash = db1_hash(noun);
     let str = db1_dehash(0xDC34AB5);
     dbg!(hash);

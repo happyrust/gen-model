@@ -11,8 +11,18 @@ use crate::consts::PDMS_SSC_ELEMENTS_TABLE;
 use std::collections::HashMap;
 use std::env;
 use std::fmt::format;
+use std::fs::File;
+use std::io::Read;
+use aios_core::accel_tree::acceleration_tree::AccelerationTree;
+use arangors_lite::{AqlQuery, Database};
+use parry3d::bounding_volume::AABB;
+use parry3d::math::Point;
+use crate::api::children::travel_children_with_refno;
 use crate::api::element::{query_ele_node, query_elenode_without_children_count, query_elenodes_without_children_count};
+use crate::aql_api::{change_vec_refnos_into_vec_string, convert_refno_vec_from_vec_string};
+use crate::aql_api::children::query_travel_children_aql;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::ssc::get_room_info_from_excel;
 
 // 缓存该参考号的 owner 和 owner 的 type
 lazy_static! {
@@ -31,12 +41,30 @@ pub struct SscEleNode {
     pub room_code: String,
 }
 
+/// 通过指定包围盒计算包围盒中的房间的所有节点
+pub async fn get_room_refnos_from_spa_tree(room_name: &str, room_refno: RefU64, aabb: AABB, database: &Database) -> anyhow::Result<HashMap<String, Vec<RefU64>>> {
+    let mut room_map = HashMap::new();
+    let mut file = File::open("./accel.spa")?;
+    let mut buf = vec![];
+    file.read_to_end(&mut buf)?;
+    let rtree = bincode::deserialize::<AccelerationTree>(&buf)?;
+    let test_aabb = aabb;
+    let mut target_refnos = rtree
+        .locate_intersecting_bounds(&test_aabb).collect::<Vec<_>>();
+    let pane_refnos = query_travel_children_aql(database, room_refno).await?;
+    for pane_refno in pane_refnos {
+        target_refnos.push(RefU64::from_refno_str(&pane_refno.refno).unwrap())
+    }
+    room_map.entry(room_name.to_string()).or_insert(target_refnos);
+
+    Ok(room_map)
+}
+
 /// 获取所有带有房间号的节点属性
-pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<HashMap<RefU64,SscEleNode>> {
+pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<HashMap<RefU64, SscEleNode>> {
     let sql = gen_query_all_room_data_sql();
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     let mut refno_room_map = DashMap::new();
-    let mut sql = String::new();
     let mut sqls = vec![];
     for val in vals {
         let refno = RefU64(val.get::<i64, _>("REFNO") as u64);
@@ -48,7 +76,7 @@ pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<HashMap<R
         let mut result = HashMap::new();
         for ele in elenodes {
             if let Some(room_name) = refno_room_map.get(&ele.refno) {
-                result.insert(ele.refno,SscEleNode {
+                result.insert(ele.refno, SscEleNode {
                     refno: ele.refno,
                     noun: ele.noun,
                     name: ele.name,
@@ -61,6 +89,34 @@ pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<HashMap<R
         return Ok(result);
     }
     Ok(HashMap::default())
+}
+
+pub async fn query_all_room_data_aql(database: &Database, pool: &Pool<MySql>) -> anyhow::Result<HashMap<RefU64, SscEleNode>> {
+    let mut result = HashMap::new();
+    let all_room = get_room_info_from_excel()?;
+    let room_map = get_room_refnos_from_spa_tree("1N401", RefU64::from_refno_str("17544/15203").unwrap(), AABB::new(Point::new(30995.389,-47950.0,4000.0),
+                                                                                                                 Point::new(94550.0,-23900.0,5950.0)), database).await?;
+    for (_area, map) in all_room.iter() {
+        for (_, rooms) in map.into_iter() {
+            for room in rooms {
+                // let refnos = query_room_refnos_aql(room, database).await?;
+                if !room_map.contains_key(room) { continue; }
+                let refnos = room_map.get(room).unwrap().clone();
+                if let Ok(elenodes) = query_elenodes_without_children_count(refnos, &pool).await {
+                    for ele in elenodes {
+                        result.entry(ele.refno).or_insert(SscEleNode {
+                            refno: ele.refno,
+                            noun: ele.noun,
+                            name: ele.name,
+                            owner: ele.owner,
+                            room_code: room.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 
 pub async fn query_ssc_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {
@@ -254,6 +310,14 @@ pub async fn update_ssc_type(names: Vec<String>, pool: &Pool<MySql>) -> anyhow::
         }
     }
     Ok(())
+}
+
+/// 获取某个房间下的所有参考号
+pub async fn query_room_refnos_aql(room_name: &str, database: &Database) -> anyhow::Result<Vec<RefU64>> {
+    let aql = AqlQuery::new("return document('room_eles',@room_name)")
+        .bind_var("room_name", room_name);
+    let result: Vec<String> = database.aql_query(aql).await?;
+    Ok(convert_refno_vec_from_vec_string(result))
 }
 
 fn gen_query_ssc_children_count_sql(refno: RefU64) -> String {

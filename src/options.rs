@@ -9,6 +9,8 @@ pub struct DbOption {
     pub incr_sync: bool,
     #[clap(long)]
     pub replace_dbs: bool,
+    #[clap(skip)]
+    pub replace_types: Option<Vec<String>>,
     #[clap(long)]
     pub gen_model_mesh: bool,
     #[clap(long)]

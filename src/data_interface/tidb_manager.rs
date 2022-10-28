@@ -617,7 +617,8 @@ impl AiosDBManager {
                                                                            PDMS_INFO_DB, &db_option.project_name.to_uppercase())).await?;
         let ref0_map = get_ref0_map(&info_conn).await?;
         let projects = db_option.included_projects.clone();
-        let database = get_arangodb_conn_from_db_option(&db_option).await?;
+        println!("正在创建图数据库连接");
+        let database = get_arangodb_conn_from_db_option(&db_option).await.unwrap();
         println!("正在缓存plin");
         let plin_cache_mgr = if let Some(pool) = project_map.get(&db_option.project_name) {
             cache_plin_plax(&project_map.get(&db_option.project_name).unwrap(),
@@ -725,7 +726,7 @@ impl AiosDBManager {
     ///获得branch的模型数据
     async fn get_cata_auto_tubi_geoms(mgr: Arc<AiosDBManager>, branch_refno: RefU64, group_att: &AttrMap,
                                       brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
-                                      debug_refno: Option<RefU64>,/* tubi_result: &mut Arc<Mutex<Vec<TubiEdgeAql>>>*/) -> anyhow::Result<bool> {
+                                      debug_refno: Option<RefU64>, tubi_result: &mut Arc<DashMap<u64,TubiEdgeAql>>) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
         let group_transform = mgr.get_world_transform(branch_refno).await?.unwrap_or_default();
         let htube_pt = group_transform.transform_point3(group_att.get_vec3("HPOS")
@@ -790,20 +791,21 @@ impl AiosDBManager {
             // 将 tubi 数据保存到图数据库
             let tref = group_att.get_foreign_refno(if is_hang { "TREF" } else { "LSTU" }).unwrap_or_default();
             let key = h_ref.hash_with_another_refno(tref);
-            // tubi_result.lock().unwrap().push(TubiEdgeAql {
-            //     _key: key.to_string(),
-            //     _from: format!("pdms_eles/{}", h_ref.to_url_refno()),
-            //     _to: format!("pdms_eles/{}", tref.to_url_refno()),
-            //     start_pt: current_tubing.start_pt,
-            //     end_pt: current_tubing.end_pt,
-            //     att_type: group_att.get_type().to_string(),
-            //     extra_type: "".to_string(),
-            //     bore,
-            // });
+            tubi_result.entry(key).or_insert(TubiEdgeAql {
+                _key: key.to_string(),
+                _from: format!("pdms_eles/{}", h_ref.to_url_refno()),
+                _to: format!("pdms_eles/{}", tref.to_url_refno()),
+                start_pt: current_tubing.start_pt,
+                end_pt: current_tubing.end_pt,
+                att_type: group_att.get_type().to_string(),
+                extra_type: "".to_string(),
+                bore,
+            });
             return Ok(true);
         }
 
         let last_child = children.last().unwrap().clone();
+
         for (idx, refno) in children.clone().into_iter().enumerate() {
             let mut edge = TubiEdgeAql::default();
             edge._from = format!("pdms_eles/{}", refno.to_url_refno());
@@ -882,9 +884,9 @@ impl AiosDBManager {
                     edge.start_pt = l_pos;
                 }
             }
-            // if !edge._key.is_empty() {
-            //     tubi_result.lock().unwrap().push(edge);
-            // }
+            if !edge._key.is_empty() {
+                tubi_result.entry(key).or_insert(edge);
+            }
         }
 
         //第一遍完成后，然后生成tubing
@@ -1084,16 +1086,15 @@ impl AiosDBManager {
         let mut handles = vec![];
         let all_refnos = Arc::new(has_cata_refnos);
         let processed_cnt = Arc::new(Mutex::new(has_cata_cnt));
-        // let mut tubi_result = Arc::new(Mutex::new(vec![]));
+        let mut tubi_result = Arc::new(DashMap::new());
         let replace_mesh = db_option.replace_mesh;
         for i in 0..batch_chunks_cnt as usize {
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
             let all_refnos = all_refnos.clone();
             let processed_cnt = processed_cnt.clone();
-            // let mut tubi_result_clone = tubi_result.clone();
+            let mut tubi_result_clone = tubi_result.clone();
             let handle = tokio::spawn(async move {
-                // let arango_database = mgr.clone().get_arangodb_conn().await.unwrap();
                 let start_idx = i * batch_size;
                 let mut end_idx = start_idx + batch_size;
                 if end_idx > has_cata_cnt as usize {
@@ -1114,7 +1115,7 @@ impl AiosDBManager {
                     let cur_type = current_att.get_type();
                     if cur_type == "BRAN" || cur_type == "HANG" {
                         Self::get_cata_auto_tubi_geoms(mgr.clone(), refno, &current_att, &brep_shapes_map,
-                                                       &refno_ptset_map, target_debug_refno/*, &mut tubi_result_clone*/).await.unwrap_or_default();
+                                                       &refno_ptset_map, target_debug_refno, &mut tubi_result_clone).await.unwrap_or_default();
                     } else {
                         Self::get_cata_single_geoms(mgr.clone(), refno, &brep_shapes_map,
                                                     &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
@@ -1206,19 +1207,20 @@ impl AiosDBManager {
 
                         inst_map.insert(child_refno, geos_info);
                     }
-                    
+
                     *processed_cnt.lock().unwrap() -= 1;
                 }
             });
             handles.push(handle);
         }
         futures::future::join_all(take(&mut handles)).await;
-        // let tubi_result: &Vec<TubiEdgeAql> = &*tubi_result.lock().unwrap();
-        // if !tubi_result.is_empty() {
-        //     let conn = mgr.get_arangodb_conn().await.unwrap();
-        //     let json = serde_json::to_value(tubi_result).unwrap_or_default();
-        //     save_arangodb_with_database(json, "tubi_edges", &conn).await.unwrap();
-        // }
+        let tubi_result = Arc::try_unwrap(tubi_result).unwrap()
+            .into_iter().map(|x| x.1).collect::<Vec<_>>();
+        if !tubi_result.is_empty() {
+            let conn = mgr.get_arangodb_conn().await.unwrap();
+            let json = serde_json::to_value(tubi_result).unwrap_or_default();
+            save_arangodb_with_database(json, "tubi_edges", &conn).await.unwrap();
+        }
         dbg!(instance_mgr.inst_mgr.len());
         println!("处理元件库几何体: {} 花费时间: {} ms", has_cata_cnt, t.elapsed().as_millis());
         Ok(true)
@@ -1629,7 +1631,7 @@ impl AiosDBManager {
         std::fs::create_dir_all("./assets/mesh").unwrap();
         std::fs::create_dir_all("./assets/instance").unwrap();
 
-        // let mut handles = vec![];
+        let mut handles = vec![];
         for db_no in db_nos {
             let instance_mgr =
                 PdmsMeshInstanceMgr::deserialize_from_bin_file(&format!("./assets/instance/{db_no}.inst")).unwrap_or_default();
@@ -1642,24 +1644,24 @@ impl AiosDBManager {
             let mgr_clone = mgr.clone();
 
             println!("开始处理db: {db_no}");
-            // let handle = tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 Self::cache_cata_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &project,
                                       Some(vec![db_no]), &db_option_clone).await.unwrap();
-            // });
-            // handles.push(handle);
+            });
+            handles.push(handle);
             let instance_mgr_clone = instance_mgr.clone();
             let db_option_clone = db_option.clone();
-            // if db_option_clone.debug_branch_refno.as_ref().is_none() && db_option_clone.debug_desi_refno.as_ref().is_none() {
-            let project = project.clone();
-            let mgr_clone = mgr.clone();
-            // let handle = tokio::spawn(async move {
-                Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option, Some(vec![db_no])).await.unwrap();
-                Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option, Some(vec![db_no])).await.unwrap();
-            // });
-            // handles.push(handle);
-            // }
+            if db_option_clone.debug_branch_refno.as_ref().is_none() && db_option_clone.debug_desi_refno.as_ref().is_none() {
+                // let project = project.clone();
+                let mgr_clone = mgr.clone();
+                let handle = tokio::spawn(async move {
+                    Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone, Some(vec![db_no])).await.unwrap();
+                    Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone, Some(vec![db_no])).await.unwrap();
+                });
+                handles.push(handle);
+            }
             // Self::cache_pohe_geos(mgr.clone(), &project).await?;
-            // futures::future::join_all(take(&mut handles)).await;
+            futures::future::join_all(take(&mut handles)).await;
             mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
 
 
