@@ -28,7 +28,10 @@ use futures::StreamExt;
 use itertools::Itertools;
 use nalgebra::{Quaternion, UnitQuaternion};
 use nom_derive::Parse;
-use parry3d::math::{Isometry, Vector};
+use parry3d::bounding_volume::AABB;
+use parry3d::math::{Isometry, Vector, Point};
+use parry3d::transformation::vhacd;
+use parry3d::transformation::vhacd::VHACD;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use regex::internal::Input;
 use sqlx::{Acquire, MySql, MySqlPool, Pool, Row};
@@ -157,6 +160,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let children_files = fs::read_dir("assets/mesh/")?;
+            let params = vhacd::VHACDParameters::default();
             for path in children_files {
                 let path = path?.path();
                 let filename = path.file_name().unwrap().to_str().unwrap().to_string();
@@ -166,6 +170,13 @@ async fn main() -> anyhow::Result<()> {
                 let mut data = vec![];
                 file.read_to_end(&mut data)?;
                 let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
+                for m in &mesh_mgr.meshes{
+                    let points = m.vertices.iter().map(|x| Point::from_slice(x)).collect::<Vec<Point<f32>>>();
+                    let indices: Vec<[u32; 3]> = m.indices.chunks(3).map(|x| [x[0], x[1], x[2]]).collect();
+                    let vhacd = VHACD::decompose(&params, &points, &indices, false);
+                    // let convex_hulls = vhacd.compute_convex_hulls(1);
+                }
+
                 save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
             }
         }
@@ -196,8 +207,15 @@ async fn main() -> anyhow::Result<()> {
         println!("收集空间包围盒时间: {}s", timer.elapsed().as_secs_f32());
         timer = Instant::now();
         let rtree = AccelerationTree::load(rstar_objs);
+
+        let test_aabb = AABB::new(Point::new(7699.416, 1889.874, 8962.0),
+                                  Point::new(12735.623, 10239.798, 12397.0));
+        let target_refnos = rtree
+            .locate_intersecting_bounds(&test_aabb).collect::<Vec<_>>();
+        dbg!(target_refnos);
+
         println!("生成空间树费时: {}s", timer.elapsed().as_secs_f32());
-        let mut file = fs::File::create("accel.tree").unwrap();
+        let mut file = fs::File::create("accel.spa").unwrap();
         let serialized = bincode::serialize(&rtree).unwrap();
         file.write_all(serialized.as_slice()).unwrap();
     }
