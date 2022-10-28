@@ -1132,7 +1132,7 @@ impl AiosDBManager {
                             data: vec![],
                             visible: true,
                             generic_type: mgr.get_generic_type(child_refno),
-                            aabb: AABB::new_invalid(),
+                            aabb: None,
                             world_transform: (trans_origin.rotation, trans_origin.translation, Vec3::ONE),
                             ptset_map: refno_ptset_map.remove(&child_refno).map(|x| x.1).unwrap_or_default(),
                             flow_pt_indexs: vec![child_att.get_i32("ARRI"), child_att.get_i32("LEAV")],
@@ -1190,14 +1190,14 @@ impl AiosDBManager {
                             };
                             geo_insts.push(geom_inst);
                         }
-                        geos_info.aabb = ele_aabb.transform_by(&Isometry {
+                        geos_info.aabb = Some(ele_aabb.transform_by(&Isometry {
                             rotation: UnitQuaternion::from_quaternion(Quaternion::new(trans_origin.rotation.w, trans_origin.rotation.x,
                                                                                       trans_origin.rotation.y, trans_origin.rotation.z)),
                             translation: Vector::new(trans_origin.translation.x, trans_origin.translation.y, trans_origin.translation.z).into(),
-                        });
+                        }));
 
                         if has_tubi {
-                            geos_info.aabb.merge(&tubi_aabb);
+                            geos_info.aabb.as_mut().unwrap().merge(&tubi_aabb);
                         }
                         // dbg!(&tubi_aabb);
                         // if is_debug {
@@ -1285,7 +1285,7 @@ impl AiosDBManager {
                         data: vec![],
                         visible: true,
                         generic_type: mgr.get_generic_type(refno),
-                        aabb: AABB::new_invalid(),
+                        aabb: None,
                         world_transform: (trans_origin.rotation, trans_origin.translation, Vec3::ONE),
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
@@ -1324,11 +1324,11 @@ impl AiosDBManager {
                             is_tubi: false,
                         };
                         geo_insts.push(geom_inst);
-                        geos_info.aabb = ele_aabb.transform_by(&Isometry {
+                        geos_info.aabb = Some(ele_aabb.transform_by(&Isometry {
                             rotation: UnitQuaternion::from_quaternion(Quaternion::new(trans_origin.rotation.w, trans_origin.rotation.x,
                                                                                       trans_origin.rotation.y, trans_origin.rotation.z)),
                             translation: Vector::new(trans_origin.translation.x, trans_origin.translation.y, trans_origin.translation.z).into(),
-                        });
+                        }));
                         inst_map.insert(refno, geos_info);
                     }
                 }
@@ -1479,7 +1479,7 @@ impl AiosDBManager {
                         generic_type: mgr.get_generic_type(refno),
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
-                        aabb: AABB::new_invalid(),
+                        aabb: None,
                     };
                     let mut geo_insts = &mut geos_info.data;
 
@@ -1581,11 +1581,11 @@ impl AiosDBManager {
                                     is_tubi: false,
                                 };
                                 geo_insts.push(geom_inst);
-                                geos_info.aabb = ele_aabb.transform_by(&Isometry {
+                                geos_info.aabb = Some(ele_aabb.transform_by(&Isometry {
                                     rotation: UnitQuaternion::from_quaternion(Quaternion::new(trans_origin.rotation.w, trans_origin.rotation.x,
                                                                                               trans_origin.rotation.y, trans_origin.rotation.z)),
                                     translation: Vector::new(trans_origin.translation.x, trans_origin.translation.y, trans_origin.translation.z).into(),
-                                });
+                                }));
                                 // dbg!(&geos_info.aabb);
                             } else {
                                 println!("楼板有问题：{} ", refno.to_refno_string());
