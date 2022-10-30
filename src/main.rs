@@ -45,6 +45,7 @@ use aios_database::api::element::*;
 use aios_database::api::project_mdb::insert_project_mdb;
 use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
 use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
+use aios_database::aql_api::pdms_room::{RoomEdgeAql, RoomElementAql};
 use aios_database::cata::resolve::parse_to_i32;
 use aios_database::consts::*;
 use aios_database::data_interface::interface::PdmsDataInterface;
@@ -140,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
             let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
             // let instance_mgr = Arc::new(change_instance_mgr_old_into_new(instance_mgr));
             dbg!(&instance_mgr.inst_mgr.inst_map.len());
-            sync_instance_to_graph_db(mgr.clone(), Arc::new(instance_mgr)).await?;
+            // sync_instance_to_graph_db(mgr.clone(), Arc::new(instance_mgr)).await?;
         }
         dbg!("正在保存mesh");
         if let Some(project_pool) = mgr.project_map.get(&db_option.project_name) {
@@ -164,42 +165,42 @@ async fn main() -> anyhow::Result<()> {
                 let mut data = vec![];
                 file.read_to_end(&mut data)?;
                 let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-                save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
+                // save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
             }
         }
         dbg!("图数据库保存完成");
     }
 
 
-    let children_files = fs::read_dir("assets/mesh/")?;
-    let params = vhacd::VHACDParameters::default();
-    let mut convex_mgr = CachedConvexPolyheronMgr::default();
-    for path in children_files {
-        let path = path?.path();
-        let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-        if !filename.ends_with("bin") { continue; }
-        dbg!(&filename);
-        let mut file = fs::File::open(path)?;
-        let mut data = vec![];
-        file.read_to_end(&mut data)?;
-        let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-        let mut max_indices = 0;
-        for m in &mesh_mgr.meshes {
-            let points = m.vertices.iter().map(|x| Point::from_slice(x)).collect::<Vec<Point<f32>>>();
-            let indices: Vec<[u32; 3]> = m.indices.chunks(3).map(|x| [x[0], x[1], x[2]]).collect();
-            // dbg!(indices.len());
-            max_indices = indices.len().max(max_indices);
-            // let vhacd = VHACD::decompose(&params, &points, &indices, false);
-            // let convex_hulls = vhacd.compute_convex_hulls(1);
-            // let convex_polyhedron = convex_hulls
-            //     .into_iter()
-            //     .map(|h| ConvexPolyhedron::from_convex_mesh(h.0, &h.1).unwrap())
-            //     .collect::<Vec<_>>();
-            // dbg!(convex_polyhedron.len());
-            // convex_mgr.convex_shapes_map.entry(*m.key()).or_insert(convex_polyhedron);
-        }
-        dbg!(max_indices);
-    }
+    // let children_files = fs::read_dir("assets/mesh/")?;
+    // let params = vhacd::VHACDParameters::default();
+    // let mut convex_mgr = CachedConvexPolyheronMgr::default();
+    // for path in children_files {
+    //     let path = path?.path();
+    //     let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+    //     if !filename.ends_with("bin") { continue; }
+    //     dbg!(&filename);
+    //     let mut file = fs::File::open(path)?;
+    //     let mut data = vec![];
+    //     file.read_to_end(&mut data)?;
+    //     let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
+    //     let mut max_indices = 0;
+    //     for m in &mesh_mgr.meshes {
+    //         let points = m.vertices.iter().map(|x| Point::from_slice(x)).collect::<Vec<Point<f32>>>();
+    //         let indices: Vec<[u32; 3]> = m.indices.chunks(3).map(|x| [x[0], x[1], x[2]]).collect();
+    //         // dbg!(indices.len());
+    //         max_indices = indices.len().max(max_indices);
+    //         // let vhacd = VHACD::decompose(&params, &points, &indices, false);
+    //         // let convex_hulls = vhacd.compute_convex_hulls(1);
+    //         // let convex_polyhedron = convex_hulls
+    //         //     .into_iter()
+    //         //     .map(|h| ConvexPolyhedron::from_convex_mesh(h.0, &h.1).unwrap())
+    //         //     .collect::<Vec<_>>();
+    //         // dbg!(convex_polyhedron.len());
+    //         // convex_mgr.convex_shapes_map.entry(*m.key()).or_insert(convex_polyhedron);
+    //     }
+    //     dbg!(max_indices);
+    // }
     // convex_mgr.serialize_to_bin_file();
 
     //生成rtree 结构
@@ -215,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
             let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
             dbg!(&instance_mgr.inst_mgr.inst_map.len());
             for kv in &instance_mgr.inst_mgr.inst_map {
-                if let Some(aabb) = kv.value().aabb{
+                if let Some(aabb) = kv.value().aabb {
                     if aabb.extents().magnitude().is_finite() {
                         rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, *kv.key()));
                     } else {
@@ -227,12 +228,36 @@ async fn main() -> anyhow::Result<()> {
         println!("收集空间包围盒时间: {}s", timer.elapsed().as_secs_f32());
         timer = Instant::now();
         let rtree = AccelerationTree::load(rstar_objs);
-
-        let test_aabb = AABB::new(Point::new(-20221.703,-5851.465,-3200.0),
-                                  Point::new(21765.613,31888.738,-599.9999));
+        let test_aabb = AABB::new(Point::new(7699.416, 1889.874, 8962.0),
+                                  Point::new(12735.623, 10239.798, 12397.0));
         let target_refnos = rtree
             .locate_intersecting_bounds(&test_aabb).collect::<Vec<_>>();
-        dbg!(target_refnos);
+
+        dbg!(&target_refnos);
+        {
+            let database = mgr.get_arangodb_conn().await?;
+            let mut room_eles = vec![];
+            let mut room_edges = vec![];
+            let refno = RefU64::from_refno_str("23584/44").unwrap();
+            room_eles.push(RoomElementAql {
+                _key: refno.0.to_string(),
+                refno,
+                name: "1R101".to_string(),
+                aabb: Some(test_aabb),
+            });
+            for target_refno in target_refnos {
+                let hash = refno.hash_with_another_refno(target_refno);
+                room_edges.push(RoomEdgeAql {
+                    _key: hash.to_string(),
+                    _from: format!("pdms_eles/{}", refno.to_url_refno()),
+                    _to: format!("pdms_eles/{}", target_refno.to_url_refno()),
+                })
+            }
+            let room_eles_json = serde_json::to_value(&room_eles)?;
+            let room_edges_json = serde_json::to_value(&room_edges)?;
+            save_arangodb_with_database(room_eles_json,"room_eles",&database).await?;
+            save_arangodb_with_database(room_edges_json,"room_edges",&database).await?;
+        }
 
         println!("生成空间树费时: {}s", timer.elapsed().as_secs_f32());
         let mut file = fs::File::create("accel.spa").unwrap();

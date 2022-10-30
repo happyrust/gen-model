@@ -419,7 +419,7 @@ pub async fn save_arangodb_with_db_option(json: Value, db_option: &DbOption, col
 pub async fn save_arangodb_with_database(json: Value, collection: &str, database: &Database) -> anyhow::Result<()> {
     let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
+                        INSERT d INTO @@collection")
         .bind_var("@collection", collection)
         .bind_var("elements", json);
     let _result: Vec<()> = database.aql_query(aql).await?;
