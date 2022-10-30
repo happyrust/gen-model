@@ -47,6 +47,7 @@ use aios_database::api::project_mdb::insert_project_mdb;
 use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
 use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
 use aios_database::BATCH_CHUNKS_CNT;
+use aios_database::aql_api::pdms_room::{RoomEdgeAql, RoomElementAql};
 use aios_database::cata::resolve::parse_to_i32;
 use aios_database::consts::*;
 use aios_database::data_interface::interface::PdmsDataInterface;

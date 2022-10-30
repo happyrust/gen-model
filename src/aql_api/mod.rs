@@ -9,6 +9,7 @@ pub mod plin_attr;
 pub mod para_value;
 pub mod dtse_attr;
 pub mod pdms_mesh;
+pub mod pdms_room;
 
 /// 存放在图数据库的attr
 #[derive(Debug, Default, Serialize, Deserialize)]
