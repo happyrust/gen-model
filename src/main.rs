@@ -277,17 +277,37 @@ async fn main() -> anyhow::Result<()> {
                             //filter None aabb
                             let ele_refno = *ele_geos_info.key();
                             let room_colliders = collider_shape_mgr.get_collider(ele_refno, inst_mgr, &mesh_mgr);
-                            // dbg!(serde_json::to_string(&room_collider));
                             if let Some(target_abb) = ele_geos_info.aabb {
                                 let mut withing_room_refnos = rtree
                                     .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
+                                // let mut withing_room_refnos = vec![RefU64::from_two_nums(23584, 9348)];
                                 let mut removed_refnos = vec![];
                                 withing_room_refnos.retain(|x| {
                                     let checking_colliders = collider_shape_mgr.get_collider(*x, inst_mgr, &mesh_mgr);
                                     for rc in &room_colliders {
                                         for cc in &checking_colliders {
+                                            // dbg!(serde_json::to_string(rc));
+                                            // dbg!(serde_json::to_string(cc));
+                                            // dbg!(rc.compute_local_aabb());
+                                            // dbg!(cc.compute_local_aabb().center());
+                                            // let t = rc.as_ref().distance_to_point(
+                                            //     &Isometry::identity(), &cc.compute_local_aabb().center(), false);
+                                            // dbg!(t);
+                                            // let tt = parry3d::query::distance(&Isometry::identity(),rc.as_ref(),
+                                            //                                   &Isometry::identity(), cc.as_ref()).unwrap();
+                                            // dbg!(tt);
+                                            let target_pt = if let Some(tri_mesh) = cc.as_ref().as_trimesh() {
+                                                tri_mesh.triangle(0).local_aabb().center()
+                                            }else{
+                                                cc.compute_local_aabb().center()
+                                            };
+                                            if rc.as_ref().contains_point(&Isometry::identity(), &target_pt) {
+                                                // dbg!("Point Contains");
+                                                return true;
+                                            }
                                             let r = parry3d::query::intersection_test(&Isometry::identity(),rc.as_ref(),
                                                                                       &Isometry::identity(), cc.as_ref()).unwrap();
+                                            // dbg!(r);
                                             if r {
                                                 // dbg!(*x);
                                                 return true;
@@ -297,8 +317,11 @@ async fn main() -> anyhow::Result<()> {
                                     removed_refnos.push(*x);
                                     false
                                 });
-                                dbg!(removed_refnos.len());
-                                dbg!(removed_refnos);
+                                let mut file = fs::File::create("removed_refnos.data").unwrap();
+                                let serialized = bincode::serialize(&removed_refnos).unwrap();
+                                file.write_all(serialized.as_slice()).unwrap();
+                                // dbg!(removed_refnos.len());
+                                // dbg!(removed_refnos);
                             }
                         }
                     }
