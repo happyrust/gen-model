@@ -8,6 +8,7 @@ project_name = "Sample"
 module = "DESI"
 manual_db_nums = [7200]
 gen_model_mesh = true
+save_model_mesh_to_graph_db = false
 gen_spatial_tree = true
 gen_model_batch_size = 100
 debug_print_world_transform = false

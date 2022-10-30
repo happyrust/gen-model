@@ -14,6 +14,8 @@ pub struct DbOption {
     #[clap(long)]
     pub gen_model_mesh: bool,
     #[clap(long)]
+    pub save_model_mesh_to_graph_db: bool,
+    #[clap(long)]
     pub gen_spatial_tree: bool,
     #[clap(long, default_value = "12.1SP4Projects")]
     pub project_path: String,

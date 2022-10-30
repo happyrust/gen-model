@@ -18,8 +18,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
 
 use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
+use aios_core::db_number::DbNumMgr;
 use aios_core::pdms_types::*;
 use aios_core::pdms_types::AttrVal::StringType;
+use aios_core::prim_geo;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_bin};
 use arangors_lite::collection::CollectionType::{Document, Edge};
 use chrono::{Datelike, Timelike};
@@ -29,8 +31,8 @@ use itertools::Itertools;
 use nalgebra::{max, Quaternion, UnitQuaternion};
 use nom_derive::Parse;
 use parry3d::bounding_volume::AABB;
-use parry3d::math::{Isometry, Vector, Point};
-use parry3d::shape::ConvexPolyhedron;
+use parry3d::math::{Isometry, Point, Vector};
+use parry3d::shape::{Compound, ConvexPolyhedron, SharedShape};
 use parry3d::transformation::vhacd;
 use parry3d::transformation::vhacd::VHACD;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
@@ -39,12 +41,12 @@ use sqlx::{Acquire, MySql, MySqlPool, Pool, Row};
 use sqlx::Executor;
 use sqlx::pool::PoolConnection;
 
-use aios_database::BATCH_CHUNKS_CNT;
 use aios_database::api::attr::insert_attr_info;
 use aios_database::api::element::*;
 use aios_database::api::project_mdb::insert_project_mdb;
 use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
 use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
+use aios_database::BATCH_CHUNKS_CNT;
 use aios_database::cata::resolve::parse_to_i32;
 use aios_database::consts::*;
 use aios_database::data_interface::interface::PdmsDataInterface;
@@ -58,7 +60,8 @@ use aios_database::helper::{qualified_column_name, qualified_table_name};
 use aios_database::options::DbOption;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::{gen_create_attr_info_tables_sql, gen_create_pdms_mesh_table_sql};
-
+use bevy::prelude::*;
+use bevy::transform::components::Transform;
 
 pub async fn test_batch_insert(url: &str) {
     let connection = MySqlPool::connect(&url)
@@ -120,29 +123,36 @@ async fn main() -> anyhow::Result<()> {
         dbg!("SSC同步完成");
     }
 
+    let mut all_insts_mgr = HashMap::new();
     if db_option.gen_model_mesh {
         dbg!("正在生成模型");
         let mut time = Instant::now();
         AiosDBManager::cache_geos_data(mgr.clone(), db_option.clone()).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+    }
 
+    {
         // 将 instance 保存到图数据库
-        dbg!("正在保存图数据库");
+
         let children_files = fs::read_dir("assets/instance/")?;
         for path in children_files {
             let path = path?.path();
-            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+            let filename = path.file_name().unwrap().to_str().unwrap();
             if !filename.ends_with("inst") { continue; }
             dbg!(&filename);
+            let dbno: u32 = path.file_stem().unwrap().to_str().unwrap().parse().unwrap();
             let mut file = fs::File::open(path)?;
             let mut data = vec![];
             file.read_to_end(&mut data)?;
             let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
-            // let instance_mgr = Arc::new(change_instance_mgr_old_into_new(instance_mgr));
             dbg!(&instance_mgr.inst_mgr.inst_map.len());
-            sync_instance_to_graph_db(mgr.clone(), Arc::new(instance_mgr)).await?;
+            if db_option.save_model_mesh_to_graph_db {
+                dbg!("正在保存Instances");
+                sync_instance_to_graph_db(mgr.clone(), &instance_mgr).await?;
+            }
+            all_insts_mgr.insert(dbno, instance_mgr);
         }
-        dbg!("正在保存mesh");
+
         if let Some(project_pool) = mgr.project_map.get(&db_option.project_name) {
             let create_table_sql = gen_create_pdms_mesh_table_sql();
             let mut conn = project_pool.acquire().await?;
@@ -155,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let children_files = fs::read_dir("assets/mesh/")?;
+            dbg!("正在保存Meshes");
             for path in children_files {
                 let path = path?.path();
                 let filename = path.file_name().unwrap().to_str().unwrap().to_string();
@@ -164,58 +175,79 @@ async fn main() -> anyhow::Result<()> {
                 let mut data = vec![];
                 file.read_to_end(&mut data)?;
                 let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-                save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
+                if db_option.save_model_mesh_to_graph_db {
+                    save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
+                }
             }
         }
-        dbg!("图数据库保存完成");
     }
 
 
-    let children_files = fs::read_dir("assets/mesh/")?;
-    let params = vhacd::VHACDParameters::default();
-    let mut convex_mgr = CachedConvexPolyheronMgr::default();
-    for path in children_files {
-        let path = path?.path();
-        let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-        if !filename.ends_with("bin") { continue; }
-        dbg!(&filename);
-        let mut file = fs::File::open(path)?;
-        let mut data = vec![];
-        file.read_to_end(&mut data)?;
-        let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-        let mut max_indices = 0;
-        for m in &mesh_mgr.meshes {
-            let points = m.vertices.iter().map(|x| Point::from_slice(x)).collect::<Vec<Point<f32>>>();
-            let indices: Vec<[u32; 3]> = m.indices.chunks(3).map(|x| [x[0], x[1], x[2]]).collect();
-            // dbg!(indices.len());
-            max_indices = indices.len().max(max_indices);
-            // let vhacd = VHACD::decompose(&params, &points, &indices, false);
-            // let convex_hulls = vhacd.compute_convex_hulls(1);
-            // let convex_polyhedron = convex_hulls
-            //     .into_iter()
-            //     .map(|h| ConvexPolyhedron::from_convex_mesh(h.0, &h.1).unwrap())
-            //     .collect::<Vec<_>>();
-            // dbg!(convex_polyhedron.len());
-            // convex_mgr.convex_shapes_map.entry(*m.key()).or_insert(convex_polyhedron);
-        }
-        dbg!(max_indices);
-    }
+
+    // let children_files = fs::read_dir("assets/mesh/")?;
+    // for path in children_files {
+    //     let path = path?.path();
+    //     let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+    //     if !filename.ends_with("bin") { continue; }
+    //     dbg!(&filename);
+    //     let mut file = fs::File::open(path)?;
+    //     let mut data = vec![];
+    //     file.read_to_end(&mut data)?;
+    //     let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
+    //     // let mut max_indices = 0;
+    //     for m in &mesh_mgr.meshes {
+    //         let geo_hash = *m.key();
+    //         match geo_hash {
+    //             prim_geo::CUBE_GEO_HASH => {
+    //                 collider_shape_mgr.insert(geo_hash, SharedShape::cuboid(0.5, 0.5, 0.5));
+    //             }
+    //             prim_geo::SPHERE_GEO_HASH => {
+    //                 collider_shape_mgr.insert(geo_hash, SharedShape::ball(1.0));
+    //             }
+    //             prim_geo::CYLINDER_GEO_HASH => {
+    //                 collider_shape_mgr.insert(geo_hash, SharedShape::cylinder(0.5, 1.0));
+    //             }
+    //             _ => {
+    //                 collider_shape_mgr.insert(geo_hash, SharedShape(Arc::new(m.get_tri_mesh())));
+    //             }
+    //         }
+    //         //
+    //         // let points = m.vertices.iter().map(|x| Point::from_slice(x)).collect::<Vec<Point<f32>>>();
+    //         // let indices: Vec<[u32; 3]> = m.indices.chunks(3).map(|x| [x[0], x[1], x[2]]).collect();
+    //         // dbg!(indices.len());
+    //         // max_indices = indices.len().max(max_indices);
+    //         // let vhacd = VHACD::decompose(&params, &points, &indices, false);
+    //         // let convex_hulls = vhacd.compute_convex_hulls(1);
+    //         // let convex_polyhedron = convex_hulls
+    //         //     .into_iter()
+    //         //     .map(|h| ConvexPolyhedron::from_convex_mesh(h.0, &h.1).unwrap())
+    //         //     .collect::<Vec<_>>();
+    //         // dbg!(convex_polyhedron.len());
+    //         // convex_mgr.convex_shapes_map.entry(*m.key()).or_insert(convex_polyhedron);
+    //     }
+    //     // dbg!(max_indices);
+    // }
     // convex_mgr.serialize_to_bin_file();
 
     //生成rtree 结构
+    let instance_dir_path = "assets/instance";
+    let mut collider_shape_mgr = CachedColliderShapeMgr::default();
+    let mut file = fs::File::open("assets/mesh/mesh.bin")?;
+    let mut data = vec![];
+    file.read_to_end(&mut data)?;
+    let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
     if db_option.gen_spatial_tree {
-        let dir_path = "assets/instance";
         let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
         let mut timer = Instant::now();
         let mut rstar_objs = vec![];
         for db_no in db_nos {
-            let mut file = fs::File::open(format!("{}/{}.inst", dir_path, db_no))?;
+            let mut file = fs::File::open(format!("{}/{}.inst", instance_dir_path, db_no))?;
             let mut data = vec![];
             file.read_to_end(&mut data)?;
             let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
             dbg!(&instance_mgr.inst_mgr.inst_map.len());
             for kv in &instance_mgr.inst_mgr.inst_map {
-                if let Some(aabb) = kv.value().aabb{
+                if let Some(aabb) = kv.value().aabb {
                     if aabb.extents().magnitude().is_finite() {
                         rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, *kv.key()));
                     } else {
@@ -228,11 +260,51 @@ async fn main() -> anyhow::Result<()> {
         timer = Instant::now();
         let rtree = AccelerationTree::load(rstar_objs);
 
-        let test_aabb = AABB::new(Point::new(-20221.703,-5851.465,-3200.0),
-                                  Point::new(21765.613,31888.738,-599.9999));
-        let target_refnos = rtree
-            .locate_intersecting_bounds(&test_aabb).collect::<Vec<_>>();
-        dbg!(target_refnos);
+        // dbg!(target_refnos);
+        //生成TriMesh 的 shape
+        // let all_room_refno
+        let target_refno = RefU64::from_two_nums(23584, 67);
+        let dbno_mgr = DbNumMgr::load_file(&format!("{instance_dir_path}/dbno_mgr.num")).unwrap_or_default();
+        if let Some(dbno) = dbno_mgr.get_dbno(target_refno) {
+            if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
+                if inst_mgr.level_shape_mgr.contains_key(&target_refno) {
+                    let all_refnos = inst_mgr.level_shape_mgr.get(&target_refno).unwrap();
+                    dbg!(all_refnos.value());
+                    for room_refno in all_refnos.value().clone().into_iter() {
+                        let ele_geos_info_map = inst_mgr.get_instants_data(room_refno);
+                        for ele_geos_info in &ele_geos_info_map {
+                            //filter None aabb
+                            let ele_refno = *ele_geos_info.key();
+                            let room_colliders = collider_shape_mgr.get_collider(ele_refno, inst_mgr, &mesh_mgr);
+                            // dbg!(serde_json::to_string(&room_collider));
+                            if let Some(target_abb) = ele_geos_info.aabb {
+                                let mut withing_room_refnos = rtree
+                                    .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
+                                let mut removed_refnos = vec![];
+                                withing_room_refnos.retain(|x| {
+                                    let checking_colliders = collider_shape_mgr.get_collider(*x, inst_mgr, &mesh_mgr);
+                                    for rc in &room_colliders {
+                                        for cc in &checking_colliders {
+                                            let r = parry3d::query::intersection_test(&Isometry::identity(),rc.as_ref(),
+                                                                                      &Isometry::identity(), cc.as_ref()).unwrap();
+                                            if r {
+                                                // dbg!(*x);
+                                                return true;
+                                            }
+                                        }
+                                    }
+                                    removed_refnos.push(*x);
+                                    false
+                                });
+                                dbg!(removed_refnos.len());
+                                dbg!(removed_refnos);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
 
         println!("生成空间树费时: {}s", timer.elapsed().as_secs_f32());
         let mut file = fs::File::create("accel.spa").unwrap();

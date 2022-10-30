@@ -23,7 +23,7 @@ use crate::options::DbOption;
 
 
 // todo 改成多线程
-pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>) -> anyhow::Result<()> {
+pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &PdmsMeshInstanceMgr) -> anyhow::Result<()> {
     let mut time = Instant::now();
     let collection = "pdms_instances";
     let edge_collection = "instance_edges";
@@ -31,7 +31,7 @@ pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: Ar
     let database = mgr.arango_database.clone();
     let mut instances = vec![];
     let mut edges = vec![];
-    for chunk in &instance_mgr.clone().inst_mgr.inst_map.clone().into_iter().chunks(1000) {
+    for chunk in &instance_mgr.inst_mgr.inst_map.clone().into_iter().chunks(1000) {
         for k in chunk {
             let json = serde_json::to_value(k.1.to_json_type()).unwrap();
             instances.push(json);
