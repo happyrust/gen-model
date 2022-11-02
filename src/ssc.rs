@@ -69,9 +69,10 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
         }
     }
     dbg!("创建SSC表完成");
-    let (zone_level_map, zone_name_map, next_refno) = insert_set_ssc_node_sql(project_pool).await?;
+    let room_data = query_all_room_data_aql(&mgr.get_arangodb_conn().await?, project_pool,&mgr.db_option).await?;
+    let room_info = deal_room_info(room_data.clone());
+    let (zone_level_map, zone_name_map, next_refno) = insert_set_ssc_node_sql(room_info, project_pool).await?;
     dbg!("SSC固定节点生成");
-    let room_data = query_all_room_data_aql(&mgr.get_arangodb_conn().await?,project_pool).await?;
     if room_data.len() != 0 {
         let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
         let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, next_refno, project_pool, mgr).await;
@@ -186,9 +187,9 @@ pub fn get_rooms_from_excel() -> anyhow::Result<Vec<String>> {
 }
 
 /// 创建ssc固定节点
-pub async fn insert_set_ssc_node_sql(pool: &Pool<MySql>) -> anyhow::Result<(DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
+pub async fn insert_set_ssc_node_sql(room_info: HashMap<String, RefU64>, pool: &Pool<MySql>) -> anyhow::Result<(DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
     let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
-    let (sql, zone_level_map, zone_name_map, next_refno) = set_ssc_node()?;
+    let (sql, zone_level_map, zone_name_map, next_refno) = set_ssc_node(room_info)?;
     let sql = format!("{}{}", insert_sql, sql);
     let mut conn = pool.acquire().await?;
     let result = conn.execute(sql.as_str()).await;
@@ -232,8 +233,8 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
         let room = Arc::new(room_ori).clone();
 
         // let handle = tokio::spawn(async move {
-        // let room_name = format!("1{}", room.room_code); // 默认都是 1号机组
-        let room_name = room.room_code.to_string();
+        let room_name = format!("1{}", room.room_code); // 默认都是 1号机组
+        // let room_name = room.room_code.to_string();
         if let Ok(mut zone_refnos) = query_ancestor_refnos_till_type(room.refno, "ZONE", &pool).await {
             // 想拿到 zone的参考号
             if let Some(zone_refno) = zone_refnos.pop() {
@@ -411,7 +412,7 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
 }
 
 /// 设置 ssc 的固定节点
-pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
+pub fn set_ssc_node(room_info: HashMap<String, RefU64>) -> anyhow::Result<(String, DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
     let mut next_refno = RefU64(0);
     let mut sql = String::new();
     let refno = RefU64(1);
@@ -464,7 +465,7 @@ pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMa
     let mut zone_level_map = DashMap::new();
     let mut zone_name_map = DashMap::new();
     if let Ok(map) = get_room_info_from_excel() {
-        let (zone_level_map_r, zone_name_map_r, next_refno_level) = set_ssc_level_node(map, (three_refno, n_refno), two_level_refno, &mut sql)?;
+        let (zone_level_map_r, zone_name_map_r, next_refno_level) = set_ssc_level_node(map, (three_refno, n_refno), two_level_refno, &mut sql, room_info)?;
         next_refno = next_refno_level;
         zone_level_map = zone_level_map_r;
         zone_name_map = zone_name_map_r;
@@ -484,7 +485,7 @@ pub fn gen_insert_ssc_node_sql(refno: RefU64, type_name: &str, owner: RefU64, na
     (RefU64(refno.0 + 1), sql)
 }
 
-/// ssc 节点引用pdmsrefno
+/// ssc 节点引用 pdms refno
 pub fn gen_insert_ssc_node_sql_with_pdms_refno(refno: RefU64, type_name: &str, owner: RefU64, name: &str, pdms_real_refno: RefU64, order_num: usize) -> (RefU64, String) {
     let mut sql = String::new();
     let refno_str = refno.to_refno_str().to_string();
@@ -532,7 +533,7 @@ fn gen_insert_room_level_node_sql(level: Vec<(String, Vec<String>)>, mut refno: 
 /// unit_refnos : 0:一号机组 参考号 1 : 二号机组参考号 暂时没有机组共用这一个分类 <br>
 /// next_refnos ： ssc参考号是从0开始排的，这个就是下一个节点需要用到的参考号
 fn set_ssc_level_node(node_map: HashMap<String, BTreeMap<i32, Vec<String>>>, unit_refnos: (RefU64, RefU64),
-                      mut next_refno: RefU64, insert_sql: &mut String) -> anyhow::Result<(DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
+                      mut next_refno: RefU64, insert_sql: &mut String, room_info: HashMap<String, RefU64>) -> anyhow::Result<(DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
     let mut zone_level_map = DashMap::new();
     let mut unit_refno = RefU64(0); // 不同机组对应的参考号
     let (site_level_map, zone_name_map) = get_room_level_from_excel()?;
@@ -571,10 +572,20 @@ fn set_ssc_level_node(node_map: HashMap<String, BTreeMap<i32, Vec<String>>>, uni
                 // 给每一层附上对应的房间号
                 let mut order = 0;
                 for room_name in rooms {
-                    let room_refno = next_refno;
-                    let (refno, sql) = gen_insert_ssc_node_sql(next_refno, "SSC_ROOM", leve_refno, room_name.as_str(), RefU64(0), order);
+                    // 房间的参考号和pdms房间保持一直
+                    let room_refno = if room_info.contains_key(&room_name) {
+                        *room_info.get(&room_name).unwrap()
+                    } else {
+                        next_refno
+                    };
+                    let real_refno = if room_info.contains_key(&room_name) {
+                        *room_info.get(&room_name).unwrap()
+                    } else {
+                        RefU64(0)
+                    };
+                    let (refno, sql) = gen_insert_ssc_node_sql(room_refno, "SSC_ROOM", leve_refno, room_name.as_str(), real_refno, order);
                     insert_sql.push_str(sql.as_str());
-                    next_refno = refno;
+                    if !room_info.contains_key(&room_name) { next_refno = refno }
                     order += 1;
                     // 给每个房间附上专业的节点
                     let mut site_order = 0;
@@ -604,12 +615,17 @@ fn set_ssc_level_node(node_map: HashMap<String, BTreeMap<i32, Vec<String>>>, uni
     Ok((zone_level_map, zone_name_map, next_refno))
 }
 
-
-#[test]
-fn test_set_ssc_tree() {
-    let sql = set_ssc_node().unwrap();
-    println!("zone_map={:?}", sql.1);
+/// 处理从数据库获取的和 room 相关的信息转换成 房间名 对应 参考号
+pub fn deal_room_info(room_data: HashMap<RefU64, SscEleNode>) -> HashMap<String, RefU64> {
+    let mut map = HashMap::new();
+    for (room_refno, ele) in room_data {
+        let name_split = ele.name.split('-').collect::<Vec<_>>();
+        if name_split.is_empty() { continue; }
+        map.entry(name_split.last().unwrap().to_string()).or_insert(room_refno);
+    }
+    map
 }
+
 
 #[test]
 fn test_read_excel() {
@@ -628,13 +644,4 @@ fn test_split_name() {
     let room_name = "R101";
     let room_split_name = room_name.split("-").collect::<Vec<_>>();
     println!("name={:?}", room_split_name.last());
-}
-
-#[test]
-fn test_foreach() {
-    let result = vec![1, 2, 3, 4, 5];
-    for r in result {
-        if r != 3 { continue; }
-        dbg!(r);
-    }
 }

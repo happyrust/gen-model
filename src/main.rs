@@ -29,6 +29,7 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use itertools::Itertools;
 use nalgebra::{max, Quaternion, UnitQuaternion};
+use nom::Parser;
 use nom_derive::Parse;
 use parry3d::bounding_volume::AABB;
 use parry3d::math::{Isometry, Point, Vector};
@@ -47,7 +48,7 @@ use aios_database::api::project_mdb::insert_project_mdb;
 use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
 use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
 use aios_database::BATCH_CHUNKS_CNT;
-use aios_database::aql_api::pdms_room::{RoomEdgeAql, RoomElementAql};
+use aios_database::aql_api::pdms_room::{query_all_need_compute_room_refno, RoomEdgeAql, RoomElementAql, save_room_info_to_arangodb};
 use aios_database::cata::resolve::parse_to_i32;
 use aios_database::consts::*;
 use aios_database::data_interface::interface::PdmsDataInterface;
@@ -118,8 +119,8 @@ async fn main() -> anyhow::Result<()> {
         dbg!("正在同步SSC");
         for project_db in mgr.project_map.iter() {
             // 保存ssc
-            // async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
-            set_arangodb_all_ssc_nodes(&project_db.value(), &mgr.arango_database).await?;
+            async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
+            // set_arangodb_all_ssc_nodes(&project_db.value(), &mgr.arango_database).await?;
         }
         dbg!("SSC同步完成");
     }
@@ -134,7 +135,6 @@ async fn main() -> anyhow::Result<()> {
 
     {
         // 将 instance 保存到图数据库
-
         let children_files = fs::read_dir("assets/instance/")?;
         for path in children_files {
             let path = path?.path();
@@ -183,66 +183,30 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-
-
-    // let children_files = fs::read_dir("assets/mesh/")?;
-    // for path in children_files {
-    //     let path = path?.path();
-    //     let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-    //     if !filename.ends_with("bin") { continue; }
-    //     dbg!(&filename);
-    //     let mut file = fs::File::open(path)?;
-    //     let mut data = vec![];
-    //     file.read_to_end(&mut data)?;
-    //     let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-    //     // let mut max_indices = 0;
-    //     for m in &mesh_mgr.meshes {
-    //         let geo_hash = *m.key();
-    //         match geo_hash {
-    //             prim_geo::CUBE_GEO_HASH => {
-    //                 collider_shape_mgr.insert(geo_hash, SharedShape::cuboid(0.5, 0.5, 0.5));
-    //             }
-    //             prim_geo::SPHERE_GEO_HASH => {
-    //                 collider_shape_mgr.insert(geo_hash, SharedShape::ball(1.0));
-    //             }
-    //             prim_geo::CYLINDER_GEO_HASH => {
-    //                 collider_shape_mgr.insert(geo_hash, SharedShape::cylinder(0.5, 1.0));
-    //             }
-    //             _ => {
-    //                 collider_shape_mgr.insert(geo_hash, SharedShape(Arc::new(m.get_tri_mesh())));
-    //             }
-    //         }
-    //         //
-    //         // let points = m.vertices.iter().map(|x| Point::from_slice(x)).collect::<Vec<Point<f32>>>();
-    //         // let indices: Vec<[u32; 3]> = m.indices.chunks(3).map(|x| [x[0], x[1], x[2]]).collect();
-    //         // dbg!(indices.len());
-    //         // max_indices = indices.len().max(max_indices);
-    //         // let vhacd = VHACD::decompose(&params, &points, &indices, false);
-    //         // let convex_hulls = vhacd.compute_convex_hulls(1);
-    //         // let convex_polyhedron = convex_hulls
-    //         //     .into_iter()
-    //         //     .map(|h| ConvexPolyhedron::from_convex_mesh(h.0, &h.1).unwrap())
-    //         //     .collect::<Vec<_>>();
-    //         // dbg!(convex_polyhedron.len());
-    //         // convex_mgr.convex_shapes_map.entry(*m.key()).or_insert(convex_polyhedron);
-    //     }
-    //     // dbg!(max_indices);
-    // }
-    // convex_mgr.serialize_to_bin_file();
-
     //生成rtree 结构
-    let instance_dir_path = "assets/instance";
+
     let mut collider_shape_mgr = CachedColliderShapeMgr::default();
     let mut file = fs::File::open("assets/mesh/mesh.bin")?;
     let mut data = vec![];
     file.read_to_end(&mut data)?;
     let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
+
     if db_option.gen_spatial_tree {
-        let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
         let mut timer = Instant::now();
         let mut rstar_objs = vec![];
-        for db_no in db_nos {
-            let mut file = fs::File::open(format!("{}/{}.inst", instance_dir_path, db_no))?;
+
+        let children_files = fs::read_dir("assets/instance/")?;
+        let arch_db_nums = db_option.clone().arch_db_nums.unwrap_or_default();
+        for path in children_files {
+            let path = path?.path();
+            dbg!(&path);
+            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+            if !filename.contains("inst") { continue; }
+            let dbno_str = filename.split('.').collect::<Vec<_>>();
+            let dbno = dbno_str.first().unwrap_or(&"");
+            if arch_db_nums.contains(&dbno.parse().unwrap_or(0)) { continue; }
+
+            let mut file = fs::File::open(path)?;
             let mut data = vec![];
             file.read_to_end(&mut data)?;
             let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
@@ -260,82 +224,107 @@ async fn main() -> anyhow::Result<()> {
         println!("收集空间包围盒时间: {}s", timer.elapsed().as_secs_f32());
         timer = Instant::now();
         let rtree = AccelerationTree::load(rstar_objs);
-
-        // dbg!(target_refnos);
-        //生成TriMesh 的 shape
-        // let all_room_refno
-        let target_refno = RefU64::from_two_nums(23584, 67);
-        let dbno_mgr = DbNumMgr::load_file(&format!("{instance_dir_path}/dbno_mgr.num")).unwrap_or_default();
-        if let Some(dbno) = dbno_mgr.get_dbno(target_refno) {
-            if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
-                if inst_mgr.level_shape_mgr.contains_key(&target_refno) {
-                    let all_refnos = inst_mgr.level_shape_mgr.get(&target_refno).unwrap();
-                    dbg!(all_refnos.value());
-                    for room_refno in all_refnos.value().clone().into_iter() {
-                        let ele_geos_info_map = inst_mgr.get_instants_data(room_refno);
-                        for ele_geos_info in &ele_geos_info_map {
-                            //filter None aabb
-                            let ele_refno = *ele_geos_info.key();
-                            let room_colliders = collider_shape_mgr.get_collider(ele_refno, inst_mgr, &mesh_mgr);
-                            if let Some(target_abb) = ele_geos_info.aabb {
-                                let mut withing_room_refnos = rtree
-                                    .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
-                                // let mut withing_room_refnos = vec![RefU64::from_two_nums(23584, 9348)];
-                                let mut removed_refnos = vec![];
-                                withing_room_refnos.retain(|x| {
-                                    let checking_colliders = collider_shape_mgr.get_collider(*x, inst_mgr, &mesh_mgr);
-                                    for rc in &room_colliders {
-                                        for cc in &checking_colliders {
-                                            // dbg!(serde_json::to_string(rc));
-                                            // dbg!(serde_json::to_string(cc));
-                                            // dbg!(rc.compute_local_aabb());
-                                            // dbg!(cc.compute_local_aabb().center());
-                                            // let t = rc.as_ref().distance_to_point(
-                                            //     &Isometry::identity(), &cc.compute_local_aabb().center(), false);
-                                            // dbg!(t);
-                                            // let tt = parry3d::query::distance(&Isometry::identity(),rc.as_ref(),
-                                            //                                   &Isometry::identity(), cc.as_ref()).unwrap();
-                                            // dbg!(tt);
-                                            let target_pt = if let Some(tri_mesh) = cc.as_ref().as_trimesh() {
-                                                tri_mesh.triangle(0).local_aabb().center()
-                                            }else{
-                                                cc.compute_local_aabb().center()
-                                            };
-                                            if rc.as_ref().contains_point(&Isometry::identity(), &target_pt) {
-                                                // dbg!("Point Contains");
-                                                return true;
-                                            }
-                                            let r = parry3d::query::intersection_test(&Isometry::identity(),rc.as_ref(),
-                                                                                      &Isometry::identity(), cc.as_ref()).unwrap();
-                                            // dbg!(r);
-                                            if r {
-                                                // dbg!(*x);
-                                                return true;
-                                            }
-                                        }
-                                    }
-                                    removed_refnos.push(*x);
-                                    false
-                                });
-                                let mut file = fs::File::create("removed_refnos.data").unwrap();
-                                let serialized = bincode::serialize(&removed_refnos).unwrap();
-                                file.write_all(serialized.as_slice()).unwrap();
-                                // dbg!(removed_refnos.len());
-                                // dbg!(removed_refnos);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-
         println!("生成空间树费时: {}s", timer.elapsed().as_secs_f32());
         let mut file = fs::File::create("accel.spa").unwrap();
         let serialized = bincode::serialize(&rtree).unwrap();
         file.write_all(serialized.as_slice()).unwrap();
     }
 
+    {
+        if db_option.save_spatial_tree_to_db {
+            // 保存空间树数据
+            let instance_dir_path = "assets/instance";
+            let mut file = fs::File::open("accel.spa")?;
+            let mut buf = vec![];
+            file.read_to_end(&mut buf)?;
+            let rtree = bincode::deserialize::<AccelerationTree>(&buf)?;
+            //生成TriMesh 的 shape
+
+            let dbno = db_option.arch_db_nums.clone().unwrap_or_default().clone();
+            let room_infos = query_all_need_compute_room_refno(&dbno, "FRMW", Some("-RM"), &mgr.project_map.get(&db_option.project_name).unwrap()).await?;
+            let dbno_mgr = DbNumMgr::load_file(&format!("{instance_dir_path}/dbno_mgr.num")).unwrap_or_default();
+            for (target_refno, room_name) in room_infos {
+                let mut room_info_map = HashMap::new();
+                if let Some(dbno) = dbno_mgr.get_dbno(target_refno) {
+                    if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
+                        if inst_mgr.level_shape_mgr.contains_key(&target_refno) {
+                            let all_refnos = inst_mgr.level_shape_mgr.get(&target_refno).unwrap();
+                            for room_refno in all_refnos.value().clone().into_iter() {
+                                let ele_geos_info_map = inst_mgr.get_instants_data(room_refno);
+                                for ele_geos_info in &ele_geos_info_map {
+                                    //filter None aabb
+                                    let ele_refno = *ele_geos_info.key();
+                                    let room_colliders = collider_shape_mgr.get_collider(ele_refno, inst_mgr, &mesh_mgr);
+                                    if let Some(target_abb) = ele_geos_info.aabb {
+                                        let mut withing_room_refnos = rtree
+                                            .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
+                                        if db_option.withing_room_refnos.is_some() {
+                                            withing_room_refnos = vec![RefU64::from_refno_str(&db_option.withing_room_refnos.clone().unwrap()).unwrap()];
+                                        }
+                                        dbg!(&withing_room_refnos.len());
+                                        let mut removed_refnos = vec![];
+                                        withing_room_refnos.retain(|x| {
+                                            let dbno = &dbno_mgr.get_dbno(*x);
+                                            if dbno.is_none() { return false; }
+                                            let dbno = dbno.unwrap();
+                                            let inst_mgr = all_insts_mgr.get(&dbno);
+                                            if inst_mgr.is_none() { return false; }
+                                            let inst_mgr = inst_mgr.unwrap();
+
+                                            let checking_colliders = collider_shape_mgr.get_collider(*x, inst_mgr, &mesh_mgr);
+                                            for rc in &room_colliders {
+                                                for cc in &checking_colliders {
+                                                    if db_option.withing_room_refnos.is_some() {
+                                                        dbg!(serde_json::to_string(rc));
+                                                        dbg!(serde_json::to_string(cc));
+                                                        dbg!(rc.compute_local_aabb());
+                                                        dbg!(cc.compute_local_aabb().center());
+                                                    }
+                                                    // let t = rc.as_ref().distance_to_point(
+                                                    //     &Isometry::identity(), &cc.compute_local_aabb().center(), false);
+                                                    // dbg!(t);
+                                                    // let tt = parry3d::query::distance(&Isometry::identity(),rc.as_ref(),
+                                                    //                                   &Isometry::identity(), cc.as_ref()).unwrap();
+                                                    // dbg!(tt);
+                                                    let target_pt = if let Some(tri_mesh) = cc.as_ref().as_trimesh() {
+                                                        tri_mesh.triangle(0).local_aabb().center()
+                                                    } else {
+                                                        cc.compute_local_aabb().center()
+                                                    };
+                                                    if rc.as_ref().contains_point(&Isometry::identity(), &target_pt) {
+                                                        if db_option.withing_room_refnos.is_some() {
+                                                            dbg!("Point Contains");
+                                                        }
+                                                        return true;
+                                                    }
+                                                    let r = parry3d::query::intersection_test(&Isometry::identity(), rc.as_ref(),
+                                                                                              &Isometry::identity(), cc.as_ref()).unwrap();
+                                                    if r {
+                                                        return true;
+                                                    }
+                                                }
+                                            }
+                                            removed_refnos.push(*x);
+                                            false
+                                        });
+                                        withing_room_refnos.push(target_refno); // 将 自己添加进去 方便显示房间的 pane
+                                        // let mut file = fs::File::create("removed_refnos.data").unwrap();
+                                        // let serialized = bincode::serialize(&removed_refnos).unwrap();
+                                        // file.write_all(serialized.as_slice()).unwrap();
+                                        dbg!(removed_refnos.len());
+                                        dbg!(&withing_room_refnos.len());
+                                        room_info_map.entry(target_refno).or_insert((room_name.clone(), withing_room_refnos));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                save_room_info_to_arangodb(room_info_map, &db_option).await?;
+            }
+
+        }
+    }
     Ok(())
 }
 
@@ -356,6 +345,8 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     create_arangodb_conn(&database, "ssc_edges", Edge).await?;
     create_arangodb_conn(&database, "ssc_eles", Document).await?;
     create_arangodb_conn(&database, "tubi_edges", Edge).await?;
+    create_arangodb_conn(&database, "room_eles", Document).await?;
+    create_arangodb_conn(&database, "room_edges", Edge).await?;
     Ok(())
 }
 

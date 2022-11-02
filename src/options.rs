@@ -76,4 +76,10 @@ pub struct DbOption {
     pub arangodb_password: String,
     #[clap(long)]
     pub arangodb_database: String,
+    #[clap(skip)]
+    pub withing_room_refnos: Option<String>,
+    #[clap(skip)]
+    pub arch_db_nums: Option<Vec<i32>>,
+    #[clap(long)]
+    pub save_spatial_tree_to_db: bool,
 }
