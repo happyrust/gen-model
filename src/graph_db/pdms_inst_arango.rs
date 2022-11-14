@@ -17,6 +17,7 @@ use crate::api::project_mdb::query_mdb_contain_numbdb;
 use crate::aql_api::convert_refno_vec_from_vec_string;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode, PdmsInstanceGraphEdge};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
@@ -24,11 +25,10 @@ use crate::options::DbOption;
 
 // todo 改成多线程
 pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &PdmsMeshInstanceMgr) -> anyhow::Result<()> {
-    let mut time = Instant::now();
     let collection = "pdms_instances";
     let edge_collection = "instance_edges";
 
-    let database = mgr.arango_database.clone();
+    let database = &get_arangodb_conn_from_db_option(&mgr.db_option).await?;
     let mut instances = vec![];
     let mut edges = vec![];
     for chunk in &instance_mgr.inst_mgr.inst_map.clone().into_iter().chunks(1000) {

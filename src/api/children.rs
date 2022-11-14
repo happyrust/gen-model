@@ -108,7 +108,6 @@ pub struct SimpleNodeDataForPlat {
     pub owner: String,
 }
 
-
 /// 遍历该节点的所有子节点为指定type的所有数据 返回 refno name owner
 pub async fn travel_children_with_type(refno: RefU64, att_type: String, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut result = vec![];

@@ -50,7 +50,7 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>, dbno_mgr: &mut DbNumMgr) -
                 let dbno = val.get::<i32, _>("NUMBDB");
                 dbno_mgr.insert(refno, dbno);
                 let table = qualified_table_name(type_name.as_str());
-                CACHED_REFNO_BASIC_MAP.insert(refno, &CachedRefBasic {
+                let _ = CACHED_REFNO_BASIC_MAP.insert(refno, &CachedRefBasic {
                     owner,
                     table,
                 });

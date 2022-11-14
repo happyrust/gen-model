@@ -17,12 +17,11 @@ pub struct RoomData {
     pub target_refnos: Vec<RefU64>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RoomElementAql {
     pub _key: String,
     pub refno: RefU64,
-    pub name: String,
-    // pub aabb: Option<AABB>,
+    pub aabb: AABB,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -44,14 +43,15 @@ pub struct RoomInfo {
 }
 
 /// 将房间信息保存到图数据库
-pub async fn save_room_info_to_arangodb(room_infos: HashMap<RefU64, (String, Vec<RefU64>)>, db_option: &DbOption) -> anyhow::Result<()> {
+pub async fn save_room_info_to_arangodb(room_infos: HashMap<RefU64, (AABB, Vec<RefU64>)>, db_option: &DbOption) -> anyhow::Result<()> {
     let mut room_eles_json = vec![];
     let mut room_edges_json = vec![];
-    for (refno, (room_name, target_refnos)) in room_infos {
+    for (refno, (aabb,target_refnos)) in room_infos {
         room_eles_json.push(RoomElementAql {
             _key: refno.to_url_refno(),
             refno,
-            name: room_name,
+            // name: room_name,
+            aabb,
         });
         for target_refno in target_refnos {
             let hash = refno.hash_with_another_refno(target_refno);
@@ -110,13 +110,13 @@ fn gen_query_all_need_compute_room_refno_sql(dbnos: &Vec<i32>, room_type: &str, 
 pub fn get_room_name_split(name: &str) -> Option<RoomInfo> {
     let room_split = name.split('-').collect::<Vec<_>>();
     if room_split.len() < 3 { return None; }
-    let factory = room_split[0].replace("/","");
-    let leave = room_split[1].replace("RM","").parse().unwrap_or(0);
+    let factory = room_split[0].replace("/", "");
+    let leave = room_split[1].replace("RM", "").parse().unwrap_or(0);
     let room_name = room_split[2].to_string();
-    Some(RoomInfo{
+    Some(RoomInfo {
         factory,
         leave,
-        room_name
+        room_name,
     })
 }
 

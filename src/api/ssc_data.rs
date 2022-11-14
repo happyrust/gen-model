@@ -17,7 +17,7 @@ use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use arangors_lite::{AqlQuery, Database};
 use parry3d::bounding_volume::AABB;
 use parry3d::math::Point;
-use crate::api::children::travel_children_with_refno;
+use crate::api::children::{travel_children_with_refno, travel_children_with_type};
 use crate::api::element::{query_ele_node, query_elenode_without_children_count, query_elenodes_without_children_count};
 use crate::aql_api::{change_vec_refnos_into_vec_string, convert_refno_vec_from_vec_string, PdmsRefnoNameAql};
 use crate::aql_api::children::query_travel_children_aql;
@@ -50,11 +50,10 @@ pub async fn get_room_refnos_from_spa_tree_aql(room_refno: RefU64, database: &Da
     let aql = AqlQuery::new("\
     for v in 1 outbound @id room_edges
         filter v != null
-        filter n != null
         return {
             'refno':v._key,
         }").bind_var("id", refno)
-        .bind_var("refno", room_refno.to_url_refno());
+        .bind_var("id", room_refno.to_url_refno());
     let results: Vec<String> = database.aql_query(aql).await?;
     let results = convert_refno_vec_from_vec_string(results);
     // let mut b_insert_self = true; // 需要将自己也加到 target_refnos 里面 方便显示 pane
@@ -109,7 +108,6 @@ pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<HashMap<R
 pub async fn query_all_room_data_aql(database: &Database, pool: &Pool<MySql>, db_option: &DbOption) -> anyhow::Result<HashMap<RefU64, SscEleNode>> {
     let mut result = HashMap::new();
     let all_room = get_room_info_from_excel()?;
-    // let room_map = get_room_refnos_from_spa_tree(RefU64::from_refno_str("17544/15095").unwrap(), database).await?;
     let room_map = query_all_need_compute_room_refno(&db_option.clone().arch_db_nums.unwrap_or_default(), "FRMW", Some("-RM"), pool).await?;
     for (room_refno, room_name) in room_map.iter() {
         // 通过命名规则获取到需要的房间名
@@ -121,40 +119,29 @@ pub async fn query_all_room_data_aql(database: &Database, pool: &Pool<MySql>, db
                 let room_name = format!("1{}", &room_info.room_name);
                 if rooms.contains(&room_name) {
                     // 找到房间下所有的元件
-                    let target_refnos = get_room_refnos_from_spa_tree_aql(*room_refno, database).await?;
-                    if let Ok(elenodes) = query_elenodes_without_children_count(target_refnos, &pool).await {
-                        for ele in elenodes {
-                            result.entry(ele.refno).or_insert(SscEleNode {
-                                refno: ele.refno,
-                                noun: ele.noun,
-                                name: ele.name,
-                                owner: ele.owner,
-                                room_code: room_info.room_name.to_string(),
-                            });
-                        }
-                    }
+                    result.entry(*room_refno).or_insert(SscEleNode{
+                        refno: Default::default(),
+                        noun: "".to_string(),
+                        name: "".to_string(),
+                        owner: Default::default(),
+                        room_code: room_name,
+                    });
+                    // let panes = travel_children_with_type(*room_refno,"PANE".to_string(),pool).await?;
+                    // let target_refnos = get_room_refnos_from_spa_tree_aql(*room_refno, database).await?;
+                    // if let Ok(elenodes) = query_elenodes_without_children_count(target_refnos, &pool).await {
+                    //     for ele in elenodes {
+                    //         result.entry(ele.refno).or_insert(SscEleNode {
+                    //             refno: ele.refno,
+                    //             noun: ele.noun,
+                    //             name: ele.name,
+                    //             owner: ele.owner,
+                    //             room_code: room_info.room_name.to_string(),
+                    //         });
+                    //     }
+                    // }
                 }
             }
         }
-        // for (_, rooms) in all_room.into_iter() {
-        //     for room in rooms {
-        //         let room = &room.1[1..];
-        //         // let refnos = query_room_refnos_aql(room, database).await?;
-        //         if !room_map.contains_key(room) { continue; }
-        //         let refnos = room_map.get(room).unwrap().clone();
-        //         if let Ok(elenodes) = query_elenodes_without_children_count(refnos, &pool).await {
-        //             for ele in elenodes {
-        //                 result.entry(ele.refno).or_insert(SscEleNode {
-        //                     refno: ele.refno,
-        //                     noun: ele.noun,
-        //                     name: ele.name,
-        //                     owner: ele.owner,
-        //                     room_code: room.to_string(),
-        //                 });
-        //             }
-        //         }
-        //     }
-        // }
     }
     Ok(result)
 }

@@ -26,6 +26,13 @@ use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphEdgeWithKey, PdmsEl
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
+pub async fn get_arangodb_database_from_db_option(db_option: &DbOption) -> anyhow::Result<()> {
+    let conn = Connection::establish_jwt(&db_option.arangodb_url, &db_option.arangodb_user, &db_option.arangodb_password)
+        .await?;
+    let _ = conn.create_database(&db_option.arangodb_database).await;
+    Ok(())
+}
+
 pub async fn get_arangodb_conn_from_db_option(db_option: &DbOption) -> anyhow::Result<Database> {
     let conn = Connection::establish_jwt(&db_option.arangodb_url, &db_option.arangodb_user, &db_option.arangodb_password)
         .await?;
@@ -278,9 +285,15 @@ pub async fn sync_pdms_level_edges_to_graph_db(mgr: Arc<AiosDBManager>) -> anyho
 /// 将同级 children 赋上连接关系
 async fn set_level_edges(eles: Vec<PdmsElement>, mut edges: &mut Vec<PdmsEleGraphEdge>) -> anyhow::Result<()> {
     for i in 1..eles.len() {
+        let from_refno = RefU64::from_refno_str(&eles[i].refno);
+        let to_refno = RefU64::from_refno_str(&eles[i - 1].refno);
+        if from_refno.is_err() || to_refno.is_err() { continue; }
+        let from_refno = from_refno.unwrap();
+        let to_refno = to_refno.unwrap();
         let edge = PdmsEleGraphEdge {
-            _from: format!("{}/{}", "pdms_eles", eles[i].refno.replace("/", "_")),
-            _to: format!("{}/{}", "pdms_eles", eles[i - 1].refno.replace("/", "_")),
+            _key: from_refno.hash_with_another_refno(to_refno).to_string(),
+            _from: format!("{}/{}", "pdms_eles", from_refno.to_url_refno()),
+            _to: format!("{}/{}", "pdms_eles", to_refno.to_url_refno()),
         };
         edges.push(edge);
     }

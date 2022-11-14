@@ -317,6 +317,27 @@ pub async fn query_mdb_dbnos(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> any
     Ok(mdb_map)
 }
 
+/// 获得不同mdb下所有的world(因为numbdb有问题，暂时用这个替代)
+pub async fn query_mdb_module_worlds_fix(project_name: &str, pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<RefU64>>>> {
+    let mut mdb_map = HashMap::new();
+    let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
+    for mdb in mdbs {
+        let mdb_attr = query_explicit_attr(mdb, pool).await?;
+        let mdb_name = query_name(mdb, &pool).await?;
+        let dbnos = query_project_dbno_info(project_name, info_pool).await?;
+        let mut map = HashMap::new();
+        for (db_type, dbnos) in dbnos {
+            for dbno in dbnos {
+                if let Some(world_refno) = query_dbno_world(dbno, pool).await? {
+                    map.entry(db_type.to_string()).or_insert_with(Vec::new).push(world_refno);
+                }
+            }
+        }
+        mdb_map.entry(mdb_name).or_insert(map);
+    }
+    Ok(mdb_map)
+}
+
 /// 获得不同mdb下所有的world
 pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<RefU64>>>> {
     let mut mdb_map = HashMap::new();
@@ -439,6 +460,27 @@ pub async fn query_types_refnos_names(types: &Vec<&str>, pool: &Pool<MySql>) -> 
     Ok(r)
 }
 
+pub async fn query_all_type_name_refnos(att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<String>> {
+    let mut name_vec = vec![];
+    let sql = gen_query_all_type_name_refnos(att_type);
+    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    match results {
+        Ok(results) => {
+            for result in results {
+                let mut name = result.get::<String, _>("NAME");
+                if name.starts_with("/") {
+                    name = name[1..].to_string();
+                }
+                name_vec.push(name);
+            }
+        }
+        Err(err) => {
+            dbg!(&err);
+        }
+    }
+    Ok(name_vec)
+}
+
 /// 获取zone属于哪个专业
 pub async fn get_zone_divco(refno: RefU64, pool: &Pool<MySql>) -> String {
     if let Ok(attr) = query_explicit_attr(refno, pool).await {
@@ -447,6 +489,26 @@ pub async fn get_zone_divco(refno: RefU64, pool: &Pool<MySql>) -> String {
         }
     }
     "".to_string()
+}
+
+pub async fn query_project_dbno_info(project_name: &str, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, Vec<i32>>> {
+    let mut map = HashMap::new();
+    let sql = gen_query_project_dbno_info(project_name);
+    let results = sqlx::query(&sql).fetch_all(&mut info_pool.acquire().await?).await;
+    if let Ok(results) = results {
+        for result in results {
+            let numbdb = result.get::<i32, _>("NUMBDB");
+            let db_type = result.get::<String, _>("DB_TYPE");
+            map.entry(db_type).or_insert_with(Vec::new).push(numbdb);
+        }
+    }
+    Ok(map)
+}
+
+fn gen_query_project_dbno_info(project_name: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT NUMBDB , DB_TYPE FROM {PDMS_DBNO_INFOS_TABLE} WHERE PROJECT = '{}'", project_name));
+    sql
 }
 
 fn gen_query_types_refnos_names(types: &Vec<&str>) -> String {
@@ -597,6 +659,12 @@ pub fn gen_query_name_sql(refno: RefU64) -> String {
     sql
 }
 
+fn gen_query_all_type_name_refnos(att_type: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT NAME FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND IS_DEL = 0 ", att_type));
+    sql
+}
+
 
 #[tokio::test]
 async fn test_get_mdb_type() -> anyhow::Result<()> {
@@ -688,5 +756,15 @@ async fn test_get_zone_divco() -> anyhow::Result<()> {
     let refno: RefU64 = RefI32Tuple((2013286748, 51294)).into();
     let v = get_zone_divco(refno, &pool).await;
     println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_project_dbno_info() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "pdms_info_db_sample").await?;
+    let result = query_project_dbno_info("Sample", &pool).await?;
+    dbg!(&result);
     Ok(())
 }

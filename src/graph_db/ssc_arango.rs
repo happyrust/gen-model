@@ -27,6 +27,7 @@ pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &Database)
                 real_pdms_refno: "0/0".to_string(),
             };
             let edge = PdmsEleGraphEdge {
+                _key: refno.hash_with_another_refno(owner).to_string(),
                 _from: format!("{}/{refno_str}", &collection),
                 _to: format!("{}/{owner_str}", &collection),
             };

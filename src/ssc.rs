@@ -69,10 +69,11 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
         }
     }
     dbg!("创建SSC表完成");
-    let room_data = query_all_room_data_aql(&mgr.get_arangodb_conn().await?, project_pool,&mgr.db_option).await?;
+    let room_data = query_all_room_data_aql(&mgr.get_arangodb_conn().await?, project_pool, &mgr.db_option).await?;
     let room_info = deal_room_info(room_data.clone());
-    let (zone_level_map, zone_name_map, next_refno) = insert_set_ssc_node_sql(room_info, project_pool).await?;
+    let (zone_level_map, zone_name_map, next_refno) = insert_set_ssc_node_sql(room_info.clone(), project_pool).await?;
     dbg!("SSC固定节点生成");
+    replace_ssc_room_refno(&room_info, project_pool).await?;
     if room_data.len() != 0 {
         let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
         let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, next_refno, project_pool, mgr).await;
@@ -93,6 +94,26 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
         }
     }
 
+    Ok(())
+}
+
+/// 将ssc房间对应的参考号修改为pdms房间的参考号
+pub async fn replace_ssc_room_refno(room_info: &HashMap<String, RefU64>, pool: &Pool<MySql>) -> anyhow::Result<()> {
+    // 找到 ssc 当前所有房间的参考号
+    let room_refnos = query_ssc_room_refnos(room_info, pool).await?;
+    let room_refnos_len = room_refnos.len();
+    let mut handles = vec![];
+    for (idx, (room_name, (old_refno, new_refno))) in room_refnos.into_iter().enumerate() {
+        let pool_clone = pool.clone();
+        let handle = tokio::spawn(async move {
+            let mut conn = pool_clone.acquire().await.unwrap();
+            let replace_sql = gen_replace_room_refno_sql(&room_name, new_refno, old_refno);
+            conn.execute(replace_sql.as_str()).await.unwrap();
+            println!("正在保存第{}条数据,一共{}条", idx, room_refnos_len);
+        });
+        handles.push(handle);
+    }
+    futures::future::join_all(&mut handles).await;
     Ok(())
 }
 
@@ -189,7 +210,7 @@ pub fn get_rooms_from_excel() -> anyhow::Result<Vec<String>> {
 /// 创建ssc固定节点
 pub async fn insert_set_ssc_node_sql(room_info: HashMap<String, RefU64>, pool: &Pool<MySql>) -> anyhow::Result<(DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
     let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
-    let (sql, zone_level_map, zone_name_map, next_refno) = set_ssc_node(room_info)?;
+    let (sql, zone_level_map, zone_name_map, next_refno) = set_ssc_node()?;
     let sql = format!("{}{}", insert_sql, sql);
     let mut conn = pool.acquire().await?;
     let result = conn.execute(sql.as_str()).await;
@@ -412,7 +433,7 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
 }
 
 /// 设置 ssc 的固定节点
-pub fn set_ssc_node(room_info: HashMap<String, RefU64>) -> anyhow::Result<(String, DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
+pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
     let mut next_refno = RefU64(0);
     let mut sql = String::new();
     let refno = RefU64(1);
@@ -465,7 +486,7 @@ pub fn set_ssc_node(room_info: HashMap<String, RefU64>) -> anyhow::Result<(Strin
     let mut zone_level_map = DashMap::new();
     let mut zone_name_map = DashMap::new();
     if let Ok(map) = get_room_info_from_excel() {
-        let (zone_level_map_r, zone_name_map_r, next_refno_level) = set_ssc_level_node(map, (three_refno, n_refno), two_level_refno, &mut sql, room_info)?;
+        let (zone_level_map_r, zone_name_map_r, next_refno_level) = set_ssc_level_node(map, (three_refno, n_refno), two_level_refno, &mut sql)?;
         next_refno = next_refno_level;
         zone_level_map = zone_level_map_r;
         zone_name_map = zone_name_map_r;
@@ -533,7 +554,7 @@ fn gen_insert_room_level_node_sql(level: Vec<(String, Vec<String>)>, mut refno: 
 /// unit_refnos : 0:一号机组 参考号 1 : 二号机组参考号 暂时没有机组共用这一个分类 <br>
 /// next_refnos ： ssc参考号是从0开始排的，这个就是下一个节点需要用到的参考号
 fn set_ssc_level_node(node_map: HashMap<String, BTreeMap<i32, Vec<String>>>, unit_refnos: (RefU64, RefU64),
-                      mut next_refno: RefU64, insert_sql: &mut String, room_info: HashMap<String, RefU64>) -> anyhow::Result<(DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
+                      mut next_refno: RefU64, insert_sql: &mut String) -> anyhow::Result<(DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
     let mut zone_level_map = DashMap::new();
     let mut unit_refno = RefU64(0); // 不同机组对应的参考号
     let (site_level_map, zone_name_map) = get_room_level_from_excel()?;
@@ -572,20 +593,10 @@ fn set_ssc_level_node(node_map: HashMap<String, BTreeMap<i32, Vec<String>>>, uni
                 // 给每一层附上对应的房间号
                 let mut order = 0;
                 for room_name in rooms {
-                    // 房间的参考号和pdms房间保持一直
-                    let room_refno = if room_info.contains_key(&room_name) {
-                        *room_info.get(&room_name).unwrap()
-                    } else {
-                        next_refno
-                    };
-                    let real_refno = if room_info.contains_key(&room_name) {
-                        *room_info.get(&room_name).unwrap()
-                    } else {
-                        RefU64(0)
-                    };
-                    let (refno, sql) = gen_insert_ssc_node_sql(room_refno, "SSC_ROOM", leve_refno, room_name.as_str(), real_refno, order);
+                    let room_refno = next_refno;
+                    let (refno, sql) = gen_insert_ssc_node_sql(next_refno, "SSC_ROOM", leve_refno, room_name.as_str(), RefU64(0), order);
                     insert_sql.push_str(sql.as_str());
-                    if !room_info.contains_key(&room_name) { next_refno = refno }
+                    next_refno = refno;
                     order += 1;
                     // 给每个房间附上专业的节点
                     let mut site_order = 0;
@@ -619,11 +630,52 @@ fn set_ssc_level_node(node_map: HashMap<String, BTreeMap<i32, Vec<String>>>, uni
 pub fn deal_room_info(room_data: HashMap<RefU64, SscEleNode>) -> HashMap<String, RefU64> {
     let mut map = HashMap::new();
     for (room_refno, ele) in room_data {
-        let name_split = ele.name.split('-').collect::<Vec<_>>();
-        if name_split.is_empty() { continue; }
-        map.entry(name_split.last().unwrap().to_string()).or_insert(room_refno);
+        map.entry(ele.room_code).or_insert(room_refno);
     }
     map
+}
+
+
+/// 查询ssc对应的房间名，value ： 0: ssc 第一次创建的refno, 1: pdms 中房间的参考号
+pub async fn query_ssc_room_refnos(room_info: &HashMap<String, RefU64>, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, (RefU64, RefU64)>> {
+    let mut map = HashMap::new();
+    if room_info.is_empty() { return Ok(HashMap::default()); }
+    let sql = gen_query_ssc_room_refnos_sql(room_info);
+    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    match results {
+        Ok(results) => {
+            for result in results {
+                let name = result.get::<String, _>("NAME");
+                let old_refno = RefU64(result.get::<i64, _>("ID") as u64);
+                let new_refno = room_info.get(&name);
+                if new_refno.is_none() { continue; }
+                let new_refno = new_refno.unwrap();
+                map.entry(name).or_insert((old_refno, *new_refno));
+            }
+        }
+        Err(error) => {
+            dbg!(&error);
+        }
+    }
+    Ok(map)
+}
+
+fn gen_query_ssc_room_refnos_sql(room_info: &HashMap<String, RefU64>) -> String {
+    let mut sql = String::new();
+    let mut rooms = String::new();
+    for (room_name, _) in room_info {
+        rooms.push_str(&format!("'{}' ,", room_name));
+    }
+    rooms.remove(rooms.len() - 1);
+    sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_SSC_ELEMENTS_TABLE} WHERE NAME IN ({})", rooms));
+    sql
+}
+
+fn gen_replace_room_refno_sql(room_name: &str, refno: RefU64, old_refno: RefU64) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("UPDATE {PDMS_SSC_ELEMENTS_TABLE} SET ID = {} , REFNO = '{}' WHERE NAME = '{}' ;", refno.0, refno.to_refno_str(), room_name));
+    sql.push_str(&format!("UPDATE {PDMS_SSC_ELEMENTS_TABLE} SET OWNER = {} WHERE OWNER = {} ;", refno.0, old_refno.0));
+    sql
 }
 
 

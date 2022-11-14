@@ -241,7 +241,6 @@ pub fn resolve_gmse_params(
         .collect::<anyhow::Result<_>>()?;
 
     let mut paxises: Vec<CateAxisParam> = Vec::new();
-    // dbg!(&gm.paxises);
     for axis_str in gm.paxises.iter() {
         let mut axis = axis_str.trim();
         if axis.is_empty() { continue; }

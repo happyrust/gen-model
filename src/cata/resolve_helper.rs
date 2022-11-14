@@ -72,8 +72,8 @@ pub fn eval_str_to_f32(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
 
 ///评估表达式的值
 pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -> anyhow::Result<f64> {
-    let input_expr = input_expr.trim().to_uppercase() ;
-    // dbg!(&input_expr);
+    let input_expr = input_expr.trim().to_uppercase();
+
     if input_expr.is_empty() || input_expr == "UNSET" {
         return Ok(0.0);
     }
@@ -145,7 +145,9 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
                 k = format!("PARA{}", c3).into();
             } else if c2.starts_with("OPAR") {
                 k = format!("OPAR{}", c3).into();
-            } else if c2.starts_with("DDES") {
+            } else if c2.starts_with("DDES") || c2.starts_with("ADES") {
+                k = format!("DESI{}", c3).into();
+            } else if c2.starts_with("ODES") || c2.starts_with("WDES") {
                 k = format!("DESI{}", c3).into();
             }
         }
@@ -356,10 +358,9 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                         centre_line_flag: gmse.centre_line_flag,
                         tube_flag: gmse.tube_flag,
                     })
-                }else{
+                } else {
                     CateGeoParam::Unknown
                 }
-
             }
             "LSNO" => {
                 if gmse.paxises.len() >= 2 && gmse.diameters.len() >= 2 && gmse.distances.len() >= 2 {
@@ -375,7 +376,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                         centre_line_flag: gmse.centre_line_flag,
                         tube_flag: gmse.tube_flag,
                     })
-                }else{
+                } else {
                     CateGeoParam::Unknown
                 }
             }
@@ -523,7 +524,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 })
             }
             "TUBE" => {
-                CateGeoParam::TubeImplied(CateTubeImpliedParam{
+                CateGeoParam::TubeImplied(CateTubeImpliedParam {
                     axis: None,
                     diameter: gmse.diameters[0],
                     centre_line_flag: gmse.centre_line_flag,
@@ -573,11 +574,11 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) 
         let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
         for cap in re.captures_iter(&dir_str) {
             if cap.len() == 6 {
-                let val_str= cap[2].to_string();
+                let val_str = cap[2].to_string();
                 let val_result = eval_str_to_f64(&val_str, context).unwrap_or_default().to_string();
                 new_dir_str = dir_str.replace(&val_str, &val_result);
 
-                let val_str= cap[4].to_string();
+                let val_str = cap[4].to_string();
                 let val_result = eval_str_to_f64(&val_str, context).unwrap_or_default().to_string();
                 new_dir_str = new_dir_str.replace(&val_str, &val_result);
                 // dbg!(&new_dir_str);
@@ -590,7 +591,7 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) 
             let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
             for cap in re.captures_iter(&dir_str) {
                 if cap.len() == 4 {
-                    let val_str= cap[2].to_string();
+                    let val_str = cap[2].to_string();
                     // dbg!(&val_str);
                     let val_result = eval_str_to_f64(&val_str, context).unwrap_or_default().to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
@@ -649,7 +650,6 @@ fn parse_axis() {
 }
 
 
-
 //[(.*[^-])([-?X|Y|Z])]?
 #[test]
 fn test_parse_dir() {
@@ -673,7 +673,6 @@ fn test_parse_dir() {
         // dbg!(&cap[4]);
         // println!("{} {} {} {}", &cap[1], &cap[2], &cap[3], &cap[4]);
     }
-
 }
 
 #[test]
@@ -686,7 +685,7 @@ fn test_rpro() {
 
 
     let re = Regex::new(r"([A-Z]+[0-9]*)(\s*\[(\d+)\])?").unwrap();
-    for caps in re.captures_iter(s){
+    for caps in re.captures_iter(s) {
         dbg!(&caps[0]);
     }
 
