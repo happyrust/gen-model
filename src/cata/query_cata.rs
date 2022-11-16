@@ -250,7 +250,6 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         cur_context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
         cur_context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
     }
-
     let axis_map = resolve_axis_params(scom_info, &cur_context);
     // if is_debug {
     //     dbg!(&cur_context);

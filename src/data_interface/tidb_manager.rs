@@ -858,7 +858,6 @@ impl AiosDBManager {
                 let to_attr = mgr.get_attr(to_refno).await;
                 if to_attr.is_err() { continue; }
                 let to_attr = to_attr.unwrap();
-
                 let att_type = to_attr.get_type();
                 edge.att_type = att_type.to_string();
                 // 单独存 atta 的 attype
@@ -872,14 +871,14 @@ impl AiosDBManager {
                 let mut geoms = resolve_desi_comp(refno, None, mgr.as_ref(), is_debug).await;
                 if geoms.is_err() { continue; }
                 let mut geoms = geoms.unwrap();
-
+                dbg!("hello 1");
                 let mut to_geoms = resolve_desi_comp(to_refno, None, mgr.as_ref(), is_debug).await;
                 if to_geoms.is_err() {
                     continue;
                 }
+                dbg!("hello 2");
                 let mut to_geoms = to_geoms.unwrap();
                 let to_world_trans = mgr.get_world_transform(to_refno).await?.unwrap_or_default();
-
                 if let Some(arrive) = to_attr.get_i32("ARRI") {
                     if to_geoms.axis_map.contains_key(&arrive) {
                         let p = &to_geoms.axis_map[&arrive].pt;
@@ -957,12 +956,14 @@ impl AiosDBManager {
                 }
             }
         }
+
         let last_child = children.last().unwrap().clone();
         //第一遍完成后，然后生成tubing
         for refno in children {
             if is_debug && refno != debug_refno.unwrap() {
                 continue;
             }
+            dbg!(&refno);
             let attr = mgr.get_attr(refno).await;
             if attr.is_err() { continue; }
             let attr = attr.unwrap();
@@ -1184,6 +1185,7 @@ impl AiosDBManager {
                     let current_att = mgr.get_attr(refno).await.unwrap_or_default();
                     let mut refno_ptset_map = DashMap::new();
                     let cur_type = current_att.get_type();
+                    dbg!(&cur_type);
                     if cur_type == "BRAN" || cur_type == "HANG" {
                         Self::get_cata_auto_tubi_geoms(mgr.clone(), refno, &current_att, &brep_shapes_map,
                                                        &refno_ptset_map, target_debug_refno, &mut tubi_result_clone).await.unwrap_or_default();
@@ -1278,6 +1280,11 @@ impl AiosDBManager {
                 }
             });
             handles.push(handle);
+            if !db_option.multi_threads {
+                if !handles.is_empty() {
+                    futures::future::join_all(take(&mut handles)).await;
+                }
+            }
         }
         futures::future::join_all(take(&mut handles)).await;
         let tubi_result = Arc::try_unwrap(tubi_result).unwrap()
@@ -1401,6 +1408,11 @@ impl AiosDBManager {
                 }
             });
             handles.push(handle);
+            if !db_option.multi_threads {
+                if !handles.is_empty() {
+                    futures::future::join_all(take(&mut handles)).await;
+                }
+            }
         }
         futures::future::join_all(take(&mut handles)).await;
         dbg!(instance_mgr.inst_mgr.len());
@@ -1669,6 +1681,11 @@ impl AiosDBManager {
                 }
             });
             handles.push(handle);
+            if !db_option.multi_threads {
+                if !handles.is_empty() {
+                    futures::future::join_all(take(&mut handles)).await;
+                }
+            }
         }
         futures::future::join_all(take(&mut handles)).await;
 
@@ -1717,16 +1734,27 @@ impl AiosDBManager {
                                       Some(vec![db_no]), &db_option_clone).await.unwrap();
             });
             handles.push(handle);
+            if !db_option.multi_threads {
+                if !handles.is_empty() {
+                    futures::future::join_all(take(&mut handles)).await;
+                }
+            }
+
+
             let instance_mgr_clone = instance_mgr.clone();
             let db_option_clone = db_option.clone();
             if db_option_clone.debug_branch_refno.as_ref().is_none() && db_option_clone.debug_desi_refno.as_ref().is_none() {
-                // let project = project.clone();
                 let mgr_clone = mgr.clone();
                 let handle = tokio::spawn(async move {
                     Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone, Some(vec![db_no])).await.unwrap();
                     Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone, Some(vec![db_no])).await.unwrap();
                 });
                 handles.push(handle);
+                if !db_option.multi_threads {
+                    if !handles.is_empty() {
+                        futures::future::join_all(take(&mut handles)).await;
+                    }
+                }
             }
             // Self::cache_pohe_geos(mgr.clone(), &project).await?;
             futures::future::join_all(take(&mut handles)).await;

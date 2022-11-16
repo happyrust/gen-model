@@ -73,7 +73,6 @@ pub fn eval_str_to_f32(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
 ///评估表达式的值
 pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -> anyhow::Result<f64> {
     let input_expr = input_expr.trim().to_uppercase();
-
     if input_expr.is_empty() || input_expr == "UNSET" {
         return Ok(0.0);
     }
@@ -122,7 +121,6 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
         }
         found_replaced = false;
     }
-
     //因为 attrib 的原因，这里还需要再执行一遍处理，以防止有可能出现
     //处理出现 DESIGN IPARA 1 这种没有 “[]”的情况
     // dbg!(&result_exp);
@@ -234,20 +232,39 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
         }
         result_string.push_str(" ");
     }
-
-    // dbg!(&result_string);
-    if let Ok(val) = interp(&result_string.to_lowercase()) {
-        Ok(f64_round_3(val).into())
-    } else {
-        if let Ok(mut stack) = Stack::init(&result_string) {
-            return stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", &input_expr)));
-        } else {
-            // dbg!(&context);
-            dbg!(&input_expr);
-            dbg!(&result_string);
-            return Err(anyhow!(format!("求解失败 {}", &input_expr)));
+    dbg!(&result_string);
+    match interp(&result_string.to_lowercase()) {
+        Ok(val) => {
+            Ok(f64_round_3(val).into())
+        }
+        Err(_) => {
+            dbg!("hello");
+            return if let Ok(mut stack) = Stack::init(&result_string) {
+                dbg!("return ");
+                stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", &input_expr)))
+            } else {
+                // dbg!(&context);
+                dbg!(&input_expr);
+                dbg!(&result_string);
+                Err(anyhow!(format!("求解失败 {}", &input_expr)))
+            }
         }
     }
+    // if let Ok(val) = interp(&result_string.to_lowercase()) {
+    //     dbg!(&val);
+    //     Ok(f64_round_3(val).into())
+    // } else {
+    //     dbg!("111");
+    //     if let Ok(mut stack) = Stack::init(&result_string) {
+    //         dbg!("return ");
+    //         return stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", &input_expr)));
+    //     } else {
+    //         // dbg!(&context);
+    //         dbg!(&input_expr);
+    //         dbg!(&result_string);
+    //         return Err(anyhow!(format!("求解失败 {}", &input_expr)));
+    //     }
+    // }
 }
 
 /// 解析成不同的几何体参数
@@ -567,7 +584,6 @@ pub fn parse_str_axis_to_vec3(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>) 
     let mut new_dir_str = dir_str.clone();
     let mut not_single = false;
     if !re.is_match(&dir_str) {
-        // dbg!(&dir_str);
         not_single = true;
         let mut is_three = false;
 
@@ -702,3 +718,9 @@ fn test_rpro() {
 //     let context = HashMap::new();
 //     dbg!(eval_str_to_f64(expr, &context)).expect("TODO: panic message");
 // }
+#[test]
+fn test_interp() {
+    let input_str = "((0.5*500*TAN(/2)+(500+2)*TAN(3/2)*COS(3))/2-((-(500/2+2)*TAN(3/2)+2*COS((90-3)))/2)";
+    let result = interp(&input_str.to_lowercase()).unwrap();
+    dbg!(&result);
+}

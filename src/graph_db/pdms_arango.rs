@@ -26,7 +26,8 @@ use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphEdgeWithKey, PdmsEl
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
-pub async fn get_arangodb_database_from_db_option(db_option: &DbOption) -> anyhow::Result<()> {
+/// 根据 db_option 的 project_name 创建 arangodb 的 database
+pub async fn set_arangodb_database_from_db_option(db_option: &DbOption) -> anyhow::Result<()> {
     let conn = Connection::establish_jwt(&db_option.arangodb_url, &db_option.arangodb_user, &db_option.arangodb_password)
         .await?;
     let _ = conn.create_database(&db_option.arangodb_database).await;

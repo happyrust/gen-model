@@ -82,4 +82,6 @@ pub struct DbOption {
     pub arch_db_nums: Option<Vec<i32>>,
     #[clap(long)]
     pub save_spatial_tree_to_db: bool,
+    #[clap(long)]
+    pub multi_threads: bool,
 }

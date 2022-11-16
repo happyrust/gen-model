@@ -65,6 +65,8 @@ use aios_database::tables::{gen_create_attr_info_tables_sql, gen_create_pdms_mes
 use bevy::prelude::*;
 use bevy::transform::components::Transform;
 use parse_pdms_db::parse_file;
+use tokio::spawn;
+use aios_database::aql_api::tubi::{insert_tubi_value, query_all_tubi_from_node};
 
 pub async fn test_batch_insert(url: &str) {
     let connection = MySqlPool::connect(&url)
@@ -317,13 +319,37 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    if false {
+        if let Some(pool) = mgr.project_map.get(&db_option.project_name) {
+            let brans = query_types_refnos(&vec!["BRAN"], &pool, db_option.manual_db_nums.clone()).await?;
+            let mut tubi_map = Arc::new(DashMap::new());
+            let mut handles = vec![];
+            for bran in brans {
+                dbg!(&bran);
+                let pool_clone = pool.value().clone();
+                // let db_option_clone = db_option.clone();
+                let database = mgr.arango_database.clone();
+                let mut tubi_map_clone = tubi_map.clone();
+                let handle = tokio::spawn(async move {
+                    // let database = get_arangodb_conn_from_db_option(&db_option_clone).await.unwrap();
+                    query_all_tubi_from_node(bran, &mut tubi_map_clone, &database, &pool_clone).await.unwrap_or_default();
+                });
+                handles.push(handle);
+            }
+            futures::future::join_all(&mut handles).await;
+            let mut file = fs::File::create("tubi_map.txt")?;
+            file.write_all(&serde_json::to_vec(&tubi_map).unwrap_or_default())?;
+            insert_tubi_value(Arc::try_unwrap(tubi_map).unwrap_or_default(),pool.value()).await?;
+        }
+    }
     Ok(())
 }
 
 
 /// 提前创建图数据库需要的几个collection
 async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
-    get_arangodb_database_from_db_option(db_option).await?;
+    set_arangodb_database_from_db_option(db_option).await?;
     let database = get_arangodb_conn_from_db_option(db_option).await?;
     create_arangodb_conn(&database, "data_eles", Document).await?;
     create_arangodb_conn(&database, "despara_eles", Document).await?;

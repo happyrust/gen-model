@@ -350,9 +350,13 @@ pub fn resolve_axis_param(
             })
         }
         "PTCA" | "PTMI" => {
+            dbg!("hello ptca");
             let x = eval_str_to_f32(&axis_param.x, &context).unwrap_or_default();
+            dbg!("x");
             let y = eval_str_to_f32(&axis_param.y, &context).unwrap_or_default();
+            dbg!("y");
             let z = eval_str_to_f32(&axis_param.z, &context).unwrap_or_default();
+            dbg!("hello 11");
             let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context);
             Some(CateAxisParam { refno: axis_param.refno, number, pt: Vec3::new(pos[0] + x, pos[1] + y, pos[2] + z), dir, pconnect, pbore })
         }
