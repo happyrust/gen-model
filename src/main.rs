@@ -190,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
     let mut data = vec![];
     file.read_to_end(&mut data)?;
     let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-
+    dbg!(&mesh_mgr.meshes.len());
     if db_option.gen_spatial_tree {
         let mut timer = Instant::now();
         let mut rstar_objs = vec![];
@@ -340,7 +340,7 @@ async fn main() -> anyhow::Result<()> {
             futures::future::join_all(&mut handles).await;
             let mut file = fs::File::create("tubi_map.txt")?;
             file.write_all(&serde_json::to_vec(&tubi_map).unwrap_or_default())?;
-            insert_tubi_value(Arc::try_unwrap(tubi_map).unwrap_or_default(),pool.value()).await?;
+            insert_tubi_value(Arc::try_unwrap(tubi_map).unwrap_or_default(), pool.value()).await?;
         }
     }
     Ok(())

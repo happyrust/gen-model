@@ -232,15 +232,12 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
         }
         result_string.push_str(" ");
     }
-    dbg!(&result_string);
     match interp(&result_string.to_lowercase()) {
         Ok(val) => {
             Ok(f64_round_3(val).into())
         }
         Err(_) => {
-            dbg!("hello");
             return if let Ok(mut stack) = Stack::init(&result_string) {
-                dbg!("return ");
                 stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", &input_expr)))
             } else {
                 // dbg!(&context);

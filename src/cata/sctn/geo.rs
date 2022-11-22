@@ -9,7 +9,6 @@ use aios_core::prim_geo::category::CateBrepShape;
 use aios_core::prim_geo::loft::SweepSolid;
 use aios_core::prim_geo::spine::{Line3D, Spine3D, SpineCurveType, SweepPath3D};
 use anyhow::anyhow;
-use append_only_vec::AppendOnlyVec;
 use dashmap::{DashMap, DashSet};
 use glam::{Quat, TransformSRT, Vec3};
 use regex::internal::Input;

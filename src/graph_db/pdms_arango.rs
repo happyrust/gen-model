@@ -14,6 +14,7 @@ use anyhow::anyhow;
 use arangors_lite::collection::CollectionType;
 use dashmap::{DashMap, DashSet};
 use futures::future::ok;
+use itertools::Itertools;
 use parse_pdms_db::parse::WholeAttMap;
 use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
 use crate::api::children::query_contain_noun_refnos;
@@ -63,7 +64,7 @@ pub async fn create_arangodb_conn(database: &Database, collection_name: &str, co
 /// 在同步的时候就将 pdms_element 保存到图数据库
 pub async fn save_pdms_element_in_sync(db_option: &DbOption, total_attr_map: &DashMap<RefU64, WholeAttMap>
                                        , children_map: &HashMap<RefU64, RefU64Vec>, dbnum: i32) -> anyhow::Result<()> {
-    let mut result = Vec::new();
+    let mut results = Vec::new();
     let mut edges = Vec::new();
     for (refno, whole_attr) in total_attr_map.clone() {
         let owner = whole_attr.implicit_attmap.get_owner();
@@ -86,14 +87,18 @@ pub async fn save_pdms_element_in_sync(db_option: &DbOption, total_attr_map: &Da
             _from: format!("{}/{}", "pdms_eles", refno.to_url_refno()),
             _to: format!("{}/{}", "pdms_eles", owner_str),
         };
-        result.push(pdms_element);
+        results.push(pdms_element);
         edges.push(pdms_edges);
     }
-    let json = serde_json::to_value(&take(&mut result))?;
-    save_arangodb_with_db_option(json, db_option, "pdms_eles").await?;
+    for result in results.chunks(ARANGODB_SAVE_AMOUNT) {
+        let json = serde_json::to_value(result)?;
+        save_arangodb_with_db_option(json, db_option, "pdms_eles").await?;
+    }
     dbg!(&edges.len());
-    let json = serde_json::to_value(&take(&mut edges))?;
-    save_arangodb_with_db_option(json, db_option, "pdms_edges").await?;
+    for edge in edges.chunks(ARANGODB_SAVE_AMOUNT) {
+        let json = serde_json::to_value(edge)?;
+        save_arangodb_with_db_option(json, db_option, "pdms_edges").await?;
+    }
     Ok(())
 }
 
@@ -183,7 +188,7 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
 }
 
 pub async fn save_pdms_level_edges_in_sync(db_option: &DbOption, children_map: &HashMap<RefU64, RefU64Vec>) -> anyhow::Result<()> {
-    let mut result = vec![];
+    let mut results = vec![];
     for (_refno, children_map) in children_map {
         if children_map.len() == 0 { continue; }
         for i in 1..children_map.len() {
@@ -194,12 +199,14 @@ pub async fn save_pdms_level_edges_in_sync(db_option: &DbOption, children_map: &
                 _from: format!("{}/{}", "pdms_eles", from_refno.to_url_refno()),
                 _to: format!("{}/{}", "pdms_eles", to_refno.to_url_refno()),
             };
-            result.push(edge);
+            results.push(edge);
         }
     }
-    if !result.is_empty() {
-        let json = serde_json::to_value(&take(&mut result))?;
-        save_arangodb_with_db_option(json, db_option, "sibl_edges").await?;
+    if !results.is_empty() {
+        for result in results.chunks(ARANGODB_SAVE_AMOUNT) {
+            let json = serde_json::to_value(result)?;
+            save_arangodb_with_db_option(json, db_option, "sibl_edges").await?;
+        }
     }
     Ok(())
 }
@@ -224,8 +231,10 @@ pub async fn save_foreign_refno_edges_in_sync(db_option: &DbOption, foreign_refn
         }
     }
     if foreign_edges.len() > 0 {
-        let json = serde_json::to_value(&take(&mut foreign_edges))?;
-        save_arangodb_with_db_option(json, &db_option, "foreign_edges").await?;
+        for foreign_edge in foreign_edges.chunks(ARANGODB_SAVE_AMOUNT) {
+            let json = serde_json::to_value(foreign_edge)?;
+            save_arangodb_with_db_option(json, &db_option, "foreign_edges").await?;
+        }
     }
     Ok(())
 }

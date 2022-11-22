@@ -436,11 +436,13 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 let mut type_handles = vec![];
                 // 将部分数据保存到图数据库
                 {
-                    if db_type == "CATA" || db_type == "DESI" {
+                    if db_type == "DESI" {
                         // 将 pdms_element 部分数据保存到图数据库中
                         save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
                         // 将兄弟关系保存到图数据库中
                         save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
+                    }
+                    if db_type == "CATA" || db_type == "DESI" {
                         save_foreign_refno_edges_in_sync(&db_option, foreign_refnos_map).await?;
                         // 单独保存plin
                         save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
@@ -449,6 +451,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                         // 将 dtse下的data部分数据保存到图数据库
                         save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
                     }
+                    println!("图数据库保存完成");
                 }
                 for (type_hash, type_refnos) in type_ele_map {
                     if b_replace_types {
@@ -772,10 +775,15 @@ async fn save_paras_into_arangodb(db_option: &DbOption, total_attr_map: &DashMap
             })
         }
     }
-    let para_json = serde_json::to_value(&para_map)?;
-    let des_para_json = serde_json::to_value(&des_para_map)?;
-    save_arangodb_with_db_option(para_json, db_option, "para_eles").await?;
-    save_arangodb_with_db_option(des_para_json, db_option, "despara_eles").await?;
+    for para in para_map.chunks(ARANGODB_SAVE_AMOUNT) {
+        let para_json = serde_json::to_value(para)?;
+
+        save_arangodb_with_db_option(para_json, db_option, "para_eles").await?;
+    }
+    for des_para in des_para_map.chunks(ARANGODB_SAVE_AMOUNT) {
+        let des_para_json = serde_json::to_value(des_para)?;
+        save_arangodb_with_db_option(des_para_json, db_option, "despara_eles").await?;
+    }
     Ok(())
 }
 

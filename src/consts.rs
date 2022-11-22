@@ -1,5 +1,5 @@
 pub const URL: &'static str = "mysql://root:root@127.0.0.1:3306";
-
+pub const ARANGODB_SAVE_AMOUNT:usize = 10000;
 pub const PDMS_INFO_DB: &'static str = "PDMS_INFO_DB";
 
 pub const PDMS_EXPLICIT_TABLE: &'static str = "EXPLICIT_ATT";

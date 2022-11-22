@@ -24,7 +24,6 @@ use aios_core::prim_geo::wire::CurveType;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
 use aios_core::tool::math_tool;
 use anyhow::anyhow;
-use append_only_vec::AppendOnlyVec;
 use approx::{abs_diff_eq, abs_diff_ne};
 use arangors_lite::{Connection, Database};
 use async_trait::async_trait;
@@ -871,12 +870,10 @@ impl AiosDBManager {
                 let mut geoms = resolve_desi_comp(refno, None, mgr.as_ref(), is_debug).await;
                 if geoms.is_err() { continue; }
                 let mut geoms = geoms.unwrap();
-                dbg!("hello 1");
                 let mut to_geoms = resolve_desi_comp(to_refno, None, mgr.as_ref(), is_debug).await;
                 if to_geoms.is_err() {
                     continue;
                 }
-                dbg!("hello 2");
                 let mut to_geoms = to_geoms.unwrap();
                 let to_world_trans = mgr.get_world_transform(to_refno).await?.unwrap_or_default();
                 if let Some(arrive) = to_attr.get_i32("ARRI") {
@@ -963,7 +960,6 @@ impl AiosDBManager {
             if is_debug && refno != debug_refno.unwrap() {
                 continue;
             }
-            dbg!(&refno);
             let attr = mgr.get_attr(refno).await;
             if attr.is_err() { continue; }
             let attr = attr.unwrap();
@@ -1185,7 +1181,6 @@ impl AiosDBManager {
                     let current_att = mgr.get_attr(refno).await.unwrap_or_default();
                     let mut refno_ptset_map = DashMap::new();
                     let cur_type = current_att.get_type();
-                    dbg!(&cur_type);
                     if cur_type == "BRAN" || cur_type == "HANG" {
                         Self::get_cata_auto_tubi_geoms(mgr.clone(), refno, &current_att, &brep_shapes_map,
                                                        &refno_ptset_map, target_debug_refno, &mut tubi_result_clone).await.unwrap_or_default();
@@ -1524,7 +1519,6 @@ impl AiosDBManager {
         let loop_cnt = loop_refnos.len();
         //处理loop elements
         let batch_chunks_cnt = loop_cnt / batch_size + 1;
-        dbg!(batch_chunks_cnt);
         let mut handles = vec![];
         let all_refnos = Arc::new(loop_refnos);
         let processed_cnt = Arc::new(Mutex::new(loop_cnt));
