@@ -11,7 +11,7 @@ use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
 use arangors_lite::Database;
 use glam::{Vec2, Vec3};
-use sea_orm::sea_query::IndexType::Hash;
+// use sea_orm::sea_query::IndexType::Hash;
 use smol_str::SmolStr;
 use crate::aql_api::dtse_attr::query_dtse_ppro_from_catr_refno;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;

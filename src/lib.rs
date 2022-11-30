@@ -34,6 +34,7 @@ pub mod graph_db;
 pub mod plot_data;
 pub mod data_to_file;
 pub mod admin;
+pub mod data_to_excel;
 
 
 #[macro_use]
