@@ -219,7 +219,6 @@ async fn main() -> anyhow::Result<()> {
             // let room_infos = vec![(RefU64::from_two_nums(17544, 15107), "N448".to_string())];
             let dbno_mgr = DbNumMgr::load_file(&format!("{instance_dir_path}/dbno_mgr.num")).unwrap_or_default();
             for (target_refno, room_name) in room_infos {
-                if room_name.contains("/1RX-RM02-R210") { continue; }
                 dbg!(&room_name);
                 let mut room_info_map = HashMap::new();
                 if let Some(dbno) = dbno_mgr.get_dbno(target_refno) {
@@ -237,9 +236,9 @@ async fn main() -> anyhow::Result<()> {
                                         let mut withing_room_refnos = rtree
                                             .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
                                         dbg!(&withing_room_refnos.len());
+                                        if withing_room_refnos.len() > 2000 { continue; }
                                         let mut removed_refnos = vec![];
                                         withing_room_refnos.retain(|x| {
-                                            dbg!(&x);
                                             //直接判断点集，可以快速过滤一些构件
                                             if let Some(dbno) = dbno_mgr.get_dbno(*x) {
                                                 if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
