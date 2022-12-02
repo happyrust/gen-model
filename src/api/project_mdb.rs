@@ -20,8 +20,8 @@ lazy_static! {
 }
 
 pub async fn insert_project_mdb(project_name:&str,pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<()> {
-    // let project_mdb = query_mdb_module_worlds(pool, info_pool).await?;
-    let project_mdb = query_mdb_module_worlds_fix(project_name,pool, info_pool).await?;
+    let project_mdb = query_mdb_module_worlds(pool, info_pool).await?;
+    // let project_mdb = query_mdb_module_worlds_fix(project_name,pool, info_pool).await?;
     let project_mdb_len = project_mdb.len();
     let sql = gen_insert_project_mdb_sql(project_mdb.clone());
     let json_sql = gen_insert_project_mdb_json_sql(project_mdb);

@@ -68,34 +68,6 @@ use parse_pdms_db::parse_file;
 use tokio::spawn;
 use aios_database::aql_api::tubi::{insert_tubi_value, query_all_tubi_from_node};
 
-pub async fn test_batch_insert(url: &str) {
-    let connection = MySqlPool::connect(&url)
-        .await
-        .unwrap();
-    let mut pool = connection.try_acquire().unwrap();
-    let sql = format!(r#"INSERT {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, NAME) VALUES (1, 100, 'test', 'unset'), (2, 100, 'test', 'unset')"#);
-    let result = sqlx::query(&sql).execute(&mut pool).await;
-    match result {
-        Ok(_) => {}
-        Err(_) => {
-            dbg!(sql.as_str());
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_get_att() -> anyhow::Result<()> {
-    let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    let attr = mgr.get_attr(RefU64::from_two_nums(23584, 6169)).await?;
-
-    dbg!(attr.to_string_hashmap());
-
-    let world_transform = mgr.get_world_transform(RefU64::from_two_nums(23584, 6169)).await?;
-    dbg!(&world_transform);
-
-    Ok(())
-}
-
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -122,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
         dbg!("正在同步SSC");
         for project_db in mgr.project_map.iter() {
             // 保存ssc
-            // async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
+            async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
             set_arangodb_all_ssc_nodes(&project_db.value(), &mgr.arango_database).await?;
         }
         dbg!("SSC同步完成");
@@ -176,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
                 let mut data = vec![];
                 file.read_to_end(&mut data)?;
                 let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
+                dbg!(&mesh_mgr.meshes.len());
                 if db_option.save_model_mesh_to_graph_db {
                     save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
                 }
@@ -243,9 +216,10 @@ async fn main() -> anyhow::Result<()> {
             let dbno = db_option.arch_db_nums.clone().unwrap_or_default().clone();
             // let room_infos = query_all_need_compute_room_refno(&dbno, "ROOM", Some("ROOMS"), &mgr.project_map.get(&db_option.project_name).unwrap()).await?;
             let room_infos = query_all_need_compute_room_refno(&dbno, "FRMW", Some("-RM"), &mgr.project_map.get(&db_option.project_name).unwrap()).await?;
-            let room_infos = vec![(RefU64::from_two_nums(17544, 15107), "N448".to_string())];
+            // let room_infos = vec![(RefU64::from_two_nums(17544, 15107), "N448".to_string())];
             let dbno_mgr = DbNumMgr::load_file(&format!("{instance_dir_path}/dbno_mgr.num")).unwrap_or_default();
-            for (target_refno, _room_name) in room_infos {
+            for (target_refno, room_name) in room_infos {
+                dbg!(&room_name);
                 let mut room_info_map = HashMap::new();
                 if let Some(dbno) = dbno_mgr.get_dbno(target_refno) {
                     if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
@@ -261,6 +235,8 @@ async fn main() -> anyhow::Result<()> {
                                     if let Some(target_abb) = ele_geos_info.aabb {
                                         let mut withing_room_refnos = rtree
                                             .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
+                                        dbg!(&withing_room_refnos.len());
+                                        if withing_room_refnos.len() > 2000 { continue; }
                                         let mut removed_refnos = vec![];
                                         withing_room_refnos.retain(|x| {
                                             //直接判断点集，可以快速过滤一些构件
@@ -371,7 +347,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "CATR";
+    let noun = "PTAP";
     let hash = db1_hash(noun);
     let str = db1_dehash(0xF423F);
     dbg!(hash);
@@ -384,4 +360,16 @@ fn test_time() {
     let local: DateTime<Local> = Local::now();
     println!("year:{} , month: {} , day: {}, week_day:{},hour:{} , min: {} , sec:{}", local.year(), local.month(), local.day(), local.weekday(),
              local.hour(), local.minute(), local.second());
+}
+
+/// 将 all_attr_info.bin 文件转成 json
+#[test]
+fn test_turn_bin_into_json() {
+    let mut file = File::open("all_attr_info.bin").unwrap();
+    let mut data = vec![];
+    file.read_to_end(&mut data).unwrap();
+    let map = bincode::deserialize::<PdmsDatabaseInfo>(&data).unwrap();
+    let json = serde_json::to_string(&map).unwrap();
+    let mut new_file = File::create("all_attr_info_1.json").unwrap();
+    new_file.write_all(&json.into_bytes()).unwrap();
 }

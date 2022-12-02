@@ -16,6 +16,7 @@ use crate::data_to_file::modify::modify::ModifyNewData;
 use crate::data_to_file::modify::session_page::get_latest_session_page;
 use crate::data_to_file::OldDataPage;
 use dashmap::DashSet;
+use nalgebra::inf;
 use parse_pdms_db::test_cases::convert_str_to_bytes;
 
 lazy_static! {
@@ -330,7 +331,7 @@ fn test_convert_new_increment_data_file() {
     let mut input = vec![];
     file.read_to_end(&mut input).unwrap();
     let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../../all_attr_info.json")).unwrap();
-
+    dbg!(&info.noun_attr_info_map.len());
     let mut attr = AttrMap::default();
     attr.insert(NounHash(db1_hash("TYPE")), AttrVal::StringType(SmolStr::new("ELBO")));
 
