@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use aios_core::pdms_types::RefU64;
-use parry3d::bounding_volume::AABB;
+use parry3d::bounding_volume::Aabb;
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::PDMS_ELEMENTS_TABLE;
@@ -13,7 +13,7 @@ use crate::options::DbOption;
 pub struct RoomData {
     pub refno: RefU64,
     pub name: String,
-    pub aabb: Option<AABB>,
+    pub aabb: Option<Aabb>,
     pub target_refnos: Vec<RefU64>,
 }
 
@@ -21,7 +21,7 @@ pub struct RoomData {
 pub struct RoomElementAql {
     pub _key: String,
     pub refno: RefU64,
-    pub aabb: AABB,
+    pub aabb: Aabb,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -43,7 +43,7 @@ pub struct RoomInfo {
 }
 
 /// 将房间信息保存到图数据库
-pub async fn save_room_info_to_arangodb(room_infos: HashMap<RefU64, (AABB, Vec<RefU64>)>, db_option: &DbOption) -> anyhow::Result<()> {
+pub async fn save_room_info_to_arangodb(room_infos: HashMap<RefU64, (Aabb, Vec<RefU64>)>, db_option: &DbOption) -> anyhow::Result<()> {
     let mut room_eles_json = vec![];
     let mut room_edges_json = vec![];
     for (refno, (aabb,target_refnos)) in room_infos {

@@ -30,17 +30,18 @@ use async_trait::async_trait;
 use config::{Config, ConfigError, Environment, File};
 use dashmap::{DashMap, DashSet};
 use dashmap::mapref::one::Ref;
-use glam::{EulerRot, Mat3, Quat, quat, TransformRT, TransformSRT, Vec2, Vec3};
+use glam::{EulerRot, Mat3, Quat, quat, Vec2, Vec3};
 use id_tree::{Node, NodeId};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use nalgebra::{Quaternion, UnitQuaternion};
 use once_cell::sync::Lazy;
-use parry3d::bounding_volume::{AABB, BoundingVolume};
+use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use smol_str::SmolStr;
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolOptions;
 use parry3d::math::{Isometry, Vector};
+use bevy::transform::components::Transform;
 
 use crate::api::attr::*;
 use crate::api::children::{cache_mdb_module_numbdbs, cache_site_node};
@@ -132,7 +133,7 @@ pub struct AiosDBManager {
 
     pub arango_database: Database,
 
-    cached_world_transforms_map: Arc<DashMap<RefU64, TransformRT>>,
+    cached_world_transforms_map: Arc<DashMap<RefU64, Transform>>,
 
     pub plin_cache_mgr: DashMap<RefU64, String>,
 
@@ -351,7 +352,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
-    async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>> {
+    async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
         let mut ancestors = VecDeque::new();
         let mut rotation = Quat::IDENTITY;
         let mut translation = Vec3::ZERO;
@@ -479,9 +480,10 @@ impl PdmsDataInterface for AiosDBManager {
                 rotation = rotation * quat;
             }
 
-            self.cached_world_transforms_map.entry(refno).or_insert(TransformRT {
+            self.cached_world_transforms_map.entry(refno).or_insert(Transform {
                 rotation,
                 translation,
+                ..default()
             });
         }
         //将rotation 还原为角度
@@ -491,9 +493,10 @@ impl PdmsDataInterface for AiosDBManager {
             let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
             println!("{} : {:?}", refno.to_refno_str(), (translation, ori_str));
         }
-        Ok(Some(glam::TransformRT {
+        Ok(Some(Transform {
             rotation,
             translation,
+            ..default()
         }))
     }
 }
@@ -725,11 +728,11 @@ impl AiosDBManager {
                                       debug_refno: Option<RefU64>, tubi_result: &mut Arc<DashMap<u64, TubiEdgeAql>>) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
         let group_transform = mgr.get_world_transform(branch_refno).await?.unwrap_or_default();
-        let htube_pt = group_transform.transform_point3(group_att.get_vec3("HPOS")
+        let htube_pt = group_transform.transform_point(group_att.get_vec3("HPOS")
             .ok_or(anyhow!("HPOS not exist".to_string()))?);
-        let hdir = group_transform.transform_vector3(group_att.get_vec3("HDIR")
+        let hdir = group_transform.transform_point(group_att.get_vec3("HDIR")
             .ok_or(anyhow!("HDIR not exist".to_string()))?).normalize_or_zero();
-        let bran_ttube_pt = group_transform.transform_point3(group_att.get_vec3("TPOS")
+        let bran_ttube_pt = group_transform.transform_point(group_att.get_vec3("TPOS")
             .ok_or(anyhow!("TPOS not exist".to_string()))?);
 
         let is_hang = group_att.get_type() == "HANG";
@@ -814,7 +817,7 @@ impl AiosDBManager {
                         if geoms.axis_map.contains_key(&arrive) {
                             let first_world_trans = mgr.get_world_transform(*first_refno).await?.unwrap_or_default();
                             let p = &geoms.axis_map[&arrive].pt;
-                            let a_pos = first_world_trans.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
+                            let a_pos = first_world_trans.transform_point(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
                             let key = branch_refno.hash_with_another_refno(*first_refno);
                             let att_type = first_attr.get_type();
                             let mut extra_type = "".to_string();
@@ -879,7 +882,7 @@ impl AiosDBManager {
                 if let Some(arrive) = to_attr.get_i32("ARRI") {
                     if to_geoms.axis_map.contains_key(&arrive) {
                         let p = &to_geoms.axis_map[&arrive].pt;
-                        let a_pos = to_world_trans.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
+                        let a_pos = to_world_trans.transform_point(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
                         edge.end_pt = a_pos;
                     } else {
                         dbg!(&to_refno);
@@ -910,7 +913,7 @@ impl AiosDBManager {
                 if let Some(leave) = attr.get_i32("LEAV") {
                     if geoms.axis_map.contains_key(&leave) {
                         let p = &geoms.axis_map[&leave].pt;
-                        let l_pos = world_trans.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
+                        let l_pos = world_trans.transform_point(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
                         edge.start_pt = l_pos;
                     }
                 }
@@ -929,7 +932,7 @@ impl AiosDBManager {
                         if last_geoms.axis_map.contains_key(&leave) {
                             let tref = group_att.get_foreign_refno("TREF").unwrap_or(RefU64(0));
                             let p = &last_geoms.axis_map[&leave].pt;
-                            let l_pos = last_world_trans.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
+                            let l_pos = last_world_trans.transform_point(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
                             let key = last_refno.hash_with_another_refno(tref);
                             let att_type = last_attr.get_type();
                             let mut extra_type = "".to_string();
@@ -973,9 +976,9 @@ impl AiosDBManager {
                 if let Some(arrive) = attr.get_i32("ARRI") {
                     if geoms.axis_map.contains_key(&arrive) {
                         let p = &geoms.axis_map[&arrive].pt;
-                        let a_pos = world_trans.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
+                        let a_pos = world_trans.transform_point(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
                         let dir = geoms.axis_map[&arrive].dir;
-                        let a_dir = world_trans.transform_vector3(dir).normalize_or_zero();
+                        let a_dir = world_trans.transform_point(dir).normalize_or_zero();
                         let arrive_refno = geoms.axis_map[&arrive].refno;
                         if !current_tubing.finished && a_pos.distance(current_tubing.start_pt) > TUBI_TOL {
                             current_tubing.end_pt = a_pos;
@@ -1013,8 +1016,8 @@ impl AiosDBManager {
                     if geoms.axis_map.contains_key(&leave) {
                         let p = &geoms.axis_map[&leave].pt;
                         let dir = geoms.axis_map[&leave].dir;
-                        let l_dir = world_trans.transform_vector3(dir).normalize_or_zero();
-                        let l_pos = world_trans.transform_point3(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
+                        let l_dir = world_trans.transform_point(dir).normalize_or_zero();
+                        let l_pos = world_trans.transform_point(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
                         current_tubing.start_pt = l_pos;
                         current_tubing.desire_leave_dir = l_dir;
                         current_tubing.finished = false;
@@ -1206,8 +1209,8 @@ impl AiosDBManager {
                             flow_pt_indexs: vec![child_att.get_i32("ARRI"), child_att.get_i32("LEAV")],
                         };
                         let mut geo_insts = &mut geos_info.data;
-                        let mut ele_aabb = AABB::new_invalid();
-                        let mut tubi_aabb = AABB::new_invalid();
+                        let mut ele_aabb = Aabb::new_invalid();
+                        let mut tubi_aabb = Aabb::new_invalid();
                         let mut has_tubi = false;
                         for shape in shapes {
                             let CateBrepShape {
@@ -1361,7 +1364,7 @@ impl AiosDBManager {
                     };
                     let mut geo_insts = &mut geos_info.data;
                     let mut geo_hash = None;
-                    let mut item_trans = TransformSRT::default();
+                    let mut item_trans = Transform::default();
                     let attr = mgr.get_attr(refno).await.unwrap_or_default();
                     if let Some(brep_obj) = attr.create_brep_shape() {
                         if brep_obj.check_valid() {
@@ -1373,7 +1376,7 @@ impl AiosDBManager {
                     let parent_refno = mgr.get_owner(refno);
                     if let Some(geo_hash) = geo_hash {
                         let visible = attr.is_visible_by_level(None).unwrap_or(true);
-                        let tr: TransformSRT = item_trans;
+                        let tr: Transform = item_trans;
                         let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
                         let mut aabb = bbox.unwrap();
                         //todo 去掉重复的代码
@@ -1428,7 +1431,7 @@ impl AiosDBManager {
         //         //在这里直接处理完所有需要处理的transform
         //         let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
         //         let mut geo_hash = None;
-        //         let mut item_trans = TransformSRT::default();
+        //         let mut item_trans = Transform::default();
         //         let mut facet = Facet::default();
         //         if let Ok(children_refs) = mgr.get_children_refs(refno).await {
         //             for pogo_ref in children_refs {
@@ -1467,7 +1470,7 @@ impl AiosDBManager {
         //         let mut parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["LEVE"])).await.unwrap_or_default();
         //         if let Some(geo_hash) = geo_hash {
         //             let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
-        //             let tr: TransformSRT = item_trans * transform;
+        //             let tr: Transform = item_trans * transform;
         //             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
         //             bbox.scaled(&tr.scale);
         //             let geom_data = EleGeoInstance {
@@ -1585,7 +1588,7 @@ impl AiosDBManager {
                         }
                         let mut parent_att = AttrMap::default();
                         let mut geo_hash = None;
-                        let mut item_trans = TransformSRT::default();
+                        let mut item_trans = Transform::default();
                         match parent_type {
                             "REVO" => {
                                 parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
@@ -1637,7 +1640,7 @@ impl AiosDBManager {
 
                         if let Some(geo_hash) = geo_hash {
                             let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
-                            let tr: TransformSRT = item_trans;
+                            let tr: Transform = item_trans;
                             if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
                                 aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
                                 let ele_aabb = aabb.transform_by(&Isometry {

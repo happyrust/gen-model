@@ -705,7 +705,8 @@ fn set_uda_attr(type_ele_map: &DashMap<u32, HashSet<RefU64>>, total_attr_map: &D
             let elel = elel.unwrap();
             let dflt = dflt.unwrap();
             for noun in elel {
-                uda_map.entry(db1_dehash(noun as u32)).or_insert_with(AttrMap::default).entry(NounHash(db1_hash(udna))).or_insert(dflt.clone());
+                uda_map.entry(db1_dehash(noun as u32))
+                    .or_insert_with(AttrMap::default).entry(NounHash(db1_hash(udna))).or_insert(dflt.clone());
             }
         }
     }

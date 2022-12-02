@@ -10,20 +10,15 @@ use aios_core::prim_geo::loft::SweepSolid;
 use aios_core::prim_geo::spine::{Line3D, Spine3D, SpineCurveType, SweepPath3D};
 use anyhow::anyhow;
 use dashmap::{DashMap, DashSet};
-use glam::{Quat, TransformSRT, Vec3};
+use glam::{Quat, Vec3};
 use regex::internal::Input;
+use bevy::prelude::*;
 
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::CateBrepShapeMap;
 
 pub struct ProfileGeosPoints {
     pub points: Vec<(Vec3, Vec3, Vec3)>,
-}
-
-//todo 解决spine的问题，直接求解出wire最好
-//通过wire，可以定位位置，获取得到wire
-pub fn get_spine_geoms() -> bool {
-    true
 }
 
 pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, geom_info: &GeomsInfo,
@@ -131,7 +126,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                     brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
                         refno,
                         brep_shape: Box::new(solid),
-                        transform: TransformSRT::IDENTITY,
+                        transform: Transform::IDENTITY,
                         visible: true,
                         is_tubi: false,
                         shape_err: None,

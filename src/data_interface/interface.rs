@@ -4,8 +4,8 @@ use aios_core::pdms_types::{AiosStr, AttrMap, EleTreeNode, PdmsTree, RefU64, Ref
 use smol_str::SmolStr;
 use async_trait::async_trait;
 use dashmap::mapref::one::Ref;
-use glam::TransformRT;
 use id_tree::NodeId;
+use bevy::prelude::*;
 
 
 #[async_trait]
@@ -59,6 +59,6 @@ pub trait PdmsDataInterface : Send + Sync{
 
     async fn get_ancestor_nodes(&self, refno: RefU64) -> anyhow::Result<VecDeque<EleTreeNode>>;
 
-    async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<glam::TransformRT>>;
+    async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>>;
 
 }

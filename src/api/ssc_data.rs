@@ -15,7 +15,7 @@ use std::fs::File;
 use std::io::Read;
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use arangors_lite::{AqlQuery, Database};
-use parry3d::bounding_volume::AABB;
+use parry3d::bounding_volume::Aabb;
 use parry3d::math::Point;
 use crate::api::children::{travel_children_with_refno, travel_children_with_type};
 use crate::api::element::{query_ele_node, query_elenode_without_children_count, query_elenodes_without_children_count};

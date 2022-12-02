@@ -3,13 +3,10 @@ name = "aios-database"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-
 [dependencies]
 config = "0.13.1"
 bincode = "1.3.3"
-anyhow = "1.0.57"
+anyhow = "1.0.66"
 serde_json = "1.0.81"
 hex = "0.4.3"
 once_cell = "1.12.0"
@@ -35,24 +32,25 @@ bitvec = "1.0.0"
 chrono = "0.4.22"
 geo = "0.23.0"
 
-nalgebra = { version = "0.31.2", features = ["serde"] }
+nalgebra = { version = "0.31.4", features = ["serde"] }
 nalgebra-glm = "0.17.0"
-parry3d = { version = "0.10.0", features = ["serde-serialize"] }
+parry3d = { version = "0.11.1", features = ["serde-serialize"] }
 
-#parse_pdms_db = { path = "../aios-parse-pdms" }
-#aios_core = { path = "../aios-core"}
+parse_pdms_db = { path = "../aios-parse-pdms" }
+aios_core = { path = "../crates/aios-core"}
+bevy = { path = "../crates/bevy", default-features = false }
 #arangors_lite = { path = "../arangors-lite" }
-parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms" }
-aios_core = { git = "https://gitee.com/happydpc/aios-core" }
+#parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms" }
+#aios_core = { git = "https://gitee.com/happydpc/aios-core" }
 arangors_lite = "0.2.0"
 
 
 clap = { version = "3.1.18", features = ["derive"] }
-dashmap = { version = "5.2.0", features = ["serde"] }
+dashmap = { version = "5.4.0", features = ["serde"] }
 tokio = { vertion = "1.18.2", features = ["full"] }
 serde = {version="1.0.137", features=["derive"]}
 id_tree = { version = "1.8.0", features = ["serde_support"] }
-glam = { version = "0.20.2", features = ["transform-types"] }
+glam = { version = "0.22.0" }
 sea-orm = { version = "0.8.0", features = ["default", "runtime-tokio"]}
 #openssl = { version = "0.10", features = ["vendored"] }
 #[target.'cfg(target_os = "macos")'.dependencies]

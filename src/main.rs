@@ -31,7 +31,7 @@ use itertools::Itertools;
 use nalgebra::{max, Quaternion, UnitQuaternion};
 use nom::Parser;
 use nom_derive::Parse;
-use parry3d::bounding_volume::AABB;
+use parry3d::bounding_volume::Aabb;
 use parry3d::math::{Isometry, Point, Vector};
 use parry3d::shape::{Compound, ConvexPolyhedron, SharedShape};
 use parry3d::transformation::vhacd;
@@ -216,7 +216,7 @@ async fn main() -> anyhow::Result<()> {
                     if aabb.extents().magnitude().is_finite() {
                         rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, *kv.key()));
                     } else {
-                        // println!("AABB {:?} is not ok : {:?}", kv.key(), &aabb);
+                        // println!("Aabb {:?} is not ok : {:?}", kv.key(), &aabb);
                     }
                 }
             }
@@ -271,7 +271,7 @@ async fn main() -> anyhow::Result<()> {
                                                     for ele_geos_info in &ele_geos_info_map {
                                                         let tr = ele_geos_info.get_transform();
                                                         for pt_kv in &ele_geos_info.ptset_map {
-                                                            let p = tr.mul_vec3(pt_kv.1.pt);
+                                                            let p = tr.transform_point(pt_kv.1.pt);
                                                             for rc in &room_colliders {
                                                                 if rc.as_ref().contains_point(&Isometry::identity(), &Point::new(p.x, p.y, p.z)) {
                                                                     return true;
