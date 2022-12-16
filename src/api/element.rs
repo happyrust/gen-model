@@ -445,7 +445,6 @@ pub async fn query_types_refnos_names(types: &Vec<&str>, pool: &Pool<MySql>) -> 
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match result {
         Ok(vals) => {
-            let mut r = vec![];
             for v in vals {
                 let refno = RefU64(v.get::<i64, _>("ID") as u64);
                 let name = v.get::<String, _>("NAME");

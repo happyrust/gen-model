@@ -66,6 +66,7 @@ use crate::defines::{AiosString, CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP, PD
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
 use crate::graph_db::pdms_inst_arango::sync_instance_to_graph_db;
 use crate::helper::qualified_table_name;
+use crate::mdb::get_project_mdb;
 use crate::options::DbOption;
 
 pub const TUBI_TOL: f32 = 10.0f32;
@@ -138,6 +139,8 @@ pub struct AiosDBManager {
     pub plin_cache_mgr: DashMap<RefU64, String>,
 
     pub cache_module_numbdbs: Vec<i32>,
+
+    pub mdb_map: DashMap<String, Vec<u32>>,
 }
 
 
@@ -588,6 +591,12 @@ impl AiosDBManager {
         let time = Instant::now();
         let mut dbno_mgr = DbNumMgr::default();
         let need_sync = true;
+        let desi_pool = AiosDBManager::get_db_pool(&default_conn, &db_option.project_name).await;
+
+        let mdb_map = if let Ok(desi_pool) = desi_pool {
+            get_project_mdb(&desi_pool).await.unwrap_or_default()
+        } else { DashMap::default() };
+
         for project in &db_option.included_projects {
             let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
             println!("正在创建数据库连接 {project}");
@@ -643,6 +652,7 @@ impl AiosDBManager {
                 cached_world_transforms_map: Arc::new(Default::default()),
                 plin_cache_mgr,
                 cache_module_numbdbs: numbdbs,
+                mdb_map,
             }
         )
     }

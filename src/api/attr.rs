@@ -3,7 +3,7 @@ use std::env;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::consts::*;
-use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64};
+use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64, RefU64Vec};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use anyhow::anyhow;
@@ -280,6 +280,20 @@ pub async fn query_foreign_refno(refno: RefU64, foreign_type: &str, pool: &Pool<
     };
 }
 
+pub async fn query_numbdbs_by_mdb(dbs: RefU64Vec, pool: &Pool<MySql>) -> anyhow::Result<Vec<u32>> {
+    let mut r = vec![];
+    let sql = gen_query_numbdbs_by_mdb_sql(dbs);
+    dbg!(&sql);
+    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    if let Ok(results) = results {
+        for result in results {
+            let numbdb = result.get::<i32,_>("NUMBDB");
+            r.push(numbdb as u32);
+        }
+    }
+    Ok(r)
+}
+
 fn gen_insert_attr_info_sql(attr_info: &DashMap<i32, DashMap<i32, AttrInfo>>) -> String {
     let mut sql = String::new();
     sql.push_str("INSERT IGNORE INTO ATTR_INFO (TYPE_HASH, TYPE,INFO ) VALUES ");
@@ -350,6 +364,18 @@ fn gen_position_from_id(refno: RefU64, type_name: &str) -> String {
 fn gen_query_value_from_table(noun: &str, table_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID , {} FROM {}", noun, table_name));
+    sql
+}
+
+fn gen_query_numbdbs_by_mdb_sql(dbs: RefU64Vec) -> String {
+    let mut dbs_sql = String::new();
+    let b_empty = dbs.0.is_empty();
+    for db in dbs {
+        dbs_sql.push_str(&format!("{} ,", db.0));
+    }
+    if !b_empty { dbs_sql.remove(dbs_sql.len() - 1); }
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT NUMBDB FROM DB WHERE ID IN ( {} )", dbs_sql));
     sql
 }
 
