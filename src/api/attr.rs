@@ -283,7 +283,6 @@ pub async fn query_foreign_refno(refno: RefU64, foreign_type: &str, pool: &Pool<
 pub async fn query_numbdbs_by_mdb(dbs: RefU64Vec, pool: &Pool<MySql>) -> anyhow::Result<Vec<u32>> {
     let mut r = vec![];
     let sql = gen_query_numbdbs_by_mdb_sql(dbs);
-    dbg!(&sql);
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     if let Ok(results) = results {
         for result in results {

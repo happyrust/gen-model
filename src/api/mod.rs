@@ -14,6 +14,6 @@ pub mod ssc_data;
 pub mod room_code;
 // pdms admin 模块
 pub mod admin;
-
+pub mod pdms_user;
 pub mod test_sample;
 pub mod data_state;
