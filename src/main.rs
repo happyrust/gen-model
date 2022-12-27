@@ -79,9 +79,10 @@ async fn main() -> anyhow::Result<()> {
     dbg!(&db_option);
 
     if db_option.total_sync {
-        create_arangodb_conns(&db_option).await.expect("Failed to create arangodb conns");
+        // create_arangodb_conns(&db_option).await.expect("Failed to create arangodb conns");
+        save_virtual_hole_value_to_arangodb(&db_option).await.unwrap();
         // 把pdms数据同步到mysql
-        sync_pdms(&db_option).await.unwrap();
+        // sync_pdms(&db_option).await.unwrap();
     }
 
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
@@ -341,9 +342,20 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     create_arangodb_conn(&database, "ssc_eles", Document).await?;
     create_arangodb_conn(&database, "tubi_edges", Edge).await?;
     create_arangodb_conn(&database, "room_eles", Document).await?;
+    create_arangodb_conn(&database, "virtual_hole", Document).await?;
     create_arangodb_conn(&database, "room_edges", Edge).await?;
     Ok(())
 }
+
+// #[test]
+// fn test() {
+//
+//
+// }
+//
+
+
+
 
 #[test]
 fn get_noun_hash() {

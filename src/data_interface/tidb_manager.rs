@@ -510,17 +510,14 @@ impl AiosDBManager {
         CACHED_REFNO_BASIC_MAP.get(&refno)
             .map(|x| x.get_table_name().to_string()).unwrap_or("UNSET".to_string())
     }
-
     #[inline]
     pub fn get_db_option() -> anyhow::Result<DbOption> {
         use config::{Config, ConfigError, Environment, File};
         let s = Config::builder()
             .add_source(File::with_name("DbOption"))
             .build()?;
-
         s.try_deserialize::<DbOption>().map_err(|x| anyhow!(x.to_string()))
     }
-
     #[inline]
     pub fn get_default_conn_str(d: &DbOption) -> String {
         let user = d.user.as_str();
@@ -539,7 +536,6 @@ impl AiosDBManager {
         let port = d.port.as_str();
         format!("mysql://{user}:{pwd}@{ip}:{port}")
     }
-
     /// 获得pool
     #[inline]
     pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
@@ -580,12 +576,13 @@ impl AiosDBManager {
         Self::init(db_option).await
     }
 
+
+
     ///初始化
     pub async fn init(db_option: DbOption) -> anyhow::Result<Self> {
         let dir = db_option.project_path.to_string();
         let mut project_map = DashMap::new();
         let mut numbdbs = vec![];
-
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         let time = Instant::now();
@@ -1789,24 +1786,16 @@ impl AiosDBManager {
 
 #[tokio::test]
 async fn test_get_attr() -> anyhow::Result<()> {
-    let mut mgr = AiosDBManager::init_form_config().await?;
-    let refno: RefU64 = RefI32Tuple((23584, 8)).into();
-    let v = mgr.get_attr(refno).await?;
-    println!("v={:?}", v.to_string_hashmap());
+    // let mut mgr = AiosDBManager::init_form_config().await?;
+    // let refno: RefU64 = RefI32Tuple((23584, 8)).into();
+    // let v = mgr.get_attr(refno).await?;
+    // println!("v={:?}", v.to_string_hashmap());
 
     // mgr.cache_geos_data("Sample", "SAMPLE").await?;
 
     Ok(())
 }
 
-#[tokio::test]
-async fn test_get_children_attr() -> anyhow::Result<()> {
-    let mgr = AiosDBManager::init_form_config().await?;
-    let refno: RefU64 = RefI32Tuple((23584, 7)).into();
-    let v = mgr.get_children_attrs(refno).await?;
-    println!("v={:?}", v);
-    Ok(())
-}
 
 #[test]
 fn test_compute_distance() {

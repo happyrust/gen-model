@@ -37,7 +37,7 @@ use crate::aql_api::PdmsPLINAttrAql;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{ForeignEdges, ParaDocument};
-use crate::graph_db::pdms_arango::{save_arangodb_with_db_option, save_arangodb_with_db_option_create_collection, save_dtse_value_to_arangodb, save_foreign_refno_edges_in_sync, save_pdms_element_in_sync, save_pdms_level_edges_in_sync};
+use crate::graph_db::pdms_arango::{save_arangodb_with_db_option, save_arangodb_with_db_option_create_collection, save_dtse_value_to_arangodb, save_foreign_refno_edges_in_sync, save_pdms_element_in_sync, save_pdms_level_edges_in_sync, save_virtual_hole_value_to_arangodb};
 use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
@@ -93,8 +93,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     let mut time = Instant::now();
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
     init_info_database(&default_conn_str, &db_option.project_name).await?;
-    let pdms_info_pool = AiosDBManager::get_db_pool(&default_conn_str, &format!("{}_{}",
-                                                                                PDMS_INFO_DB, &db_option.project_name)).await?;
+    let pdms_info_pool = AiosDBManager::get_db_pool(&default_conn_str, &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name)).await?;
     let mut pdms_info_conn = pdms_info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
     for project in &db_option.included_projects {
@@ -181,7 +180,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             insert_project_mdb(project,&project_pool, &pdms_info_pool).await?;
         }
     }
-
     println!("创建表花费时间: {} ms", create_tables_elapse);
     println!("初始化数据库时间: {} ms", time.elapsed().as_millis() - create_tables_elapse);
 
@@ -436,6 +434,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 let mut type_handles = vec![];
                 // 将部分数据保存到图数据库
                 {
+
                     if db_type == "DESI" {
                         // 将 pdms_element 部分数据保存到图数据库中
                         save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
