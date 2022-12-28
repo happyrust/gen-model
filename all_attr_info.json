@@ -16153,7 +16153,7 @@
 			"900454": {
 				"name": "DETR",
 				"hash": 900454,
-				"offset": 0,
+				"offset": 17,
 				"default_val": {
 					"ElementType": ""
 				},
@@ -29469,7 +29469,7 @@
 				"hash": 779125,
 				"offset": 13,
 				"default_val": {
-					"StringType": ""
+					"StringType": "0"
 				},
 				"att_type": "STRING"
 			},
@@ -29478,7 +29478,7 @@
 				"hash": 877540,
 				"offset": 15,
 				"default_val": {
-					"StringType": ""
+					"StringType": "0"
 				},
 				"att_type": "STRING"
 			},

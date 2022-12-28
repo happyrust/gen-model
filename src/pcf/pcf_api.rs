@@ -1,0 +1,210 @@
+use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
+use aios_core::prim_geo::tubing::TubiEdgeAql;
+use itertools::Itertools;
+use lazy_static::lazy_static;
+use sqlx::{MySql, Pool};
+use dashmap::DashSet;
+use crate::api::attr::{query_full_attr, query_implicit_attr};
+use crate::api::element::query_name;
+use crate::data_interface::interface::PdmsDataInterface;
+use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::pcf::bran::{gen_center_point_data, gen_endpoint_data, gen_refno_data, gen_type_name_data};
+use crate::pcf::elbo::gen_elbo_data;
+use crate::pcf::flan::gen_flan_data;
+use crate::pcf::gask::gen_gask_data;
+use crate::pcf::inst::gen_inst_data;
+use crate::pcf::olet::gen_olet_data;
+use crate::pcf::redu::gen_redu_data;
+use crate::pcf::tee::gen_tee_data;
+use crate::pcf::valv::gen_valv_data;
+
+lazy_static! {
+    /// attr_map 中不需要转为 bytes的属性
+    pub static ref PCF_NODES: DashSet<String> = {
+        let mut set = DashSet::new();
+        set.insert("ELBO".to_string());
+        set.insert("FLAN".to_string());
+        set.insert("GASK".to_string());
+        set.insert("INST".to_string());
+        set.insert("OLET".to_string());
+        set.insert("REDU".to_string());
+        set.insert("TEE".to_string());
+        set.insert("VALV".to_string());
+        set
+    };
+}
+
+/// 生成每个节点都存在的 pcf 数据
+pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut materials: &mut Vec<(RefU64, String)>,
+                                 bran_attr: &AttrMap, start_edge: &TubiEdgeAql,
+                                 end_edge: &TubiEdgeAql, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) {
+    let attr = query_full_attr(refno, &aios_mgr, None).await;
+    if attr.is_err() { return; }
+    let attr = attr.unwrap();
+    let type_name = attr.get_type();
+    if !PCF_NODES.contains(type_name) { return; }
+    if type_name != "TEE" { // TEE 需要做特殊处理
+        data.append(&mut gen_type_name_data(type_name));
+        let start_point = start_edge.end_pt;
+        data.append(&mut gen_endpoint_data(start_point, start_edge.bore));
+        let end_point = end_edge.start_pt;
+        data.append(&mut gen_endpoint_data(end_point, end_edge.bore));
+    }
+    match type_name {
+        "ELBO" => { data.append(&mut gen_elbo_data(aios_mgr, &attr, pool, materials).await); }
+        "GASK" => { data.append(&mut gen_gask_data(aios_mgr, &attr, pool, materials).await); }
+        "FLAN" => { data.append(&mut gen_flan_data(aios_mgr, &attr, pool, materials).await); }
+        "VALV" => { data.append(&mut gen_valv_data(aios_mgr, &attr, pool, materials).await); }
+        "TEE" => { data.append(&mut gen_tee_data(aios_mgr, &attr, bran_attr, pool, materials, start_edge, end_edge).await); }
+        "REDU" => { data.append(&mut gen_redu_data(aios_mgr, &attr, pool, materials).await); }
+        "INST" => { data.append(&mut gen_inst_data(aios_mgr, &attr, pool, materials).await); }
+        "OLET" => { data.append(&mut gen_olet_data(aios_mgr, &attr, pool, materials).await); }
+        _ => {}
+    }
+}
+
+/// 生成 center_point 数据
+pub async fn create_center_point_data(refno: RefU64, aios_mgr: &AiosDBManager) -> Vec<u8> {
+    let center_point = aios_mgr.get_world_transform(refno).await;
+    if let Ok(Some(center_point)) = center_point {
+        return gen_center_point_data(center_point.translation);
+    }
+    vec![]
+}
+
+/// 生成 SKEY 数据
+pub async fn create_s_key_data(attr: &AttrMap, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> Vec<u8> {
+    let spre_refno = attr.get_refu64("SPRE");
+    if spre_refno.is_none() { return vec![]; }
+    let spre_refno = spre_refno.unwrap();
+    let spre_cache = aios_mgr.get_refno_basic(spre_refno);
+    if spre_cache.is_none() { return vec![]; }
+    let spre_cache = spre_cache.unwrap();
+    let spre_attr = query_implicit_attr(spre_refno, spre_cache.value(), pool, Some(vec!["DETR"])).await;
+    if spre_attr.is_err() { return vec![]; }
+    let spre_attr = spre_attr.unwrap();
+    let detr_refno = spre_attr.get_refu64("DETR");
+    if let Some(detr_refno) = detr_refno {
+        if let Some(cache) = aios_mgr.get_refno_basic(detr_refno) {
+            let detr_att = query_implicit_attr(detr_refno, cache.value(), pool, Some(vec!["SKEY"])).await;
+            if let Ok(detr_att) = detr_att {
+                let s_key = detr_att.get_str("SKEY");
+                if let Some(s_key) = s_key {
+                    return gen_s_key_data_str(s_key);
+                }
+            }
+        }
+    }
+    vec![]
+}
+
+pub async fn get_s_key_value(attr: &AttrMap, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> Option<String> {
+    let spre_refno = attr.get_refu64("SPRE");
+    if spre_refno.is_none() { return None; }
+    let spre_refno = spre_refno.unwrap();
+    let spre_cache = aios_mgr.get_refno_basic(spre_refno);
+    if spre_cache.is_none() { return None; }
+    let spre_cache = spre_cache.unwrap();
+    let spre_attr = query_implicit_attr(spre_refno, spre_cache.value(), pool, Some(vec!["DETR"])).await;
+    if spre_attr.is_err() { return None; }
+    let spre_attr = spre_attr.unwrap();
+    let detr_refno = spre_attr.get_refu64("DETR");
+    if let Some(detr_refno) = detr_refno {
+        if let Some(cache) = aios_mgr.get_refno_basic(detr_refno) {
+            let detr_att = query_implicit_attr(detr_refno, cache.value(), pool, Some(vec!["SKEY"])).await;
+            if let Ok(detr_att) = detr_att {
+                let s_key = detr_att.get_str("SKEY");
+                if let Some(s_key) = s_key {
+                    return Some(s_key.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 生成 ANGL 数据
+pub fn create_angl_data(attr: &AttrMap) -> Vec<u8> {
+    let angle = attr.get_val("ANGL");
+    if let Some(AttrVal::DoubleType(angl)) = angle {
+        return gen_angl_data_str(*angl);
+    }
+    vec![]
+}
+
+pub fn create_refno_data(attr: &AttrMap) -> Vec<u8> {
+    if let Some(refno) = attr.get_refno() {
+        return gen_refno_data(refno);
+    }
+    vec![]
+}
+
+pub fn create_temperature_data(attr: &AttrMap) -> Vec<u8> {
+    if let Some(temp) = attr.get_f64("TEMP") {
+        return gen_temperature_data_str(temp);
+    }
+    vec![]
+}
+
+pub async fn create_pipeline_spec_data(attr: &AttrMap, pool: &Pool<MySql>) -> Vec<u8> {
+    if let Some(pspe_refno) = attr.get_refu64("PSPE") {
+        let pspe_name = query_name(pspe_refno, pool).await;
+        if let Ok(name) = pspe_name {
+            return gen_pipeline_spec_str(&name);
+        }
+    }
+    vec![]
+}
+
+pub async fn create_tee_item_code_bran_data(attr: &AttrMap, pool: &Pool<MySql>) -> Vec<u8> {
+    if let Some(pspe_refno) = attr.get_refu64("PSPE") {
+        let pspe_name = query_name(pspe_refno, pool).await;
+        if let Ok(name) = pspe_name {
+            return gen_tee_item_code_bran_data_str(&name);
+        }
+    }
+    vec![]
+}
+
+pub fn create_pipeline_href_data(attr: &AttrMap) -> Vec<u8> {
+    if let Some(href_refno) = attr.get_refu64("HREF") {
+        return gen_pipeline_href_str(href_refno);
+    }
+    vec![]
+}
+
+pub fn create_pipeline_tref_data(attr: &AttrMap) -> Vec<u8> {
+    if let Some(tref_refno) = attr.get_refu64("TREF") {
+        return gen_pipeline_tref_str(tref_refno);
+    }
+    vec![]
+}
+
+/// 生成 SKEY pcf 的数据
+pub fn gen_s_key_data_str(s_key: &str) -> Vec<u8> {
+    format!("        SKEY  {}\r\n", s_key).into_bytes()
+}
+
+fn gen_angl_data_str(angl: f64) -> Vec<u8> {
+    format!("        ANGLE        {}\r\n", angl).into_bytes()
+}
+
+fn gen_temperature_data_str(temp: f64) -> Vec<u8> {
+    format!("        PIPELINE-TEMP       {}\r\n", temp).into_bytes()
+}
+
+fn gen_pipeline_spec_str(pspe_name: &str) -> Vec<u8> {
+    format!("        PIPING-SPEC    {}\r\n", pspe_name).into_bytes()
+}
+
+fn gen_pipeline_href_str(href: RefU64) -> Vec<u8> {
+    format!("        ID-HREF    {}\r\n", href.to_refno_string()).into_bytes()
+}
+
+fn gen_pipeline_tref_str(tref: RefU64) -> Vec<u8> {
+    format!("        ID-TREF    {}\r\n", tref.to_refno_string()).into_bytes()
+}
+
+fn gen_tee_item_code_bran_data_str(pspe_name: &str) -> Vec<u8> {
+    format!("        ITEM-CODE-BRANCH1    {}\r\n", pspe_name).into_bytes()
+}
