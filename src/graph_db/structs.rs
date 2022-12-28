@@ -29,7 +29,6 @@ pub struct VirtualHoleGraphNode {
     pub shape: String,
     pub ori: String,
     pub itemref: String,
-
     pub mainitemref: String,
     pub openitem: String,
     pub plugtype: String,
@@ -52,6 +51,36 @@ pub struct VirtualHoleGraphNode {
     pub note: String,
 }
 
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct VirtualEmbedGraphNode {
+    pub _key: String,
+    pub intelld: i32,
+    pub code: String,
+    pub relyitem: String,
+    pub relyitemref: String,
+    pub mainitem: String,
+    pub speciality: String,
+    pub position: String,
+    pub ori: String,
+    pub work: String,
+    pub workby: String,
+    pub time: String,
+    pub standertype: String,
+    pub openitem: String,
+    pub holework: String,
+    pub sizelength: f32,
+    pub sizewidth: f32,
+    pub sizethickness: f32,
+    pub minthickness: f32,
+    pub load: f32,
+    pub mindistance: f32,
+    pub subsmeterial: String,
+    pub fittid: String,
+    pub _ref: String,
+    pub shape: String,
+    pub note: String,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct PdmsEleGraphEdge {
