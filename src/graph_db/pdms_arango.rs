@@ -92,12 +92,6 @@ pub async fn save_pdms_element_in_sync(db_option: &DbOption, total_attr_map: &Da
         results.push(pdms_element);
         edges.push(pdms_edges);
     }
-    // //获取虚拟孔洞信息
-    // let hole_data = insert_virtual_hole_data();
-    // for data in hole_data.chunks(ARANGODB_SAVE_AMOUNT) {
-    //     let json = serde_json::to_value(data)?;
-    //     save_arangodb_with_db_option(json, db_option, "hole_data").await?;
-    // }
     for result in results.chunks(ARANGODB_SAVE_AMOUNT) {
         let json = serde_json::to_value(result)?;
         save_arangodb_with_db_option(json, db_option, "pdms_eles").await?;
@@ -230,31 +224,26 @@ fn insert_virtual_embed_data() -> Vec<VirtualEmbedGraphNode> {
             code: i.2.parse().unwrap(),
             relyitem: i.3.parse().unwrap(),
             relyitemref: i.4.parse().unwrap(),
-
             mainitem: i.5.parse().unwrap(),
             speciality: i.6.parse().unwrap(),
             position: i.7.parse().unwrap(),
             ori: i.8.parse().unwrap(),
             work: i.9.parse().unwrap(),
-
             workby: i.10.parse().unwrap(),
             time: i.11.parse().unwrap(),
             standertype: i.12.parse().unwrap(),
             openitem: i.13.to_string(),
             holework: i.14.to_string(),
-
             sizelength: i.15,
             sizewidth: i.16,
             sizethickness: i.17 as f32,
             minthickness: i.18 as f32,
             load: i.19,
-
             mindistance: i.20,
             subsmeterial: i.21.to_string(),
             fittid: i.22.parse().unwrap(),
             _ref: i.23.parse().unwrap(),
             shape: i.24.parse().unwrap(),
-
             note: i.25.parse().unwrap(),
         };
         virtual_data.push(hole_data);
