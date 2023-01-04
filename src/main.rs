@@ -373,3 +373,15 @@ fn test_turn_bin_into_json() {
     let mut new_file = File::create("all_attr_info_1.json").unwrap();
     new_file.write_all(&json.into_bytes()).unwrap();
 }
+
+#[test]
+fn test_inst_mgr() {
+    let mut file = File::open("assets/instance/7999.inst").unwrap();
+    let mut data = vec![];
+    file.read_to_end(&mut data).unwrap();
+    let map = bincode::deserialize::<PdmsMeshInstanceMgr>(&data).unwrap();
+    let refno = RefU64::from_refno_str("32575/2179").unwrap();
+    if let Some(value) = map.inst_mgr.inst_map.get(&refno) {
+        dbg!(&value.value());
+    };
+}

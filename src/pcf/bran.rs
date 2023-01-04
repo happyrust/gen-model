@@ -36,6 +36,7 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager)
     let database = aios_mgr.get_arangodb_conn().await?;
     let bran_attr = query_full_attr(refno, &aios_mgr, None).await?;
     let bran_name = bran_attr.get_name().to_string();
+    // 生成 bran 的数据
     data.append(&mut gen_bran_reference_data(&bran_name));
     let bran_infos = query_bran_info(refno, &database).await?;
     // 生成 bran href 的数据
@@ -48,12 +49,23 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager)
     // 生成 bran 中间节点的数据
     for i in 0..bran_infos.len() {
         // 可能存在 tubi
-        let distance = bran_infos[i].start_pt.distance(bran_infos[i].end_pt);
-        if distance >= TUBI_TOL {
-            let from_refno = RefU64::from_arangodb_refno_str(&bran_infos[i]._from);
-            let mut tubi_data = gen_tubi_data(bran_infos[i].start_pt, bran_infos[i].end_pt,
-                                              bran_infos[i].bore, &bran_attr, from_refno, pool.value(), &mut materials).await;
-            data.append(&mut tubi_data);
+        let tubi_start_index = if i == 0 { 1 } else { i };
+        if bran_infos[tubi_start_index - 1].att_type != "ATTA" {
+            let mut tubi_end_index = i;
+            let distance = bran_infos[i].start_pt.distance(bran_infos[tubi_end_index].end_pt);
+            if distance >= TUBI_TOL {
+                // 跳过 atta ，不记录 atta的长度
+                if bran_infos[i].att_type == "ATTA" {
+                    while tubi_end_index < bran_infos.len() - 1 {
+                        if bran_infos[tubi_end_index].att_type == "ATTA" { tubi_end_index += 1; } else { break; }
+                    }
+                }
+                let from_refno = RefU64::from_arangodb_refno_str(&bran_infos[i]._from);
+                let mut tubi_data = gen_tubi_data(bran_infos[i].start_pt, bran_infos[tubi_end_index].end_pt,
+                                                  bran_infos[tubi_end_index].bore, &bran_attr, from_refno, pool.value(), &mut materials).await;
+                data.append(&mut tubi_data);
+                // 如果 tubi_edge 的 att_type 是 ATTA ， 统计tubi的时候就需要跳过下一个tubi
+            }
         }
         if i == bran_infos.len() - 1 { continue; }
         let refno = convert_refno_from_edge_str(&bran_infos[i]._to);
@@ -128,6 +140,7 @@ async fn gen_material_data(materials: Vec<(RefU64, String)>, aios_mgr: &AiosDBMa
 
 fn match_type_name(input: &str) -> &str {
     match input {
+        "ATTA" => { "SUPPORT" }
         "GASK" => { "GASKET" }
         "FLAN" => { "FLANGE" }
         "ELBO" => { "ELBOW" }
@@ -157,6 +170,10 @@ pub fn gen_endpoint_data(point: Vec3, bore: f32) -> Vec<u8> {
 /// 生成 center_point 得 pcf 数据
 pub fn gen_center_point_data(center_point: Vec3) -> Vec<u8> {
     format!("        CENTRE-POINT    {}  {}  {}\r\n", center_point.x, center_point.y, center_point.z).into_bytes()
+}
+
+pub fn gen_cords_point_data(cords_point: Vec3) -> Vec<u8> {
+    format!("        CO-ORDS    {}  {}  {}\r\n", cords_point.x, cords_point.y, cords_point.z).into_bytes()
 }
 
 pub async fn gen_item_code_data_attr_val(spre_refno: Option<&AttrVal>, pool: &Pool<MySql>, materials: &mut Vec<(RefU64, String)>) -> Vec<u8> {
@@ -238,7 +255,7 @@ async fn gen_file() -> anyhow::Result<()> {
     let mut file = std::fs::File::create("test.txt").unwrap();
     // let data = gen_pcf_file_head();
     let mgr = AiosDBManager::init_form_config().await?;
-    let refno = RefU64::from_refno_str("23584/5734").unwrap();
+    let refno = RefU64::from_refno_str("23584/5535").unwrap();
     let data = get_bran_name_and_children(refno, &mgr).await?;
     file.write_all(&data).unwrap();
     Ok(())
