@@ -103,6 +103,17 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
         //只是重新插入 project_mdb
         if db_option.only_rebuild_pdms_element {
+            // tables_sql.push_str(&tables::gen_create_project_mdb_sql());
+            let sql = tables::gen_create_project_mdb_sql();
+            let result =
+                pdms_info_conn.execute(sql.as_str()).await;
+            match result {
+                Ok(_) => {}
+                Err(e) => {
+                    dbg!(&e);
+                    dbg!(sql.as_str());
+                }
+            }
             insert_project_mdb(project, &project_pool, &pdms_info_pool).await?;
             continue;
         }
