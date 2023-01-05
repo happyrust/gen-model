@@ -47,7 +47,7 @@ pub struct DbOption {
     #[clap(long)]
     pub replace_mesh: bool,
     #[clap(long)]
-    pub only_rebuild_pdms_element: bool,
+    pub only_update_dbinfo: bool,
     #[clap(long)]
     pub ip: String,
     #[clap(long)]
