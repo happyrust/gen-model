@@ -17,14 +17,14 @@ fn gen_query_dbtype_from_dbno(dbno: i32, project: &str) -> String {
     sql
 }
 
-pub async fn query_dbtype_from_dbno_count(dbno: i32, pool: &Pool<MySql>) -> anyhow::Result<i32> {
-    let sql = gen_query_dbtype_from_dbno_count(dbno);
+pub async fn query_dbtype_from_dbno_count(dbno: i32, pool: &Pool<MySql>, project: &str) -> anyhow::Result<i32> {
+    let sql = gen_query_dbtype_from_dbno_count(dbno, project);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(result.try_get::<i32, _>(0)?)
 }
 
-fn gen_query_dbtype_from_dbno_count(dbno: i32) -> String {
+fn gen_query_dbtype_from_dbno_count(dbno: i32, project: &str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT COUNT(*) FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {}", dbno));
+    sql.push_str(&format!("SELECT COUNT(*) FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {} AND PROJECT = {}", dbno, project));
     sql
 }

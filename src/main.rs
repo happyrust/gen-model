@@ -219,7 +219,7 @@ async fn main() -> anyhow::Result<()> {
             // let room_infos = vec![(RefU64::from_two_nums(17544, 15107), "N448".to_string())];
             let dbno_mgr = DbNumMgr::load_file(&format!("{instance_dir_path}/dbno_mgr.num")).unwrap_or_default();
             for (target_refno, room_name) in room_infos {
-                dbg!(&room_name);
+                // dbg!(&room_name);
                 let mut room_info_map = HashMap::new();
                 if let Some(dbno) = dbno_mgr.get_dbno(target_refno) {
                     if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
