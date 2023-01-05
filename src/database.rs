@@ -52,7 +52,7 @@ pub trait MySqlMethods {
 }
 
 
-//创建database
+/// 初始化database
 pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()> {
     let connection = MySqlPool::connect(url)
         .await
@@ -62,7 +62,7 @@ pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 创建 info 库和表
+/// 初始化 info 库和表
 pub async fn init_info_database(url: &str, project_name: &str) -> anyhow::Result<()> {
     let pool = MySqlPool::connect(&url).await?;
     pool.execute(format!("CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};", project_name).as_str()).await?;
@@ -99,6 +99,13 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     let mut create_tables_elapse = 0;
     for project in &db_option.included_projects {
         init_database(project, &default_conn_str).await?;
+
+        //只是重新插入 project_mdb
+        if db_option.only_rebuild_pdms_element {
+            insert_project_mdb(project, &project_pool, &pdms_info_pool).await?;
+            continue;
+        }
+
         let mut table_time = Instant::now();
         let mut tables_sql = String::new();
         if !db_option.only_rebuild_pdms_element {
