@@ -1700,7 +1700,7 @@ impl AiosDBManager {
             let info_pool = AiosDBManager::get_db_pool(
                 &url, format!("PDMS_INFO_DB_{}", mgr.db_option.project_name.to_uppercase()).as_str()).await?;
             let pool = AiosDBManager::get_db_pool(&url, project).await?;
-            let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
+            let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool, project).await?;
             let key_str = format!("/{mdb}");
             if mdb_dbnos_map.contains_key(&key_str) {
                 db_nos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned().unwrap_or_default();

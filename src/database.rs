@@ -476,12 +476,12 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                     let pool_clone = pool.clone();
 
                     // println!("类型: {} 数量: {}", db1_dehash(type_hash), type_refnos.len());
-                    let mut dbno_filename_sql = gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(),
-                                                                             version.0, &project_clone.clone(), db_type.clone());
+                    let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(db_no.0, &filename_clone.clone(),
+                                                                           version.0, &project_clone.clone(), db_type.clone());
                     let mut info_conn = info_pool_clone.acquire().await.unwrap();
                     //保存dbno的信息表
-                    let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
-                    sql.push_str(dbno_filename_sql.as_str());
+                    let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
+                    sql.push_str(dbinfo_value_sql.as_str());
                     if is_replace {
                         sql = sql.replace("INSERT IGNORE", "REPLACE");
                     }

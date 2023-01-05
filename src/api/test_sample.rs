@@ -71,7 +71,7 @@ mod tests {
     async fn test_get_mdb_type() -> anyhow::Result<()> {
         let info_pool = get_test_info_pool().await;
         let pool = get_test_sample_pool().await;
-        let project = query_mdb_module_worlds(&pool, &info_pool).await?;
+        let project = query_mdb_module_worlds(&pool, &info_pool, ).await?;
         if let Some(v) = project.get("/SAMPLE") {
             if let Some(val) = v.get("DESI") {
                 println!("val={:?}", val);

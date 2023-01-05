@@ -1,16 +1,18 @@
-use aios_core::pdms_types::*;
-use sqlx::{Error, MySql, Pool, Row};
 use std::collections::{BTreeMap, HashMap};
 use std::env;
+
+use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::db1_hash;
 use anyhow::anyhow;
-use smol_str::SmolStr;
-use parse_pdms_db::parse::WholeAttMap;
 use dashmap::DashMap;
 use futures::poll;
 use itertools::Itertools;
+use parse_pdms_db::parse::WholeAttMap;
+use smol_str::SmolStr;
+use sqlx::{Error, MySql, Pool, Row};
 // use sea_orm::sea_query::any;
 use sqlx::mysql::{MySqlQueryResult, MySqlRow};
+
 use crate::api::attr::{query_explicit_attr, query_implicit_attr};
 use crate::api::children::{query_numbdb_by_refno, query_numbdb_from_refnos};
 use crate::api::dbno_filename::{query_dbtype_from_dbno, query_dbtype_from_dbno_count};
@@ -295,7 +297,7 @@ pub async fn query_pdms_elements_type_name(refno: RefU64, pool: &Pool<MySql>) ->
 }
 
 /// 获得不同mdb下所有的world
-pub async fn query_mdb_dbnos(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<i32>>>> {
+pub async fn query_mdb_dbnos(pool: &Pool<MySql>, info_pool: &Pool<MySql>, project: &str) -> anyhow::Result<HashMap<String, HashMap<String, Vec<i32>>>> {
     let mut mdb_map = HashMap::new();
     let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
     for mdb in mdbs {
@@ -306,7 +308,7 @@ pub async fn query_mdb_dbnos(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> any
             let dbs = dbs.refu64_vec_value().unwrap();
             for db in dbs {
                 if let Some(dbno) = query_dbno_from_db(db, pool).await? {
-                    if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool).await? {
+                    if let Some(db_type) = query_dbtype_from_dbno(dbno, project, info_pool).await? {
                         map.entry(db_type).or_insert_with(Vec::new).push(dbno);
                     }
                 }
@@ -339,8 +341,9 @@ pub async fn query_mdb_module_worlds_fix(project_name: &str, pool: &Pool<MySql>,
 }
 
 pub type MdbWorldsMap = HashMap<String, HashMap<String, Vec<RefU64>>>;
+
 /// 获得mdb下所有的world
-pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<MdbWorldsMap> {
+pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>, project: &str) -> anyhow::Result<MdbWorldsMap> {
     let mut mdb_map = HashMap::new();
     let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
     for mdb in mdbs {
@@ -350,7 +353,7 @@ pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>
             let mut map = HashMap::new();
             for db in dbs {
                 if let Some(dbno) = query_dbno_from_db(db, pool).await? {
-                    if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool).await? {
+                    if let Some(db_type) = query_dbtype_from_dbno(dbno, project, info_pool).await? {
                         if let Some(world_refno) = query_dbno_world(dbno, pool).await? {
                             map.entry(db_type).or_insert_with(Vec::new).push(world_refno);
                         }
@@ -590,7 +593,8 @@ pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, ord
     sql
 }
 
-pub fn gen_dbno_filename_insert_sql(dbno: u32, filename: &str, version: u32, project: &str, db_type: String) -> String {
+#[inline]
+pub fn gen_dbinfo_value_insert_sql(dbno: u32, filename: &str, version: u32, project: &str, db_type: String) -> String {
     let mut sql = String::new();
     sql.push_str(&format!(r#"({},'{}',{} , '{}','{}')"#, dbno, filename, version, project, db_type));
     sql
@@ -672,7 +676,7 @@ async fn test_get_mdb_type() -> anyhow::Result<()> {
     let url = env::var("DATABASE_URL")?;
     let info_pool = AiosDBManager::get_db_pool(&url, "pdms_info_db").await?;
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let project = query_mdb_module_worlds(&pool, &info_pool).await?;
+    let project = query_mdb_module_worlds(&pool, &info_pool, ).await?;
     if let Some(v) = project.get("/SAMPLE") {
         if let Some(val) = v.get("DESI") {
             println!("val={:?}", val);

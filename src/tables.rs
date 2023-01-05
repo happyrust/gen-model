@@ -41,7 +41,8 @@ pub fn gen_create_uda_tables_sql() -> String {
 pub fn gen_create_dbno_infos_tables_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_DBNO_INFOS_TABLE} ("#));
-    sql.push_str(&format!(r#"{} INT PRIMARY KEY ,"#, "NUMBDB"));
+    sql.push_str("id MEDIUMINT NOT NULL AUTO_INCREMENT, PRIMARY KEY (id), ");
+    sql.push_str(&format!(r#"{} INT,"#, "NUMBDB"));
     sql.push_str(&format!(r#"{} VARCHAR(30),"#, "FILENAME"));
     sql.push_str(&format!(r#"{} INT, "#, "VERSION"));
     sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "PROJECT"));
