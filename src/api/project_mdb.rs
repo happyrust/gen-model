@@ -21,7 +21,7 @@ lazy_static! {
 
 pub async fn insert_project_mdb(project_name:&str,pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<()> {
     let project_mdb = query_mdb_module_worlds(pool, info_pool).await?;
-    // let project_mdb = query_mdb_module_worlds_fix(project_name,pool, info_pool).await?;
+    dbg!(&project_mdb);
     let project_mdb_len = project_mdb.len();
     let sql = gen_insert_project_mdb_sql(project_mdb.clone());
     let json_sql = gen_insert_project_mdb_json_sql(project_mdb);
@@ -67,7 +67,7 @@ pub async fn query_mdb_contain_numbdb(mdb: &str, module: &str, pool: &Pool<MySql
 
 pub fn gen_insert_project_mdb_sql(mdbs: HashMap<String, HashMap<String, Vec<RefU64>>>) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("INSERT IGNORE INTO {PDMS_PROJECT_MDB_TABLE} (MDB_NAME,DB_TYPE,DATA) VALUES "));
+    sql.push_str(&format!("REPLACE INTO {PDMS_PROJECT_MDB_TABLE} (MDB_NAME,DB_TYPE,DATA) VALUES "));
     for (name, vals) in mdbs {
         for (db_type, data) in vals {
             let data = hex::encode(bincode::serialize(&data).unwrap());

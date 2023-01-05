@@ -338,8 +338,9 @@ pub async fn query_mdb_module_worlds_fix(project_name: &str, pool: &Pool<MySql>,
     Ok(mdb_map)
 }
 
-/// 获得不同mdb下所有的world
-pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<RefU64>>>> {
+pub type MdbWorldsMap = HashMap<String, HashMap<String, Vec<RefU64>>>;
+/// 获得mdb下所有的world
+pub async fn query_mdb_module_worlds(pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<MdbWorldsMap> {
     let mut mdb_map = HashMap::new();
     let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
     for mdb in mdbs {

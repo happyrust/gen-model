@@ -154,10 +154,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 dbg!(tables_sql.as_str());
             }
         }
-
-
         create_tables_elapse += table_time.elapsed().as_millis();
-        let result = pdms_info_conn.execute(tables::gen_create_dbno_infos_tables_sql().as_str()).await;
+        let result =
+            pdms_info_conn.execute(tables::gen_create_dbno_infos_tables_sql().as_str()).await;
         match result {
             Ok(_) => {}
             Err(e) => {
@@ -165,7 +164,8 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 dbg!(tables_sql.as_str());
             }
         }
-        let result = pdms_info_conn.execute(gen_creat_version_info_table_sql(&db_option.project_name).as_str()).await;
+        let result =
+            pdms_info_conn.execute(gen_creat_version_info_table_sql(&db_option.project_name).as_str()).await;
         match result {
             Ok(_) => {}
             Err(e) => {
@@ -178,7 +178,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         sync_total_async_threaded(&db_option, project, project_pool.clone(),
                                   pdms_info_pool.clone()).await.expect("同步数据失败");
         if !db_option.only_rebuild_pdms_element {
-            insert_project_mdb(project,&project_pool, &pdms_info_pool).await?;
+            insert_project_mdb(project, &project_pool, &pdms_info_pool).await?;
         }
     }
 
