@@ -157,7 +157,13 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             }
         }
 
+
+
         let mut conn = project_pool.acquire().await?;
+
+        conn.execute(gen_create_project_mdb_sql().as_str()).await.expect("gen_create_project_mdb_sql");
+        conn.execute(gen_create_project_mdb_json_sql().as_str()).await.expect("gen_create_project_mdb_json_sql");
+
         tables_sql.push_str(&tables::gen_create_element_tables_sql());
         tables_sql.push_str(&gen_create_project_mdb_sql());
         tables_sql.push_str(&gen_create_project_mdb_json_sql());
