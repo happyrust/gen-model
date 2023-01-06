@@ -3,6 +3,7 @@ use std::sync::Arc;
 use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
 use aios_core::prim_geo::tubing::TubiEdgeAql;
 use arangors_lite::Database;
+use bevy::prelude::dbg;
 use glam::Vec3;
 use parse_pdms_db::parse_explict_tools::times_keep_f32_two_decimal_place;
 use sqlx::{MySql, Pool};
@@ -15,7 +16,7 @@ use crate::pcf::elbo::gen_elbo_data;
 use crate::pcf::flan::gen_flan_data;
 use crate::pcf::gask::gen_gask_data;
 use crate::pcf::nozz::gen_nozz_data;
-use crate::pcf::pcf_api::{create_pipeline_href_data, create_pipeline_spec_data, create_pipeline_tref_data, create_refno_data, create_temperature_data, gen_node_basic_data};
+use crate::pcf::pcf_api::{create_end_position_null_data, create_pipeline_href_data, create_pipeline_spec_data, create_pipeline_tref_data, create_refno_data, create_temperature_data, gen_node_basic_data};
 use crate::pcf::tee::gen_tee_data;
 use crate::pcf::tubi::gen_tubi_data;
 use crate::pcf::valv::gen_valv_data;
@@ -72,8 +73,10 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager)
         let refno = convert_refno_from_edge_str(&bran_infos[i]._to);
         if refno.is_none() { continue; }
         let refno = refno.unwrap();
-        gen_node_basic_data(refno, &mut data, &mut materials, &bran_attr,
-                            &bran_infos[i], &bran_infos[i + 1], aios_mgr, pool.value()).await;
+        if gen_node_basic_data(refno, &mut data, &mut materials, &bran_attr,
+                               &bran_infos[i], &bran_infos[i + 1], aios_mgr, pool.value()).await {
+            break;
+        }
     }
     // 生成 bran tref 的数据
     if let Some(leave_position) = bran_infos.last() {
@@ -102,6 +105,7 @@ pub async fn gen_bran_pipeline_reference_data(attr: &AttrMap, start_position: Ve
 pub async fn gen_bran_connection_data(refno: Option<RefU64>, leave_position: Vec3, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> Vec<u8> {
     let mut data = vec![];
     if let Some(refno) = refno {
+        if refno == RefU64(0) { return create_end_position_null_data(leave_position); }
         let refno_table_name = aios_mgr.get_refno_basic(refno);
         if refno_table_name.is_none() { return data; }
         let refno_table_name = refno_table_name.unwrap();
@@ -117,6 +121,8 @@ pub async fn gen_bran_connection_data(refno: Option<RefU64>, leave_position: Vec
             let name = query_name(refno, pool).await.unwrap_or("".to_string());
             data.append(&mut gen_pipeline_reference_data_str(&name));
         }
+    } else {
+        data.append(&mut create_end_position_null_data(leave_position));
     }
     data
 }
@@ -245,7 +251,7 @@ fn gen_start_co_ords_data(position: Vec3) -> Vec<u8> {
     format!("        START-CO-ORDS  {}  {}  {}\r\n", position.x, position.y, position.z).into_bytes()
 }
 
-fn gen_co_ords_data(position: Vec3) -> Vec<u8> {
+pub fn gen_co_ords_data(position: Vec3) -> Vec<u8> {
     format!("        CO-ORDS  {}  {}  {}\r\n", position.x, position.y, position.z).into_bytes()
 }
 

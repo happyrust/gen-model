@@ -4,13 +4,14 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use sqlx::{MySql, Pool};
 use dashmap::DashSet;
+use glam::Vec3;
 use crate::api::attr::{query_full_attr, query_implicit_attr};
 use crate::api::element::query_name;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::pcf::atta::gen_atta_data;
 use crate::pcf::bend::gen_bend_data;
-use crate::pcf::bran::{gen_center_point_data, gen_cords_point_data, gen_endpoint_data, gen_refno_data, gen_type_name_data};
+use crate::pcf::bran::{gen_center_point_data, gen_co_ords_data, gen_cords_point_data, gen_endpoint_data, gen_refno_data, gen_type_name_data};
 use crate::pcf::cap::gen_cap_data;
 use crate::pcf::coup::gen_coup_data;
 use crate::pcf::elbo::gen_elbo_data;
@@ -42,15 +43,15 @@ lazy_static! {
     };
 }
 
-/// 生成每个节点都存在的 pcf 数据
+/// 生成每个节点都存在的 pcf 数据 ，返回值为是否是cap 是cap就代表bran结束，后面的节点就不用执行了
 pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut materials: &mut Vec<(RefU64, String)>,
                                  bran_attr: &AttrMap, start_edge: &TubiEdgeAql,
-                                 end_edge: &TubiEdgeAql, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) {
+                                 end_edge: &TubiEdgeAql, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> bool{
     let attr = query_full_attr(refno, &aios_mgr, None).await;
-    if attr.is_err() { return; }
+    if attr.is_err() { return false; }
     let attr = attr.unwrap();
     let type_name = attr.get_type();
-    if !PCF_NODES.contains(type_name) { return; }
+    if !PCF_NODES.contains(type_name) { return false; }
     if !["ATTA", "TEE"].contains(&type_name) { // TEE 需要做特殊处理
         data.append(&mut gen_type_name_data(type_name));
         let start_point = start_edge.end_pt;
@@ -61,7 +62,11 @@ pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut mate
     match type_name {
         "ATTA" => { data.append(&mut gen_atta_data(aios_mgr, &attr, pool, materials).await); }
         "BEND" => { data.append(&mut gen_bend_data(aios_mgr, &attr, pool, materials).await); }
-        "CAP" => { data.append(&mut gen_cap_data(aios_mgr, &attr, pool).await); }
+        "CAP" => {
+            data.append(&mut gen_cap_data(aios_mgr, &attr, pool).await);
+            // cap 是管套 代表一个bran结束
+            return true;
+        }
         "ELBO" => { data.append(&mut gen_elbo_data(aios_mgr, &attr, pool, materials).await); }
         "GASK" => { data.append(&mut gen_gask_data(aios_mgr, &attr, pool, materials).await); }
         "FLAN" => { data.append(&mut gen_flan_data(aios_mgr, &attr, pool, materials).await); }
@@ -73,6 +78,7 @@ pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut mate
         "COUP" => { data.append(&mut gen_coup_data(aios_mgr, &attr, pool, materials).await); }
         _ => {}
     }
+    false
 }
 
 /// 生成 center_point 数据
@@ -219,6 +225,13 @@ pub async fn create_cref_name_data(attr: &AttrMap, pool: &Pool<MySql>) -> Vec<u8
     gen_cref_name_str(&cref_name)
 }
 
+pub fn create_end_position_null_data(position:Vec3) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.append(&mut gen_end_connection_null_head_data());
+    data.append(&mut gen_co_ords_data(position));
+    data
+}
+
 /// 生成 SKEY pcf 的数据
 pub fn gen_s_key_data_str(s_key: &str) -> Vec<u8> {
     format!("        SKEY  {}\r\n", s_key).into_bytes()
@@ -254,4 +267,8 @@ fn gen_s_text_str(s_text: &str) -> Vec<u8> {
 
 fn gen_cref_name_str(cref_name: &str) -> Vec<u8> {
     format!("        CONNECTION-REFERENCE    {}\r\n", cref_name).into_bytes()
+}
+
+fn gen_end_connection_null_head_data() -> Vec<u8> {
+    format!("END-POSITION-NULL\r\n").into_bytes()
 }
