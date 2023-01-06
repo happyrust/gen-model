@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
 use sqlx::Row;
 
-use crate::api::element::query_mdb_dbnos;
 use crate::api::project_mdb::query_mdb_contain_numbdb;
 use crate::aql_api::convert_refno_vec_from_vec_string;
 use crate::consts::*;

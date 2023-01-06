@@ -296,28 +296,7 @@ pub async fn query_pdms_elements_type_name(refno: RefU64, pool: &Pool<MySql>) ->
     Ok(result.get::<String, _>("TYPE"))
 }
 
-/// 获得不同mdb下所有的world
-pub async fn query_mdb_dbnos(pool: &Pool<MySql>, info_pool: &Pool<MySql>, project: &str) -> anyhow::Result<HashMap<String, HashMap<String, Vec<i32>>>> {
-    let mut mdb_map = HashMap::new();
-    let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
-    for mdb in mdbs {
-        let mdb_attr = query_explicit_attr(mdb, pool).await?;
-        let mdb_name = query_name(mdb, &pool).await?;
-        if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
-            let mut map = HashMap::new();
-            let dbs = dbs.refu64_vec_value().unwrap();
-            for refno in dbs {
-                if let Some(dbno) = query_dbno(refno, pool).await? {
-                    if let Some(db_type) = query_dbtype_from_dbno(dbno, project, info_pool).await? {
-                        map.entry(db_type).or_insert_with(Vec::new).push(dbno);
-                    }
-                }
-            }
-            mdb_map.entry(mdb_name).or_insert(map);
-        }
-    }
-    Ok(mdb_map)
-}
+
 
 /// 获得不同mdb下所有的world(因为numbdb有问题，暂时用这个替代)
 // pub async fn query_mdb_module_worlds_fix(project_name: &str, pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<RefU64>>>> {
@@ -342,29 +321,7 @@ pub async fn query_mdb_dbnos(pool: &Pool<MySql>, info_pool: &Pool<MySql>, projec
 
 pub type MdbWorldsMap = HashMap<String, HashMap<String, Vec<RefU64>>>;
 
-/// 获得mdb下所有的world的参考号
-pub async fn query_mdb_module_world_refnos(pool: &Pool<MySql>, info_pool: &Pool<MySql>, project: &str) -> anyhow::Result<MdbWorldsMap> {
-    let mut mdb_map = HashMap::new();
-    let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
-    for mdb in mdbs {
-        let mdb_attr = query_explicit_attr(mdb, pool).await?;
-        let mdb_name = query_name(mdb, &pool).await?;
-        if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
-            let mut map = HashMap::new();
-            for db_refno in dbs {
-                if let Some(dbno) = query_dbno(db_refno, pool).await? {
-                    if let Some(db_type) = query_dbtype_from_dbno(dbno, project, info_pool).await? {
-                        if let Some(world_refno) = query_world_refno_by_dbno(dbno, pool).await? {
-                            map.entry(db_type).or_insert_with(Vec::new).push(world_refno);
-                        }
-                    }
-                }
-            }
-            mdb_map.entry(mdb_name).or_insert(map);
-        }
-    }
-    Ok(mdb_map)
-}
+
 
 pub async fn query_types_refnos(type_names: &Vec<&str>, pool: &Pool<MySql>, dbnos: Option<Vec<i32>>) -> anyhow::Result<RefU64Vec> {
     let mut r = vec![];
@@ -383,6 +340,7 @@ pub async fn query_name(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Str
     Ok(result.get::<String, _>("NAME"))
 }
 
+/// todo dbno may exist in other database
 pub async fn query_dbno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<i32>> {
     let sql = gen_query_dbno_from_db_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
@@ -674,16 +632,16 @@ fn gen_query_all_type_name_refnos(att_type: &str) -> String {
 
 #[tokio::test]
 async fn test_get_mdb_type() -> anyhow::Result<()> {
-    let url = env::var("DATABASE_URL")?;
-    let info_pool = AiosDBManager::get_db_pool(&url, "pdms_info_db").await?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let project = query_mdb_module_world_refnos(&pool, &info_pool, ).await?;
-    if let Some(v) = project.get("/SAMPLE") {
-        if let Some(val) = v.get("DESI") {
-            println!("val={:?}", val);
-        }
-    }
-    println!("v={:?}", project);
+    // let url = env::var("DATABASE_URL")?;
+    // let info_pool = AiosDBManager::get_db_pool(&url, "pdms_info_db").await?;
+    // let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
+    // let project = query_mdb_module_world_refnos(&pool, &info_pool, ).await?;
+    // if let Some(v) = project.get("/SAMPLE") {
+    //     if let Some(val) = v.get("DESI") {
+    //         println!("val={:?}", val);
+    //     }
+    // }
+    // println!("v={:?}", project);
     Ok(())
 }
 

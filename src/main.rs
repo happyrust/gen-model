@@ -44,7 +44,6 @@ use sqlx::pool::PoolConnection;
 
 use aios_database::api::attr::insert_attr_info;
 use aios_database::api::element::*;
-use aios_database::api::project_mdb::insert_project_mdb;
 use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
 use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
 use aios_database::BATCH_CHUNKS_CNT;

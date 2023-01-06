@@ -31,13 +31,12 @@ use sqlx::pool::PoolConnection;
 
 use crate::{ATTR_INFO_MAP, options, tables};
 use crate::api::element::*;
-use crate::api::project_mdb::insert_project_mdb;
 use crate::api::ssc_data::SscEleNode;
 use crate::aql_api::PdmsPLINAttrAql;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{ForeignEdges, ParaDocument};
-use crate::graph_db::pdms_arango::{save_arangodb_with_db_option, save_arangodb_with_db_option_create_collection, save_dtse_value_to_arangodb, save_foreign_refno_edges_in_sync, save_pdms_element_in_sync, save_pdms_level_edges_in_sync};
+use crate::graph_db::pdms_arango::*;
 use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
@@ -53,7 +52,7 @@ pub trait MySqlMethods {
 
 
 /// 初始化project database
-pub async fn init_project_database(project: &str, url: &str) -> anyhow::Result<()> {
+pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result<()> {
     let connection = MySqlPool::connect(url)
         .await
         .unwrap();
@@ -63,7 +62,7 @@ pub async fn init_project_database(project: &str, url: &str) -> anyhow::Result<(
 }
 
 /// 初始化 info 库和表
-pub async fn init_info_database(url: &str, project_name: &str) -> anyhow::Result<()> {
+pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Result<()> {
     let pool = MySqlPool::connect(&url).await?;
     pool.execute(format!("CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};", project_name).as_str()).await?;
 
@@ -109,20 +108,15 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
     let mut time = Instant::now();
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
-    init_info_database(&default_conn_str, &db_option.project_name).await?;
+    create_info_database(&default_conn_str, &db_option.project_name).await?;
     let pdms_info_pool = AiosDBManager::get_db_pool(&default_conn_str, &format!("{}_{}",
                                                                                 PDMS_INFO_DB, &db_option.project_name)).await?;
     let mut pdms_info_conn = pdms_info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
+    dbg!("执行多线程解析");
     for project in &db_option.included_projects {
-        init_project_database(project, &default_conn_str).await?;
+        create_project_database(project, &default_conn_str).await?;
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
-        //只是重新插入 project_mdb
-        // if db_option.only_update_dbinfo {
-        //     insert_project_mdb(project, &project_pool, &pdms_info_pool).await?;
-        //     continue;
-        // }
-
         let mut table_time = Instant::now();
         let mut tables_sql = String::new();
         if let Ok(db_info) = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")) {
@@ -156,36 +150,28 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 tables_sql.push_str(&tables::gen_create_uda_tables_sql());
             }
         }
-
-
-
         let mut conn = project_pool.acquire().await?;
-
-        conn.execute(gen_create_project_mdb_sql().as_str()).await.expect("gen_create_project_mdb_sql");
-        conn.execute(gen_create_project_mdb_json_sql().as_str()).await.expect("gen_create_project_mdb_json_sql");
-
-        // tables_sql.push_str(&tables::gen_create_element_tables_sql());
-        // tables_sql.push_str(&gen_create_project_mdb_sql());
-        // tables_sql.push_str(&gen_create_project_mdb_json_sql());
-        // tables_sql.push_str(&gen_create_data_state_tables_sql());
-        // tables_sql.push_str(&gen_create_pdms_version_table_sql());
-        // tables_sql.push_str(&gen_create_room_code_table_sql());
-        // tables_sql.push_str(&gen_create_file_version_table_sql());
-        // let result = conn.execute(tables_sql.as_str()).await;
-        // match result {
-        //     Ok(_) => {}
-        //     Err(e) => {
-        //         dbg!(&e);
-        //         // dbg!(tables_sql.as_str());
-        //     }
-        // }
+        tables_sql.push_str(&tables::gen_create_element_tables_sql());
+        tables_sql.push_str(&gen_create_project_mdb_sql());
+        tables_sql.push_str(&gen_create_project_mdb_json_sql());
+        tables_sql.push_str(&gen_create_data_state_tables_sql());
+        tables_sql.push_str(&gen_create_pdms_version_table_sql());
+        tables_sql.push_str(&gen_create_room_code_table_sql());
+        tables_sql.push_str(&gen_create_file_version_table_sql());
+        let result = conn.execute(tables_sql.as_str()).await;
+        match result {
+            Ok(_) => {}
+            Err(e) => {
+                // dbg!(&e);
+                // dbg!(tables_sql.as_str());
+            }
+        }
         create_tables_elapse += table_time.elapsed().as_millis();
 
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
-        dbg!("执行多线程解析");
-        // sync_total_async_threaded(&db_option, project, project_pool.clone(),
-        //                           pdms_info_pool.clone()).await.expect("同步数据失败");
-        insert_project_mdb(project, &project_pool, &pdms_info_pool).await?;
+
+        sync_total_async_threaded(&db_option, project, project_pool.clone(),
+                                  pdms_info_pool.clone()).await.expect("同步数据失败");
     }
 
     println!("创建表花费时间: {} ms", create_tables_elapse);

@@ -271,14 +271,14 @@ pub async fn query_owner_till_type(mut refno: RefU64, types: Vec<String>, pool: 
 }
 
 /// 将树节点的 site 提前保存下来
-pub async fn cache_site_node(mdb: &str, module: &str, pool: &Pool<MySql>) {
+pub async fn cache_mdb_site_map(mdb: &str, module: &str, pool: &Pool<MySql>) {
     if let Ok(world) = query_world(mdb, module, pool).await {
         if !CACHED_MDB_SITE_MAP.contains_key(&world.refno) {
             if let Ok(mut children) = query_world_children_eles(mdb, module, pool).await {
                 for mut child in &mut children {
                     child.owner = world.refno;
                 }
-                CACHED_MDB_SITE_MAP.insert(world.refno, &PdmsElementVec(children));
+                CACHED_MDB_SITE_MAP.insert(world.refno, &PdmsElementVec(children)).expect("CACHED_MDB_SITE_MAP save error");
             }
         }
     }
