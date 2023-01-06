@@ -14,6 +14,7 @@ use crate::data_interface::tidb_manager::{AiosDBManager, TUBI_TOL};
 use crate::pcf::elbo::gen_elbo_data;
 use crate::pcf::flan::gen_flan_data;
 use crate::pcf::gask::gen_gask_data;
+use crate::pcf::nozz::gen_nozz_data;
 use crate::pcf::pcf_api::{create_pipeline_href_data, create_pipeline_spec_data, create_pipeline_tref_data, create_refno_data, create_temperature_data, gen_node_basic_data};
 use crate::pcf::tee::gen_tee_data;
 use crate::pcf::tubi::gen_tubi_data;
@@ -44,12 +45,13 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager)
         let start_position = start_position.start_pt;
         data.append(&mut gen_bran_pipeline_reference_data(&bran_attr, start_position, pool.value()).await);
         let href = bran_attr.get_refu64("HREF");
-        data.append(&mut gen_bran_connection_data(href, start_position, pool.value()).await);
+        data.append(&mut gen_bran_connection_data(href, start_position, aios_mgr, pool.value()).await);
     }
     // 生成 bran 中间节点的数据
     for i in 0..bran_infos.len() {
         // 可能存在 tubi
         let tubi_start_index = if i == 0 { 1 } else { i };
+        // 如果 tubi_edge 的 att_type 是 ATTA ， 统计tubi的时候就需要跳过下一个tubi
         if bran_infos[tubi_start_index - 1].att_type != "ATTA" {
             let mut tubi_end_index = i;
             let distance = bran_infos[i].start_pt.distance(bran_infos[tubi_end_index].end_pt);
@@ -64,7 +66,6 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager)
                 let mut tubi_data = gen_tubi_data(bran_infos[i].start_pt, bran_infos[tubi_end_index].end_pt,
                                                   bran_infos[tubi_end_index].bore, &bran_attr, from_refno, pool.value(), &mut materials).await;
                 data.append(&mut tubi_data);
-                // 如果 tubi_edge 的 att_type 是 ATTA ， 统计tubi的时候就需要跳过下一个tubi
             }
         }
         if i == bran_infos.len() - 1 { continue; }
@@ -78,7 +79,7 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager)
     if let Some(leave_position) = bran_infos.last() {
         let leave_position = leave_position.end_pt;
         let tref = bran_attr.get_refu64("TREF");
-        data.append(&mut gen_bran_connection_data(tref, leave_position, pool.value()).await);
+        data.append(&mut gen_bran_connection_data(tref, leave_position, aios_mgr, pool.value()).await);
     }
     // 生成 material 数据
     data.append(&mut gen_material_data(materials, aios_mgr, pool.value()).await);
@@ -98,15 +99,26 @@ pub async fn gen_bran_pipeline_reference_data(attr: &AttrMap, start_position: Ve
     data
 }
 
-pub async fn gen_bran_connection_data(refno: Option<RefU64>, leave_position: Vec3, pool: &Pool<MySql>) -> Vec<u8> {
+pub async fn gen_bran_connection_data(refno: Option<RefU64>, leave_position: Vec3, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> Vec<u8> {
     let mut data = vec![];
-    data.push(gen_end_connection_pipeline_head_data());
-    data.push(gen_co_ords_data(leave_position));
-    if let Some(tref) = refno {
-        let tref_name = query_name(tref, pool).await.unwrap_or("".to_string());
-        data.push(gen_pipeline_reference_data_str(&tref_name));
+    if let Some(refno) = refno {
+        let refno_table_name = aios_mgr.get_refno_basic(refno);
+        if refno_table_name.is_none() { return data; }
+        let refno_table_name = refno_table_name.unwrap();
+        // 如果连接的是 nozz ， 则是另一种取数据方式
+        if refno_table_name.table.to_uppercase() == "NOZZ" {
+            let nozz_attr = query_full_attr(refno, aios_mgr, Some(vec!["CREF"])).await;
+            if let Ok(nozz_attr) = nozz_attr {
+                data.append(&mut gen_nozz_data(aios_mgr, &nozz_attr, pool).await);
+            }
+        } else {
+            data.append(&mut gen_end_connection_pipeline_head_data());
+            data.append(&mut gen_co_ords_data(leave_position));
+            let name = query_name(refno, pool).await.unwrap_or("".to_string());
+            data.append(&mut gen_pipeline_reference_data_str(&name));
+        }
     }
-    data.into_iter().flatten().collect()
+    data
 }
 
 async fn gen_material_data(materials: Vec<(RefU64, String)>, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> Vec<u8> {
@@ -224,6 +236,7 @@ fn convert_refno_from_edge_str(refno_str: &str) -> Option<RefU64> {
     RefU64::from_url_refno(refno_str)
 }
 
+
 fn gen_end_connection_pipeline_head_data() -> Vec<u8> {
     format!("END-CONNECTION-PIPELINE\r\n").into_bytes()
 }
@@ -255,7 +268,7 @@ async fn gen_file() -> anyhow::Result<()> {
     let mut file = std::fs::File::create("test.txt").unwrap();
     // let data = gen_pcf_file_head();
     let mgr = AiosDBManager::init_form_config().await?;
-    let refno = RefU64::from_refno_str("23584/5535").unwrap();
+    let refno = RefU64::from_refno_str("23584/5796").unwrap();
     let data = get_bran_name_and_children(refno, &mgr).await?;
     file.write_all(&data).unwrap();
     Ok(())

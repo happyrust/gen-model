@@ -11,6 +11,8 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::pcf::atta::gen_atta_data;
 use crate::pcf::bend::gen_bend_data;
 use crate::pcf::bran::{gen_center_point_data, gen_cords_point_data, gen_endpoint_data, gen_refno_data, gen_type_name_data};
+use crate::pcf::cap::gen_cap_data;
+use crate::pcf::coup::gen_coup_data;
 use crate::pcf::elbo::gen_elbo_data;
 use crate::pcf::flan::gen_flan_data;
 use crate::pcf::gask::gen_gask_data;
@@ -34,6 +36,8 @@ lazy_static! {
         set.insert("TEE".to_string());
         set.insert("VALV".to_string());
         set.insert("BEND".to_string());
+        set.insert("CAP".to_string());
+        set.insert("COUP".to_string());
         set
     };
 }
@@ -47,7 +51,7 @@ pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut mate
     let attr = attr.unwrap();
     let type_name = attr.get_type();
     if !PCF_NODES.contains(type_name) { return; }
-    if !["ATTA","TEE"].contains(&type_name) { // TEE 需要做特殊处理
+    if !["ATTA", "TEE"].contains(&type_name) { // TEE 需要做特殊处理
         data.append(&mut gen_type_name_data(type_name));
         let start_point = start_edge.end_pt;
         data.append(&mut gen_endpoint_data(start_point, start_edge.bore));
@@ -56,6 +60,8 @@ pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut mate
     }
     match type_name {
         "ATTA" => { data.append(&mut gen_atta_data(aios_mgr, &attr, pool, materials).await); }
+        "BEND" => { data.append(&mut gen_bend_data(aios_mgr, &attr, pool, materials).await); }
+        "CAP" => { data.append(&mut gen_cap_data(aios_mgr, &attr, pool).await); }
         "ELBO" => { data.append(&mut gen_elbo_data(aios_mgr, &attr, pool, materials).await); }
         "GASK" => { data.append(&mut gen_gask_data(aios_mgr, &attr, pool, materials).await); }
         "FLAN" => { data.append(&mut gen_flan_data(aios_mgr, &attr, pool, materials).await); }
@@ -64,7 +70,7 @@ pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut mate
         "REDU" => { data.append(&mut gen_redu_data(aios_mgr, &attr, pool, materials).await); }
         "INST" => { data.append(&mut gen_inst_data(aios_mgr, &attr, pool, materials).await); }
         "OLET" => { data.append(&mut gen_olet_data(aios_mgr, &attr, pool, materials).await); }
-        "BEND" => { data.append(&mut gen_bend_data(aios_mgr, &attr, pool, materials).await); }
+        "COUP" => { data.append(&mut gen_coup_data(aios_mgr, &attr, pool, materials).await); }
         _ => {}
     }
 }
@@ -203,6 +209,16 @@ pub fn create_pipeline_tref_data(attr: &AttrMap) -> Vec<u8> {
     vec![]
 }
 
+pub async fn create_cref_name_data(attr: &AttrMap, pool: &Pool<MySql>) -> Vec<u8> {
+    let cref = attr.get_refu64("CREF");
+    if cref.is_none() { return Vec::new(); }
+    let cref = cref.unwrap();
+    let cref_name = query_name(cref, pool).await;
+    if cref_name.is_err() { return Vec::new(); }
+    let cref_name = cref_name.unwrap();
+    gen_cref_name_str(&cref_name)
+}
+
 /// 生成 SKEY pcf 的数据
 pub fn gen_s_key_data_str(s_key: &str) -> Vec<u8> {
     format!("        SKEY  {}\r\n", s_key).into_bytes()
@@ -234,4 +250,8 @@ fn gen_tee_item_code_bran_data_str(pspe_name: &str) -> Vec<u8> {
 
 fn gen_s_text_str(s_text: &str) -> Vec<u8> {
     format!("        SUPPORT-TYPE    {}\r\n", s_text).into_bytes()
+}
+
+fn gen_cref_name_str(cref_name: &str) -> Vec<u8> {
+    format!("        CONNECTION-REFERENCE    {}\r\n", cref_name).into_bytes()
 }

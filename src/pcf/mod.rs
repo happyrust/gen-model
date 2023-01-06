@@ -12,4 +12,7 @@ mod redu;
 mod inst;
 mod olet;
 mod bend;
+mod nozz;
+mod cap;
+mod coup;
 mod pcf_api;
