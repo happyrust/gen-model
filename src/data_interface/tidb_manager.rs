@@ -713,17 +713,20 @@ impl AiosDBManager {
                 for db_refno in dbs {
                     let project = self.get_project_name(db_refno).unwrap_or_default();
                     dbg!(&project);
-                    let pool = self.get_project_pool_by_refno(db_refno).unwrap();
-                    let att = self.get_attr(db_refno).await?;
-                    let dbno = att.get_i32("NUMBDB").unwrap_or_default();
-                    dbg!(dbno);
-                    // if let Some(dbno) = query_dbno(db_refno).await? {
-                        if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool, &project).await? {
-                            if let Some(world_refno) = query_world_refno_by_dbno(dbno, &pool).await? {
-                                map.entry(db_type).or_insert_with(Vec::new).push(world_refno);
+                    if let Some(pool) = self.get_project_pool_by_refno(db_refno){
+                        if let Ok(att) = self.get_attr(db_refno).await{
+                            let dbno = att.get_i32("NUMBDB").unwrap_or_default();
+                            dbg!(att.to_string_hashmap());
+                            dbg!(dbno);
+                            if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool, &project).await? {
+                                if let Some(world_refno) = query_world_refno_by_dbno(dbno, &pool).await? {
+                                    map.entry(db_type).or_insert_with(Vec::new).push(world_refno);
+                                }
                             }
+                        }else{
+                            dbg!(db_refno);
                         }
-                    // }
+                    }
                 }
                 mdb_map.entry(mdb_name).or_insert(map);
             }
