@@ -1,8 +1,9 @@
-total_sync = true
+total_sync = false
 incr_sync = false
 project_path = "C:/AVEVA/Plant/Projects12.1.SP4" #TestCatalogue
 included_projects = ["Sample", "Master"]   # ,"Sample" , "Master"  "Sample",
 mdb_name = "SAMPLE"
+#mdb_name = "ALLMAS"
 project_name = "Sample"
 module = "DESI"
 manual_db_nums = [7200]

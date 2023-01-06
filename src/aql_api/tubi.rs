@@ -52,7 +52,7 @@ pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &Database) -> an
     let key = format!("pdms_eles/{}", bran_refno.to_url_refno());
     let aql = AqlQuery::new("
     let bran_name = ( return document('pdms_eles',@bran_refno).name )
-    for v,e in 0..100 outbound @id tubi_edges
+    for v,e in 0..1000 outbound @id tubi_edges
     filter bran_name[0] != null
     filter bran_name[0] == e.bran_name
     filter e != null
@@ -75,6 +75,32 @@ pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &Database) -> an
         let distance = r.start_pt.distance(r.end_pt);
         distance > TUBI_TOL
     });
+    Ok(results)
+}
+
+/// 获取 bran 所有的 tubi_edge 的信息
+pub async fn query_bran_info(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiEdgeAql>> {
+    let key = format!("pdms_eles/{}", bran_refno.to_url_refno());
+    let aql = AqlQuery::new("
+    let bran_name = ( return document('pdms_eles',@bran_refno).name )
+    for v,e in 0..1000 outbound @id tubi_edges
+    filter bran_name[0] != null
+    filter bran_name[0] == e.bran_name
+    filter e != null
+    return {
+        '_key': e._key,
+        '_from': e._from,
+        '_to':e._to,
+        'start_pt': e.start_pt,
+        'end_pt': e.end_pt,
+        'att_type': e.att_type,
+        'bran_name': e.bran_name,
+        'extra_type': e.extra_type,
+        'bore': e.bore
+    }")
+        .bind_var("id", key)
+        .bind_var("bran_refno", bran_refno.to_url_refno());
+    let results: Vec<TubiEdgeAql> = database.aql_query(aql).await?;
     Ok(results)
 }
 

@@ -66,7 +66,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     let scom_info = CACHED_SCOM_INFO_MAP.get(&scom_ref).unwrap();
     // if is_debug {
-    //     dbg!(&scom_info);
+    //     dbg!(&scom_info.value());
     // }
     let mut context: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
     if let Some(v) = desi_att.get_as_string("JUSL") {
@@ -121,9 +121,9 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
         if let Ok(ptre_am) = interface.get_attr(ptre_refno).await {
             if let Ok(axis_param_map) = query_axis_params(&ptre_am, interface, is_debug).await {
-                if is_debug {
-                    dbg!(&axis_param_map);
-                }
+                // if is_debug {
+                //     dbg!(&axis_param_map);
+                // }
                 axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
                 axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
             }

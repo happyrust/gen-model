@@ -103,7 +103,7 @@ mod tests {
     async fn test_query_children_pdms_tree() -> anyhow::Result<()> {
         let info_pool = get_test_info_pool().await;
         let pool = get_test_sample_pool().await;
-        let refno: RefU64 = RefI32Tuple((15392, 0)).into();
+        let refno: RefU64 = RefI32Tuple((15193,14639)).into();
         let v = query_children_pdms_tree("SAMPLE", "DESI", refno, &pool).await?;
         println!("v={:?}", v);
         Ok(())
