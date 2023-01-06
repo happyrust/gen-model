@@ -118,7 +118,7 @@ pub struct AiosDBManager {
     //不同project的连接池子
     pub project_map: DashMap<String, Pool<MySql>>,
 
-    pub ref0_map: DashMap<u32, Vec<String>>,
+    pub ref0_map: DashMap<u32, HashSet<String>>,
 
     pub info_pool: Pool<MySql>,
 
@@ -681,11 +681,11 @@ impl AiosDBManager {
         )
     }
 
-    ///获得 project 名称
-    // #[inline]
-    // pub fn get_project_name(&self, refno: RefU64) -> Option<String> {
-    //     self.ref0_map.get(&refno.get_0()).map(|x| x.value().clone())
-    // }
+    /// 根据project获取连接池
+    #[inline]
+    pub fn get_project_pool(&self, project: &str) -> Option<Pool<MySql>> {
+        self.project_map.get(project).map(|x| x.value().clone())
+    }
 
     ///获得project 的db
     #[inline]
@@ -693,9 +693,9 @@ impl AiosDBManager {
         if let Some(projects) = self.ref0_map.get(&refno.get_0()) {
             ///只有一个的时候
             if projects.len() == 1 {
-                let project = projects.value()[0].clone();
-                if let Some(project_pool) = self.project_map.get(&project) {
-                    return Some((project, project_pool.value().clone()));
+                let project = projects.value().iter().next().as_ref().unwrap().clone();
+                if let Some(project_pool) = self.project_map.get(project) {
+                    return Some((project.clone(), project_pool.value().clone()));
                 }
             } else {
                 //check if exist in pdms_elements
@@ -713,11 +713,7 @@ impl AiosDBManager {
         (None)
     }
 
-    /// 根据project获取连接池
-    #[inline]
-    pub fn get_project_pool(&self, project: &str) -> Option<Pool<MySql>> {
-        self.project_map.get(project).map(|x| x.value().clone())
-    }
+
 
     /// 获得mdb下所有的world的参考号
     pub async fn query_mdb_worlds_map(&self, project_pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<MdbWorldsMap> {
