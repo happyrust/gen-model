@@ -713,16 +713,7 @@ impl AiosDBManager {
         (None)
     }
 
-    ///获得project 的mysql pool
-    // #[inline]
-    // pub fn get_project_pool_by_refno(&self, refno: RefU64) -> Option<Pool<MySql>> {
-    //     if let Some(d) = self.ref0_map.get(&refno.get_0()) {
-    //         self.project_map.get(d.value()).map(|x| x.value().clone())
-    //     } else {
-    //         None
-    //     }
-    // }
-
+    /// 根据project获取连接池
     #[inline]
     pub fn get_project_pool(&self, project: &str) -> Option<Pool<MySql>> {
         self.project_map.get(project).map(|x| x.value().clone())

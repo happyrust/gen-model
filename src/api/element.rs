@@ -471,7 +471,7 @@ pub async fn query_project_dbno_info(project_name: &str, info_pool: &Pool<MySql>
 ///检查refno是否存在PDMS_ELEMENTS的表中
 pub async fn check_exist_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<bool>{
     //SELECT EXISTS(SELECT 1 FROM table_1 WHERE id = 1)
-    let sql = format!("SELECT EXISTS(SELECT 1 FROM {PDMS_DBNO_INFOS_TABLE} WHERE ID = {})", refno.0);
+    let sql = format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {})", refno.0);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(result.get::<bool, _>(0))
 }

@@ -7,7 +7,6 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::mem::take;
 use std::path::{Path, PathBuf};
-use std::ptr::hash;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -29,6 +28,8 @@ use sqlx::Executor;
 use sqlx::mysql::MySqlArguments;
 use sqlx::pool::PoolConnection;
 
+
+
 use crate::{ATTR_INFO_MAP, options, tables};
 use crate::api::element::*;
 use crate::api::ssc_data::SscEleNode;
@@ -41,6 +42,9 @@ use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
 use crate::tables::*;
+use std::hash::{Hash, Hasher};
+use parry3d::utils::hashmap::FxHasher32;
+
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -71,7 +75,8 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, { PDMS_REFNO_INFOS_TABLE }));
     // sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "REF0"));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "REF0"));
+    sql.push_str(&format!(r#"{} INT PRIMARY KEY ,"#, "ID"));
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL ,"#, "REF0"));
     //允许有多个project的存在
     sql.push_str(&format!(r#"{} VARCHAR(100)"#, "PROJECT"));
 
@@ -443,9 +448,13 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                     }
                 }
                 //保存refno的信息表
-                let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE}(REF0, PROJECT) VALUES ");
+                let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (ID, REF0, PROJECT) VALUES ");
                 for kv in &refno_info_map {
-                    sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, project_clone.as_str()));
+                    let mut s: FxHasher32 = Default::default();
+                    kv.value().ref_0.hash(&mut s);
+                    project_clone.hash(&mut s);
+                    let h = s.finish();
+                    sql.push_str(&format!(r#"({}, {},'{}') ,"#, h, kv.value().ref_0, project_clone.as_str()));
                 }
                 sql.remove(sql.len() - 1);
                 if is_replace {
