@@ -123,8 +123,8 @@ mod tests {
     async fn test_query_implicit_attr() -> anyhow::Result<()> {
         let refno = RefU64::from_two_nums(23548, 402);
         let mgr = AiosDBManager::init_form_config().await?;
-        let project = mgr.get_project_name(refno).unwrap();
-        dbg!(&project);
+        // let project = mgr.get_project_name(refno).unwrap();
+        // dbg!(&project);
         // let v = attr::query_implicit_attr(refno, &mgr.get_project_pool(refno).unwrap(), None).await.unwrap();
         // println!("v={:?}", v.to_string_hashmap());
         // let v = attr::query_implicit_attr(refno, &mgr.get_project_pool(refno).unwrap(), Some(vec!["ANGL"])).await.unwrap();
@@ -148,10 +148,10 @@ mod tests {
     async fn test_query_explicit_attr() -> anyhow::Result<()> {
         let refno = RefU64(105548821299733);
         let mgr = AiosDBManager::init_form_config().await?;
-        let project = mgr.get_project_name(refno).unwrap();
-        dbg!(&project);
-        let v = attr::query_explicit_attr(refno, &mgr.get_project_pool_by_refno(refno).unwrap()).await?;
-        println!("v={:?}", v.to_string_hashmap());
+        // let project = mgr.get_project_name(refno).unwrap();
+        // dbg!(&project);
+        // let v = attr::query_explicit_attr(refno, &mgr.get_project_pool_by_refno(refno).await.unwrap()).await?;
+        // println!("v={:?}", v.to_string_hashmap());
         Ok(())
     }
 

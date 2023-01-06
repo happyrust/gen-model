@@ -360,7 +360,7 @@ pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::
                 // 获得 catr 的 ptre gmre dtre
                 if catr_set.contains(&catr) { continue; }
                 if let Some(refno_basic) = mgr.get_refno_basic(catr) {
-                    if let Some(project_db) = mgr.get_project_db(catr) {
+                    if let Some((_, project_db)) = mgr.get_project_pool_by_refno(catr).await {
                         let att = query_implicit_attr(catr, refno_basic.value(), &project_db, Some(catr_foreign_refs.clone())).await?;
                         for catr_foreign_type in &catr_foreign_refs {
                             if let Some(ptre) = att.get_val(catr_foreign_type) {

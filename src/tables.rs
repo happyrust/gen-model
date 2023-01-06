@@ -225,7 +225,7 @@ pub fn gen_create_room_code_table_sql() -> String {
     sql
 }
 
-pub fn gen_creat_version_info_table_sql(project_name: &str) -> String {
+pub fn gen_create_version_info_table_sql(project_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {PDMS_VERSION}("));
     sql.push_str(&format!("{} VARCHAR(20) ,", "PROJECT"));

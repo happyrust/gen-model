@@ -66,11 +66,14 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
     let pool = MySqlPool::connect(&url).await?;
     pool.execute(format!("CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};", project_name).as_str()).await?;
 
+    //todo 改成一对多的实现
     let mut pool = AiosDBManager::get_db_pool(&url, &format!("{}_{}", PDMS_INFO_DB, project_name)).await?;
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, { PDMS_REFNO_INFOS_TABLE }));
+    // sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "REF0"));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "REF0"));
-    sql.push_str(&format!(r#"{} VARCHAR(20)"#, "PROJECT"));
+    //允许有多个project的存在
+    sql.push_str(&format!(r#"{} VARCHAR(100)"#, "PROJECT"));
 
     sql.push_str(");");
     let result = pool.execute(sql.as_str()).await;
@@ -91,7 +94,7 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
         }
     }
     let result =
-        pool.execute(gen_creat_version_info_table_sql(project_name).as_str()).await;
+        pool.execute(gen_create_version_info_table_sql(project_name).as_str()).await;
     match result {
         Ok(_) => {}
         Err(e) => {
@@ -421,8 +424,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                          })) = tokio::task::spawn_blocking(move || {
                 parse_file(&path, &None, &file_name, project_name.clone().as_str(), "")
             }).await {
-
-                //save dbno info
+                //save dbno info first
                 let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(db_no.0, &file_name_clone.clone(),
                                                                        version.0, project_clone.clone().as_str(), db_type.clone());
                 let mut info_conn = info_pool.acquire().await.unwrap();

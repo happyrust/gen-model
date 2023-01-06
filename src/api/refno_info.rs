@@ -16,8 +16,8 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::helper::qualified_table_name;
 use crate::defines::CACHED_REFNO_BASIC_MAP;
 
-///更新获得ref0->project 缓存
-pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, String>> {
+///更新获得ref0->projects 缓存
+pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Vec<String>>> {
     let mut map = DashMap::new();
     let sql = "SELECT REF0 , PROJECT FROM REFNO_INFOS";
     let results = sqlx::query(sql).fetch_all(&mut pool.acquire().await?).await;
@@ -25,8 +25,8 @@ pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Str
         Ok(vals) => {
             for val in vals {
                 let ref0 = val.get::<i32, _>("REF0") as u32;
-                let project = val.get::<String, _>("PROJECT");
-                map.entry(ref0).or_insert(project);
+                let project_str = val.get::<String, _>("PROJECT");
+                map.entry(ref0).or_insert(serde_json::from_str(&project_str).unwrap_or_default());
             }
         }
         Err(e) => {
