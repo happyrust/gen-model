@@ -4,6 +4,7 @@ use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
 use aios_core::prim_geo::tubing::TubiEdgeAql;
 use arangors_lite::Database;
 use bevy::prelude::dbg;
+use dashmap::DashMap;
 use glam::Vec3;
 use parse_pdms_db::parse_explict_tools::times_keep_f32_two_decimal_place;
 use sqlx::{MySql, Pool};
@@ -13,10 +14,11 @@ use crate::aql_api::tubi::query_bran_info;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager, TUBI_TOL};
 use crate::pcf::elbo::gen_elbo_data;
+use crate::pcf::excel_api::get_pipe_thickness_table;
 use crate::pcf::flan::gen_flan_data;
 use crate::pcf::gask::gen_gask_data;
 use crate::pcf::nozz::gen_nozz_data;
-use crate::pcf::pcf_api::{create_end_position_null_data, create_pipeline_href_data, create_pipeline_spec_data, create_pipeline_tref_data, create_refno_data, create_temperature_data, gen_node_basic_data};
+use crate::pcf::pcf_api::{create_end_position_null_data, create_pipe_thickness_data, create_pipeline_href_data, create_pipeline_spec_data, create_pipeline_tref_data, create_refno_data, create_temperature_data, gen_node_basic_data};
 use crate::pcf::tee::gen_tee_data;
 use crate::pcf::tubi::gen_tubi_data;
 use crate::pcf::valv::gen_valv_data;
@@ -30,7 +32,8 @@ fn gen_pcf_file_head() -> String {
      UNITS-WEIGHT            KGS\r\n".to_string()
 }
 
-pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<u8>> {
+pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
+                                        thickness_map: &DashMap<String, DashMap<String, String>>) -> anyhow::Result<Vec<u8>> {
     let mut data = vec![];
     let mut materials = vec![];
     data.append(&mut gen_pcf_file_head().into_bytes());
@@ -38,13 +41,17 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager)
     let database = aios_mgr.get_arangodb_conn().await?;
     let bran_attr = query_full_attr(refno, &aios_mgr, None).await?;
     let bran_name = bran_attr.get_name().to_string();
+    // 先把 pipe_thickness 算好，需要的直接放进去就好了
+    let pipe_refno = aios_mgr.get_owner(refno);
+    let pipe_name = query_name(pipe_refno, pool.value()).await?;
+    let pipe_thickness_data = create_pipe_thickness_data(&pipe_name, thickness_map);
     // 生成 bran 的数据
-    data.append(&mut gen_bran_reference_data(&bran_name));
+    // data.append(&mut gen_bran_reference_data(&bran_name));
     let bran_infos = query_bran_info(refno, &database).await?;
     // 生成 bran href 的数据
     if let Some(start_position) = bran_infos.first() {
         let start_position = start_position.start_pt;
-        data.append(&mut gen_bran_pipeline_reference_data(&bran_attr, start_position, pool.value()).await);
+        data.append(&mut gen_bran_pipeline_reference_data(&bran_attr, start_position, pool.value(), &pipe_thickness_data).await);
         let href = bran_attr.get_refu64("HREF");
         data.append(&mut gen_bran_connection_data(href, start_position, aios_mgr, pool.value()).await);
     }
@@ -65,7 +72,8 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager)
                 }
                 let from_refno = RefU64::from_arangodb_refno_str(&bran_infos[i]._from);
                 let mut tubi_data = gen_tubi_data(bran_infos[i].start_pt, bran_infos[tubi_end_index].end_pt,
-                                                  bran_infos[tubi_end_index].bore, &bran_attr, from_refno, pool.value(), &mut materials).await;
+                                                  bran_infos[tubi_end_index].bore, &bran_attr, from_refno, pool.value(),
+                                                  &mut materials,&pipe_thickness_data).await;
                 data.append(&mut tubi_data);
             }
         }
@@ -74,7 +82,8 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager)
         if refno.is_none() { continue; }
         let refno = refno.unwrap();
         if gen_node_basic_data(refno, &mut data, &mut materials, &bran_attr,
-                               &bran_infos[i], &bran_infos[i + 1], aios_mgr, pool.value()).await {
+                               &bran_infos[i], thickness_map,&bran_infos[i + 1],
+                               aios_mgr, pool.value()).await {
             break;
         }
     }
@@ -89,7 +98,8 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager)
     Ok(data)
 }
 
-pub async fn gen_bran_pipeline_reference_data(attr: &AttrMap, start_position: Vec3, pool: &Pool<MySql>) -> Vec<u8> {
+pub async fn gen_bran_pipeline_reference_data(attr: &AttrMap, start_position: Vec3, pool: &Pool<MySql>,
+                                              pipe_thickness_data:&Vec<u8>) -> Vec<u8> {
     let mut data = vec![];
     let name = attr.get_name();
     data.append(&mut gen_pipeline_reference_data_str_head(name.as_str()));
@@ -99,6 +109,7 @@ pub async fn gen_bran_pipeline_reference_data(attr: &AttrMap, start_position: Ve
     data.append(&mut create_refno_data(attr));
     data.append(&mut create_pipeline_href_data(attr));
     data.append(&mut create_pipeline_tref_data(attr));
+    data.append(&mut pipe_thickness_data.clone());
     data
 }
 
@@ -275,7 +286,8 @@ async fn gen_file() -> anyhow::Result<()> {
     // let data = gen_pcf_file_head();
     let mgr = AiosDBManager::init_form_config().await?;
     let refno = RefU64::from_refno_str("23584/5796").unwrap();
-    let data = get_bran_name_and_children(refno, &mgr).await?;
+    let thickness_map = get_pipe_thickness_table()?;
+    let data = get_bran_name_and_children(refno, &mgr, &thickness_map).await?;
     file.write_all(&data).unwrap();
     Ok(())
 }

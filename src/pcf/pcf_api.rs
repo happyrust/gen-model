@@ -3,8 +3,9 @@ use aios_core::prim_geo::tubing::TubiEdgeAql;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use sqlx::{MySql, Pool};
-use dashmap::DashSet;
+use dashmap::{DashMap, DashSet};
 use glam::Vec3;
+use log::kv::ToValue;
 use crate::api::attr::{query_explicit_attr, query_full_attr, query_implicit_attr};
 use crate::api::element::query_name;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -45,7 +46,7 @@ lazy_static! {
 
 /// 生成每个节点都存在的 pcf 数据 ，返回值为是否是cap 是cap就代表bran结束，后面的节点就不用执行了
 pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut materials: &mut Vec<(RefU64, String)>,
-                                 bran_attr: &AttrMap, start_edge: &TubiEdgeAql,
+                                 bran_attr: &AttrMap, start_edge: &TubiEdgeAql,thickness_map: &DashMap<String,DashMap<String,String>>,
                                  end_edge: &TubiEdgeAql, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> bool {
     let attr = query_full_attr(refno, &aios_mgr, None).await;
     if attr.is_err() { return false; }
@@ -71,7 +72,7 @@ pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut mate
         "GASK" => { data.append(&mut gen_gask_data(aios_mgr, &attr, pool, materials).await); }
         "FLAN" => { data.append(&mut gen_flan_data(aios_mgr, &attr, pool, materials).await); }
         "VALV" => { data.append(&mut gen_valv_data(aios_mgr, &attr, pool, materials).await); }
-        "TEE" => { data.append(&mut gen_tee_data(aios_mgr, &attr, bran_attr, pool, materials, start_edge, end_edge).await); }
+        "TEE" => { data.append(&mut gen_tee_data(aios_mgr, &attr, bran_attr, pool, materials, start_edge, end_edge,thickness_map).await); }
         "REDU" => { data.append(&mut gen_redu_data(aios_mgr, &attr, pool, materials).await); }
         "INST" => { data.append(&mut gen_inst_data(aios_mgr, &attr, pool, materials).await); }
         "OLET" => { data.append(&mut gen_olet_data(aios_mgr, &attr, pool, materials).await); }
@@ -269,6 +270,30 @@ pub async fn create_weld_spec_data(attr: &AttrMap, aios_mgr: &AiosDBManager, poo
     data
 }
 
+pub fn create_pipe_thickness_data(name: &str,thickness_map: &DashMap<String,DashMap<String,String>>) -> Vec<u8> {
+    let mut data = Vec::new();
+    let mut od = "".to_string();
+    let mut thick = "".to_string();
+    let name_splits = name.split("-").collect::<Vec<_>>();
+    if name_splits.len() >= 5 && !thickness_map.is_empty() {
+        let dn = name_splits[3];
+        let key = name_splits[4];
+        if let Some(dn) = thickness_map.get(dn) {
+            let dn = dn.value();
+            if let Some(value) = dn.get(key) {
+                let value = value.split("x").collect::<Vec<_>>();
+                if value.len() > 1 {
+                    od = value[0].to_string();
+                    thick = value[1].to_string();
+                }
+            }
+        }
+    }
+    data.append(&mut gen_pipe_od_str(&od));
+    data.append(&mut gen_pipe_thick_str(&thick));
+    data
+}
+
 /// 生成 SKEY pcf 的数据
 pub fn gen_s_key_data_str(s_key: &str) -> Vec<u8> {
     format!("        SKEY  {}\r\n", s_key).into_bytes()
@@ -312,4 +337,12 @@ fn gen_end_connection_null_head_data() -> Vec<u8> {
 
 fn gen_weld_spec_str(weld_spec: &str) -> Vec<u8> {
     format!("        WELD-SPEC  {}\r\n", weld_spec).into_bytes()
+}
+
+fn gen_pipe_od_str(od:&str) -> Vec<u8> {
+    format!("        PIPE-OD  {}\r\n",od).into_bytes()
+}
+
+fn gen_pipe_thick_str(od:&str) -> Vec<u8> {
+    format!("        PIPE-THICK  {}\r\n",od).into_bytes()
 }

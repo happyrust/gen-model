@@ -1,17 +1,20 @@
+use std::task::Poll;
 use aios_core::pdms_types::{AttrMap, RefU64};
 use aios_core::prim_geo::tubing::TubiEdgeAql;
+use dashmap::DashMap;
 use glam::Vec3;
 use sqlx::{MySql, Pool};
 use crate::api::attr::query_implicit_attr;
+use crate::api::element::query_name;
 use crate::aql_api::tubi::query_bran_info;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::pcf::bran::{gen_endpoint_data, gen_item_code_data_attr_val, gen_type_name_data};
-use crate::pcf::pcf_api::{create_center_point_data, create_pipeline_spec_data, create_refno_data, create_s_key_data, create_tee_item_code_bran_data, create_weld_spec_data, gen_s_key_data_str, get_s_key_value};
+use crate::pcf::pcf_api::{create_center_point_data, create_pipe_thickness_data, create_pipeline_spec_data, create_refno_data, create_s_key_data, create_tee_item_code_bran_data, create_weld_spec_data, gen_s_key_data_str, get_s_key_value};
 
 pub async fn gen_tee_data(aios_mgr: &AiosDBManager, attr: &AttrMap, bran_attr: &AttrMap,
                           pool: &Pool<MySql>, materials: &mut Vec<(RefU64, String)>,
-                          start_edge: &TubiEdgeAql, end_edge: &TubiEdgeAql, ) -> Vec<u8> {
+                          start_edge: &TubiEdgeAql, end_edge: &TubiEdgeAql, thickness_map:&DashMap<String,DashMap<String,String>>) -> Vec<u8> {
     let mut data = vec![];
     let refno = attr.get_refno();
     if refno.is_none() { return vec![]; }
@@ -40,6 +43,7 @@ pub async fn gen_tee_data(aios_mgr: &AiosDBManager, attr: &AttrMap, bran_attr: &
         data.append(&mut gen_item_code_data_attr_val(spre, &pool, materials).await);
         data.append(&mut create_weld_spec_data(attr, aios_mgr, pool).await);
         data.append(&mut create_refno_data(attr));
+        data.append(&mut create_cref_pipe_thickness_data(attr,pool,thickness_map).await);
     }
     data
 }
@@ -84,6 +88,17 @@ async fn create_tee_set_on_branch_1_point_data(aios_mgr: &AiosDBManager, refno: 
         return gen_branch_1_point_data_str(world_transform.translation);
     }
     vec![]
+}
+
+async fn create_cref_pipe_thickness_data(attr:&AttrMap,pool:&Pool<MySql>,thickness_map:&DashMap<String,DashMap<String,String>>) -> Vec<u8> {
+    let mut data = Vec::new();
+    let cref = attr.get_refu64("CREF");
+    if cref.is_none() { return  data; }
+    let cref = cref.unwrap();
+    let cref_name = query_name(cref,pool).await;
+    if cref_name.is_err() { return data; }
+    let cref_name = cref_name.unwrap();
+    create_pipe_thickness_data(&cref_name,thickness_map)
 }
 
 fn gen_branch_1_point_data_str(point: Vec3) -> Vec<u8> {
