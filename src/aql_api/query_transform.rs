@@ -8,6 +8,8 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool};
+use crate::graph_db::pdms_arango::save_virtual_hole_value_to_arangodb;
+use crate::options::DbOption;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CylinderTransform {
@@ -18,7 +20,7 @@ pub struct CylinderTransform {
     pub ori_down: Vec3,
 }
 
-pub async fn query_cylinder_transform(refno: RefU64,mgr:Arc<AiosDBManager>) -> anyhow::Result<Vec<CylinderTransform>> {
+pub async fn query_cylinder_transform(refno: RefU64, mgr: Arc<AiosDBManager>) -> anyhow::Result<Vec<CylinderTransform>> {
     let mut result = vec![];
     if let Some(project_db) = mgr.get_project_db(refno) {
         let att_type = query_refno_type(refno, &project_db).await?;
@@ -59,8 +61,11 @@ pub async fn query_cylinder_transform(refno: RefU64,mgr:Arc<AiosDBManager>) -> a
 
 #[tokio::test]
 async fn query_cylinder_transform_test() -> anyhow::Result<()> {
-    let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    let result = query_cylinder_transform( RefU64::from_refno_str("23584/108").unwrap(),mgr).await?;
-    dbg!(&result);
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    save_virtual_hole_value_to_arangodb(&db_option).await.unwrap();
     Ok(())
 }
