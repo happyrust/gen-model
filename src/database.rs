@@ -164,27 +164,27 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         conn.execute(gen_create_project_mdb_sql().as_str()).await.expect("gen_create_project_mdb_sql");
         conn.execute(gen_create_project_mdb_json_sql().as_str()).await.expect("gen_create_project_mdb_json_sql");
 
-        tables_sql.push_str(&tables::gen_create_element_tables_sql());
-        tables_sql.push_str(&gen_create_project_mdb_sql());
-        tables_sql.push_str(&gen_create_project_mdb_json_sql());
-        tables_sql.push_str(&gen_create_data_state_tables_sql());
-        tables_sql.push_str(&gen_create_pdms_version_table_sql());
-        tables_sql.push_str(&gen_create_room_code_table_sql());
-        tables_sql.push_str(&gen_create_file_version_table_sql());
-        let result = conn.execute(tables_sql.as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(&e);
-                // dbg!(tables_sql.as_str());
-            }
-        }
+        // tables_sql.push_str(&tables::gen_create_element_tables_sql());
+        // tables_sql.push_str(&gen_create_project_mdb_sql());
+        // tables_sql.push_str(&gen_create_project_mdb_json_sql());
+        // tables_sql.push_str(&gen_create_data_state_tables_sql());
+        // tables_sql.push_str(&gen_create_pdms_version_table_sql());
+        // tables_sql.push_str(&gen_create_room_code_table_sql());
+        // tables_sql.push_str(&gen_create_file_version_table_sql());
+        // let result = conn.execute(tables_sql.as_str()).await;
+        // match result {
+        //     Ok(_) => {}
+        //     Err(e) => {
+        //         dbg!(&e);
+        //         // dbg!(tables_sql.as_str());
+        //     }
+        // }
         create_tables_elapse += table_time.elapsed().as_millis();
 
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
         dbg!("执行多线程解析");
-        sync_total_async_threaded(&db_option, project, project_pool.clone(),
-                                  pdms_info_pool.clone()).await.expect("同步数据失败");
+        // sync_total_async_threaded(&db_option, project, project_pool.clone(),
+        //                           pdms_info_pool.clone()).await.expect("同步数据失败");
         insert_project_mdb(project, &project_pool, &pdms_info_pool).await?;
     }
 

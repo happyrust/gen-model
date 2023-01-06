@@ -596,7 +596,7 @@ pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, ord
 #[inline]
 pub fn gen_dbinfo_value_insert_sql(dbno: u32, filename: &str, version: u32, project: &str, db_type: String) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!(r#"('{0}_{3}', {},'{}',{} , '{}','{}')"#, dbno, filename, version, project, db_type));
+    sql.push_str(&format!(r#"('{}', {},'{}',{} , '{}','{}')"#, format!("{}_{}", project, dbno), dbno, filename, version, project, db_type));
     sql
 }
 

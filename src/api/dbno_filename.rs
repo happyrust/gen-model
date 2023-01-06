@@ -13,7 +13,8 @@ pub async fn query_dbtype_from_dbno(dbno: i32, project: &str, pool: &Pool<MySql>
 
 fn gen_query_dbtype_from_dbno(dbno: i32, project: &str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT DB_TYPE FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {} AND PROJECT = {} ", dbno, project));
+    sql.push_str(&format!(r#"SELECT DB_TYPE FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {} AND PROJECT = '{}' "#, dbno, project));
+    // dbg!(&sql);
     sql
 }
 
