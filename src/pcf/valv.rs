@@ -2,7 +2,7 @@ use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
 use sqlx::{MySql, Pool};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::pcf::bran::{gen_item_code_data_attr_val, gen_refno_data};
-use crate::pcf::pcf_api::{create_angl_data, create_center_point_data, create_refno_data, create_s_key_data};
+use crate::pcf::pcf_api::{create_angl_data, create_center_point_data, create_refno_data, create_s_key_data, create_weld_spec_data};
 
 pub async fn gen_valv_data(aios_mgr:&AiosDBManager,attr: &AttrMap, pool: &Pool<MySql>,materials:&mut Vec<(RefU64,String)>) -> Vec<u8> {
     let mut data = vec![];
@@ -13,6 +13,7 @@ pub async fn gen_valv_data(aios_mgr:&AiosDBManager,attr: &AttrMap, pool: &Pool<M
     data.append(&mut create_s_key_data(attr,aios_mgr,pool).await);
     let spre = attr.get_val("SPRE");
     data.append(&mut gen_item_code_data_attr_val(spre, &pool,materials).await);
+    data.append(&mut create_weld_spec_data(attr, aios_mgr, pool).await);
     data.append(&mut gen_name_data(attr.get_name().as_str()));
     data.append(&mut create_angl_data(attr));
     data.append(&mut create_refno_data(attr));

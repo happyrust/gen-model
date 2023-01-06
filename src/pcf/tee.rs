@@ -7,7 +7,7 @@ use crate::aql_api::tubi::query_bran_info;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::pcf::bran::{gen_endpoint_data, gen_item_code_data_attr_val, gen_type_name_data};
-use crate::pcf::pcf_api::{create_center_point_data, create_pipeline_spec_data, create_refno_data, create_s_key_data, create_tee_item_code_bran_data, gen_s_key_data_str, get_s_key_value};
+use crate::pcf::pcf_api::{create_center_point_data, create_pipeline_spec_data, create_refno_data, create_s_key_data, create_tee_item_code_bran_data, create_weld_spec_data, gen_s_key_data_str, get_s_key_value};
 
 pub async fn gen_tee_data(aios_mgr: &AiosDBManager, attr: &AttrMap, bran_attr: &AttrMap,
                           pool: &Pool<MySql>, materials: &mut Vec<(RefU64, String)>,
@@ -38,6 +38,7 @@ pub async fn gen_tee_data(aios_mgr: &AiosDBManager, attr: &AttrMap, bran_attr: &
         data.append(&mut gen_s_key_data_str(s_key.as_str()));
         let spre = attr.get_val("SPRE");
         data.append(&mut gen_item_code_data_attr_val(spre, &pool, materials).await);
+        data.append(&mut create_weld_spec_data(attr, aios_mgr, pool).await);
         data.append(&mut create_refno_data(attr));
     }
     data

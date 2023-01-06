@@ -5,7 +5,7 @@ use lazy_static::lazy_static;
 use sqlx::{MySql, Pool};
 use dashmap::DashSet;
 use glam::Vec3;
-use crate::api::attr::{query_full_attr, query_implicit_attr};
+use crate::api::attr::{query_explicit_attr, query_full_attr, query_implicit_attr};
 use crate::api::element::query_name;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -46,7 +46,7 @@ lazy_static! {
 /// 生成每个节点都存在的 pcf 数据 ，返回值为是否是cap 是cap就代表bran结束，后面的节点就不用执行了
 pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut materials: &mut Vec<(RefU64, String)>,
                                  bran_attr: &AttrMap, start_edge: &TubiEdgeAql,
-                                 end_edge: &TubiEdgeAql, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> bool{
+                                 end_edge: &TubiEdgeAql, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> bool {
     let attr = query_full_attr(refno, &aios_mgr, None).await;
     if attr.is_err() { return false; }
     let attr = attr.unwrap();
@@ -225,10 +225,47 @@ pub async fn create_cref_name_data(attr: &AttrMap, pool: &Pool<MySql>) -> Vec<u8
     gen_cref_name_str(&cref_name)
 }
 
-pub fn create_end_position_null_data(position:Vec3) -> Vec<u8> {
+pub fn create_end_position_null_data(position: Vec3) -> Vec<u8> {
     let mut data = Vec::new();
     data.append(&mut gen_end_connection_null_head_data());
     data.append(&mut gen_co_ords_data(position));
+    data
+}
+
+pub async fn create_weld_spec_data(attr: &AttrMap, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> Vec<u8> {
+    let mut data = Vec::new();
+    let spre = attr.get_refu64("SPRE");
+    if spre.is_none() { return data; }
+    let spre = spre.unwrap();
+
+    let spre_cache = aios_mgr.get_refno_basic(spre);
+    if spre_cache.is_none() { return data; }
+    let spre_cache = spre_cache.unwrap();
+    let spre_attr = query_implicit_attr(spre, spre_cache.value(), pool, Some(vec!["DETR"])).await;
+    if spre_attr.is_err() { return data; }
+    let spre_attr = spre_attr.unwrap();
+
+    let detr = spre_attr.get_refu64("DETR");
+    if detr.is_none() { return data; }
+    let detr = detr.unwrap();
+    let detr_attr = query_explicit_attr(detr, pool).await;
+    if detr_attr.is_err() { return data; }
+    let detr_attr = detr_attr.unwrap();
+
+    let mut weld_spec = "";
+    let r_text = detr_attr.get_str("RTEX").unwrap_or("");
+    if r_text.contains("BW") {
+        weld_spec = "BW";
+    } else if r_text.contains("RF") {
+        let r_text_splits = r_text.split(" ").collect::<Vec<_>>();
+        for r_text_split in r_text_splits {
+            if r_text_split.contains("RF/") {
+                weld_spec = r_text_split;
+                break;
+            }
+        }
+    }
+    data.append(&mut gen_weld_spec_str(weld_spec));
     data
 }
 
@@ -271,4 +308,8 @@ fn gen_cref_name_str(cref_name: &str) -> Vec<u8> {
 
 fn gen_end_connection_null_head_data() -> Vec<u8> {
     format!("END-POSITION-NULL\r\n").into_bytes()
+}
+
+fn gen_weld_spec_str(weld_spec: &str) -> Vec<u8> {
+    format!("        WELD-SPEC  {}\r\n", weld_spec).into_bytes()
 }

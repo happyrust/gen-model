@@ -27,6 +27,7 @@ use anyhow::anyhow;
 use approx::{abs_diff_eq, abs_diff_ne};
 use arangors_lite::{Connection, Database};
 use async_trait::async_trait;
+use bevy::prelude::dbg;
 use config::{Config, ConfigError, Environment, File};
 use dashmap::{DashMap, DashSet};
 use dashmap::mapref::one::Ref;
@@ -540,6 +541,7 @@ impl AiosDBManager {
     #[inline]
     pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
         let url = &format!("{connection_str}/{}", project);
+        dbg!(&url);
         PoolOptions::new().max_connections(500).acquire_timeout(Duration::from_secs(10 * 60)).connect(url).await.map_err(
             {
                 |x| anyhow!(x.to_string())

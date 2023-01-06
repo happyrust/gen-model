@@ -4,7 +4,7 @@ use crate::api::attr::{query_explicit_attr, query_implicit_attr};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::pcf::bran::{gen_center_point_data, gen_item_code_data_attr_val, gen_refno_data};
-use crate::pcf::pcf_api::{create_angl_data, create_center_point_data, create_s_key_data};
+use crate::pcf::pcf_api::{create_angl_data, create_center_point_data, create_s_key_data, create_weld_spec_data};
 
 /// 生成 elbo 特有的 pcf 数据
 pub async fn gen_elbo_data(aios_mgr: &AiosDBManager, attr: &AttrMap, pool: &Pool<MySql>,materials:&mut Vec<(RefU64,String)>) -> Vec<u8> {
@@ -17,6 +17,7 @@ pub async fn gen_elbo_data(aios_mgr: &AiosDBManager, attr: &AttrMap, pool: &Pool
     data.append(&mut create_angl_data(attr));
     let spre = attr.get_val("SPRE");
     data.append(&mut gen_item_code_data_attr_val(spre, &pool,materials).await);
+    data.append(&mut create_weld_spec_data(attr, aios_mgr, pool).await);
     data.append(&mut gen_refno_data(refno));
     data.append(&mut get_catr_para_data_from_spre(spre, &aios_mgr, pool).await);
     data
