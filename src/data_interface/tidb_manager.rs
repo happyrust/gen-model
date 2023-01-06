@@ -716,8 +716,9 @@ impl AiosDBManager {
                     let pool = self.get_project_pool_by_refno(db_refno).unwrap();
                     let att = self.get_attr(db_refno).await?;
                     let dbno = att.get_i32("NUMBDB").unwrap_or_default();
+                    dbg!(dbno);
                     // if let Some(dbno) = query_dbno(db_refno).await? {
-                        if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool).await? {
+                        if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool, &project).await? {
                             if let Some(world_refno) = query_world_refno_by_dbno(dbno, &pool).await? {
                                 map.entry(db_type).or_insert_with(Vec::new).push(world_refno);
                             }
@@ -1790,8 +1791,9 @@ impl AiosDBManager {
                 let dbs = dbs.refu64_vec_value().unwrap();
                 for refno in dbs {
                     let att = self.get_attr(refno).await?;
+                    let project = self.get_project_name(refno).unwrap_or_default();
                     if let Some(dbno) = att.get_i32("NUMBDB"){
-                        if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool).await? {
+                        if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool, &project).await? {
                             map.entry(db_type).or_insert_with(Vec::new).push(dbno);
                         }
                     }
