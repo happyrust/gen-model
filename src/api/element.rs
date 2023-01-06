@@ -15,7 +15,7 @@ use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 
 use crate::api::attr::{query_explicit_attr, query_implicit_attr};
 use crate::api::children::{query_numbdb_by_refno, query_numbdb_from_refnos};
-use crate::api::dbno_filename::{query_dbtype_from_dbno, query_dbtype_from_dbno_count};
+use crate::api::dbno_sql::{query_dbtype_from_dbno, query_dbno_count};
 use crate::api::project_mdb::query_world_data;
 use crate::api::test_sample::{get_test_info_pool, get_test_sample_pool};
 use crate::consts::*;
@@ -468,6 +468,14 @@ pub async fn query_project_dbno_info(project_name: &str, info_pool: &Pool<MySql>
     Ok(map)
 }
 
+///检查refno是否存在PDMS_ELEMENTS的表中
+pub async fn check_exist_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<bool>{
+    //SELECT EXISTS(SELECT 1 FROM table_1 WHERE id = 1)
+    let sql = format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {})", refno.0);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    Ok(result.get::<bool, _>(0))
+}
+
 fn gen_query_dbno_info_by_project(project_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT NUMBDB , DB_TYPE FROM {PDMS_DBNO_INFOS_TABLE} WHERE PROJECT = '{}'", project_name));
@@ -486,60 +494,61 @@ fn gen_query_types_refnos_names(types: &Vec<&str>) -> String {
     sql
 }
 
+#[inline]
 fn gen_query_id_by_dbno_type_sql(dbno: i32, type_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND NUMBDB = {} AND IS_DEL = 0 ; ", type_name, dbno));
     sql
 }
-
+#[inline]
 fn gen_query_node_id_from_refno_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT OWNER,NAME,TYPE,CHILDREN_COUNT FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {}", refno.0));
     sql
 }
-
+#[inline]
 fn gen_query_id_name_from_dbno_type_sql(dbno: i32, type_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID ,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND NUMBDB = {} AND IS_DEL = 0 ; ", type_name, dbno));
     sql
 }
-
+#[inline]
 fn gen_query_id_name_type_from_dbno(dbno: u32) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID ,NAME, TYPE FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB = {} AND IS_DEL = 0 ; ", dbno));
     sql
 }
-
+#[inline]
 fn gen_query_dbno_from_db_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT NUMBDB FROM DB WHERE ID = {}", refno.0));
     sql
 }
-
+#[inline]
 fn gen_pdms_elements_dbno_sql(dbno: u32, type_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID, OWNER ,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB = {} AND TYPE = '{}' AND IS_DEL = 0 ;", dbno, type_name));
     sql
 }
-
+#[inline]
 fn gen_pdms_elements_get_children_ele_node_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID,NAME,TYPE,OWNER,ORDER_NUM,CHILDREN_COUNT FROM {PDMS_ELEMENTS_TABLE} WHERE OWNER = {} AND IS_DEL = 0 ", refno.0));
     sql
 }
-
+#[inline]
 fn gen_pdms_elements_get_all_world_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID,NAME,TYPE FROM {PDMS_ELEMENTS_TABLE} WHERE OWNER = '0/0' AND IS_DEL = 0 ;"));
     sql
 }
-
+#[inline]
 fn gen_pdms_elements_get_children_count_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT COUNT(*) FROM {PDMS_ELEMENTS_TABLE} WHERE OWNER = {} AND IS_DEL = 0", refno.0));
     sql
 }
-
+#[inline]
 pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, order: usize, children_count: usize) -> String {
     let implicit = &att.implicit_attmap;
     let refno = implicit.get_refno().unwrap();
@@ -580,6 +589,7 @@ pub fn get_name(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashMa
     };
 }
 
+#[inline]
 pub fn get_order(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashMap<RefU64, RefU64Vec>, refno: RefU64) -> usize {
     let attr = whole_attr.get(&refno).unwrap();
     let owner = attr.implicit_attmap.get_owner().unwrap();
@@ -588,13 +598,13 @@ pub fn get_order(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashM
     }
     0
 }
-
+#[inline]
 pub fn gen_query_refno_type_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT TYPE FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND IS_DEL = 0 ", refno.0));
     sql
 }
-
+#[inline]
 pub fn gen_query_type_refnos_sql(type_names: &Vec<&str>, dbnos: Option<Vec<i32>>) -> String {
     let mut sql = String::new();
     let mut in_sql = " (".to_string();
@@ -616,13 +626,13 @@ pub fn gen_query_type_refnos_sql(type_names: &Vec<&str>, dbnos: Option<Vec<i32>>
     sql.push_str(&format!("SELECT ID FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE IN {in_sql} {dbnos_filter_sql} AND IS_DEL = 0 ORDER BY ID;"));
     sql
 }
-
+#[inline]
 pub fn gen_query_name_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT NAME FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND IS_DEL = 0;", refno.0));
     sql
 }
-
+#[inline]
 fn gen_query_all_type_name_refnos(att_type: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT NAME FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND IS_DEL = 0 ", att_type));

@@ -109,18 +109,7 @@ pub fn gen_create_data_state_tables_sql() -> String {
     sql
 }
 
-#[inline]
-pub fn gen_create_attr_info_tables_sql(project_name: &str) -> String {
-    let mut sql = String::new();
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_REFNO_INFOS_TABLE}("#));
-    sql.push_str(&format!(r#"{} INT PRIMARY KEY ,"#, "TYPE_HASH"));
-    sql.push_str(&format!(r#"{} VARCHAR(8) ,"#, "TYPE"));
-    sql.push_str(&format!(r#"{} BLOB "#, "INFO"));
-    sql.push_str(");");
 
-    // sql.push_str(&format!("CREATE INDEX REF0_TYPE_IDX ON {PDMS_REFNO_INFOS_TABLE}(TYPE);"));
-    sql
-}
 
 #[inline]
 pub fn gen_create_project_mdb_sql() -> String {
@@ -225,7 +214,7 @@ pub fn gen_create_room_code_table_sql() -> String {
     sql
 }
 
-pub fn gen_creat_version_info_table_sql(project_name: &str) -> String {
+pub fn gen_create_version_info_table_sql(project_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {PDMS_VERSION}("));
     sql.push_str(&format!("{} VARCHAR(20) ,", "PROJECT"));

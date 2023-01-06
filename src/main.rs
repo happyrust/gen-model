@@ -60,7 +60,7 @@ use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::helper::{qualified_column_name, qualified_table_name};
 use aios_database::options::DbOption;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
-use aios_database::tables::{gen_create_attr_info_tables_sql, gen_create_pdms_mesh_table_sql};
+use aios_database::tables::*;
 use bevy::prelude::*;
 use bevy::transform::components::Transform;
 use parse_pdms_db::parse_file;

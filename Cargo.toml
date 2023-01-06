@@ -47,6 +47,9 @@ aios_core = { path = "../aios-core"}
 arangors_lite = "0.2.0"
 bevy = { git = "https://gitee.com/happydpc/bevy", default-features = false, features = ["render"]}
 
+#argon2 = "0.4.1"
+#fasthash = "0.4.0"
+fxhash = "0.2.1"
 clap = { version = "3.1.18", features = ["derive"] }
 dashmap = { version = "5.2.0", features = ["serde"] }
 tokio = { vertion = "1.18.2", features = ["full"] }

@@ -3,7 +3,6 @@ use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
 use arangors_lite::{AqlQuery, Connection, Database};
 use serde::{Serialize, Deserialize};
 use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsElementAql, PdmsPLINAttrAql, PdmsRefnoNameAql, PdmsRefnoTypeAql};
-use crate::consts::URL;
 
 
 pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
