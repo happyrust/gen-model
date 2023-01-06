@@ -1807,7 +1807,7 @@ impl AiosDBManager {
         Ok(mdb_map)
     }
 
-    /// 生成模型
+    // 需要区分project，不同project的mesh，是不同的
     pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<bool> {
         let mut time = Instant::now();
         let project = &db_option.project_name;
