@@ -4,11 +4,14 @@ use crate::consts::*;
 
 pub async fn query_dbtype_from_dbno(dbno: i32, pool: &Pool<MySql>, project: &str) -> anyhow::Result<Option<String>> {
     let mut sql = String::new();
-    sql.push_str(&format!(r#"SELECT DB_TYPE FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {} AND PROJECT = {}"#, dbno, project));
+    sql.push_str(&format!(r#"SELECT DB_TYPE FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {} AND PROJECT = '{}'"#, dbno, project));
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
         Ok(v) => { Ok(Some(v.get::<String, _>(0))) }
-        Err(_) => { Ok(None) }
+        Err(_) => {
+            dbg!(&sql);
+            Ok(None)
+        }
     };
 }
 
@@ -22,6 +25,6 @@ pub async fn query_dbtype_from_dbno_count(dbno: i32, pool: &Pool<MySql>, project
 
 fn gen_query_dbtype_from_dbno_count(dbno: i32, project: &str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT COUNT(*) FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {} AND PROJECT = {}", dbno, project));
+    sql.push_str(&format!("SELECT COUNT(*) FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {} AND PROJECT = '{}'", dbno, project));
     sql
 }
