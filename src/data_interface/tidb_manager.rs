@@ -22,12 +22,12 @@ use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdgeAql};
 use aios_core::prim_geo::wire::CurveType;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
+use aios_core::tool::db_tool::db1_hash;
 use aios_core::tool::math_tool;
 use anyhow::anyhow;
 use approx::{abs_diff_eq, abs_diff_ne};
 use arangors_lite::{Connection, Database};
 use async_trait::async_trait;
-use bevy::prelude::dbg;
 use config::{Config, ConfigError, Environment, File};
 use dashmap::{DashMap, DashSet};
 use dashmap::mapref::one::Ref;
@@ -36,17 +36,19 @@ use id_tree::{Node, NodeId};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use nalgebra::{Quaternion, UnitQuaternion};
+use nalgebra_glm::project;
 use once_cell::sync::Lazy;
-use parry3d::bounding_volume::{Aabb, BoundingVolume};
+use parry3d::bounding_volume::{AABB, BoundingVolume};
+use parry3d::math::{Isometry, Vector};
 use smol_str::SmolStr;
 use sqlx::{MySql, MySqlPool, Pool};
 use sqlx::pool::PoolOptions;
-use parry3d::math::{Isometry, Vector};
-use bevy::transform::components::Transform;
 
 use crate::api::attr::*;
-use crate::api::children::{cache_mdb_module_numbdbs, cache_site_node};
+use crate::api::children::{cache_mdb_module_numbdbs, cache_mdb_site_map};
+use crate::api::dbno_sql::query_dbtype_from_dbno;
 use crate::api::element::*;
+use crate::api::project_mdb::{gen_insert_project_mdb_json_sql, gen_insert_project_mdb_sql};
 use crate::api::refno_info::{cache_plin_plax, get_ref0_map, sync_refno_basic_map};
 use crate::aql_api::children::{query_brother_node_front, query_travel_children_aql, query_travel_children_with_type_aql, query_travel_children_with_types_aql};
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
@@ -69,6 +71,7 @@ use crate::graph_db::pdms_inst_arango::sync_instance_to_graph_db;
 use crate::helper::qualified_table_name;
 use crate::mdb::get_project_mdb;
 use crate::options::DbOption;
+use crate::tables::{gen_create_project_mdb_json_sql, gen_create_project_mdb_sql};
 
 pub const TUBI_TOL: f32 = 10.0f32;
 // pub const batch_size: usize = 50;
@@ -113,9 +116,10 @@ static GENRIC_NOUN_NAMES: Lazy<Vec<SmolStr>> = Lazy::new(|| {
 
 #[derive(Debug)]
 pub struct AiosDBManager {
+    //不同project的连接池子
     pub project_map: DashMap<String, Pool<MySql>>,
 
-    pub ref0_map: DashMap<u32, String>,
+    pub ref0_map: DashMap<u32, HashSet<String>>,
 
     pub info_pool: Pool<MySql>,
 
@@ -140,8 +144,6 @@ pub struct AiosDBManager {
     pub plin_cache_mgr: DashMap<RefU64, String>,
 
     pub cache_module_numbdbs: Vec<i32>,
-
-    pub mdb_map: DashMap<String, Vec<u32>>,
 }
 
 
@@ -171,7 +173,7 @@ impl PdmsDataInterface for AiosDBManager {
         // if let Some(k) = PDMS_IMPLICIT_ATT_MAP_CACHE.get(&refno) {
         //     return Ok(k.value().clone());
         // }
-        if let Some(project_pool) = self.get_project_pool(refno) {
+        if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr = query_implicit_attr(refno, ref_basic.value(), &project_pool, columns).await?;
                 // PDMS_IMPLICIT_ATT_MAP_CACHE.insert(refno, attr.clone());
@@ -183,7 +185,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     /// 获得OWNER隐含数据的属性
     async fn get_implicit_attrs_by_owner(&self, owner: RefU64, type_name: &str, columns: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>> {
-        if let Some(project_pool) = self.get_project_pool(owner) {
+        if let Some((_, project_pool)) = self.get_project_pool_by_refno(owner).await {
             let attr = query_implicit_attrs_by_owner(owner, type_name, &project_pool, columns).await?;
             return Ok(attr);
         }
@@ -214,7 +216,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     /// 获得节点数据
     async fn get_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>> {
-        if let Some(project_pool) = self.get_project_pool(refno) {
+        if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
             if let Ok(node) = query_ele_node(refno, &project_pool).await {
                 return Ok(Some(node));
             }
@@ -224,7 +226,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     async fn get_owner_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>> {
         let mut node = None;
-        if let Some(project_pool) = self.get_project_pool(refno) {
+        if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
             let parent = self.get_owner(refno);
             if parent.is_valid() {
                 node = Some(query_ele_node(parent, &project_pool).await?);
@@ -243,7 +245,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     async fn get_children_nodes(&self, refno: RefU64) -> anyhow::Result<Vec<EleTreeNode>> {
         let mut r = vec![];
-        if let Some(project_pool) = self.get_project_pool(refno) {
+        if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
             let children = query_children(refno, &project_pool).await?;
             for (refno, _) in children {
                 let node = query_ele_node(refno, &project_pool).await?;
@@ -255,7 +257,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     async fn get_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
-        if let Some(project_pool) = self.get_project_pool(refno) {
+        if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
             let children = query_children(refno, &project_pool).await?;
             for child in children {
                 let attr = self.get_attr(child.0).await?;
@@ -267,7 +269,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
         let mut result = RefU64Vec::default();
-        if let Some(project_pool) = self.get_project_pool(refno) {
+        if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
             let children = query_children(refno, &project_pool).await?;
             children.into_iter().for_each(|child| {
                 result.push(child.0);
@@ -277,7 +279,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr> {
-        if let Some(project_pool) = self.get_project_pool(refno) {
+        if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
             let name = query_name(refno, &project_pool).await?;
             return Ok(SmolStr::new(name));
         }
@@ -331,14 +333,15 @@ impl PdmsDataInterface for AiosDBManager {
     async fn get_ancestors_attrs(&self, refno: RefU64) -> Vec<AttrMap> {
         let mut cur_refno = refno;
         let mut r = vec![];
-        let pool = self.get_project_pool(refno).unwrap();
-        while let Ok(attr) = self.get_implicit_attr(cur_refno, None).await {
-            //后面是不是要缓存这个层级结构
-            if let Ok(Some(owner)) = query_owner_from_id(cur_refno, &pool).await {
-                r.push(attr);
-                cur_refno = owner;
-            } else {
-                break;
+        if let Some((_, pool)) = self.get_project_pool_by_refno(refno).await{
+            while let Ok(attr) = self.get_implicit_attr(cur_refno, None).await {
+                //后面是不是要缓存这个层级结构
+                if let Ok(Some(owner)) = query_owner_from_id(cur_refno, &pool).await {
+                    r.push(attr);
+                    cur_refno = owner;
+                } else {
+                    break;
+                }
             }
         }
         r
@@ -423,11 +426,11 @@ impl PdmsDataInterface for AiosDBManager {
                 quat = quat_v.unwrap();
             } else {
                 let extru_dir: Vec3 = if let Some(poss) = att.get_poss() &&
-                let Some(pose) = att.get_pose()
+                    let Some(pose) = att.get_pose()
                 {
                     need_bangle = true;
                     (pose - poss).normalize()
-                } else{
+                } else {
                     Vec3::Z
                 };
                 let d = extru_dir.dot(Vec3::Z).abs();
@@ -487,7 +490,6 @@ impl PdmsDataInterface for AiosDBManager {
             self.cached_world_transforms_map.entry(refno).or_insert(Transform {
                 rotation,
                 translation,
-                ..default()
             });
         }
         //将rotation 还原为角度
@@ -497,10 +499,9 @@ impl PdmsDataInterface for AiosDBManager {
             let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
             println!("{} : {:?}", refno.to_refno_str(), (translation, ori_str));
         }
-        Ok(Some(Transform {
+        Ok(Some(glam::TransformRT {
             rotation,
             translation,
-            ..default()
         }))
     }
 }
@@ -556,14 +557,26 @@ impl AiosDBManager {
         Ok(conn.db(&self.db_option.arangodb_database).await?)
     }
 
-    pub fn gen_pool_from_refno(self, refno: RefU64) -> anyhow::Result<Option<Pool<MySql>>> {
-        if let Some(project) = self.ref0_map.get(&refno.get_0()) {
-            if let Some(project_pool) = self.project_map.get(project.value()) {
-                return Ok(Some(project_pool.value().clone()));
-            }
-        }
-        Ok(None)
-    }
+    // pub fn gen_pool_from_refno(&self, refno: RefU64) -> anyhow::Result<Option<Pool<MySql>>> {
+    //     if let Some(projects) = self.ref0_map.get(&refno.get_0()) {
+    //         ///只有一个的时候
+    //         if projects.len() == 1 {
+    //             if let Some(project_pool) = self.project_map.get(&projects.value()[0]) {
+    //                 return Ok(Some(project_pool.value().clone()));
+    //             }
+    //         }else{
+    //             //check if exist in pdms_elements
+    //             for project in projects.value() {
+    //                 if let Some(pool) = self.get_project_pool(project) {
+    //                     if check_exist_refno(refno, &pool) {
+    //                         return Ok(Some(pool.value().clone()));
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     Ok(None)
+    // }
 
     ///获得默认的pool
     #[inline]
@@ -574,27 +587,42 @@ impl AiosDBManager {
     ///从默认配置文件初始化
     pub async fn init_form_config() -> anyhow::Result<Self> {
         let db_option = Self::get_db_option()?;
-        Self::init(db_option).await
+        let mut mgr = Self::init(&db_option).await?;
+        mgr.init_mdb(&db_option.project_name, &db_option.mdb_name, &db_option.module).await?;
+        Ok(mgr)
     }
 
 
+    /// init by mdb
+    pub async fn init_mdb(&mut self, project: &str, mdb: &str, module: &str) -> anyhow::Result<()> {
+        if let Some(project_pool) = self.get_project_pool(project) {
+            dbg!("init mdb");
+            dbg!(project);
+            let mut conn = project_pool.acquire().await?;
+            conn.execute(gen_create_project_mdb_sql().as_str()).await?;
+            conn.execute(gen_create_project_mdb_json_sql().as_str()).await?;
+            self.insert_project_mdb(&project_pool, &self.info_pool).await?;
+            cache_mdb_site_map(mdb, module, &project_pool).await;
+            // 将 mdb对应的 module 下的所有 numbdb保存下来
+            let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
+            for r in results {
+                self.cache_module_numbdbs.push(r);
+            }
+        }
+        Ok(())
+    }
 
-    ///初始化
-    pub async fn init(db_option: DbOption) -> anyhow::Result<Self> {
+    ///init the project and mdb name
+    pub async fn init(db_option: &DbOption) -> anyhow::Result<Self> {
         let dir = db_option.project_path.to_string();
         let mut project_map = DashMap::new();
-        let mut numbdbs = vec![];
+        // let mut numbdbs = vec![];
+
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         let time = Instant::now();
         let mut dbno_mgr = DbNumMgr::default();
         let need_sync = true;
-        let desi_pool = AiosDBManager::get_db_pool(&default_conn, &db_option.project_name).await;
-
-        let mdb_map = if let Ok(desi_pool) = desi_pool {
-            get_project_mdb(&desi_pool).await.unwrap_or_default()
-        } else { DashMap::default() };
-
         for project in &db_option.included_projects {
             let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
             println!("正在创建数据库连接 {project}");
@@ -604,14 +632,10 @@ impl AiosDBManager {
                     if need_sync {
                         sync_refno_basic_map(&pool, &mut dbno_mgr).await.unwrap();
                     }
+                    println!("数据库连接成功 {project}");
                     project_map.entry(project.clone()).or_insert(pool.clone());
                     // 将树节点的site层提前缓存下来
-                    cache_site_node(&db_option.mdb_name, &db_option.module, &pool).await;
-                    // 将 mdb对应的 module 下的所有 numbdb保存下来
-                    let results = cache_mdb_module_numbdbs(&db_option.mdb_name, &db_option.module, &pool).await?;
-                    for r in results {
-                        numbdbs.push(r);
-                    }
+                    // cache_mdb_site_map(&db_option.mdb_name, &db_option.module, &pool).await;
                 }
                 Err(_) => { println!("project: {} init failed", project); }
             }
@@ -649,36 +673,108 @@ impl AiosDBManager {
                 arango_database: database,
                 cached_world_transforms_map: Arc::new(Default::default()),
                 plin_cache_mgr,
-                cache_module_numbdbs: numbdbs,
-                mdb_map,
+                cache_module_numbdbs: Default::default(),
             }
         )
     }
 
-    ///获得 project 名称
+    /// 根据project获取连接池
     #[inline]
-    pub fn get_project_name(&self, refno: RefU64) -> Option<String> {
-        self.ref0_map.get(&refno.get_0()).map(|x| x.value().clone())
+    pub fn get_project_pool(&self, project: &str) -> Option<Pool<MySql>> {
+        self.project_map.get(project).map(|x| x.value().clone())
     }
 
     ///获得project 的db
     #[inline]
-    pub fn get_project_db(&self, refno: RefU64) -> Option<Pool<MySql>> {
-        if let Some(d) = self.ref0_map.get(&refno.get_0()) {
-            self.project_map.get(d.value()).map(|x| x.value().clone())
-        } else {
-            None
+    pub async fn get_project_pool_by_refno(&self, refno: RefU64) -> Option<(String, Pool<MySql>)> {
+        if let Some(projects) = self.ref0_map.get(&refno.get_0()) {
+            ///只有一个的时候
+            if projects.len() == 1 {
+                let project = projects.value().iter().next().as_ref().unwrap().clone();
+                if let Some(project_pool) = self.project_map.get(project) {
+                    return Some((project.clone(), project_pool.value().clone()));
+                }
+            } else {
+                //check if exist in pdms_elements
+                for project in projects.value() {
+                    if let Some(pool) = self.get_project_pool(project) {
+                        if let Ok(s) = check_exist_refno(refno, &pool).await {
+                            if s {
+                                return Some((project.clone(), pool.clone()));
+                            }
+                        }
+                    }
+                }
+            }
         }
+        (None)
     }
 
-    ///获得project 的mysql pool
-    #[inline]
-    pub fn get_project_pool(&self, refno: RefU64) -> Option<Pool<MySql>> {
-        if let Some(d) = self.ref0_map.get(&refno.get_0()) {
-            self.project_map.get(d.value()).map(|x| x.value().clone())
-        } else {
-            None
+
+
+    /// 获得mdb下所有的world的参考号
+    pub async fn query_mdb_worlds_map(&self, project_pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<MdbWorldsMap> {
+        let mut mdb_map = HashMap::new();
+        let mdbs = query_types_refnos(&vec!["MDB"], project_pool, None).await?;
+        for mdb in mdbs {
+            let mdb_attr = query_explicit_attr(mdb, project_pool).await?;
+            let mdb_name = query_name(mdb, &project_pool).await?;
+            if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
+                let mut map = HashMap::new();
+                for db_refno in dbs {
+                    // let project = self.get_project_name(db_refno).unwrap_or_default();
+                    // dbg!(&project);
+                    if let Some((project, pool)) = self.get_project_pool_by_refno(db_refno).await {
+                        if let Ok(att) = self.get_attr(db_refno).await {
+                            let dbno = att.get_i32("NUMBDB").unwrap_or_default();
+                            // dbg!(att.to_string_hashmap());
+                            dbg!(dbno);
+                            dbg!(db_refno);
+                            if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool, &project).await? {
+                                dbg!(&db_type);
+                                if let Some(world_refno) = query_world_refno_by_dbno(dbno, &pool).await? {
+                                    map.entry(db_type).or_insert_with(Vec::new).push(world_refno);
+                                }
+                            }
+                        } else {
+                            dbg!(db_refno);
+                        }
+                    }
+                }
+                mdb_map.entry(mdb_name).or_insert(map);
+            }
         }
+        dbg!(&mdb_map);
+        Ok(mdb_map)
+    }
+
+    /// save project mdb info to database
+    pub async fn insert_project_mdb(&self, project_pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<()> {
+        let project_mdb_map = self.query_mdb_worlds_map(project_pool, info_pool).await?;
+        dbg!(&project_mdb_map);
+        let project_mdb_len = project_mdb_map.len();
+        let sql = gen_insert_project_mdb_sql(&project_mdb_map);
+        let json_sql = gen_insert_project_mdb_json_sql(&project_mdb_map);
+        if project_mdb_len != 0 {
+            let mut conn = project_pool.acquire().await?;
+            let result = conn.execute(sql.as_str()).await;
+            match result {
+                Ok(_) => {}
+                Err(e) => {
+                    dbg!(&e);
+                    dbg!(sql.as_str());
+                }
+            }
+            let json_result = conn.execute(json_sql.as_str()).await;
+            match json_result {
+                Ok(_) => {}
+                Err(e) => {
+                    dbg!(&e);
+                    dbg!(json_sql.as_str());
+                }
+            }
+        }
+        Ok(())
     }
 
     ///获得参考号对应的一般类型
@@ -1217,8 +1313,8 @@ impl AiosDBManager {
                             flow_pt_indexs: vec![child_att.get_i32("ARRI"), child_att.get_i32("LEAV")],
                         };
                         let mut geo_insts = &mut geos_info.data;
-                        let mut ele_aabb = Aabb::new_invalid();
-                        let mut tubi_aabb = Aabb::new_invalid();
+                        let mut ele_aabb = AABB::new_invalid();
+                        let mut tubi_aabb = AABB::new_invalid();
                         let mut has_tubi = false;
                         for shape in shapes {
                             let CateBrepShape {
@@ -1372,7 +1468,7 @@ impl AiosDBManager {
                     };
                     let mut geo_insts = &mut geos_info.data;
                     let mut geo_hash = None;
-                    let mut item_trans = Transform::default();
+                    let mut item_trans = TransformSRT::default();
                     let attr = mgr.get_attr(refno).await.unwrap_or_default();
                     if let Some(brep_obj) = attr.create_brep_shape() {
                         if brep_obj.check_valid() {
@@ -1384,7 +1480,7 @@ impl AiosDBManager {
                     let parent_refno = mgr.get_owner(refno);
                     if let Some(geo_hash) = geo_hash {
                         let visible = attr.is_visible_by_level(None).unwrap_or(true);
-                        let tr: Transform = item_trans;
+                        let tr: TransformSRT = item_trans;
                         let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
                         let mut aabb = bbox.unwrap();
                         //todo 去掉重复的代码
@@ -1439,7 +1535,7 @@ impl AiosDBManager {
         //         //在这里直接处理完所有需要处理的transform
         //         let transform = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
         //         let mut geo_hash = None;
-        //         let mut item_trans = Transform::default();
+        //         let mut item_trans = TransformSRT::default();
         //         let mut facet = Facet::default();
         //         if let Ok(children_refs) = mgr.get_children_refs(refno).await {
         //             for pogo_ref in children_refs {
@@ -1478,7 +1574,7 @@ impl AiosDBManager {
         //         let mut parent_att = mgr.get_implicit_attr(parent_refno, Some(vec!["LEVE"])).await.unwrap_or_default();
         //         if let Some(geo_hash) = geo_hash {
         //             let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
-        //             let tr: Transform = item_trans * transform;
+        //             let tr: TransformSRT = item_trans * transform;
         //             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash).unwrap();
         //             bbox.scaled(&tr.scale);
         //             let geom_data = EleGeoInstance {
@@ -1596,7 +1692,7 @@ impl AiosDBManager {
                         }
                         let mut parent_att = AttrMap::default();
                         let mut geo_hash = None;
-                        let mut item_trans = Transform::default();
+                        let mut item_trans = TransformSRT::default();
                         match parent_type {
                             "REVO" => {
                                 parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
@@ -1648,7 +1744,7 @@ impl AiosDBManager {
 
                         if let Some(geo_hash) = geo_hash {
                             let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
-                            let tr: Transform = item_trans;
+                            let tr: TransformSRT = item_trans;
                             if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
                                 aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
                                 let ele_aabb = aabb.transform_by(&Isometry {
@@ -1699,7 +1795,34 @@ impl AiosDBManager {
         Ok(true)
     }
 
-    /// 生成模型
+    /// 获得不同mdb下所有的world
+    pub async fn query_mdb_dbnos(&self, pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<i32>>>> {
+        let mut mdb_map = HashMap::new();
+        let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
+        for mdb in mdbs {
+            let mdb_attr = query_explicit_attr(mdb, pool).await?;
+            let mdb_name = query_name(mdb, &pool).await?;
+            if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
+                let mut map = HashMap::new();
+                let dbs = dbs.refu64_vec_value().unwrap();
+                for refno in dbs {
+                    let att = self.get_attr(refno).await?;
+                    if let Some((project, _)) = self.get_project_pool_by_refno(refno).await{
+                        if let Some(dbno) = att.get_i32("NUMBDB") {
+                            if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool, &project).await? {
+                                map.entry(db_type).or_insert_with(Vec::new).push(dbno);
+                            }
+                        }
+                    }
+
+                }
+                mdb_map.entry(mdb_name).or_insert(map);
+            }
+        }
+        Ok(mdb_map)
+    }
+
+    // 需要区分project，不同project的mesh，是不同的
     pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<bool> {
         let mut time = Instant::now();
         let project = &db_option.project_name;
@@ -1711,7 +1834,7 @@ impl AiosDBManager {
             let info_pool = AiosDBManager::get_db_pool(
                 &url, format!("PDMS_INFO_DB_{}", mgr.db_option.project_name.to_uppercase()).as_str()).await?;
             let pool = AiosDBManager::get_db_pool(&url, project).await?;
-            let mdb_dbnos_map = query_mdb_dbnos(&pool, &info_pool).await?;
+            let mdb_dbnos_map = mgr.query_mdb_dbnos(&pool, &info_pool).await?;
             let key_str = format!("/{mdb}");
             if mdb_dbnos_map.contains_key(&key_str) {
                 db_nos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned().unwrap_or_default();

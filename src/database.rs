@@ -7,7 +7,6 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::mem::take;
 use std::path::{Path, PathBuf};
-use std::ptr::hash;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -29,19 +28,23 @@ use sqlx::Executor;
 use sqlx::mysql::MySqlArguments;
 use sqlx::pool::PoolConnection;
 
+
+
 use crate::{ATTR_INFO_MAP, options, tables};
 use crate::api::element::*;
-use crate::api::project_mdb::insert_project_mdb;
 use crate::api::ssc_data::SscEleNode;
 use crate::aql_api::PdmsPLINAttrAql;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{ForeignEdges, ParaDocument};
-use crate::graph_db::pdms_arango::{save_arangodb_with_db_option, save_arangodb_with_db_option_create_collection, save_dtse_value_to_arangodb, save_foreign_refno_edges_in_sync, save_pdms_element_in_sync, save_pdms_level_edges_in_sync, save_virtual_hole_value_to_arangodb};
+use crate::graph_db::pdms_arango::*;
 use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
 use crate::tables::*;
+use std::hash::{Hash, Hasher};
+use parry3d::utils::hashmap::FxHasher32;
+
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -52,8 +55,8 @@ pub trait MySqlMethods {
 }
 
 
-//创建database
-pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()> {
+/// 初始化project database
+pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result<()> {
     let connection = MySqlPool::connect(url)
         .await
         .unwrap();
@@ -62,16 +65,20 @@ pub async fn init_database(project: &str, url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 创建 info 库和表
-pub async fn init_info_database(url: &str, project_name: &str) -> anyhow::Result<()> {
+/// 初始化 info 库和表
+pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Result<()> {
     let pool = MySqlPool::connect(&url).await?;
     pool.execute(format!("CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};", project_name).as_str()).await?;
 
+    //todo 改成一对多的实现
     let mut pool = AiosDBManager::get_db_pool(&url, &format!("{}_{}", PDMS_INFO_DB, project_name)).await?;
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, { PDMS_REFNO_INFOS_TABLE }));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "REF0"));
-    sql.push_str(&format!(r#"{} VARCHAR(20)"#, "PROJECT"));
+    // sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "REF0"));
+    sql.push_str(&format!(r#"{} INT PRIMARY KEY ,"#, "ID"));
+    sql.push_str(&format!(r#"{} BIGINT NOT NULL ,"#, "REF0"));
+    //允许有多个project的存在
+    sql.push_str(&format!(r#"{} VARCHAR(100)"#, "PROJECT"));
 
     sql.push_str(");");
     let result = pool.execute(sql.as_str()).await;
@@ -80,6 +87,23 @@ pub async fn init_info_database(url: &str, project_name: &str) -> anyhow::Result
         Err(e) => {
             dbg!(e);
             dbg!(sql.as_str());
+        }
+    }
+
+    let result =
+        pool.execute(gen_create_dbno_infos_tables_sql().as_str()).await;
+    match result {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(&e);
+        }
+    }
+    let result =
+        pool.execute(gen_create_version_info_table_sql(project_name).as_str()).await;
+    match result {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(&e);
         }
     }
 
@@ -92,93 +116,70 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
     let mut time = Instant::now();
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
-    init_info_database(&default_conn_str, &db_option.project_name).await?;
-    let pdms_info_pool = AiosDBManager::get_db_pool(&default_conn_str, &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name)).await?;
+    create_info_database(&default_conn_str, &db_option.project_name).await?;
+    let pdms_info_pool = AiosDBManager::get_db_pool(&default_conn_str, &format!("{}_{}",
+                                                                                PDMS_INFO_DB, &db_option.project_name)).await?;
     let mut pdms_info_conn = pdms_info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
+    dbg!("执行多线程解析");
     for project in &db_option.included_projects {
-        init_database(project, &default_conn_str).await?;
+        create_project_database(project, &default_conn_str).await?;
+        let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
         let mut table_time = Instant::now();
         let mut tables_sql = String::new();
-        if !db_option.only_rebuild_pdms_element {
-            if let Ok(db_info) = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")) {
-                for (k, v) in db_info.noun_attr_info_map {
-                    let mut attr_map = BTreeMap::new();
-                    let type_name = db1_dehash(k as u32);
-                    if type_name.is_empty() {
-                        continue;
-                    }
-                    let mut tmp_sets = HashSet::new();
-                    for (kk, vv) in v {
-                        let att_name = vv.name.to_string();
-                        if &att_name != "unset" {
-                            if att_name.starts_with(":") || vv.offset == 0 {
-                                continue;
-                            }
-                            if !tmp_sets.contains(&att_name) {
-                                tmp_sets.insert(att_name.clone());
-                            } else {
-                                continue;
-                            }
-                            if kk == *TYPE_HASH as i32 {
-                                attr_map.insert(vv.offset, (att_name, StringType(db1_dehash(k as u32).into())));
-                            } else {
-                                attr_map.insert(vv.offset, (att_name, vv.default_val));
-                            }
+        if let Ok(db_info) = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")) {
+            for (k, v) in db_info.noun_attr_info_map {
+                let mut attr_map = BTreeMap::new();
+                let type_name = db1_dehash(k as u32);
+                if type_name.is_empty() {
+                    continue;
+                }
+                let mut tmp_sets = HashSet::new();
+                for (kk, vv) in v {
+                    let att_name = vv.name.to_string();
+                    if &att_name != "unset" {
+                        if att_name.starts_with(":") || vv.offset == 0 {
+                            continue;
+                        }
+                        if !tmp_sets.contains(&att_name) {
+                            tmp_sets.insert(att_name.clone());
+                        } else {
+                            continue;
+                        }
+                        if kk == *TYPE_HASH as i32 {
+                            attr_map.insert(vv.offset, (att_name, StringType(db1_dehash(k as u32).into())));
+                        } else {
+                            attr_map.insert(vv.offset, (att_name, vv.default_val));
                         }
                     }
-                    tables_sql.push_str(&tables::gen_create_implicit_tables_sql(type_name.as_str(), &attr_map));
-                    tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
-                    tables_sql.push_str(&tables::gen_create_uda_tables_sql());
                 }
+                tables_sql.push_str(&tables::gen_create_implicit_tables_sql(type_name.as_str(), &attr_map));
+                tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
+                tables_sql.push_str(&tables::gen_create_uda_tables_sql());
             }
         }
-
-        let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
         let mut conn = project_pool.acquire().await?;
         tables_sql.push_str(&tables::gen_create_element_tables_sql());
-        if !db_option.only_rebuild_pdms_element {
-            tables_sql.push_str(&tables::gen_create_project_mdb_sql());
-            tables_sql.push_str(&gen_create_project_mdb_json_sql());
-            tables_sql.push_str(&gen_create_data_state_tables_sql());
-            tables_sql.push_str(&gen_create_pdms_version_table_sql());
-            tables_sql.push_str(&gen_create_room_code_table_sql());
-            tables_sql.push_str(&gen_create_file_version_table_sql());
-        }
+        tables_sql.push_str(&gen_create_project_mdb_sql());
+        tables_sql.push_str(&gen_create_project_mdb_json_sql());
+        tables_sql.push_str(&gen_create_data_state_tables_sql());
+        tables_sql.push_str(&gen_create_pdms_version_table_sql());
+        tables_sql.push_str(&gen_create_room_code_table_sql());
+        tables_sql.push_str(&gen_create_file_version_table_sql());
         let result = conn.execute(tables_sql.as_str()).await;
         match result {
             Ok(_) => {}
             Err(e) => {
-                dbg!(&e);
-                dbg!(tables_sql.as_str());
+                // dbg!(&e);
+                // dbg!(tables_sql.as_str());
             }
         }
-
-
         create_tables_elapse += table_time.elapsed().as_millis();
-        let result = pdms_info_conn.execute(tables::gen_create_dbno_infos_tables_sql().as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(&e);
-                dbg!(tables_sql.as_str());
-            }
-        }
-        let result = pdms_info_conn.execute(gen_creat_version_info_table_sql(&db_option.project_name).as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(&e);
-                dbg!(tables_sql.as_str());
-            }
-        }
+
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
-        dbg!("执行多线程解析");
+
         sync_total_async_threaded(&db_option, project, project_pool.clone(),
                                   pdms_info_pool.clone()).await.expect("同步数据失败");
-        if !db_option.only_rebuild_pdms_element {
-            insert_project_mdb(project,&project_pool, &pdms_info_pool).await?;
-        }
     }
     println!("创建表花费时间: {} ms", create_tables_elapse);
     println!("初始化数据库时间: {} ms", time.elapsed().as_millis() - create_tables_elapse);
@@ -410,6 +411,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
         if need_parsing_files.is_none() || need_parsing_files.as_ref().unwrap().contains(&file_name) {
             println!("path={:?}", &file_name);
             let project_clone = project.clone();
+            let project_name = project.as_str().to_string();
             if let Ok(Ok(PdmsDbData {
                              all_attr_map,
                              total_attr_map,
@@ -424,8 +426,48 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                              foreign_refnos_map,
                              ..
                          })) = tokio::task::spawn_blocking(move || {
-                parse_file(&path, &None, &file_name, project_clone.as_str(), "")
+                parse_file(&path, &None, &file_name, project_name.clone().as_str(), "")
             }).await {
+                //save dbno info first
+                let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(db_no.0, &file_name_clone.clone(),
+                                                                       version.0, project_clone.clone().as_str(), db_type.clone());
+                let mut info_conn = info_pool.acquire().await.unwrap();
+                //保存dbno的信息表
+                let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( id, NUMBDB, FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
+                sql.push_str(dbinfo_value_sql.as_str());
+                if is_replace {
+                    sql = sql.replace("INSERT IGNORE", "REPLACE");
+                }
+                let result = info_conn.execute(sql.as_str()).await;
+                match result {
+                    Ok(_) => {}
+                    Err(e) => {
+                        dbg!(&e);
+                        dbg!(sql.as_str());
+                    }
+                }
+                //保存refno的信息表
+                let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (ID, REF0, PROJECT) VALUES ");
+                for kv in &refno_info_map {
+                    let mut s: FxHasher32 = Default::default();
+                    kv.value().ref_0.hash(&mut s);
+                    project_clone.hash(&mut s);
+                    let h = s.finish();
+                    sql.push_str(&format!(r#"({}, {},'{}') ,"#, h, kv.value().ref_0, project_clone.as_str()));
+                }
+                sql.remove(sql.len() - 1);
+                if is_replace {
+                    sql = sql.replace("INSERT IGNORE", "REPLACE");
+                }
+                let result = info_conn.execute(sql.as_str()).await;
+                match result {
+                    Ok(_) => {}
+                    Err(e) => {
+                        dbg!(&e);
+                        dbg!(sql.as_str());
+                    }
+                }
+
                 version_map.entry(file_name_clone.clone()).or_insert(version);
                 set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
                 //类型暂时不多线程
@@ -452,6 +494,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                     }
                     println!("图数据库保存完成");
                 }
+
                 for (type_hash, type_refnos) in type_ele_map {
                     if b_replace_types {
                         let replace_types = replace_types.clone().unwrap();
@@ -468,40 +511,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                     let pool_clone = pool.clone();
 
                     // println!("类型: {} 数量: {}", db1_dehash(type_hash), type_refnos.len());
-                    let mut dbno_filename_sql = gen_dbno_filename_insert_sql(db_no.0, &filename_clone.clone(),
-                                                                             version.0, &project_clone.clone(), db_type.clone());
-                    let mut info_conn = info_pool_clone.acquire().await.unwrap();
-                    //保存dbno的信息表
-                    let mut sql = format!("INSERT IGNORE INTO {PDMS_DBNO_INFOS_TABLE} ( NUMBDB,FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
-                    sql.push_str(dbno_filename_sql.as_str());
-                    if is_replace {
-                        sql = sql.replace("INSERT IGNORE", "REPLACE");
-                    }
-                    let result = info_conn.execute(sql.as_str()).await;
-                    match result {
-                        Ok(_) => {}
-                        Err(e) => {
-                            dbg!(&e);
-                            dbg!(sql.as_str());
-                        }
-                    }
-                    //保存refno的信息表
-                    let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE}(REF0, PROJECT) VALUES ");
-                    for kv in &refno_info_map {
-                        sql.push_str(&format!(r#"({},'{}') ,"#, kv.value().ref_0, project_clone.as_str()));
-                    }
-                    sql.remove(sql.len() - 1);
-                    if is_replace {
-                        sql = sql.replace("INSERT IGNORE", "REPLACE");
-                    }
-                    let result = info_conn.execute(sql.as_str()).await;
-                    match result {
-                        Ok(_) => {}
-                        Err(e) => {
-                            dbg!(&e);
-                            dbg!(sql.as_str());
-                        }
-                    }
+
                     let type_handle = tokio::spawn(async move {
                         let refnos_cnt = type_refnos.len();
                         // 线程初步估计数量
@@ -610,7 +620,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
 
                 let mut project_conn = pool.acquire().await.unwrap();
                 // 将带有 room_code 属性的保存下来
-                if !db_option.only_rebuild_pdms_element {
+                if !db_option.only_update_dbinfo {
                     for (room_name, refnos) in room_code_map.clone() {
                         let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
                         for refno in refnos.clone() {

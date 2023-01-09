@@ -20,7 +20,7 @@ use parse_pdms_db::parse::WholeAttMap;
 use regex::internal::Input;
 use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
 use crate::api::children::query_contain_noun_refnos;
-use crate::api::element::{get_name, query_children, query_children_eles, query_mdb_dbnos, query_types_refnos, query_world, query_world_children_eles};
+use crate::api::element::*;
 use crate::api::project_mdb::query_mdb_contain_numbdb;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -49,14 +49,14 @@ pub async fn create_arangodb_conn(database: &Database, collection_name: &str, co
             let database = database.create_collection(collection_name).await;
             match database {
                 Ok(_v) => {}
-                Err(_e) => { println!("collection 已存在") }
+                Err(e) => { dbg!(&e); }
             }
         }
         CollectionType::Edge => {
             let database = database.create_edge_collection(collection_name).await;
             match database {
                 Ok(_v) => {}
-                Err(_e) => { println!("collection 已存在") }
+                Err(e) => { dbg!(&e); }
             }
         }
     }
@@ -510,7 +510,7 @@ pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::
                 // 获得 catr 的 ptre gmre dtre
                 if catr_set.contains(&catr) { continue; }
                 if let Some(refno_basic) = mgr.get_refno_basic(catr) {
-                    if let Some(project_db) = mgr.get_project_db(catr) {
+                    if let Some((_, project_db)) = mgr.get_project_pool_by_refno(catr).await {
                         let att = query_implicit_attr(catr, refno_basic.value(), &project_db, Some(catr_foreign_refs.clone())).await?;
                         for catr_foreign_type in &catr_foreign_refs {
                             if let Some(ptre) = att.get_val(catr_foreign_type) {

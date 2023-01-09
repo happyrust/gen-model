@@ -121,7 +121,8 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &Vec<
 }
 
 /// 获得隐式属性
-pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
+pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic,
+                                 pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
     let type_name = ref_basic.get_type();
     let type_hash = *ref_basic.get_noun_hash() as i32;
     let mut exclude_columns = vec![];
@@ -189,24 +190,21 @@ pub async fn query_uda_attr(att_type: &str, pool: &Pool<MySql>) -> anyhow::Resul
 }
 
 pub async fn query_full_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
-    if let Some(project) = aios_mgr.ref0_map.get(&refno.get_0()) {
-        let pool = aios_mgr.project_map.get(project.value());
-        if pool.is_none() { return Ok(AttrMap::default()); }
-        let pool = pool.unwrap();
+    if let Some((project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
+        // let pool = aios_mgr.get_project_pool(&project).ok_or(anyhow!("No project pool"))?;
         let ref_basic = aios_mgr.get_refno_basic(refno);
         if ref_basic.is_none() { return Ok(AttrMap::default()); }
         let ref_basic = ref_basic.unwrap();
-
-        let mut attr = query_implicit_attr(refno, ref_basic.value(), pool.value(), column_names).await?;
+        let mut attr = query_implicit_attr(refno, ref_basic.value(), &pool, column_names).await?;
         let att_type = attr.get_type().to_string();
-        let explicit_attr = query_explicit_attr(refno, pool.value()).await?;
-        let ele = query_ele_node(refno, pool.value()).await?;
+        let explicit_attr = query_explicit_attr(refno, &pool).await?;
+        let ele = query_ele_node(refno, &pool).await?;
         for (k, v) in explicit_attr.map {
             attr.entry(k).or_insert(v);
         }
         for pool in &aios_mgr.project_map {
             // uda 赋值需要加上元件库
-            let uda_attr = query_uda_attr(&att_type, pool.value()).await?;
+            let uda_attr = query_uda_attr(&att_type, &pool).await?;
             for (k, v) in uda_attr.map {
                 attr.entry(k).or_insert(v);
             }

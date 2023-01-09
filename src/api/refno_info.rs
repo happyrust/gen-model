@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
@@ -16,17 +16,17 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::helper::qualified_table_name;
 use crate::defines::CACHED_REFNO_BASIC_MAP;
 
-///更新获得ref0->project 缓存
-pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, String>> {
+///更新获得ref0->projects 缓存
+pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, HashSet<String>>> {
     let mut map = DashMap::new();
-    let sql = "SELECT REF0 , PROJECT FROM REFNO_INFOS";
-    let results = sqlx::query(sql).fetch_all(&mut pool.acquire().await?).await;
+    let sql = format!("SELECT REF0, PROJECT FROM {PDMS_REFNO_INFOS_TABLE}");
+    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match results {
         Ok(vals) => {
             for val in vals {
                 let ref0 = val.get::<i32, _>("REF0") as u32;
-                let project = val.get::<String, _>("PROJECT");
-                map.entry(ref0).or_insert(project);
+                let project_str = val.get::<String, _>("PROJECT");
+                map.entry(ref0).or_insert(HashSet::new()).insert(project_str);
             }
         }
         Err(e) => {

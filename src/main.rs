@@ -44,7 +44,6 @@ use sqlx::pool::PoolConnection;
 
 use aios_database::api::attr::insert_attr_info;
 use aios_database::api::element::*;
-use aios_database::api::project_mdb::insert_project_mdb;
 use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
 use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
 use aios_database::BATCH_CHUNKS_CNT;
@@ -61,7 +60,7 @@ use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::helper::{qualified_column_name, qualified_table_name};
 use aios_database::options::DbOption;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
-use aios_database::tables::{gen_create_attr_info_tables_sql, gen_create_pdms_mesh_table_sql};
+use aios_database::tables::*;
 use bevy::prelude::*;
 use bevy::transform::components::Transform;
 use parse_pdms_db::parse_file;
@@ -219,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
             // let room_infos = vec![(RefU64::from_two_nums(17544, 15107), "N448".to_string())];
             let dbno_mgr = DbNumMgr::load_file(&format!("{instance_dir_path}/dbno_mgr.num")).unwrap_or_default();
             for (target_refno, room_name) in room_infos {
-                dbg!(&room_name);
+                // dbg!(&room_name);
                 let mut room_info_map = HashMap::new();
                 if let Some(dbno) = dbno_mgr.get_dbno(target_refno) {
                     if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
