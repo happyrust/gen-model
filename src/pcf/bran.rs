@@ -285,7 +285,7 @@ async fn gen_file() -> anyhow::Result<()> {
     let mut file = std::fs::File::create("test.txt").unwrap();
     // let data = gen_pcf_file_head();
     let mgr = AiosDBManager::init_form_config().await?;
-    let refno = RefU64::from_refno_str("23584/5796").unwrap();
+    let refno = RefU64::from_refno_str("23584/5864").unwrap();
     let thickness_map = get_pipe_thickness_table()?;
     let data = get_bran_name_and_children(refno, &mgr, &thickness_map).await?;
     file.write_all(&data).unwrap();

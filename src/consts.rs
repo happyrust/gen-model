@@ -17,6 +17,7 @@ pub const ROOM_CODE: &'static str = "ROOM_CODE";
 pub const VERSION_DATA: &'static str = "VERSION_DATA";
 pub const PDMS_VERSION: &'static str = "PDMS_VERSION";
 pub const PDMS_MESH: &'static str = "PDMS_MESH";
+pub const METADATA_TABLE: &'static str = "METADATA_MANAGE";
 // project_mdb
 // 专业表单
 pub const PROFESSION_TX_XT: &'static str = "TX_XT";

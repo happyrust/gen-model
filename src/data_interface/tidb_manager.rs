@@ -541,7 +541,6 @@ impl AiosDBManager {
     #[inline]
     pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
         let url = &format!("{connection_str}/{}", project);
-        dbg!(&url);
         PoolOptions::new().max_connections(500).acquire_timeout(Duration::from_secs(10 * 60)).connect(url).await.map_err(
             {
                 |x| anyhow!(x.to_string())
