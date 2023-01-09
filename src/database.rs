@@ -178,8 +178,8 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
 
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
 
-        // sync_total_async_threaded(&db_option, project, project_pool.clone(),
-        //                           pdms_info_pool.clone()).await.expect("同步数据失败");
+        sync_total_async_threaded(&db_option, project, project_pool.clone(),
+                                  pdms_info_pool.clone()).await.expect("同步数据失败");
     }
 
     println!("创建表花费时间: {} ms", create_tables_elapse);
@@ -468,7 +468,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                         dbg!(sql.as_str());
                     }
                 }
-                continue;
 
                 version_map.entry(file_name_clone.clone()).or_insert(version);
                 set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
