@@ -1,5 +1,4 @@
 use std::env;
-use bevy::prelude::dbg;
 use sqlx::{MySql, Pool, Row};
 use crate::consts::METADATA_TABLE;
 use aios_core::metadata_manager::MetadataManagerTreeNode;

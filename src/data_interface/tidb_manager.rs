@@ -28,6 +28,7 @@ use anyhow::anyhow;
 use approx::{abs_diff_eq, abs_diff_ne};
 use arangors_lite::{Connection, Database};
 use async_trait::async_trait;
+use bevy::prelude::Transform;
 use config::{Config, ConfigError, Environment, File};
 use dashmap::{DashMap, DashSet};
 use dashmap::mapref::one::Ref;
@@ -38,10 +39,10 @@ use lazy_static::lazy_static;
 use nalgebra::{Quaternion, UnitQuaternion};
 use nalgebra_glm::project;
 use once_cell::sync::Lazy;
-use parry3d::bounding_volume::{AABB, BoundingVolume};
+use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Vector};
 use smol_str::SmolStr;
-use sqlx::{MySql, MySqlPool, Pool};
+use sqlx::{Executor, MySql, MySqlPool, Pool};
 use sqlx::pool::PoolOptions;
 
 use crate::api::attr::*;
@@ -50,7 +51,7 @@ use crate::api::dbno_sql::query_dbtype_from_dbno;
 use crate::api::element::*;
 use crate::api::project_mdb::{gen_insert_project_mdb_json_sql, gen_insert_project_mdb_sql};
 use crate::api::refno_info::{cache_plin_plax, get_ref0_map, sync_refno_basic_map};
-use crate::aql_api::children::{query_brother_node_front, query_travel_children_aql, query_travel_children_with_type_aql, query_travel_children_with_types_aql};
+use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::para_value::{query_des_para_value, query_para_from_desi_refno};
 use crate::aql_api::plin_attr::{match_jusline_attr, query_plin_attrs, query_pline_value};
@@ -139,7 +140,7 @@ pub struct AiosDBManager {
 
     pub arango_database: Database,
 
-    cached_world_transforms_map: Arc<DashMap<RefU64, Transform>>,
+    cached_world_transforms_map: Arc<DashMap<RefU64, bevy::prelude::Transform>>,
 
     pub plin_cache_mgr: DashMap<RefU64, String>,
 
@@ -333,7 +334,7 @@ impl PdmsDataInterface for AiosDBManager {
     async fn get_ancestors_attrs(&self, refno: RefU64) -> Vec<AttrMap> {
         let mut cur_refno = refno;
         let mut r = vec![];
-        if let Some((_, pool)) = self.get_project_pool_by_refno(refno).await{
+        if let Some((_, pool)) = self.get_project_pool_by_refno(refno).await {
             while let Ok(attr) = self.get_implicit_attr(cur_refno, None).await {
                 //后面是不是要缓存这个层级结构
                 if let Ok(Some(owner)) = query_owner_from_id(cur_refno, &pool).await {
@@ -426,7 +427,7 @@ impl PdmsDataInterface for AiosDBManager {
                 quat = quat_v.unwrap();
             } else {
                 let extru_dir: Vec3 = if let Some(poss) = att.get_poss() &&
-                    let Some(pose) = att.get_pose()
+                let Some(pose) = att.get_pose()
                 {
                     need_bangle = true;
                     (pose - poss).normalize()
@@ -490,6 +491,7 @@ impl PdmsDataInterface for AiosDBManager {
             self.cached_world_transforms_map.entry(refno).or_insert(Transform {
                 rotation,
                 translation,
+                scale: Vec3::ONE,
             });
         }
         //将rotation 还原为角度
@@ -499,9 +501,10 @@ impl PdmsDataInterface for AiosDBManager {
             let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
             println!("{} : {:?}", refno.to_refno_str(), (translation, ori_str));
         }
-        Ok(Some(glam::TransformRT {
+        Ok(Some(Transform {
             rotation,
             translation,
+            scale: Vec3::ONE,
         }))
     }
 }
@@ -709,7 +712,6 @@ impl AiosDBManager {
         }
         (None)
     }
-
 
 
     /// 获得mdb下所有的world的参考号
@@ -1313,8 +1315,10 @@ impl AiosDBManager {
                             flow_pt_indexs: vec![child_att.get_i32("ARRI"), child_att.get_i32("LEAV")],
                         };
                         let mut geo_insts = &mut geos_info.data;
-                        let mut ele_aabb = AABB::new_invalid();
-                        let mut tubi_aabb = AABB::new_invalid();
+                        // let mut ele_aabb = AABB::new_invalid();
+                        // let mut tubi_aabb = AABB::new_invalid();
+                        let mut ele_aabb = Aabb::new_invalid();
+                        let mut tubi_aabb = Aabb::new_invalid();
                         let mut has_tubi = false;
                         for shape in shapes {
                             let CateBrepShape {
@@ -1468,7 +1472,8 @@ impl AiosDBManager {
                     };
                     let mut geo_insts = &mut geos_info.data;
                     let mut geo_hash = None;
-                    let mut item_trans = TransformSRT::default();
+                    let mut item_trans = Transform::default();
+
                     let attr = mgr.get_attr(refno).await.unwrap_or_default();
                     if let Some(brep_obj) = attr.create_brep_shape() {
                         if brep_obj.check_valid() {
@@ -1480,7 +1485,7 @@ impl AiosDBManager {
                     let parent_refno = mgr.get_owner(refno);
                     if let Some(geo_hash) = geo_hash {
                         let visible = attr.is_visible_by_level(None).unwrap_or(true);
-                        let tr: TransformSRT = item_trans;
+                        let tr: Transform = item_trans;
                         let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
                         let mut aabb = bbox.unwrap();
                         //todo 去掉重复的代码
@@ -1692,7 +1697,7 @@ impl AiosDBManager {
                         }
                         let mut parent_att = AttrMap::default();
                         let mut geo_hash = None;
-                        let mut item_trans = TransformSRT::default();
+                        let mut item_trans = Transform::default();
                         match parent_type {
                             "REVO" => {
                                 parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
@@ -1744,7 +1749,7 @@ impl AiosDBManager {
 
                         if let Some(geo_hash) = geo_hash {
                             let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
-                            let tr: TransformSRT = item_trans;
+                            let tr: Transform = item_trans;
                             if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
                                 aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
                                 let ele_aabb = aabb.transform_by(&Isometry {
@@ -1807,14 +1812,13 @@ impl AiosDBManager {
                 let dbs = dbs.refu64_vec_value().unwrap();
                 for refno in dbs {
                     let att = self.get_attr(refno).await?;
-                    if let Some((project, _)) = self.get_project_pool_by_refno(refno).await{
+                    if let Some((project, _)) = self.get_project_pool_by_refno(refno).await {
                         if let Some(dbno) = att.get_i32("NUMBDB") {
                             if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool, &project).await? {
                                 map.entry(db_type).or_insert_with(Vec::new).push(dbno);
                             }
                         }
                     }
-
                 }
                 mdb_map.entry(mdb_name).or_insert(map);
             }

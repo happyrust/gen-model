@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use aios_core::pdms_types::RefU64;
-use glam::Vec3;
 use crate::api::attr::query_implicit_attr;
 use crate::api::element::query_refno_type;
 use crate::aql_api::children::{query_children_aql, query_travel_children_aql};
@@ -14,10 +13,10 @@ use crate::options::DbOption;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CylinderTransform {
     pub refno: String,
-    pub pos_up: Vec3,
-    pub pos_down: Vec3,
-    pub ori_up: Vec3,
-    pub ori_down: Vec3,
+    pub pos_up: glam::Vec3,
+    pub pos_down: glam::Vec3,
+    pub ori_up: glam::Vec3,
+    pub ori_down: glam::Vec3,
 }
 
 pub async fn query_cylinder_transform(refno: RefU64, mgr: Arc<AiosDBManager>) -> anyhow::Result<Vec<CylinderTransform>> {
@@ -42,10 +41,10 @@ pub async fn query_cylinder_transform(refno: RefU64, mgr: Arc<AiosDBManager>) ->
             if mgr.get_world_transform(child_refno).await?.is_none() { continue; }
             let world_transform = mgr.get_world_transform(child_refno).await?.unwrap();
             // 将中心坐标转化为cyli上下两个点的坐标
-            let pos_up = world_transform.transform_point(Vec3::new(0.0, 0.0, height / 2.0_f32));
-            let pos_down = world_transform.transform_point(Vec3::new(0.0, 0.0, -height / 2.0_f32));
-            let ori_up = world_transform.transform_point(Vec3::new(0.0, 0.0, 1.0)).normalize();
-            let ori_down = world_transform.transform_point(Vec3::new(0.0, 0.0, -1.0)).normalize();
+            let pos_up = world_transform.transform_point(glam::Vec3::new(0.0, 0.0, height / 2.0_f32));
+            let pos_down = world_transform.transform_point(glam::Vec3::new(0.0, 0.0, -height / 2.0_f32));
+            let ori_up = world_transform.transform_point(glam::Vec3::new(0.0, 0.0, 1.0)).normalize();
+            let ori_down = world_transform.transform_point(glam::Vec3::new(0.0, 0.0, -1.0)).normalize();
             let cylinder_transform = CylinderTransform {
                 refno: child_refno.to_refno_string(),
                 pos_up,
