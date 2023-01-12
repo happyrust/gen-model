@@ -10,6 +10,7 @@ use crate::consts::METADATA_TABLE;
 use aios_core::metadata_manager::{MetadataManagerTableData, MetadataManagerTreeNode};
 use bevy::prelude::dbg;
 use regex::Regex;
+use crate::consts::METADATA_DATA;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MetadataManagerExcelTreeData {
@@ -59,7 +60,7 @@ impl MetadataManagerExcelTableData {
     }
 }
 
-fn create_metadata_table_sql() -> String {
+fn create_metadata_tree_table_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {METADATA_TABLE} ("));
     sql.push_str(&format!("{} BIGINT UNSIGNED  PRIMARY KEY ,", "ID"));
@@ -70,6 +71,22 @@ fn create_metadata_table_sql() -> String {
     sql.push_str(");");
     sql
 }
+
+fn create_metadata_data_table_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {METADATA_DATA} ("));
+    sql.push_str(&format!("{} BIGINT UNSIGNED,", "ID"));
+    sql.push_str(&format!("{} VARCHAR(50),", "CODE"));
+    sql.push_str(&format!("{} VARCHAR(50),", "NAME"));
+    sql.push_str(&format!("{} TINYINT(1) ,", "B_NULL"));
+    sql.push_str(&format!("{} TINYINT ,", "DATA_TYPE"));
+    sql.push_str(&format!("{} TINYINT ,", "UNIT"));
+    sql.push_str(&format!("{} VARCHAR(100),", "DESCRIPTION"));
+    sql.push_str(&format!("{} VARCHAR(50) ", "SCOPE"));
+    sql.push_str(");");
+    sql
+}
+
 
 async fn save_metadata_data(data: DashMap<u64, MetadataManagerTreeNode>, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let mut sql = String::new();
@@ -93,8 +110,31 @@ async fn save_metadata_data(data: DashMap<u64, MetadataManagerTreeNode>, pool: &
     Ok(())
 }
 
+async fn save_metadata_table_data(data: Vec<MetadataManagerTableData>, pool: &Pool<MySql>) -> anyhow::Result<()> {
+    let mut sql = String::new();
+    sql.push_str(&format!("INSERT IGNORE INTO {METADATA_DATA}(ID,CODE,NAME,B_NULL,DATA_TYPE,UNIT,DESCRIPTION,SCOPE) VALUES"));
+    let b_empty = data.is_empty();
+    for v in data {
+        sql.push_str(&format!("( {},'{}', '{}' , {} , {} , {} , '{}' , '{}' ) ,", v.id, v.code, v.name, if v.b_null { 1 } else { 0 },
+                              v.data_type, v.unit, v.desc, v.scope));
+    }
+    if !b_empty {
+        sql.remove(sql.len() - 1);
+    }
+    let mut conn = pool.acquire().await?;
+    let result = conn.execute(sql.as_str()).await;
+    match result {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(sql);
+            dbg!(&e);
+        }
+    }
+    Ok(())
+}
+
 /// 将 excel 中的数据进行处理，放到sql中
-fn read_excel_file_to_sql(file_path: &str) -> anyhow::Result<DashMap<u64, MetadataManagerTreeNode>> {
+fn read_excel_file_to_sql(file_path: &str) -> anyhow::Result<(DashMap<u64, MetadataManagerTreeNode>, Vec<MetadataManagerTableData>)> {
     let mut map = DashMap::new();
     let mut workbook: Xlsx<_> = open_workbook(file_path)?;
     // 树节点数据
@@ -149,7 +189,7 @@ fn read_excel_file_to_sql(file_path: &str) -> anyhow::Result<DashMap<u64, Metada
             table_map.push(data);
         }
     }
-    Ok(map)
+    Ok((map, table_map))
 }
 
 pub fn convert_str_to_hash(input: &str) -> u64 {
@@ -172,7 +212,7 @@ async fn test_create_metadata_table() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let table_sql = create_metadata_table_sql();
+    let table_sql = create_metadata_tree_table_sql();
     let mut conn = pool.clone().acquire().await?;
     let result = conn.execute(table_sql.as_str()).await;
     match result {
@@ -182,9 +222,20 @@ async fn test_create_metadata_table() -> anyhow::Result<()> {
             dbg!(&e);
         }
     }
+    let data_sql = create_metadata_data_table_sql();
+    let mut conn = pool.clone().acquire().await?;
+    let result = conn.execute(data_sql.as_str()).await;
+    match result {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(data_sql);
+            dbg!(&e);
+        }
+    }
     let path = "resource/元数据_测试.xlsx";
-    let data = read_excel_file_to_sql(path)?;
+    let (data, table_data) = read_excel_file_to_sql(path)?;
     save_metadata_data(data, &pool).await?;
+    save_metadata_table_data(table_data, &pool).await?;
     Ok(())
 }
 
