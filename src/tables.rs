@@ -138,7 +138,7 @@ pub fn gen_create_project_mdb_json_sql() -> String {
 }
 
 #[inline]
-pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, (String, AttrVal)>) -> String {
+pub fn gen_create_implicit_tables_sql(type_name: &str, att_map: &BTreeMap<u32, (String, AttrVal)>) -> String {
     let mut sql = String::new();
     let table_name = qualified_table_name(type_name);
     let table_name = table_name.as_str();
@@ -149,7 +149,7 @@ pub fn gen_create_implicit_tables_sql(type_name: &str, att_bmap: &BTreeMap<u32, 
     sql.push_str(&format!(r#"{} VARCHAR(8),"#, "TYPE"));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL,"#, "OWNER"));
 
-    for (offset, (k, v)) in att_bmap {
+    for (offset, (k, v)) in att_map {
         let att_name = qualified_column_name(k);
 
         match v {
