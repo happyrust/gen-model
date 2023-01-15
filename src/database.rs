@@ -29,7 +29,6 @@ use sqlx::mysql::MySqlArguments;
 use sqlx::pool::PoolConnection;
 
 
-
 use crate::{ATTR_INFO_MAP, options, tables};
 use crate::api::element::*;
 use crate::api::ssc_data::SscEleNode;
@@ -75,7 +74,7 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, { PDMS_REFNO_INFOS_TABLE }));
     // sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "REF0"));
-    sql.push_str(&format!(r#"{} INT PRIMARY KEY ,"#, "ID"));
+    sql.push_str(&format!(r#"{} BIGINT UNSIGNED PRIMARY KEY ,"#, "ID"));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL ,"#, "REF0"));
     //允许有多个project的存在
     sql.push_str(&format!(r#"{} VARCHAR(100)"#, "PROJECT"));
@@ -399,9 +398,9 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
     let is_replace = db_option.replace_dbs;
     let replace_types = db_option.replace_types.clone();
     let b_replace_types = replace_types.is_some();
-    let mut uda_map:HashMap<String, AttrMap> = HashMap::new();
+    let mut uda_map: HashMap<String, AttrMap> = HashMap::new();
     let mut version_map = HashMap::new();
-
+    let only_update_dbinfo = db_option.only_update_dbinfo;
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
         let file_name_clone = Arc::new(file_name.clone());
@@ -432,6 +431,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(db_no.0, &file_name_clone.clone(),
                                                                        version.0, project_clone.clone().as_str(), db_type.clone());
                 let mut info_conn = info_pool.acquire().await.unwrap();
+
                 //保存dbno的信息表
                 let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( id, NUMBDB, FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
                 sql.push_str(dbinfo_value_sql.as_str());
@@ -474,9 +474,9 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 let total_attr_map_arc = Arc::new(total_attr_map);
                 let children_map_arc = Arc::new(children_map);
                 let mut type_handles = vec![];
+
                 // 将部分数据保存到图数据库
                 {
-
                     if db_type == "DESI" {
                         // 将 pdms_element 部分数据保存到图数据库中
                         save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
@@ -554,53 +554,54 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                                         let children_count = children_map_arc_clone.get(&refno).unwrap_or(&RefU64Vec::default()).len();
                                         pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order, children_count));
                                     }
-
-                                    let mut project_conn = pool_clone.acquire().await.unwrap();
-                                    let mut sql = String::new();
-                                    sql.push_str(implicit_columns_sql.0.as_str());
-                                    sql.push_str(implicit_values_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    if is_replace {
-                                        sql = sql.replace("INSERT IGNORE", "REPLACE");
-                                    }
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            dbg!(&e);
-                                            dbg!(sql.as_str());
+                                    if !only_update_dbinfo {
+                                        let mut project_conn = pool_clone.acquire().await.unwrap();
+                                        let mut sql = String::new();
+                                        sql.push_str(implicit_columns_sql.0.as_str());
+                                        sql.push_str(implicit_values_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        if is_replace {
+                                            sql = sql.replace("INSERT IGNORE", "REPLACE");
                                         }
-                                    }
-
-                                    //执行显示数据保存
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
-                                    sql.push_str(explicit_values_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    if is_replace {
-                                        sql = sql.replace("INSERT IGNORE", "REPLACE");
-                                    }
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            dbg!(&e);
-                                            dbg!(sql.as_str());
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
                                         }
-                                    }
 
-                                    // {PDMS_ELEMENTS_TABLE} 保存
-                                    let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
-                                    sql.push_str(pdms_elements_sql.as_str());
-                                    sql.remove(sql.len() - 1);
-                                    if is_replace {
-                                        sql = sql.replace("INSERT IGNORE", "REPLACE");
-                                    }
-                                    let result = project_conn.execute(sql.as_str()).await;
-                                    match result {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            dbg!(&e);
-                                            dbg!(sql.as_str());
+                                        //执行显示数据保存
+                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                        sql.push_str(explicit_values_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        if is_replace {
+                                            sql = sql.replace("INSERT IGNORE", "REPLACE");
+                                        }
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
+                                        }
+
+                                        // {PDMS_ELEMENTS_TABLE} 保存
+                                        let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
+                                        sql.push_str(pdms_elements_sql.as_str());
+                                        sql.remove(sql.len() - 1);
+                                        if is_replace {
+                                            sql = sql.replace("INSERT IGNORE", "REPLACE");
+                                        }
+                                        let result = project_conn.execute(sql.as_str()).await;
+                                        match result {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                dbg!(&e);
+                                                dbg!(sql.as_str());
+                                            }
                                         }
                                     }
                                     implicit_values_sql.clear();

@@ -28,7 +28,7 @@ use anyhow::anyhow;
 use approx::{abs_diff_eq, abs_diff_ne};
 use arangors_lite::{Connection, Database};
 use async_trait::async_trait;
-use bevy::prelude::Transform;
+use bevy::prelude::{dbg, Transform};
 use config::{Config, ConfigError, Environment, File};
 use dashmap::{DashMap, DashSet};
 use dashmap::mapref::one::Ref;
@@ -691,6 +691,9 @@ impl AiosDBManager {
     #[inline]
     pub async fn get_project_pool_by_refno(&self, refno: RefU64) -> Option<(String, Pool<MySql>)> {
         if let Some(projects) = self.ref0_map.get(&refno.get_0()) {
+            if refno == RefU64::from_refno_str("24575/2004").unwrap() {
+                dbg!(&projects.len());
+            }
             ///只有一个的时候
             if projects.len() == 1 {
                 let project = projects.value().iter().next().as_ref().unwrap().clone();
@@ -727,33 +730,33 @@ impl AiosDBManager {
                     // let project = self.get_project_name(db_refno).unwrap_or_default();
                     // dbg!(&project);
                     if let Some((project, pool)) = self.get_project_pool_by_refno(db_refno).await {
-                        if let Ok(att) = self.get_attr(db_refno).await {
+                        if let Ok(att) = self.get_implicit_attr(db_refno,Some(vec!["NUMBDB"])).await {
                             let dbno = att.get_i32("NUMBDB").unwrap_or_default();
                             // dbg!(att.to_string_hashmap());
-                            // dbg!(dbno);
-                            // dbg!(db_refno);
+                            dbg!(dbno);
+                            dbg!(db_refno);
                             if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool, &project).await? {
-                                // dbg!(&db_type);
+                                dbg!(&db_type);
                                 if let Some(world_refno) = query_world_refno_by_dbno(dbno, &pool).await? {
                                     map.entry(db_type).or_insert_with(Vec::new).push(world_refno);
                                 }
                             }
                         } else {
-                            // dbg!(db_refno);
+                            dbg!(db_refno);
                         }
                     }
                 }
                 mdb_map.entry(mdb_name).or_insert(map);
             }
         }
-        // dbg!(&mdb_map);
+        dbg!(&mdb_map);
         Ok(mdb_map)
     }
 
     /// save project mdb info to database
     pub async fn insert_project_mdb(&self, project_pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<()> {
         let project_mdb_map = self.query_mdb_worlds_map(project_pool, info_pool).await?;
-        // dbg!(&project_mdb_map);
+        dbg!(&project_mdb_map);
         let project_mdb_len = project_mdb_map.len();
         let sql = gen_insert_project_mdb_sql(&project_mdb_map);
         let json_sql = gen_insert_project_mdb_json_sql(&project_mdb_map);
@@ -1806,14 +1809,20 @@ impl AiosDBManager {
         let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
         for mdb in mdbs {
             let mdb_attr = query_explicit_attr(mdb, pool).await?;
+            dbg!(&mdb);
             let mdb_name = query_name(mdb, &pool).await?;
             if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
                 let mut map = HashMap::new();
                 let dbs = dbs.refu64_vec_value().unwrap();
                 for refno in dbs {
-                    let att = self.get_attr(refno).await?;
+                    // let att = self.get_attr(refno).await?;
+                    let att = self.get_implicit_attr(refno,Some(vec!["NUMBDB"])).await?;
                     if let Some((project, _)) = self.get_project_pool_by_refno(refno).await {
+                        if mdb == RefU64::from_refno_str("24575/2178").unwrap() {
+                            dbg!(refno);
+                        }
                         if let Some(dbno) = att.get_i32("NUMBDB") {
+                            dbg!(&dbno);
                             if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool, &project).await? {
                                 map.entry(db_type).or_insert_with(Vec::new).push(dbno);
                             }
