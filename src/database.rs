@@ -459,7 +459,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 if is_replace {
                     sql = sql.replace("INSERT IGNORE", "REPLACE");
                 }
-                dbg!(&sql);
                 let result = info_conn.execute(sql.as_str()).await;
                 match result {
                     Ok(_) => {}
