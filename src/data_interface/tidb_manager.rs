@@ -730,30 +730,30 @@ impl AiosDBManager {
                         if let Ok(att) = self.get_attr(db_refno).await {
                             let dbno = att.get_i32("NUMBDB").unwrap_or_default();
                             // dbg!(att.to_string_hashmap());
-                            dbg!(dbno);
-                            dbg!(db_refno);
+                            // dbg!(dbno);
+                            // dbg!(db_refno);
                             if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool, &project).await? {
-                                dbg!(&db_type);
+                                // dbg!(&db_type);
                                 if let Some(world_refno) = query_world_refno_by_dbno(dbno, &pool).await? {
                                     map.entry(db_type).or_insert_with(Vec::new).push(world_refno);
                                 }
                             }
                         } else {
-                            dbg!(db_refno);
+                            // dbg!(db_refno);
                         }
                     }
                 }
                 mdb_map.entry(mdb_name).or_insert(map);
             }
         }
-        dbg!(&mdb_map);
+        // dbg!(&mdb_map);
         Ok(mdb_map)
     }
 
     /// save project mdb info to database
     pub async fn insert_project_mdb(&self, project_pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<()> {
         let project_mdb_map = self.query_mdb_worlds_map(project_pool, info_pool).await?;
-        dbg!(&project_mdb_map);
+        // dbg!(&project_mdb_map);
         let project_mdb_len = project_mdb_map.len();
         let sql = gen_insert_project_mdb_sql(&project_mdb_map);
         let json_sql = gen_insert_project_mdb_json_sql(&project_mdb_map);

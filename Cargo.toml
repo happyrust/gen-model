@@ -34,14 +34,14 @@ geo = "0.23.1"
 
 nalgebra = { version = "0.31.2", features = ["serde"] }
 nalgebra-glm = "0.17.0"
-parry3d = { version = "0.10.0", features = ["serde-serialize"] }
+parry3d = { version = "0.11.1", features = ["serde-serialize"] }
 
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path = "../crates/aios-core"}
 bevy = { path = "../crates/bevy", default-features = false }
 #arangors_lite = { path = "../arangors-lite" }
-parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms" }
-aios_core = { git = "https://gitee.com/happydpc/aios-core" }
+#parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms" }
+#aios_core = { git = "https://gitee.com/happydpc/aios-core" }
 arangors_lite = "0.2.0"
 #bevy = { git = "https://gitee.com/happydpc/bevy", default-features = false, features = ["render"]}
 
@@ -50,7 +50,7 @@ dashmap = { version = "5.4.0", features = ["serde"] }
 tokio = { vertion = "1.18.2", features = ["full"] }
 serde = {version="1.0.137", features=["derive"]}
 id_tree = { version = "1.8.0", features = ["serde_support"] }
-glam = { version = "0.22.0" }
+glam = { version = "0.22.0"}
 sea-orm = { version = "0.8.0", features = ["default", "runtime-tokio"]}
 #openssl = { version = "0.10", features = ["vendored"] }
 #[target.'cfg(target_os = "macos")'.dependencies]
