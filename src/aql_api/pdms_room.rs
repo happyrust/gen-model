@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::env;
 use aios_core::pdms_types::RefU64;
+use arangors_lite::{AqlQuery, ClientError, Database};
 use parry3d::bounding_volume::Aabb;
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
+use crate::api::children::query_ancestor_of_type;
+use crate::aql_api::children::query_ancestor_name_of_type_aql;
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
@@ -46,7 +49,7 @@ pub struct RoomInfo {
 pub async fn save_room_info_to_arangodb(room_infos: HashMap<RefU64, (Aabb, Vec<RefU64>)>, db_option: &DbOption) -> anyhow::Result<()> {
     let mut room_eles_json = vec![];
     let mut room_edges_json = vec![];
-    for (refno, (aabb,target_refnos)) in room_infos {
+    for (refno, (aabb, target_refnos)) in room_infos {
         room_eles_json.push(RoomElementAql {
             _key: refno.to_url_refno(),
             refno,
@@ -85,6 +88,34 @@ pub async fn query_all_need_compute_room_refno(dbno: &Vec<i32>, room_type: &str,
     Ok(refnos)
 }
 
+/// 获取该参考号属于哪个房间 room_name_type : 存放房间名的类型
+pub async fn query_room_info_from_refno(refno: RefU64, room_name_type: &str, database: &Database) -> anyhow::Result<Option<String>> {
+    let refno = format!("pdms_eles/{}", refno.to_url_refno());
+    let aql = AqlQuery::new("
+    let refno = (for v,e in 1 inbound @id room_edges
+                return v._key )[0]
+    return refno").bind_var("id", refno);
+    let result = database.aql_query::<String>(aql).await;
+    return match result {
+        Ok(r) => {
+            if !r.is_empty() {
+                let room_refno = RefU64::from_url_refno(&r[0]);
+                if room_refno.is_none() { return Ok(None); }
+                let room_refno = room_refno.unwrap();
+                let room_name = query_ancestor_name_of_type_aql(database, room_refno, room_name_type).await?;
+                if room_name.is_none() { return Ok(None); }
+                let room_name = room_name.unwrap();
+                Ok(Some(room_name))
+            } else {
+                Ok(None)
+            }
+        }
+        Err(_) => {
+            Ok(None)
+        }
+    };
+}
+
 fn gen_query_all_need_compute_room_refno_sql(dbnos: &Vec<i32>, room_type: &str, filter_name: Option<&str>) -> String {
     let mut sql = String::new();
 
@@ -120,10 +151,17 @@ pub fn get_room_name_split(name: &str) -> Option<RoomInfo> {
     })
 }
 
-
-#[test]
-fn test_get_room_name_split() {
-    let name = "/1AR-RM01-A109";
-    let r = get_room_name_split(name).unwrap();
-    dbg!(&r);
+#[tokio::test]
+async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let refno = RefU64::from_url_refno("24381_178638").unwrap();
+    let name =query_room_info_from_refno(refno,"FRMW",&database).await?.unwrap();
+    let room_name = get_room_name_split(&name).unwrap();
+    dbg!(&room_name);
+    Ok(())
 }

@@ -11,7 +11,7 @@ lazy_static! {
     pub static ref PDMS_ATT_MAP_CACHE: CacheMgr<AttrMap>  = CacheMgr::new("ATTR_MAP_CACHE", true);
     pub static ref PDMS_ANCESTOR_CACHE: CacheMgr<RefU64Vec>  = CacheMgr::new("ANCESTOR_CACHE",  true);
     pub static ref CACHED_REFNO_BASIC_MAP: CacheMgr<CachedRefBasic>  = CacheMgr::new("REFNO_BASIC_CACHE",  false);
-    pub static ref CACHED_MDB_SITE_MAP: CacheMgr<PdmsElementVec>  = CacheMgr::new("MDB_SITE_CACHE",  true);
+    pub static ref CACHED_MDB_SITE_MAP: CacheMgr<PdmsElementVec>  = CacheMgr::new("MDB_SITE_CACHE", false);
     pub static ref CACHED_SCOM_INFO_MAP: CacheMgr<ScomInfo>  = CacheMgr::new("SCOM_INFO_CACHE",  true);
 }
 

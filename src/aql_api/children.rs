@@ -142,6 +142,19 @@ pub async fn query_ancestor_till_type_aql(arango_database: &Database, refno: Ref
     Ok(Some(r))
 }
 
+/// 向上遍历父节点，到某个类型停止，返回该类型的 name
+pub async fn query_ancestor_name_of_type_aql(arango_database: &Database, refno: RefU64, att_type: &str) -> anyhow::Result<Option<String>> {
+    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let aql = AqlQuery::new("
+    for o in 1..10 outbound @id pdms_edges
+        Filter o.noun == @noun
+        return o.name")
+        .bind_var("id", refno_aql)
+        .bind_var("noun", att_type);
+    let mut result: Vec<String> = arango_database.aql_query(aql).await?;
+    if result.is_empty() { return Ok(None) }
+    Ok(Some(result.remove(0)))
+}
 
 /// 遍历refno获取所有子节点的PdmsElement
 pub async fn query_travel_children_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
