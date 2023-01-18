@@ -51,8 +51,8 @@ pub async fn query_virtual_hole_value(refnos: Vec<RefU64>) -> anyhow::Result<Opt
             'substype':a.substype,
             'time':a.time,
             'workby':a.workby,
-}
-")
+        }
+        ")
             .bind_var("collection", "hole_data")
             .bind_var("refno", refno.to_url_refno());
         hole.append(&mut database.aql_query(aql).await?);
@@ -64,34 +64,34 @@ pub async fn query_virtual_hole_value(refnos: Vec<RefU64>) -> anyhow::Result<Opt
         let aql = AqlQuery::new("
         let a =  document(@collection,@refno)
         return {
-             '_key':a._key,
-             'intelld':a. intelld,
-             'code':a.code,
-             'relyitem':a.relyitem,
-             'relyitemref':a.relyitemref,
-             'mainitem':a.mainitem,
-             'speciality':a.speciality,
-             'position':a.position,
-             'ori':a.ori,
-             'work':a.work,
-             'workby':a.workby,
-             'time':a.time,
-             'standertype':a.standertype,
-             'openitem':a.openitem,
-             'holework':a.holework,
-             'sizelength':a.sizelength,
-             'sizewidth':a.sizewidth,
-             'sizethickness':a.sizethickness,
-             'minthickness':a.minthickness,
-             'load': a.load,
-             'mindistance':a.mindistance,
-             'subsmeterial':a.subsmeterial,
-             'fittid':a.fittid,
-             '_ref':a._ref,
-             'shape':a.shape,
-             'note':a.note
-}
-")
+            '_key':a._key,
+            'intelld':a. intelld,
+            'code':a.code,
+            'relyitem':a.relyitem,
+            'relyitemref':a.relyitemref,
+            'mainitem':a.mainitem,
+            'speciality':a.speciality,
+            'position':a.position,
+            'ori':a.ori,
+            'work':a.work,
+            'workby':a.workby,
+            'time':a.time,
+            'standertype':a.standertype,
+            'openitem':a.openitem,
+            'holework':a.holework,
+            'sizelength':a.sizelength,
+            'sizewidth':a.sizewidth,
+            'sizethickness':a.sizethickness,
+            'minthickness':a.minthickness,
+            'load': a.load,
+            'mindistance':a.mindistance,
+            'subsmeterial':a.subsmeterial,
+            'fittid':a.fittid,
+            '_ref':a._ref,
+            'shape':a.shape,
+            'note':a.note
+        }
+        ")
             .bind_var("collection", "embed_data")
             .bind_var("refno", refno.to_url_refno());
         embed.append(&mut database.aql_query(aql).await?);

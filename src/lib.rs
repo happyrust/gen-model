@@ -38,6 +38,7 @@ pub mod mdb;
 pub mod data_to_excel;
 pub mod pcf;
 pub mod metadata;
+pub mod data_center_api;
 
 
 #[macro_use]

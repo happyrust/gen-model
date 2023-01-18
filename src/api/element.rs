@@ -740,3 +740,13 @@ async fn test_query_project_dbno_info() -> anyhow::Result<()> {
     dbg!(&result);
     Ok(())
 }
+
+#[tokio::test]
+async fn test_query_world_children_eles() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
+    let result = query_world_children_eles("ALL","DESI", &pool).await?;
+    dbg!(&result);
+    Ok(())
+}
