@@ -12,7 +12,7 @@ pub async fn query_dbtype_from_dbno(dbno: i32, pool: &Pool<MySql>, project: &str
     return match result {
         Ok(v) => { Ok(Some(v.get::<String, _>(0))) }
         Err(_) => {
-            dbg!(&sql);
+            // dbg!(&sql);
             Ok(None)
         }
     };

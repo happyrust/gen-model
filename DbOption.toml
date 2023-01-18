@@ -1,20 +1,22 @@
 total_sync = false
 incr_sync = false
 project_path = "D:/AVEVA/Projects/E3D2.1" #TestCatalogue
-included_projects = ["AvevaCatalogue","AvevaMarineSample","AvevaPlantSample","SCB","ZDJ"]   #
-#,,,
+included_projects = ["AvevaCatalogue","AvevaMarineSample","AvevaPlantSample","SCB","ZDJ"]   #,,,,
+#
 mdb_name = "ALL"
 #mdb_name = "ALLMAS"cargo run
 project_name = "AvevaMarineSample"
 module = "DESI"
 #manual_db_nums = [7200]
-gen_model_mesh = true
-save_model_mesh_to_graph_db = true
+
+gen_model_mesh = false
+save_model_mesh_to_graph_db = false
+
 gen_spatial_tree = false
 gen_model_batch_size = 100
 debug_print_world_transform = false
 arangodb_database = "ams"
-replace_mesh = true
+replace_mesh = false
 only_rebuild_pdms_element = false
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_arangodb = false

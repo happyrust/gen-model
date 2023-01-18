@@ -12,6 +12,7 @@ pub mod pdms_mesh;
 pub mod pdms_room;
 pub mod tubi;
 pub mod virtual_hole_value;
+pub mod atta_pos;
 
 /// 存放在图数据库的attr
 #[derive(Debug, Default, Serialize, Deserialize)]
