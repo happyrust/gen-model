@@ -1,17 +1,18 @@
 use aios_core::pdms_types::RefU64;
 use arangors_lite::AqlQuery;
 use config::{Config, ConfigError, Environment, File};
+use arangors_lite::Database;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::graph_db::structs::{VirtualEmbedGraphNode, VirtualHoleGraphNode};
 use crate::options::DbOption;
 
 
-pub async fn query_virtual_hole_value(refnos: Vec<RefU64>) -> anyhow::Result<Option<(Vec<VirtualHoleGraphNode>, Vec<VirtualEmbedGraphNode>)>> {
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+pub async fn query_virtual_hole_value(database: &Database, refnos: Vec<RefU64>) -> anyhow::Result<Option<(Vec<VirtualHoleGraphNode>, Vec<VirtualEmbedGraphNode>)>> {
+    // let s = Config::builder()
+    //     .add_source(File::with_name("DbOption"))
+    //     .build()?;
+    // let db_option: DbOption = s.try_deserialize().unwrap();
+    // let database = get_arangodb_conn_from_db_option(&db_option).await?;
 
     let mut hole: Vec<VirtualHoleGraphNode> = Vec::new();
     for refno in &refnos {

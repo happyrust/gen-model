@@ -43,24 +43,3 @@ async fn test_query_para_from_desi_refno() -> anyhow::Result<()> {
     Ok(())
 }
 
-
-#[tokio::test]
-async fn test() -> anyhow::Result<()> {
-    let mut refnos = Vec::new();
-    refnos.push(RefU64::from_refno_str("24383/46246").unwrap());
-    refnos.push(RefU64::from_refno_str("24383/380").unwrap());
-    let result = query_virtual_hole_value(refnos).await?;
-    dbg!(&result.unwrap());
-    Ok(())
-}
-
-
-#[tokio::test]
-async fn insert_virtual_hole_test() -> anyhow::Result<()> {
-    let mut refnos = Vec::new();
-    refnos.push(RefU64::from_refno_str("24383/46246").unwrap());
-    refnos.push(RefU64::from_refno_str("24383/380").unwrap());
-    let result = query_virtual_hole_value(refnos).await?;
-    dbg!(&result.unwrap());
-    Ok(())
-}

@@ -1,4 +1,4 @@
-total_sync = false
+total_sync = true
 incr_sync = false
 project_path = "D:/AVEVA/Projects/E3D2.1" #TestCatalogue
 included_projects = ["AvevaCatalogue","AvevaMarineSample","AvevaPlantSample","SCB","ZDJ"]   #,,,,

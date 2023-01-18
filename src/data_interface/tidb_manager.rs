@@ -427,7 +427,7 @@ impl PdmsDataInterface for AiosDBManager {
                 quat = quat_v.unwrap();
             } else {
                 let extru_dir: Vec3 = if let Some(poss) = att.get_poss() &&
-                let Some(pose) = att.get_pose()
+                    let Some(pose) = att.get_pose()
                 {
                     need_bangle = true;
                     (pose - poss).normalize()
@@ -727,7 +727,7 @@ impl AiosDBManager {
                     // let project = self.get_project_name(db_refno).unwrap_or_default();
                     // dbg!(&project);
                     if let Some((project, pool)) = self.get_project_pool_by_refno(db_refno).await {
-                        if let Ok(att) = self.get_implicit_attr(db_refno,Some(vec!["NUMBDB"])).await {
+                        if let Ok(att) = self.get_implicit_attr(db_refno, Some(vec!["NUMBDB"])).await {
                             let dbno = att.get_i32("NUMBDB").unwrap_or_default();
                             if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool, &project).await? {
                                 if let Some(world_refno) = query_world_refno_by_dbno(dbno, &pool).await? {
@@ -1808,7 +1808,7 @@ impl AiosDBManager {
                 let dbs = dbs.refu64_vec_value().unwrap();
                 for refno in dbs {
                     // let att = self.get_attr(refno).await?;
-                    let att = self.get_implicit_attr(refno,Some(vec!["NUMBDB"])).await?;
+                    let att = self.get_implicit_attr(refno, Some(vec!["NUMBDB"])).await?;
                     if let Some((project, _)) = self.get_project_pool_by_refno(refno).await {
                         if mdb == RefU64::from_refno_str("24575/2178").unwrap() {
                             dbg!(refno);
