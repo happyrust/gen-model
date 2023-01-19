@@ -7,8 +7,14 @@ use std::sync::Arc;
 use glam::Vec3;
 
 
+
+#[tokio::test]
+pub async fn test_() -> anyhow::Result<()> {
+
+    Ok(())
+}
+
 pub async fn get_atta_pos(brans: Vec<(RefU64,f32)>,mgr:Arc<AiosDBManager>) -> Vec<Vec<Vec3>> {
-    // let mut mgr = AiosDBManager::init_form_config().await;
     let database = mgr.get_arangodb_conn().await.unwrap().clone();
     let mut atta_pos_vec = Vec::new();
     for bran in brans {
@@ -49,19 +55,17 @@ pub async fn get_atta_pos(brans: Vec<(RefU64,f32)>,mgr:Arc<AiosDBManager>) -> Ve
             atta_vec.push(pos);
             dis = dis - 500.0;
         }
-        // let interval = 5000.0;
         while index < (pos_vec.len() - 2) || dis >= bran.1 {
             if dis >= bran.1 {
                 dis -= bran.1;
                 let pos = atta_pos(pos_vec[index], pos_vec[index + 1], bran.1);
-                pos_vec.push(pos);
+                atta_vec.push(pos);
             } else {
                 index += 1;
                 dis += dis_vec[index];
             }
         }
-        dbg!(&pos_vec);
-        atta_pos_vec.push(pos_vec);
+        atta_pos_vec.push(atta_vec);
     }
     return atta_pos_vec;
 }
