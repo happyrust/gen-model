@@ -52,7 +52,7 @@ async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager,position:Ve
         let instance = query_rvm_instance_data_from_refno_aql(refno,database).await?;
         if instance.is_none() { continue; }
         let instance = instance.unwrap();
-        data.append(&mut gen_prim_data(instance,ShapeTypeData::Box(460.0,460.0,460.0)));
+        data.append(&mut gen_prim_data(instance,ShapeTypeData::Box([460.0,460.0,460.0])));
         data.append(&mut gen_cnte_data());
     }
     Ok(data)

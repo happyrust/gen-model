@@ -7,21 +7,25 @@ use crate::graph_db::pdms_inst_arango::query_rvm_instance_data_from_refno_aql;
 
 #[derive(Debug)]
 pub enum ShapeTypeData {
-    Pyramid,
+    // 0: bottom width, 1: bottom length , 2:top width, 3:top length , 6: height
+    Pyramid([f32; 7]),
     // 长 宽 高
     Box([f32; 3]),
-    RectangularTorus,
-    // 0:弧长, 1: radius
+    // 0:弧长半径, 1:矩形的宽, 2: 矩形的长 3: 角度: π/n
+    RectangularTorus([f32;4]),
+    // 0:弧长半径, 1: 圆半径 2: 角度: π/n
     CircularTorus([f32; 3]),
-    EllipticalDish,
+    // 0:radius 1: height
+    EllipticalDish([f32;2]),
     // 半径 高
     SphericalDish([f32; 2]),
-    // 0: bottom radius 1 : top radius 2: height
+    // 0: bottom radius 1 : top radius 2: height 3-5 : x offset position 6-8: y offset position
     Snout([f32; 9]),
     // 半径 高
     Cylinder([f32; 2]),
     Sphere,
-    Line,
+    // 0: 1: 长度(mm)
+    Line([f32;2]),
     FacetGroup,
 }
 
@@ -29,24 +33,37 @@ impl ShapeTypeData {
     /// 获得 ShapeType在 Prim种代表的数字
     pub fn get_shape_number(&self) -> u8 {
         match self {
-            ShapeTypeData::Pyramid => 1,
+            ShapeTypeData::Pyramid(_) => 1,
             ShapeTypeData::Box(_) => 2,
-            ShapeTypeData::RectangularTorus => 3,
+            ShapeTypeData::RectangularTorus(_) => 3,
             ShapeTypeData::CircularTorus(_) => 4,
-            ShapeTypeData::EllipticalDish => 5,
+            ShapeTypeData::EllipticalDish(_) => 5,
             ShapeTypeData::SphericalDish(_) => 6,
             ShapeTypeData::Snout(_) => 7,
             ShapeTypeData::Cylinder(_) => 8,
             ShapeTypeData::Sphere => 9,
-            ShapeTypeData::Line => 10,
+            ShapeTypeData::Line(_) => 10,
             ShapeTypeData::FacetGroup => 11,
         }
     }
     pub fn convert_shape_type_to_bytes(&self) -> Vec<u8> {
         let mut data = vec![];
         match &self {
-            ShapeTypeData::Box(arr) => {
-                data.append(&mut format!("     {:.7}     {:.7}     {:.7}\r\n", arr[0], arr[1], arr[2]).into_bytes());
+            ShapeTypeData::Pyramid(array) => {
+                data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", array[0], array[1], array[2], array[3]).into_bytes());
+                data.append(&mut format!("     {:.7}     {:.7}     {:.7}\r\n", array[4], array[5], array[6]).into_bytes());
+            }
+            ShapeTypeData::Box(array) => {
+                data.append(&mut format!("     {:.7}     {:.7}     {:.7}\r\n", array[0], array[1], array[2]).into_bytes());
+            }
+            ShapeTypeData::RectangularTorus(array) => {
+                data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", array[0], array[1], array[2],array[3]).into_bytes());
+            }
+            ShapeTypeData::CircularTorus(array) => {
+                data.append(&mut format!("     {:.7}     {:.7}     {:.7}\r\n", array[0], array[1], array[2]).into_bytes());
+            }
+            ShapeTypeData::EllipticalDish(array) => {
+                data.append(&mut format!("     {:.7}     {:.7}\r\n", array[0], array[1]).into_bytes());
             }
             ShapeTypeData::SphericalDish(arr) => {
                 data.append(&mut format!("     {:.7}     {:.7}\r\n", arr[0], arr[1]).into_bytes());
@@ -55,7 +72,10 @@ impl ShapeTypeData {
                 data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}     {:.7}\r\n", array[0], array[1], array[2], array[3], array[4]).into_bytes());
                 data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", array[5], array[6], array[7], array[8]).into_bytes());
             }
-            ShapeTypeData::Cylinder(arr) => {
+            ShapeTypeData::Cylinder(array) => {
+                data.append(&mut format!("     {:.7}     {:.7}\r\n", array[0], array[1]).into_bytes());
+            }
+            ShapeTypeData::Line(arr) => {
                 data.append(&mut format!("     {:.7}     {:.7}\r\n", arr[0], arr[1]).into_bytes());
             }
             _ => {}

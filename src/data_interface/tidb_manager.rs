@@ -21,6 +21,7 @@ use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
 use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdgeAql};
 use aios_core::prim_geo::wire::CurveType;
+use aios_core::rvm_types::GeomsInfoAql;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
 use aios_core::tool::db_tool::db1_hash;
 use aios_core::tool::math_tool;
@@ -790,7 +791,7 @@ impl AiosDBManager {
     pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64,
                                        brep_shape_map: &CateBrepShapeMap,
                                        refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
-                                       debug_refno: Option<RefU64>,
+                                       debug_refno: Option<RefU64>,geo_infos: &mut Arc<DashMap<RefU64,GeomsInfoAql>>
     ) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
         if is_debug && design_refno != debug_refno.unwrap() {
@@ -804,6 +805,10 @@ impl AiosDBManager {
         }
         let desi_att = mgr.get_attr(design_refno).await?;
         let geoms = resolve_desi_comp(design_refno, None, mgr.as_ref(), is_debug).await.unwrap_or_default();
+        geo_infos.entry(design_refno).or_insert(GeomsInfoAql{
+            _key: design_refno.to_url_refno(),
+            geometries:geoms.geometries.clone(),
+        });
         if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" {
             create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref()).await?;
         } else {
@@ -825,7 +830,8 @@ impl AiosDBManager {
     ///获得branch的模型数据
     async fn get_cata_auto_tubi_geoms(mgr: Arc<AiosDBManager>, branch_refno: RefU64, group_att: &AttrMap,
                                       brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
-                                      debug_refno: Option<RefU64>, tubi_result: &mut Arc<DashMap<u64, TubiEdgeAql>>) -> anyhow::Result<bool> {
+                                      debug_refno: Option<RefU64>, tubi_result: &mut Arc<DashMap<u64, TubiEdgeAql>>,
+                                      geo_infos: &mut Arc<DashMap<RefU64,GeomsInfoAql>>) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
         let group_transform = mgr.get_world_transform(branch_refno).await?.unwrap_or_default();
         let htube_pt = group_transform.transform_point(group_att.get_vec3("HPOS")
@@ -847,6 +853,10 @@ impl AiosDBManager {
             href_type = h_att.get_type().to_string();
             let h_cat_ref = h_att.get_foreign_refno("CATR").unwrap_or_default();
             let tubi_geoms_info = resolve_desi_comp(branch_refno, Some(h_cat_ref), mgr.as_ref(), is_debug).await.unwrap_or_default();
+            geo_infos.entry(branch_refno).or_insert(GeomsInfoAql{
+                _key: branch_refno.to_url_refno(),
+                geometries:tubi_geoms_info.geometries.clone(),
+            });
             let mut has_tube_geom = false;
             for tubi_geom in &tubi_geoms_info.geometries {
                 if let TubeImplied(d) = tubi_geom {
@@ -913,6 +923,10 @@ impl AiosDBManager {
                 let first_attr = mgr.get_attr(*first_refno).await?;
                 let geoms = resolve_desi_comp(*first_refno, None, mgr.as_ref(), is_debug).await;
                 if let Ok(geoms) = geoms {
+                    geo_infos.entry(*first_refno).or_insert(GeomsInfoAql{
+                        _key: first_refno.to_url_refno(),
+                        geometries:geoms.geometries.clone(),
+                    });
                     if let Some(arrive) = first_attr.get_i32("ARRI") {
                         if geoms.axis_map.contains_key(&arrive) {
                             let first_world_trans = mgr.get_world_transform(*first_refno).await?.unwrap_or_default();
@@ -978,6 +992,10 @@ impl AiosDBManager {
                     continue;
                 }
                 let mut to_geoms = to_geoms.unwrap();
+                geo_infos.entry(to_refno).or_insert(GeomsInfoAql{
+                    _key: to_refno.to_url_refno(),
+                    geometries:to_geoms.geometries.clone(),
+                });
                 let to_world_trans = mgr.get_world_transform(to_refno).await?.unwrap_or_default();
                 if let Some(arrive) = to_attr.get_i32("ARRI") {
                     if to_geoms.axis_map.contains_key(&arrive) {
@@ -993,6 +1011,10 @@ impl AiosDBManager {
                     if let Ok(lstube_att) = mgr.get_attr(lstube).await {
                         let lstube_cat_refno = lstube_att.get_foreign_refno("CATR").unwrap_or_default();
                         let tubi_geoms_info = resolve_desi_comp(refno, Some(lstube_cat_refno), mgr.as_ref(), is_debug).await.unwrap_or_default();
+                        geo_infos.entry(refno).or_insert(GeomsInfoAql{
+                            _key: refno.to_url_refno(),
+                            geometries:tubi_geoms_info.geometries.clone(),
+                        });
                         let mut has_tube_geom = false;
                         for tubi_geom in &tubi_geoms_info.geometries {
                             if let TubeImplied(d) = tubi_geom {
@@ -1027,6 +1049,10 @@ impl AiosDBManager {
                 let last_attr = mgr.get_attr(*last_refno).await?;
                 let last_geoms = resolve_desi_comp(*last_refno, None, mgr.as_ref(), is_debug).await;
                 if let Ok(last_geoms) = last_geoms {
+                    geo_infos.entry(*last_refno).or_insert(GeomsInfoAql{
+                        _key: last_refno.to_url_refno(),
+                        geometries:last_geoms.geometries.clone(),
+                    });
                     let last_world_trans = mgr.get_world_transform(*last_refno).await?.unwrap_or_default();
                     if let Some(leave) = last_attr.get_i32("LEAV") {
                         if last_geoms.axis_map.contains_key(&leave) {
@@ -1129,6 +1155,7 @@ impl AiosDBManager {
                 geometries,
                 axis_map
             } = geoms;
+
             for (i, geom) in geometries.into_iter().enumerate() {
                 if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
                     brep_shape_map.entry(refno).or_insert(Vec::new()).push(cate_shape);
@@ -1258,6 +1285,7 @@ impl AiosDBManager {
         let all_refnos = Arc::new(has_cata_refnos);
         let processed_cnt = Arc::new(Mutex::new(has_cata_cnt));
         let mut tubi_result = Arc::new(DashMap::new());
+        let mut geo_infos = Arc::new(DashMap::new());
         let replace_mesh = db_option.replace_mesh;
         for i in 0..batch_chunks_cnt as usize {
             let mgr = mgr.clone();
@@ -1265,6 +1293,7 @@ impl AiosDBManager {
             let all_refnos = all_refnos.clone();
             let processed_cnt = processed_cnt.clone();
             let mut tubi_result_clone = tubi_result.clone();
+            let mut geo_infos_clone = geo_infos.clone();
             let handle = tokio::spawn(async move {
                 let start_idx = i * batch_size;
                 let mut end_idx = start_idx + batch_size;
@@ -1286,10 +1315,10 @@ impl AiosDBManager {
                     let cur_type = current_att.get_type();
                     if cur_type == "BRAN" || cur_type == "HANG" {
                         Self::get_cata_auto_tubi_geoms(mgr.clone(), refno, &current_att, &brep_shapes_map,
-                                                       &refno_ptset_map, target_debug_refno, &mut tubi_result_clone).await.unwrap_or_default();
+                                                       &refno_ptset_map, target_debug_refno, &mut tubi_result_clone,&mut geo_infos_clone).await.unwrap_or_default();
                     } else {
                         Self::get_cata_single_geoms(mgr.clone(), refno, &brep_shapes_map,
-                                                    &refno_ptset_map, target_debug_refno).await.unwrap_or_default();
+                                                    &refno_ptset_map, target_debug_refno,&mut geo_infos_clone).await.unwrap_or_default();
                     }
                     for (child_refno, shapes) in brep_shapes_map {
                         let trans_origin = mgr.get_world_transform(child_refno).await.unwrap_or_default().unwrap_or_default();
@@ -1350,7 +1379,6 @@ impl AiosDBManager {
                                 ele_aabb.merge(&transformed_aabb);
                             }
 
-
                             //tubi 需要特殊处理
                             let geom_inst = EleGeoInstance {
                                 geo_hash,
@@ -1387,12 +1415,22 @@ impl AiosDBManager {
             }
         }
         futures::future::join_all(take(&mut handles)).await;
+
+        dbg!("模型生成完毕,正在保存到数据库");
         let tubi_result = Arc::try_unwrap(tubi_result).unwrap()
             .into_iter().map(|x| x.1).collect::<Vec<_>>();
         if !tubi_result.is_empty() {
             let conn = mgr.get_arangodb_conn().await.unwrap();
             let json = serde_json::to_value(tubi_result).unwrap_or_default();
             save_arangodb_with_database(json, "tubi_edges", &conn).await.unwrap();
+        }
+
+        let geo_infos = Arc::try_unwrap(geo_infos).unwrap()
+            .into_iter().filter(|x| !x.1.geometries.is_empty()).map(|x| x.1).collect::<Vec<_>>();
+        if !geo_infos.is_empty() {
+            let conn = mgr.get_arangodb_conn().await.unwrap();
+            let json = serde_json::to_value(&geo_infos).unwrap_or_default();
+            save_arangodb_with_database(json, "geo_infos", &conn).await.unwrap();
         }
         dbg!(instance_mgr.inst_mgr.len());
         println!("处理元件库几何体: {} 花费时间: {} ms", has_cata_cnt, t.elapsed().as_millis());
