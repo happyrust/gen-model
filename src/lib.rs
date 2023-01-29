@@ -37,6 +37,7 @@ pub mod admin;
 pub mod mdb;
 pub mod data_to_excel;
 pub mod pcf;
+pub mod rvm;
 pub mod metadata;
 pub mod data_center_api;
 

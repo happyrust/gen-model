@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::mem::take;
+use std::ops::Mul;
 use std::sync::Arc;
 use std::time::Instant;
 
 use aios_core::pdms_types::{EleGeoInstance, EleGeosInfo, PdmsElement, PdmsMeshInstanceMgr, RefU64};
 use anyhow::anyhow;
 use arangors_lite::{AqlQuery, Connection, Database};
+use bevy::prelude::{dbg, Transform};
 use futures::future::ok;
+use glam::{Quat, Vec3, Vec4};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
@@ -20,7 +23,7 @@ use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode, PdmsInstanceGraphEdge};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
-
+use aios_core::rvm_types::RvmGeoInfo;
 
 // todo 改成多线程
 pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &PdmsMeshInstanceMgr) -> anyhow::Result<()> {
@@ -115,4 +118,34 @@ pub async fn query_instance_level_with_ssc_refno_in_arangodb(refno: RefU64, data
     if result.is_empty() { return Ok(vec![]); }
     let result = convert_refno_vec_from_vec_string(result);
     Ok(result)
+}
+
+pub async fn query_rvm_instance_data_from_refno_aql(refno: RefU64, database: &Database) -> anyhow::Result<Option<RvmGeoInfo>> {
+    let refno_aql = refno.to_url_refno();
+    let aql = AqlQuery::new("
+    let r = document('pdms_instances',@key)
+    return {
+        '_key':r._key,
+        'aabb':r.aabb,
+        'world_transform':r.world_transform
+    }").bind_var("key", refno_aql);
+    let mut result: Vec<RvmGeoInfo> = database.aql_query(aql).await?;
+    if result.is_empty() { return Ok(None); }
+    Ok(Some(result.remove(0)))
+}
+
+#[test]
+fn test_get_matrix() {
+    let world_transform = bevy::prelude::Transform {
+        translation: Vec3::from([2950., 7370., 3105.]),
+        rotation: Quat::from_xyzw(0.0, 0.0, 0.0, 1.0),
+        scale: Vec3::from([1.0, 1.0, 1.0]),
+    };
+    let inverse = world_transform.compute_matrix().inverse();
+    let min = Vec3::from([2720.0, 7220.0, 2790.0]);
+    let max = Vec3::from([3180.0, 7520.0, 3420.0]);
+    let min_bbox = inverse.transform_point3(min);
+    let max_bbox = inverse.transform_point3(max);
+    dbg!(&min_bbox);
+    dbg!(&max_bbox);
 }

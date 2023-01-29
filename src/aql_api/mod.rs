@@ -22,7 +22,7 @@ pub struct PdmsPLINAttrAql {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct PdmsRefnoNameAql {
+pub struct PdmsRefnoNameAql {
     pub refno: String,
     pub name: String,
 }

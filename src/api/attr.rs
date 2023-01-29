@@ -238,9 +238,15 @@ pub async fn insert_attr_info(pool: Pool<MySql>) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn query_position_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<Vec3>> {
-    let type_name = query_refno_type(refno, pool).await?;
-    let sql = gen_position_from_id(refno, &type_name);
+pub async fn query_position_from_id(refno: RefU64,aios_mgr:&AiosDBManager) -> anyhow::Result<Option<Vec3>> {
+    // let type_name = query_refno_type(refno, pool).await?;
+    let table_name = aios_mgr.get_refno_basic(refno);
+    if table_name.is_none() { return Ok(None); }
+    let table_name = table_name.unwrap();
+    let pool = aios_mgr.get_project_pool_by_refno(refno).await;
+    if pool.is_none() { return Ok(None); }
+    let (_,pool) = pool.unwrap();
+    let sql = gen_position_from_id(refno, &table_name.value().table);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
         Ok(v) => {
@@ -382,16 +388,6 @@ async fn test_query_foreign_refno() -> anyhow::Result<()> {
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
     let refno: RefU64 = RefI32Tuple((23584, 121)).into();
     let v = query_foreign_refno(refno, "catr", &pool).await?;
-    println!("v={:?}", v);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_query_position_refno() -> anyhow::Result<()> {
-    let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let refno: RefU64 = RefI32Tuple((23584, 11)).into();
-    let v = query_position_from_id(refno, &pool).await?;
     println!("v={:?}", v);
     Ok(())
 }
