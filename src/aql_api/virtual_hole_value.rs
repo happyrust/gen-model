@@ -1,9 +1,9 @@
 use aios_core::pdms_types::RefU64;
+use aios_core::structs::{VirtualEmbedGraphNode, VirtualHoleGraphNode};
 use arangors_lite::AqlQuery;
 use config::{Config, ConfigError, Environment, File};
 use arangors_lite::Database;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
-use crate::graph_db::structs::{VirtualEmbedGraphNode, VirtualHoleGraphNode};
 use crate::options::DbOption;
 
 
@@ -58,8 +58,6 @@ pub async fn query_virtual_hole_value(database: &Database, refnos: Vec<RefU64>) 
             .bind_var("refno", refno.to_url_refno());
         hole.append(&mut database.aql_query(aql).await?);
     }
-
-
     let mut embed: Vec<VirtualEmbedGraphNode> = Vec::new();
     for refno in &refnos {
         let aql = AqlQuery::new("
