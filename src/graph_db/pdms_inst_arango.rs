@@ -9,7 +9,7 @@ use anyhow::anyhow;
 use arangors_lite::{AqlQuery, Connection, Database};
 use bevy::prelude::{dbg, Transform};
 use futures::future::ok;
-use glam::{Quat, Vec3, Vec4};
+use glam::{Mat3, Quat, Vec3, Vec4};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
@@ -137,8 +137,8 @@ pub async fn query_rvm_instance_data_from_refno_aql(refno: RefU64, database: &Da
 #[test]
 fn test_get_matrix() {
     let world_transform = bevy::prelude::Transform {
-        translation: Vec3::from([2950., 7370., 3105.]),
-        rotation: Quat::from_xyzw(0.0, 0.0, 0.0, 1.0),
+        translation: Vec3::from([12490., 12280., 2835.0]),
+        rotation: Quat::from_array([0.7071067690849304, 0., 0., -0.7071067690849304]),
         scale: Vec3::from([1.0, 1.0, 1.0]),
     };
     let inverse = world_transform.compute_matrix().inverse();
@@ -146,6 +146,23 @@ fn test_get_matrix() {
     let max = Vec3::from([3180.0, 7520.0, 3420.0]);
     let min_bbox = inverse.transform_point3(min);
     let max_bbox = inverse.transform_point3(max);
+    let rotation = Mat3::from_quat(world_transform.rotation);
+
+    let x_axis = rotation.x_axis * world_transform.scale.x;
+    let y_axis = rotation.y_axis * world_transform.scale.y;
+    let z_axis = rotation.z_axis * world_transform.scale.z;
+
+    // let x_axis = world_transform.scale.x * rotation.x_axis;
+    // let y_axis = world_transform.scale.y * rotation.y_axis;
+    // let z_axis = world_transform.scale.z * rotation.z_axis;
+    // let scale = Mat3::from_diagonal(world_transform.scale);
+    // let arrays = rotation * scale;
+    //
+    // dbg!(arrays);
+    dbg!(&x_axis);
+    dbg!(&y_axis);
+    dbg!(&z_axis);
+
     dbg!(&min_bbox);
     dbg!(&max_bbox);
 }

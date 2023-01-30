@@ -40,7 +40,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             if spre.contains_attr_name("CATR") {
                 scom_ref = spre.get_foreign_refno("CATR");
             } else {
-                //SFIT 的scom 和 spre 是同一个
+                // SFIT 的 scom 和 spre 是同一个
                 scom_ref = Some(spre_ref);
             }
         }

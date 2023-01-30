@@ -22,7 +22,7 @@ pub struct ProfileGeosPoints {
 }
 
 pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, geom_info: &GeomsInfo,
-                                                       brep_shapes_map: &CateBrepShapeMap, interface: &T) -> anyhow::Result<bool> {
+                                                       brep_shapes_map: &CateBrepShapeMap, interface: &T,mut transforms:&mut Vec<(Quat, Vec3, Vec3)>) -> anyhow::Result<bool> {
     let geoms = &geom_info.geometries;
     // dbg!(geoms.len());
     if geoms.len() == 0 { return Ok(false); }
@@ -59,7 +59,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                         "THRU" => { SpineCurveType::THRU }
                         _ => { SpineCurveType::UNKNOWN }
                     };
-                    paths.push(Spine3D{
+                    paths.push(Spine3D {
                         pt0,
                         pt1,
                         thru_pt: mid_pt,
@@ -70,13 +70,13 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                         radius: att2.get_f32("RAD").unwrap_or_default(),
                     });
                 }
-            }else if refs.len() == 2 {
+            } else if refs.len() == 2 {
                 let att1: AttrMap = interface.get_attr(refs[0]).await?;
                 let att2 = interface.get_attr(refs[1]).await?;
                 let pt0 = att1.get_position().unwrap_or_default();
                 let pt1 = att2.get_position().unwrap_or_default();
                 if att1.get_type() == "POINSP" && att2.get_type() == "POINSP" {
-                    paths.push(Spine3D{
+                    paths.push(Spine3D {
                         pt0,
                         pt1,
                         curve_type: SpineCurveType::LINE,
@@ -95,7 +95,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
     let drne = rot * drne;
     if spine_paths.len() == 0 {
         if let Some(poss) = att.get_poss() &&
-        let Some(pose) = att.get_pose(){
+            let Some(pose) = att.get_pose() {
             height = pose.distance(poss);
             //还原成相对坐标系下的拉升方向
             extrude_dir = rot * ((pose - poss).normalize());
@@ -116,7 +116,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                         plane_normal,
                         extrude_dir,
                         height,
-                        path: SweepPath3D::Line(Line3D{
+                        path: SweepPath3D::Line(Line3D {
                             start: Default::default(),
                             end: pose - poss,
                             is_spine: false,
@@ -132,17 +132,19 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                         shape_err: None,
                         pts: Default::default(),
                     });
+                    let identity = Transform::IDENTITY;
+                    transforms.push((identity.rotation,identity.translation,identity.scale));
                 }
             }
         }
-    }else{
+    } else {
         for spine in spine_paths {
             for (i, geom) in geoms.iter().enumerate() {
                 if let CateGeoParam::Profile(profile) = geom {
                     if let CateProfileParam::SPRO(spro) = profile {
                         plane_normal = spro.normal_axis.normalize();
                     }
-                    if let CateProfileParam::SANN (s) = profile{
+                    if let CateProfileParam::SANN(s) = profile {
                         plane_normal = s.paxis.as_ref().map(|x| x.dir).unwrap_or(Vec3::Y);
                     }
                     // dbg!(&spine);
@@ -163,6 +165,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                             height: 0.0,
                             path,
                         };
+                        transforms.push((transform.rotation,transform.translation,transform.scale));
                         brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
                             refno,
                             brep_shape: Box::new(loft),
@@ -173,7 +176,6 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                             pts: Default::default(),
                         });
                     }
-
                 }
                 // break;
             }

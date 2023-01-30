@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::Write;
 use chrono::{Datelike, DateTime, Local, Timelike};
 use crate::options::DbOption;
+use crate::rvm::data_api::{gen_cnte_data, gen_end_data};
 
 /// 生成 rvm 头部信息
 pub fn create_head_data(db_option:&DbOption) -> Vec<u8> {
@@ -12,6 +13,16 @@ pub fn create_head_data(db_option:&DbOption) -> Vec<u8> {
     data.append(&mut create_head_time_data());
     data.append(&mut create_computer_user_data());
     data.append(&mut create_project_info_data(project_name,mdb_name));
+    data
+}
+
+// 在文件末尾将 ancestor 得 cntb 数量对齐
+pub fn create_tail_data(cntb_count:usize) -> Vec<u8> {
+    let mut data = vec![];
+    for i in 0..cntb_count {
+        data.append(&mut gen_cnte_data());
+    }
+    data.append(&mut gen_end_data());
     data
 }
 
@@ -28,7 +39,7 @@ fn create_head_time_data() -> Vec<u8> {
 }
 
 fn create_computer_user_data() -> Vec<u8> {
-    "admin@admin/r/nUnicode UTF-8\r\n".to_string().into_bytes()
+    "admin@admin \r\nUnicode UTF-8 \r\n".to_string().into_bytes()
 }
 
 fn create_project_info_data(project_name: &str, mdb: &str) -> Vec<u8> {

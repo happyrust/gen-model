@@ -1,27 +1,46 @@
 use std::io::Write;
 use std::sync::Arc;
+use aios_core::cache::refno::CachedRefBasic;
 use aios_core::pdms_types::RefU64;
 use arangors_lite::Database;
 use glam::Vec3;
 use sqlx::{MySql, Pool};
-use crate::api::attr::query_position_from_id;
+use crate::api::attr::{query_implicit_attr, query_position_from_id};
 use crate::api::element::query_children_eles;
 use crate::aql_api::children::{query_ancestor_till_type_aql, query_ancestor_with_name_till_type_aql};
 use crate::aql_api::PdmsRefnoNameAql;
+use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_inst_arango::query_rvm_instance_data_from_refno_aql;
 use crate::rvm::data_api::{gen_cntb_data, gen_cnte_data, gen_name_position_data, gen_prim_data, ShapeTypeData};
+use crate::rvm::head::{create_head_data, create_tail_data};
+
+pub async fn create_rvm_file(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<u8>> {
+    let mut data = vec![];
+    let database = aios_mgr.get_arangodb_conn().await?;
+    let db_option = &aios_mgr.db_option;
+    let ancestor = query_ancestor_with_name_till_type_aql(&database, refno, "SITE").await?;
+    if ancestor.is_empty() { return Ok(data); }
+    let cntb_len = ancestor.len();
+    data.append(&mut create_head_data(db_option));
+    let mut ancestor_data = create_ancestor_data(ancestor, aios_mgr).await.unwrap_or((vec![], Vec3::ZERO));
+    data.append(&mut ancestor_data.0);
+    data.append(&mut create_element_data(refno, aios_mgr, ancestor_data.1, &database).await?);
+    data.append(&mut create_tail_data(cntb_len));
+    Ok(data)
+}
 
 pub async fn create_owner_data(refno: RefU64, aios_mgr: &AiosDBManager, database: &Database) -> anyhow::Result<Vec<u8>> {
     let mut data = vec![];
     let ancestor = query_ancestor_with_name_till_type_aql(database, refno, "SITE").await?;
     if ancestor.is_empty() { return Ok(data); }
-    data.append(&mut create_ancestor_data(ancestor, aios_mgr).await.unwrap_or(vec![]));
-    data.append(&mut create_element_data(refno,aios_mgr,Vec3::ZERO,database).await?);
+    let mut ancestor_data = create_ancestor_data(ancestor, aios_mgr).await.unwrap_or((vec![], Vec3::ZERO));
+    data.append(&mut ancestor_data.0);
+    data.append(&mut create_element_data(refno, aios_mgr, ancestor_data.1, database).await?);
     Ok(data)
 }
 
-async fn create_ancestor_data(ancestor: Vec<PdmsRefnoNameAql>, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<u8>> {
+async fn create_ancestor_data(ancestor: Vec<PdmsRefnoNameAql>, aios_mgr: &AiosDBManager) -> anyhow::Result<(Vec<u8>, Vec3)> {
     let mut data = vec![];
     let mut current_position = Vec3::ZERO;
     for refno_name in ancestor.into_iter().rev() {
@@ -32,11 +51,11 @@ async fn create_ancestor_data(ancestor: Vec<PdmsRefnoNameAql>, aios_mgr: &AiosDB
         current_position = current_position + pos;
         data.append(&mut gen_ancestor_data_str(&refno_name.name, current_position));
     }
-    Ok(data)
+    Ok((data, current_position))
 }
 
 /// position: ancestor到本层级的相对坐标
-async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager,position:Vec3,database:&Database) -> anyhow::Result<Vec<u8>> {
+async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager, position: Vec3, database: &Database) -> anyhow::Result<Vec<u8>> {
     let mut data = vec![];
     let pool = aios_mgr.get_project_pool_by_refno(refno).await;
     if pool.is_none() { return Ok(data); }
@@ -46,22 +65,117 @@ async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager,position:Ve
         let refno = RefU64::from_refno_str(&child.refno);
         if refno.is_err() { continue; }
         let refno = refno.unwrap();
+        let shape_data = convert_shape_type_data(refno, aios_mgr).await?;
+        if shape_data.is_none() { continue; }
+        let shape_data = shape_data.unwrap();
+        let refno = RefU64::from_refno_str(&child.refno);
+        if refno.is_err() { continue; }
+        let refno = refno.unwrap();
         data.append(&mut gen_cntb_data());
-        let pos = query_position_from_id(refno,aios_mgr).await?.unwrap_or(Vec3::ZERO) + position;
-        data.append(&mut gen_name_position_data(&child.name,pos));
-        let instance = query_rvm_instance_data_from_refno_aql(refno,database).await?;
+        let pos = query_position_from_id(refno, aios_mgr).await?.unwrap_or(Vec3::ZERO) + position;
+        data.append(&mut gen_name_position_data(&child.name, pos));
+        let instance = query_rvm_instance_data_from_refno_aql(refno, database).await?;
         if instance.is_none() { continue; }
         let instance = instance.unwrap();
-        data.append(&mut gen_prim_data(instance,ShapeTypeData::Box([460.0,460.0,460.0])));
+        data.append(&mut gen_prim_data(instance, shape_data));
         data.append(&mut gen_cnte_data());
     }
     Ok(data)
 }
 
+pub async fn convert_shape_type_data(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<ShapeTypeData>> {
+    let pool = aios_mgr.get_project_pool_by_refno(refno).await;
+    if pool.is_none() { return Ok(None); }
+    let (_, pool) = pool.unwrap();
+    let cache_basic = aios_mgr.get_refno_basic(refno);
+    if cache_basic.is_none() { return Ok(None); }
+    let cache_basic = cache_basic.unwrap();
+    return match cache_basic.table.to_uppercase().as_str() {
+        "BOX" => { get_box_shape_data(refno, cache_basic.value(), &pool).await }
+        "CYLI" => { get_cylinder_shape_data(refno, cache_basic.value(), &pool).await }
+        "CONE" => { get_cone_shape_data(refno, cache_basic.value(), &pool).await }
+        "DISH" => { get_dish_shape_data(refno, cache_basic.value(), &pool).await }
+        "PYRA" => { get_pyramid_shape_data(refno, cache_basic.value(), &pool).await }
+        _ => { Ok(None) }
+    };
+}
 
+async fn get_box_shape_data(refno: RefU64, cache_basic: &CachedRefBasic, pool: &Pool<MySql>) -> anyhow::Result<Option<ShapeTypeData>> {
+    let attr = query_implicit_attr(refno, cache_basic, pool, Some(vec!["XLEN", "YLEN", "ZLEN"])).await?;
+    let x_length = attr.get_f32("XLEN");
+    let y_length = attr.get_f32("YLEN");
+    let z_length = attr.get_f32("ZLEN");
+    if x_length.is_none() || y_length.is_none() || z_length.is_none() { return Ok(None); }
+    let x_length = x_length.unwrap();
+    let y_length = y_length.unwrap();
+    let z_length = z_length.unwrap();
+    Ok(Some(ShapeTypeData::Box([x_length, y_length, z_length])))
+}
+
+async fn get_cylinder_shape_data(refno: RefU64, cache_basic: &CachedRefBasic, pool: &Pool<MySql>) -> anyhow::Result<Option<ShapeTypeData>> {
+    let attr = query_implicit_attr(refno, cache_basic, pool, Some(vec!["DIAM", "HEIG"])).await?;
+    let diameter = attr.get_f32("DIAM");
+    let height = attr.get_f32("HEIG");
+    if diameter.is_none() || height.is_none() { return Ok(None); }
+    let diameter = (diameter.unwrap() * 50.0).round() / 100.0;
+    let height = height.unwrap();
+    Ok(Some(ShapeTypeData::Cylinder([diameter, height])))
+}
+
+async fn get_cone_shape_data(refno: RefU64, cache_basic: &CachedRefBasic, pool: &Pool<MySql>) -> anyhow::Result<Option<ShapeTypeData>> {
+    let attr = query_implicit_attr(refno, cache_basic, pool, Some(vec!["DTOP", "DBOT", "HEIG"])).await?;
+    let top_radius = attr.get_f32("DTOP");
+    let bottom_radius = attr.get_f32("DBOT");
+    let height = attr.get_f32("HEIG");
+    if top_radius.is_none() || bottom_radius.is_none() || height.is_none() { return Ok(None); }
+    let top_radius = (top_radius.unwrap() * 50.0).round() / 100.0;
+    let bottom_radius = (bottom_radius.unwrap() * 50.0).round() / 100.0;
+    let height = height.unwrap();
+    Ok(Some(ShapeTypeData::Snout([bottom_radius, top_radius, height, 0.0, 0., 0., 0., 0., 0.])))
+}
+
+async fn get_dish_shape_data(refno: RefU64, cache_basic: &CachedRefBasic, pool: &Pool<MySql>) -> anyhow::Result<Option<ShapeTypeData>> {
+    let attr = query_implicit_attr(refno, cache_basic, pool, Some(vec!["DIAM", "HEIG"])).await?;
+    let diameter = attr.get_f32("DIAM");
+    let height = attr.get_f32("HEIG");
+    if diameter.is_none() || height.is_none() { return Ok(None); }
+    let top_radius = (diameter.unwrap() * 50.0).round() / 100.0;
+    let height = (height.unwrap() * 100.0).round() / 100.0;
+    Ok(Some(ShapeTypeData::SphericalDish([top_radius, height])))
+}
+
+async fn get_pyramid_shape_data(refno: RefU64, cache_basic: &CachedRefBasic, pool: &Pool<MySql>) -> anyhow::Result<Option<ShapeTypeData>> {
+    let attr = query_implicit_attr(refno, cache_basic, pool, Some(vec!["XTOP", "YTOP", "XBOT", "YBOT", "HEIG", "XOFF", "YOFF"])).await?;
+    let x_top = attr.get_f32("XTOP");
+    let y_top = attr.get_f32("YTOP");
+    let x_bottom = attr.get_f32("XBOT");
+    let y_bottom = attr.get_f32("YBOT");
+    let x_offset = attr.get_f32("XOFF");
+    let y_offset = attr.get_f32("YOFF");
+    let height = attr.get_f32("HEIG");
+    if x_top.is_none() || y_top.is_none() || x_bottom.is_none() || y_bottom.is_none() || x_offset.is_none() || y_offset.is_none() || height.is_none() { return Ok(None); }
+    let x_top = (x_top.unwrap() * 100.0).round() / 100.0;
+    let y_top = (y_top.unwrap() * 100.0).round() / 100.0;
+    let x_bottom = (x_bottom.unwrap() * 100.0).round() / 100.0;
+    let y_bottom = (y_bottom.unwrap() * 100.0).round() / 100.0;
+    let x_offset = (x_offset.unwrap() * 100.0).round() / 100.0;
+    let y_offset = (y_offset.unwrap() * 100.0).round() / 100.0;
+    let height = (height.unwrap() * 100.0).round() / 100.0;
+    Ok(Some(ShapeTypeData::Pyramid([x_bottom, y_bottom, x_top, y_top, x_offset, y_offset, height])))
+}
 
 fn gen_ancestor_data_str(name: &str, pos: Vec3) -> Vec<u8> {
     format!("CNTB\r\n     1     2\r\n{}\r\n          {:.2}          {:.2}          {:.2}\r\n     1\r\n", name, pos.x, pos.y, pos.z).into_bytes()
+}
+
+#[tokio::test]
+async fn test_create_rvm_file() -> anyhow::Result<()> {
+    let mgr = Arc::new(AiosDBManager::init_form_config().await?);
+    let refno = RefU64::from_refno_str("23584/5417").unwrap();
+    let data = create_rvm_file(refno, &mgr).await?;
+    let mut file = std::fs::File::create("test_rvm.rvm").unwrap();
+    file.write_all(&data).unwrap();
+    Ok(())
 }
 
 #[tokio::test]
