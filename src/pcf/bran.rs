@@ -279,15 +279,3 @@ fn gen_material_head_data() -> Vec<u8> {
 }
 
 fn gen_material_item_code_description(desc: &str) -> Vec<u8> { format!("        DESCRIPTION    {}\r\n", desc).into_bytes() }
-
-#[tokio::test]
-async fn gen_file() -> anyhow::Result<()> {
-    let mut file = std::fs::File::create("test.txt").unwrap();
-    // let data = gen_pcf_file_head();
-    let mgr = AiosDBManager::init_form_config().await?;
-    let refno = RefU64::from_refno_str("23584/5864").unwrap();
-    let thickness_map = get_pipe_thickness_table()?;
-    let data = get_bran_name_and_children(refno, &mgr, &thickness_map).await?;
-    file.write_all(&data).unwrap();
-    Ok(())
-}

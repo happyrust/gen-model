@@ -2,16 +2,23 @@ use std::sync::Arc;
 use aios_core::pdms_types::RefU64;
 use aios_core::prim_geo::tubing::TubiEdgeAql;
 use arangors_lite::{AqlQuery, Database};
+use bevy::prelude::{dbg, unwrap};
 use dashmap::DashMap;
+use glam::Vec3;
+
+
 use smol_str::SmolStr;
 use sqlx::{Executor, MySql, Pool};
 use crate::api::children::travel_children_with_type;
 use crate::api::element::query_name;
 use crate::aql_api::children::query_travel_children_with_type_aql;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
+use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager, TUBI_TOL};
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::options::DbOption;
+use crate::pcf::bran::get_bran_name_and_children;
+use crate::pcf::excel_api::get_pipe_thickness_table;
 
 /// 找到某个节点下所有的 bran 中的 tubi
 pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<(RefU64, String), f32>>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<()> {
@@ -77,6 +84,80 @@ pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &Database) -> an
     });
     Ok(results)
 }
+
+//
+// #[tokio::test]
+// pub async fn test_() -> anyhow::Result<()> {
+//     let mut mgr = AiosDBManager::init_form_config().await;
+//     let database = mgr.as_ref().expect("REASON").get_arangodb_conn().await.unwrap().clone();
+//     let mut pos_vec = Vec::new();
+//     let refno = RefU64::from_refno_str("24381/147719").unwrap();
+//     // 取arrive，leave
+//     let data = query_bran_info(refno, &database).await.unwrap();
+//     //取hpos,取tpos
+//     let len = data.len();
+//     let hpos = data[0].start_pt;
+//     let tpos = data[len - 1].end_pt;
+//     pos_vec.push(hpos);
+//     // 取wrt
+//     for i in data {
+//         //获取转折点坐标
+//         if i.att_type == "ELBO" || i.att_type == "BEND" {
+//             let refno: Vec<&str> = i._to.split("/").collect();
+//             let refno = refno[1];
+//             let result = mgr.as_ref().unwrap().get_world_transform(RefU64::from_url_refno(refno).unwrap()).await.unwrap().unwrap().clone();
+//             pos_vec.push(result.translation);
+//         }
+//     }
+//     pos_vec.push(tpos);
+//     let mut dis_vec = Vec::new();
+// //求每段直段的距离
+//     for i in 0..(pos_vec.len() - 1) {
+//         let dx = pos_vec[i + 1].x - pos_vec[i].x;
+//         let dy = pos_vec[i + 1].y - pos_vec[i].y;
+//         let dz = pos_vec[i + 1].z - pos_vec[i].z;
+//         dis_vec.push((dx.powi(2) + dy.powi(2) + dz.powi(2)).sqrt().round());
+//     }
+//     //第一个ATTA点在500mm处，最后一个ATTA点离TPOS100mm以上，中间每间隔interval设置一个ATTA
+//     let mut atta_vec = Vec::new();
+//     //当前在哪段
+//     let mut index = 0;
+//     let mut dis = dis_vec[index];
+//     let interval = 5500.0;
+//     if dis >= 500.0 {
+//         let pos = atta_pos(pos_vec[index], pos_vec[index + 1], 500.0);
+//         atta_vec.push(pos);
+//         dis = dis - 500.0;
+//     }
+//     while index < (pos_vec.len() - 2) || dis >= interval {
+//         if dis >= interval {
+//             dis -= interval;
+//             let pos = atta_pos(pos_vec[index], pos_vec[index + 1], interval);
+//             pos_vec.push(pos);
+//         } else {
+//             index += 1;
+//             dis += dis_vec[index];
+//         }
+//     }
+//     dbg!(pos_vec);
+//     Ok(())
+// }
+
+// pub fn atta_pos(s_pos: Vec3, e_pos: Vec3, distance: f32) -> Vec3 {
+//     let x1 = s_pos.x;
+//     let y1 = s_pos.y;
+//     let z1 = s_pos.z;
+//     let x2 = e_pos.x;
+//     let y2 = e_pos.y;
+//     let z2 = e_pos.z;
+//     let dx = x2 - x1;
+//     let dy = y2 - y1;
+//     let dz = z2 - z1;
+//     let line_length = ((dx * dx + dy * dy + dz * dz).sqrt());
+//     let ratio = distance / line_length;
+//     return Vec3::new(x1 + ratio * dx, y1 + ratio * dy, z1 + ratio * dz);
+// }
+
 
 /// 获取 bran 所有的 tubi_edge 的信息
 pub async fn query_bran_info(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiEdgeAql>> {

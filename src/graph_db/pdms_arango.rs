@@ -9,6 +9,7 @@ use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use aios_core::pdms_types::{PdmsElement, RefU64, RefU64Vec};
+use aios_core::structs::VirtualEmbedGraphNode;
 use aios_core::tool::db_tool::db1_hash;
 use anyhow::anyhow;
 use arangors_lite::collection::CollectionType;
@@ -25,7 +26,7 @@ use crate::api::project_mdb::query_mdb_contain_numbdb;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{DataDocument, ForeignEdges};
-use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphEdgeWithKey, PdmsEleGraphNode, VirtualEmbedGraphNode, VirtualHoleGraphNode};
+use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphEdgeWithKey, PdmsEleGraphNode};
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
 
