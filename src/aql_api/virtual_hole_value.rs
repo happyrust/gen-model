@@ -1,5 +1,5 @@
+use aios_core::create_attas_structs::{VirtualEmbedGraphNode, VirtualHoleGraphNode};
 use aios_core::pdms_types::RefU64;
-use aios_core::structs::{VirtualEmbedGraphNode, VirtualHoleGraphNode};
 use arangors_lite::AqlQuery;
 use config::{Config, ConfigError, Environment, File};
 use arangors_lite::Database;

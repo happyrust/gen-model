@@ -1,11 +1,10 @@
 use aios_core::pdms_types::RefU64;
-use aios_core::structs::ATTAPosVec;
 use crate::aql_api::tubi::query_bran_info;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use std::sync::Arc;
+use aios_core::create_attas_structs::{ATTAPos, ATTAPosVec};
 use glam::Vec3;
-use aios_core::structs::ATTAPos;
 use bevy::prelude::dbg;
 
 

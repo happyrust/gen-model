@@ -3,7 +3,6 @@ use arangors_lite::{AqlQuery, Connection, Database};
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::virtual_hole_value::query_virtual_hole_value;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
-use aios_core::structs::VirtualHoleGraphNode;
 use crate::options::DbOption;
 
 pub async fn query_para_from_desi_refno(refno: RefU64, database: &Database) -> anyhow::Result<Option<Vec<f64>>> {

@@ -143,26 +143,7 @@ fn gen_prim_scale_position_data(rotation: Quat, scale: Vec3, position: Vec3, sha
     let mut position_x = position.x;
     let mut position_y = position.y;
     let mut position_z = position.z;
-    if let ShapeModule::Cata = shape_module {
-        match shape_type {
-            Cylinder(data) => {
-                let height = data[1];
-                let cylinder_transform = Vec3::from_array([0.0,0.0,height/2.0]);
-                let transform = Transform {
-                    translation: position,
-                    rotation,
-                    scale,
-                };
-                let translation = transform.transform_point(cylinder_transform);
-                position_x = translation.x;
-                position_y = translation.y;
-                position_z = translation.z;
-            }
-            _ => {}
-        }
-    }
 
-    let position = keep_2_decimals_from_vec3(position);
     data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", x_axis.x / 1000.0, y_axis.x / 1000.0, z_axis.x / 1000.0, position_x / 1000.0).into_bytes());
     data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", x_axis.y / 1000.0, y_axis.y / 1000.0, z_axis.y / 1000.0, position_y / 1000.0).into_bytes());
     data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", x_axis.z / 1000.0, y_axis.z / 1000.0, z_axis.z / 1000.0, position_z / 1000.0).into_bytes());
