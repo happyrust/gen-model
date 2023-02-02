@@ -2,11 +2,20 @@ use std::ops::Mul;
 use aios_core::pdms_types::RefU64;
 use aios_core::rvm_types::RvmGeoInfo;
 use arangors_lite::Database;
+use bevy::prelude::Transform;
 use glam::{Mat3, Mat3A, Quat, Vec3};
 use parry3d::bounding_volume::Aabb;
+use regex::Regex;
 use crate::graph_db::pdms_inst_arango::query_rvm_instance_data_from_refno_aql;
+use crate::rvm::data_api::ShapeTypeData::*;
 
-#[derive(Debug)]
+#[derive(Debug,Clone)]
+pub enum ShapeModule {
+    Desi,
+    Cata,
+}
+
+#[derive(Debug, Clone)]
 pub enum ShapeTypeData {
     /// 0: bottom width, 1: bottom length , 2:top width, 3:top length ,4:x offset, 5: y offset, 6: height
     Pyramid([f32; 7]),
@@ -86,14 +95,19 @@ impl ShapeTypeData {
 }
 
 // type_data: prim 最后一列不同 att_type 存放的数据不一样
-pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: ShapeTypeData) -> Vec<u8> {
+pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: ShapeTypeData, shape_module: ShapeModule) -> Vec<u8> {
     let mut data = vec![];
     if rvm_instance.aabb.is_none() { return data; }
     let aabb = rvm_instance.aabb.unwrap();
     data.append(&mut gen_prim_head_data());
     data.append(&mut format!("     {}\r\n", shape_type.get_shape_number()).into_bytes());
-    data.append(&mut gen_prim_scale_position_data(rvm_instance.world_transform.0, rvm_instance.world_transform.2, rvm_instance.world_transform.1));
-    data.append(&mut gen_prim_aabb_data(aabb, rvm_instance.world_transform));
+    data.append(&mut gen_prim_scale_position_data(rvm_instance.world_transform.0, rvm_instance.world_transform.2,
+                                                  rvm_instance.world_transform.1, shape_type.clone(), shape_module.clone()));
+    match shape_module {
+        ShapeModule::Desi => { data.append(&mut gen_desi_prim_aabb_data(aabb, rvm_instance.world_transform)); }
+        ShapeModule::Cata => { data.append(&mut gen_cata_prim_aabb_data(aabb)); }
+    }
+
     data.append(&mut shape_type.convert_shape_type_to_bytes());
     data
 }
@@ -118,20 +132,44 @@ fn gen_prim_head_data() -> Vec<u8> {
     format!("PRIM\r\n     1     1\r\n").into_bytes()
 }
 
-fn gen_prim_scale_position_data(rotation: Quat, scale: Vec3, position: Vec3) -> Vec<u8> {
+fn gen_prim_scale_position_data(rotation: Quat, scale: Vec3, position: Vec3, shape_type: ShapeTypeData, shape_module: ShapeModule) -> Vec<u8> {
     let mut data = Vec::new();
-    let rotation = Mat3::from_quat(rotation);
-    let x_axis = keep_2_decimals_from_vec3(rotation.x_axis * scale.x);
-    let y_axis = keep_2_decimals_from_vec3(rotation.y_axis * scale.y);
-    let z_axis = keep_2_decimals_from_vec3(rotation.z_axis * scale.z);
+    let rotation_mat = Mat3::from_quat(rotation);
+
+    let x_axis = keep_2_decimals_from_vec3(rotation_mat.x_axis * scale.x).normalize();
+    let y_axis = keep_2_decimals_from_vec3(rotation_mat.y_axis * scale.y).normalize();
+    let z_axis = keep_2_decimals_from_vec3(rotation_mat.z_axis * scale.z).normalize();
+
+    let mut position_x = position.x;
+    let mut position_y = position.y;
+    let mut position_z = position.z;
+    if let ShapeModule::Cata = shape_module {
+        match shape_type {
+            Cylinder(data) => {
+                let height = data[1];
+                let cylinder_transform = Vec3::from_array([0.0,0.0,height/2.0]);
+                let transform = Transform {
+                    translation: position,
+                    rotation,
+                    scale,
+                };
+                let translation = transform.transform_point(cylinder_transform);
+                position_x = translation.x;
+                position_y = translation.y;
+                position_z = translation.z;
+            }
+            _ => {}
+        }
+    }
+
     let position = keep_2_decimals_from_vec3(position);
-    data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", x_axis.x / 1000.0, y_axis.x / 1000.0, z_axis.x / 1000.0, position.x / 1000.0).into_bytes());
-    data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", x_axis.y / 1000.0, y_axis.y / 1000.0, z_axis.y / 1000.0, position.y / 1000.0).into_bytes());
-    data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", x_axis.z / 1000.0, y_axis.z / 1000.0, z_axis.z / 1000.0, position.z / 1000.0).into_bytes());
+    data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", x_axis.x / 1000.0, y_axis.x / 1000.0, z_axis.x / 1000.0, position_x / 1000.0).into_bytes());
+    data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", x_axis.y / 1000.0, y_axis.y / 1000.0, z_axis.y / 1000.0, position_y / 1000.0).into_bytes());
+    data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", x_axis.z / 1000.0, y_axis.z / 1000.0, z_axis.z / 1000.0, position_z / 1000.0).into_bytes());
     data
 }
 
-fn gen_prim_aabb_data(aabb: Aabb, world_transform: (Quat, Vec3, Vec3)) -> Vec<u8> {
+fn gen_desi_prim_aabb_data(aabb: Aabb, world_transform: (Quat, Vec3, Vec3)) -> Vec<u8> {
     let transform = bevy::prelude::Transform {
         translation: world_transform.1,
         rotation: world_transform.0,
@@ -148,9 +186,26 @@ fn gen_prim_aabb_data(aabb: Aabb, world_transform: (Quat, Vec3, Vec3)) -> Vec<u8
     data
 }
 
+fn gen_cata_prim_aabb_data(aabb: Aabb) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.append(&mut format!("     {:.2}       {:.2}       {:.2}\r\n", aabb.mins.x, aabb.mins.y, aabb.mins.z).into_bytes());
+    data.append(&mut format!("     {:.2}       {:.2}       {:.2}\r\n", aabb.maxs.x, aabb.maxs.y, aabb.maxs.z).into_bytes());
+    data
+}
+
 fn keep_2_decimals_from_vec3(input: Vec3) -> Vec3 {
     let x = (input.x * 100.0).round() / 100.0;
     let y = (input.y * 100.0).round() / 100.0;
     let z = (input.z * 100.0).round() / 100.0;
     Vec3::from_array([x, y, z])
+}
+
+#[test]
+fn test_str_split() {
+    let regex = Regex::new(r"[0-9]+([.]{1}[0-9]+){0,1}").unwrap();
+    let str = "?0.5";
+    // let result = &str[3..];
+    if let Some(captures) = regex.captures(str) {
+        dbg!(&captures[0]);
+    }
 }

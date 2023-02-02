@@ -120,6 +120,7 @@ pub async fn query_instance_level_with_ssc_refno_in_arangodb(refno: RefU64, data
     Ok(result)
 }
 
+/// 查找基本体得 instance
 pub async fn query_rvm_instance_data_from_refno_aql(refno: RefU64, database: &Database) -> anyhow::Result<Option<RvmGeoInfo>> {
     let refno_aql = refno.to_url_refno();
     let aql = AqlQuery::new("
@@ -127,9 +128,12 @@ pub async fn query_rvm_instance_data_from_refno_aql(refno: RefU64, database: &Da
     return {
         '_key':r._key,
         'aabb':r.aabb,
+        'data':r.data,
         'world_transform':r.world_transform
     }").bind_var("key", refno_aql);
-    let mut result: Vec<RvmGeoInfo> = database.aql_query(aql).await?;
+    let result = database.aql_query::<RvmGeoInfo>(aql).await;
+    if result.is_err() { return Ok(None); }
+    let mut result = result.unwrap();
     if result.is_empty() { return Ok(None); }
     Ok(Some(result.remove(0)))
 }
@@ -139,7 +143,7 @@ fn test_get_matrix() {
     let world_transform = bevy::prelude::Transform {
         translation: Vec3::from([12490., 12280., 2835.0]),
         rotation: Quat::from_array([0.7071067690849304, 0., 0., -0.7071067690849304]),
-        scale: Vec3::from([1.0, 1.0, 1.0]),
+        scale: Vec3::from([114.0, 114.0, 150.0]),
     };
     let inverse = world_transform.compute_matrix().inverse();
     let min = Vec3::from([2720.0, 7220.0, 2790.0]);
@@ -152,17 +156,37 @@ fn test_get_matrix() {
     let y_axis = rotation.y_axis * world_transform.scale.y;
     let z_axis = rotation.z_axis * world_transform.scale.z;
 
-    // let x_axis = world_transform.scale.x * rotation.x_axis;
-    // let y_axis = world_transform.scale.y * rotation.y_axis;
-    // let z_axis = world_transform.scale.z * rotation.z_axis;
-    // let scale = Mat3::from_diagonal(world_transform.scale);
-    // let arrays = rotation * scale;
-    //
-    // dbg!(arrays);
-    dbg!(&x_axis);
-    dbg!(&y_axis);
-    dbg!(&z_axis);
+    dbg!(&x_axis.normalize());
+    dbg!(&y_axis.normalize());
+    dbg!(&z_axis.normalize());
 
     dbg!(&min_bbox);
     dbg!(&max_bbox);
+}
+
+#[test]
+fn test_cata_transform() {
+    let desi_transform = Transform {
+        translation: Vec3::from([0.0, 0.0, 0.0]),
+        rotation: Quat::from_array([0.0, 0.7071067690849304,0.0, -0.7071067690849304]),
+        scale: Vec3::from([381.,381.,41.]),
+    };
+
+    let cata_transform = Transform {
+        translation: Vec3::from([2950.,9200.,2785.]),
+        rotation: Quat::from_array([0.0, 0.7071067690849304,0.0, -0.7071067690849304]),
+        scale: Vec3::from([1.,1.,1.]),
+    };
+
+    let total_transform = cata_transform * desi_transform;
+
+    let rotation = Mat3::from_quat(total_transform.rotation);
+    let scale = total_transform.scale;
+    let x_axis = rotation.x_axis * scale.x;
+    let y_axis = rotation.y_axis * scale.y;
+    let z_axis = rotation.z_axis * scale.z;
+    dbg!(total_transform.translation);
+    dbg!(x_axis);
+    dbg!(y_axis);
+    dbg!(z_axis);
 }

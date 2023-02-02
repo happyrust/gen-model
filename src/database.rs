@@ -401,11 +401,15 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
     let mut uda_map: HashMap<String, AttrMap> = HashMap::new();
     let mut version_map = HashMap::new();
     let only_update_dbinfo = db_option.only_update_dbinfo;
+    let only_sync_sys = db_option.only_sync_sys;
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
         let file_name_clone = Arc::new(file_name.clone());
         if file_name.ends_with("com") || file_name.ends_with("mis") {
             continue;
+        }
+        if only_sync_sys {
+            if !file_name.ends_with("sys") { continue; }
         }
         if need_parsing_files.is_none() || need_parsing_files.as_ref().unwrap().contains(&file_name) {
             println!("path={:?}", &file_name);

@@ -29,8 +29,8 @@ pub struct DbOption {
     pub module: String,
     #[clap(long)]
     pub project_name: String,
-    #[clap(short)]
-    pub main_db_code: u32,
+    // #[clap(short)]
+    // pub main_db_code: u32,
     #[clap(skip)]
     pub manual_db_nums: Option<Vec<i32>>,
 
@@ -65,11 +65,11 @@ pub struct DbOption {
     #[clap(short)]
     pub gen_model_batch_size: usize,
     #[clap(long)]
-    pub arangodb_url:String,
+    pub arangodb_url: String,
     #[clap(long)]
-    pub rebuild_arangodb :bool,
+    pub rebuild_arangodb: bool,
     #[clap(long)]
-    pub server_release_ip :String,
+    pub server_release_ip: String,
     #[clap(long)]
     pub arangodb_user: String,
     #[clap(long)]
@@ -84,4 +84,6 @@ pub struct DbOption {
     pub save_spatial_tree_to_db: bool,
     #[clap(long)]
     pub multi_threads: bool,
+    #[clap(short)]
+    pub only_sync_sys: bool,
 }

@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::Write;
 use std::sync::Arc;
 use aios_core::pdms_types::RefU64;
 use dashmap::DashMap;
@@ -5,7 +7,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
-use crate::api::attr::{query_full_attr};
+use crate::api::attr::{query_full_attr, query_full_attr_with_pool};
 use crate::api::children::query_ancestor_of_type;
 use crate::api::element::query_name;
 use crate::aql_api::children::query_ancestor_till_type_aql;
@@ -22,17 +24,19 @@ pub struct AdminData {
     pub desc: String,
 }
 
-pub async fn query_all_db_infos(mgr: Arc<AiosDBManager>) -> anyhow::Result<Vec<AdminData>> {
-    let mut r = vec![];
-    let db_option = &mgr.db_option;
+pub async fn query_all_db_infos(mgr: &AiosDBManager) -> anyhow::Result<()> {
     let mut team_name_map = DashMap::new();
-    if let Some(project_db) = mgr.project_map.get(&db_option.project_name) {
+    for project_db in mgr.project_map.iter() {
+        let mut r = vec![];
         let all_db_refnos = query_all_db_refnos(project_db.value()).await?;
         for db_refno in all_db_refnos {
-            let db_attr = query_full_attr(db_refno, &mgr, Some(vec!["NUMBDB","STYP"])).await?;
-
+            let db_attr = query_full_attr_with_pool(db_refno, &mgr, Some(vec!["NUMBDB","STYP"]),project_db.value()).await;
+            if db_attr.is_err() { continue; }
+            let db_attr = db_attr.unwrap();
             let team_refno = query_ancestor_of_type(db_refno, "TEAM", project_db.value()).await?;
-            if team_refno.is_none() { continue; }
+            if team_refno.is_none() {
+                continue;
+            }
             let team_refno = team_refno.unwrap();
 
             let team_name = if !team_name_map.contains_key(&team_refno) {
@@ -46,7 +50,9 @@ pub async fn query_all_db_infos(mgr: Arc<AiosDBManager>) -> anyhow::Result<Vec<A
             let db_name = db_attr.get_name().to_string();
             let s_type = db_attr.get_str("STYP").unwrap_or("0");
             let mut names = db_name.split('/').collect::<Vec<_>>();
-            if names.len() < 2 { continue; }
+            if names.len() < 2 {
+                continue;
+            }
             let mut name = String::new();
             for n in names {
                 name.push_str(n);
@@ -67,8 +73,11 @@ pub async fn query_all_db_infos(mgr: Arc<AiosDBManager>) -> anyhow::Result<Vec<A
                 desc: desc.to_string(),
             })
         }
+        let project_name = project_db.key();
+        let mut file = File::create(&format!("{}_db_info.json",project_name))?;
+        file.write_all(&serde_json::to_string(&r).unwrap_or("".to_string()).into_bytes())?;
     }
-    Ok(r)
+    Ok(())
 }
 
 pub async fn query_all_db_refnos(pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {

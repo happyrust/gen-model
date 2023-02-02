@@ -65,6 +65,7 @@ use bevy::prelude::*;
 use bevy::transform::components::Transform;
 use parse_pdms_db::parse_file;
 use tokio::spawn;
+use aios_database::api::admin::query_all_db_infos;
 use aios_database::aql_api::tubi::{insert_tubi_value, query_all_tubi_from_node};
 
 
@@ -295,6 +296,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+
     if false {
         if let Some(pool) = mgr.project_map.get(&db_option.project_name) {
             let brans = query_types_refnos(&vec!["BRAN"], &pool, db_option.manual_db_nums.clone()).await?;
@@ -317,6 +319,10 @@ async fn main() -> anyhow::Result<()> {
             file.write_all(&serde_json::to_vec(&tubi_map).unwrap_or_default())?;
             insert_tubi_value(Arc::try_unwrap(tubi_map).unwrap_or_default(), pool.value()).await?;
         }
+    }
+
+    if db_option.only_sync_sys {
+        query_all_db_infos(&mgr).await?;
     }
     Ok(())
 }

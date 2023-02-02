@@ -8,11 +8,14 @@ use aios_core::pdms_types::{AttrMap, RefU64};
 use aios_core::prim_geo::category::CateBrepShape;
 use aios_core::prim_geo::loft::SweepSolid;
 use aios_core::prim_geo::spine::{Line3D, Spine3D, SpineCurveType, SweepPath3D};
+use aios_core::rvm_types::GeoParaInfo;
+use aios_core::shape::pdms_shape::BrepShapeTrait;
 use anyhow::anyhow;
 use dashmap::{DashMap, DashSet};
 use glam::{Quat, Vec3};
 use regex::internal::Input;
 use bevy::prelude::*;
+use parry3d::bounding_volume::Aabb;
 
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::CateBrepShapeMap;
@@ -22,7 +25,7 @@ pub struct ProfileGeosPoints {
 }
 
 pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, geom_info: &GeomsInfo,
-                                                       brep_shapes_map: &CateBrepShapeMap, interface: &T,mut transforms:&mut Vec<(Quat, Vec3, Vec3)>) -> anyhow::Result<bool> {
+                                                       brep_shapes_map: &CateBrepShapeMap, interface: &T, mut transforms: &mut Vec<GeoParaInfo>) -> anyhow::Result<bool> {
     let geoms = &geom_info.geometries;
     // dbg!(geoms.len());
     if geoms.len() == 0 { return Ok(false); }
@@ -122,7 +125,13 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                             is_spine: false,
                         }),
                     };
-                    // dbg!(&solid);
+                    
+                    let transform = solid.get_trans();
+                    transforms.push(GeoParaInfo {
+                        aabb: Aabb { mins: Default::default(), maxs: Default::default() },
+                        geometry: geom.clone(),
+                        transform: (transform.rotation, transform.translation, transform.scale),
+                    });
                     brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
                         refno,
                         brep_shape: Box::new(solid),
@@ -132,8 +141,6 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                         shape_err: None,
                         pts: Default::default(),
                     });
-                    let identity = Transform::IDENTITY;
-                    transforms.push((identity.rotation,identity.translation,identity.scale));
                 }
             }
         }
@@ -165,7 +172,12 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                             height: 0.0,
                             path,
                         };
-                        transforms.push((transform.rotation,transform.translation,transform.scale));
+                        let transform = loft.get_trans();
+                        transforms.push(GeoParaInfo {
+                            aabb: Aabb { mins: Default::default(), maxs: Default::default() },
+                            geometry: geom.clone(),
+                            transform: (transform.rotation, transform.translation, transform.scale),
+                        });
                         brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
                             refno,
                             brep_shape: Box::new(loft),
@@ -177,7 +189,6 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                         });
                     }
                 }
-                // break;
             }
         }
     }

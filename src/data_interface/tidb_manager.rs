@@ -21,7 +21,7 @@ use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
 use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdgeAql};
 use aios_core::prim_geo::wire::CurveType;
-use aios_core::rvm_types::GeomsInfoAql;
+use aios_core::rvm_types::{GeomsInfoAql, GeoParaInfo};
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
 use aios_core::tool::db_tool::db1_hash;
 use aios_core::tool::math_tool;
@@ -805,14 +805,9 @@ impl AiosDBManager {
         }
         let desi_att = mgr.get_attr(design_refno).await?;
         let geoms = resolve_desi_comp(design_refno, None, mgr.as_ref(), is_debug).await.unwrap_or_default();
-        let mut geo_info_aql = GeomsInfoAql {
-            _key: design_refno.to_url_refno(),
-            geometries: geoms.geometries.clone(),
-            transform: vec![],
-        };
-        let mut transforms = vec![];
+        let mut geo_params = vec![];
         if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" {
-            create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref(), &mut transforms).await?;
+            create_profile_geos(design_refno, &desi_att, &geoms, &brep_shape_map, mgr.as_ref(), &mut geo_params).await?;
         } else {
             let GeomsInfo {
                 geometries,
@@ -820,13 +815,28 @@ impl AiosDBManager {
             } = geoms;
             for (i, geom) in geometries.into_iter().enumerate() {
                 if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
-                    transforms.push((cate_shape.transform.rotation, cate_shape.transform.translation, cate_shape.transform.scale));
+                    let geo_hash = mgr.cached_mesh_mgr.gen_pdms_mesh(cate_shape.brep_shape.clone(), false);
+                    let mut bbox = mgr.cached_mesh_mgr.get_bbox(&geo_hash);
+                    if let Some(mut aabb) = bbox {
+                        let rot = cate_shape.transform.rotation;
+                        let trans = cate_shape.brep_shape.get_trans();
+                        let translation = cate_shape.transform.translation + cate_shape.transform.rotation * trans.translation;
+                        aabb = aabb.scaled(&Vector::new(trans.scale.x, trans.scale.y, trans.scale.z));
+                        geo_params.push(GeoParaInfo {
+                            aabb,
+                            geometry: geom,
+                            transform: (rot, translation, trans.scale),
+                        });
+                    }
                     brep_shape_map.entry(design_refno).or_insert(Vec::new()).push(cate_shape);
                 }
             }
             refno_ptset_map.insert(design_refno, axis_map);
         }
-        geo_info_aql.transform = transforms;
+        let geo_info_aql = GeomsInfoAql {
+            _key: design_refno.to_url_refno(),
+            geo_params,
+        };
         geo_infos.entry(design_refno).or_insert(geo_info_aql);
         Ok(true)
     }
@@ -858,11 +868,11 @@ impl AiosDBManager {
             href_type = h_att.get_type().to_string();
             let h_cat_ref = h_att.get_foreign_refno("CATR").unwrap_or_default();
             let tubi_geoms_info = resolve_desi_comp(branch_refno, Some(h_cat_ref), mgr.as_ref(), is_debug).await.unwrap_or_default();
-            geo_infos.entry(branch_refno).or_insert(GeomsInfoAql {
-                _key: branch_refno.to_url_refno(),
-                geometries: tubi_geoms_info.geometries.clone(),
-                transform: vec![],
-            });
+            // geo_infos.entry(branch_refno).or_insert(GeomsInfoAql {
+            //     _key: branch_refno.to_url_refno(),
+            //     geometries: tubi_geoms_info.geometries.clone(),
+            //     transform: vec![],
+            // });
             let mut has_tube_geom = false;
             for tubi_geom in &tubi_geoms_info.geometries {
                 if let TubeImplied(d) = tubi_geom {
@@ -1043,11 +1053,11 @@ impl AiosDBManager {
                 let last_attr = mgr.get_attr(*last_refno).await?;
                 let last_geoms = resolve_desi_comp(*last_refno, None, mgr.as_ref(), is_debug).await;
                 if let Ok(last_geoms) = last_geoms {
-                    geo_infos.entry(*last_refno).or_insert(GeomsInfoAql {
-                        _key: last_refno.to_url_refno(),
-                        geometries: last_geoms.geometries.clone(),
-                        transform: vec![],
-                    });
+                    // geo_infos.entry(*last_refno).or_insert(GeomsInfoAql {
+                    //     _key: last_refno.to_url_refno(),
+                    //     geometries: last_geoms.geometries.clone(),
+                    //     transform: vec![],
+                    // });
                     let last_world_trans = mgr.get_world_transform(*last_refno).await?.unwrap_or_default();
                     if let Some(leave) = last_attr.get_i32("LEAV") {
                         if last_geoms.axis_map.contains_key(&leave) {
@@ -1107,11 +1117,11 @@ impl AiosDBManager {
                             current_tubing.finished = true;
                             if current_tubing.is_dir_ok() {
                                 let brep_shape = current_tubing.convert_to_shape();
-                                geo_infos.entry(branch_refno).or_insert(GeomsInfoAql {
-                                    _key: branch_refno.to_url_refno(),
-                                    geometries: geoms.geometries.clone(),
-                                    transform: vec![(brep_shape.transform.rotation, brep_shape.transform.translation, brep_shape.transform.scale)],
-                                });
+                                // geo_infos.entry(branch_refno).or_insert(GeomsInfoAql {
+                                //     _key: branch_refno.to_url_refno(),
+                                //     geometries: geoms.geometries.clone(),
+                                //     transform: vec![(brep_shape.transform.rotation, brep_shape.transform.translation, brep_shape.transform.scale)],
+                                // });
                                 brep_shape_map.entry(refno).or_insert(Vec::new()).push(brep_shape);
                             }
                         }
@@ -1156,14 +1166,14 @@ impl AiosDBManager {
                 geometries,
                 axis_map
             } = geoms;
-            let mut geo_infos_aql = GeomsInfoAql {
-                _key: refno.to_url_refno(),
-                geometries:geometries.clone(),
-                transform: vec![],
-            };
+            // let mut geo_infos_aql = GeomsInfoAql {
+            //     _key: refno.to_url_refno(),
+            //     geometries: geometries.clone(),
+            //     transform: vec![],
+            // };
             for (i, geom) in geometries.into_iter().enumerate() {
                 if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
-                    geo_infos_aql.transform.push((cate_shape.transform.rotation, cate_shape.transform.translation, cate_shape.transform.scale));
+                    // geo_infos_aql.transform.push((cate_shape.transform.rotation, cate_shape.transform.translation, cate_shape.transform.scale));
                     brep_shape_map.entry(refno).or_insert(Vec::new()).push(cate_shape);
                 }
             }
@@ -1180,8 +1190,8 @@ impl AiosDBManager {
 
                         if current_tubing.is_dir_ok() {
                             let shape = current_tubing.convert_to_shape();
-                            geo_infos_aql.transform.push((shape.transform.rotation, shape.transform.translation,
-                                                          shape.transform.scale));
+                            // geo_infos_aql.transform.push((shape.transform.rotation, shape.transform.translation,
+                            //                               shape.transform.scale));
                             brep_shape_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
                         }
                     }
@@ -1435,7 +1445,7 @@ impl AiosDBManager {
         }
 
         let geo_infos = Arc::try_unwrap(geo_infos).unwrap()
-            .into_iter().filter(|x| !x.1.geometries.is_empty()).map(|x| x.1).collect::<Vec<_>>();
+            .into_iter().filter(|x| !x.1.geo_params.is_empty()).map(|x| x.1).collect::<Vec<_>>();
         if !geo_infos.is_empty() {
             let conn = mgr.get_arangodb_conn().await.unwrap();
             let json = serde_json::to_value(&geo_infos).unwrap_or_default();
