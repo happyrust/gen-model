@@ -725,8 +725,6 @@ impl AiosDBManager {
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 let mut map = HashMap::new();
                 for db_refno in dbs {
-                    // let project = self.get_project_name(db_refno).unwrap_or_default();
-                    // dbg!(&project);
                     if let Some((project, pool)) = self.get_project_pool_by_refno(db_refno).await {
                         if let Ok(att) = self.get_implicit_attr(db_refno, Some(vec!["NUMBDB"])).await {
                             let dbno = att.get_i32("NUMBDB").unwrap_or_default();
@@ -743,7 +741,6 @@ impl AiosDBManager {
                 mdb_map.entry(mdb_name).or_insert(map);
             }
         }
-        dbg!(&mdb_map);
         Ok(mdb_map)
     }
 
@@ -912,7 +909,8 @@ impl AiosDBManager {
                 current_tubing.desire_arrive_dir = -current_tubing.get_dir();
                 //检查一下方向是否一致，不一致的，不显示，或者加标记位
                 if current_tubing.is_dir_ok() {
-                    brep_shape_map.entry(branch_refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                    let shape = current_tubing.convert_to_shape();
+                    brep_shape_map.entry(branch_refno).or_insert(Vec::new()).push(shape);
                 }
             }
             // 将 tubi 数据保存到图数据库
@@ -1167,17 +1165,31 @@ impl AiosDBManager {
                 geometries,
                 axis_map
             } = geoms;
-            // let mut geo_infos_aql = GeomsInfoAql {
-            //     _key: refno.to_url_refno(),
-            //     geometries: geometries.clone(),
-            //     transform: vec![],
-            // };
+            let mut geos = vec![];
             for (i, geom) in geometries.into_iter().enumerate() {
                 if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
-                    // geo_infos_aql.transform.push((cate_shape.transform.rotation, cate_shape.transform.translation, cate_shape.transform.scale));
+                    let geo_hash = mgr.cached_mesh_mgr.gen_pdms_mesh(cate_shape.brep_shape.clone(), false);
+                    let bbox = mgr.cached_mesh_mgr.get_bbox(&geo_hash);
+
+                    if let Some(mut aabb) = bbox {
+                        let rot = cate_shape.transform.rotation;
+                        let trans = cate_shape.brep_shape.get_trans();
+                        let translation = cate_shape.transform.translation + cate_shape.transform.rotation * trans.translation;
+                        aabb = aabb.scaled(&Vector::new(trans.scale.x, trans.scale.y, trans.scale.z));
+                        geos.push(GeoParaInfo {
+                            aabb,
+                            geometry: geom,
+                            transform: (rot, translation, trans.scale),
+                        });
+                    }
+
                     brep_shape_map.entry(refno).or_insert(Vec::new()).push(cate_shape);
                 }
             }
+            geo_infos.entry(refno).or_insert(GeomsInfoAql{
+                _key:refno.to_url_refno(),
+                geo_params: geos,
+            });
             refno_ptset_map.insert(refno, axis_map);
             //有隐含管段
             if has_tubi {
@@ -1191,9 +1203,7 @@ impl AiosDBManager {
 
                         if current_tubing.is_dir_ok() {
                             let shape = current_tubing.convert_to_shape();
-                            // geo_infos_aql.transform.push((shape.transform.rotation, shape.transform.translation,
-                            //                               shape.transform.scale));
-                            brep_shape_map.entry(refno).or_insert(Vec::new()).push(current_tubing.convert_to_shape());
+                            brep_shape_map.entry(refno).or_insert(Vec::new()).push(shape);
                         }
                     }
                 }

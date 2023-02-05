@@ -1,6 +1,8 @@
-use std::env;
+use std::{env, fs};
+use std::cmp::max;
+use std::io::Cursor;
 use anyhow::anyhow;
-use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
+use calamine::{DataType, open_workbook, Range, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sqlx::{Error, Executor, MySql, Pool};
@@ -9,8 +11,21 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::consts::METADATA_TABLE;
 use aios_core::metadata_manager::{MetadataManagerTableData, MetadataManagerTreeNode};
 use bevy::prelude::dbg;
+use bevy::reflect::Array;
 use regex::Regex;
 use crate::consts::METADATA_DATA;
+
+macro_rules! max {
+    ($x: expr) => ($x);
+    ($x: expr, $($z: expr),+) => {{
+        let y = max!($($z),*);
+        if $x > y {
+            $x
+        } else {
+            y
+        }
+    }}
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct MetadataManagerExcelTreeData {
@@ -192,6 +207,137 @@ fn read_excel_file_to_sql(file_path: &str) -> anyhow::Result<(DashMap<u64, Metad
     Ok((map, table_map))
 }
 
+pub fn read_metadata_excel_bytes(data: Vec<u8>, sheet_idx: usize) -> Vec<Vec<String>> {
+    let buffer: Cursor<Vec<u8>> = Cursor::new(data);
+
+    let mut sheets = calamine::open_workbook_auto_from_rs(buffer).unwrap();
+    let first_sheet = sheets.worksheet_range_at(sheet_idx);
+    let mut rows_vec = vec![];
+    match first_sheet {
+        Some(sheet_result) => match sheet_result {
+            Ok(range) => {
+                for r in range.rows() {
+                    let mut r_vec = vec![];
+                    for (_, cell) in r.iter().enumerate() {
+                        r_vec.push(format!("{}", cell).to_string());
+                    }
+                    rows_vec.push(r_vec);
+                }
+            }
+            _ => {}
+        },
+        _ => {}
+    };
+    rows_vec
+}
+
+/// 读取 excel 表格生成元数据管理树结构的数据
+pub fn convert_metadata_tree_value_from_excel_bytes(mut tree_data: Vec<Vec<String>>) -> DashMap<u64, MetadataManagerTreeNode>{
+    let mut tree_data_map: DashMap<u64, MetadataManagerTreeNode> = DashMap::new();
+    let headers = tree_data.remove(0);
+    // 找到树结构的数据位于 excel 表的哪一行
+    let mut user_code_idx = None;
+    let mut chinese_name_idx = None;
+    let mut english_name_idx = None;
+    for (idx, header) in headers.into_iter().enumerate() {
+        match header.to_lowercase().as_str() {
+            "user_code" => { user_code_idx = Some(idx) }
+            "chinese_name" => { chinese_name_idx = Some(idx) }
+            "english_name" => { english_name_idx = Some(idx) }
+            _ => {}
+        }
+    }
+    // 按表头对应数据的位置，把所有数据形成struct
+    if user_code_idx.is_some() && chinese_name_idx.is_some() && english_name_idx.is_some() {
+        let user_code_idx = user_code_idx.unwrap();
+        let chinese_name_idx = chinese_name_idx.unwrap();
+        let english_name_idx = english_name_idx.unwrap();
+        let max_idx = max!(user_code_idx,chinese_name_idx,english_name_idx);
+        let mut b_head = true; // 第一个默认为根节点
+        for mut data in tree_data.into_iter() {
+            if max_idx >= data.len() { continue; }
+            let user_code_data = data[user_code_idx].clone();
+            if user_code_data.is_empty() { continue; }
+            let chinese_name_data = data[chinese_name_idx].clone();
+            let english_name_data = data[english_name_idx].clone();
+            let id = convert_str_to_hash(&user_code_data);
+            let mut user_code_split = user_code_data.clone();
+            user_code_split.remove(user_code_data.len() - 1);
+            let owner = if b_head { 0 } else { convert_str_to_hash(&user_code_split) };
+            tree_data_map.entry(id).or_insert(MetadataManagerTreeNode {
+                id,
+                owner,
+                user_code: user_code_data,
+                chinese_name: chinese_name_data,
+                english_name: english_name_data,
+            });
+            b_head = false;
+        }
+    }
+    tree_data_map
+}
+
+pub fn convert_metadata_table_value_from_excel_bytes(mut table_data: Vec<Vec<String>>) -> Vec<MetadataManagerTableData> {
+    let mut result = Vec::new();
+    let headers = table_data.remove(0);
+
+    let mut code_idx = None;
+    let mut name_idx = None;
+    let mut b_null_idx = None;
+    let mut data_type_idx = None;
+    let mut unit_idx = None;
+    let mut des_idx = None;
+    let mut scope_idx = None;
+    // 找到需要的数据位于表格的哪一列
+    for (idx, header) in headers.into_iter().enumerate() {
+        match header.to_lowercase().as_str() {
+            "code" => { code_idx = Some(idx) }
+            "name" => { name_idx = Some(idx) }
+            "b_null" => { b_null_idx = Some(idx) }
+            "data_type" => { data_type_idx = Some(idx) }
+            "unit" => { unit_idx = Some(idx) }
+            "description" => { des_idx = Some(idx) }
+            "scope" => { scope_idx = Some(idx) }
+            _ => {}
+        }
+    }
+    if code_idx.is_some() && name_idx.is_some() && b_null_idx.is_some() && data_type_idx.is_some()
+        && unit_idx.is_some() && des_idx.is_some() && scope_idx.is_some() {
+        let code_idx = code_idx.unwrap();
+        let name_idx = name_idx.unwrap();
+        let b_null_idx = b_null_idx.unwrap();
+        let data_type_idx = data_type_idx.unwrap();
+        let unit_idx = unit_idx.unwrap();
+        let des_idx = des_idx.unwrap();
+        let scope_idx = scope_idx.unwrap();
+        let max_idx = max!(code_idx,name_idx,name_idx,data_type_idx,unit_idx,des_idx,scope_idx);
+
+        for data in table_data {
+            if max_idx >= data.len() { continue; }
+            let code = data[code_idx].clone();
+            let id = convert_str_to_hash(&get_characters_in_str(&code));
+            let name = data[name_idx].clone();
+            let b_null = if data[b_null_idx] == "是" { true } else { false };
+            let data_type = MetadataManagerTableData::convert_str_to_data_type(&data[data_type_idx]);
+            let unit = MetadataManagerTableData::convert_str_to_unit(&data[unit_idx]);
+            let desc = data[des_idx].clone();
+            let scope = data[scope_idx].clone();
+
+            result.push(MetadataManagerTableData {
+                id,
+                code,
+                name,
+                b_null,
+                data_type,
+                unit,
+                desc,
+                scope,
+            })
+        }
+    }
+    result
+}
+
 pub fn convert_str_to_hash(input: &str) -> u64 {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(input, &mut hash);
@@ -237,6 +383,17 @@ async fn test_create_metadata_table() -> anyhow::Result<()> {
     save_metadata_data(data, &pool).await?;
     save_metadata_table_data(table_data, &pool).await?;
     Ok(())
+}
+
+#[test]
+fn test_read_excel_bytes_data() {
+    let path = "resource/元数据_测试.xlsx";
+    let data = fs::read(path).unwrap();
+    let result = read_metadata_excel_bytes(data.clone(), 0);
+    let map = convert_metadata_tree_value_from_excel_bytes(result.clone());
+    let result = read_metadata_excel_bytes(data, 1);
+    let table_data = convert_metadata_table_value_from_excel_bytes(result);
+    dbg!(&table_data.len());
 }
 
 #[test]
