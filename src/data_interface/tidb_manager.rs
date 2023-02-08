@@ -866,11 +866,6 @@ impl AiosDBManager {
             href_type = h_att.get_type().to_string();
             let h_cat_ref = h_att.get_foreign_refno("CATR").unwrap_or_default();
             let tubi_geoms_info = resolve_desi_comp(branch_refno, Some(h_cat_ref), mgr.as_ref(), is_debug).await.unwrap_or_default();
-            // geo_infos.entry(branch_refno).or_insert(GeomsInfoAql {
-            //     _key: branch_refno.to_url_refno(),
-            //     geometries: tubi_geoms_info.geometries.clone(),
-            //     transform: vec![],
-            // });
             let mut has_tube_geom = false;
             for tubi_geom in &tubi_geoms_info.geometries {
                 if let TubeImplied(d) = tubi_geom {
@@ -1052,11 +1047,6 @@ impl AiosDBManager {
                 let last_attr = mgr.get_attr(*last_refno).await?;
                 let last_geoms = resolve_desi_comp(*last_refno, None, mgr.as_ref(), is_debug).await;
                 if let Ok(last_geoms) = last_geoms {
-                    // geo_infos.entry(*last_refno).or_insert(GeomsInfoAql {
-                    //     _key: last_refno.to_url_refno(),
-                    //     geometries: last_geoms.geometries.clone(),
-                    //     transform: vec![],
-                    // });
                     let last_world_trans = mgr.get_world_transform(*last_refno).await?.unwrap_or_default();
                     if let Some(leave) = last_attr.get_i32("LEAV") {
                         if last_geoms.axis_map.contains_key(&leave) {
@@ -1099,7 +1089,9 @@ impl AiosDBManager {
             println!("正在处理元件{}: {}", attr.get_type(), refno.to_refno_string());
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
             let mut geoms = resolve_desi_comp(refno, None, mgr.as_ref(), is_debug).await;
-            if geoms.is_err() { continue; }
+            if geoms.is_err() {
+                continue;
+            }
             let mut geoms = geoms.unwrap();
             //有隐含管段
             if has_tubi && attr.get_type() != "ATTA" {
@@ -1186,8 +1178,8 @@ impl AiosDBManager {
                     brep_shape_map.entry(refno).or_insert(Vec::new()).push(cate_shape);
                 }
             }
-            geo_infos.entry(refno).or_insert(GeomsInfoAql{
-                _key:refno.to_url_refno(),
+            geo_infos.entry(refno).or_insert(GeomsInfoAql {
+                _key: refno.to_url_refno(),
                 geo_params: geos,
             });
             refno_ptset_map.insert(refno, axis_map);
@@ -1868,7 +1860,6 @@ impl AiosDBManager {
         let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
         for mdb in mdbs {
             let mdb_attr = query_explicit_attr(mdb, pool).await?;
-            dbg!(&mdb);
             let mdb_name = query_name(mdb, &pool).await?;
             if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
                 let mut map = HashMap::new();
@@ -1877,11 +1868,7 @@ impl AiosDBManager {
                     // let att = self.get_attr(refno).await?;
                     let att = self.get_implicit_attr(refno, Some(vec!["NUMBDB"])).await?;
                     if let Some((project, _)) = self.get_project_pool_by_refno(refno).await {
-                        if mdb == RefU64::from_refno_str("24575/2178").unwrap() {
-                            dbg!(refno);
-                        }
                         if let Some(dbno) = att.get_i32("NUMBDB") {
-                            dbg!(&dbno);
                             if let Some(db_type) = query_dbtype_from_dbno(dbno, info_pool, &project).await? {
                                 map.entry(db_type).or_insert_with(Vec::new).push(dbno);
                             }
@@ -1912,7 +1899,6 @@ impl AiosDBManager {
                 db_nos = mdb_dbnos_map.get(&key_str).unwrap().get("DESI").cloned().unwrap_or_default();
             }
         }
-        dbg!(&db_nos);
         std::fs::create_dir_all("./assets/mesh").unwrap();
         std::fs::create_dir_all("./assets/instance").unwrap();
 

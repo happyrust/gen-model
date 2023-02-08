@@ -46,7 +46,6 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
     let pipe_name = query_name(pipe_refno, pool.value()).await?;
     let pipe_thickness_data = create_pipe_thickness_data(&pipe_name, thickness_map);
     // 生成 bran 的数据
-    // data.append(&mut gen_bran_reference_data(&bran_name));
     let bran_infos = query_bran_info(refno, &database).await?;
     // 生成 bran href 的数据
     if let Some(start_position) = bran_infos.first() {
@@ -73,7 +72,7 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
                 let from_refno = RefU64::from_arangodb_refno_str(&bran_infos[i]._from);
                 let mut tubi_data = gen_tubi_data(bran_infos[i].start_pt, bran_infos[tubi_end_index].end_pt,
                                                   bran_infos[tubi_end_index].bore, &bran_attr, from_refno, pool.value(),
-                                                  &mut materials,&pipe_thickness_data).await;
+                                                  &mut materials, &pipe_thickness_data,aios_mgr).await;
                 data.append(&mut tubi_data);
             }
         }
@@ -82,7 +81,7 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
         if refno.is_none() { continue; }
         let refno = refno.unwrap();
         if gen_node_basic_data(refno, &mut data, &mut materials, &bran_attr,
-                               &bran_infos[i], thickness_map,&bran_infos[i + 1],
+                               &bran_infos[i], thickness_map, &bran_infos[i + 1],
                                aios_mgr, pool.value()).await {
             break;
         }
@@ -99,7 +98,7 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
 }
 
 pub async fn gen_bran_pipeline_reference_data(attr: &AttrMap, start_position: Vec3, pool: &Pool<MySql>,
-                                              pipe_thickness_data:&Vec<u8>) -> Vec<u8> {
+                                              pipe_thickness_data: &Vec<u8>) -> Vec<u8> {
     let mut data = vec![];
     let name = attr.get_name();
     data.append(&mut gen_pipeline_reference_data_str_head(name.as_str()));
@@ -205,11 +204,14 @@ pub fn gen_cords_point_data(cords_point: Vec3) -> Vec<u8> {
     format!("        CO-ORDS    {}  {}  {}\r\n", cords_point.x, cords_point.y, cords_point.z).into_bytes()
 }
 
-pub async fn gen_item_code_data_attr_val(spre_refno: Option<&AttrVal>, pool: &Pool<MySql>, materials: &mut Vec<(RefU64, String)>) -> Vec<u8> {
+pub async fn gen_item_code_data_attr_val(spre_refno: Option<&AttrVal>, aios_mgr: &AiosDBManager, materials: &mut Vec<(RefU64, String)>) -> Vec<u8> {
     if let Some(spre) = spre_refno {
         let spre_refno = spre.refno_value();
         if let Some(spre_refno) = spre_refno {
-            let spre_name = query_name(spre_refno, pool).await;
+            let spre_pool = aios_mgr.get_project_pool_by_refno(spre_refno).await;
+            if spre_pool.is_none() { return vec![]; }
+            let (_, spre_pool) = spre_pool.unwrap();
+            let spre_name = query_name(spre_refno, &spre_pool).await;
             return if let Ok(spre_name) = spre_name {
                 if !materials.contains(&(spre_refno, spre_name.clone())) {
                     materials.push((spre_refno, spre_name.clone()));

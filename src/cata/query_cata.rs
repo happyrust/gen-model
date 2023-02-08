@@ -36,7 +36,9 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             }
         } else {
             let spre_ref = desi_att.get_foreign_refno("SPRE").unwrap_or_default();
+            dbg!(spre_ref);
             let spre = interface.get_attr(spre_ref).await?;
+            dbg!(&spre.map.len());
             if spre.contains_attr_name("CATR") {
                 scom_ref = spre.get_foreign_refno("CATR");
             } else {
@@ -46,10 +48,12 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         }
     }
 
-    if is_debug {
-        dbg!(&scom_ref);
-    }
+    // if is_debug {
+
+    // }
+    dbg!(&scom_ref);
     let scom_ref = scom_ref.ok_or(anyhow!(format!("SCOM not exist in element: {}", refno.to_refno_str())))?;
+    dbg!(&scom_ref);
     if !scom_ref.is_valid() {
         return Err(anyhow!("Scom ref is invalid".to_string()));
     }
@@ -267,6 +271,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         None
     };
     let geometries = resolve_gms(&scom_info.gm_params, &jusl_param, &cur_context, &axis_map);
+    dbg!(&geometries.len());
     Ok(GeomsInfo {
         geometries,
         axis_map,

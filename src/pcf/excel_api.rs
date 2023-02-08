@@ -11,12 +11,12 @@ struct PipeThicknessTable {
     dn: Option<String>,
     h: Option<String>,
     i: Option<String>,
-    j: Option<String>,
+    l: Option<String>,
 }
 
 impl PipeThicknessTable {
     fn is_null(&self) -> bool {
-        if self.dn.is_none() || self.i.is_none() || self.j.is_none() || self.h.is_none() { return true; }
+        if self.dn.is_none() || self.i.is_none() || self.l.is_none() || self.h.is_none() { return true; }
         false
     }
 }
@@ -33,7 +33,7 @@ pub fn get_pipe_thickness_table() -> anyhow::Result<DashMap<String, DashMap<Stri
         if !v.is_null() {
             map.entry(v.dn.clone().unwrap()).or_insert_with(DashMap::new).entry("H".to_string()).or_insert(v.h.unwrap());
             map.entry(v.dn.clone().unwrap()).or_insert_with(DashMap::new).entry("I".to_string()).or_insert(v.i.unwrap());
-            map.entry(v.dn.unwrap()).or_insert_with(DashMap::new).entry("J".to_string()).or_insert(v.j.unwrap());
+            map.entry(v.dn.unwrap()).or_insert_with(DashMap::new).entry("L".to_string()).or_insert(v.l.unwrap());
         }
     }
     Ok(map)

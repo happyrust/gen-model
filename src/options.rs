@@ -66,8 +66,8 @@ pub struct DbOption {
     pub gen_model_batch_size: usize,
     #[clap(long)]
     pub arangodb_url: String,
-    #[clap(long)]
-    pub rebuild_arangodb: bool,
+    // #[clap(long)]
+    // pub rebuild_arangodb: bool,
     #[clap(long)]
     pub server_release_ip: String,
     #[clap(long)]

@@ -9,7 +9,7 @@ use sqlx::{Error, Executor, MySql, Pool};
 use sqlx::mysql::MySqlQueryResult;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::consts::METADATA_TABLE;
-use aios_core::metadata_manager::{MetadataManagerTableData, MetadataManagerTreeNode};
+use aios_core::metadata_manager::{MetadataManagerTableData, MetadataManagerTreeNode, ShowMetadataManagerTableData};
 use bevy::prelude::dbg;
 use bevy::reflect::Array;
 use regex::Regex;
@@ -75,7 +75,7 @@ impl MetadataManagerExcelTableData {
     }
 }
 
-fn create_metadata_tree_table_sql() -> String {
+pub async fn create_metadata_tree_table_sql(pool: &Pool<MySql>) -> anyhow::Result<()> {
     let mut sql = String::new();
     sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {METADATA_TABLE} ("));
     sql.push_str(&format!("{} BIGINT UNSIGNED  PRIMARY KEY ,", "ID"));
@@ -84,10 +84,18 @@ fn create_metadata_tree_table_sql() -> String {
     sql.push_str(&format!("{} VARCHAR(50) ,", "CHINESE_NAME"));
     sql.push_str(&format!("{} VARCHAR(50) ", "ENGLISH_NAME"));
     sql.push_str(");");
-    sql
+    let mut conn = pool.clone().acquire().await?;
+    let result = conn.execute(sql.as_str()).await;
+    match result {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(&e);
+        }
+    }
+    Ok(())
 }
 
-fn create_metadata_data_table_sql() -> String {
+pub async fn create_metadata_data_table_sql(pool: &Pool<MySql>) -> anyhow::Result<()> {
     let mut sql = String::new();
     sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {METADATA_DATA} ("));
     sql.push_str(&format!("{} BIGINT UNSIGNED,", "ID"));
@@ -99,11 +107,19 @@ fn create_metadata_data_table_sql() -> String {
     sql.push_str(&format!("{} VARCHAR(100),", "DESCRIPTION"));
     sql.push_str(&format!("{} VARCHAR(50) ", "SCOPE"));
     sql.push_str(");");
-    sql
+    let mut conn = pool.clone().acquire().await?;
+    let result = conn.execute(sql.as_str()).await;
+    match result {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(&e);
+        }
+    }
+    Ok(())
 }
 
 
-async fn save_metadata_data(data: DashMap<u64, MetadataManagerTreeNode>, pool: &Pool<MySql>) -> anyhow::Result<()> {
+pub async fn save_metadata_data(data: DashMap<u64, MetadataManagerTreeNode>, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let mut sql = String::new();
     sql.push_str(&format!("INSERT IGNORE INTO {METADATA_TABLE}(ID, OWNER,USER_CODE,CHINESE_NAME,ENGLISH_NAME) VALUES"));
     let b_empty = data.is_empty();
@@ -125,7 +141,7 @@ async fn save_metadata_data(data: DashMap<u64, MetadataManagerTreeNode>, pool: &
     Ok(())
 }
 
-async fn save_metadata_table_data(data: Vec<MetadataManagerTableData>, pool: &Pool<MySql>) -> anyhow::Result<()> {
+pub async fn save_metadata_table_data(data: Vec<MetadataManagerTableData>, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let mut sql = String::new();
     sql.push_str(&format!("INSERT IGNORE INTO {METADATA_DATA}(ID,CODE,NAME,B_NULL,DATA_TYPE,UNIT,DESCRIPTION,SCOPE) VALUES"));
     let b_empty = data.is_empty();
@@ -232,7 +248,7 @@ pub fn read_metadata_excel_bytes(data: Vec<u8>, sheet_idx: usize) -> Vec<Vec<Str
 }
 
 /// 读取 excel 表格生成元数据管理树结构的数据
-pub fn convert_metadata_tree_value_from_excel_bytes(mut tree_data: Vec<Vec<String>>) -> DashMap<u64, MetadataManagerTreeNode>{
+pub fn convert_metadata_tree_value_from_excel_bytes(mut tree_data: Vec<Vec<String>>) -> DashMap<u64, MetadataManagerTreeNode> {
     let mut tree_data_map: DashMap<u64, MetadataManagerTreeNode> = DashMap::new();
     let headers = tree_data.remove(0);
     // 找到树结构的数据位于 excel 表的哪一行
@@ -338,6 +354,18 @@ pub fn convert_metadata_table_value_from_excel_bytes(mut table_data: Vec<Vec<Str
     result
 }
 
+pub async fn replace_metadata_table_data(data: Vec<ShowMetadataManagerTableData>, pool: &Pool<MySql>) -> anyhow::Result<bool> {
+    let sql = gen_replace_metadata_table_data(data);
+    let mut conn = pool.acquire().await?;
+    let result = conn.execute(sql.as_str()).await;
+    return match result {
+        Ok(_) => { Ok(true) }
+        Err(e) => {
+            Ok(false)
+        }
+    };
+}
+
 pub fn convert_str_to_hash(input: &str) -> u64 {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
     std::hash::Hash::hash(input, &mut hash);
@@ -353,31 +381,26 @@ fn get_characters_in_str(input: &str) -> String {
     "".to_string()
 }
 
+fn gen_replace_metadata_table_data(datas: Vec<ShowMetadataManagerTableData>) -> String {
+    let mut sql = String::new();
+    for data in datas {
+        let b_null = if data.b_null == "是" { 1 } else { 0 };
+        sql.push_str(format!("update metadata_data m set m.`CODE` = '{}',
+	                        m.`NAME` = '{}',m.B_NULL = {b_null},m.DATA_TYPE ={},m.UNIT = {},m.DESCRIPTION = '{}',
+	                        m.SCOPE = '{}' WHERE m.ID = {} and m.`CODE` = '{}'",
+                             data.new_code, data.name, data.data_type_back, data.unit_back, data.desc, data.scope, data.id, data.old_code).as_str());
+    }
+    sql
+}
+
 #[tokio::test]
 async fn test_create_metadata_table() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let table_sql = create_metadata_tree_table_sql();
-    let mut conn = pool.clone().acquire().await?;
-    let result = conn.execute(table_sql.as_str()).await;
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            dbg!(table_sql);
-            dbg!(&e);
-        }
-    }
-    let data_sql = create_metadata_data_table_sql();
-    let mut conn = pool.clone().acquire().await?;
-    let result = conn.execute(data_sql.as_str()).await;
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            dbg!(data_sql);
-            dbg!(&e);
-        }
-    }
+    let table_sql = create_metadata_tree_table_sql(&pool).await?;
+    let _ = create_metadata_data_table_sql(&pool).await?;
+
     let path = "resource/元数据_测试.xlsx";
     let (data, table_data) = read_excel_file_to_sql(path)?;
     save_metadata_data(data, &pool).await?;

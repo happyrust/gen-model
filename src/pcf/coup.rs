@@ -9,9 +9,9 @@ pub async fn gen_coup_data(aios_mgr: &AiosDBManager, attr: &AttrMap, pool: &Pool
     let refno = attr.get_refno();
     if refno.is_none() { return vec![]; }
     let refno = refno.unwrap();
-    data.append(&mut create_s_key_data(attr, aios_mgr, pool).await);
+    data.append(&mut create_s_key_data(attr, aios_mgr).await);
     let spre = attr.get_val("SPRE");
-    data.append(&mut gen_item_code_data_attr_val(spre, &pool, materials).await);
+    data.append(&mut gen_item_code_data_attr_val(spre, aios_mgr, materials).await);
     data.append(&mut create_refno_data(attr));
     data
 }

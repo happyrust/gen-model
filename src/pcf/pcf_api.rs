@@ -46,7 +46,7 @@ lazy_static! {
 
 /// 生成每个节点都存在的 pcf 数据 ，返回值为是否是cap 是cap就代表bran结束，后面的节点就不用执行了
 pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut materials: &mut Vec<(RefU64, String)>,
-                                 bran_attr: &AttrMap, start_edge: &TubiEdgeAql,thickness_map: &DashMap<String,DashMap<String,String>>,
+                                 bran_attr: &AttrMap, start_edge: &TubiEdgeAql, thickness_map: &DashMap<String, DashMap<String, String>>,
                                  end_edge: &TubiEdgeAql, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> bool {
     let attr = query_full_attr(refno, &aios_mgr, None).await;
     if attr.is_err() { return false; }
@@ -72,7 +72,7 @@ pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut mate
         "GASK" => { data.append(&mut gen_gask_data(aios_mgr, &attr, pool, materials).await); }
         "FLAN" => { data.append(&mut gen_flan_data(aios_mgr, &attr, pool, materials).await); }
         "VALV" => { data.append(&mut gen_valv_data(aios_mgr, &attr, pool, materials).await); }
-        "TEE" => { data.append(&mut gen_tee_data(aios_mgr, &attr, bran_attr, pool, materials, start_edge, end_edge,thickness_map).await); }
+        "TEE" => { data.append(&mut gen_tee_data(aios_mgr, &attr, bran_attr, pool, materials, start_edge, end_edge, thickness_map).await); }
         "REDU" => { data.append(&mut gen_redu_data(aios_mgr, &attr, pool, materials).await); }
         "INST" => { data.append(&mut gen_inst_data(aios_mgr, &attr, pool, materials).await); }
         "OLET" => { data.append(&mut gen_olet_data(aios_mgr, &attr, pool, materials).await); }
@@ -101,20 +101,26 @@ pub async fn create_cords_point_data(refno: RefU64, aios_mgr: &AiosDBManager) ->
 }
 
 /// 生成 SKEY 数据
-pub async fn create_s_key_data(attr: &AttrMap, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> Vec<u8> {
+pub async fn create_s_key_data(attr: &AttrMap, aios_mgr: &AiosDBManager) -> Vec<u8> {
     let spre_refno = attr.get_refu64("SPRE");
     if spre_refno.is_none() { return vec![]; }
     let spre_refno = spre_refno.unwrap();
     let spre_cache = aios_mgr.get_refno_basic(spre_refno);
     if spre_cache.is_none() { return vec![]; }
     let spre_cache = spre_cache.unwrap();
-    let spre_attr = query_implicit_attr(spre_refno, spre_cache.value(), pool, Some(vec!["DETR"])).await;
+    let spre_pool = aios_mgr.get_project_pool_by_refno(spre_refno).await;
+    if spre_pool.is_none() { return vec![]; }
+    let (project, spre_pool) = spre_pool.unwrap();
+    let spre_attr = query_implicit_attr(spre_refno, spre_cache.value(), &spre_pool, Some(vec!["DETR"])).await;
     if spre_attr.is_err() { return vec![]; }
     let spre_attr = spre_attr.unwrap();
     let detr_refno = spre_attr.get_refu64("DETR");
     if let Some(detr_refno) = detr_refno {
+        let detr_pool = aios_mgr.get_project_pool_by_refno(detr_refno).await;
+        if detr_pool.is_none() { return vec![]; }
+        let (project, detr_pool) = detr_pool.unwrap();
         if let Some(cache) = aios_mgr.get_refno_basic(detr_refno) {
-            let detr_att = query_implicit_attr(detr_refno, cache.value(), pool, Some(vec!["SKEY"])).await;
+            let detr_att = query_implicit_attr(detr_refno, cache.value(), &detr_pool, Some(vec!["SKEY"])).await;
             if let Ok(detr_att) = detr_att {
                 let s_key = detr_att.get_str("SKEY");
                 if let Some(s_key) = s_key {
@@ -233,7 +239,7 @@ pub fn create_end_position_null_data(position: Vec3) -> Vec<u8> {
     data
 }
 
-pub async fn create_weld_spec_data(attr: &AttrMap, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> Vec<u8> {
+pub async fn create_weld_spec_data(attr: &AttrMap, aios_mgr: &AiosDBManager) -> Vec<u8> {
     let mut data = Vec::new();
     let spre = attr.get_refu64("SPRE");
     if spre.is_none() { return data; }
@@ -242,14 +248,20 @@ pub async fn create_weld_spec_data(attr: &AttrMap, aios_mgr: &AiosDBManager, poo
     let spre_cache = aios_mgr.get_refno_basic(spre);
     if spre_cache.is_none() { return data; }
     let spre_cache = spre_cache.unwrap();
-    let spre_attr = query_implicit_attr(spre, spre_cache.value(), pool, Some(vec!["DETR"])).await;
+    let spre_pool = aios_mgr.get_project_pool_by_refno(spre).await;
+    if spre_pool.is_none() { return data; }
+    let (_, spre_pool) = spre_pool.unwrap();
+    let spre_attr = query_implicit_attr(spre, spre_cache.value(), &spre_pool, Some(vec!["DETR"])).await;
     if spre_attr.is_err() { return data; }
     let spre_attr = spre_attr.unwrap();
 
     let detr = spre_attr.get_refu64("DETR");
     if detr.is_none() { return data; }
     let detr = detr.unwrap();
-    let detr_attr = query_explicit_attr(detr, pool).await;
+    let detr_pool = aios_mgr.get_project_pool_by_refno(detr).await;
+    if detr_pool.is_none() { return data; }
+    let (_, detr_pool) = detr_pool.unwrap();
+    let detr_attr = query_explicit_attr(detr, &detr_pool).await;
     if detr_attr.is_err() { return data; }
     let detr_attr = detr_attr.unwrap();
 
@@ -270,7 +282,7 @@ pub async fn create_weld_spec_data(attr: &AttrMap, aios_mgr: &AiosDBManager, poo
     data
 }
 
-pub fn create_pipe_thickness_data(name: &str,thickness_map: &DashMap<String,DashMap<String,String>>) -> Vec<u8> {
+pub fn create_pipe_thickness_data(name: &str, thickness_map: &DashMap<String, DashMap<String, String>>) -> Vec<u8> {
     let mut data = Vec::new();
     let mut od = "".to_string();
     let mut thick = "".to_string();
@@ -339,10 +351,10 @@ fn gen_weld_spec_str(weld_spec: &str) -> Vec<u8> {
     format!("        WELD-SPEC  {}\r\n", weld_spec).into_bytes()
 }
 
-fn gen_pipe_od_str(od:&str) -> Vec<u8> {
-    format!("        PIPE-OD  {}\r\n",od).into_bytes()
+fn gen_pipe_od_str(od: &str) -> Vec<u8> {
+    format!("        PIPE-OD  {}\r\n", od).into_bytes()
 }
 
-fn gen_pipe_thick_str(od:&str) -> Vec<u8> {
-    format!("        PIPE-THICK  {}\r\n",od).into_bytes()
+fn gen_pipe_thick_str(od: &str) -> Vec<u8> {
+    format!("        PIPE-THICK  {}\r\n", od).into_bytes()
 }

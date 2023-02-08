@@ -8,7 +8,7 @@ pub async fn gen_cap_data(aios_mgr:&AiosDBManager, attr: &AttrMap, pool:&Pool<My
     let mut data = vec![];
     let refno = attr.get_refno();
     if refno.is_none() { return vec![]; }
-    data.append(&mut create_s_key_data(attr,aios_mgr,pool).await);
+    data.append(&mut create_s_key_data(attr,aios_mgr).await);
     data.append(&mut create_refno_data(attr));
     data
 }

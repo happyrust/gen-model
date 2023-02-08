@@ -141,7 +141,8 @@ pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic,
     };
     let sql = gen_query_implicit_attr_sql(refno, ref_basic.get_table_name(), &column_names);
     let row = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
-    let mut r = convert_row_to_attmap(&row, type_hash, &column_names)?;
+    let mut r = convert_row_to_attmap(&row, type_hash, &column_names);
+    let mut r = r?;
     //其他的插入
     if exclude_columns.len() > 0 {
         exclude_columns.iter().for_each(|x| {
@@ -190,15 +191,17 @@ pub async fn query_uda_attr(att_type: &str, pool: &Pool<MySql>) -> anyhow::Resul
 }
 
 pub async fn query_full_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
-    if let Some((_project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
-        // let pool = aios_mgr.get_project_pool(&project).ok_or(anyhow!("No project pool"))?;
+    if let Some((project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
         let ref_basic = aios_mgr.get_refno_basic(refno);
         if ref_basic.is_none() { return Ok(AttrMap::default()); }
         let ref_basic = ref_basic.unwrap();
         let mut attr = query_implicit_attr(refno, ref_basic.value(), &pool, column_names).await?;
+
         let att_type = attr.get_type().to_string();
         let explicit_attr = query_explicit_attr(refno, &pool).await?;
+
         let ele = query_ele_node(refno, &pool).await?;
+
         for (k, v) in explicit_attr.map {
             attr.entry(k).or_insert(v);
         }
