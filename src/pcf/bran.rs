@@ -18,7 +18,7 @@ use crate::pcf::excel_api::get_pipe_thickness_table;
 use crate::pcf::flan::gen_flan_data;
 use crate::pcf::gask::gen_gask_data;
 use crate::pcf::nozz::gen_nozz_data;
-use crate::pcf::pcf_api::{create_end_position_null_data, create_pipe_thickness_data, create_pipeline_href_data, create_pipeline_spec_data, create_pipeline_tref_data, create_refno_data, create_temperature_data, gen_node_basic_data};
+use crate::pcf::pcf_api::{create_end_position_null_data, create_thickness_data, create_pipeline_href_data, create_pipeline_spec_data, create_pipeline_tref_data, create_refno_data, create_temperature_data, gen_node_basic_data};
 use crate::pcf::tee::gen_tee_data;
 use crate::pcf::tubi::gen_tubi_data;
 use crate::pcf::valv::gen_valv_data;
@@ -41,16 +41,22 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
     let database = aios_mgr.get_arangodb_conn().await?;
     let bran_attr = query_full_attr(refno, &aios_mgr, None).await?;
     let bran_name = bran_attr.get_name().to_string();
+
     // 先把 pipe_thickness 算好，需要的直接放进去就好了
     let pipe_refno = aios_mgr.get_owner(refno);
     let pipe_name = query_name(pipe_refno, pool.value()).await?;
-    let pipe_thickness_data = create_pipe_thickness_data(&pipe_name, thickness_map);
-    // 生成 bran 的数据
+    let pipe_cache = aios_mgr.get_refno_basic(pipe_refno);
+    if pipe_cache.is_none() { return Ok(data); }
+    let pipe_cache = pipe_cache.unwrap();
+    let pipe_temp = query_implicit_attr(pipe_refno,pipe_cache.value(),pool.value(),Some(vec!["TEMP"])).await.unwrap_or_default();
+    let pipe_temp = pipe_temp.get_f64("TEMP").unwrap_or(-100000.0);
+    let pipe_thickness_data = create_thickness_data(&pipe_name, thickness_map, true);
+    // 查找 bran带tubi和元件 的数据
     let bran_infos = query_bran_info(refno, &database).await?;
     // 生成 bran href 的数据
     if let Some(start_position) = bran_infos.first() {
         let start_position = start_position.start_pt;
-        data.append(&mut gen_bran_pipeline_reference_data(&bran_attr, start_position, pool.value(), &pipe_thickness_data).await);
+        data.append(&mut gen_bran_pipeline_reference_data(&bran_attr, start_position, pool.value(), &pipe_thickness_data,pipe_temp).await);
         let href = bran_attr.get_refu64("HREF");
         data.append(&mut gen_bran_connection_data(href, start_position, aios_mgr, pool.value()).await);
     }
@@ -71,11 +77,12 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
                 }
                 let from_refno = RefU64::from_arangodb_refno_str(&bran_infos[i]._from);
                 let mut tubi_data = gen_tubi_data(bran_infos[i].start_pt, bran_infos[tubi_end_index].end_pt,
-                                                  bran_infos[tubi_end_index].bore, &bran_attr, from_refno, pool.value(),
-                                                  &mut materials, &pipe_thickness_data,aios_mgr).await;
+                                                  bran_infos[tubi_end_index].bore, &bran_attr, from_refno,
+                                                  &mut materials, &pipe_thickness_data, aios_mgr).await;
                 data.append(&mut tubi_data);
             }
         }
+        // 生成 bran 元件数据
         if i == bran_infos.len() - 1 { continue; }
         let refno = convert_refno_from_edge_str(&bran_infos[i]._to);
         if refno.is_none() { continue; }
@@ -98,12 +105,12 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
 }
 
 pub async fn gen_bran_pipeline_reference_data(attr: &AttrMap, start_position: Vec3, pool: &Pool<MySql>,
-                                              pipe_thickness_data: &Vec<u8>) -> Vec<u8> {
+                                              pipe_thickness_data: &Vec<u8>,pipe_temp:f64) -> Vec<u8> {
     let mut data = vec![];
     let name = attr.get_name();
     data.append(&mut gen_pipeline_reference_data_str_head(name.as_str()));
     data.append(&mut gen_start_co_ords_data(start_position));
-    data.append(&mut create_temperature_data(attr));
+    data.append(&mut create_temperature_data(pipe_temp));
     data.append(&mut create_pipeline_spec_data(attr, pool).await);
     data.append(&mut create_refno_data(attr));
     data.append(&mut create_pipeline_href_data(attr));

@@ -10,11 +10,11 @@ use crate::aql_api::tubi::query_bran_info;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::pcf::bran::{gen_endpoint_data, gen_item_code_data_attr_val, gen_type_name_data};
-use crate::pcf::pcf_api::{create_center_point_data, create_pipe_thickness_data, create_pipeline_spec_data, create_refno_data, create_s_key_data, create_tee_item_code_bran_data, create_weld_spec_data, gen_s_key_data_str, get_s_key_value};
+use crate::pcf::pcf_api::{create_center_point_data, create_thickness_data, create_pipeline_spec_data, create_refno_data, create_s_key_data, create_tee_item_code_bran_data, create_weld_spec_data, gen_s_key_data_str, get_s_key_value};
 
 pub async fn gen_tee_data(aios_mgr: &AiosDBManager, attr: &AttrMap, bran_attr: &AttrMap,
                           pool: &Pool<MySql>, materials: &mut Vec<(RefU64, String)>,
-                          start_edge: &TubiEdgeAql, end_edge: &TubiEdgeAql, thickness_map:&DashMap<String,DashMap<String,String>>) -> Vec<u8> {
+                          start_edge: &TubiEdgeAql, end_edge: &TubiEdgeAql, thickness_map: &DashMap<String, DashMap<String, String>>) -> Vec<u8> {
     let mut data = vec![];
     let refno = attr.get_refno();
     if refno.is_none() { return vec![]; }
@@ -43,7 +43,7 @@ pub async fn gen_tee_data(aios_mgr: &AiosDBManager, attr: &AttrMap, bran_attr: &
         data.append(&mut gen_item_code_data_attr_val(spre, aios_mgr, materials).await);
         data.append(&mut create_weld_spec_data(attr, aios_mgr).await);
         data.append(&mut create_refno_data(attr));
-        data.append(&mut create_cref_pipe_thickness_data(attr,pool,thickness_map).await);
+        data.append(&mut create_cref_thickness_data(attr, pool, thickness_map, false).await);
     }
     data
 }
@@ -55,7 +55,7 @@ pub async fn create_tee_branch_point_data(aios_mgr: &AiosDBManager, attr: &AttrM
         if database.is_err() { return vec![]; }
         let database = database.unwrap();
         let bran_infos = query_bran_info(cref_refno, &database).await;
-        if bran_infos.is_err() { return vec![];}
+        if bran_infos.is_err() { return vec![]; }
         let bran_infos = bran_infos.unwrap();
         let cref_cache = aios_mgr.get_refno_basic(cref_refno);
         if cref_cache.is_none() { return vec![]; }
@@ -90,15 +90,16 @@ async fn create_tee_set_on_branch_1_point_data(aios_mgr: &AiosDBManager, refno: 
     vec![]
 }
 
-async fn create_cref_pipe_thickness_data(attr:&AttrMap,pool:&Pool<MySql>,thickness_map:&DashMap<String,DashMap<String,String>>) -> Vec<u8> {
+/// cref_thickness 分为 pipe 和 bran 两种 b_pipe就代表是pipe这一种
+async fn create_cref_thickness_data(attr: &AttrMap, pool: &Pool<MySql>, thickness_map: &DashMap<String, DashMap<String, String>>, b_pipe: bool) -> Vec<u8> {
     let mut data = Vec::new();
     let cref = attr.get_refu64("CREF");
-    if cref.is_none() { return  data; }
+    if cref.is_none() { return data; }
     let cref = cref.unwrap();
-    let cref_name = query_name(cref,pool).await;
+    let cref_name = query_name(cref, pool).await;
     if cref_name.is_err() { return data; }
     let cref_name = cref_name.unwrap();
-    create_pipe_thickness_data(&cref_name,thickness_map)
+    create_thickness_data(&cref_name, thickness_map, b_pipe)
 }
 
 fn gen_branch_1_point_data_str(point: Vec3) -> Vec<u8> {

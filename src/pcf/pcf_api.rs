@@ -173,11 +173,8 @@ pub fn create_refno_data(attr: &AttrMap) -> Vec<u8> {
     vec![]
 }
 
-pub fn create_temperature_data(attr: &AttrMap) -> Vec<u8> {
-    if let Some(temp) = attr.get_f64("TEMP") {
-        return gen_temperature_data_str(temp);
-    }
-    vec![]
+pub fn create_temperature_data(temp: f64) -> Vec<u8> {
+    gen_temperature_data_str(temp)
 }
 
 pub fn create_s_text_data(attr: &AttrMap) -> Vec<u8> {
@@ -282,7 +279,8 @@ pub async fn create_weld_spec_data(attr: &AttrMap, aios_mgr: &AiosDBManager) -> 
     data
 }
 
-pub fn create_pipe_thickness_data(name: &str, thickness_map: &DashMap<String, DashMap<String, String>>) -> Vec<u8> {
+/// b_pipe 分为 bran_thickness 和 pipe_thickness 两种 取数据方式一样，最后输出的文字不同
+pub fn create_thickness_data(name: &str, thickness_map: &DashMap<String, DashMap<String, String>>, b_pipe: bool) -> Vec<u8> {
     let mut data = Vec::new();
     let mut od = "".to_string();
     let mut thick = "".to_string();
@@ -290,6 +288,7 @@ pub fn create_pipe_thickness_data(name: &str, thickness_map: &DashMap<String, Da
     if name_splits.len() >= 5 && !thickness_map.is_empty() {
         let dn = name_splits[3];
         let key = name_splits[4];
+        let key = &key[0..1];
         if let Some(dn) = thickness_map.get(dn) {
             let dn = dn.value();
             if let Some(value) = dn.get(key) {
@@ -301,8 +300,13 @@ pub fn create_pipe_thickness_data(name: &str, thickness_map: &DashMap<String, Da
             }
         }
     }
-    data.append(&mut gen_pipe_od_str(&od));
-    data.append(&mut gen_pipe_thick_str(&thick));
+    if b_pipe {
+        data.append(&mut gen_pipe_od_str(&od));
+        data.append(&mut gen_pipe_thick_str(&thick));
+    } else {
+        data.append(&mut gen_bran_od_str(&od));
+        data.append(&mut gen_bran_thick_str(&thick));
+    }
     data
 }
 
@@ -355,6 +359,14 @@ fn gen_pipe_od_str(od: &str) -> Vec<u8> {
     format!("        PIPE-OD  {}\r\n", od).into_bytes()
 }
 
-fn gen_pipe_thick_str(od: &str) -> Vec<u8> {
-    format!("        PIPE-THICK  {}\r\n", od).into_bytes()
+fn gen_pipe_thick_str(thick: &str) -> Vec<u8> {
+    format!("        PIPE-THICK  {}\r\n", thick).into_bytes()
+}
+
+fn gen_bran_od_str(od: &str) -> Vec<u8> {
+    format!("        BRANCH1-OD  {}\r\n", od).into_bytes()
+}
+
+fn gen_bran_thick_str(thick: &str) -> Vec<u8> {
+    format!("        BRANCH1-THICK  {}\r\n", thick).into_bytes()
 }

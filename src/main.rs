@@ -76,7 +76,6 @@ async fn main() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    dbg!(&db_option);
     if db_option.total_sync {
         create_arangodb_conns(&db_option).await.expect("Failed to create arangodb conns");
         // save_virtual_hole_value_to_arangodb(&db_option).await.unwrap();

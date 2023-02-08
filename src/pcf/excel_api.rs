@@ -4,6 +4,7 @@ use bevy::utils::HashMap;
 use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use crate::pcf::pcf_api::create_thickness_data;
 use crate::ssc::SiteExcelDataTest;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -41,7 +42,8 @@ pub fn get_pipe_thickness_table() -> anyhow::Result<DashMap<String, DashMap<Stri
 
 #[test]
 fn test_get_pipe_thickness_table() -> anyhow::Result<()> {
+    let pipe_name = "2ACAS-A6-806-6-LJ6";
     let map = get_pipe_thickness_table()?;
-    dbg!(&map);
+    let name = create_thickness_data(pipe_name, &map);
     Ok(())
 }

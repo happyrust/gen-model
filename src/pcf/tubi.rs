@@ -6,7 +6,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::pcf::bran::{gen_endpoint_data, gen_item_code_data_attr_val, gen_refno_data, gen_refno_data_pipe};
 
 pub async fn gen_tubi_data(start_point: Vec3, end_point: Vec3, bore: f32,
-                           bran_attr: &AttrMap, from_refno: Option<RefU64>, pool: &Pool<MySql>,
+                           bran_attr: &AttrMap, from_refno: Option<RefU64>,
                            materials:&mut Vec<(RefU64,String)>,pipe_thickness_data:&Vec<u8>,aios_mgr:&AiosDBManager) -> Vec<u8> {
     let mut pipe_data = Vec::new();
     pipe_data.append(&mut "PIPE \r\n".to_string().into_bytes());
