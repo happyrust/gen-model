@@ -1,14 +1,20 @@
+use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
-use aios_core::pdms_types::RefU64;
+use aios_core::pdms_types::{PdmsElement, RefU64};
 use arangors_lite::Database;
 use bitvec::macros::internal::funty::Floating;
+use dashmap::{DashMap, DashSet};
+use futures::future::BoxFuture;
+use futures::FutureExt;
 use glam::Vec3;
+use id_tree::{Node, Tree};
+use id_tree::InsertBehavior::AsRoot;
 use sqlx::{MySql, Pool};
 use crate::api::attr::{query_implicit_attr, query_position_from_id};
-use crate::api::element::query_children_eles;
-use crate::aql_api::children::{query_ancestor_till_type_aql, query_ancestor_with_name_till_type_aql};
+use crate::api::element::{query_children_eles, query_ele_node};
+use crate::aql_api::children::{query_ancestor_till_type_aql, query_ancestor_with_name_till_type_aql, query_children_aql};
 use crate::aql_api::PdmsRefnoNameAql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -21,13 +27,20 @@ pub async fn create_rvm_file(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow:
     let mut data = vec![];
     let database = aios_mgr.get_arangodb_conn().await?;
     let db_option = &aios_mgr.db_option;
+    let pool = aios_mgr.get_project_pool_by_refno(refno).await;
+    if pool.is_none() { return Ok(data); }
+    let (_, pool) = pool.unwrap();
     let ancestor = query_ancestor_with_name_till_type_aql(&database, refno, "SITE").await?;
     if ancestor.is_empty() { return Ok(data); }
     let cntb_len = ancestor.len();
     data.append(&mut create_head_data(db_option));
-    let mut ancestor_data = create_ancestor_data(ancestor, aios_mgr).await.unwrap_or((vec![], Vec3::ZERO));
+    let mut ancestor_data = create_ancestor_data(refno, ancestor, aios_mgr).await.unwrap_or((vec![], Vec3::ZERO));
     data.append(&mut ancestor_data.0);
-    data.append(&mut create_element_data(refno, aios_mgr, ancestor_data.1, &database).await?);
+    let mut element_data = vec![];
+    let element = create_element_data(refno, aios_mgr, &mut element_data, ancestor_data.1, &database, &pool).await;
+    if let Ok(_) = element {
+        data.append(&mut element_data);
+    }
     data.append(&mut create_tail_data(cntb_len));
     Ok(data)
 }
@@ -36,20 +49,27 @@ pub async fn create_owner_data(refno: RefU64, aios_mgr: &AiosDBManager, database
     let mut data = vec![];
     let ancestor = query_ancestor_with_name_till_type_aql(database, refno, "SITE").await?;
     if ancestor.is_empty() { return Ok(data); }
-    let mut ancestor_data = create_ancestor_data(ancestor, aios_mgr).await.unwrap_or((vec![], Vec3::ZERO));
+    let mut ancestor_data = create_ancestor_data(refno,ancestor, aios_mgr).await.unwrap_or((vec![], Vec3::ZERO));
+    let pool = aios_mgr.get_project_pool_by_refno(refno).await;
+    if pool.is_none() { return Ok(data); }
+    let (_, pool) = pool.unwrap();
+    let mut element_data = vec![];
     data.append(&mut ancestor_data.0);
-    data.append(&mut create_element_data(refno, aios_mgr, ancestor_data.1, database).await?);
+    if let Ok(_) = create_element_data(refno, aios_mgr, &mut data, ancestor_data.1, database, &pool).await {
+        data.append(&mut element_data);
+    }
     Ok(data)
 }
 
-async fn create_ancestor_data(ancestor: Vec<PdmsRefnoNameAql>, aios_mgr: &AiosDBManager) -> anyhow::Result<(Vec<u8>, Vec3)> {
+async fn create_ancestor_data(refno: RefU64, ancestor: Vec<PdmsRefnoNameAql>, aios_mgr: &AiosDBManager) -> anyhow::Result<(Vec<u8>, Vec3)> {
     let mut data = vec![];
     let mut current_position = Vec3::ZERO;
     for refno_name in ancestor.into_iter().rev() {
-        let refno = RefU64::from_url_refno(&refno_name.refno);
-        if refno.is_none() { continue; }
-        let refno = refno.unwrap();
-        let pos = query_position_from_id(refno, aios_mgr).await?.unwrap_or(Vec3::ZERO);
+        let ancestor_refno = RefU64::from_url_refno(&refno_name.refno);
+        if ancestor_refno.is_none() { continue; }
+        let ancestor_refno = ancestor_refno.unwrap();
+        if ancestor_refno == refno { continue; }
+        let pos = query_position_from_id(ancestor_refno, aios_mgr).await?.unwrap_or(Vec3::ZERO);
         current_position = current_position + pos;
         data.append(&mut gen_ancestor_data_str(&refno_name.name, current_position));
     }
@@ -57,17 +77,12 @@ async fn create_ancestor_data(ancestor: Vec<PdmsRefnoNameAql>, aios_mgr: &AiosDB
 }
 
 /// position: ancestor到本层级的相对坐标
-async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager, position: Vec3, database: &Database) -> anyhow::Result<Vec<u8>> {
-    let mut data = vec![];
-    let pool = aios_mgr.get_project_pool_by_refno(refno).await;
-    if pool.is_none() { return Ok(data); }
-    let (_, pool) = pool.unwrap();
+async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager, mut data: &mut Vec<u8>, position: Vec3, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let children = query_children_eles(refno, &pool).await?;
     for child in children {
         let refno = RefU64::from_refno_str(&child.refno);
         if refno.is_err() { continue; }
         let refno = refno.unwrap();
-
         let instance = query_rvm_instance_data_from_refno_aql(refno, database).await?;
         if instance.is_none() { continue; }
         let instance = instance.unwrap();
@@ -85,7 +100,7 @@ async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager, position: 
             data.append(&mut gen_cntb_data());
             let pos = query_position_from_id(refno, aios_mgr).await?.unwrap_or(Vec3::ZERO) + position;
             data.append(&mut gen_name_position_data(&child.name, pos));
-            data.append(&mut gen_prim_data(instance, shape_data,ShapeModule::Desi));
+            data.append(&mut gen_prim_data(instance, shape_data, ShapeModule::Desi));
         } else {
             let mut cata_element_data = create_cata_element_data(refno, instance, database).await?;
             if !cata_element_data.is_empty() {
@@ -97,7 +112,69 @@ async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager, position: 
         }
         data.append(&mut gen_cnte_data());
     }
-    Ok(data)
+    Ok(())
+}
+
+async fn create_element_data_test(refno: RefU64, aios_mgr: &AiosDBManager, position: Vec3, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<()> {
+    // let mut pending_children = VecDeque::new();
+    // let current_element = query_ele_node(refno, pool).await; // 返回选中节点的elenode数据
+    // if current_element.is_err() { return Ok(()); }
+    // let mut node_id_map = DashMap::new();
+    // let current_element = current_element.unwrap();
+    //
+    // let mut tree = Tree::new();
+    // // 将选中节点设为头节点
+    // let current_element = PdmsElement {
+    //     refno: current_element.refno.to_refno_string(),
+    //     owner: current_element.owner,
+    //     name: current_element.name,
+    //     noun: current_element.noun,
+    //     version: 0,
+    //     children_count: 0,
+    // };
+    // pending_children.push_back(current_element.clone());
+    //
+    // for child in pending_children {
+    //     let mut data = Vec::new();
+    //     let refno = RefU64::from_refno_str(&child.refno);
+    //     if refno.is_err() { continue; }
+    //     let refno = refno.unwrap();
+    //     let children = query_children_eles(refno, &pool).await?;
+    //     pending_children.extend(children);
+    //     let instance = query_rvm_instance_data_from_refno_aql(refno, database).await?;
+    //     // 如果模型中所有得类型 visible 都为 false 就跳过
+    //     let mut b_visible = 0;
+    //     for data in &instance.data {
+    //         if !data.visible { b_visible += 1; }
+    //     }
+    //     if b_visible >= instance.data.len() {
+    //         continue;
+    //     }
+    //     let shape_data = convert_shape_type_data(refno, aios_mgr).await?;
+    //
+    //     // data.append(&mut gen_cntb_data());
+    //     let pos = query_position_from_id(refno, aios_mgr).await?.unwrap_or(Vec3::ZERO) + position;
+    //     data.append(&mut gen_name_position_data(&child.name, pos));
+    //
+    //     if let Some(instance) = instance {
+    //         if let Some(shape_data) = shape_data {
+    //             data.append(&mut gen_prim_data(instance, shape_data, ShapeModule::Desi));
+    //         } else {
+    //             let mut cata_element_data = create_cata_element_data(refno, instance, database).await?;
+    //             if !cata_element_data.is_empty() {
+    //                 data.append(&mut cata_element_data);
+    //             }
+    //         }
+    //     }
+    //     if None = tree.root_node_id() {
+    //         let root = tree.insert(Node::new(data), AsRoot)?;
+    //         node_id_map.entry(refno).or_insert(root);
+    //     } else {
+    //         // let owner =
+    //     }
+    //     // data.append(&mut gen_cnte_data());
+    // }
+    Ok(())
 }
 
 pub async fn convert_shape_type_data(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<ShapeTypeData>> {
@@ -213,10 +290,32 @@ async fn test_create_rvm_file() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_create_owner_data() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    let refno = RefU64::from_refno_str("23584/108").unwrap();
+    let refno = RefU64::from_refno_str("23584/5495").unwrap();
     let database = mgr.get_arangodb_conn().await?;
     let data = create_owner_data(refno, &mgr, &database).await?;
     let mut file = std::fs::File::create("test_rvm.txt").unwrap();
+    file.write_all(&data).unwrap();
+    Ok(())
+}
+
+/// 基本体的圆柱 h/2 问题
+#[tokio::test]
+async fn test_cylinder_height() -> anyhow::Result<()> {
+    let mgr = Arc::new(AiosDBManager::init_form_config().await?);
+    let refno = RefU64::from_refno_str("23584/108").unwrap();
+    let data = create_rvm_file(refno, &mgr).await?;
+    let mut file = std::fs::File::create("test_rvm.rvm").unwrap();
+    file.write_all(&data).unwrap();
+    Ok(())
+}
+
+/// 1. aabb 保存的值和 rvm的值对不上 ， 2. 管道的 tubi 没保存
+#[tokio::test]
+async fn test_cata_aabb() -> anyhow::Result<()> {
+    let mgr = Arc::new(AiosDBManager::init_form_config().await?);
+    let refno = RefU64::from_refno_str("23584/5495").unwrap();
+    let data = create_rvm_file(refno, &mgr).await?;
+    let mut file = std::fs::File::create("test_rvm.rvm").unwrap();
     file.write_all(&data).unwrap();
     Ok(())
 }

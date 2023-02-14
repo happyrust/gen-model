@@ -9,7 +9,7 @@ use regex::Regex;
 use crate::graph_db::pdms_inst_arango::query_rvm_instance_data_from_refno_aql;
 use crate::rvm::data_api::ShapeTypeData::*;
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub enum ShapeModule {
     Desi,
     Cata,
@@ -29,7 +29,7 @@ pub enum ShapeTypeData {
     EllipticalDish([f32; 2]),
     /// 半径 高
     SphericalDish([f32; 2]),
-    /// 0: bottom radius 1 : top radius 2: height 3-5 : x offset position 6-8: y offset position
+    /// 0: bottom radius 1 : top radius 2: height 3: offset
     Snout([f32; 9]),
     /// 半径 高
     Cylinder([f32; 2]),
@@ -102,7 +102,7 @@ pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: ShapeTypeData, shape_
     data.append(&mut gen_prim_head_data());
     data.append(&mut format!("     {}\r\n", shape_type.get_shape_number()).into_bytes());
     data.append(&mut gen_prim_scale_position_data(rvm_instance.world_transform.0, rvm_instance.world_transform.2,
-                                                  rvm_instance.world_transform.1, shape_type.clone(), shape_module.clone()));
+                                                  rvm_instance.world_transform.1));
     match shape_module {
         ShapeModule::Desi => { data.append(&mut gen_desi_prim_aabb_data(aabb, rvm_instance.world_transform)); }
         ShapeModule::Cata => { data.append(&mut gen_cata_prim_aabb_data(aabb)); }
@@ -132,7 +132,7 @@ fn gen_prim_head_data() -> Vec<u8> {
     format!("PRIM\r\n     1     1\r\n").into_bytes()
 }
 
-fn gen_prim_scale_position_data(rotation: Quat, scale: Vec3, position: Vec3, shape_type: ShapeTypeData, shape_module: ShapeModule) -> Vec<u8> {
+fn gen_prim_scale_position_data(rotation: Quat, scale: Vec3, position: Vec3) -> Vec<u8> {
     let mut data = Vec::new();
     let rotation_mat = Mat3::from_quat(rotation);
 
@@ -179,6 +179,10 @@ fn keep_2_decimals_from_vec3(input: Vec3) -> Vec3 {
     let y = (input.y * 100.0).round() / 100.0;
     let z = (input.z * 100.0).round() / 100.0;
     Vec3::from_array([x, y, z])
+}
+
+pub fn keep_2_decimals_from_f32(input: f32) -> f32 {
+    (input * 100.0).round() / 100.0
 }
 
 #[test]
