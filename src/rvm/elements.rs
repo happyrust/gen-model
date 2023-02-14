@@ -298,7 +298,7 @@ async fn test_create_owner_data() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 基本体的圆柱 h/2 问题
+/// 元件库的圆柱 h/2 问题
 #[tokio::test]
 async fn test_cylinder_height() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
