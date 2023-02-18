@@ -4,6 +4,7 @@ use aios_core::rvm_types::RvmGeoInfo;
 use arangors_lite::Database;
 use bevy::prelude::Transform;
 use glam::{Mat3, Mat3A, Quat, Vec3};
+use id_tree::{NodeId, Tree};
 use parry3d::bounding_volume::Aabb;
 use regex::Regex;
 use crate::graph_db::pdms_inst_arango::query_rvm_instance_data_from_refno_aql;
@@ -110,6 +111,28 @@ pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: ShapeTypeData, shape_
 
     data.append(&mut shape_type.convert_shape_type_to_bytes());
     data
+}
+
+pub fn gen_data_from_tree(tree: Tree<(RefU64, Vec<u8>)>) -> Vec<u8> {
+    let mut data = Vec::new();
+    let root = tree.root_node_id();
+    if root.is_none() { return data; }
+    let root = root.unwrap();
+    // 递归生成数据
+    gen_data_recursion(&mut data,&tree,root);
+    data
+}
+
+fn gen_data_recursion(mut data: &mut Vec<u8>, tree: &Tree<(RefU64, Vec<u8>)>, current_node: &NodeId) {
+    if let Ok(node) = tree.get(current_node) {
+        let node_data = node.data();
+        data.append(&mut gen_cntb_data());
+        data.append(&mut node_data.1.clone());
+        for child in node.children() {
+            gen_data_recursion(data, tree, child);
+        }
+        data.append(&mut gen_cnte_data());
+    }
 }
 
 pub fn gen_cntb_data() -> Vec<u8> {

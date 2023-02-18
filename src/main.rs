@@ -67,6 +67,7 @@ use parse_pdms_db::parse_file;
 use tokio::spawn;
 use aios_database::api::admin::query_all_db_infos;
 use aios_database::aql_api::tubi::{insert_tubi_value, query_all_tubi_from_node};
+use aios_database::rvm::elements::create_rvm_file;
 
 
 #[tokio::main]
@@ -214,11 +215,10 @@ async fn main() -> anyhow::Result<()> {
 
             let dbno = db_option.arch_db_nums.clone().unwrap_or_default().clone();
             // let room_infos = query_all_need_compute_room_refno(&dbno, "ROOM", Some("ROOMS"), &mgr.project_map.get(&db_option.project_name).unwrap()).await?;
-            let room_infos = query_all_need_compute_room_refno(&dbno, "FRMW", Some("-RM"), &mgr.project_map.get(&db_option.project_name).unwrap()).await?;
-            // let room_infos = vec![(RefU64::from_two_nums(17544, 15107), "N448".to_string())];
+            // let room_infos = query_all_need_compute_room_refno(&dbno, "FRMW", Some("-RM"), &mgr.project_map.get(&db_option.project_name).unwrap()).await?;
+            let room_infos = vec![(RefU64::from_two_nums(24381, 35031), "R330".to_string())];
             let dbno_mgr = DbNumMgr::load_file(&format!("{instance_dir_path}/dbno_mgr.num")).unwrap_or_default();
             for (target_refno, room_name) in room_infos {
-                // dbg!(&room_name);
                 let mut room_info_map = HashMap::new();
                 if let Some(dbno) = dbno_mgr.get_dbno(target_refno) {
                     if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
@@ -235,7 +235,7 @@ async fn main() -> anyhow::Result<()> {
                                         let mut withing_room_refnos = rtree
                                             .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
                                         dbg!(&withing_room_refnos.len());
-                                        if withing_room_refnos.len() > 2000 { continue; }
+                                        // if withing_room_refnos.len() > 2000 { continue; }
                                         let mut removed_refnos = vec![];
                                         withing_room_refnos.retain(|x| {
                                             //直接判断点集，可以快速过滤一些构件
@@ -276,6 +276,7 @@ async fn main() -> anyhow::Result<()> {
                                                 }
                                             }
                                             removed_refnos.push(*x);
+                                            println!("removed {} refnos ;", removed_refnos.len());
                                             false
                                         });
                                         let mut file = fs::File::create("removed_refnos.data").unwrap();
@@ -326,6 +327,15 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+// #[tokio::main]
+// async fn main() -> anyhow::Result<()> {
+//     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
+//     let refno = RefU64::from_refno_str("23584/5495").unwrap();
+//     let data = create_rvm_file(refno, &mgr).await?;
+//     let mut file = std::fs::File::create("test_rvm.rvm").unwrap();
+//     file.write_all(&data).unwrap();
+//     Ok(())
+// }
 
 /// 提前创建图数据库需要的几个collection
 async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {

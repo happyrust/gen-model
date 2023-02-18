@@ -54,8 +54,8 @@ pub async fn query_metadata_table_sql(id: u64, pool: &Pool<MySql>) -> anyhow::Re
             let code = result.get::<String, _>("CODE");
             let name = result.get::<String, _>("NAME");
             let b_null = result.get::<bool, _>("B_NULL");
-            let data_type = result.get::<i8, _>("DATA_TYPE") as u8;
-            let unit = result.get::<i8, _>("UNIT") as u8;
+            let data_type = result.get::<String, _>("DATA_TYPE");
+            let unit = result.get::<String, _>("UNIT");
             let desc = result.get::<String, _>("DESCRIPTION");
             let scope = result.get::<String, _>("SCOPE");
             datas.push(MetadataManagerTableData {
