@@ -8,12 +8,6 @@ use crate::options::DbOption;
 
 
 pub async fn query_virtual_hole_value(database: &Database, refnos: Vec<RefU64>) -> anyhow::Result<Option<(Vec<VirtualHoleGraphNode>, Vec<VirtualEmbedGraphNode>)>> {
-    // let s = Config::builder()
-    //     .add_source(File::with_name("DbOption"))
-    //     .build()?;
-    // let db_option: DbOption = s.try_deserialize().unwrap();
-    // let database = get_arangodb_conn_from_db_option(&db_option).await?;
-
     let mut hole: Vec<VirtualHoleGraphNode> = Vec::new();
     for refno in &refnos {
         let aql = AqlQuery::new("

@@ -1,7 +1,7 @@
 use std::env;
 use sqlx::{MySql, Pool, Row};
 use crate::consts::METADATA_TABLE;
-use aios_core::metadata_manager::{MetadataManagerTableData, MetadataManagerTreeNode};
+use aios_core::metadata_manager::{MetadataManagerTableData, MetadataManagerTreeNode, ShowMetadataManagerTableData};
 use nom::number::streaming::u64;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::consts::METADATA_DATA;
@@ -73,14 +73,14 @@ pub async fn query_metadata_table_sql(id: u64, pool: &Pool<MySql>) -> anyhow::Re
     Ok(datas)
 }
 
-pub async fn query_tree_node_detail(id: u64,pool:Pool<MySql>) -> anyhow::Result<Option<MetadataManagerTreeNode>> {
+
+pub async fn query_tree_node_detail(id: u64, pool: Pool<MySql>) -> anyhow::Result<Option<MetadataManagerTreeNode>> {
     let sql = gen_query_metadata_tree_data_sql(id);
     let result = sqlx::query(&sql).fetch_one(&pool).await;
     if let Ok(result) = result {
-        let id = result.get::<u64,_>("ID");
-        let code = result.get::<String,_>("USER_CODE");
-        let english_name = result.get::<String,_>("ENGLISH_NAME");
-
+        let id = result.get::<u64, _>("ID");
+        let code = result.get::<String, _>("USER_CODE");
+        let english_name = result.get::<String, _>("ENGLISH_NAME");
     }
     Ok(None)
 }
