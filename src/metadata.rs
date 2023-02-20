@@ -102,9 +102,9 @@ pub async fn create_metadata_data_table_sql(pool: &Pool<MySql>) -> anyhow::Resul
     sql.push_str(&format!("{} VARCHAR(50),", "CODE"));
     sql.push_str(&format!("{} VARCHAR(50),", "NAME"));
     sql.push_str(&format!("{} TINYINT(1) ,", "B_NULL"));
-    sql.push_str(&format!("{} TINYINT ,", "DATA_TYPE"));
-    sql.push_str(&format!("{} TINYINT ,", "UNIT"));
-    sql.push_str(&format!("{} VARCHAR(100),", "DESCRIPTION"));
+    sql.push_str(&format!("{} VARCHAR(50) ,", "DATA_TYPE"));
+    sql.push_str(&format!("{} VARCHAR(50) ,", "UNIT"));
+    sql.push_str(&format!("{} VARCHAR(500),", "DESCRIPTION"));
     sql.push_str(&format!("{} VARCHAR(50) ", "SCOPE"));
     sql.push_str(");");
     let mut conn = pool.clone().acquire().await?;
@@ -146,8 +146,12 @@ pub async fn save_metadata_table_data(data: Vec<MetadataManagerTableData>, pool:
     sql.push_str(&format!("INSERT IGNORE INTO {METADATA_DATA}(ID,CODE,NAME,B_NULL,DATA_TYPE,UNIT,DESCRIPTION,SCOPE) VALUES"));
     let b_empty = data.is_empty();
     for v in data {
-        sql.push_str(&format!("( {},'{}', '{}' , {} , {} , {} , '{}' , '{}' ) ,", v.id, v.code, v.name, if v.b_null { 1 } else { 0 },
-                              v.data_type, v.unit, v.desc, v.scope));
+        let code = correct_to_mysql_str(&v.code);
+        let name = correct_to_mysql_str(&v.name);
+        let desc = correct_to_mysql_str(&v.desc);
+        let scope = correct_to_mysql_str(&v.scope);
+        sql.push_str(&format!("( {},'{code}', '{name}' , {} , '{}' , '{}' , '{desc}' , '{}' ) ,", v.id, if v.b_null { 1 } else { 0 },
+                              v.data_type, v.unit, scope));
     }
     if !b_empty {
         sql.remove(sql.len() - 1);
@@ -205,8 +209,8 @@ fn read_excel_file_to_sql(file_path: &str) -> anyhow::Result<(DashMap<u64, Metad
         if !v.is_null() {
             let code = v.code.unwrap();
             let id = convert_str_to_hash(&get_characters_in_str(&code));
-            let data_type = MetadataManagerTableData::convert_str_to_data_type(&v.data_type.unwrap());
-            let unit = MetadataManagerTableData::convert_str_to_unit(&v.unit.unwrap());
+            let data_type = v.data_type.unwrap();
+            let unit = v.unit.unwrap();
             let data = MetadataManagerTableData {
                 id,
                 code,
@@ -326,7 +330,7 @@ pub fn convert_metadata_table_value_from_excel_bytes(mut table_data: Vec<Vec<Str
         let unit_idx = unit_idx.unwrap();
         let des_idx = des_idx.unwrap();
         let scope_idx = scope_idx.unwrap();
-        let max_idx = max!(code_idx,name_idx,name_idx,data_type_idx,unit_idx,des_idx,scope_idx);
+        let max_idx = vec![code_idx, name_idx, name_idx, data_type_idx, unit_idx, des_idx, scope_idx].into_iter().max().unwrap_or(scope_idx);
 
         for data in table_data {
             if max_idx >= data.len() { continue; }
@@ -334,8 +338,8 @@ pub fn convert_metadata_table_value_from_excel_bytes(mut table_data: Vec<Vec<Str
             let id = convert_str_to_hash(&get_characters_in_str(&code));
             let name = data[name_idx].clone();
             let b_null = if data[b_null_idx] == "是" { true } else { false };
-            let data_type = MetadataManagerTableData::convert_str_to_data_type(&data[data_type_idx]);
-            let unit = MetadataManagerTableData::convert_str_to_unit(&data[unit_idx]);
+            let data_type = data[data_type_idx].clone();
+            let unit = data[unit_idx].clone();
             let desc = data[des_idx].clone();
             let scope = data[scope_idx].clone();
 
@@ -388,9 +392,26 @@ fn gen_replace_metadata_table_data(datas: Vec<ShowMetadataManagerTableData>) -> 
         sql.push_str(format!("update metadata_data m set m.`CODE` = '{}',
 	                        m.`NAME` = '{}',m.B_NULL = {b_null},m.DATA_TYPE ={},m.UNIT = {},m.DESCRIPTION = '{}',
 	                        m.SCOPE = '{}' WHERE m.ID = {} and m.`CODE` = '{}'",
-                             data.new_code, data.name, data.data_type_back, data.unit_back, data.desc, data.scope, data.id, data.old_code).as_str());
+                             data.new_code, data.name, data.data_type, data.unit, data.desc, data.scope, data.id, data.old_code).as_str());
     }
     sql
+}
+
+/// 将不符合 mysql 语法的字符进行转义
+pub fn correct_to_mysql_str(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    for s in input.chars() {
+        match s {
+            '\'' => result.push_str("\\'"),
+            '"' => result.push_str("\\\""),
+            '\\' => result.push_str("\\\\"),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            _ => result.push(s),
+        }
+    }
+    result
 }
 
 #[tokio::test]

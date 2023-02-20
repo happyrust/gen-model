@@ -12,7 +12,7 @@ use aios_core::cache::refno::*;
 use aios_core::consts::*;
 use aios_core::db_number::DbNumMgr;
 use aios_core::parsed_data::{CateAxisParam, GeomsInfo};
-use aios_core::parsed_data::geo_params_data::CateGeoParam::TubeImplied;
+use aios_core::parsed_data::geo_params_data::CateGeoParam::{Cone, LCylinder, TubeImplied};
 // use simple_process_stats::ProcessStats;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::category::{CateBrepShape, convert_to_brep_shapes};
@@ -893,7 +893,6 @@ impl AiosDBManager {
             bore,
             finished: false,
         };
-        // let mut cur_leave_dir = None;
         let children = mgr.get_children_refs(branch_refno).await.unwrap_or_default();
         // 整个 bran 就一个 tubi
         if children.len() == 0 {
@@ -1108,11 +1107,6 @@ impl AiosDBManager {
                             current_tubing.finished = true;
                             if current_tubing.is_dir_ok() {
                                 let brep_shape = current_tubing.convert_to_shape();
-                                // geo_infos.entry(branch_refno).or_insert(GeomsInfoAql {
-                                //     _key: branch_refno.to_url_refno(),
-                                //     geometries: geoms.geometries.clone(),
-                                //     transform: vec![(brep_shape.transform.rotation, brep_shape.transform.translation, brep_shape.transform.scale)],
-                                // });
                                 brep_shape_map.entry(refno).or_insert(Vec::new()).push(brep_shape);
                             }
                         }
@@ -1162,7 +1156,6 @@ impl AiosDBManager {
                 if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
                     let geo_hash = mgr.cached_mesh_mgr.gen_pdms_mesh(cate_shape.brep_shape.clone(), false);
                     let bbox = mgr.cached_mesh_mgr.get_bbox(&geo_hash);
-
                     if let Some(mut aabb) = bbox {
                         let rot = cate_shape.transform.rotation;
                         let trans = cate_shape.brep_shape.get_trans();

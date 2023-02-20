@@ -7,7 +7,8 @@ use crate::aql_api::convert_refno_vec_from_vec_string;
 pub async fn query_room_refnos_aql(refno: RefU64, database: &Database) -> anyhow::Result<Vec<RefU64>> {
     let key = format!("room_eles/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
-        for v,e in 1 outbound @key room_edges
+        for v in 1 outbound @key room_edges
+            filter v!= null
             return v._key
         ").bind_var("key", key);
     let result: Vec<String> = database.aql_query(aql).await?;

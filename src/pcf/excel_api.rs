@@ -44,6 +44,6 @@ pub fn get_pipe_thickness_table() -> anyhow::Result<DashMap<String, DashMap<Stri
 fn test_get_pipe_thickness_table() -> anyhow::Result<()> {
     let pipe_name = "2ACAS-A6-806-6-LJ6";
     let map = get_pipe_thickness_table()?;
-    let name = create_thickness_data(pipe_name, &map);
+    let name = create_thickness_data(pipe_name, &map,true);
     Ok(())
 }

@@ -37,7 +37,7 @@ nalgebra-glm = "0.17.0"
 parry3d = { version = "0.11.1", features = ["serde-serialize"] }
 
 parse_pdms_db = { path = "../aios-parse-pdms" }
-aios_core = { path = "../crates/aios-core"}
+aios_core = { path = "../crates/aios-core" }
 bevy = { path = "../crates/bevy", default-features = false }
 #arangors_lite = { path = "../arangors-lite" }
 #parse_pdms_db = { git = "https://gitee.com/happydpc/aios-parse-pdms" }
@@ -48,11 +48,10 @@ arangors_lite = "0.2.0"
 clap = { version = "3.1.18", features = ["derive"] }
 dashmap = { version = "5.4.0", features = ["serde"] }
 tokio = { vertion = "1.18.2", features = ["full"] }
-serde = {version="1.0.137", features=["derive"]}
+serde = { version = "1.0.137", features = ["derive"] }
 id_tree = { version = "1.8.0", features = ["serde_support"] }
-glam = { version = "0.22.0"}
-#glam = { version = "0.20.2", features = ["transform-types"] }
-sea-orm = { version = "0.8.0", features = ["default", "runtime-tokio"]}
+glam = { version = "0.22.0" }
+sea-orm = { version = "0.8.0", features = ["default", "runtime-tokio"] }
 #openssl = { version = "0.10", features = ["vendored"] }
 #[target.'cfg(target_os = "macos")'.dependencies]
 #simple-process-stats = { path = "../simple-process-stats"}
@@ -67,7 +66,7 @@ cc = { version = "1.0", features = ["parallel"] }
 version = "0.6.1"
 default-features = false
 features = [
-#    "runtime-async-std-native-tls",
+    #    "runtime-async-std-native-tls",
     "runtime-async-std-rustls",
     "macros",
     "mysql",

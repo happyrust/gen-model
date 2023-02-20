@@ -142,12 +142,12 @@ pub async fn query_rvm_instance_data_from_refno_aql(refno: RefU64, database: &Da
 fn test_get_matrix() {
     let world_transform = bevy::prelude::Transform {
         translation: Vec3::from([12490., 12280., 2835.0]),
-        rotation: Quat::from_array([0.7071067690849304, 0., 0., -0.7071067690849304]),
-        scale: Vec3::from([114.0, 114.0, 150.0]),
+        rotation: Quat::from_array([0., 0.7071067690849304, 0., 0.7071067690849304]),
+        scale: Vec3::from([210.0, 210.0, 29.0]),
     };
     let inverse = world_transform.compute_matrix().inverse();
-    let min = Vec3::from([2720.0, 7220.0, 2790.0]);
-    let max = Vec3::from([3180.0, 7520.0, 3420.0]);
+    let min = Vec3::from([-105.0, -105.0, 0.0]);
+    let max = Vec3::from([105.0, 105.0, 29.0]);
     let min_bbox = inverse.transform_point3(min);
     let max_bbox = inverse.transform_point3(max);
     let rotation = Mat3::from_quat(world_transform.rotation);
@@ -167,15 +167,15 @@ fn test_get_matrix() {
 #[test]
 fn test_cata_transform() {
     let desi_transform = Transform {
-        translation: Vec3::from([0.0, 0.0, 0.0]),
-        rotation: Quat::from_array([0.0, 0.7071067690849304,0.0, -0.7071067690849304]),
-        scale: Vec3::from([381.,381.,41.]),
+        translation: Vec3::from([5360.43994140625,16279.5,2596.780029296875]),
+        rotation: Quat::from_array([0.0, 0.0, 0.7071067690849304, -0.7071067690849304]),
+        scale: Vec3::from([1., 1., 1.]),
     };
 
     let cata_transform = Transform {
-        translation: Vec3::from([2950.,9200.,2785.]),
-        rotation: Quat::from_array([0.0, 0.7071067690849304,0.0, -0.7071067690849304]),
-        scale: Vec3::from([1.,1.,1.]),
+        translation: Vec3::from([0.0, 0.0, 0.0]),
+        rotation: Quat::from_array([0.0, 0.7071067690849304, 0.0, 0.7071067690849304]),
+        scale: Vec3::from([210.0, 210.0, 29.0]),
     };
 
     let total_transform = cata_transform * desi_transform;
@@ -186,7 +186,7 @@ fn test_cata_transform() {
     let y_axis = rotation.y_axis * scale.y;
     let z_axis = rotation.z_axis * scale.z;
     dbg!(total_transform.translation);
-    dbg!(x_axis);
-    dbg!(y_axis);
-    dbg!(z_axis);
+    dbg!(x_axis.normalize());
+    dbg!(y_axis.normalize());
+    dbg!(z_axis.normalize());
 }
