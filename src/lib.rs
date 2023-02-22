@@ -40,6 +40,7 @@ pub mod pcf;
 pub mod rvm;
 pub mod metadata;
 pub mod data_center_api;
+pub mod spatial_tree;
 
 
 #[macro_use]
