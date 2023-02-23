@@ -68,6 +68,7 @@ use tokio::spawn;
 use aios_database::api::admin::query_all_db_infos;
 use aios_database::aql_api::tubi::{insert_tubi_value, query_all_tubi_from_node};
 use aios_database::rvm::elements::create_rvm_file;
+use aios_database::spatial_tree::recompute_spatial_tree;
 
 
 #[tokio::main]
@@ -79,7 +80,6 @@ async fn main() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     if db_option.total_sync {
         create_arangodb_conns(&db_option).await.expect("Failed to create arangodb conns");
-        // save_virtual_hole_value_to_arangodb(&db_option).await.unwrap();
         // 把pdms数据同步到mysql
         sync_pdms(&db_option).await.unwrap();
     }
@@ -203,99 +203,11 @@ async fn main() -> anyhow::Result<()> {
         file.write_all(serialized.as_slice()).unwrap();
     }
 
-    {
-        if db_option.save_spatial_tree_to_db {
-            // 保存空间树数据
-            let instance_dir_path = "assets/instance";
-            let mut file = fs::File::open("accel.spa")?;
-            let mut buf = vec![];
-            file.read_to_end(&mut buf)?;
-            let rtree = bincode::deserialize::<AccelerationTree>(&buf)?;
-            //生成TriMesh 的 shape
-
-            let dbno = db_option.arch_db_nums.clone().unwrap_or_default().clone();
-            // let room_infos = query_all_need_compute_room_refno(&dbno, "ROOM", Some("ROOMS"), &mgr.project_map.get(&db_option.project_name).unwrap()).await?;
-            // let room_infos = query_all_need_compute_room_refno(&dbno, "FRMW", Some("-RM"), &mgr.project_map.get(&db_option.project_name).unwrap()).await?;
-            let room_infos = vec![(RefU64::from_two_nums(24381, 35031), "R330".to_string())];
-            let dbno_mgr = DbNumMgr::load_file(&format!("{instance_dir_path}/dbno_mgr.num")).unwrap_or_default();
-            for (target_refno, room_name) in room_infos {
-                let mut room_info_map = HashMap::new();
-                if let Some(dbno) = dbno_mgr.get_dbno(target_refno) {
-                    if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
-                        if inst_mgr.level_shape_mgr.contains_key(&target_refno) {
-                            let all_refnos = inst_mgr.level_shape_mgr.get(&target_refno).unwrap();
-                            for room_refno in all_refnos.value().clone().into_iter() {
-                                if room_info_map.contains_key(&room_refno) { continue; }
-                                let ele_geos_info_map = inst_mgr.get_instants_data(room_refno);
-                                for ele_geos_info in &ele_geos_info_map {
-                                    //filter None aabb
-                                    let ele_refno = *ele_geos_info.key();
-                                    let room_colliders = collider_shape_mgr.get_collider(ele_refno, inst_mgr, &mesh_mgr);
-                                    if let Some(target_abb) = ele_geos_info.aabb {
-                                        let mut withing_room_refnos = rtree
-                                            .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
-                                        dbg!(&withing_room_refnos.len());
-                                        // if withing_room_refnos.len() > 2000 { continue; }
-                                        let mut removed_refnos = vec![];
-                                        withing_room_refnos.retain(|x| {
-                                            //直接判断点集，可以快速过滤一些构件
-                                            if let Some(dbno) = dbno_mgr.get_dbno(*x) {
-                                                if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
-                                                    let ele_geos_info_map = inst_mgr.get_instants_data(*x);
-                                                    let mut has_checked = false;
-                                                    for ele_geos_info in &ele_geos_info_map {
-                                                        let tr = ele_geos_info.get_transform();
-                                                        for pt_kv in &ele_geos_info.ptset_map {
-                                                            let p = tr.transform_point(pt_kv.1.pt);
-                                                            for rc in &room_colliders {
-                                                                if rc.as_ref().contains_point(&Isometry::identity(), &Point::new(p.x, p.y, p.z)) {
-                                                                    return true;
-                                                                }
-                                                            }
-                                                            has_checked = true;
-                                                            let checking_colliders = collider_shape_mgr.get_collider(*x, inst_mgr, &mesh_mgr);
-                                                            for rc in &room_colliders {
-                                                                for cc in &checking_colliders {
-                                                                    let target_pt = if let Some(tri_mesh) = cc.as_ref().as_trimesh() {
-                                                                        tri_mesh.triangle(0).local_aabb().center()
-                                                                    } else {
-                                                                        cc.compute_local_aabb().center()
-                                                                    };
-                                                                    if rc.as_ref().contains_point(&Isometry::identity(), &target_pt) {
-                                                                        return true;
-                                                                    }
-                                                                    let r = parry3d::query::intersection_test(&Isometry::identity(), rc.as_ref(),
-                                                                                                              &Isometry::identity(), cc.as_ref()).unwrap();
-                                                                    if r {
-                                                                        return true;
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            removed_refnos.push(*x);
-                                            println!("removed {} refnos ;", removed_refnos.len());
-                                            false
-                                        });
-                                        let mut file = fs::File::create("removed_refnos.data").unwrap();
-                                        let serialized = bincode::serialize(&removed_refnos).unwrap();
-                                        file.write_all(serialized.as_slice()).unwrap();
-                                        dbg!(removed_refnos.len());
-                                        dbg!(&withing_room_refnos.len());
-                                        room_info_map.entry(room_refno).or_insert((target_abb, withing_room_refnos));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                save_room_info_to_arangodb(room_info_map, &db_option).await?;
-            }
-        }
+    if db_option.save_spatial_tree_to_db {
+        let room_infos = vec![RefU64::from_two_nums(24381, 35031)];
+        let map = recompute_spatial_tree(room_infos,all_insts_mgr, collider_shape_mgr, &db_option).await?;
+        save_room_info_to_arangodb(map, &db_option).await?;
     }
-
 
     if false {
         if let Some(pool) = mgr.project_map.get(&db_option.project_name) {
