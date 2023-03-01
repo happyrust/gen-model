@@ -13,7 +13,9 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};
 use sqlx::mysql::MySqlRow;
 use crate::aql_api::children::query_owner_with_type_aql;
+use crate::data_interface::interface::PdmsDataInterface;
 use crate::defines::{AiosString, CACHED_MDB_SITE_MAP};
+use crate::helper::qualified_table_name;
 
 /// 遍历该节点下的 children (包含自己)
 pub async fn travel_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
@@ -209,6 +211,18 @@ pub async fn query_owner_type_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyh
         }
     }
     Ok(None)
+}
+
+
+pub fn get_ancestor_refno_of_type_data(aios_mgr: &AiosDBManager, mut refno: RefU64, att_type: String) -> RefU64 {
+    let att_type = qualified_table_name(&att_type).to_lowercase();
+    while let Some(basic) = aios_mgr.get_refno_basic(refno) {
+        if &basic.get_type().to_lowercase() == &att_type {
+            return refno;
+        }
+        refno = basic.get_owner();
+    }
+    RefU64(0)
 }
 
 pub async fn query_ancestor_of_type(mut refno: RefU64, att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {

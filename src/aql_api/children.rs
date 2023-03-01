@@ -90,8 +90,8 @@ pub async fn query_children_with_name_aql(arango_database: &Database, refno: Ref
     let aql = AqlQuery::new("\
     FOR z in 1 INBOUND @id pdms_edges
         return {
-        'refno':z._key,
-        'name':z.name,
+            'refno':z._key,
+            'name':z.name,
         }
     ").bind_var("id", refno_aql);
     let result: Vec<PdmsRefnoNameAql> = arango_database.aql_query(aql).await?;

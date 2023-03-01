@@ -472,7 +472,7 @@ pub fn convert_str_to_hash(input: &str) -> u64 {
 }
 
 /// 获取 字符串中的字符部分 ,遇到非字符就停止
-fn get_characters_in_str(input: &str) -> String {
+pub fn get_characters_in_str(input: &str) -> String {
     let regex = Regex::new(r"[a-zA-Z]+").unwrap();
     if let Some(captures) = regex.captures(input) {
         return captures[0].to_string();

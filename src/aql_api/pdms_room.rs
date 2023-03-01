@@ -1,12 +1,15 @@
 use std::collections::HashMap;
 use std::env;
-use aios_core::pdms_types::RefU64;
+use aios_core::pdms_types::{NounHash, RefU64, UdaMajorType};
+use aios_core::pdms_types::UdaMajorType::T;
 use arangors_lite::{AqlQuery, ClientError, Database};
 use parry3d::bounding_volume::Aabb;
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
-use crate::api::children::query_ancestor_of_type;
+use crate::api::attr::{get_site_major_from_uda, query_explicit_attr};
+use crate::api::children::{get_ancestor_refno_of_type_data, query_ancestor_of_type};
 use crate::aql_api::children::query_ancestor_name_of_type_aql;
+use crate::aql_api::convert_refno_vec_from_vec_string;
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
@@ -27,11 +30,12 @@ pub struct RoomElementAql {
     pub aabb: Aabb,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct RoomEdgeAql {
     pub _key: String,
     pub _from: String,
     pub _to: String,
+    pub major: UdaMajorType,
 }
 
 /// 房间对应的信息
@@ -46,22 +50,35 @@ pub struct RoomInfo {
 }
 
 /// 将房间信息保存到图数据库
-pub async fn save_room_info_to_arangodb(room_infos: HashMap<RefU64, (Aabb, Vec<RefU64>)>, db_option: &DbOption) -> anyhow::Result<()> {
+pub async fn save_room_info_to_arangodb(aios_mgr: &AiosDBManager, room_infos: HashMap<RefU64, (Aabb, Vec<RefU64>)>, db_option: &DbOption, mut major_map: &mut HashMap<RefU64, UdaMajorType>) -> anyhow::Result<()> {
     let mut room_eles_json = vec![];
     let mut room_edges_json = vec![];
     for (refno, (aabb, target_refnos)) in room_infos {
         room_eles_json.push(RoomElementAql {
             _key: refno.to_url_refno(),
             refno,
-            // name: room_name,
             aabb,
         });
         for target_refno in target_refnos {
+            // 获取 target_refno 属于哪个专业
+            let site = get_ancestor_refno_of_type_data(&aios_mgr, target_refno, "SITE".to_string());
+            let mut major = UdaMajorType::Unknown;
+            if let Some(r) = major_map.get(&site) {
+                major = r.clone();
+            } else {
+                if let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(site).await {
+                    if let Some(major_uda) = get_site_major_from_uda(site, &pool).await {
+                        major_map.insert(site, major_uda.clone());
+                        major = major_uda;
+                    }
+                }
+            }
             let hash = refno.hash_with_another_refno(target_refno);
             room_edges_json.push(RoomEdgeAql {
                 _key: hash.to_string(),
                 _from: format!("room_eles/{}", refno.to_url_refno()),
                 _to: format!("pdms_eles/{}", target_refno.to_url_refno()),
+                major,
             })
         }
     }
@@ -137,6 +154,32 @@ fn gen_query_all_need_compute_room_refno_sql(dbnos: &Vec<i32>, room_type: &str, 
     sql
 }
 
+/// 查找房间下的所有元件的参考号
+pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<Vec<UdaMajorType>>, database: &Database) -> anyhow::Result<Vec<RefU64>> {
+    let key = format!("room_eles/{}", refno.to_url_refno());
+    let aql = if filter_major.is_none() {
+        AqlQuery::new("
+        for v in 1 outbound @key room_edges
+            filter v != null
+            return v._key
+        ").bind_var("key", key)
+    } else {
+        let filter_major = filter_major.unwrap();
+        let mut filter_data = vec![];
+        for major in filter_major {
+            filter_data.push(major.to_major_str());
+        }
+        AqlQuery::new("
+        for v,e in 1 outbound @key room_edges
+            filter v != null
+            filter POSITION(@filter_major,e.major)
+            return v._key
+        ").bind_var("key", key).bind_var("filter_major", filter_data)
+    };
+    let result: Vec<String> = database.aql_query(aql).await?;
+    Ok(convert_refno_vec_from_vec_string(result))
+}
+
 /// 通过命名规则获取房间名
 pub fn get_room_name_split(name: &str) -> Option<RoomInfo> {
     let room_split = name.split('-').collect::<Vec<_>>();
@@ -160,8 +203,15 @@ async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let refno = RefU64::from_url_refno("24381_178638").unwrap();
-    let name =query_room_info_from_refno(refno,"FRMW",&database).await?.unwrap();
+    let name = query_room_info_from_refno(refno, "FRMW", &database).await?.unwrap();
     let room_name = get_room_name_split(&name).unwrap();
     dbg!(&room_name);
     Ok(())
+}
+
+#[test]
+fn test_json() {
+    let str = vec![T];
+    let json = serde_json::to_string(&str).unwrap();
+    dbg!(&json);
 }
