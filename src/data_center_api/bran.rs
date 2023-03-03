@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use aios_core::data_center::AttrValue::{AttrIntArray, AttrString};
+use aios_core::data_center::AttrValue::{AttrIntArray, AttrMap, AttrString};
 use aios_core::data_center::DataCenterAttr;
 use aios_core::pdms_types::RefU64;
 
@@ -14,8 +14,8 @@ pub fn get_data_center_bran_attr(refno:RefU64) -> Vec<DataCenterAttr> {
     let segma_6 = "TEST".to_string();
     let segma_7 = "TEST".to_string();
     let mut map = HashMap::new();
-    map.insert("流向1",vec!["支吊架编号1","支吊架编号2"]);
-    let segma_8 = "TEST".to_string();
+    map.insert("流向1".to_string(),vec!["支吊架编号1".to_string(),"支吊架编号2".to_string()]);
+    let segma_8 = map;
     let segma_9 = "TEST".to_string();
     let segma_10 = "TEST".to_string();
 
@@ -49,7 +49,7 @@ pub fn get_data_center_bran_attr(refno:RefU64) -> Vec<DataCenterAttr> {
     });
     result.push(DataCenterAttr{
         attribute_model_code: "SEGMA8".to_string(),
-        value: AttrString(segma_8),
+        value: AttrMap(segma_8),
     });
     result.push(DataCenterAttr{
         attribute_model_code: "SEGMA9".to_string(),
