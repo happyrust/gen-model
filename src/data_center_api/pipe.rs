@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::Write;
 use std::sync::Arc;
 use aios_core::data_center::{DataCenterAttr, DataCenterInstance, DataCenterProject, DataCenterProjectWithRelations, DataCenterRelations};
+use aios_core::data_center::AttrValue::AttrString;
 use aios_core::pdms_types::{PdmsElement, RefU64};
 use arangors_lite::Database;
 use sqlx::{MySql, Pool};
@@ -201,7 +202,7 @@ fn get_instance_data_element(metadata_map: &HashMap<String, Vec<String>>, att_ty
     for value in metadata_values {
         result.push(DataCenterAttr {
             attribute_model_code: value.to_string(),
-            value: "TEST".to_string(),
+            value: AttrString("TEST".to_string()),
         });
     }
     Some(DataCenterInstance {
