@@ -32,7 +32,7 @@ pub fn get_data_center_bran_attr(refno:RefU64) -> Vec<DataCenterAttr> {
         value: AttrString(segma_3),
     });
     result.push(DataCenterAttr{
-        attribute_model_code: "SEGMA2".to_string(),
+        attribute_model_code: "SEGMA4".to_string(),
         value: AttrString(segma_4),
     });
     result.push(DataCenterAttr{
