@@ -3,7 +3,7 @@ use std::env;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::consts::*;
-use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64, RefU64Vec};
+use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64, RefU64Vec, UdaMajorType};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use anyhow::anyhow;
@@ -365,6 +365,17 @@ pub fn gen_query_implicit_attr_sql_by_owner(owner: RefU64, type_name: &str, colu
     }).unwrap_or("*".to_string());
     sql.push_str(&format!("SELECT {cols_sql} FROM {} WHERE OWNER = {}", table_name, owner.0));
     sql
+}
+
+/// 获取site属于哪个专业
+pub async fn get_site_major_from_uda(site_refno: RefU64, pool: &Pool<MySql>) -> Option<UdaMajorType> {
+    if let Ok(explicit_attr) = query_explicit_attr(site_refno, &pool).await {
+        if let Some(major) = explicit_attr.map.get(&NounHash(688051936)) {
+            let major_str = major.string_value();
+            return Some(UdaMajorType::from_str(major_str.as_str()));
+        }
+    }
+    None
 }
 
 pub fn gen_query_explicit_attr_sql(refno: RefU64) -> String {

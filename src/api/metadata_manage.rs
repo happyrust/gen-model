@@ -139,6 +139,19 @@ pub async fn query_metadata_table_sql(id: u64, pool: &Pool<MySql>) -> anyhow::Re
     Ok(datas)
 }
 
+pub async fn query_metadata_table_code_sql(id: u64, pool: &Pool<MySql>) -> anyhow::Result<Vec<String>> {
+    let mut datas = Vec::new();
+    let sql = gen_query_metadata_table_code_data_sql(id);
+    let result = sqlx::query(&sql).fetch_all(pool).await;
+    if let Ok(results) = result {
+        for result in results {
+            let code = result.get::<String, _>("CODE");
+            datas.push(code);
+        }
+    }
+    Ok(datas)
+}
+
 pub async fn query_tree_node_detail(id: u64, pool: Pool<MySql>) -> anyhow::Result<Option<MetadataManagerTreeNode>> {
     let sql = gen_query_metadata_tree_data_sql(id);
     let result = sqlx::query(&sql).fetch_one(&pool).await;
@@ -178,6 +191,12 @@ fn gen_query_metadata_tree_node_data(id: u64) -> String {
 fn gen_query_metadata_table_data_sql(id: u64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT CODE,DATA_TYPE,DATA_CONSTRAINT,B_MULTI,ENGLISH_NAME,CHINESE_NAME , ENGLISH_DEFINE,CHINESE_DEFINE , UNIT , GROUPINGS,CUSTOM_ITEM ,DESCRIPTION,STATE,OWNED_NAME FROM {METADATA_DATA} WHERE ID = {}", id));
+    sql
+}
+
+fn gen_query_metadata_table_code_data_sql(id: u64) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT CODE FROM {METADATA_DATA} WHERE ID = {}", id));
     sql
 }
 

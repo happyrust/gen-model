@@ -4,10 +4,10 @@ use std::io::{Read, Write};
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::db_number::DbNumMgr;
 use aios_core::pdms_types::{CachedColliderShapeMgr, CachedMeshesMgr, PdmsMeshInstanceMgr, RefU64};
+use aios_core::pdms_types::UdaMajorType::{E, T, V};
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::{Isometry, Point};
-use crate::api::room_code::query_room_refnos_aql;
-use crate::aql_api::pdms_room::{query_room_info_from_refno, save_room_info_to_arangodb};
+use crate::aql_api::pdms_room::{query_room_info_from_refno, query_room_refnos_aql, save_room_info_to_arangodb};
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::options::DbOption;
 
@@ -117,12 +117,14 @@ async fn test_save_spatial_tree_to_db() -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let room_contains_refno = vec![RefU64::from_two_nums(24384, 3088), RefU64::from_two_nums(24384, 3090), RefU64::from_two_nums(24381, 71799), RefU64::from_two_nums(24384, 3130)];
     let not_contains_refno = vec![RefU64::from_two_nums(24381, 35286), RefU64::from_two_nums(17496, 106149), RefU64::from_two_nums(24381, 110151), RefU64::from_two_nums(24381, 101720), RefU64::from_two_nums(17496, 100004)];
-    let compute_contains_refno = query_room_refnos_aql(test_room_refno, &database).await?;
-    dbg!(&compute_contains_refno.len());
-    for compute_refno in compute_contains_refno {
-        if not_contains_refno.contains(&compute_refno) {
-            dbg!(&compute_refno);
-        }
-    }
+    let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(vec![E]),&database).await?;
+    let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(vec![T]),&database).await?;
+    // let compute_contains_refno = query_room_refnos_aql(test_room_refno, None,&database).await?;
+    // dbg!(&compute_contains_refno.len());
+    // for compute_refno in compute_contains_refno {
+    //     if not_contains_refno.contains(&compute_refno) {
+    //         dbg!(&compute_refno);
+    //     }
+    // }
     Ok(())
 }
