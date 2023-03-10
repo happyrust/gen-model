@@ -2,7 +2,7 @@ use aios_core::data_center::{AttrValue, DataCenterAttr};
 use aios_core::data_center::AttrValue::{AttrFloat, AttrStrArray, AttrString};
 use aios_core::pdms_types::RefU64;
 
-pub fn get_data_center_tubi_attr(refno: RefU64) -> Vec<DataCenterAttr> {
+pub fn get_data_center_redu_attr(refno: RefU64) -> Vec<DataCenterAttr> {
     let mut result = Vec::new();
     let item_1 = DataCenterAttr {
         attribute_model_code: "ITEMAJ1".to_string(),

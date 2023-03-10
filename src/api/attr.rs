@@ -196,10 +196,8 @@ pub async fn query_full_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_nam
         if ref_basic.is_none() { return Ok(AttrMap::default()); }
         let ref_basic = ref_basic.unwrap();
         let mut attr = query_implicit_attr(refno, ref_basic.value(), &pool, column_names).await?;
-
         let att_type = attr.get_type().to_string();
         let explicit_attr = query_explicit_attr(refno, &pool).await?;
-
         let ele = query_ele_node(refno, &pool).await?;
 
         for (k, v) in explicit_attr.map {

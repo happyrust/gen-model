@@ -960,6 +960,7 @@ impl AiosDBManager {
                 }
             }
             // 保存元件之间的距离
+            dbg!(&children);
             for (idx, refno) in children.clone().into_iter().enumerate() {
                 let mut edge = TubiEdgeAql::default();
                 edge._from = format!("pdms_eles/{}", refno.to_url_refno());
@@ -1088,7 +1089,7 @@ impl AiosDBManager {
             println!("正在处理元件{}: {}", attr.get_type(), refno.to_refno_string());
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
             let mut geoms = resolve_desi_comp(refno, None, mgr.as_ref(), is_debug).await;
-            if geoms.is_err() {
+                        if geoms.is_err() {
                 continue;
             }
             let mut geoms = geoms.unwrap();

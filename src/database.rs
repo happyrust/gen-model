@@ -480,7 +480,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 let mut type_handles = vec![];
 
                 // 将部分数据保存到图数据库
-                if !b_replace_types {
+                if !b_replace_types && !only_update_dbinfo {
                     if db_type == "DESI" {
                         // 将 pdms_element 部分数据保存到图数据库中
                         save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;

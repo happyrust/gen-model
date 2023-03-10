@@ -28,6 +28,15 @@ pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> an
     Ok(r)
 }
 
+pub async fn query_children_refnos_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
+    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let aql = AqlQuery::new("\
+    for z in 1 inbound @id pdms_edges
+        return  z._key ").bind_var("id", refno_aql);
+    let result: Vec<String> = arango_database.aql_query(aql).await?;
+    Ok(convert_refno_vec_from_vec_string(result))
+}
+
 pub async fn query_children_aql_order(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let mut r = vec![];
     let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());

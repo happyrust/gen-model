@@ -2,7 +2,7 @@ use aios_core::data_center::{AttrValue, DataCenterAttr};
 use aios_core::data_center::AttrValue::{AttrFloat, AttrStrArray, AttrString};
 use aios_core::pdms_types::RefU64;
 
-pub fn get_data_center_tubi_attr(refno: RefU64) -> Vec<DataCenterAttr> {
+pub fn get_data_center_flan_attr(refno: RefU64) -> Vec<DataCenterAttr> {
     let mut result = Vec::new();
     let segma_1 = vec!["001".to_string(), "100".to_string(), "50".to_string(), "500".to_string()];
     let segma_2 = vec!["001".to_string(), "100".to_string(), "50".to_string(), "500".to_string()];
