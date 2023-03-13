@@ -4,7 +4,7 @@ use std::io::Write;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject, HoleType, ItemValue};
 use aios_core::pdms_types::RefU64;
 use sqlx::{Error, Executor, MySql, Pool, Row};
-use sqlx::mysql::MySqlQueryResult;
+use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use crate::consts::HOLES_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::rvm::data_api::get_num_from_str;
@@ -158,6 +158,20 @@ async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<H
     Ok(map)
 }
 
+async fn query_stucg_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, AttrValue>> {
+    let mut map = HashMap::new();
+    let sql = gen_query_hole_data_sql(refno);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    match result {
+        Ok(result) => {
+            let item_ref = result.try_get::<String, _>("ItemREF").unwrap_or("".to_string());
+            let value = get_item_ref_value(item_ref, HoleType::STUCJ);
+        }
+        _ => {}
+    }
+    Ok(map)
+}
+
 fn gen_query_hole_data_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT * FROM {HOLES_TABLE} WHERE refNo = '{}'", refno.to_refno_string()));
@@ -184,7 +198,15 @@ fn get_item_ref_value(item_ref: String, h_type: HoleType) -> Vec<ItemValue> {
                 let len = item_ref.len();
                 result.push(ItemValue::String(item_ref[len - 1..len].to_string()));
             }
-            HoleType::STUCG => {}
+            HoleType::STUCG => {
+                if item_ref.len() >= 12 {
+                    result.push(ItemValue::String(item_ref[..3].to_string()));
+                    result.push(ItemValue::String(item_ref[3..5].to_string()));
+                    result.push(ItemValue::String(item_ref[5..7].to_string()));
+                    result.push(ItemValue::String(item_ref[7..11].to_string()));
+                    result.push(ItemValue::String(item_ref[11..12].to_string()));
+                }
+            }
             HoleType::STUCH => {}
             HoleType::STUCK => {}
             HoleType::STUCL => {}
@@ -194,6 +216,7 @@ fn get_item_ref_value(item_ref: String, h_type: HoleType) -> Vec<ItemValue> {
     }
     result
 }
+
 
 fn get_pos_from_str(input: String) -> Vec<f32> {
     let mut result = Vec::new();
@@ -208,8 +231,8 @@ fn get_pos_from_str(input: String) -> Vec<f32> {
 
 #[test]
 fn test_get_item_ref_value() {
-    let item_refno = "1RSDTT0001K".to_string();
-    let r = get_item_ref_value(item_refno, HoleType::STUCJ);
+    let item_refno = "1RSETT0003T".to_string();
+    let r = get_item_ref_value(item_refno, HoleType::STUCG);
     dbg!(&r);
 }
 
