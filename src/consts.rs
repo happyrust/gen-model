@@ -18,6 +18,7 @@ pub const PDMS_VERSION: &'static str = "PDMS_VERSION";
 pub const PDMS_MESH: &'static str = "PDMS_MESH";
 pub const METADATA_TABLE: &'static str = "METADATA_MANAGE";
 pub const METADATA_DATA: &'static str = "METADATA_DATA";
+pub const HOLES_TABLE: &'static str = "HOLEDATATABLE";
 // project_mdb
 // 专业表单
 pub const PROFESSION_TX_XT: &'static str = "TX_XT";

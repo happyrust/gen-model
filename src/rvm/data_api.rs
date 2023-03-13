@@ -119,7 +119,7 @@ pub fn gen_data_from_tree(tree: Tree<(RefU64, Vec<u8>)>) -> Vec<u8> {
     if root.is_none() { return data; }
     let root = root.unwrap();
     // 递归生成数据
-    gen_data_recursion(&mut data,&tree,root);
+    gen_data_recursion(&mut data, &tree, root);
     data
 }
 
@@ -208,10 +208,21 @@ pub fn keep_2_decimals_from_f32(input: f32) -> f32 {
     (input * 100.0).round() / 100.0
 }
 
+/// 正则匹配字符串中的数字
+pub fn get_num_from_str(input: &str) -> Option<i32> {
+    let regex = Regex::new(r"[0-9]+([.]{1}[0-9]+){0,1}").unwrap();
+    if let Some(captures) = regex.captures(input) {
+        if let Ok(r) = captures[0].parse::<i32>() {
+            return Some(r);
+        }
+    }
+    None
+}
+
 #[test]
 fn test_str_split() {
     let regex = Regex::new(r"[0-9]+([.]{1}[0-9]+){0,1}").unwrap();
-    let str = "?0.5";
+    let str = "RSDTT0001K";
     // let result = &str[3..];
     if let Some(captures) = regex.captures(str) {
         dbg!(&captures[0]);
