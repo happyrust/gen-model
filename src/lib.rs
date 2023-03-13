@@ -41,6 +41,7 @@ pub mod rvm;
 pub mod metadata;
 pub mod data_center_api;
 pub mod spatial_tree;
+pub mod negative;
 
 
 #[macro_use]
