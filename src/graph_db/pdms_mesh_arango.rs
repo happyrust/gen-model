@@ -11,9 +11,11 @@ pub struct MeshMgrArangodb {
     pub data: String,
 }
 
-pub async fn sync_mesh_to_graph_db(mgr: Arc<AiosDBManager>, mesh_mgr: CachedMeshesMgr) -> anyhow::Result<()> {
+pub async fn sync_mesh_to_graph_db(mgr: &AiosDBManager, mesh_mgr: &CachedMeshesMgr) -> anyhow::Result<()> {
     let mut result = vec![];
-    for (hash, mesh) in mesh_mgr.meshes.into_iter() {
+    for kv in &mesh_mgr.meshes {
+        let hash = kv.key();
+        let mesh = kv.value();
         // 将 mesh 转换成二进制并压缩
         let mesh_bin = hex::encode(mesh.into_compress_bytes());
         result.push(MeshMgrArangodb {

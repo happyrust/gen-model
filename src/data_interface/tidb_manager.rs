@@ -97,7 +97,8 @@ lazy_static! {
 }
 //"SPINE", "GENS",
 static GNERAL_PRIM_NOUN_NAMES: Lazy<Vec<&'static str>> = Lazy::new(|| {
-    vec!["BOX", "CYLI", "SPHE", "CONE", "DISH", "CTOR", "RTOR", "PYRA"]
+    // vec!["BOX", "CYLI", "SPHE", "CONE", "DISH", "CTOR", "RTOR", "PYRA","NCYL" ,"NBOX","NCON", "NSNO","NPYR", "NDIS" ,"NXTR", "NCTO" ,"NRTO" ,"NSLC","NREV"]
+    vec!["NCYL"]
 });
 
 static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> = Lazy::new(|| {
@@ -1502,7 +1503,6 @@ impl AiosDBManager {
                 let level_shape_mgr = &instance_mgr.level_shape_mgr;
                 for j in start_idx..end_idx {
                     let refno = all_refnos[j];
-
                     let trans_origin = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
                     let ancestors = mgr.get_ancestors_refnos_without_world(refno);
                     for p_refno in ancestors {

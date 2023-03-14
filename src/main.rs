@@ -67,6 +67,7 @@ use parse_pdms_db::parse_file;
 use tokio::spawn;
 use aios_database::api::admin::query_all_db_infos;
 use aios_database::aql_api::tubi::{insert_tubi_value, query_all_tubi_from_node};
+use aios_database::negative::{compute_boolean_mesh, query_negative_refnos_aql};
 use aios_database::rvm::elements::create_rvm_file;
 use aios_database::spatial_tree::recompute_spatial_tree;
 
@@ -150,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
                 let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
                 dbg!(&mesh_mgr.meshes.len());
                 if db_option.save_model_mesh_to_graph_db {
+                    sync_mesh_to_graph_db(&mgr,&mesh_mgr).await?;
                     save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
                 }
             }
@@ -237,6 +239,22 @@ async fn main() -> anyhow::Result<()> {
     if db_option.only_sync_sys {
         query_all_db_infos(&mgr).await?;
     }
+    Ok(())
+}
+
+// #[tokio::main]
+async fn main_1() -> anyhow::Result<()> {
+    // use config::{Config, ConfigError, Environment, File};
+    // let s = Config::builder()
+    //     .add_source(File::with_name("DbOption"))
+    //     .build()?;
+    // let db_option: DbOption = s.try_deserialize().unwrap();
+    let aios_mgr = AiosDBManager::init_form_config().await?;
+    let database = aios_mgr.get_arangodb_conn().await?;
+    let refno = RefU64::from_refno_str("23584/5386").unwrap();
+    let negative_refnos = query_negative_refnos_aql(refno,&database).await?.get(&refno).unwrap().to_vec();
+    let result = compute_boolean_mesh(refno,negative_refnos, &aios_mgr).await?;
+    // dbg!(&result);
     Ok(())
 }
 
