@@ -218,7 +218,7 @@ fn get_item_ref_value(item_ref: String, h_type: HoleType) -> Vec<ItemValue> {
 }
 
 
-fn get_pos_from_str(input: String) -> Vec<f32> {
+pub(crate) fn get_pos_from_str(input: String) -> Vec<f32> {
     let mut result = Vec::new();
     let input_split = input.split(",").collect::<Vec<&str>>();
     for input_str in input_split {
