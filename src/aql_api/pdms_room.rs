@@ -62,7 +62,7 @@ pub async fn save_room_info_to_arangodb(aios_mgr: &AiosDBManager, room_infos: Ha
         for target_refno in target_refnos {
             // 获取 target_refno 属于哪个专业
             let site = get_ancestor_refno_of_type_data(&aios_mgr, target_refno, "SITE".to_string());
-            let mut major = UdaMajorType::Unknown;
+            let mut major = UdaMajorType::NULL;
             if let Some(r) = major_map.get(&site) {
                 major = r.clone();
             } else {

@@ -11,8 +11,15 @@ use crate::aql_api::pdms_room::{query_room_info_from_refno, query_room_refnos_aq
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::options::DbOption;
 
+
+pub fn tri_tri_intersection() -> bool{
+    true
+}
+
+
 /// 精算房间计算
-pub async fn recompute_spatial_tree(room_refno: Vec<RefU64>, all_insts_mgr: HashMap<u32, PdmsMeshInstanceMgr>, collider_shape_mgr: CachedColliderShapeMgr, db_option: &DbOption) -> anyhow::Result<HashMap<RefU64, (Aabb, Vec<RefU64>)>> {
+pub async fn recompute_spatial_tree(room_refno: Vec<RefU64>, all_insts_mgr: HashMap<u32, PdmsMeshInstanceMgr>,
+                                    collider_shape_mgr: CachedColliderShapeMgr, db_option: &DbOption) -> anyhow::Result<HashMap<RefU64, (Aabb, Vec<RefU64>)>> {
     let mut room_info_map = HashMap::new();
     let mut file = fs::File::open("assets/mesh/mesh.bin")?;
     let mut data = vec![];
