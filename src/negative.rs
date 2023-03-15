@@ -13,7 +13,6 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
 use crate::options::DbOption;
-use csg::{Mesh , Pt3};
 use dashmap::DashMap;
 use parry3d::bounding_volume::Aabb;
 use crate::graph_db::pdms_inst_arango::query_rvm_instance_data_from_refno_aql;

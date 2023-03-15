@@ -787,11 +787,12 @@ impl AiosDBManager {
     }
 
     ///获取单个元件的模型数据
-    pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>, design_refno: RefU64,
+    pub async fn get_cata_single_geoms(mgr: Arc<AiosDBManager>,
+                                       design_refno: RefU64,
                                        brep_shape_map: &CateBrepShapeMap,
                                        refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
-                                       debug_refno: Option<RefU64>, geo_infos: &mut Arc<DashMap<RefU64, GeomsInfoAql>>,
-    ) -> anyhow::Result<bool> {
+                                       debug_refno: Option<RefU64>,
+                                       geo_infos: &mut Arc<DashMap<RefU64, GeomsInfoAql>>) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
         if is_debug && design_refno != debug_refno.unwrap() {
             return Ok(false);

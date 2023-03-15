@@ -141,17 +141,18 @@ async fn main() -> anyhow::Result<()> {
 
             let children_files = fs::read_dir("assets/mesh/")?;
             dbg!("正在保存Meshes");
-            for path in children_files {
-                let path = path?.path();
-                let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-                if !filename.ends_with("bin") { continue; }
-                let mut file = fs::File::open(path)?;
-                let mut data = vec![];
-                file.read_to_end(&mut data)?;
-                let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-                dbg!(&mesh_mgr.meshes.len());
-                if db_option.save_model_mesh_to_graph_db {
-                    sync_mesh_to_graph_db(&mgr,&mesh_mgr).await?;
+            if db_option.save_model_mesh_to_graph_db {
+                for path in children_files {
+                    let path = path?.path();
+                    let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+                    if !filename.ends_with("bin") { continue; }
+                    let mut file = fs::File::open(path)?;
+                    let mut data = vec![];
+                    file.read_to_end(&mut data)?;
+                    let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
+                    dbg!(&mesh_mgr.meshes.len());
+
+                    sync_mesh_to_graph_db(&mgr, &mesh_mgr).await?;
                     save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
                 }
             }
@@ -208,8 +209,8 @@ async fn main() -> anyhow::Result<()> {
     if db_option.save_spatial_tree_to_db {
         let mut site_major_map = HashMap::new();
         let room_infos = vec![RefU64::from_two_nums(24381, 35031)];
-        let map = recompute_spatial_tree(room_infos,all_insts_mgr, collider_shape_mgr, &db_option).await?;
-        save_room_info_to_arangodb(&mgr,map, &db_option,&mut site_major_map).await?;
+        let map = recompute_spatial_tree(room_infos, all_insts_mgr, collider_shape_mgr, &db_option).await?;
+        save_room_info_to_arangodb(&mgr, map, &db_option, &mut site_major_map).await?;
     }
 
     if false {
@@ -252,8 +253,8 @@ async fn main_1() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let database = aios_mgr.get_arangodb_conn().await?;
     let refno = RefU64::from_refno_str("23584/5386").unwrap();
-    let negative_refnos = query_negative_refnos_aql(refno,&database).await?.get(&refno).unwrap().to_vec();
-    let result = compute_boolean_mesh(refno,negative_refnos, &aios_mgr).await?;
+    let negative_refnos = query_negative_refnos_aql(refno, &database).await?.get(&refno).unwrap().to_vec();
+    let result = compute_boolean_mesh(refno, negative_refnos, &aios_mgr).await?;
     // dbg!(&result);
     Ok(())
 }

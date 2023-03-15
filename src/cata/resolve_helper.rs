@@ -709,12 +709,12 @@ fn test_rpro() {
     dbg!(result);
 }
 
-// #[test]
-// fn test_math_exp() {
-//     let expr = "MAX ( ( ( - 31 ) + 60 ), 29.2 )";
-//     let context = HashMap::new();
-//     dbg!(eval_str_to_f64(expr, &context)).expect("TODO: panic message");
-// }
+#[test]
+fn test_math_exp() {
+    let expr = "MAX ( ( ( - 31 ) + 60 ), 29.2 )";
+    let context = HashMap::new();
+    dbg!(eval_str_to_f64(expr, &context)).expect("TODO: panic message");
+}
 #[test]
 fn test_interp() {
     let input_str = "((0.5*500*TAN(/2)+(500+2)*TAN(3/2)*COS(3))/2-((-(500/2+2)*TAN(3/2)+2*COS((90-3)))/2)";

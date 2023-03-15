@@ -56,11 +56,6 @@ fn test_hash_name() {
     println!("{}", db1_hash("DBWRIT"));
 }
 
-#[test]
-fn test_function() {
-    
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
