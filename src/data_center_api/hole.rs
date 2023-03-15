@@ -246,6 +246,7 @@ async fn test_gen_stucj_data() -> anyhow::Result<()> {
     let mut file = fs::File::create("孔洞.json")?;
     if let Some(r) = r {
         let data = DataCenterProject {
+            package_code: DataCenterProject::convert_package_code(),
             project_code: "1516".to_string(),
             owner: "KY1801-208".to_string(),
             instances: vec![r],

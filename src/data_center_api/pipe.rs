@@ -68,6 +68,7 @@ pub async fn get_data_center_from_pipe(aios_mgr: &AiosDBManager, pipe_refno: Ref
     }
     let instances = instance_map.into_iter().map(|x| x.1).collect::<Vec<DataCenterInstance>>();
     let data = DataCenterProjectWithRelations {
+        package_code: DataCenterProjectWithRelations::convert_package_code(),
         project_code: "1516".to_string(),
         owner: "KY1801-208".to_string(),
         instances,

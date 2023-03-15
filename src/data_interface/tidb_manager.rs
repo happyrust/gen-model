@@ -98,7 +98,7 @@ lazy_static! {
 //"SPINE", "GENS",
 static GNERAL_PRIM_NOUN_NAMES: Lazy<Vec<&'static str>> = Lazy::new(|| {
     // vec!["BOX", "CYLI", "SPHE", "CONE", "DISH", "CTOR", "RTOR", "PYRA","NCYL" ,"NBOX","NCON", "NSNO","NPYR", "NDIS" ,"NXTR", "NCTO" ,"NRTO" ,"NSLC","NREV"]
-    vec!["NCYL"]
+    vec!["NCYL","NSCY"]
 });
 
 static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> = Lazy::new(|| {
