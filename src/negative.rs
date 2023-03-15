@@ -102,7 +102,7 @@ pub async fn query_negative_refnos_aql(refno: RefU64, database: &Database) -> an
         for z in 1 inbound c._id pdms_edges
             return 1
         ) == 0
-    filter c.noun in ['NCYL' ,'NBOX','NCON', 'NSNO','NPYR', 'NDIS' ,'NXTR', 'NCTO' ,'NRTO' ,'NSLC','NREV']
+    filter c.noun in ['NCYL' ,'NBOX','NCON', 'NSNO','NPYR', 'NDIS' ,'NXTR', 'NCTO' ,'NRTO' ,'NSLC','NREV','NSCY' ,'NSBO']
     return {
         'refno':c._key,
         'owner':c.owner,

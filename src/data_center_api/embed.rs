@@ -1,6 +1,6 @@
 use std::{env, fs};
 use std::io::Write;
-use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance};
+use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::{RefU64, UdaMajorType};
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
@@ -8,7 +8,21 @@ use crate::data_center_api::hole::get_pos_from_str;
 use crate::consts::EMBED_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
-pub async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<(String, DataCenterInstance)>> {
+pub async fn create_embed_data(refno:RefU64, pool:&Pool<MySql>) -> anyhow::Result<Option<(String,DataCenterProject)>> {
+    let instance = query_embed_data(refno,pool).await?;
+    if let Some(instance) = instance {
+        let project = DataCenterProject {
+            package_code: DataCenterProject::convert_package_code(),
+            project_code: "1516".to_string(),
+            owner: "KY1801".to_string(),
+            instances: vec![instance.1],
+        };
+        return Ok(Some((instance.0,project)))
+    }
+    Ok(None)
+}
+
+async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<(String, DataCenterInstance)>> {
     let mut instances = Vec::new();
     let sql = gen_query_embed_data_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
@@ -167,7 +181,7 @@ async fn test_query_embed_data() -> anyhow::Result<()> {
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
     let refno = RefU64::from_refno_str("17496/105935").unwrap();
-    let r = query_embed_data(refno, &pool).await?;
+    let r = create_embed_data(refno, &pool).await?;
     if let Some((file_name,r)) = r {
         let mut file = fs::File::create(file_name.as_str())?;
         let data = serde_json::to_string(&r).unwrap();
