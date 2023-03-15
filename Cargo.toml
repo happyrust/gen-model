@@ -38,6 +38,7 @@ parry3d = { version = "0.13.3", features = ["serde-serialize"] }
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path = "../crates/aios-core" }
 bevy = { path = "../crates/bevy", default-features = false }
+csg = { path = "../crates/csgrs/csg" }
 arangors_lite = "0.2.0"
 
 clap = { version = "3.1.18", features = ["derive"] }

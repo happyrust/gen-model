@@ -151,11 +151,10 @@ pub async fn recompute_spatial_tree(room_refno: Vec<RefU64>,
                             let ele_refno = *ele_geos_info.key();
                             let room_colliders = collider_shape_mgr.get_collider(ele_refno, inst_mgr, &mesh_mgr);
                             if let Some(target_abb) = ele_geos_info.aabb {
-                                // let mut withing_room_refnos = rtree
-                                //     .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
-                                // dbg!(&withing_room_refnos.len());
-                                let mut withing_room_refnos = vec![RefU64::from_refno_str("24381/109830").unwrap()];
-                                // if withing_room_refnos.len() > 2000 { continue; }
+                                let mut withing_room_refnos = rtree
+                                    .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
+                                dbg!(&withing_room_refnos.len());
+                                // let mut withing_room_refnos = vec![RefU64::from_refno_str("24383/68087").unwrap()];
                                 let mut removed_refnos = vec![];
                                 withing_room_refnos.retain(|x| {
                                     //直接判断点集，可以快速过滤一些构件

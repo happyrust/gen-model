@@ -208,7 +208,7 @@ async fn main() -> anyhow::Result<()> {
 
     if db_option.save_spatial_tree_to_db {
         let mut site_major_map = HashMap::new();
-        let room_infos = vec![RefU64::from_two_nums(24381, 35031)];
+        let room_infos = vec![RefU64::from_two_nums(24381,34919)];
         let map = recompute_spatial_tree(room_infos, all_insts_mgr, collider_shape_mgr, &db_option).await?;
         save_room_info_to_arangodb(&mgr, map, &db_option, &mut site_major_map).await?;
     }

@@ -712,7 +712,7 @@ fn test_rpro() {
 #[test]
 fn test_math_exp() {
     let expr = "MAX ( ( ( - 31 ) + 60 ), 29.2 )";
-    let context = HashMap::new();
+    let context = BTreeMap::new();
     dbg!(eval_str_to_f64(expr, &context)).expect("TODO: panic message");
 }
 #[test]

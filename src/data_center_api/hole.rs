@@ -14,8 +14,8 @@ async fn query_hole_data(refno: RefU64, pool: &Pool<MySql>) -> Option<DataCenter
         let result = match hole_type {
             HoleType::STUCJ => {
                 DataCenterInstance {
-                    object_model_code: "1516".to_string(),
-                    instance_code: "KY1801-208".to_string(),
+                    object_model_code: "STUCJ".to_string(),
+                    instance_code: "STUCJ01".to_string(),
                     attributes: gen_stucj_data(refno, pool).await,
                 }
             }
@@ -83,8 +83,10 @@ async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<H
             map.entry("STUCJ4".to_string()).or_insert(AttrValue::AttrString(rely_item));
             let rely_item_ref = result.get::<String, _>("RelyItemREF");
             map.entry("STUCJ5".to_string()).or_insert(AttrValue::AttrString(rely_item_ref));
-            let main_pipe_line = result.get::<String, _>("MainPipeline");
-            map.entry("STUCJ6".to_string()).or_insert(AttrValue::AttrString(main_pipe_line));
+            // let main_pipe_line = result.get::<String, _>("MainPipeline");
+            let mut pipe_line_map = HashMap::new();
+            pipe_line_map.entry("工艺管道".to_string()).or_insert_with(Vec::new).push("Test".to_string());
+            map.entry("STUCJ6".to_string()).or_insert(AttrValue::AttrMap(pipe_line_map));
 
             let position = result.get::<String, _>("Position");
             let position = get_pos_from_str(position);
@@ -121,14 +123,16 @@ async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<H
             let plug_type = result.get::<Option<String>, _>("PlugType");
             if let Some(plug_type) = plug_type {
                 map.entry("STUCJ15".to_string()).or_insert(AttrValue::AttrString("Y".to_string()));
-                map.entry("STUCJ16".to_string()).or_insert(AttrValue::AttrString(plug_type));
+                let plug_type = plug_type.chars().map(|x| x.to_string()).collect::<Vec<_>>();
+                map.entry("STUCJ16".to_string()).or_insert(AttrValue::AttrStrArray(plug_type));
             } else {
                 map.entry("STUCJ15".to_string()).or_insert(AttrValue::AttrString("N".to_string()));
-                map.entry("STUCJ16".to_string()).or_insert(AttrValue::AttrString("".to_string()));
+                map.entry("STUCJ16".to_string()).or_insert(AttrValue::AttrStrArray(Vec::new()));
             }
 
             let b_second = result.get::<bool, _>("Second");
             map.entry("STUCJ19".to_string()).or_insert(AttrValue::AttrBool(b_second));
+            map.entry("STUCJ20".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0,0.0]));
             let hole_work = result.get::<String, _>("HoleWork");
             map.entry("STUCJ21".to_string()).or_insert(AttrValue::AttrString(hole_work));
             let work_by = result.get::<String, _>("WorkBy");

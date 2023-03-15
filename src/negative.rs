@@ -13,24 +13,25 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
 use crate::options::DbOption;
+use csg::{Mesh, Pt3};
 use dashmap::DashMap;
 use parry3d::bounding_volume::Aabb;
 use crate::graph_db::pdms_inst_arango::query_rvm_instance_data_from_refno_aql;
 
-async fn boolean_negative_mesh(refno: RefU64, aios_mgr:&AiosDBManager) -> anyhow::Result<()> {
+async fn boolean_negative_mesh(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<()> {
     let mut negative_mesh_map = DashMap::new();
     let database = aios_mgr.get_arangodb_conn().await?;
     let need_compute_refnos = query_negative_refnos_aql(refno, &database).await?;
     for (refno, negative_refnos) in need_compute_refnos {
-        if let Some((refno,mesh)) = compute_boolean_mesh(refno,negative_refnos,aios_mgr).await?{
+        if let Some((refno, mesh)) = compute_boolean_mesh(refno, negative_refnos, aios_mgr).await? {
             negative_mesh_map.entry(refno).or_insert(mesh);
         }
     }
-    save_boolean_negative_mesh(negative_mesh_map,&database).await?;
+    save_boolean_negative_mesh(negative_mesh_map, &database).await?;
     Ok(())
 }
 
-pub async fn save_boolean_negative_mesh(negative_mesh_map:DashMap<RefU64,PdmsMesh>, database: &Database) -> anyhow::Result<()> {
+pub async fn save_boolean_negative_mesh(negative_mesh_map: DashMap<RefU64, PdmsMesh>, database: &Database) -> anyhow::Result<()> {
     let mut eles_vec = Vec::new();
     let eles = negative_mesh_map.into_iter().collect::<Vec<_>>();
     for (refno, mesh) in eles {
@@ -85,8 +86,8 @@ pub async fn compute_boolean_mesh(refno: RefU64, negative_refnos: Vec<PdmsElemen
                         }
                     }
                 }
-                let pdms_mesh = refno_mesh.from_scg_mesh(&refno_csg_mesh,&refno_transform);
-                return Ok(Some((refno,pdms_mesh)))
+                let pdms_mesh = refno_mesh.from_scg_mesh(&refno_csg_mesh, &refno_transform);
+                return Ok(Some((refno, pdms_mesh)));
             }
         }
     }
@@ -102,7 +103,8 @@ pub async fn query_negative_refnos_aql(refno: RefU64, database: &Database) -> an
         for z in 1 inbound c._id pdms_edges
             return 1
         ) == 0
-    filter c.noun in ['NCYL' ,'NBOX','NCON', 'NSNO','NPYR', 'NDIS' ,'NXTR', 'NCTO' ,'NRTO' ,'NSLC','NREV','NSCY' ,'NSBO']
+    filter c.noun in ['NCYL' ,'NBOX','NCON', 'NSNO','NPYR', 'NDIS' ,'NXTR', 'NCTO' ,'NRTO' ,'NSLC','NREV','NLCY',
+     'NLPY', 'NLSN', 'NSBO', 'NSCO', 'NSCT', 'NSCY', 'NSDS', 'NSEX' ,'NSRE', 'NSRT', 'NSSL', 'NSSP']
     return {
         'refno':c._key,
         'owner':c.owner,

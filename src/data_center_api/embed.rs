@@ -124,8 +124,8 @@ async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<O
                         value: AttrValue::AttrString(stander_type),
                     });
                     Ok(Some(("埋件.json".to_string(), DataCenterInstance {
-                        object_model_code: "1516".to_string(),
-                        instance_code: "KY1801-208".to_string(),
+                        object_model_code: "STUCC".to_string(),
+                        instance_code: "STUCC01".to_string(),
                         attributes: instances,
                     })))
                 }
@@ -141,8 +141,8 @@ async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<O
                         value: AttrValue::AttrFloat(size_thickness),
                     });
                     Ok(Some(("非标准埋件.json".to_string(), DataCenterInstance {
-                        object_model_code: "1516".to_string(),
-                        instance_code: "KY1801-208".to_string(),
+                        object_model_code: "STUCC".to_string(),
+                        instance_code: "STUCC01".to_string(),
                         attributes: instances,
                     })))
                 }

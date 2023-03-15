@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
-use aios_core::pdms_types::{NounHash, RefU64, UdaMajorType};
+use aios_core::pdms_types::{NounHash, PdmsElement, RefU64, UdaMajorType};
 use aios_core::pdms_types::UdaMajorType::T;
 use arangors_lite::{AqlQuery, ClientError, Database};
 use parry3d::bounding_volume::Aabb;
+use regex::Regex;
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
 use crate::api::attr::{get_site_major_from_uda, query_explicit_attr};
@@ -194,6 +195,44 @@ pub fn get_room_name_split(name: &str) -> Option<RoomInfo> {
     })
 }
 
+pub async fn query_refno_belong_rooms(refno: RefU64, database: &Database) -> anyhow::Result<Vec<PdmsElement>> {
+    let mut set = HashSet::new();
+    let mut r = Vec::new();
+    let id = format!("pdms_eles/{}", refno.to_url_refno());
+    let aql = AqlQuery::new("
+    let elements = ( for v in 0..100 inbound @id pdms_edges
+                    filter v!= null
+                    return v._id )
+    let room_refnos = (for element in elements
+                        for v in 1 inbound element room_edges
+                        filter v!= null
+                        return v._key )
+    for room_refno in room_refnos
+        let id = document('pdms_eles',room_refno)._id
+        for v in 0..10 outbound id pdms_edges
+            filter v!= null
+            filter v.noun == 'FRMW'
+            return { refno:v._key , owner:0 , name:v.name,noun:v.noun,version:0,children_count:1 }")
+        .bind_var("id", id);
+    let results: Vec<PdmsElement> = database.aql_query(aql).await?;
+    for result in results {
+        let refno = RefU64::from_url_refno(&result.refno);
+        if refno.is_none() { continue; }
+        let refno = refno.unwrap();
+        if set.contains(&refno) { continue; }
+        set.insert(refno);
+        r.push(PdmsElement {
+            refno: refno.to_refno_string(),
+            owner: result.owner,
+            name: result.name,
+            noun: result.noun,
+            version: 0,
+            children_count: 1,
+        })
+    }
+    Ok(r)
+}
+
 #[tokio::test]
 async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
@@ -209,9 +248,35 @@ async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let refno = RefU64::from_url_refno("24383_68084").unwrap();
+    let name = query_refno_belong_rooms(refno,  &database).await?;
+    dbg!(&name);
+    Ok(())
+}
+
 #[test]
 fn test_json() {
     let str = vec![T];
     let json = serde_json::to_string(&str).unwrap();
     dbg!(&json);
+}
+
+#[test]
+fn test_match_room_name() {
+    let re = Regex::new(r"^/\d+[A-Z]{2}-RM\d{2}-R\d{3}$").unwrap();
+
+    dbg!(re.is_match("/123AB-RM03-R310"));
+    dbg!(re.is_match("/456CD-RM03-R312"));
+    dbg!(re.is_match("/789EF-RM11-R976"));
+    dbg!(!re.is_match("/1RA-RM03-R312"));
+    dbg!(!re.is_match("/1NX-RM11-R976"));
+    dbg!(!re.is_match("/12A-RM11-R976"));
 }
