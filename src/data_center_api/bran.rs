@@ -21,43 +21,43 @@ pub fn get_data_center_bran_attr(refno:RefU64) -> Vec<DataCenterAttr> {
 
     result.push(DataCenterAttr{
         attribute_model_code: "SEGMA1".to_string(),
-        value: AttrIntArray(segma_1),
+        value: AttrIntArray(segma_1).into(),
     });
     result.push(DataCenterAttr{
         attribute_model_code: "SEGMA2".to_string(),
-        value: AttrString(segma_2),
+        value: AttrString(segma_2).into(),
     });
     result.push(DataCenterAttr{
         attribute_model_code: "SEGMA3".to_string(),
-        value: AttrString(segma_3),
+        value: AttrString(segma_3).into(),
     });
     result.push(DataCenterAttr{
         attribute_model_code: "SEGMA4".to_string(),
-        value: AttrString(segma_4),
+        value: AttrString(segma_4).into(),
     });
     result.push(DataCenterAttr{
         attribute_model_code: "SEGMA5".to_string(),
-        value: AttrString(segma_5),
+        value: AttrString(segma_5).into(),
     });
     result.push(DataCenterAttr{
         attribute_model_code: "SEGMA6".to_string(),
-        value: AttrString(segma_6),
+        value: AttrString(segma_6).into(),
     });
     result.push(DataCenterAttr{
         attribute_model_code: "SEGMA7".to_string(),
-        value: AttrString(segma_7),
+        value: AttrString(segma_7).into(),
     });
     result.push(DataCenterAttr{
         attribute_model_code: "SEGMA8".to_string(),
-        value: AttrMap(segma_8),
+        value: AttrMap(segma_8).into(),
     });
     result.push(DataCenterAttr{
         attribute_model_code: "SEGMA9".to_string(),
-        value: AttrString(segma_9),
+        value: AttrString(segma_9).into(),
     });
     result.push(DataCenterAttr{
         attribute_model_code: "SEGMA10".to_string(),
-        value: AttrString(segma_10),
+        value: AttrString(segma_10).into(),
     });
     result
 }

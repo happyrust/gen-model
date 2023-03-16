@@ -10,7 +10,7 @@ use sqlx::{MySql, Pool, Row};
 use crate::api::attr::{get_site_major_from_uda, query_explicit_attr};
 use crate::api::children::{get_ancestor_refno_of_type_data, query_ancestor_of_type};
 use crate::aql_api::children::query_ancestor_name_of_type_aql;
-use crate::aql_api::convert_refno_vec_from_vec_string;
+use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsElementAql};
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
@@ -156,29 +156,59 @@ fn gen_query_all_need_compute_room_refno_sql(dbnos: &Vec<i32>, room_type: &str, 
 }
 
 /// 查找房间下的所有元件的参考号
-pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<Vec<UdaMajorType>>, database: &Database) -> anyhow::Result<Vec<RefU64>> {
-    let key = format!("room_eles/{}", refno.to_url_refno());
+pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<UdaMajorType>, database: &Database) -> anyhow::Result<Vec<RefU64>> {
+    let key = format!("pdms_eles/{}", refno.to_url_refno());
     let aql = if filter_major.is_none() {
         AqlQuery::new("
-        for v in 1 outbound @key room_edges
-            filter v != null
-            return v._key
+        for e in 0..10 inbound @key pdms_edges
+            filter e.noun == 'PANE'
+            for v in 1 outbound CONCAT('room_eles/',e._key) room_edges
+                filter v != null
+                return v._key
         ").bind_var("key", key)
     } else {
-        let filter_major = filter_major.unwrap();
-        let mut filter_data = vec![];
-        for major in filter_major {
-            filter_data.push(major.to_major_str());
-        }
+        let filter_data = filter_major.unwrap().to_major_str();
         AqlQuery::new("
         for v,e in 1 outbound @key room_edges
             filter v != null
-            filter POSITION(@filter_major,e.major)
+            filter filter_major == e.major
             return v._key
         ").bind_var("key", key).bind_var("filter_major", filter_data)
     };
     let result: Vec<String> = database.aql_query(aql).await?;
     Ok(convert_refno_vec_from_vec_string(result))
+}
+
+/// 查找房间下的所有元件的 pdms_element
+pub async fn query_room_pdms_elements_aql(refno: RefU64, filter_major: Option<UdaMajorType>, database: &Database) -> anyhow::Result<Vec<PdmsElement>> {
+    let mut r = Vec::new();
+    let key = format!("pdms_eles/{}", refno.to_url_refno());
+    let aql = if filter_major.is_none() {
+        AqlQuery::new("
+        for e in 0..10 inbound @key pdms_edges
+            filter e.noun == 'PANE'
+            for v in 1 outbound CONCAT('room_eles/',e._key) room_edges
+                filter v != null
+                return { refno:v._key , owner:v.owner , name:v.name,noun:v.noun,version:0,children_count:0 }
+        ").bind_var("key", key)
+    } else {
+        let filter_data = filter_major.unwrap().to_major_str();
+        AqlQuery::new("
+        for p in 0..10 inbound @key pdms_edges
+            filter p.noun == 'PANE'
+            for v,e in 1 outbound CONCAT('room_eles/',p._key) room_edges
+                filter v != null
+                filter @filter_major == e.major
+                return { refno:v._key , owner:v.owner , name:v.name,noun:v.noun,version:0,children_count:0 }
+        ").bind_var("key", key).bind_var("filter_major", filter_data)
+    };
+    let results: Vec<PdmsElementAql> = database.aql_query(aql).await.unwrap();
+    for result in results {
+        if let Some(pdms_element) = result.change_to_pdms_element() {
+            r.push(pdms_element);
+        }
+    }
+    Ok(r)
 }
 
 /// 通过命名规则获取房间名
@@ -257,7 +287,7 @@ async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let refno = RefU64::from_url_refno("24383_68084").unwrap();
-    let name = query_refno_belong_rooms(refno,  &database).await?;
+    let name = query_refno_belong_rooms(refno, &database).await?;
     dbg!(&name);
     Ok(())
 }

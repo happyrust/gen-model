@@ -15,7 +15,7 @@ pub async fn create_embed_data(refno:RefU64, pool:&Pool<MySql>) -> anyhow::Resul
             package_code: DataCenterProject::convert_package_code(),
             project_code: "1516".to_string(),
             owner: "KY1801".to_string(),
-            instances: vec![instance.1],
+            instances: instance.1,
         };
         return Ok(Some((instance.0,project)))
     }
@@ -32,27 +32,27 @@ async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<O
             let speciality = UdaMajorType::from_chinese_description(&speciality).to_major_str();
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC1".to_string(),
-                value: AttrValue::AttrString(speciality),
+                value: AttrValue::AttrString(speciality).into(),
             });
             let code = result.try_get::<String, _>("Code").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC2".to_string(),
-                value: AttrValue::AttrString(code),
+                value: AttrValue::AttrString(code).into(),
             });
             let rely_item = result.try_get::<String, _>("RelyItem").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC3".to_string(),
-                value: AttrValue::AttrString(rely_item),
+                value: AttrValue::AttrString(rely_item).into(),
             });
             let rely_item_ref = result.try_get::<String, _>("RelyItemRef").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC4".to_string(),
-                value: AttrValue::AttrString(rely_item_ref),
+                value: AttrValue::AttrString(rely_item_ref).into(),
             });
             let main_item = result.try_get::<String, _>("MainItem").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC6".to_string(),
-                value: AttrValue::AttrString(main_item),
+                value: AttrValue::AttrString(main_item).into(),
             });
 
             let position = result.try_get::<String, _>("Position").unwrap_or("".to_string());
@@ -60,72 +60,74 @@ async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<O
             let position = if position.len() > 2 { position } else { vec![0.0, 0.0, 0.0] };
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC9".to_string(),
-                value: AttrValue::AttrFloatArray(position),
+                value: AttrValue::AttrFloatArray(position).into(),
             });
             let ori = result.try_get::<String, _>("Ori").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC10".to_string(),
-                value: AttrValue::AttrString(ori),
+                value: AttrValue::AttrString(ori).into(),
             });
 
             let work = result.try_get::<String, _>("Work").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC11".to_string(),
-                value: AttrValue::AttrString(work),
+                value: AttrValue::AttrString(work).into(),
             });
             let load = result.try_get::<String, _>("Load").unwrap_or("".to_string());
             let load = get_pos_from_str(load);
             let load = if load.len() > 2 { load } else { vec![0.0, 0.0, 0.0] };
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC12".to_string(),
-                value: AttrValue::AttrFloatArray(load[..3].to_vec()),
+                value: AttrValue::AttrFloatArray(load[..3].to_vec()).into(),
             });
             let sub_material = result.try_get::<String, _>("SubsMaterial").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC14".to_string(),
-                value: AttrValue::AttrString(sub_material),
+                value: AttrValue::AttrString(sub_material).into(),
             });
             let work_by = result.try_get::<String, _>("WorkBy").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC15".to_string(),
-                value: AttrValue::AttrString(work_by),
+                value: AttrValue::AttrString(work_by).into(),
             });
             let time = result.try_get::<String, _>("Time").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC16".to_string(),
-                value: AttrValue::AttrString(time),
+                value: AttrValue::AttrString(time).into(),
             });
             let open_item = result.try_get::<String, _>("OpenItem").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC17".to_string(),
-                value: AttrValue::AttrString(open_item),
+                value: AttrValue::AttrString(open_item).into(),
             });
             let note = result.try_get::<String, _>("Note").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC18".to_string(),
-                value: AttrValue::AttrString(note),
+                value: AttrValue::AttrString(note).into(),
             });
 
             let fitt_id = result.try_get::<String, _>("FittID").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC27".to_string(),
-                value: AttrValue::AttrString(fitt_id),
+                value: AttrValue::AttrString(fitt_id).into(),
             });
             let form = result.try_get::<String, _>("Form").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCCA2".to_string(),
-                value: AttrValue::AttrString(form.clone()),
+                value: AttrValue::AttrString(form.clone()).into(),
             });
             return match form.as_str() {
                 "标准埋件(P)" => {
                     let stander_type = result.try_get::<String, _>("StanderType").unwrap_or("".to_string());
                     instances.push(DataCenterAttr {
                         attribute_model_code: "STUCCA1".to_string(),
-                        value: AttrValue::AttrString(stander_type),
+                        value: AttrValue::AttrString(stander_type).into(),
                     });
                     Ok(Some(("埋件.json".to_string(), DataCenterInstance {
                         object_model_code: "STUCC".to_string(),
+                        project_code: "1516".to_string(),
                         instance_code: "STUCC01".to_string(),
+                        version: "A版".to_string(),
                         attributes: instances,
                     })))
                 }
@@ -133,16 +135,18 @@ async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<O
                     let size_length = result.try_get::<f32, _>("SizeLength").unwrap_or(0.0);
                     instances.push(DataCenterAttr {
                         attribute_model_code: "STUCCB1".to_string(),
-                        value: AttrValue::AttrFloat(size_length),
+                        value: AttrValue::AttrFloat(size_length).into(),
                     });
                     let size_thickness = result.try_get::<f32, _>("SizeThickness").unwrap_or(0.0);
                     instances.push(DataCenterAttr {
                         attribute_model_code: "STUCCB2".to_string(),
-                        value: AttrValue::AttrFloat(size_thickness),
+                        value: AttrValue::AttrFloat(size_thickness).into(),
                     });
                     Ok(Some(("非标准埋件.json".to_string(), DataCenterInstance {
                         object_model_code: "STUCC".to_string(),
+                        project_code: "1516".to_string(),
                         instance_code: "STUCC01".to_string(),
+                        version: "A版".to_string(),
                         attributes: instances,
                     })))
                 }

@@ -420,7 +420,9 @@ fn get_instance_data_element(metadata_map: &HashMap<String, Vec<String>>, refno:
     };
     Some(DataCenterInstance {
         object_model_code: code,
+        project_code: "1516".to_string(),
         instance_code,
+        version: "A版".to_string(),
         attributes: result,
     })
 }
