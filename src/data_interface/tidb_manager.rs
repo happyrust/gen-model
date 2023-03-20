@@ -94,12 +94,20 @@ lazy_static! {
         let mut s = DashMap::new();
         s
     };
+
+    pub static ref PRIMITIVE_NOUN_NAMES: Vec<String> = {
+        vec!["BOX".to_string(), "CYLI".to_string(), "SPHE".to_string(), "CONE".to_string(),
+            "DISH".to_string(), "CTOR".to_string(), "RTOR".to_string(), "PYRA".to_string()]
+    };
 }
 //"SPINE", "GENS",
 static GNERAL_PRIM_NOUN_NAMES: Lazy<Vec<&'static str>> = Lazy::new(|| {
-    // vec!["BOX", "CYLI", "SPHE", "CONE", "DISH", "CTOR", "RTOR", "PYRA","NCYL" ,"NBOX","NCON", "NSNO","NPYR", "NDIS" ,"NXTR", "NCTO" ,"NRTO" ,"NSLC","NREV"]
-    vec!["NCYL","NSCY"]
+    vec!["BOX", "CYLI", "SPHE", "CONE", "DISH", "CTOR", "RTOR", "PYRA","NCYL" ,"NBOX","NCON", "NSNO",
+         "NPYR", "NDIS" ,"NXTR", "NCTO" ,"NRTO" ,"NSLC","NREV","NSCY"]
+    // vec!["NCYL","NSCY"]
 });
+
+
 
 static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> = Lazy::new(|| {
     // vec!["EQUI", "PIPE", "STRU", "ELEC", ""]
@@ -264,6 +272,19 @@ impl PdmsDataInterface for AiosDBManager {
             let children = query_children(refno, &project_pool).await?;
             for child in children {
                 let attr = self.get_attr(child.0).await?;
+                r.push(attr);
+            }
+        }
+        Ok(r)
+    }
+
+    async fn get_travel_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
+        let mut r = vec![];
+        if let Ok(database) = self.get_arangodb_conn().await {
+            let children = query_travel_children_aql(&database,refno).await?;
+            for child in children {
+                let child_refno = RefU64::from_refno_str(&child.refno)?;
+                let attr = self.get_attr(child_refno).await?;
                 r.push(attr);
             }
         }

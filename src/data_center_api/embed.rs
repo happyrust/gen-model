@@ -1,23 +1,23 @@
 use std::{env, fs};
 use std::io::Write;
-use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
+use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject, ItemValue};
 use aios_core::pdms_types::{RefU64, UdaMajorType};
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
-use crate::data_center_api::hole::get_pos_from_str;
+use crate::data_center_api::hole::{convert_time_to_vec, get_pos_from_str};
 use crate::consts::EMBED_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
-pub async fn create_embed_data(refno:RefU64, pool:&Pool<MySql>) -> anyhow::Result<Option<(String,DataCenterProject)>> {
-    let instance = query_embed_data(refno,pool).await?;
+pub async fn create_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<(String, DataCenterProject)>> {
+    let instance = query_embed_data(refno, pool).await?;
     if let Some(instance) = instance {
         let project = DataCenterProject {
             package_code: DataCenterProject::convert_package_code(),
             project_code: "1516".to_string(),
             owner: "KY1801".to_string(),
-            instances: instance.1,
+            instances: vec![instance.1],
         };
-        return Ok(Some((instance.0,project)))
+        return Ok(Some((instance.0, project)));
     }
     Ok(None)
 }
@@ -28,11 +28,15 @@ async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<O
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     match result {
         Ok(result) => {
-            let speciality = result.try_get::<String, _>("Speciality").unwrap_or("".to_string());
-            let speciality = UdaMajorType::from_chinese_description(&speciality).to_major_str();
+            // let speciality = result.try_get::<String, _>("Speciality").unwrap_or("".to_string());
+            // let speciality = UdaMajorType::from_chinese_description(&speciality).to_major_str();
+            // instances.push(DataCenterAttr {
+            //     attribute_model_code: "STUCC1".to_string(),
+            //     value: AttrValue::AttrString(speciality).into(),
+            // });
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC1".to_string(),
-                value: AttrValue::AttrString(speciality).into(),
+                value: AttrValue::AttrStrArray(vec!["Tes".to_string(), "Te".to_string(), "Te".to_string(), "Test".to_string(), "T".to_string()]).into(),
             });
             let code = result.try_get::<String, _>("Code").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
@@ -49,19 +53,30 @@ async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<O
                 attribute_model_code: "STUCC4".to_string(),
                 value: AttrValue::AttrString(rely_item_ref).into(),
             });
+
             let main_item = result.try_get::<String, _>("MainItem").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC6".to_string(),
                 value: AttrValue::AttrString(main_item).into(),
             });
 
-            let position = result.try_get::<String, _>("Position").unwrap_or("".to_string());
-            let position = get_pos_from_str(position);
-            let position = if position.len() > 2 { position } else { vec![0.0, 0.0, 0.0] };
+            let mut stucc_7 = Vec::new();
+            stucc_7.push(ItemValue::String("T".to_string()));
+            stucc_7.push(ItemValue::String("Te".to_string()));
+            stucc_7.push(ItemValue::String("Test".to_string()));
+            stucc_7.push(ItemValue::Int(1));
             instances.push(DataCenterAttr {
-                attribute_model_code: "STUCC9".to_string(),
-                value: AttrValue::AttrFloatArray(position).into(),
+                attribute_model_code: "STUCC7".to_string(),
+                value: AttrValue::AttrItemArray(stucc_7).into(),
             });
+
+            // let position = result.try_get::<String, _>("Position").unwrap_or("".to_string());
+            // let position = get_pos_from_str(position);
+            // let position = if position.len() > 2 { position } else { vec![0.0, 0.0, 0.0] };
+            // instances.push(DataCenterAttr {
+            //     attribute_model_code: "STUCC9".to_string(),
+            //     value: AttrValue::AttrFloatArray(position).into(),
+            // });
             let ori = result.try_get::<String, _>("Ori").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC10".to_string(),
@@ -75,11 +90,12 @@ async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<O
             });
             let load = result.try_get::<String, _>("Load").unwrap_or("".to_string());
             let load = get_pos_from_str(load);
-            let load = if load.len() > 2 { load } else { vec![0.0, 0.0, 0.0] };
+            let load = if load.len() > 5 { load } else { vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0] };
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC12".to_string(),
-                value: AttrValue::AttrFloatArray(load[..3].to_vec()).into(),
+                value: AttrValue::AttrFloatArray(load.to_vec()).into(),
             });
+
             let sub_material = result.try_get::<String, _>("SubsMaterial").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC14".to_string(),
@@ -91,10 +107,13 @@ async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<O
                 value: AttrValue::AttrString(work_by).into(),
             });
             let time = result.try_get::<String, _>("Time").unwrap_or("".to_string());
+            let time = time.replace("/","-");
+            let time = convert_time_to_vec(&time);
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC16".to_string(),
-                value: AttrValue::AttrString(time).into(),
+                value: AttrValue::AttrStrArray(time).into(),
             });
+
             let open_item = result.try_get::<String, _>("OpenItem").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC17".to_string(),
@@ -106,16 +125,18 @@ async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<O
                 value: AttrValue::AttrString(note).into(),
             });
 
-            let fitt_id = result.try_get::<String, _>("FittID").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
-                attribute_model_code: "STUCC27".to_string(),
-                value: AttrValue::AttrString(fitt_id).into(),
+                attribute_model_code: "STUCC19".to_string(),
+                value: AttrValue::AttrString("Test".to_string()).into(),
             });
+
+            // let fitt_id = result.try_get::<String, _>("FittID").unwrap_or("".to_string());
+            // instances.push(DataCenterAttr {
+            //     attribute_model_code: "STUCC27".to_string(),
+            //     value: AttrValue::AttrString(fitt_id).into(),
+            // });
             let form = result.try_get::<String, _>("Form").unwrap_or("".to_string());
-            instances.push(DataCenterAttr {
-                attribute_model_code: "STUCCA2".to_string(),
-                value: AttrValue::AttrString(form.clone()).into(),
-            });
+
             return match form.as_str() {
                 "标准埋件(P)" => {
                     let stander_type = result.try_get::<String, _>("StanderType").unwrap_or("".to_string());
@@ -123,10 +144,22 @@ async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<O
                         attribute_model_code: "STUCCA1".to_string(),
                         value: AttrValue::AttrString(stander_type).into(),
                     });
+                    instances.push(DataCenterAttr {
+                        attribute_model_code: "STUCCA2".to_string(),
+                        value: AttrValue::AttrFloat(0.0).into(),
+                    });
+                    instances.push(DataCenterAttr {
+                        attribute_model_code: "STUCCA3".to_string(),
+                        value: AttrValue::AttrString("预埋板".to_string()).into(),
+                    });
+                    instances.push(DataCenterAttr {
+                        attribute_model_code: "STUCCA4".to_string(),
+                        value: AttrValue::AttrFloat(0.0).into(),
+                    });
                     Ok(Some(("埋件.json".to_string(), DataCenterInstance {
-                        object_model_code: "STUCC".to_string(),
+                        object_model_code: "STUCCA".to_string(),
                         project_code: "1516".to_string(),
-                        instance_code: "STUCC01".to_string(),
+                        instance_code: "STUCCA01".to_string(),
                         version: "A版".to_string(),
                         attributes: instances,
                     })))
@@ -142,8 +175,20 @@ async fn query_embed_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<O
                         attribute_model_code: "STUCCB2".to_string(),
                         value: AttrValue::AttrFloat(size_thickness).into(),
                     });
+                    instances.push(DataCenterAttr {
+                        attribute_model_code: "STUCCB3".to_string(),
+                        value: AttrValue::AttrString("非标预埋板".to_string()).into(),
+                    });
+                    instances.push(DataCenterAttr {
+                        attribute_model_code: "STUCCB4".to_string(),
+                        value: AttrValue::AttrString("Test".to_string()).into(),
+                    });
+                    instances.push(DataCenterAttr {
+                        attribute_model_code: "STUCCB5".to_string(),
+                        value: AttrValue::AttrFloat(0.0).into(),
+                    });
                     Ok(Some(("非标准埋件.json".to_string(), DataCenterInstance {
-                        object_model_code: "STUCC".to_string(),
+                        object_model_code: "STUCCB".to_string(),
                         project_code: "1516".to_string(),
                         instance_code: "STUCC01".to_string(),
                         version: "A版".to_string(),
@@ -184,9 +229,9 @@ async fn test_query_embed_data() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
-    let refno = RefU64::from_refno_str("17496/105935").unwrap();
+    let refno = RefU64::from_refno_str("17496/108516").unwrap();
     let r = create_embed_data(refno, &pool).await?;
-    if let Some((file_name,r)) = r {
+    if let Some((file_name, r)) = r {
         let mut file = fs::File::create(file_name.as_str())?;
         let data = serde_json::to_string(&r).unwrap();
         file.write_all(&data.into_bytes())?;

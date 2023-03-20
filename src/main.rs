@@ -243,21 +243,23 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// #[tokio::main]
-async fn main_1() -> anyhow::Result<()> {
-    // use config::{Config, ConfigError, Environment, File};
-    // let s = Config::builder()
-    //     .add_source(File::with_name("DbOption"))
-    //     .build()?;
-    // let db_option: DbOption = s.try_deserialize().unwrap();
-    let aios_mgr = AiosDBManager::init_form_config().await?;
-    let database = aios_mgr.get_arangodb_conn().await?;
-    let refno = RefU64::from_refno_str("23584/5386").unwrap();
-    let negative_refnos = query_negative_refnos_aql(refno, &database).await?.get(&refno).unwrap().to_vec();
-    let result = compute_boolean_mesh(refno, negative_refnos, &aios_mgr).await?;
-    // dbg!(&result);
-    Ok(())
-}
+// // #[tokio::main]
+// async fn main_1() -> anyhow::Result<()> {
+//     use config::{Config, ConfigError, Environment, File};
+//     let s = Config::builder()
+//         .add_source(File::with_name("DbOption"))
+//         .build()?;
+//     let db_option: DbOption = s.try_deserialize().unwrap();
+//     let database = get_arangodb_conn_from_db_option(&db_option).await?;
+//     // let aios_mgr = AiosDBManager::init_form_config().await?;
+//     // let database = aios_mgr.get_arangodb_conn().await?;
+//     let refno = RefU64::from_refno_str("23584/5386").unwrap();
+//
+//     let negative_refnos = query_negative_refnos_aql(refno, &aios_mgr,&database).await?.get(&refno).unwrap().to_vec();
+//     let result = compute_boolean_mesh(refno, negative_refnos, &database).await?;
+//     // dbg!(&result);
+//     Ok(())
+// }
 
 // #[tokio::main]
 // async fn main() -> anyhow::Result<()> {

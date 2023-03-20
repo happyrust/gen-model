@@ -227,8 +227,8 @@ async fn test_save_spatial_tree_to_db() -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let room_contains_refno = vec![RefU64::from_two_nums(24384, 3088), RefU64::from_two_nums(24384, 3090), RefU64::from_two_nums(24381, 71799), RefU64::from_two_nums(24384, 3130)];
     let not_contains_refno = vec![RefU64::from_two_nums(24381, 35286), RefU64::from_two_nums(17496, 106149), RefU64::from_two_nums(24381, 110151), RefU64::from_two_nums(24381, 101720), RefU64::from_two_nums(17496, 100004)];
-    let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(vec![E]), &database).await?;
-    let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(vec![T]), &database).await?;
+    let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(E), &database).await?;
+    let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(T), &database).await?;
     // let compute_contains_refno = query_room_refnos_aql(test_room_refno, None,&database).await?;
     // dbg!(&compute_contains_refno.len());
     // for compute_refno in compute_contains_refno {

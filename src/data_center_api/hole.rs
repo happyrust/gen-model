@@ -116,7 +116,7 @@ async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<H
             };
             let a = Vec3::from_array([0.0, 0.0, 0.0]);
             let b = Vec3::from_array([0.0, 0.0, 0.0]);
-            map.entry("STUCJ9".to_string()).or_insert(AttrValue::AttrVec3Array(vec![a, b]));
+            // map.entry("STUCJ9".to_string()).or_insert(AttrValue::AttrVec3Array(vec![a, b]));
             map.entry("STUCJ10".to_string()).or_insert(AttrValue::AttrMapFloatArray(shape_map));
 
             let bank_height = result.try_get::<f32, _>("BankHeight").unwrap_or(0.0);
@@ -131,11 +131,11 @@ async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<H
 
             map.entry("STUCJ13".to_string()).or_insert(AttrValue::AttrFloat(bank_width));
 
-            map.entry("STUCJ14".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0]));
-
-            map.entry("STUCJ15".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0]));
-
-            map.entry("STUCJ16".to_string()).or_insert(AttrValue::AttrBool(true));
+            // map.entry("STUCJ14".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0]));
+            //
+            // map.entry("STUCJ15".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0]));
+            //
+            // map.entry("STUCJ16".to_string()).or_insert(AttrValue::AttrBool(true));
 
             let plug_type = result.get::<Option<String>, _>("PlugType");
             if let Some(plug_type) = plug_type {
@@ -146,7 +146,7 @@ async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<H
                 map.entry("STUCJ18".to_string()).or_insert(AttrValue::AttrString("气密".to_string()));
                 map.entry("STUCJ17".to_string()).or_insert(AttrValue::AttrBool(false));
             }
-            map.entry("STUCJ19".to_string()).or_insert(AttrValue::AttrString("PIA100".to_string()));
+            // map.entry("STUCJ19".to_string()).or_insert(AttrValue::AttrString("PIA100".to_string()));
             map.entry("STUCJ20".to_string()).or_insert(AttrValue::AttrString("600".to_string()));
             let b_second = result.get::<bool, _>("Second");
             map.entry("STUCJ21".to_string()).or_insert(AttrValue::AttrBool(b_second));
@@ -168,19 +168,19 @@ async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<H
             let note = result.get::<String, _>("Note");
             map.entry("STUCJ27".to_string()).or_insert(AttrValue::AttrString(note));
 
-            let fitt_refno = result.get::<String, _>("FittRefNo");
-            map.entry("STUCJ28".to_string()).or_insert(AttrValue::AttrString(fitt_refno));
-            let hole_b_pid = result.get::<f32, _>("HoleBPID");
-            map.entry("STUCJ29".to_string()).or_insert(AttrValue::AttrFloat(hole_b_pid));
-
-            let hole_b_pver = result.get::<f32, _>("HoleBPVER");
-            map.entry("STUCJ30".to_string()).or_insert(AttrValue::AttrFloat(hole_b_pver));
-
-            let rely_item_b_pid = result.get::<f32, _>("RelyItemBPID");
-            map.entry("STUCJ31".to_string()).or_insert(AttrValue::AttrFloat(rely_item_b_pid));
-
-            let rely_item_b_pver = result.get::<f32, _>("RelyItemBPVER");
-            map.entry("STUCJ32".to_string()).or_insert(AttrValue::AttrFloat(rely_item_b_pver));
+            // let fitt_refno = result.get::<String, _>("FittRefNo");
+            // map.entry("STUCJ28".to_string()).or_insert(AttrValue::AttrString(fitt_refno));
+            // let hole_b_pid = result.get::<f32, _>("HoleBPID");
+            // map.entry("STUCJ29".to_string()).or_insert(AttrValue::AttrFloat(hole_b_pid));
+            //
+            // let hole_b_pver = result.get::<f32, _>("HoleBPVER");
+            // map.entry("STUCJ30".to_string()).or_insert(AttrValue::AttrFloat(hole_b_pver));
+            //
+            // let rely_item_b_pid = result.get::<f32, _>("RelyItemBPID");
+            // map.entry("STUCJ31".to_string()).or_insert(AttrValue::AttrFloat(rely_item_b_pid));
+            //
+            // let rely_item_b_pver = result.get::<f32, _>("RelyItemBPVER");
+            // map.entry("STUCJ32".to_string()).or_insert(AttrValue::AttrFloat(rely_item_b_pver));
 
 
         }
@@ -260,9 +260,8 @@ pub(crate) fn get_pos_from_str(input: String) -> Vec<f32> {
     result
 }
 
-fn convert_time_to_vec(time: &str) -> Vec<String> {
+pub fn convert_time_to_vec(time: &str) -> Vec<String> {
     let mut r = Vec::new();
-    dbg!(&time);
     if let Ok(dt) = NaiveDateTime::parse_from_str(time, "%Y-%m-%d %H:%M:%S") {
         r.push(dt.year().to_string());
         r.push(dt.month().to_string());
@@ -303,9 +302,9 @@ async fn test_gen_stucj_data() -> anyhow::Result<()> {
             package_code: DataCenterProject::convert_package_code(),
             project_code: "1516".to_string(),
             owner: "KY1801-208".to_string(),
-            instances: r,
+            instances: vec![r],
         };
-        let data = serde_json::to_string(&vec![data]).unwrap();
+        let data = serde_json::to_string(&data).unwrap();
         file.write_all(&data.into_bytes())?;
     }
     Ok(())

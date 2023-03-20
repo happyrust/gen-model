@@ -7,31 +7,51 @@ use bevy::prelude::{Transform};
 use glam::{Mat4, Vec3};
 use itertools::Itertools;
 use sqlx::{MySql, Pool};
-use crate::aql_api::pdms_mesh::{query_refnos_meshes_aql};
-use crate::aql_api::PdmsElementAql;
+use crate::aql_api::pdms_mesh::{query_catr_refnos_meshes_aql, query_refnos_meshes_aql};
+use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsElementAql};
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::data_interface::tidb_manager::{AiosDBManager, PRIMITIVE_NOUN_NAMES};
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
 use crate::options::DbOption;
 use csg::{Mesh, Pt3};
-use dashmap::DashMap;
+use dashmap::{DashMap, DashSet};
 use parry3d::bounding_volume::Aabb;
+use crate::api::element::query_refno_type;
+use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::graph_db::pdms_inst_arango::query_rvm_instance_data_from_refno_aql;
+use std::io::Write;
+use csg::mesh::IndexedMesh;
+
+/// 查找需要负实体计算的instance
+pub async fn query_instance_refnos_negative_aql(refno:RefU64,database:&Database) -> anyhow::Result<Vec<RefU64>> {
+    let id = format!("pdms_eles/{}",refno.to_url_refno());
+    let aql = AqlQuery::new("
+    for v in 0..10 inbound @id pdms_edges
+        filter !POSITION(['NCYL' ,'NBOX','NCON', 'NSNO','NPYR', 'NDIS' ,'NXTR', 'NCTO' ,'NRTO' ,'NSLC','NREV'],v.noun)
+        filter document('pdms_instances',v._key) != null
+        return v._key
+    ").bind_var("id",id);
+    let result:Vec<String> = database.aql_query(aql).await?;
+    let refnos = convert_refno_vec_from_vec_string(result);
+    Ok(refnos)
+}
 
 async fn boolean_negative_mesh(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<()> {
     let mut negative_mesh_map = DashMap::new();
     let database = aios_mgr.get_arangodb_conn().await?;
-    let need_compute_refnos = query_negative_refnos_aql(refno, &database).await?;
+    let need_compute_refnos = query_negative_refnos_aql(refno, aios_mgr, &database).await?;
     for (refno, negative_refnos) in need_compute_refnos {
-        if let Some((refno, mesh)) = compute_boolean_mesh(refno, negative_refnos, aios_mgr).await? {
-            negative_mesh_map.entry(refno).or_insert(mesh);
+        if let Some((_,pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
+            if let Some((refno, mesh)) = compute_boolean_mesh(refno, negative_refnos, &pool, &database).await? {
+                negative_mesh_map.entry(refno).or_insert(mesh);
+            }
         }
     }
     save_boolean_negative_mesh(negative_mesh_map, &database).await?;
     Ok(())
 }
 
-pub async fn save_boolean_negative_mesh(negative_mesh_map: DashMap<RefU64, PdmsMesh>, database: &Database) -> anyhow::Result<()> {
+pub async fn save_boolean_negative_mesh(negative_mesh_map: DashMap<RefU64, IndexedMesh>, database: &Database) -> anyhow::Result<()> {
     let mut eles_vec = Vec::new();
     let eles = negative_mesh_map.into_iter().collect::<Vec<_>>();
     for (refno, mesh) in eles {
@@ -48,55 +68,104 @@ pub async fn save_boolean_negative_mesh(negative_mesh_map: DashMap<RefU64, PdmsM
 }
 
 // refno : 基本体的 refno  negative_refnos ： 负实体的集合
-pub async fn compute_boolean_mesh(refno: RefU64, negative_refnos: Vec<PdmsElement>, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<(RefU64, PdmsMesh)>> {
-    let database = aios_mgr.get_arangodb_conn().await?;
-    let refno_meshes_map = query_refnos_meshes_aql(refno, &database).await?;
-    let refno_transform = aios_mgr.get_world_transform(refno).await?;
-    if let Some(mut refno_transform) = refno_transform {
-        if let Some(mut refno_mesh) = refno_meshes_map.get_mut(&refno) {
-            let transform = query_rvm_instance_data_from_refno_aql(refno, &database).await?;
-            if let Some(geo_info) = transform {
-                let transform = geo_info.data[0].clone().transform;
-                let t = refno_transform * Transform {
-                    translation: transform.1,
-                    rotation: transform.0,
-                    scale: transform.2,
-                };
-                let mut refno_csg_mesh = refno_mesh.value().into_csg_mesh(&t);
-                // 计算基本体下面的负实体的 mesh
-                for negative_refno in negative_refnos {
-                    let negative_refno = RefU64::from_refno_str(&negative_refno.refno).unwrap();
-                    if let Some(negative_mesh) = refno_meshes_map.get(&negative_refno) {
-                        let negative_transform = aios_mgr.get_world_transform(negative_refno).await?;
-                        if negative_transform.is_none() {
-                            dbg!("transform none");
-                            continue;
-                        }
-                        let mut negative_transform = negative_transform.unwrap();
-                        let transform = query_rvm_instance_data_from_refno_aql(negative_refno, &database).await?;
-                        if let Some(geo_info) = transform {
-                            let transform = geo_info.data[0].clone().transform;
-                            let t = negative_transform * Transform {
-                                translation: transform.1,
-                                rotation: transform.0,
-                                scale: transform.2,
-                            };
-                            let negative_csg_mesh = negative_mesh.into_csg_mesh(&t);
-                            refno_csg_mesh -= negative_csg_mesh;
+pub async fn compute_boolean_mesh(refno: RefU64, negative_elements: Vec<PdmsElement>, pool: &Pool<MySql>, database: &Database) -> anyhow::Result<Option<(RefU64, IndexedMesh)>> {
+    // let database = aios_mgr.get_arangodb_conn().await?;
+    let refno_type = query_refno_type(refno, pool).await?;
+    let refno_meshes_map = query_catr_refnos_meshes_aql(refno, database).await?;
+    let negative_refnos = negative_elements.clone().iter().filter_map(|x| RefU64::from_refno_str(&x.refno).ok()).collect::<Vec<_>>();
+    let transform = query_rvm_instance_data_from_refno_aql(refno, database).await?;
+    if let Some(refno_geo_info) = transform {
+        // let transform = query_rvm_instance_data_from_refno_aql(refno, &database).await?;
+        // if let Some(geo_info) = transform {
+        let mut refno_csg_mesh = Mesh::default();
+        let refno_transform = Transform {
+            translation: refno_geo_info.world_transform.1,
+            rotation: refno_geo_info.world_transform.0,
+            scale: refno_geo_info.world_transform.2,
+        };
+        if PRIMITIVE_NOUN_NAMES.contains(&refno_type) {
+            // 找到基本体的mesh
+            if let Some(refno_mesh) = refno_meshes_map.get(&refno) {
+                for data in refno_geo_info.data {
+                    let t = refno_transform * Transform {
+                        translation: data.transform.1,
+                        rotation: data.transform.0,
+                        scale: data.transform.2,
+                    };
+                    refno_csg_mesh += refno_mesh.value().into_csg_mesh(&t);
+                    // 减去负实体的 mesh
+                    for negative_refno in &negative_refnos {
+                        if let Some(negative_mesh) = refno_meshes_map.get(&negative_refno) {
+                            let transform = query_rvm_instance_data_from_refno_aql(*negative_refno, &database).await?;
+                            if let Some(geo_info) = transform {
+                                let negative_transform = Transform {
+                                    translation: geo_info.world_transform.1,
+                                    rotation: geo_info.world_transform.0,
+                                    scale: geo_info.world_transform.2,
+                                };
+                                for data in geo_info.data {
+                                    let transform = data.clone().transform;
+                                    let t = negative_transform * Transform {
+                                        translation: transform.1,
+                                        rotation: transform.0,
+                                        scale: transform.2,
+                                    };
+                                    let negative_csg_mesh = negative_mesh.into_csg_mesh(&t);
+                                    refno_csg_mesh -= negative_csg_mesh;
+                                }
+                            }
                         }
                     }
                 }
-                let pdms_mesh = refno_mesh.from_scg_mesh(&refno_csg_mesh, &refno_transform);
-                return Ok(Some((refno, pdms_mesh)));
+            }
+        } else {
+            for data in &refno_geo_info.data {
+                if let Some(refno_mesh) = refno_meshes_map.get(&data.refno) {
+                    let t = refno_transform * Transform {
+                        translation: data.transform.1,
+                        rotation: data.transform.0,
+                        scale: data.transform.2,
+                    };
+                    // let mut refno_csg_mesh = refno_mesh.value().into_csg_mesh(&t);
+                    if negative_refnos.contains(&data.refno) {
+                        refno_csg_mesh += refno_mesh.value().into_csg_mesh(&t);
+                    } else {
+                        refno_csg_mesh -= refno_mesh.value().into_csg_mesh(&t);
+                    }
+                }
             }
         }
+        let index_mesh = refno_csg_mesh.simplified(0.1);
+        return Ok(Some((refno,index_mesh)));
     }
     Ok(None)
 }
 
-pub async fn query_negative_refnos_aql(refno: RefU64, database: &Database) -> anyhow::Result<HashMap<RefU64, Vec<PdmsElement>>> {
+pub async fn query_negative_refnos_aql(refno: RefU64, aios_mgr: &AiosDBManager, database: &Database) -> anyhow::Result<HashMap<RefU64, Vec<PdmsElement>>> {
     let mut map = HashMap::new();
-    let key = format!("{}/{}", "pdms_eles", refno.to_url_refno());
+    let attr = aios_mgr.get_implicit_attr(refno, Some(vec!["SPRE", "CATR"])).await?;
+    let spre = attr.get_refu64("SPRE").unwrap_or(RefU64(0));
+    let catr = attr.get_refu64("CATR").unwrap_or(RefU64(0));
+
+    let catr = if catr.0 != 0 {
+        let gmre = query_foreign_refno_aql(refno, vec!["CATR", "GMRE"], database).await?;
+        if let Some(gmre) = gmre {
+            gmre
+        } else {
+            refno
+        }
+    } else if spre.0 != 0 {
+        let catr = query_foreign_refno_aql(refno, vec!["SPRE", "GMRE"], database).await?;
+        if let Some(catr) = catr {
+            catr
+        } else {
+            refno
+        }
+    } else {
+        refno
+    };
+
+    let key = format!("{}/{}", "pdms_eles", catr.to_url_refno());
     let aql = AqlQuery::new("
     for c in 1..1000 inbound @id pdms_edges
     filter length(
@@ -116,7 +185,8 @@ pub async fn query_negative_refnos_aql(refno: RefU64, database: &Database) -> an
     let result: Vec<PdmsElementAql> = database.aql_query(aql).await?;
     for v in result {
         if let Some(pdms_element) = v.change_to_pdms_element() {
-            map.entry(pdms_element.owner).or_insert_with(Vec::new).push(pdms_element);
+            map.entry(refno).or_insert_with(Vec::new).push(
+                pdms_element);
         }
     }
     Ok(map)
@@ -130,9 +200,11 @@ async fn test_query_negative_refnos_aql() -> anyhow::Result<()> {
     //     .build()?;
     // let db_option: DbOption = s.try_deserialize().unwrap();
     let aios_mgr = AiosDBManager::init_form_config().await?;
-    // let database = aios_mgr.get_arangodb_conn().await?;
-    let refno = RefU64::from_refno_str("23584/5386").unwrap();
-    boolean_negative_mesh(refno, &aios_mgr).await?;
+    let database = aios_mgr.get_arangodb_conn().await?;
+    let refno = RefU64::from_refno_str("23584/5382").unwrap();
+    for refno in query_instance_refnos_negative_aql(refno,&database).await? {
+        boolean_negative_mesh(refno, &aios_mgr).await?;
+    }
     // let result = compute_boolean_mesh(refno, negative_refnos, &aios_mgr).await?;
     Ok(())
 }

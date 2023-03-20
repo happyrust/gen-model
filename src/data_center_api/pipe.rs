@@ -172,8 +172,8 @@ async fn get_instances_data(compute_refnos: HashMap<String, HashSet<RefU64>>, me
                         let from_refno = from_refno.unwrap();
                         let to_refno = to_refno.unwrap();
                         let tube_refno = RefU64(from_refno.hash_with_another_refno(to_refno));
-                        // let tube_code = tube_refno.to_refno_string();
-                        let tube_code = format!("from:{} / to:{}", from_refno.to_refno_string(), to_refno.to_refno_string());
+                        let tube_code = tube_refno.to_refno_string();
+                        // let tube_code = format!("from:{} / to:{}", from_refno.to_refno_string(), to_refno.to_refno_string());
                         let instance = get_instance_data_element(&metadata_map, tube_refno, "TUBE", tube_code);
                         if instance.is_none() { continue; }
                         let instance = instance.unwrap();

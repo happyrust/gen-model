@@ -317,7 +317,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     dist_to_top: gmse.distances[1],
                 })
             }
-            "SCYL" => {
+           "NSCY" | "SCYL" => {
                 // 圆柱体
                 CateGeoParam::SCylinder(CateSCylinderParam {
                     refno: gmse.refno,
