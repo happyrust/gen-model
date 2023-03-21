@@ -79,30 +79,20 @@ pub const TUBI_TOL: f32 = 10.0f32;
 // pub const batch_size: usize = 50;
 
 pub type CateBrepShapeMap = DashMap<RefU64, Vec<CateBrepShape>>;
-// static GLOBAL_COLLISION_WORLD: Lazy<Mutex<CollisionWorld<f32, (RefU64, RefU64)>>> = Lazy::new(|| {
-//     let mut world = CollisionWorld::<f32, (RefU64, RefU64)>::new(0.001f32);
-//     Mutex::new(world)
-// });
-
-// static PRIM_HASH_NOUNS: Lazy<Vec<u32>> = Lazy::new(|| {
-//     vec![BOX_HASH, CYLI_NOUN, SPHE_NOUN, CONE_NOUN, CTOR_NOUN, DISH_NOUN,
-//          LOOP_NOUN, PYRA_NOUN, RTOR_NOUN, REVO_NOUN, POHE_NOUN, PLOO_NOUN, SPINE_NOUN]
-// });
-
 lazy_static! {
     pub static ref CATAEXPRCONTEXT_MAP: DashMap<RefU64, CataExprContext> = {
         let mut s = DashMap::new();
         s
     };
 }
+
+///基本体的名称集合
 //"SPINE", "GENS",
 static GNERAL_PRIM_NOUN_NAMES: Lazy<Vec<&'static str>> = Lazy::new(|| {
-    // vec!["BOX", "CYLI", "SPHE", "CONE", "DISH", "CTOR", "RTOR", "PYRA","NCYL" ,"NBOX","NCON", "NSNO","NPYR", "NDIS" ,"NXTR", "NCTO" ,"NRTO" ,"NSLC","NREV"]
-    vec!["NCYL","NSCY"]
+    vec!["BOX", "CYLI", "SPHE", "CONE", "DISH", "CTOR", "RTOR", "PYRA","NCYL" ,"NBOX","NCON", "NSNO","NPYR", "NDIS" ,"NXTR", "NCTO" ,"NRTO" ,"NSLC","NREV"]
 });
 
 static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> = Lazy::new(|| {
-    // vec!["EQUI", "PIPE", "STRU", "ELEC", ""]
     let mut m = HashMap::new();
     m.insert("EQUI", PdmsGenericType::EQUI);
     m.insert("PIPE", PdmsGenericType::PIPE);
@@ -319,6 +309,7 @@ impl PdmsDataInterface for AiosDBManager {
         result
     }
 
+    ///获得不包含world的父节点路径
     fn get_ancestors_refnos_without_world(&self, refno: RefU64) -> Vec<RefU64> {
         let mut result = vec![refno]; //需要包含自己
         let mut cur_refno = refno;
@@ -844,8 +835,10 @@ impl AiosDBManager {
     ///记录点集的信息
     ///获得branch的模型数据
     async fn get_cata_auto_tubi_geoms(mgr: Arc<AiosDBManager>, branch_refno: RefU64, group_att: &AttrMap,
-                                      brep_shape_map: &CateBrepShapeMap, refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
-                                      debug_refno: Option<RefU64>, tubi_result: &mut Arc<DashMap<u64, TubiEdgeAql>>,
+                                      brep_shape_map: &CateBrepShapeMap,
+                                      refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
+                                      debug_refno: Option<RefU64>,
+                                      tubi_result: &mut Arc<DashMap<u64, TubiEdgeAql>>,
                                       geo_infos: &mut Arc<DashMap<RefU64, GeomsInfoAql>>) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
         let group_transform = mgr.get_world_transform(branch_refno).await?.unwrap_or_default();
@@ -864,6 +857,7 @@ impl AiosDBManager {
         let mut has_tubi = true;
         let mut bore = 0.0f32;
         let mut href_type = "".to_string();
+        //头节点的处理
         if let Ok(h_att) = mgr.get_attr(h_ref).await {
             href_type = h_att.get_type().to_string();
             let h_cat_ref = h_att.get_foreign_refno("CATR").unwrap_or_default();
@@ -906,6 +900,7 @@ impl AiosDBManager {
                 //检查一下方向是否一致，不一致的，不显示，或者加标记位
                 if current_tubing.is_dir_ok() {
                     let shape = current_tubing.convert_to_shape();
+                    dbg!(&shape);
                     brep_shape_map.entry(branch_refno).or_insert(Vec::new()).push(shape);
                 }
             }
@@ -925,8 +920,6 @@ impl AiosDBManager {
             });
             return Ok(true);
         }
-
-
         // 将 bran 保存到 tubi_edges 中
         {
             // 保存bran 和 第一个子节点的连接关系
@@ -962,7 +955,6 @@ impl AiosDBManager {
                 }
             }
             // 保存元件之间的距离
-            dbg!(&children);
             for (idx, refno) in children.clone().into_iter().enumerate() {
                 let mut edge = TubiEdgeAql::default();
                 edge._from = format!("pdms_eles/{}", refno.to_url_refno());
@@ -1091,7 +1083,7 @@ impl AiosDBManager {
             println!("正在处理元件{}: {}", attr.get_type(), refno.to_refno_string());
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
             let mut geoms = resolve_desi_comp(refno, None, mgr.as_ref(), is_debug).await;
-                        if geoms.is_err() {
+            if geoms.is_err() {
                 continue;
             }
             let mut geoms = geoms.unwrap();
@@ -1102,14 +1094,17 @@ impl AiosDBManager {
                         let p = &geoms.axis_map[&arrive].pt;
                         let a_pos = world_trans.transform_point(Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32));
                         let dir = geoms.axis_map[&arrive].dir;
-                        let a_dir = world_trans.transform_point(dir).normalize_or_zero();
+                        let a_dir = (world_trans * dir).normalize_or_zero();
                         let arrive_refno = geoms.axis_map[&arrive].refno;
                         if !current_tubing.finished && a_pos.distance(current_tubing.start_pt) > TUBI_TOL {
                             current_tubing.end_pt = a_pos;
                             current_tubing.desire_arrive_dir = a_dir;
                             current_tubing.finished = true;
-                            if current_tubing.is_dir_ok() {
+                            // if current_tubing.is_dir_ok()
+                            dbg!(current_tubing.is_dir_ok());
+                            {
                                 let brep_shape = current_tubing.convert_to_shape();
+                                // dbg!(&brep_shape);
                                 brep_shape_map.entry(refno).or_insert(Vec::new()).push(brep_shape);
                             }
                         }
@@ -1197,6 +1192,9 @@ impl AiosDBManager {
                 }
             }
         }
+
+        // dbg!(tubi_result.len());
+
         Ok(true)
     }
 
@@ -1231,7 +1229,7 @@ impl AiosDBManager {
         // eval_str_to_f32(expr, &context)
     }
 
-    /// 缓存使用元件库的几何体
+    /// 生成元件库的几何体
     pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str,
                                  db_nos: Option<Vec<i32>>, db_option: &DbOption) -> anyhow::Result<bool> {
         let batch_size = mgr.db_option.gen_model_batch_size;
@@ -1356,8 +1354,6 @@ impl AiosDBManager {
                             flow_pt_indexs: vec![child_att.get_i32("ARRI"), child_att.get_i32("LEAV")],
                         };
                         let mut geo_insts = &mut geos_info.data;
-                        // let mut ele_aabb = AABB::new_invalid();
-                        // let mut tubi_aabb = AABB::new_invalid();
                         let mut ele_aabb = Aabb::new_invalid();
                         let mut tubi_aabb = Aabb::new_invalid();
                         let mut has_tubi = false;
@@ -1456,7 +1452,8 @@ impl AiosDBManager {
     }
 
     /// 生成基本体的几何数据
-    pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, db_option: &DbOption, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
+    pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>,
+                                 db_option: &DbOption, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let batch_size = mgr.db_option.gen_model_batch_size;
         let mut prim_refnos = RefU64Vec::default();
@@ -1466,19 +1463,20 @@ impl AiosDBManager {
                     |x| RefU64::from_refno_str(x).unwrap_or_default());
                 if target_debug_refno.is_some() {
                     prim_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
+                } else {
+                    if let Some(root_refnos_str) = &db_option.debug_root_refno {
+                        for root_refno_str in root_refnos_str {
+                            if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
+                                query_travel_children_with_types_aql(&mgr.arango_database, root_refno, GNERAL_PRIM_NOUN_NAMES.clone()).await?
+                                    .iter().for_each(|x| prim_refnos.push(x.refno));
+                            }
+                        }
+                    }
                 }
             }
         } else {
-            if let Some(root_refnos_str) = &db_option.debug_root_refno {
-                for root_refno_str in root_refnos_str {
-                    if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
-                        query_travel_children_with_types_aql(&mgr.arango_database, root_refno, GNERAL_PRIM_NOUN_NAMES.clone()).await?
-                            .iter().for_each(|x| prim_refnos.push(x.refno));
-                    }
-                }
-            } else {
-                prim_refnos = mgr.get_refnos_by_types(db_option.project_name.as_str(), &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
-            }
+            prim_refnos = mgr.get_refnos_by_types(db_option.project_name.as_str(),
+                                                  &GNERAL_PRIM_NOUN_NAMES, db_nos).await?;
         }
         let prim_cnt = prim_refnos.len();
         let batch_chunks_cnt = prim_cnt / batch_size + 1;
@@ -1506,6 +1504,7 @@ impl AiosDBManager {
                     let refno = all_refnos[j];
                     let trans_origin = mgr.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default();
                     let ancestors = mgr.get_ancestors_refnos_without_world(refno);
+                    //todo 可以使用图数据库的edge 来获取，不用提前存储，暂时可以用来做调试用
                     for p_refno in ancestors {
                         level_shape_mgr.entry(p_refno).or_insert(RefU64Vec::default()).push(refno);
                     }
@@ -1572,6 +1571,12 @@ impl AiosDBManager {
         }
         futures::future::join_all(take(&mut handles)).await;
         dbg!(instance_mgr.inst_mgr.len());
+
+        // let test_refno = RefU64::from_refno_str("23584/116").unwrap();
+        // if instance_mgr.level_shape_mgr.contains_key(&test_refno) {
+        //     let refnos = instance_mgr.level_shape_mgr.get(&test_refno).unwrap();
+        //     dbg!(refnos.len());
+        // }
         println!("处理常规基本几何体: {} 花费时间: {} ms", prim_cnt, t.elapsed().as_millis());
         Ok(true)
     }
@@ -1878,7 +1883,7 @@ impl AiosDBManager {
 
     // 需要区分project，不同project的mesh，是不同的
     pub async fn cache_geos_data(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<bool> {
-        let mut time = Instant::now();
+        let time = Instant::now();
         let project = &db_option.project_name;
         let mdb = &db_option.mdb_name;
         let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
@@ -1899,9 +1904,12 @@ impl AiosDBManager {
 
         let mut handles = vec![];
         for db_no in db_nos {
+            if db_option.debug_db_num.is_some() && db_no != db_option.debug_db_num.unwrap() as i32  {
+                continue;
+            }
             let instance_mgr =
                 PdmsMeshInstanceMgr::deserialize_from_bin_file(&format!("./assets/instance/{db_no}.inst")).unwrap_or_default();
-            dbg!(instance_mgr.inst_mgr.len());
+            // dbg!(instance_mgr.inst_mgr.len());
             let instance_mgr = Arc::new(instance_mgr);
             let instance_mgr_clone = instance_mgr.clone();
 
@@ -1910,6 +1918,7 @@ impl AiosDBManager {
             let mgr_clone = mgr.clone();
 
             println!("开始处理db: {db_no}");
+            //todo 三角化有点问题
             let handle = tokio::spawn(async move {
                 Self::cache_cata_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &project,
                                       Some(vec![db_no]), &db_option_clone).await.unwrap();
@@ -1924,25 +1933,24 @@ impl AiosDBManager {
 
             let instance_mgr_clone = instance_mgr.clone();
             let db_option_clone = db_option.clone();
-            if db_option_clone.debug_branch_refno.as_ref().is_none() && db_option_clone.debug_desi_refno.as_ref().is_none() {
-                let mgr_clone = mgr.clone();
-                let handle = tokio::spawn(async move {
-                    Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone, Some(vec![db_no])).await.unwrap();
-                    Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone, Some(vec![db_no])).await.unwrap();
-                });
-                handles.push(handle);
-                if !db_option.multi_threads {
-                    if !handles.is_empty() {
-                        futures::future::join_all(take(&mut handles)).await;
-                    }
-                }
-            }
+            // if db_option_clone.debug_branch_refno.as_ref().is_none() && db_option_clone.debug_desi_refno.as_ref().is_none() {
+            let mgr_clone = mgr.clone();
+            let handle = tokio::spawn(async move {
+                Self::cache_loop_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone, Some(vec![db_no])).await.unwrap();
+                Self::cache_prim_geos(mgr_clone.clone(), instance_mgr_clone.clone(), &db_option_clone, Some(vec![db_no])).await.unwrap();
+            });
+            handles.push(handle);
+            // if !db_option.multi_threads {
+            // futures::future::join_all(take(&mut handles)).await;
+            // }
+            // }
             // Self::cache_pohe_geos(mgr.clone(), &project).await?;
             futures::future::join_all(take(&mut handles)).await;
             mgr.cached_mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
 
 
             instance_mgr.serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
+            instance_mgr.serialize_to_json_file(&format!("./assets/instance/{db_no}.json"));
 
             println!("{db_no} 生成完毕。");
         }

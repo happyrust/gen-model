@@ -18,5 +18,5 @@ sql_threads_number = 100
 batch_insert_sql_cnt = 100
 files_multi_thread = true
 types_multi_thread = true
-recreate_db = true
+
 

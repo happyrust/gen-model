@@ -1,30 +1,25 @@
-total_sync = true
+#同步文件配置
+total_sync = false
 incr_sync = false
+
+#项目设置
 project_path = "/Users/dongpengcheng/Documents/work/TestProject" #TestCatalogue
-included_projects = ["Sample"]   # "Sample" , "Master"
+included_projects = ["Sample", "Master"]   # "Sample" , "Master"
 # "AvevaMarineSample","AvevaCatalogue","AvevaPlantSample","SCB","ZDJ"
 #mdb_name = "ALL"
 mdb_name = "SAMPLE"
 project_name = "Sample"
 module = "DESI"
 gen_model_mesh = true
-save_model_mesh_to_graph_db = false
 gen_spatial_tree = false
 gen_model_batch_size = 100
-debug_print_world_transform = false
+
+#arangodb 配置
 #arangodb_database = "ams"
 arangodb_database = "pdms"
 save_spatial_tree_to_db = false
 multi_threads = true
 only_sync_sys = false
-#debug_root_refno = ["32575/2179"]
-#debug_branch_refno = "23584/5563"
-#debug_desi_refno = "23584/68"
-#debug_refno_type = "LOOP"  # "CATA", "LOOP", "PRIM"
-#included_db_files = ["ams7997_0001"]
-#replace_types = ["SDTE"]
-replace_mesh = false
-only_rebuild_pdms_element = false
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_arangodb = false
 rebuild_ssc_tree = false
@@ -40,9 +35,21 @@ sql_threads_number = 50
 batch_insert_sql_cnt = 800
 files_multi_thread = true
 types_multi_thread = true
-recreate_db = true
-replace_dbs = false
 server_release_ip = "localhost:9099"
 arangodb_user = "root"
 arangodb_password = ""
+
+#调试选项
+replace_mesh = true
+save_model_mesh_to_graph_db = false
 only_update_dbinfo = false
+debug_print_world_transform = false
+only_rebuild_pdms_element = false
+replace_dbs = false
+#debug_root_refno = ["23584/107"]
+#debug_branch_refno = "23584/5563"
+#debug_desi_refno = "23584/107"
+#debug_refno_type = "CATA"  # "CATA", "LOOP", "PRIM"
+debug_db_num = 7200
+#included_db_files = ["ams7997_0001"]
+#replace_types = ["SDTE"]
