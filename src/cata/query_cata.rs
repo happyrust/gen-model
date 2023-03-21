@@ -102,6 +102,9 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         error!("{:?}",geom_info.as_ref().err());
         error!("{:?}",desi_att.to_string_hashmap());
     }
+    if refno == RefU64::from_refno_str("23584/5398").unwrap() {
+        dbg!(geom_info.as_ref().unwrap().geometries.clone());
+    }
     geom_info
 }
 
@@ -201,7 +204,8 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
 ) -> anyhow::Result<Vec<GmParam>> {
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_children_attrs(refno).await?;
+    // let children = interface.get_children_attrs(refno).await?;
+    let children = interface.get_travel_children_attrs(refno).await?;
     for child in children {
         //暂时把 Level 的判断加到这里
         if !child.is_visible_by_level(None).unwrap_or(true) {

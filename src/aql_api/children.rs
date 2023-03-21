@@ -28,6 +28,44 @@ pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> an
     Ok(r)
 }
 
+pub async fn query_children_order_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
+    let mut r = vec![];
+    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let aql = AqlQuery::new("\
+    let datas = (
+    for v,e in 1 inbound @id pdms_edges
+        filter v!= null
+        return v._id )
+
+    let backs = (
+    for v in 0..1000 inbound datas[0] sibl_edges
+        return v )
+
+    let front = (
+    for v in 0..1000 outbound datas[0] sibl_edges
+        return v
+    )
+    let children = append(REVERSE(front),backs)
+
+    for child in children
+        return {
+            'refno':child._key,
+            'owner':child.owner,
+            'name':child.name,
+            'noun':child.noun,
+            'version':0,
+            'children_count':length(for c in 1 inbound child._id pdms_edges
+                                return 1 ),
+        }").bind_var("id", refno_aql);
+    let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
+    for v in result {
+        if let Some(pdms_element) = v.change_to_pdms_element() {
+            r.push(pdms_element);
+        }
+    }
+    Ok(r)
+}
+
 pub async fn query_children_refnos_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
     let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
@@ -174,7 +212,7 @@ pub async fn query_ancestor_name_of_type_aql(arango_database: &Database, refno: 
         .bind_var("id", refno_aql)
         .bind_var("noun", att_type);
     let mut result: Vec<String> = arango_database.aql_query(aql).await?;
-    if result.is_empty() { return Ok(None) }
+    if result.is_empty() { return Ok(None); }
     Ok(Some(result.remove(0)))
 }
 

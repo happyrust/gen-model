@@ -73,6 +73,7 @@ pub fn resolve_paragon_gm_params(
     context: &BTreeMap<SmolStr, SmolStr>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
 ) -> anyhow::Result<CateGeoParam> {
+    dbg!(&gm_param.refno);
     if let Ok(gm_data) = resolve_gmse_params(gm_param, jusl_param, context, axis_params) {
         panic::catch_unwind(|| {
             resolve_to_cate_geo_params(&gm_data).expect("resolve geom failed")

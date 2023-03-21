@@ -151,11 +151,10 @@ pub async fn recompute_spatial_tree(room_refno: Vec<RefU64>,
                             let ele_refno = *ele_geos_info.key();
                             let room_colliders = collider_shape_mgr.get_collider(ele_refno, inst_mgr, &mesh_mgr);
                             if let Some(target_abb) = ele_geos_info.aabb {
-                                // let mut withing_room_refnos = rtree
-                                //     .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
-                                // dbg!(&withing_room_refnos.len());
-                                let mut withing_room_refnos = vec![RefU64::from_refno_str("24381/109830").unwrap()];
-                                // if withing_room_refnos.len() > 2000 { continue; }
+                                let mut withing_room_refnos = rtree
+                                    .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
+                                dbg!(&withing_room_refnos.len());
+                                // let mut withing_room_refnos = vec![RefU64::from_refno_str("24383/68087").unwrap()];
                                 let mut removed_refnos = vec![];
                                 withing_room_refnos.retain(|x| {
                                     //直接判断点集，可以快速过滤一些构件
@@ -228,8 +227,8 @@ async fn test_save_spatial_tree_to_db() -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let room_contains_refno = vec![RefU64::from_two_nums(24384, 3088), RefU64::from_two_nums(24384, 3090), RefU64::from_two_nums(24381, 71799), RefU64::from_two_nums(24384, 3130)];
     let not_contains_refno = vec![RefU64::from_two_nums(24381, 35286), RefU64::from_two_nums(17496, 106149), RefU64::from_two_nums(24381, 110151), RefU64::from_two_nums(24381, 101720), RefU64::from_two_nums(17496, 100004)];
-    let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(vec![E]), &database).await?;
-    let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(vec![T]), &database).await?;
+    let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(E), &database).await?;
+    let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(T), &database).await?;
     // let compute_contains_refno = query_room_refnos_aql(test_room_refno, None,&database).await?;
     // dbg!(&compute_contains_refno.len());
     // for compute_refno in compute_contains_refno {

@@ -210,7 +210,7 @@ async fn main() -> anyhow::Result<()> {
 
     if db_option.save_spatial_tree_to_db {
         let mut site_major_map = HashMap::new();
-        let room_infos = vec![RefU64::from_two_nums(24381, 35031)];
+        let room_infos = vec![RefU64::from_two_nums(24381,34919)];
         let map = recompute_spatial_tree(room_infos, all_insts_mgr, collider_shape_mgr, &db_option).await?;
         save_room_info_to_arangodb(&mgr, map, &db_option, &mut site_major_map).await?;
     }
@@ -245,21 +245,23 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// #[tokio::main]
-async fn main_1() -> anyhow::Result<()> {
-    // use config::{Config, ConfigError, Environment, File};
-    // let s = Config::builder()
-    //     .add_source(File::with_name("DbOption"))
-    //     .build()?;
-    // let db_option: DbOption = s.try_deserialize().unwrap();
-    let aios_mgr = AiosDBManager::init_form_config().await?;
-    let database = aios_mgr.get_arangodb_conn().await?;
-    let refno = RefU64::from_refno_str("23584/5386").unwrap();
-    let negative_refnos = query_negative_refnos_aql(refno, &database).await?.get(&refno).unwrap().to_vec();
-    let result = compute_boolean_mesh(refno, negative_refnos, &aios_mgr).await?;
-    // dbg!(&result);
-    Ok(())
-}
+// // #[tokio::main]
+// async fn main_1() -> anyhow::Result<()> {
+//     use config::{Config, ConfigError, Environment, File};
+//     let s = Config::builder()
+//         .add_source(File::with_name("DbOption"))
+//         .build()?;
+//     let db_option: DbOption = s.try_deserialize().unwrap();
+//     let database = get_arangodb_conn_from_db_option(&db_option).await?;
+//     // let aios_mgr = AiosDBManager::init_form_config().await?;
+//     // let database = aios_mgr.get_arangodb_conn().await?;
+//     let refno = RefU64::from_refno_str("23584/5386").unwrap();
+//
+//     let negative_refnos = query_negative_refnos_aql(refno, &aios_mgr,&database).await?.get(&refno).unwrap().to_vec();
+//     let result = compute_boolean_mesh(refno, negative_refnos, &database).await?;
+//     // dbg!(&result);
+//     Ok(())
+// }
 
 // #[tokio::main]
 // async fn main() -> anyhow::Result<()> {
@@ -332,7 +334,7 @@ fn test_inst_mgr() {
     let mut data = vec![];
     file.read_to_end(&mut data).unwrap();
     let map = bincode::deserialize::<PdmsMeshInstanceMgr>(&data).unwrap();
-    let refno = RefU64::from_refno_str("32575/2179").unwrap();
+    let refno = RefU64::from_refno_str("24381/34919").unwrap();
     if let Some(value) = map.inst_mgr.inst_map.get(&refno) {
         dbg!(&value.value());
     };

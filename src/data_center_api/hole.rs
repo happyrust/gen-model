@@ -3,6 +3,10 @@ use std::{env, fs};
 use std::io::Write;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject, HoleType, ItemValue};
 use aios_core::pdms_types::RefU64;
+use bevy::prelude::dbg;
+use chrono::DateTime;
+use chrono::{Datelike, NaiveDateTime, Timelike};
+use glam::Vec3;
 use sqlx::{Error, Executor, MySql, Pool, Row};
 use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use crate::consts::HOLES_TABLE;
@@ -14,8 +18,10 @@ async fn query_hole_data(refno: RefU64, pool: &Pool<MySql>) -> Option<DataCenter
         let result = match hole_type {
             HoleType::STUCJ => {
                 DataCenterInstance {
-                    object_model_code: "1516".to_string(),
-                    instance_code: "KY1801-208".to_string(),
+                    object_model_code: "STUCJ".to_string(),
+                    project_code: "1516".to_string(),
+                    instance_code: "STUCJ01".to_string(),
+                    version: "A版".to_string(),
                     attributes: gen_stucj_data(refno, pool).await,
                 }
             }
@@ -51,14 +57,14 @@ async fn query_hole_type(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Ho
 async fn gen_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> Vec<DataCenterAttr> {
     let mut result = Vec::new();
     if let Ok(stucj_data_map) = query_stucj_data(refno, pool).await {
-        for i in 0..31 {
+        for i in 0..33 {
             let name = format!("STUCJ{}", i);
             let value = stucj_data_map.get(&name);
             if value.is_none() { continue; }
             let value = value.unwrap();
             result.push(DataCenterAttr {
                 attribute_model_code: name,
-                value: value.clone(),
+                value: value.clone().into(),
             });
         }
     }
@@ -83,8 +89,10 @@ async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<H
             map.entry("STUCJ4".to_string()).or_insert(AttrValue::AttrString(rely_item));
             let rely_item_ref = result.get::<String, _>("RelyItemREF");
             map.entry("STUCJ5".to_string()).or_insert(AttrValue::AttrString(rely_item_ref));
-            let main_pipe_line = result.get::<String, _>("MainPipeline");
-            map.entry("STUCJ6".to_string()).or_insert(AttrValue::AttrString(main_pipe_line));
+            // let main_pipe_line = result.get::<String, _>("MainPipeline");
+            let mut pipe_line_map = HashMap::new();
+            pipe_line_map.entry("工艺管道".to_string()).or_insert_with(Vec::new).push("Test".to_string());
+            map.entry("STUCJ6".to_string()).or_insert(AttrValue::AttrMap(pipe_line_map));
 
             let position = result.get::<String, _>("Position");
             let position = get_pos_from_str(position);
@@ -106,52 +114,75 @@ async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<H
                 }
                 _ => {}
             };
+            let a = Vec3::from_array([0.0, 0.0, 0.0]);
+            let b = Vec3::from_array([0.0, 0.0, 0.0]);
+            // map.entry("STUCJ9".to_string()).or_insert(AttrValue::AttrVec3Array(vec![a, b]));
             map.entry("STUCJ10".to_string()).or_insert(AttrValue::AttrMapFloatArray(shape_map));
 
             let bank_height = result.try_get::<f32, _>("BankHeight").unwrap_or(0.0);
             let bank_width = result.try_get::<f32, _>("BankWidth").unwrap_or(0.0);
-            map.entry("STUCJ12".to_string()).or_insert(AttrValue::AttrFloat(bank_height));
-            map.entry("STUCJ13".to_string()).or_insert(AttrValue::AttrFloat(bank_width));
             if bank_height != 0.0 && bank_width != 0.0 {
                 map.entry("STUCJ11".to_string()).or_insert(AttrValue::AttrString("Y".to_string()));
             } else {
                 map.entry("STUCJ11".to_string()).or_insert(AttrValue::AttrString("N".to_string()));
             }
 
+            map.entry("STUCJ12".to_string()).or_insert(AttrValue::AttrFloat(bank_height));
+
+            map.entry("STUCJ13".to_string()).or_insert(AttrValue::AttrFloat(bank_width));
+
+            // map.entry("STUCJ14".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0]));
+            //
+            // map.entry("STUCJ15".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0]));
+            //
+            // map.entry("STUCJ16".to_string()).or_insert(AttrValue::AttrBool(true));
+
             let plug_type = result.get::<Option<String>, _>("PlugType");
             if let Some(plug_type) = plug_type {
-                map.entry("STUCJ15".to_string()).or_insert(AttrValue::AttrString("Y".to_string()));
-                map.entry("STUCJ16".to_string()).or_insert(AttrValue::AttrString(plug_type));
+                let plug_type = plug_type.chars().map(|x| x.to_string()).collect::<Vec<_>>();
+                map.entry("STUCJ18".to_string()).or_insert(AttrValue::AttrString("气密".to_string()));
+                map.entry("STUCJ17".to_string()).or_insert(AttrValue::AttrBool(true));
             } else {
-                map.entry("STUCJ15".to_string()).or_insert(AttrValue::AttrString("N".to_string()));
-                map.entry("STUCJ16".to_string()).or_insert(AttrValue::AttrString("".to_string()));
+                map.entry("STUCJ18".to_string()).or_insert(AttrValue::AttrString("气密".to_string()));
+                map.entry("STUCJ17".to_string()).or_insert(AttrValue::AttrBool(false));
             }
-
+            // map.entry("STUCJ19".to_string()).or_insert(AttrValue::AttrString("PIA100".to_string()));
+            map.entry("STUCJ20".to_string()).or_insert(AttrValue::AttrString("600".to_string()));
             let b_second = result.get::<bool, _>("Second");
-            map.entry("STUCJ19".to_string()).or_insert(AttrValue::AttrBool(b_second));
+            map.entry("STUCJ21".to_string()).or_insert(AttrValue::AttrBool(b_second));
+
+            map.entry("STUCJ22".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0,0.0,0.0,0.0,0.0,0.0]));
             let hole_work = result.get::<String, _>("HoleWork");
-            map.entry("STUCJ21".to_string()).or_insert(AttrValue::AttrString(hole_work));
+            map.entry("STUCJ23".to_string()).or_insert(AttrValue::AttrString(hole_work));
+
             let work_by = result.get::<String, _>("WorkBy");
-            map.entry("STUCJ22".to_string()).or_insert(AttrValue::AttrString(work_by));
-            let time = result.get::<String, _>("Time");
-            map.entry("STUCJ23".to_string()).or_insert(AttrValue::AttrString(time));
-            let open_item = result.get::<String, _>("OpenItem");
-            map.entry("STUCJ24".to_string()).or_insert(AttrValue::AttrString(open_item));
+            map.entry("STUCJ24".to_string()).or_insert(AttrValue::AttrString(work_by));
+
+            let time = result.get::<String, _>("Time").replace("/","-");
+            let time = convert_time_to_vec(&time);
+            map.entry("STUCJ25".to_string()).or_insert(AttrValue::AttrStrArray(time));
+
+            let open_item = result.try_get::<String, _>("OpenItem").unwrap_or("".to_string());
+            map.entry("STUCJ26".to_string()).or_insert(AttrValue::AttrString(open_item));
+
             let note = result.get::<String, _>("Note");
-            map.entry("STUCJ25".to_string()).or_insert(AttrValue::AttrString(note));
-            let hole_b_pid = result.get::<f32, _>("HoleBPID");
-            map.entry("STUCJ27".to_string()).or_insert(AttrValue::AttrFloat(hole_b_pid));
-            let hole_b_pver = result.get::<f32, _>("HoleBPVER");
-            map.entry("STUCJ28".to_string()).or_insert(AttrValue::AttrFloat(hole_b_pver));
-            let rely_item_b_pid = result.get::<f32, _>("RelyItemBPID");
-            map.entry("STUCJ29".to_string()).or_insert(AttrValue::AttrFloat(rely_item_b_pid));
-            let rely_item_b_pver = result.get::<f32, _>("RelyItemBPVER");
-            map.entry("STUCJ30".to_string()).or_insert(AttrValue::AttrFloat(rely_item_b_pver));
-            let fitt_refno = result.get::<String, _>("FittRefNo");
-            map.entry("STUCJ26".to_string()).or_insert(AttrValue::AttrString(fitt_refno));
-            map.entry("STUCJ5".to_string()).or_insert(AttrValue::AttrString("".to_string()));
-            map.entry("STUCJ18".to_string()).or_insert(AttrValue::AttrString("600".to_string()));
-            map.entry("STUCJ18".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+            map.entry("STUCJ27".to_string()).or_insert(AttrValue::AttrString(note));
+
+            // let fitt_refno = result.get::<String, _>("FittRefNo");
+            // map.entry("STUCJ28".to_string()).or_insert(AttrValue::AttrString(fitt_refno));
+            // let hole_b_pid = result.get::<f32, _>("HoleBPID");
+            // map.entry("STUCJ29".to_string()).or_insert(AttrValue::AttrFloat(hole_b_pid));
+            //
+            // let hole_b_pver = result.get::<f32, _>("HoleBPVER");
+            // map.entry("STUCJ30".to_string()).or_insert(AttrValue::AttrFloat(hole_b_pver));
+            //
+            // let rely_item_b_pid = result.get::<f32, _>("RelyItemBPID");
+            // map.entry("STUCJ31".to_string()).or_insert(AttrValue::AttrFloat(rely_item_b_pid));
+            //
+            // let rely_item_b_pver = result.get::<f32, _>("RelyItemBPVER");
+            // map.entry("STUCJ32".to_string()).or_insert(AttrValue::AttrFloat(rely_item_b_pver));
+
+
         }
         Err(err) => { dbg!(&err); }
     }
@@ -227,6 +258,28 @@ pub(crate) fn get_pos_from_str(input: String) -> Vec<f32> {
         result.push(data.unwrap());
     }
     result
+}
+
+pub fn convert_time_to_vec(time: &str) -> Vec<String> {
+    let mut r = Vec::new();
+    if let Ok(dt) = NaiveDateTime::parse_from_str(time, "%Y-%m-%d %H:%M:%S") {
+        r.push(dt.year().to_string());
+        r.push(dt.month().to_string());
+        r.push(dt.day().to_string());
+        r.push(dt.hour().to_string());
+        r.push(dt.minute().to_string());
+        r.push(dt.second().to_string());
+    }
+    r
+}
+
+#[test]
+fn test_convert_time_to_vec() {
+    // let mut r = Vec::new();
+    let time_str = "2023-3-9 10:42:35";
+    let dt = NaiveDateTime::parse_from_str(time_str, "%Y-%m-%d %H:%M:%S").unwrap();
+    dbg!(dt.year());
+    // dbg!(&r);
 }
 
 #[test]

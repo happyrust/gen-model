@@ -317,7 +317,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     dist_to_top: gmse.distances[1],
                 })
             }
-            "SCYL" => {
+           "NSCY" | "SCYL" => {
                 // 圆柱体
                 CateGeoParam::SCylinder(CateSCylinderParam {
                     refno: gmse.refno,
@@ -712,7 +712,7 @@ fn test_rpro() {
 #[test]
 fn test_math_exp() {
     let expr = "MAX ( ( ( - 31 ) + 60 ), 29.2 )";
-    let context = HashMap::new();
+    let context = BTreeMap::new();
     dbg!(eval_str_to_f64(expr, &context)).expect("TODO: panic message");
 }
 #[test]

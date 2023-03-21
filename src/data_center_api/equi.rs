@@ -6,28 +6,29 @@ pub fn get_machine_equi_data(refno:RefU64) -> DataCenterInstance {
     let mut attr = Vec::new();
     attr.push(DataCenterAttr {
         attribute_model_code: "COMPB1".to_string(),
-        value: AttrValue::AttrString("Test".to_string()),
+        value: AttrValue::AttrString("Test".to_string()).into(),
     });
     attr.push(DataCenterAttr {
         attribute_model_code: "COMPB2".to_string(),
-        value: AttrValue::AttrString("预埋板".to_string()),
+        value: AttrValue::AttrString("预埋板".to_string()).into(),
     });
     attr.push(DataCenterAttr {
         attribute_model_code: "COMPB3".to_string(),
-        value: AttrValue::AttrFloat(0.0),
+        value: AttrValue::AttrFloat(0.0).into(),
     });
     attr.push(DataCenterAttr {
         attribute_model_code: "COMPB4".to_string(),
-        value: AttrValue::AttrFloat(0.0),
+        value: AttrValue::AttrFloat(0.0).into(),
     });
     attr.push(DataCenterAttr {
         attribute_model_code: "COMPB5".to_string(),
-        value: AttrValue::AttrFloat(0.0),
+        value: AttrValue::AttrFloat(0.0).into(),
     });
     DataCenterInstance {
-
         object_model_code: "1516".to_string(),
+        project_code: "1516".to_string(),
         instance_code: "KY1801-208".to_string(),
+        version: "A版".to_string(),
         attributes: attr,
     }
 }
