@@ -79,14 +79,16 @@ async fn main() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
+    /// 是否全部同步模型
     if db_option.total_sync {
         create_arangodb_conns(&db_option).await.expect("Failed to create arangodb conns");
         // 把pdms数据同步到mysql
         sync_pdms(&db_option).await.unwrap();
     }
 
+    /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    if let Some(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file("./assets/mesh/mesh.bin") {
+    if let Some(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file("assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(cache_mesh);
         dbg!("read cached mesh ok.");
     }

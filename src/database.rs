@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::default::default;
 use std::fmt::format;
 use std::fs;
@@ -11,39 +11,38 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use aios_core::consts::*;
-use aios_core::pdms_types::{AttrMap, AttrVal, CachedMeshesMgr, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec};
 use aios_core::pdms_types::AttrVal::StringType;
+use aios_core::pdms_types::{
+    AttrMap, AttrVal, CachedMeshesMgr, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec,
+};
 use aios_core::tool::db_tool::{convert_to_hash, db1_dehash, db1_hash};
 use aios_core::tool::float_tool::f64_round_3;
 use anyhow::anyhow;
-use arangors_lite::collection::CollectionType::Document;
 use dashmap::{DashMap, DashSet};
 use itertools::Itertools;
 use nom::character::complete::u64;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 use parse_pdms_db::parse_file;
 use smol_str::SmolStr;
-use sqlx::{Connection, MySql, MySqlPool, Pool};
-use sqlx::Executor;
 use sqlx::mysql::MySqlArguments;
 use sqlx::pool::PoolConnection;
+use sqlx::Executor;
+use sqlx::{Connection, MySql, MySqlPool, Pool};
 
-
-use crate::{ATTR_INFO_MAP, options, tables};
 use crate::api::element::*;
 use crate::api::ssc_data::SscEleNode;
 use crate::aql_api::PdmsPLINAttrAql;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::{ForeignEdges, ParaDocument};
 use crate::graph_db::pdms_arango::*;
+use crate::graph_db::{ForeignEdges, ParaDocument};
 use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::options::DbOption;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
 use crate::tables::*;
-use std::hash::{Hash, Hasher};
+use crate::{options, tables, ATTR_INFO_MAP};
 use parry3d::utils::hashmap::FxHasher32;
-
+use std::hash::{Hash, Hasher};
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -53,26 +52,37 @@ pub trait MySqlMethods {
     fn name() -> String;
 }
 
-
 /// 初始化project database
 pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result<()> {
-    let connection = MySqlPool::connect(url)
-        .await
-        .unwrap();
+    let connection = MySqlPool::connect(url).await.unwrap();
     let mut pool = connection.try_acquire().unwrap();
-    sqlx::query(&format!("CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8")).execute(&mut pool).await?;
+    sqlx::query(&format!(
+        "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
+    ))
+    .execute(&mut pool)
+    .await?;
     Ok(())
 }
 
 /// 初始化 info 库和表
 pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Result<()> {
     let pool = MySqlPool::connect(&url).await?;
-    pool.execute(format!("CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};", project_name).as_str()).await?;
+    pool.execute(
+        format!(
+            "CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};",
+            project_name
+        )
+        .as_str(),
+    )
+    .await?;
 
     //todo 改成一对多的实现
-    let mut pool = AiosDBManager::get_db_pool(&url, &format!("{}_{}", PDMS_INFO_DB, project_name)).await?;
+    let mut pool =
+        AiosDBManager::get_db_pool(&url, &format!("{}_{}", PDMS_INFO_DB, project_name)).await?;
     let mut sql = String::new();
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, { PDMS_REFNO_INFOS_TABLE }));
+    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, {
+        PDMS_REFNO_INFOS_TABLE
+    }));
     // sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "REF0"));
     sql.push_str(&format!(r#"{} BIGINT UNSIGNED PRIMARY KEY ,"#, "ID"));
     sql.push_str(&format!(r#"{} BIGINT NOT NULL ,"#, "REF0"));
@@ -89,16 +99,18 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
         }
     }
 
-    let result =
-        pool.execute(gen_create_dbno_infos_tables_sql().as_str()).await;
+    let result = pool
+        .execute(gen_create_dbno_infos_tables_sql().as_str())
+        .await;
     match result {
         Ok(_) => {}
         Err(e) => {
             dbg!(&e);
         }
     }
-    let result =
-        pool.execute(gen_create_version_info_table_sql(project_name).as_str()).await;
+    let result = pool
+        .execute(gen_create_version_info_table_sql(project_name).as_str())
+        .await;
     match result {
         Ok(_) => {}
         Err(e) => {
@@ -109,15 +121,17 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
     Ok(())
 }
 
-
 /// 同步pdms数据到数据
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
     let mut time = Instant::now();
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
     create_info_database(&default_conn_str, &db_option.project_name).await?;
-    let pdms_info_pool = AiosDBManager::get_db_pool(&default_conn_str, &format!("{}_{}",
-                                                                                PDMS_INFO_DB, &db_option.project_name)).await?;
+    let pdms_info_pool = AiosDBManager::get_db_pool(
+        &default_conn_str,
+        &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name),
+    )
+    .await?;
     let mut pdms_info_conn = pdms_info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
     dbg!("执行多线程解析");
@@ -126,7 +140,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
         let mut table_time = Instant::now();
         let mut tables_sql = String::new();
-        if let Ok(db_info) = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")) {
+        if let Ok(db_info) =
+            serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json"))
+        {
             for (k, v) in db_info.noun_attr_info_map {
                 let mut attr_map = BTreeMap::new();
                 let type_name = db1_dehash(k as u32);
@@ -146,13 +162,19 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                             continue;
                         }
                         if kk == *TYPE_HASH as i32 {
-                            attr_map.insert(vv.offset, (att_name, StringType(db1_dehash(k as u32).into())));
+                            attr_map.insert(
+                                vv.offset,
+                                (att_name, StringType(db1_dehash(k as u32).into())),
+                            );
                         } else {
                             attr_map.insert(vv.offset, (att_name, vv.default_val));
                         }
                     }
                 }
-                tables_sql.push_str(&tables::gen_create_implicit_tables_sql(type_name.as_str(), &attr_map));
+                tables_sql.push_str(&tables::gen_create_implicit_tables_sql(
+                    type_name.as_str(),
+                    &attr_map,
+                ));
                 tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
                 tables_sql.push_str(&tables::gen_create_uda_tables_sql());
             }
@@ -177,26 +199,47 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
 
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
 
-        sync_total_async_threaded(&db_option, project, project_pool.clone(),
-                                  pdms_info_pool.clone()).await.expect("同步数据失败");
+        sync_total_async_threaded(
+            &db_option,
+            project,
+            project_pool.clone(),
+            pdms_info_pool.clone(),
+        )
+        .await
+        .expect("同步数据失败");
     }
     println!("创建表花费时间: {} ms", create_tables_elapse);
-    println!("初始化数据库时间: {} ms", time.elapsed().as_millis() - create_tables_elapse);
+    println!(
+        "初始化数据库时间: {} ms",
+        time.elapsed().as_millis() - create_tables_elapse
+    );
 
     Ok(())
 }
 
-pub fn gen_explicit_att_insert_sql(refno: RefU64, type_name: &str, owner: RefU64, e_att: &AttrMap) -> String {
+pub fn gen_explicit_att_insert_sql(
+    refno: RefU64,
+    type_name: &str,
+    owner: RefU64,
+    e_att: &AttrMap,
+) -> String {
     let mut sql = String::new();
     let mut table_columns_sql = String::new();
     let table_name = qualified_table_name(type_name);
     // table_columns_sql.push_str("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA)");
-    table_columns_sql.push_str("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA)");
+    table_columns_sql
+        .push_str("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA)");
 
     let mut table_vals_sql = String::new();
     let data = hex::encode(e_att.into_compress_bytes());
-    table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {}, 0x{})"#, refno.0, refno.to_refno_str(), table_name, owner.0, data));
-
+    table_vals_sql.push_str(&format!(
+        r#"({}, '{}', '{}', {}, 0x{})"#,
+        refno.0,
+        refno.to_refno_str(),
+        table_name,
+        owner.0,
+        data
+    ));
 
     sql.push_str(&table_columns_sql);
     sql.push_str(" VALUES ");
@@ -213,13 +256,20 @@ pub fn gen_implicit_attr_insert_sql(hash: u32) -> (String, Vec<NounHash>) {
     // if b_replace {
     //     table_columns_sql.push_str(&format!("REPLACE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
     // } else {
-    table_columns_sql.push_str(&format!("INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
+    table_columns_sql.push_str(&format!(
+        "INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER",
+        table_name
+    ));
     // }
 
     let implicit_names = ATTR_INFO_MAP.get_type_implicit_att_names(type_name.as_str());
-    let column_hashs = implicit_names.iter().filter_map(|x| (x != "unset")
-        .then(|| NounHash(db1_hash(x.as_str())))).collect();
-    let v_sql = implicit_names.iter().map(|x| qualified_column_name(x.as_str()))
+    let column_hashs = implicit_names
+        .iter()
+        .filter_map(|x| (x != "unset").then(|| NounHash(db1_hash(x.as_str()))))
+        .collect();
+    let v_sql = implicit_names
+        .iter()
+        .map(|x| qualified_column_name(x.as_str()))
         .join(",");
     // dbg!(&v_sql);
     if v_sql.len() > 0 {
@@ -239,7 +289,14 @@ pub fn gen_uda_attr_value_sql(att: &WholeAttMap) -> String {
     let type_name = i_att.get_type();
     let owner = i_att.get_owner().unwrap();
     let data = hex::encode(att.uda_attmap.into_compress_bytes());
-    table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {}, 0x{}),"#, refno.0, refno.to_refno_str(), type_name, owner.0, data));
+    table_vals_sql.push_str(&format!(
+        r#"({}, '{}', '{}', {}, 0x{}),"#,
+        refno.0,
+        refno.to_refno_str(),
+        type_name,
+        owner.0,
+        data
+    ));
 
     table_vals_sql
 }
@@ -252,7 +309,14 @@ pub fn gen_explicit_attr_value_sql(att: &WholeAttMap) -> String {
     let type_name = i_att.get_type();
     let owner = i_att.get_owner().unwrap();
     let data = hex::encode(att.explicit_attmap.into_compress_bytes());
-    table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {}, 0x{}),"#, refno.0, refno.to_refno_str(), type_name, owner.0, data));
+    table_vals_sql.push_str(&format!(
+        r#"({}, '{}', '{}', {}, 0x{}),"#,
+        refno.0,
+        refno.to_refno_str(),
+        type_name,
+        owner.0,
+        data
+    ));
 
     table_vals_sql
 }
@@ -264,7 +328,13 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
     let refno = i_att.get_refno().unwrap();
     let type_name = i_att.get_type();
     let owner = i_att.get_owner().unwrap();
-    table_vals_sql.push_str(&format!(r#"({}, '{}', '{}', {},"#, refno.0, refno.to_refno_str(), type_name, owner.0));
+    table_vals_sql.push_str(&format!(
+        r#"({}, '{}', '{}', {},"#,
+        refno.0,
+        refno.to_refno_str(),
+        type_name,
+        owner.0
+    ));
     if let Some(info_map) = ATTR_INFO_MAP.get(&(db1_hash(type_name) as i32)) {
         for noun_hash in column_hashes {
             //如果没有这个属性，需要用unset顶上
@@ -282,23 +352,38 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                         table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
                     }
                     AttrVal::DoubleArrayType(d) => {
-                        table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap_or_default().as_slice())));
+                        table_vals_sql.push_str(&format!(
+                            r#"0x{},"#,
+                            hex::encode(bincode::serialize(d).unwrap_or_default().as_slice())
+                        ));
                     }
                     AttrVal::StringArrayType(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                        table_vals_sql.push_str(&format!(
+                            r#"'{}',"#,
+                            serde_json::to_string(d).unwrap_or_default()
+                        ));
                     }
                     AttrVal::BoolArrayType(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                        table_vals_sql.push_str(&format!(
+                            r#"'{}',"#,
+                            serde_json::to_string(d).unwrap_or_default()
+                        ));
                     }
                     AttrVal::IntArrayType(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                        table_vals_sql.push_str(&format!(
+                            r#"'{}',"#,
+                            serde_json::to_string(d).unwrap_or_default()
+                        ));
                     }
                     AttrVal::BoolType(d) => {
                         let b = if *d { 1 } else { 0 };
                         table_vals_sql.push_str(&format!("{},", b));
                     }
                     AttrVal::Vec3Type(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                        table_vals_sql.push_str(&format!(
+                            r#"'{}',"#,
+                            serde_json::to_string(d).unwrap_or_default()
+                        ));
                     }
                     AttrVal::ElementType(d) => {
                         table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
@@ -310,7 +395,10 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                         table_vals_sql.push_str(&format!("{},", d.0));
                     }
                     AttrVal::RefU64Array(d) => {
-                        table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                        table_vals_sql.push_str(&format!(
+                            r#"'{}',"#,
+                            serde_json::to_string(d).unwrap_or_default()
+                        ));
                     }
                     AttrVal::StringHashType(_) => {}
                 }
@@ -330,23 +418,38 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                             table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
                         }
                         AttrVal::DoubleArrayType(d) => {
-                            table_vals_sql.push_str(&format!(r#"0x{},"#, hex::encode(bincode::serialize(d).unwrap_or_default().as_slice())));
+                            table_vals_sql.push_str(&format!(
+                                r#"0x{},"#,
+                                hex::encode(bincode::serialize(d).unwrap_or_default().as_slice())
+                            ));
                         }
                         AttrVal::StringArrayType(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                            table_vals_sql.push_str(&format!(
+                                r#"'{}',"#,
+                                serde_json::to_string(d).unwrap_or_default()
+                            ));
                         }
                         AttrVal::BoolArrayType(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                            table_vals_sql.push_str(&format!(
+                                r#"'{}',"#,
+                                serde_json::to_string(d).unwrap_or_default()
+                            ));
                         }
                         AttrVal::IntArrayType(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                            table_vals_sql.push_str(&format!(
+                                r#"'{}',"#,
+                                serde_json::to_string(d).unwrap_or_default()
+                            ));
                         }
                         AttrVal::BoolType(d) => {
                             let b = if *d { 1 } else { 0 };
                             table_vals_sql.push_str(&format!("{},", b));
                         }
                         AttrVal::Vec3Type(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                            table_vals_sql.push_str(&format!(
+                                r#"'{}',"#,
+                                serde_json::to_string(d).unwrap_or_default()
+                            ));
                         }
                         AttrVal::ElementType(d) => {
                             table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
@@ -358,7 +461,10 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                             table_vals_sql.push_str(&format!("{},", d.0));
                         }
                         AttrVal::RefU64Array(d) => {
-                            table_vals_sql.push_str(&format!(r#"'{}',"#, serde_json::to_string(d).unwrap_or_default()));
+                            table_vals_sql.push_str(&format!(
+                                r#"'{}',"#,
+                                serde_json::to_string(d).unwrap_or_default()
+                            ));
                         }
                         AttrVal::StringHashType(_) => {}
                     }
@@ -374,24 +480,40 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
     table_vals_sql
 }
 
-pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool: Pool<MySql>, info_pool: Pool<MySql>) -> anyhow::Result<()> {
+///多线程同步数据
+pub async fn sync_total_async_threaded(
+    db_option: &DbOption,
+    project: &str,
+    pool: Pool<MySql>,
+    info_pool: Pool<MySql>,
+) -> anyhow::Result<()> {
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsing_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
     let max_sql_threads_number = db_option.sql_threads_number as usize;
     let batch_insert_sql_cnt = db_option.batch_insert_sql_cnt as usize;
     if max_sql_threads_number * batch_insert_sql_cnt == 0 {
-        return Err(anyhow!("batch_insert_sql_cnt 或者  sql_threads_number 不能为0"));
+        return Err(anyhow!(
+            "batch_insert_sql_cnt 或者  sql_threads_number 不能为0"
+        ));
     }
-    let mut target_dir = fs::read_dir(&project_dir).unwrap().into_iter().map(|entry| {
-        let entry = entry.unwrap();
-        entry.path()
-    }).find(|x| x.file_name().unwrap().to_str().unwrap().ends_with("000")).unwrap();
+    let mut target_dir = fs::read_dir(&project_dir)
+        .unwrap()
+        .into_iter()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            entry.path()
+        })
+        .find(|x| x.file_name().unwrap().to_str().unwrap().ends_with("000"))
+        .unwrap();
 
-    let mut children_files = fs::read_dir(target_dir)?.into_iter().map(|entry| {
-        let entry = entry.unwrap();
-        entry.path()
-    }).collect::<Vec<PathBuf>>();
+    let mut children_files = fs::read_dir(target_dir)?
+        .into_iter()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            entry.path()
+        })
+        .collect::<Vec<PathBuf>>();
 
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
@@ -409,31 +531,41 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
             continue;
         }
         if only_sync_sys {
-            if !file_name.ends_with("sys") { continue; }
+            if !file_name.ends_with("sys") {
+                continue;
+            }
         }
-        if need_parsing_files.is_none() || need_parsing_files.as_ref().unwrap().contains(&file_name) {
+        if need_parsing_files.is_none() || need_parsing_files.as_ref().unwrap().contains(&file_name)
+        {
             println!("path={:?}", &file_name);
             let project_clone = project.clone();
             let project_name = project.as_str().to_string();
             if let Ok(Ok(PdmsDbData {
-                             all_attr_map,
-                             total_attr_map,
-                             type_ele_map,
-                             refno_info_map,
-                             children_map,
-                             db_type,
-                             db_no,
-                             field_no,
-                             version,
-                             room_code_map,
-                             foreign_refnos_map,
-                             ..
-                         })) = tokio::task::spawn_blocking(move || {
+                all_attr_map,
+                total_attr_map,
+                type_ele_map,
+                refno_info_map,
+                children_map,
+                db_type,
+                db_no,
+                field_no,
+                version,
+                room_code_map,
+                foreign_refnos_map,
+                ..
+            })) = tokio::task::spawn_blocking(move || {
                 parse_file(&path, &None, &file_name, project_name.clone().as_str(), "")
-            }).await {
+            })
+            .await
+            {
                 //save dbno info first
-                let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(db_no.0, &file_name_clone.clone(),
-                                                                       version.0, project_clone.clone().as_str(), db_type.clone());
+                let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(
+                    db_no.0,
+                    &file_name_clone.clone(),
+                    version.0,
+                    project_clone.clone().as_str(),
+                    db_type.clone(),
+                );
                 let mut info_conn = info_pool.acquire().await.unwrap();
 
                 //保存dbno的信息表
@@ -451,13 +583,20 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                     }
                 }
                 //保存refno的信息表
-                let mut sql = format!("INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (ID, REF0, PROJECT) VALUES ");
+                let mut sql = format!(
+                    "INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (ID, REF0, PROJECT) VALUES "
+                );
                 for kv in &refno_info_map {
                     let mut s: FxHasher32 = Default::default();
                     kv.value().ref_0.hash(&mut s);
                     project_clone.hash(&mut s);
                     let h = s.finish();
-                    sql.push_str(&format!(r#"({}, {},'{}') ,"#, h, kv.value().ref_0, project_clone.as_str()));
+                    sql.push_str(&format!(
+                        r#"({}, {},'{}') ,"#,
+                        h,
+                        kv.value().ref_0,
+                        project_clone.as_str()
+                    ));
                 }
                 sql.remove(sql.len() - 1);
                 if is_replace {
@@ -472,7 +611,9 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                     }
                 }
 
-                version_map.entry(file_name_clone.clone()).or_insert(version);
+                version_map
+                    .entry(file_name_clone.clone())
+                    .or_insert(version);
                 set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
                 //类型暂时不多线程
                 let total_attr_map_arc = Arc::new(total_attr_map);
@@ -483,18 +624,26 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 if !b_replace_types && !only_update_dbinfo {
                     if db_type == "DESI" {
                         // 将 pdms_element 部分数据保存到图数据库中
-                        save_pdms_element_in_sync(&db_option, &total_attr_map_arc, &children_map_arc, db_no.0 as i32).await?;
+                        save_pdms_element_in_sync(
+                            &db_option,
+                            &total_attr_map_arc,
+                            &children_map_arc,
+                            db_no.0 as i32,
+                        )
+                        .await?;
                         // 将兄弟关系保存到图数据库中
                         save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
                     }
                     if db_type == "CATA" || db_type == "DESI" {
                         save_foreign_refno_edges_in_sync(&db_option, foreign_refnos_map).await?;
                         // 单独保存plin
-                        save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                        save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc)
+                            .await?;
                         // 将 para 和 des_para保存的图数据库中
                         save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
                         // 将 dtse下的data部分数据保存到图数据库
-                        save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc).await?;
+                        save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc)
+                            .await?;
                     }
                     println!("图数据库保存完成");
                 }
@@ -542,21 +691,48 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
 
                                 let implicit_columns_sql = gen_implicit_attr_insert_sql(type_hash);
                                 let column_hashs = &implicit_columns_sql.1;
-                                for j in (start_idx..end_idx).into_iter().step_by(batch_insert_sql_cnt) {
+                                for j in (start_idx..end_idx)
+                                    .into_iter()
+                                    .step_by(batch_insert_sql_cnt)
+                                {
                                     let mut end = j + batch_insert_sql_cnt;
-                                    if end > refnos_cnt { end = refnos_cnt; }
+                                    if end > refnos_cnt {
+                                        end = refnos_cnt;
+                                    }
                                     //合并sql语句
                                     for k in j..end {
                                         let refno = all_refnos[k];
                                         let att = total_attr_map_arc_clone.get(&refno).unwrap();
 
-                                        implicit_values_sql.push_str(&gen_implicit_attr_value_sql(att.value(), column_hashs));
-                                        explicit_values_sql.push_str(&gen_explicit_attr_value_sql(att.value()));
-                                        let name = get_name(&total_attr_map_arc_clone, &children_map_arc_clone, refno).replace(r#"'"#, r#"\'"#)
-                                            .replace(r#"""#, r#"\""#);
-                                        let order = get_order(&total_attr_map_arc_clone, &children_map_arc_clone, refno);
-                                        let children_count = children_map_arc_clone.get(&refno).unwrap_or(&RefU64Vec::default()).len();
-                                        pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(att.value(), &name, db_no.0, order, children_count));
+                                        implicit_values_sql.push_str(&gen_implicit_attr_value_sql(
+                                            att.value(),
+                                            column_hashs,
+                                        ));
+                                        explicit_values_sql
+                                            .push_str(&gen_explicit_attr_value_sql(att.value()));
+                                        let name = get_name(
+                                            &total_attr_map_arc_clone,
+                                            &children_map_arc_clone,
+                                            refno,
+                                        )
+                                        .replace(r#"'"#, r#"\'"#)
+                                        .replace(r#"""#, r#"\""#);
+                                        let order = get_order(
+                                            &total_attr_map_arc_clone,
+                                            &children_map_arc_clone,
+                                            refno,
+                                        );
+                                        let children_count = children_map_arc_clone
+                                            .get(&refno)
+                                            .unwrap_or(&RefU64Vec::default())
+                                            .len();
+                                        pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(
+                                            att.value(),
+                                            &name,
+                                            db_no.0,
+                                            order,
+                                            children_count,
+                                        ));
                                     }
                                     if !only_update_dbinfo {
                                         let mut project_conn = pool_clone.acquire().await.unwrap();
@@ -627,9 +803,14 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
                 // 将带有 room_code 属性的保存下来
                 if !db_option.only_update_dbinfo {
                     for (room_name, refnos) in room_code_map.clone() {
-                        let mut room_code_sql = format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                        let mut room_code_sql =
+                            format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
                         for refno in refnos.clone() {
-                            room_code_sql.push_str(&format!("( {},'{}' ) ,", refno.0, room_name.clone()));
+                            room_code_sql.push_str(&format!(
+                                "( {},'{}' ) ,",
+                                refno.0,
+                                room_name.clone()
+                            ));
                         }
                         room_code_sql.remove(room_code_sql.len() - 1);
                         if is_replace {
@@ -669,7 +850,8 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
     // 保存每个file最新的page_num
     if version_map.len() > 0 {
         let table_sql = gen_create_file_version_table_sql();
-        let mut version_sql = format!("INSERT IGNORE INTO {PDMS_FILE_VERSION_TABLE} (FILENAME,VERSION) VALUES");
+        let mut version_sql =
+            format!("INSERT IGNORE INTO {PDMS_FILE_VERSION_TABLE} (FILENAME,VERSION) VALUES");
         for (file_name, version) in version_map.into_iter() {
             version_sql.push_str(&format!("('{}',{}),", file_name, version.0))
         }
@@ -696,13 +878,19 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str, pool
 }
 
 /// 给对应类型的参考号赋上 uda 默认值
-fn set_uda_attr(type_ele_map: &DashMap<u32, HashSet<RefU64>>, total_attr_map: &DashMap<RefU64, WholeAttMap>, uda_map: &mut HashMap<String, AttrMap>) -> anyhow::Result<()> {
+fn set_uda_attr(
+    type_ele_map: &DashMap<u32, HashSet<RefU64>>,
+    total_attr_map: &DashMap<RefU64, WholeAttMap>,
+    uda_map: &mut HashMap<String, AttrMap>,
+) -> anyhow::Result<()> {
     // let mut uda_map: HashMap<String, HashMap<String, String>> = HashMap::new();
     if let Some(uda_refnos) = type_ele_map.get(&db1_hash("UDA")) {
         // 获取每个 uda 的 ELEL , DFLT , UDNA属性
         for uda_refno in uda_refnos.value() {
             let uda_att = total_attr_map.get(uda_refno);
-            if uda_att.is_none() { continue; }
+            if uda_att.is_none() {
+                continue;
+            }
             let uda_att = uda_att.unwrap();
             let uda_implicit_att = &uda_att.implicit_attmap;
             let uda_explicit_att = &uda_att.explicit_attmap;
@@ -713,13 +901,18 @@ fn set_uda_attr(type_ele_map: &DashMap<u32, HashSet<RefU64>>, total_attr_map: &D
             }
             let elel = uda_explicit_att.get_i32_vec("ELEL");
             let dflt = uda_explicit_att.get_val("DFLT");
-            if udna.is_none() || elel.is_none() || dflt.is_none() { continue; }
+            if udna.is_none() || elel.is_none() || dflt.is_none() {
+                continue;
+            }
             let udna = udna.unwrap();
             let elel = elel.unwrap();
             let dflt = dflt.unwrap();
             for noun in elel {
-                uda_map.entry(db1_dehash(noun as u32))
-                    .or_insert_with(AttrMap::default).entry(NounHash(db1_hash(udna))).or_insert(dflt.clone());
+                uda_map
+                    .entry(db1_dehash(noun as u32))
+                    .or_insert_with(AttrMap::default)
+                    .entry(NounHash(db1_hash(udna)))
+                    .or_insert(dflt.clone());
             }
         }
     }
@@ -730,7 +923,11 @@ pub async fn save_pdms_mesh_tidb(mgr: CachedMeshesMgr, pool: &Pool<MySql>) -> an
     for chunks in &mgr.meshes.iter().chunks(1000) {
         let mut sql = format!("INSERT IGNORE INTO {PDMS_MESH} (HASH,MESH) VALUES ");
         for map in chunks.into_iter() {
-            sql.push_str(&format!("( {}, 0x{}) ,", map.key(), hex::encode(&map.value().into_compress_bytes())));
+            sql.push_str(&format!(
+                "( {}, 0x{}) ,",
+                map.key(),
+                hex::encode(&map.value().into_compress_bytes())
+            ));
         }
         sql.remove(sql.len() - 1);
         let result = pool.execute(sql.as_str()).await;
@@ -746,17 +943,25 @@ pub async fn save_pdms_mesh_tidb(mgr: CachedMeshesMgr, pool: &Pool<MySql>) -> an
 }
 
 /// 将部分type的数据单独保存到图数据库中
-async fn save_plin_attr_arangodb(db_option: &DbOption, type_ele_map: &DashMap<u32,
-    HashSet<RefU64>>, total_attr_map: &DashMap<RefU64, WholeAttMap>) -> anyhow::Result<()> {
+async fn save_plin_attr_arangodb(
+    db_option: &DbOption,
+    type_ele_map: &DashMap<u32, HashSet<RefU64>>,
+    total_attr_map: &DashMap<RefU64, WholeAttMap>,
+) -> anyhow::Result<()> {
     let mut refno_attrs = vec![];
     if let Some(refnos) = &type_ele_map.get(&db1_hash("PLIN")) {
         for refno in refnos.value() {
             let whole_attr = total_attr_map.get(refno);
-            if whole_attr.is_none() { continue; }
+            if whole_attr.is_none() {
+                continue;
+            }
             // 暂时只要 p_key 和 plaxis
             refno_attrs.push(PdmsPLINAttrAql {
                 _key: refno.to_url_refno(),
-                attr: whole_attr.unwrap().clone().change_implicit_explicit_into_attr(),
+                attr: whole_attr
+                    .unwrap()
+                    .clone()
+                    .change_implicit_explicit_into_attr(),
             })
         }
         if refno_attrs.len() > 0 {
@@ -767,7 +972,10 @@ async fn save_plin_attr_arangodb(db_option: &DbOption, type_ele_map: &DashMap<u3
     Ok(())
 }
 
-async fn save_paras_into_arangodb(db_option: &DbOption, total_attr_map: &DashMap<RefU64, WholeAttMap>) -> anyhow::Result<()> {
+async fn save_paras_into_arangodb(
+    db_option: &DbOption,
+    total_attr_map: &DashMap<RefU64, WholeAttMap>,
+) -> anyhow::Result<()> {
     let mut para_map = Vec::new();
     let mut des_para_map = Vec::new();
     for v in total_attr_map.iter() {
@@ -775,14 +983,18 @@ async fn save_paras_into_arangodb(db_option: &DbOption, total_attr_map: &DashMap
         let explicit_map = &v.explicit_attmap;
         if let Some(para) = explicit_map.get_val("PARA") {
             let paras = para.dvec_value();
-            if paras.is_none() { continue; }
+            if paras.is_none() {
+                continue;
+            }
             para_map.push(ParaDocument {
                 _key: v.key().to_url_refno(),
                 para: paras.unwrap(),
             })
         } else if let Some(des_para) = explicit_map.get_val("DESP") {
             let paras = des_para.dvec_value();
-            if paras.is_none() { continue; }
+            if paras.is_none() {
+                continue;
+            }
             des_para_map.push(ParaDocument {
                 _key: v.key().to_url_refno(),
                 para: paras.unwrap(),
@@ -818,4 +1030,3 @@ async fn test_threads() {
         dbg!(v);
     }
 }
-

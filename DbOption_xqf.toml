@@ -37,7 +37,7 @@ sql_threads_number = 50
 batch_insert_sql_cnt = 800
 files_multi_thread = true
 types_multi_thread = true
-recreate_db = true
+
 replace_dbs = false
 server_release_ip = "localhost:9099"
 arangodb_user = "root"
