@@ -102,9 +102,6 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         error!("{:?}",geom_info.as_ref().err());
         error!("{:?}",desi_att.to_string_hashmap());
     }
-    if refno == RefU64::from_refno_str("23584/5398").unwrap() {
-        dbg!(geom_info.as_ref().unwrap().geometries.clone());
-    }
     geom_info
 }
 
@@ -135,13 +132,13 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     let gmref_name = if is_sprf { "GSTR" } else { "GMRE" };
     let mut gm_params = vec![];
     if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
-        let gmse_am = interface.get_attr(gmse_refno).await?;
-        gm_params = query_gm_params(&gmse_am, interface).await?;
-        if is_debug {
-            dbg!(&gm_params);
+        if let Ok(gmse_am) = interface.get_attr(gmse_refno).await {
+            gm_params = query_gm_params(&gmse_am, interface).await?;
+            if is_debug {
+                dbg!(&gm_params);
+            }
         }
     }
-
     let mut plin_map = HashMap::new();
     if let Some(pstr_refno) = attr_map.get_foreign_refno("PSTR") {
         let pstr_am = interface.get_children_attrs(pstr_refno).await?;
@@ -204,8 +201,9 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
 ) -> anyhow::Result<Vec<GmParam>> {
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
-    // let children = interface.get_children_attrs(refno).await?;
-    let children = interface.get_travel_children_attrs(refno).await?;
+    let children = interface.get_children_attrs(refno).await?;
+    // if refno == RefU64(0) { return Ok(gms); }
+    // let children = interface.get_travel_children_attrs(refno).await?;
     for child in children {
         //暂时把 Level 的判断加到这里
         if !child.is_visible_by_level(None).unwrap_or(true) {
