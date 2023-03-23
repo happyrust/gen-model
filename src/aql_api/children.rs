@@ -38,7 +38,7 @@ pub async fn query_children_order_aql(arango_database: &Database, refno: RefU64)
         return v._id )
 
     let backs = (
-    for v in 0..1000 inbound datas[0] sibl_edges
+    for v in 1..1000 inbound datas[0] sibl_edges
         return v )
 
     let front = (
