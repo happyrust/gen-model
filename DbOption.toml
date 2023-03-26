@@ -41,7 +41,7 @@ arangodb_password = ""
 
 #调试选项
 replace_mesh = true
-save_model_mesh_to_graph_db = false
+save_model_mesh_to_graph_db = true
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
