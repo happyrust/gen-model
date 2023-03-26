@@ -46,9 +46,6 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         }
     }
 
-    // if is_debug {
-
-    // }
     let scom_ref = scom_ref.ok_or(anyhow!(format!("SCOM not exist in element: {}", refno.to_refno_str())))?;
     if !scom_ref.is_valid() {
         return Err(anyhow!("Scom ref is invalid".to_string()));
@@ -121,9 +118,6 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
         if let Ok(ptre_am) = interface.get_attr(ptre_refno).await {
             if let Ok(axis_param_map) = query_axis_params(&ptre_am, interface, is_debug).await {
-                // if is_debug {
-                //     dbg!(&axis_param_map);
-                // }
                 axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
                 axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
             }
@@ -184,9 +178,6 @@ pub async fn query_axis_params<T: PdmsDataInterface>(
 
     for child in children {
         let number = child.get_i32("NUMB").unwrap_or(-1);
-        if is_debug {
-            // dbg!(&child);
-        }
         if let Some(axis) = get_axis_param(&child) {
             map.entry(number).or_insert(axis);
         }

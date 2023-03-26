@@ -6,6 +6,8 @@ use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::PDMS_MESH;
+use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::options::DbOption;
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct PdmsMeshAql {
@@ -17,6 +19,12 @@ struct PdmsMeshAql {
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct PdmsCatrMeshAql {
     pub refno: u64,
+    pub hash: String,
+    pub data: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+struct PdmsMeshWithoutRefnoAql {
     pub hash: String,
     pub data: String,
 }
@@ -100,6 +108,28 @@ pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &Database) ->
     Ok(map)
 }
 
+pub async fn query_pdms_mesh_aql(hashes:Vec<u64>,database:&Database) -> anyhow::Result<CachedMeshesMgr> {
+    let mut cache_mgr = CachedMeshesMgr::default();
+    let hashes = hashes.into_iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let aql = AqlQuery::new("\
+    for hash in @hashes
+        return {
+            'hash':hash,
+            'data' : document('pdms_mesh',hash).data
+        }
+    ").bind_var("hashes",hashes);
+    let results:Vec<PdmsMeshWithoutRefnoAql> = database.aql_query(aql).await?;
+    for result in results {
+        let hash:u64 = result.hash.parse()?;
+        let data = hex::decode(&result.data)?;
+        let mesh = PdmsMesh::from_compress_bytes(&data);
+        if mesh.is_none() { continue; }
+        let mesh = mesh.unwrap();
+        cache_mgr.meshes.entry(hash).or_insert(mesh);
+    }
+    Ok(cache_mgr)
+}
+
 pub async fn query_pdms_mesh_from_refno_aql(refno: RefU64, database: &Database) -> anyhow::Result<PdmsInstanceMeshMap> {
     let mut mgr = DashMap::new();
     let mut instances = DashMap::new();
@@ -170,4 +200,18 @@ fn gen_query_pdms_mesh_from_refno_sql(hash: Vec<u64>) -> String {
     sql.remove(sql.len() - 1);
     sql.push_str(")");
     sql
+}
+
+#[tokio::test]
+async fn test_query_pdms_mesh_aql() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let hashes = vec![546828117367565544,1418680084324994534];
+    let meshes = query_pdms_mesh_aql(hashes,&database).await?;
+    dbg!(&meshes.meshes.len());
+    Ok(())
 }
