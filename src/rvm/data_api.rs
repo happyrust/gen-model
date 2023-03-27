@@ -102,7 +102,7 @@ pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: ShapeTypeData, shape_
     let aabb = rvm_instance.aabb.unwrap();
     data.append(&mut gen_prim_head_data());
     data.append(&mut format!("     {}\r\n", shape_type.get_shape_number()).into_bytes());
-    data.append(&mut gen_prim_scale_position_data(rvm_instance.world_transform.0, rvm_instance.world_transform.2,
+    data.append(&mut gen_prim_scale_position_data(rvm_instance.world_transform.0, Vec3::ONE,
                                                   rvm_instance.world_transform.1));
     match shape_module {
         ShapeModule::Desi => { data.append(&mut gen_desi_prim_aabb_data(aabb, rvm_instance.world_transform)); }
@@ -159,9 +159,9 @@ fn gen_prim_scale_position_data(rotation: Quat, scale: Vec3, position: Vec3) -> 
     let mut data = Vec::new();
     let rotation_mat = Mat3::from_quat(rotation);
 
-    let x_axis = keep_2_decimals_from_vec3(rotation_mat.x_axis * scale.x).normalize();
-    let y_axis = keep_2_decimals_from_vec3(rotation_mat.y_axis * scale.y).normalize();
-    let z_axis = keep_2_decimals_from_vec3(rotation_mat.z_axis * scale.z).normalize();
+    let x_axis = rotation_mat.x_axis.normalize();
+    let y_axis = rotation_mat.y_axis.normalize();
+    let z_axis = rotation_mat.z_axis.normalize();
 
     let mut position_x = position.x;
     let mut position_y = position.y;

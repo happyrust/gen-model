@@ -110,15 +110,15 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno:RefU64,database:&Databa
     let results: Vec<TubiEdgeAql> = database.aql_query(aql).await?;
     // 过滤 atta
     let mut i = 0;
-    while i < results.len() -1 {
+    while i < results.len() {
         let distance = results[i].start_pt.distance(results[i].end_pt);
         if distance >= TUBI_TOL {
             // atta 跳过 继续往后找到下一个非 atta 元件
             if results[i].att_type.to_uppercase().as_str() == "ATTA" {
                 let mut j = i;
-                while j < results.len() - 1 && results[j].att_type.to_uppercase().as_str() == "ATTA" {
+                while j < results.len() && results[j].att_type.to_uppercase().as_str() == "ATTA" {
                     j +=1;
-                    if j < results.len() - 1 && results[j].att_type.to_uppercase().as_str() != "ATTA" {
+                    if j < results.len() && ( results[j].att_type.to_uppercase().as_str() != "ATTA" || j == results.len() - 1 ) {
                         tubi.push(TubiEdgeAql {
                             _key: results[i]._key.to_string(),
                             _from: results[i]._from.to_string(),
@@ -280,7 +280,7 @@ async fn test_query_tubi_from_bran_filter_atta() -> anyhow::Result<()>{
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
-    let refno = RefU64::from_refno_str("23584/5535").unwrap();
+    let refno = RefU64::from_refno_str("23584/6771").unwrap();
     let results = query_tubi_from_bran_filter_atta(refno,&database).await?;
     dbg!(&results);
     Ok(())
