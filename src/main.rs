@@ -155,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
                     dbg!(&mesh_mgr.meshes.len());
 
                     sync_mesh_to_graph_db(&mgr, &mesh_mgr).await?;
-                    save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
+                    // save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
                 }
             }
         }

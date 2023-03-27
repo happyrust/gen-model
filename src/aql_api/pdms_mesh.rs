@@ -1,5 +1,6 @@
+use std::collections::HashSet;
 use aios_core::negative_mesh_type::NegativeEles;
-use aios_core::pdms_types::{CachedMeshesMgr, GeoHash, RefU64};
+use aios_core::pdms_types::{CachedMeshesMgr, EleGeosInfo, GeoHash, RefU64, ShapeInstancesMgr};
 use aios_core::shape::pdms_shape::{PdmsInstanceMeshMap, PdmsMesh};
 use arangors_lite::{AqlQuery, Database};
 use dashmap::DashMap;
@@ -7,7 +8,10 @@ use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::PDMS_MESH;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::graph_db::pdms_inst_arango::query_instance_with_refno_in_arangodb;
+use crate::negative::query_instance_refnos_negative_aql;
 use crate::options::DbOption;
+use aios_core::pdms_data::PdmsInstanceMeshMgr;
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct PdmsMeshAql {
@@ -192,6 +196,30 @@ pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &Datab
     Ok(cache_mgr)
 }
 
+/// 通过参考号获取参考后下面所有的instance 和 对应的 mesh
+pub async fn query_pdms_instance_mesh_from_refno(refno:RefU64,database:&Database) -> anyhow::Result<PdmsInstanceMeshMgr> {
+    let mut inst_mgr = ShapeInstancesMgr::default();
+    let mut hashes = HashSet::new();
+    if let Some(instance) = query_instance_with_refno_in_arangodb(refno,database).await? {
+        for inst in instance {
+            let refno = RefU64::from_url_refno(&inst._key);
+            if refno.is_none() { continue; }
+            // 找到参考号需要那些mesh,避免重复
+            for data in &inst.data {
+                hashes.insert(data.geo_hash);
+            }
+            let refno = refno.unwrap();
+            inst_mgr.inst_map.entry(refno).or_insert(inst);
+        }
+    }
+    let hashes = hashes.into_iter().collect::<Vec<_>>();
+    let mesh_mgr = query_pdms_mesh_aql(hashes,database).await.unwrap_or_default();
+    Ok(PdmsInstanceMeshMgr {
+        inst_mgr,
+        mesh_mgr,
+    })
+}
+
 fn gen_query_pdms_mesh_from_refno_sql(hash: Vec<u64>) -> String {
     let mut sql = format!("SELECT * FROM {PDMS_MESH} WHERE HASH IN (");
     for h in hash {
@@ -213,5 +241,22 @@ async fn test_query_pdms_mesh_aql() -> anyhow::Result<()> {
     let hashes = vec![546828117367565544,1418680084324994534];
     let meshes = query_pdms_mesh_aql(hashes,&database).await?;
     dbg!(&meshes.meshes.len());
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_pdms_instance_mesh_from_refno() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let refno = RefU64::from_refno_str("23584/5535").unwrap();
+    let result = query_pdms_instance_mesh_from_refno(refno,&database).await?;
+    for data in result.inst_mgr.inst_map {
+        dbg!(&data.0);
+    }
+    dbg!(&result.mesh_mgr.len());
     Ok(())
 }

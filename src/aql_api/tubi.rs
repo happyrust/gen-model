@@ -85,6 +85,74 @@ pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &Database) -> an
     Ok(results)
 }
 
+pub async fn query_tubi_from_bran_filter_atta(bran_refno:RefU64,database:&Database) -> anyhow::Result<Vec<TubiEdgeAql>> {
+    let mut tubi = Vec::new();
+    let key = format!("pdms_eles/{}", bran_refno.to_url_refno());
+    let aql = AqlQuery::new("
+    let bran_name = ( return document('pdms_eles',@bran_refno).name )
+    for v,e in 0..1000 outbound @id tubi_edges
+    filter bran_name[0] != null
+    filter bran_name[0] == e.bran_name
+    filter e != null
+    return {
+        '_key': e._key,
+        '_from': e._from,
+        '_to':e._to,
+        'start_pt': e.start_pt,
+        'end_pt': e.end_pt,
+        'att_type': e.att_type,
+        'bran_name': e.bran_name,
+        'extra_type': e.extra_type,
+        'bore': e.bore
+    }")
+        .bind_var("id", key)
+        .bind_var("bran_refno", bran_refno.to_url_refno());
+    let results: Vec<TubiEdgeAql> = database.aql_query(aql).await?;
+    // 过滤 atta
+    let mut i = 0;
+    while i < results.len() -1 {
+        let distance = results[i].start_pt.distance(results[i].end_pt);
+        if distance >= TUBI_TOL {
+            // atta 跳过 继续往后找到下一个非 atta 元件
+            if results[i].att_type.to_uppercase().as_str() == "ATTA" {
+                let mut j = i;
+                while j < results.len() - 1 && results[j].att_type.to_uppercase().as_str() == "ATTA" {
+                    j +=1;
+                    if j < results.len() - 1 && results[j].att_type.to_uppercase().as_str() != "ATTA" {
+                        tubi.push(TubiEdgeAql {
+                            _key: results[i]._key.to_string(),
+                            _from: results[i]._from.to_string(),
+                            _to: results[j]._to.to_string(),
+                            start_pt: results[i].start_pt,
+                            end_pt: results[j].end_pt,
+                            att_type: results[j].att_type.to_string(),
+                            extra_type: results[j].extra_type.to_string(),
+                            bore: results[j].bore,
+                            bran_name: results[i].bran_name.to_string(),
+                        });
+                        i = j;
+                        break;
+                    }
+                }
+            } else {
+                tubi.push(TubiEdgeAql {
+                    _key: results[i]._key.to_string(),
+                    _from: results[i]._from.to_string(),
+                    _to: results[i]._to.to_string(),
+                    start_pt: results[i].start_pt,
+                    end_pt: results[i].end_pt,
+                    att_type: results[i].att_type.to_string(),
+                    extra_type: results[i].extra_type.to_string(),
+                    bore: results[i].bore,
+                    bran_name: results[i].bran_name.to_string(),
+                });
+            }
+        }
+        i += 1;
+    }
+    Ok(tubi)
+}
+
 //
 // #[tokio::test]
 // pub async fn test_() -> anyhow::Result<()> {
@@ -201,5 +269,19 @@ pub async fn insert_tubi_value(tubi_map: DashMap<(RefU64, String), f32>, pool: &
             dbg!(&err);
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_tubi_from_bran_filter_atta() -> anyhow::Result<()>{
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let refno = RefU64::from_refno_str("23584/5535").unwrap();
+    let results = query_tubi_from_bran_filter_atta(refno,&database).await?;
+    dbg!(&results);
     Ok(())
 }
