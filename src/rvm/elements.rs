@@ -307,7 +307,7 @@ fn gen_ancestor_data_str(name: &str, pos: Vec3) -> Vec<u8> {
 #[tokio::test]
 async fn test_create_rvm_file() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    let refno = RefU64::from_refno_str("23584/8168").unwrap();
+    let refno = RefU64::from_refno_str("23584/108").unwrap();
     let data = create_rvm_file(refno, &mgr).await?;
     let mut file = std::fs::File::create("test_rvm.rvm").unwrap();
     file.write_all(&data).unwrap();

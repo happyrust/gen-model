@@ -28,19 +28,19 @@ fn gen_cata_element_prim_data(geo_info: GeoParaInfo, desi_instance: RvmGeoInfo) 
     let cata_transform = Transform {
         translation: geo_info.transform.1,
         rotation: geo_info.transform.0,
-        scale: geo_info.transform.2,
+        scale: Vec3::ONE,
     };
     let desi_transform = Transform {
         translation: desi_instance.world_transform.1,
         rotation: desi_instance.world_transform.0,
-        scale: desi_instance.world_transform.2,
+        scale: Vec3::ONE,
     };
     let world_transform = desi_transform * cata_transform;
     let mut rvm_geo_info = RvmGeoInfo {
         _key: "".to_string(),
         aabb: Some(geo_info.aabb),
         data: vec![],
-        world_transform: (world_transform.rotation, world_transform.translation, world_transform.scale),
+        world_transform: (world_transform.rotation, world_transform.translation, Vec3::ONE),
     };
     match geo_info.geometry {
         CateGeoParam::Boxi(_) => {}
@@ -70,6 +70,7 @@ fn gen_cata_element_prim_data(geo_info: GeoParaInfo, desi_instance: RvmGeoInfo) 
         CateGeoParam::SCylinder(data) => {
             let radius = (data.diameter / 2.0 * 100.0).round() / 100.0;
             let height = data.height.abs();
+            // rvm_geo_info.world_transform.1.z -= height/2.0;
             let shape = ShapeTypeData::Cylinder([radius, height]);
             result.append(&mut gen_prim_data(rvm_geo_info, shape, ShapeModule::Cata));
         }
