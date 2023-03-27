@@ -920,7 +920,8 @@ impl AiosDBManager {
                 //需要检查href的方位
                 current_tubing.desire_arrive_dir = -current_tubing.get_dir();
                 //检查一下方向是否一致，不一致的，不显示，或者加标记位
-                if current_tubing.is_dir_ok() {
+                // if current_tubing.is_dir_ok()
+                {
                     let shape = current_tubing.convert_to_shape();
                     dbg!(&shape);
                     brep_shape_map.entry(branch_refno).or_insert(Vec::new()).push(shape);
@@ -1206,7 +1207,8 @@ impl AiosDBManager {
                         //todo 需要取得连接到的，tref的点对应的arrive方向
                         current_tubing.desire_arrive_dir = -current_tubing.desire_leave_dir;
 
-                        if current_tubing.is_dir_ok() {
+                        // if current_tubing.is_dir_ok()
+                        {
                             let shape = current_tubing.convert_to_shape();
                             brep_shape_map.entry(refno).or_insert(Vec::new()).push(shape);
                         }
