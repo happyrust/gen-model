@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::io::Write;
 use aios_core::pdms_types::CachedMeshesMgr;
 use arangors_lite::collection::CollectionType::Document;
-use arangors_lite::Document;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{create_arangodb_conn, save_arangodb_with_database};
 use serde::{Serialize, Deserialize};

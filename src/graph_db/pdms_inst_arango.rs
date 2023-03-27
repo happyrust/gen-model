@@ -4,7 +4,7 @@ use std::ops::Mul;
 use std::sync::Arc;
 use std::time::Instant;
 
-use aios_core::pdms_types::{EleGeoInstance, EleGeosInfo, PdmsElement, PdmsMeshInstanceMgr, RefU64};
+use aios_core::pdms_types::{EleGeoInstance, EleGeosInfo, EleGeosInfoJson, PdmsElement, PdmsMeshInstanceMgr, RefU64};
 use anyhow::anyhow;
 use arangors_lite::{AqlQuery, Connection, Database};
 use bevy::prelude::{dbg, Transform};
@@ -81,8 +81,9 @@ pub async fn query_instance_with_refno_in_arangodb(refno: RefU64, database: &Dat
         }")
         .bind_var("refno", refno_aql)
         .bind_var("collection", pdms_instances);
-    let result: Vec<EleGeosInfo> = database.aql_query(aql).await?;
+    let result: Vec<EleGeosInfoJson> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }
+    let result = result.into_iter().map(|x| EleGeosInfo::from_json_type(x)).collect::<Vec<_>>();
     Ok(Some(result))
 }
 
