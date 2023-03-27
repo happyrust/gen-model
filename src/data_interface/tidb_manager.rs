@@ -1172,30 +1172,11 @@ impl AiosDBManager {
                 geometries,
                 axis_map
             } = geoms;
-            let mut geos = vec![];
             for (i, geom) in geometries.into_iter().enumerate() {
                 if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
-                    let geo_hash = mgr.cached_mesh_mgr.gen_pdms_mesh(cate_shape.brep_shape.clone(), false);
-                    let bbox = mgr.cached_mesh_mgr.get_bbox(&geo_hash);
-                    if let Some(mut aabb) = bbox {
-                        let rot = cate_shape.transform.rotation;
-                        let trans = cate_shape.brep_shape.get_trans();
-                        let translation = cate_shape.transform.translation + cate_shape.transform.rotation * trans.translation;
-                        aabb = aabb.scaled(&Vector::new(trans.scale.x, trans.scale.y, trans.scale.z));
-                        geos.push(GeoParaInfo {
-                            aabb,
-                            geometry: geom,
-                            transform: (rot, translation, trans.scale),
-                        });
-                    }
-
                     brep_shape_map.entry(refno).or_insert(Vec::new()).push(cate_shape);
                 }
             }
-            geo_infos.entry(refno).or_insert(GeomsInfoAql {
-                _key: refno.to_url_refno(),
-                geo_params: geos,
-            });
             refno_ptset_map.insert(refno, axis_map);
             //有隐含管段
             if has_tubi {
