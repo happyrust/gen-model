@@ -3,12 +3,12 @@ use std::fs;
 use std::io::{Read, Write};
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::db_number::DbNumMgr;
-use aios_core::pdms_types::{CachedColliderShapeMgr, CachedMeshesMgr, PdmsMeshInstanceMgr, RefU64};
+use aios_core::pdms_types::*;
 use aios_core::pdms_types::UdaMajorType::{E, T, V};
 use bevy::utils::default;
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::{Isometry, Point};
-use crate::aql_api::pdms_room::{query_room_info_from_refno, query_room_refnos_aql, save_room_info_to_arangodb};
+use crate::aql_api::pdms_room::*;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::options::DbOption;
 
@@ -19,9 +19,10 @@ pub fn tri_tri_intersection() -> bool {
 
 ///投影到平面上的房间，去计算是否二维有相交
 pub async fn compute_rooms_by_projection(room_refno: Vec<RefU64>,
-                                    all_insts_mgr: HashMap<u32, PdmsMeshInstanceMgr>,
-                                    collider_shape_mgr: CachedColliderShapeMgr, db_option: &DbOption)
-    -> anyhow::Result<HashMap<RefU64, (Aabb, Vec<RefU64>)>> {
+                                         all_insts_mgr: HashMap<u32, CachedInstanceMgr>,
+                                         collider_shape_mgr: CachedColliderShapeMgr,
+                                         db_option: &DbOption)
+                                         -> anyhow::Result<HashMap<RefU64, (Aabb, Vec<RefU64>)>> {
     let mut room_info_map = HashMap::new();
     let mut file = fs::File::open("assets/mesh/mesh.bin")?;
     let mut data = vec![];
@@ -120,7 +121,7 @@ pub async fn compute_rooms_by_projection(room_refno: Vec<RefU64>,
 
 /// 精算房间计算
 pub async fn recompute_spatial_tree(room_refno: Vec<RefU64>,
-                                    all_insts_mgr: HashMap<u32, PdmsMeshInstanceMgr>,
+                                    all_insts_mgr: HashMap<u32, CachedInstanceMgr>,
                                     collider_shape_mgr: CachedColliderShapeMgr,
                                     db_option: &DbOption) -> anyhow::Result<HashMap<RefU64, (Aabb, Vec<RefU64>)>> {
     let mut room_info_map = HashMap::new();

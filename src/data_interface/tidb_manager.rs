@@ -136,7 +136,7 @@ pub struct AiosDBManager {
 
     pub cached_mesh_mgr: Arc<CachedMeshesMgr>,
 
-    pub mesh_instance_mgr: Arc<DashMap<i32, PdmsMeshInstanceMgr>>,
+    pub mesh_instance_mgr: Arc<DashMap<i32, CachedInstanceMgr>>,
 
     pub arango_database: Database,
 
@@ -1596,7 +1596,7 @@ impl AiosDBManager {
     }
 
     /// 生成元件库的几何体
-    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, project: &str,
+    pub async fn cache_cata_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<CachedInstanceMgr>, project: &str,
                                  db_nos: Option<Vec<i32>>, db_option: &DbOption) -> anyhow::Result<bool> {
         let batch_size = mgr.db_option.gen_model_batch_size;
         let mdb = &db_option.mdb_name;
@@ -1819,7 +1819,7 @@ impl AiosDBManager {
     }
 
     /// 生成基本体的几何数据
-    pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>,
+    pub async fn cache_prim_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<CachedInstanceMgr>,
                                  db_option: &DbOption, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let batch_size = mgr.db_option.gen_model_batch_size;
@@ -2024,7 +2024,7 @@ impl AiosDBManager {
     }
 
 
-    pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<PdmsMeshInstanceMgr>, db_option: &DbOption, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
+    pub async fn cache_loop_geos(mgr: Arc<AiosDBManager>, instance_mgr: Arc<CachedInstanceMgr>, db_option: &DbOption, db_nos: Option<Vec<i32>>) -> anyhow::Result<bool> {
         let t = Instant::now();
         let batch_size = mgr.db_option.gen_model_batch_size;
 
@@ -2275,7 +2275,7 @@ impl AiosDBManager {
                 continue;
             }
             let instance_mgr =
-                PdmsMeshInstanceMgr::deserialize_from_bin_file(&format!("./assets/instance/{db_no}.inst")).unwrap_or_default();
+                CachedInstanceMgr::deserialize_from_bin_file(&format!("./assets/instance/{db_no}.inst")).unwrap_or_default();
             // dbg!(instance_mgr.inst_mgr.len());
             let instance_mgr = Arc::new(instance_mgr);
             let instance_mgr_clone = instance_mgr.clone();

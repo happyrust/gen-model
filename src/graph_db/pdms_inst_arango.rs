@@ -4,7 +4,7 @@ use std::ops::Mul;
 use std::sync::Arc;
 use std::time::Instant;
 
-use aios_core::pdms_types::{EleGeoInstance, EleGeosInfo, EleGeosInfoJson, PdmsElement, PdmsMeshInstanceMgr, RefU64};
+use aios_core::pdms_types::*;
 use anyhow::anyhow;
 use arangors_lite::{AqlQuery, Connection, Database};
 use bevy::prelude::{dbg, Transform};
@@ -26,7 +26,7 @@ use crate::options::DbOption;
 use aios_core::rvm_types::RvmGeoInfo;
 
 // todo 改成多线程
-pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &PdmsMeshInstanceMgr) -> anyhow::Result<()> {
+pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &CachedInstanceMgr) -> anyhow::Result<()> {
     let collection = "pdms_instances";
     let edge_collection = "instance_edges";
 

@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
             let mut file = fs::File::open(path)?;
             let mut data = vec![];
             file.read_to_end(&mut data)?;
-            let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
+            let instance_mgr = bincode::deserialize::<CachedInstanceMgr>(&data)?;
             if db_option.save_model_mesh_to_graph_db {
                 dbg!("正在保存Instances");
                 sync_instance_to_graph_db(mgr.clone(), &instance_mgr).await?;
@@ -187,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
             let mut file = fs::File::open(path)?;
             let mut data = vec![];
             file.read_to_end(&mut data)?;
-            let instance_mgr = bincode::deserialize::<PdmsMeshInstanceMgr>(&data)?;
+            let instance_mgr = bincode::deserialize::<CachedInstanceMgr>(&data)?;
             dbg!(&instance_mgr.inst_mgr.inst_map.len());
             for kv in &instance_mgr.inst_mgr.inst_map {
                 if let Some(aabb) = kv.value().aabb {
@@ -333,7 +333,7 @@ fn test_inst_mgr() {
     let mut file = File::open("assets/instance/7999.inst").unwrap();
     let mut data = vec![];
     file.read_to_end(&mut data).unwrap();
-    let map = bincode::deserialize::<PdmsMeshInstanceMgr>(&data).unwrap();
+    let map = bincode::deserialize::<CachedInstanceMgr>(&data).unwrap();
     let refno = RefU64::from_refno_str("24381/34919").unwrap();
     if let Some(value) = map.inst_mgr.inst_map.get(&refno) {
         dbg!(&value.value());
