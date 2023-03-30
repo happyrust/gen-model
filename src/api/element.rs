@@ -323,7 +323,7 @@ pub type MdbWorldsMap = HashMap<String, HashMap<String, Vec<RefU64>>>;
 
 
 
-pub async fn query_types_refnos(type_names: &Vec<&str>, pool: &Pool<MySql>, dbnos: Option<Vec<i32>>) -> anyhow::Result<RefU64Vec> {
+pub async fn query_types_refnos(type_names: &[&str], pool: &Pool<MySql>, dbnos: Option<Vec<i32>>) -> anyhow::Result<RefU64Vec> {
     let mut r = vec![];
     let sql = gen_query_type_refnos_sql(type_names, dbnos);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
@@ -402,7 +402,7 @@ pub async fn query_id_from_dbno_type(dbno: u32, pool: &Pool<MySql>) -> anyhow::R
 }
 
 /// 指定type查询所有type符合该值的节点
-pub async fn query_types_refnos_names(types: &Vec<&str>, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
+pub async fn query_types_refnos_names(types: &[&str], pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut r = vec![];
     let sql = gen_query_types_refnos_names(types);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
@@ -480,7 +480,7 @@ fn gen_query_dbno_info_by_project(project_name: &str) -> String {
     sql
 }
 
-fn gen_query_types_refnos_names(types: &Vec<&str>) -> String {
+fn gen_query_types_refnos_names(types: &[&str]) -> String {
     let mut sql = String::new();
     let mut types_sql = String::new();
     for att_type in types {
@@ -603,7 +603,7 @@ pub fn gen_query_refno_type_sql(refno: RefU64) -> String {
     sql
 }
 #[inline]
-pub fn gen_query_type_refnos_sql(type_names: &Vec<&str>, dbnos: Option<Vec<i32>>) -> String {
+pub fn gen_query_type_refnos_sql(type_names: &[&str], dbnos: Option<Vec<i32>>) -> String {
     let mut sql = String::new();
     let mut in_sql = " (".to_string();
     for type_name in type_names {

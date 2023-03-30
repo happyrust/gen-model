@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use aios_core::negative_mesh_type::NegativeEles;
+use aios_core::pdms_data::PdmsInstanceMeshData;
 use aios_core::pdms_types::{CachedMeshesMgr, EleGeosInfo, GeoHash, RefU64, ShapeInstancesMgr};
 use aios_core::shape::pdms_shape::{PdmsInstanceMeshMap, PdmsMesh};
 use arangors_lite::{AqlQuery, Database};
@@ -11,7 +12,6 @@ use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::graph_db::pdms_inst_arango::query_instance_with_refno_in_arangodb;
 use crate::negative::query_instance_refnos_negative_aql;
 use crate::options::DbOption;
-use aios_core::pdms_data::PdmsInstanceMeshMgr;
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct PdmsMeshAql {
@@ -197,7 +197,7 @@ pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &Datab
 }
 
 /// 通过参考号获取参考后下面所有的instance 和 对应的 mesh
-pub async fn query_pdms_instance_mesh_from_refno(refno:RefU64,database:&Database) -> anyhow::Result<PdmsInstanceMeshMgr> {
+pub async fn query_pdms_instance_mesh_from_refno(refno:RefU64,database:&Database) -> anyhow::Result<PdmsInstanceMeshData> {
     let mut inst_mgr = ShapeInstancesMgr::default();
     let mut hashes = HashSet::new();
     if let Some(instance) = query_instance_with_refno_in_arangodb(refno,database).await? {
@@ -214,7 +214,7 @@ pub async fn query_pdms_instance_mesh_from_refno(refno:RefU64,database:&Database
     }
     let hashes = hashes.into_iter().collect::<Vec<_>>();
     let mesh_mgr = query_pdms_mesh_aql(hashes,database).await.unwrap_or_default();
-    Ok(PdmsInstanceMeshMgr {
+    Ok(PdmsInstanceMeshData {
         inst_mgr,
         mesh_mgr,
     })

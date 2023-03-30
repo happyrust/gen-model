@@ -3,6 +3,7 @@ use std::mem::take;
 use std::ops::Mul;
 use std::sync::Arc;
 use std::time::Instant;
+use aios_core::geom_types::RvmGeoInfo;
 
 use aios_core::pdms_types::*;
 use anyhow::anyhow;
@@ -20,10 +21,9 @@ use crate::aql_api::convert_refno_vec_from_vec_string;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
-use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode, PdmsInstanceGraphEdge};
+use crate::graph_db::structs::*;
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
-use aios_core::rvm_types::RvmGeoInfo;
 
 // todo 改成多线程
 pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &CachedInstanceMgr) -> anyhow::Result<()> {
@@ -63,15 +63,16 @@ pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &C
 /// 传入参考号，返回该参考号下面的模型数据
 pub async fn query_instance_with_refno_in_arangodb(refno: RefU64, database: &Database) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
     let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
-    let pdms_instances = "pdms_instances";
     let aql = AqlQuery::new("
     FOR c IN 0..10 inbound @refno pdms_edges
         PRUNE document(@collection,c._key) != null
         Filter document(@collection,c._key) != null
         let f = document(@collection,c._key)
+        let p = document(@params_collection, c._key)
         return {
             '_key':f._key,
             'data':f.data,
+            'params': p.geo_params,
             'visible':f.visible,
             'generic_type':f.generic_type,
             'aabb':f.aabb,
@@ -80,7 +81,8 @@ pub async fn query_instance_with_refno_in_arangodb(refno: RefU64, database: &Dat
             'flow_pt_indexs':f.flow_pt_indexs
         }")
         .bind_var("refno", refno_aql)
-        .bind_var("collection", pdms_instances);
+        .bind_var("collection", "pdms_instances")
+        .bind_var("params_collection", "geo_infos");
     let result: Vec<EleGeosInfoJson> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }
     let result = result.into_iter().map(|x| EleGeosInfo::from_json_type(x)).collect::<Vec<_>>();
@@ -168,7 +170,7 @@ fn test_get_matrix() {
 #[test]
 fn test_cata_transform() {
     let desi_transform = Transform {
-        translation: Vec3::from([5360.43994140625,16279.5,2596.780029296875]),
+        translation: Vec3::from([5360.43994140625, 16279.5, 2596.780029296875]),
         rotation: Quat::from_array([0.0, 0.0, 0.7071067690849304, -0.7071067690849304]),
         scale: Vec3::from([1., 1., 1.]),
     };

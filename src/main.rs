@@ -68,7 +68,6 @@ use tokio::spawn;
 use aios_database::api::admin::query_all_db_infos;
 use aios_database::aql_api::tubi::{insert_tubi_value, query_all_tubi_from_node};
 use aios_database::negative::{compute_boolean_mesh, query_negative_refnos_aql};
-use aios_database::rvm::elements::create_rvm_file;
 use aios_database::spatial_tree::recompute_spatial_tree;
 
 

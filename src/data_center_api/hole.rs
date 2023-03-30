@@ -7,11 +7,22 @@ use bevy::prelude::dbg;
 use chrono::DateTime;
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use glam::Vec3;
+use regex::Regex;
 use sqlx::{Error, Executor, MySql, Pool, Row};
 use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use crate::consts::HOLES_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::rvm::data_api::get_num_from_str;
+
+/// 正则匹配字符串中的数字
+pub fn get_num_from_str(input: &str) -> Option<i32> {
+    let regex = Regex::new(r"[0-9]+([.]{1}[0-9]+){0,1}").unwrap();
+    if let Some(captures) = regex.captures(input) {
+        if let Ok(r) = captures[0].parse::<i32>() {
+            return Some(r);
+        }
+    }
+    None
+}
 
 async fn query_hole_data(refno: RefU64, pool: &Pool<MySql>) -> Option<DataCenterInstance> {
     if let Ok(hole_type) = query_hole_type(refno, pool).await {

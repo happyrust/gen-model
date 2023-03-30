@@ -37,7 +37,7 @@ pub async fn query_implicit_attrs_by_owner(owner: RefU64, type_name: &str, pool:
 }
 
 #[inline]
-pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &Vec<&str>) -> anyhow::Result<AttrMap> {
+pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &[&str]) -> anyhow::Result<AttrMap> {
     let mut r = AttrMap::default();
     if let Some(val) = ATTR_INFO_MAP.get(&type_hash) {
         for info in val.value() {
@@ -342,7 +342,7 @@ fn gen_insert_attr_info_sql(attr_info: &DashMap<i32, DashMap<i32, AttrInfo>>) ->
 }
 
 #[inline]
-pub fn gen_query_implicit_attr_sql(refno: RefU64, table_name: &str, columns: &Vec<&str>) -> String {
+pub fn gen_query_implicit_attr_sql(refno: RefU64, table_name: &str, columns: &[&str]) -> String {
     let mut sql = String::new();
     let cols_sql = if columns.len() == 0 {
         "*".to_string()

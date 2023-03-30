@@ -1,6 +1,6 @@
 use std::ops::Mul;
 use aios_core::pdms_types::RefU64;
-use aios_core::rvm_types::RvmGeoInfo;
+use aios_core::geom_types::RvmGeoInfo;
 use arangors_lite::Database;
 use bevy::prelude::Transform;
 use glam::{Mat3, Mat3A, Quat, Vec3};
@@ -8,7 +8,6 @@ use id_tree::{NodeId, Tree};
 use parry3d::bounding_volume::Aabb;
 use regex::Regex;
 use crate::graph_db::pdms_inst_arango::query_rvm_instance_data_from_refno_aql;
-use crate::rvm::data_api::ShapeTypeData::*;
 
 #[derive(Debug, Clone)]
 pub enum ShapeModule {
@@ -16,8 +15,9 @@ pub enum ShapeModule {
     Cata,
 }
 
+/// rvm 格式类型
 #[derive(Debug, Clone)]
-pub enum ShapeTypeData {
+pub enum RvmShapeTypeData {
     /// 0: bottom width, 1: bottom length , 2:top width, 3:top length ,4:x offset, 5: y offset, 6: height
     Pyramid([f32; 7]),
     /// 长 宽 高
@@ -34,59 +34,61 @@ pub enum ShapeTypeData {
     Snout([f32; 9]),
     /// 半径 高
     Cylinder([f32; 2]),
+    /// 球体
     Sphere,
     /// 0: 1: 长度(mm)
     Line([f32; 2]),
+    /// 多面体
     FacetGroup,
 }
 
-impl ShapeTypeData {
+impl RvmShapeTypeData {
     /// 获得 ShapeType在 Prim种代表的数字
     pub fn get_shape_number(&self) -> u8 {
         match self {
-            ShapeTypeData::Pyramid(_) => 1,
-            ShapeTypeData::Box(_) => 2,
-            ShapeTypeData::RectangularTorus(_) => 3,
-            ShapeTypeData::CircularTorus(_) => 4,
-            ShapeTypeData::EllipticalDish(_) => 5,
-            ShapeTypeData::SphericalDish(_) => 6,
-            ShapeTypeData::Snout(_) => 7,
-            ShapeTypeData::Cylinder(_) => 8,
-            ShapeTypeData::Sphere => 9,
-            ShapeTypeData::Line(_) => 10,
-            ShapeTypeData::FacetGroup => 11,
+            RvmShapeTypeData::Pyramid(_) => 1,
+            RvmShapeTypeData::Box(_) => 2,
+            RvmShapeTypeData::RectangularTorus(_) => 3,
+            RvmShapeTypeData::CircularTorus(_) => 4,
+            RvmShapeTypeData::EllipticalDish(_) => 5,
+            RvmShapeTypeData::SphericalDish(_) => 6,
+            RvmShapeTypeData::Snout(_) => 7,
+            RvmShapeTypeData::Cylinder(_) => 8,
+            RvmShapeTypeData::Sphere => 9,
+            RvmShapeTypeData::Line(_) => 10,
+            RvmShapeTypeData::FacetGroup => 11,
         }
     }
     pub fn convert_shape_type_to_bytes(&self) -> Vec<u8> {
         let mut data = vec![];
         match &self {
-            ShapeTypeData::Pyramid(array) => {
+            RvmShapeTypeData::Pyramid(array) => {
                 data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", array[0], array[1], array[2], array[3]).into_bytes());
                 data.append(&mut format!("     {:.7}     {:.7}     {:.7}\r\n", array[4], array[5], array[6]).into_bytes());
             }
-            ShapeTypeData::Box(array) => {
+            RvmShapeTypeData::Box(array) => {
                 data.append(&mut format!("     {:.7}     {:.7}     {:.7}\r\n", array[0], array[1], array[2]).into_bytes());
             }
-            ShapeTypeData::RectangularTorus(array) => {
+            RvmShapeTypeData::RectangularTorus(array) => {
                 data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", array[0], array[1], array[2], array[3]).into_bytes());
             }
-            ShapeTypeData::CircularTorus(array) => {
+            RvmShapeTypeData::CircularTorus(array) => {
                 data.append(&mut format!("     {:.7}     {:.7}     {:.7}\r\n", array[0], array[1], array[2]).into_bytes());
             }
-            ShapeTypeData::EllipticalDish(array) => {
+            RvmShapeTypeData::EllipticalDish(array) => {
                 data.append(&mut format!("     {:.7}     {:.7}\r\n", array[0], array[1]).into_bytes());
             }
-            ShapeTypeData::SphericalDish(arr) => {
+            RvmShapeTypeData::SphericalDish(arr) => {
                 data.append(&mut format!("     {:.7}     {:.7}\r\n", arr[0], arr[1]).into_bytes());
             }
-            ShapeTypeData::Snout(array) => {
+            RvmShapeTypeData::Snout(array) => {
                 data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}     {:.7}\r\n", array[0], array[1], array[2], array[3], array[4]).into_bytes());
                 data.append(&mut format!("     {:.7}     {:.7}     {:.7}     {:.7}\r\n", array[5], array[6], array[7], array[8]).into_bytes());
             }
-            ShapeTypeData::Cylinder(array) => {
+            RvmShapeTypeData::Cylinder(array) => {
                 data.append(&mut format!("     {:.7}     {:.7}\r\n", array[0], array[1]).into_bytes());
             }
-            ShapeTypeData::Line(arr) => {
+            RvmShapeTypeData::Line(arr) => {
                 data.append(&mut format!("     {:.7}     {:.7}\r\n", arr[0], arr[1]).into_bytes());
             }
             _ => {}
@@ -96,7 +98,7 @@ impl ShapeTypeData {
 }
 
 // type_data: prim 最后一列不同 att_type 存放的数据不一样
-pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: ShapeTypeData, shape_module: ShapeModule) -> Vec<u8> {
+pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: RvmShapeTypeData, shape_module: ShapeModule) -> Vec<u8> {
     let mut data = vec![];
     if rvm_instance.aabb.is_none() { return data; }
     let aabb = rvm_instance.aabb.unwrap();

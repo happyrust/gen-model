@@ -4,7 +4,7 @@ use std::ops::Neg;
 use std::panic;
 use std::sync::Arc;
 use aios_core::parsed_data::{CateAxisParam, GmseParamData};
-use aios_core::parsed_data::geo_params_data::CateGeoParam;
+use aios_core::parsed_data::geo_params_data::{CateGeoParam};
 use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::db1_dehash;

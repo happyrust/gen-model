@@ -1,14 +1,12 @@
 use std::default::default;
 use std::f32::EPSILON;
 use std::vec::Vec;
-
 use aios_core::parsed_data::{CateProfileParam, GeomsInfo};
-use aios_core::parsed_data::geo_params_data::CateGeoParam;
+use aios_core::parsed_data::geo_params_data::{CateGeoParam, PdmsGeoParam};
 use aios_core::pdms_types::{AttrMap, RefU64};
 use aios_core::prim_geo::category::CateBrepShape;
 use aios_core::prim_geo::loft::SweepSolid;
 use aios_core::prim_geo::spine::{Line3D, Spine3D, SpineCurveType, SweepPath3D};
-use aios_core::rvm_types::GeoParaInfo;
 use aios_core::shape::pdms_shape::BrepShapeTrait;
 use anyhow::anyhow;
 use dashmap::{DashMap, DashSet};
@@ -24,8 +22,11 @@ pub struct ProfileGeosPoints {
     pub points: Vec<(Vec3, Vec3, Vec3)>,
 }
 
-pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &AttrMap, geom_info: &GeomsInfo,
-                                                       brep_shapes_map: &CateBrepShapeMap, interface: &T, mut transforms: &mut Vec<GeoParaInfo>) -> anyhow::Result<bool> {
+pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
+                                                       att: &AttrMap,
+                                                       geom_info: &GeomsInfo,
+                                                       brep_shapes_map: &CateBrepShapeMap,
+                                                       interface: &T, ) -> anyhow::Result<bool> {
     let geoms = &geom_info.geometries;
     // dbg!(geoms.len());
     if geoms.len() == 0 { return Ok(false); }
@@ -127,11 +128,6 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                     };
                     
                     let transform = solid.get_trans();
-                    transforms.push(GeoParaInfo {
-                        aabb: Aabb { mins: Default::default(), maxs: Default::default() },
-                        geometry: geom.clone(),
-                        transform: (transform.rotation, transform.translation, transform.scale),
-                    });
                     brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
                         refno,
                         brep_shape: Box::new(solid),
@@ -154,12 +150,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                     if let CateProfileParam::SANN(s) = profile {
                         plane_normal = s.paxis.as_ref().map(|x| x.dir).unwrap_or(Vec3::Y);
                     }
-                    // dbg!(&spine);
                     let (paths, transform) = spine.generate_paths();
-                    // dbg!(&paths);
-                    // dbg!(&transform);
-                    // let transform = transform.inverse();
-                    // let transform = spine.get_coord_transform();
                     let bangle = att.get_f32("BANG").unwrap_or_default();
                     for path in paths {
                         let loft = SweepSolid {
@@ -173,11 +164,6 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64, att: &Attr
                             path,
                         };
                         let transform = loft.get_trans();
-                        transforms.push(GeoParaInfo {
-                            aabb: Aabb { mins: Default::default(), maxs: Default::default() },
-                            geometry: geom.clone(),
-                            transform: (transform.rotation, transform.translation, transform.scale),
-                        });
                         brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
                             refno,
                             brep_shape: Box::new(loft),

@@ -69,21 +69,18 @@ pub async fn save_boolean_negative_mesh(negative_mesh_map: DashMap<RefU64, Index
 
 // refno : 基本体的 refno  negative_refnos ： 负实体的集合
 pub async fn compute_boolean_mesh(refno: RefU64, negative_elements: Vec<PdmsElement>, pool: &Pool<MySql>, database: &Database) -> anyhow::Result<Option<(RefU64, IndexedMesh)>> {
-    // let database = aios_mgr.get_arangodb_conn().await?;
     let refno_type = query_refno_type(refno, pool).await?;
     let refno_meshes_map = query_catr_refnos_meshes_aql(refno, database).await?;
     let negative_refnos = negative_elements.clone().iter().filter_map(|x| RefU64::from_refno_str(&x.refno).ok()).collect::<Vec<_>>();
     let transform = query_rvm_instance_data_from_refno_aql(refno, database).await?;
     if let Some(refno_geo_info) = transform {
-        // let transform = query_rvm_instance_data_from_refno_aql(refno, &database).await?;
-        // if let Some(geo_info) = transform {
         let mut refno_csg_mesh = Mesh::default();
         let refno_transform = Transform {
             translation: refno_geo_info.world_transform.1,
             rotation: refno_geo_info.world_transform.0,
             scale: refno_geo_info.world_transform.2,
         };
-        if PRIMITIVE_NOUN_NAMES.contains(&refno_type) {
+        if PRIMITIVE_NOUN_NAMES.contains(&refno_type.as_str()) {
             // 找到基本体的mesh
             if let Some(refno_mesh) = refno_meshes_map.get(&refno) {
                 for data in refno_geo_info.data {

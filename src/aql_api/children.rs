@@ -257,7 +257,7 @@ pub async fn query_travel_children_with_out_leaf_aql(arango_database: &Database,
 }
 
 /// 遍历refno只获取指定类型数组的refnos
-pub async fn query_travel_children_with_types_aql(arango_database: &Database, refno: RefU64, att_types: Vec<&str>) -> anyhow::Result<Vec<EleTreeNode>> {
+pub async fn query_travel_children_with_types_aql(arango_database: &Database, refno: RefU64, att_types: &[&str]) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
