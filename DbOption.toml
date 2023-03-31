@@ -1,9 +1,12 @@
 #同步文件配置
 total_sync = false
-incr_sync = false
+incr_sync =  false
 
 #项目设置
-project_path = "/Users/dongpengcheng/Documents/work/TestProject" #TestCatalogue
+#
+project_path = "D:/new/AVEVA/Plant/Projects12.1.SP4" #TestCatalogue
+
+
 included_projects = ["Sample", "Master"]   # "Sample" , "Master"
 # "AvevaMarineSample","AvevaCatalogue","AvevaPlantSample","SCB","ZDJ"
 #mdb_name = "ALL"
@@ -29,8 +32,8 @@ main_db_code = 7200
 ip = "127.0.0.1"
 user = "root"
 password = ""
-#port = "3306"
-port = "4000"
+port = "3306"
+#port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 800
 files_multi_thread = true
@@ -40,7 +43,7 @@ arangodb_user = "root"
 arangodb_password = ""
 
 #调试选项
-replace_mesh = true
+replace_mesh = false
 save_model_mesh_to_graph_db = true
 only_update_dbinfo = false
 debug_print_world_transform = false
@@ -49,7 +52,7 @@ replace_dbs = false
 #debug_root_refno = ["23584/107"]
 # debug_branch_refno = "23584/5443"
 #debug_desi_refno = "23584/5566"
-# debug_refno_type = "CATA"  # "CATA", "LOOP", "PRIM"
+#debug_refno_type = "CATA"  # "CATA", "LOOP", "PRIM"
 debug_db_num = 7200
 #included_db_files = ["ams7997_0001"]
 #replace_types = ["SDTE"]
