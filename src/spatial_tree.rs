@@ -45,70 +45,58 @@ pub async fn compute_rooms_by_projection(room_refno: Vec<RefU64>,
                     let all_refnos = inst_mgr.level_shape_mgr.get(&target_refno).unwrap();
                     for room_refno in all_refnos.value().clone().into_iter() {
                         if room_info_map.contains_key(&room_refno) { continue; }
-                        let ele_geos_info_map = inst_mgr.get_instants_data(room_refno);
-                        for ele_geos_info in &ele_geos_info_map {
-                            //filter None aabb
-                            let ele_refno = *ele_geos_info.key();
-
-                            // let room_mesh2d = inst_mgr.get_mesh2d(ele_refno);
-
-                            let room_colliders = collider_shape_mgr.get_collider(ele_refno, inst_mgr, &mesh_mgr);
-                            if let Some(target_abb) = ele_geos_info.aabb {
-                                // let mut withing_room_refnos = rtree
-                                //     .locate_intersecting_bounds(&target_abb).collect::<Vec<_>>();
-                                // dbg!(&withing_room_refnos.len());
-                                let mut withing_room_refnos = vec![RefU64::from_refno_str("24381/109830").unwrap()];
-                                // if withing_room_refnos.len() > 2000 { continue; }
-                                let mut removed_refnos = vec![];
-                                withing_room_refnos.retain(|x| {
-                                    //直接判断点集，可以快速过滤一些构件
-                                    if let Some(dbno) = dbno_mgr.get_dbno(*x) {
-                                        if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
-                                            let ele_geos_info_map = inst_mgr.get_instants_data(*x);
-                                            let mut has_checked = false;
-                                            for ele_geos_info in &ele_geos_info_map {
-                                                let tr = ele_geos_info.get_transform();
-                                                for pt_kv in &ele_geos_info.ptset_map {
-                                                    let p = tr.transform_point(pt_kv.1.pt);
-                                                    for rc in &room_colliders {
-                                                        if rc.as_ref().contains_point(&Isometry::identity(), &Point::new(p.x, p.y, p.z)) {
-                                                            return true;
-                                                        };
+                        let ele_geos_info = inst_mgr.get_inst_data(room_refno);
+                        let ele_refno = *ele_geos_info.key();
+                        let room_colliders = collider_shape_mgr.get_collider(ele_refno, inst_mgr, &mesh_mgr);
+                        if let Some(target_abb) = ele_geos_info.aabb {
+                            let mut withing_room_refnos = vec![RefU64::from_refno_str("24381/109830").unwrap()];
+                            let mut removed_refnos = vec![];
+                            withing_room_refnos.retain(|x| {
+                                //直接判断点集，可以快速过滤一些构件
+                                if let Some(dbno) = dbno_mgr.get_dbno(*x) {
+                                    if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
+                                        let ele_geos_info = inst_mgr.get_inst_data(*x);
+                                        let mut has_checked = false;
+                                        let tr = ele_geos_info.get_transform();
+                                        for pt_kv in &ele_geos_info.ptset_map {
+                                            let p = tr.transform_point(pt_kv.1.pt);
+                                            for rc in &room_colliders {
+                                                if rc.as_ref().contains_point(&Isometry::identity(), &Point::new(p.x, p.y, p.z)) {
+                                                    return true;
+                                                };
+                                            }
+                                            has_checked = true;
+                                            let checking_colliders = collider_shape_mgr.get_collider(*x, inst_mgr, &mesh_mgr);
+                                            for rc in &room_colliders {
+                                                for cc in &checking_colliders {
+                                                    let target_pt = if let Some(tri_mesh) = cc.as_ref().as_trimesh() {
+                                                        tri_mesh.triangle(0).local_aabb().center()
+                                                    } else {
+                                                        cc.compute_local_aabb().center()
+                                                    };
+                                                    if rc.as_ref().contains_point(&Isometry::identity(), &target_pt) {
+                                                        return true;
                                                     }
-                                                    has_checked = true;
-                                                    let checking_colliders = collider_shape_mgr.get_collider(*x, inst_mgr, &mesh_mgr);
-                                                    for rc in &room_colliders {
-                                                        for cc in &checking_colliders {
-                                                            let target_pt = if let Some(tri_mesh) = cc.as_ref().as_trimesh() {
-                                                                tri_mesh.triangle(0).local_aabb().center()
-                                                            } else {
-                                                                cc.compute_local_aabb().center()
-                                                            };
-                                                            if rc.as_ref().contains_point(&Isometry::identity(), &target_pt) {
-                                                                return true;
-                                                            }
-                                                            let r = parry3d::query::intersection_test(&Isometry::identity(), rc.as_ref(),
-                                                                                                      &Isometry::identity(), cc.as_ref()).unwrap();
-                                                            if r {
-                                                                return true;
-                                                            }
-                                                        }
+                                                    let r = parry3d::query::intersection_test(&Isometry::identity(), rc.as_ref(),
+                                                                                              &Isometry::identity(), cc.as_ref()).unwrap();
+                                                    if r {
+                                                        return true;
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                    removed_refnos.push(*x);
-                                    println!("removed {} refno ;", removed_refnos.len());
-                                    false
-                                });
-                                let mut file = fs::File::create("removed_refnos.data").unwrap();
-                                let serialized = bincode::serialize(&removed_refnos).unwrap();
-                                file.write_all(serialized.as_slice()).unwrap();
-                                dbg!(removed_refnos.len());
-                                dbg!(&withing_room_refnos.len());
-                                room_info_map.entry(room_refno).or_insert((target_abb, withing_room_refnos));
-                            }
+                                }
+                                removed_refnos.push(*x);
+                                println!("removed {} refno ;", removed_refnos.len());
+                                false
+                            });
+                            let mut file = fs::File::create("removed_refnos.data").unwrap();
+                            let serialized = bincode::serialize(&removed_refnos).unwrap();
+                            file.write_all(serialized.as_slice()).unwrap();
+                            dbg!(removed_refnos.len());
+                            dbg!(&withing_room_refnos.len());
+                            room_info_map.entry(room_refno).or_insert((target_abb, withing_room_refnos));
                         }
                     }
                 }
@@ -146,8 +134,8 @@ pub async fn recompute_spatial_tree(room_refno: Vec<RefU64>,
                     let all_refnos = inst_mgr.level_shape_mgr.get(&target_refno).unwrap();
                     for room_refno in all_refnos.value().clone().into_iter() {
                         if room_info_map.contains_key(&room_refno) { continue; }
-                        let ele_geos_info_map = inst_mgr.get_instants_data(room_refno);
-                        for ele_geos_info in &ele_geos_info_map {
+                        let ele_geos_info = inst_mgr.get_inst_data(room_refno);
+                        {
                             //filter None aabb
                             let ele_refno = *ele_geos_info.key();
                             let room_colliders = collider_shape_mgr.get_collider(ele_refno, inst_mgr, &mesh_mgr);
@@ -161,9 +149,9 @@ pub async fn recompute_spatial_tree(room_refno: Vec<RefU64>,
                                     //直接判断点集，可以快速过滤一些构件
                                     if let Some(dbno) = dbno_mgr.get_dbno(*x) {
                                         if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
-                                            let ele_geos_info_map = inst_mgr.get_instants_data(*x);
+                                            let ele_geos_info = inst_mgr.get_inst_data(*x);
                                             let mut has_checked = false;
-                                            for ele_geos_info in &ele_geos_info_map {
+                                            {
                                                 let tr = ele_geos_info.get_transform();
                                                 for pt_kv in &ele_geos_info.ptset_map {
                                                     let p = tr.transform_point(pt_kv.1.pt);
