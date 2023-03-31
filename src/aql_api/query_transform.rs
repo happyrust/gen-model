@@ -60,7 +60,7 @@ pub async fn query_cylinder_transform(refno: RefU64, mgr: Arc<AiosDBManager>) ->
 }
 
 #[tokio::test]
-async fn query_cylinder_transform_test() -> anyhow::Result<()> {
+async fn virtual_hole_test() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
