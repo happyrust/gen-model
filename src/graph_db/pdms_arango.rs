@@ -107,11 +107,11 @@ pub async fn save_pdms_element_in_sync(db_option: &DbOption, total_attr_map: &Da
 /// 保存虚拟孔洞数据到图数据库
 pub async fn save_virtual_hole_value_to_arangodb(db_option: &DbOption) -> anyhow::Result<()> {
     //获取虚拟孔洞信息
-    // let hole_data = insert_virtual_hole_data();
-    // for data in hole_data.chunks(ARANGODB_SAVE_AMOUNT) {
-    //     let json = serde_json::to_value(data)?;
-    //     save_arangodb_with_db_option(json, db_option, "hole_data").await?;
-    // }
+    let hole_data = insert_virtual_hole_data();
+    for data in hole_data.chunks(ARANGODB_SAVE_AMOUNT) {
+        let json = serde_json::to_value(data)?;
+        save_arangodb_with_db_option(json, db_option, "hole_data").await?;
+    }
 
     let embed_data = insert_virtual_embed_data();
     for data in embed_data.chunks(ARANGODB_SAVE_AMOUNT) {
