@@ -256,7 +256,6 @@ async fn create_element_data_tree_test(cur_refno: RefU64, database: &Database, p
         }
 
         if let Some(node_id) = node_id_map.get(&refno) {
-            // let id = tree.insert(Node::new((refno, data)), UnderNode(node_id))?;
             let mut tree_data = tree.get_mut(node_id).unwrap().data_mut();
             tree_data.1 = data;
         }
@@ -391,7 +390,7 @@ fn gen_ancestor_data_str(name: &str, pos: Vec3) -> Vec<u8> {
 #[tokio::test]
 async fn test_create_rvm_file() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    let refno = RefU64::from_refno_str("23584/5502").unwrap();
+    let refno = RefU64::from_refno_str("23584/5417").unwrap();
     let data = create_rvm_file(refno, &mgr).await?;
     let mut file = std::fs::File::create("test_rvm.rvm").unwrap();
     file.write_all(&data).unwrap();
