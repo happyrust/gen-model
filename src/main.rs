@@ -6,7 +6,6 @@
 extern crate clap;
 #[macro_use]
 extern crate nom;
-
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::format;
 use std::fs;
@@ -16,7 +15,6 @@ use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
-
 use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
 use aios_core::db_number::DbNumMgr;
 use aios_core::pdms_types::*;
@@ -41,7 +39,6 @@ use regex::internal::Input;
 use sqlx::{Acquire, MySql, MySqlPool, Pool, Row};
 use sqlx::Executor;
 use sqlx::pool::PoolConnection;
-
 use aios_database::api::attr::insert_attr_info;
 use aios_database::api::element::*;
 use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};

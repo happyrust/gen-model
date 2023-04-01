@@ -1523,19 +1523,16 @@ impl AiosDBManager {
                             geo_hash = Some(r);
                         }
                     }
-                    let parent_refno = mgr.get_owner(refno);
                     if let Some(geo_hash) = geo_hash {
                         let visible = attr.is_visible_by_level(None).unwrap_or(true);
-                        let tr: Transform = item_trans;
+                        let tr = &item_trans;
                         let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
                         let mut aabb = bbox.unwrap();
-                        //todo 去掉重复的代码
                         aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
                         let ele_aabb = aabb.transform_by(&Isometry {
                             rotation: UnitQuaternion::from_quaternion(Quaternion::new(tr.rotation.w, tr.rotation.x, tr.rotation.y, tr.rotation.z)),
                             translation: Vector::new(tr.translation.x, tr.translation.y, tr.translation.z).into(),
                         });
-                        // geos_info.aabb.merge(&transformed_aabb);
                         let geom_inst = EleGeoInstance {
                             geo_hash,
                             refno,
