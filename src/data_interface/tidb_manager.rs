@@ -79,6 +79,7 @@ pub const TUBI_TOL: f32 = 10.0f32;
 // pub const batch_size: usize = 50;
 
 pub type CateBrepShapeMap = DashMap<RefU64, Vec<CateBrepShape>>;
+
 lazy_static! {
     pub static ref CATAEXPRCONTEXT_MAP: DashMap<RefU64, CataExprContext> = {
         let mut s = DashMap::new();
@@ -95,6 +96,12 @@ pub const GNERAL_PRIM_NOUN_NAMES: [&'static str; 20] = [
     "RTOR", "PYRA", "NCYL", "NBOX", "NCON", "NSNO",
     "NPYR", "NDIS", "NXTR", "NCTO", "NRTO", "NSLC",
     "NREV", "NSCY"];
+
+pub const GENRAL_NEGATIVE_NOUN_NAMES: [&'static str;12 ] = [
+    "NCYL", "NBOX", "NCON", "NSNO",
+    "NPYR", "NDIS", "NXTR", "NCTO", "NRTO", "NSLC",
+    "NREV", "NSCY"
+];
 
 pub const CATA_ATT_TYPES: [&'static str; 23] = ["BRAN", "HANG",
     // "ELCONN",
@@ -638,8 +645,8 @@ impl AiosDBManager {
     pub async fn init_mdb(&mut self, project: &str, mdb: &str, module: &str) -> anyhow::Result<()> {
         if let Some(project_pool) = self.get_project_pool(project) {
             dbg!("init mdb");
-            dbg!(project);
             let mut conn = project_pool.acquire().await?;
+            dbg!(project);
             conn.execute(gen_create_project_mdb_sql().as_str()).await?;
             conn.execute(gen_create_project_mdb_json_sql().as_str()).await?;
             self.insert_project_mdb(&project_pool, &self.info_pool).await?;
@@ -1129,7 +1136,6 @@ impl AiosDBManager {
                             current_tubing.end_pt = a_pos;
                             current_tubing.desire_arrive_dir = a_dir;
                             current_tubing.finished = true;
-                            // dbg!(current_tubing.is_dir_ok());
                             if current_tubing.is_dir_ok() {
                                 let brep_shape = current_tubing.convert_to_shape();
                                 brep_shape_map.entry(refno).or_insert(Vec::new()).push(brep_shape);
@@ -1208,7 +1214,6 @@ impl AiosDBManager {
                 }
             }
         }
-        dbg!(&brep_shape_map.len());
         Ok(true)
     }
 

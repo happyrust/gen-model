@@ -48,6 +48,7 @@ pub async fn query_children_order_aql(arango_database: &Database, refno: RefU64)
     let children = append(REVERSE(front),backs)
 
     for child in children
+        filter child._key != null
         return {
             'refno':child._key,
             'owner':child.owner,
@@ -57,7 +58,7 @@ pub async fn query_children_order_aql(arango_database: &Database, refno: RefU64)
             'children_count':length(for c in 1 inbound child._id pdms_edges
                                 return 1 ),
         }").bind_var("id", refno_aql);
-    let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
+    let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await.unwrap_or(Vec::new());
     for v in result {
         if let Some(pdms_element) = v.change_to_pdms_element() {
             r.push(pdms_element);
@@ -73,46 +74,6 @@ pub async fn query_children_refnos_aql(arango_database: &Database, refno: RefU64
         return  z._key ").bind_var("id", refno_aql);
     let result: Vec<String> = arango_database.aql_query(aql).await?;
     Ok(convert_refno_vec_from_vec_string(result))
-}
-
-pub async fn query_children_aql_order(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
-    let mut r = vec![];
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("\
-    for z in 1 inbound @id pdms_edges
-        return {
-        'refno':z._key,
-        'owner':z.owner,
-        'name':z.name,
-        'noun':z.noun,
-        'version':0,
-        'children_count':length(for c in 1 inbound z._id pdms_edges
-                            return 1 ),
-    }").bind_var("id", refno_aql);
-    let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
-    // 对获取到的children进行排序
-    let first_refno = RefU64::from_url_refno(&result[0].refno).unwrap();
-    let mut children_map = HashMap::new();
-    for r in result {
-        if let Some(refno) = RefU64::from_url_refno(&r.refno) {
-            children_map.entry(refno).or_insert(r);
-        }
-    }
-    // 获取有顺序的children
-    let sibl_refnos = query_sibl_level_refnos(first_refno, arango_database).await?;
-    for sibl_refno in sibl_refnos {
-        if let Some(v) = children_map.remove(&sibl_refno) {
-            r.push(PdmsElement {
-                refno: sibl_refno.to_refno_string(),
-                noun: v.noun,
-                name: v.name,
-                owner: RefU64::from_url_refno(&v.owner).unwrap(),
-                children_count: v.children_count,
-                version: 0,
-            })
-        }
-    }
-    Ok(r)
 }
 
 /// 找到该节点同级的上一个节点
@@ -359,7 +320,8 @@ pub async fn query_sibl_level_refnos(refno: RefU64, database: &Database) -> anyh
         for v in 1..1000 inbound @id sibl_edges
             return v._key")
         .bind_var("id", refno_url.clone());
-    let result: Vec<String> = database.aql_query(aql_in).await?;
+    let result: Vec<String> = database.aql_query(aql_in).await.unwrap_or(Vec::new());
+    if result.is_empty() { return Ok(vec![]); }
     let in_refnos = convert_refno_vec_from_vec_string(result);
     // out 是该 refno 上面
     let aql_out = AqlQuery::new(r"

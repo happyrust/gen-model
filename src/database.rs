@@ -619,7 +619,6 @@ pub async fn sync_total_async_threaded(
                 let total_attr_map_arc = Arc::new(total_attr_map);
                 let children_map_arc = Arc::new(children_map);
                 let mut type_handles = vec![];
-
                 // 将部分数据保存到图数据库
                 if !b_replace_types && !only_update_dbinfo {
                     if db_type == "DESI" {

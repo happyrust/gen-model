@@ -1,11 +1,13 @@
 use std::ops::Mul;
-use aios_core::pdms_types::RefU64;
+use aios_core::pdms_types::{EleGeoInstance, EleGeosInfo, RefU64};
 use aios_core::geom_types::RvmGeoInfo;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use arangors_lite::Database;
 use bevy::prelude::Transform;
 use glam::{Mat3, Mat3A, Quat, Vec3};
 use id_tree::{NodeId, Tree};
 use parry3d::bounding_volume::Aabb;
+use parry3d::math::Vector;
 use regex::Regex;
 use crate::graph_db::pdms_inst_arango::query_rvm_instance_data_from_refno_aql;
 
@@ -107,11 +109,50 @@ pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: RvmShapeTypeData, sha
     data.append(&mut gen_prim_scale_position_data(rvm_instance.world_transform.0, Vec3::ONE,
                                                   rvm_instance.world_transform.1));
     match shape_module {
-        ShapeModule::Desi => { data.append(&mut gen_desi_prim_aabb_data(aabb, rvm_instance.world_transform)); }
+        ShapeModule::Desi => { data.append(&mut gen_desi_prim_aabb_data(aabb, rvm_instance.world_transform, &PdmsGeoParam::default())); }
         ShapeModule::Cata => { data.append(&mut gen_cata_prim_aabb_data(aabb)); }
     }
 
     data.append(&mut shape_type.convert_shape_type_to_bytes());
+    data
+}
+
+pub fn gen_prim_data_test(geo_instance: &EleGeoInstance, desi_transform: Transform) -> Vec<u8> {
+    let mut data = vec![];
+    let geo_transform = Transform {
+        translation: geo_instance.transform.1,
+        rotation: geo_instance.transform.0,
+        scale: geo_instance.transform.2,
+    };
+    let mut transform = desi_transform * geo_transform;
+    let aabb = geo_instance.aabb.scaled(&Vector::new(desi_transform.scale.x, desi_transform.scale.y, desi_transform.scale.z));
+
+    if let Some(num) = geo_instance.geo_param.into_rvm_pri_num() {
+        // tubi 不需要和desi进行变换
+        let translation = if geo_instance.is_tubi {
+            transform.translation
+        } else {
+            match &geo_instance.geo_param {
+                PdmsGeoParam::PrimSCylinder(data) => {
+                    if data.center_in_mid {
+                        transform.translation + transform.rotation.mul_vec3(Vec3::new(0.0, 0.0, data.phei / 2.0))
+                    } else {
+                        transform.translation
+                        // transform.translation + transform.rotation.mul_vec3(Vec3::new(0.0, 0.0, data.phei / 2.0))
+                    }
+                }
+                _ => {
+                    transform.translation
+                }
+            }
+        };
+        data.append(&mut gen_prim_head_data());
+        data.append(&mut format!("     {}\r\n", num).into_bytes());
+        data.append(&mut gen_prim_scale_position_data(transform.rotation, Vec3::ONE,
+                                                      translation));
+        data.append(&mut gen_desi_prim_aabb_data(aabb, geo_instance.transform, &geo_instance.geo_param));
+        data.append(&mut geo_instance.geo_param.convert_rvm_pri_data());
+    }
     data
 }
 
@@ -175,20 +216,32 @@ fn gen_prim_scale_position_data(rotation: Quat, scale: Vec3, position: Vec3) -> 
     data
 }
 
-fn gen_desi_prim_aabb_data(aabb: Aabb, world_transform: (Quat, Vec3, Vec3)) -> Vec<u8> {
-    let transform = bevy::prelude::Transform {
-        translation: world_transform.1,
-        rotation: world_transform.0,
-        scale: world_transform.2,
+fn gen_desi_prim_aabb_data(aabb: Aabb, world_transform: (Quat, Vec3, Vec3), geo_param: &PdmsGeoParam) -> Vec<u8> {
+    let max = if let PdmsGeoParam::PrimSCylinder(data) = geo_param {
+        if data.center_in_mid {
+            Vec3::from((aabb.maxs.x, aabb.maxs.y, aabb.maxs.z / 2.0))
+        } else {
+            // Vec3::from((aabb.maxs.x, aabb.maxs.y, aabb.maxs.z))
+            Vec3::from((aabb.maxs.x, aabb.maxs.y, aabb.maxs.z / 2.0))
+        }
+    } else {
+        Vec3::from((aabb.maxs.x, aabb.maxs.y, aabb.maxs.z))
     };
-    let inverse = transform.compute_matrix().inverse();
-    let min = Vec3::from((aabb.mins.x, aabb.mins.y, aabb.mins.z));
-    let max = Vec3::from((aabb.maxs.x, aabb.maxs.y, aabb.maxs.z));
-    let min_bbox = inverse.transform_point3(min);
-    let max_bbox = inverse.transform_point3(max);
+
+    let min = if let PdmsGeoParam::PrimSCylinder(data) = geo_param {
+        if data.center_in_mid {
+            Vec3::from((aabb.mins.x, aabb.mins.y, -aabb.maxs.z / 2.0))
+        } else {
+            // Vec3::from((aabb.mins.x, aabb.mins.y, aabb.mins.z))
+            Vec3::from((aabb.mins.x, aabb.mins.y, -aabb.maxs.z / 2.0))
+        }
+    } else {
+        Vec3::from((aabb.mins.x, aabb.mins.y, aabb.mins.z))
+    };
+
     let mut data = Vec::new();
-    data.append(&mut format!("     {:.2}       {:.2}       {:.2}\r\n", min_bbox.x, min_bbox.y, min_bbox.z).into_bytes());
-    data.append(&mut format!("     {:.2}       {:.2}       {:.2}\r\n", max_bbox.x, max_bbox.y, max_bbox.z).into_bytes());
+    data.append(&mut format!("     {:.2}       {:.2}       {:.2}\r\n", min.x, min.y, min.z).into_bytes());
+    data.append(&mut format!("     {:.2}       {:.2}       {:.2}\r\n", max.x, max.y, max.z).into_bytes());
     data
 }
 
