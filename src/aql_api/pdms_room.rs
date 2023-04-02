@@ -161,7 +161,7 @@ pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<UdaMajorT
     let aql = if filter_major.is_none() {
         AqlQuery::new("
         for e in 0..10 inbound @key pdms_edges
-            filter e.noun == 'PANE'
+            // filter e.noun == 'PANE'
             for v in 1 outbound CONCAT('room_eles/',e._key) room_edges
                 filter v != null
                 return v._key

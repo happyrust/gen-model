@@ -6,6 +6,7 @@
 extern crate clap;
 #[macro_use]
 extern crate nom;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::format;
 use std::fs;
@@ -41,7 +42,7 @@ use sqlx::Executor;
 use sqlx::pool::PoolConnection;
 use aios_database::api::attr::insert_attr_info;
 use aios_database::api::element::*;
-use aios_database::api::ssc_data::{get_ancestor_till_type, update_ssc_type};
+use aios_database::api::ssc_data::{get_ancestor_till_type, query_all_room_data, update_ssc_type};
 use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
 use aios_database::BATCH_CHUNKS_CNT;
 use aios_database::aql_api::pdms_room::{query_all_need_compute_room_refno, RoomEdgeAql, RoomElementAql, save_room_info_to_arangodb};
@@ -183,14 +184,13 @@ async fn main() -> anyhow::Result<()> {
             let mut file = fs::File::open(path)?;
             let mut data = vec![];
             file.read_to_end(&mut data)?;
-            let instance_mgr = bincode::deserialize::<CachedInstanceMgr>(&data)?;
-            dbg!(&instance_mgr.inst_mgr.inst_map.len());
-            for kv in &instance_mgr.inst_mgr.inst_map {
-                if let Some(aabb) = kv.value().aabb {
-                    if aabb.extents().magnitude().is_finite() {
-                        rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, *kv.key()));
-                    } else {
-                        // println!("Aabb {:?} is not ok : {:?}", kv.key(), &aabb);
+            if let Ok(instance_mgr) = bincode::deserialize::<CachedInstanceMgr>(&data) {
+                dbg!(&instance_mgr.inst_mgr.inst_map.len());
+                for kv in &instance_mgr.inst_mgr.inst_map {
+                    if let Some(aabb) = kv.value().aabb {
+                        if aabb.extents().magnitude().is_finite() {
+                            rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, *kv.key()));
+                        } else {}
                     }
                 }
             }
@@ -199,14 +199,16 @@ async fn main() -> anyhow::Result<()> {
         timer = Instant::now();
         let rtree = AccelerationTree::load(rstar_objs);
         println!("生成空间树费时: {}s", timer.elapsed().as_secs_f32());
-        let mut file = fs::File::create("accel.spa").unwrap();
+        let mut file = fs::File::create("assets/accel.spa").unwrap();
         let serialized = bincode::serialize(&rtree).unwrap();
         file.write_all(serialized.as_slice()).unwrap();
     }
 
     if db_option.save_spatial_tree_to_db {
         let mut site_major_map = HashMap::new();
-        let room_infos = vec![RefU64::from_two_nums(24381,34919)];
+        // let room_infos = vec![RefU64::from_two_nums(24381,34919)];
+        let room_infos = query_all_need_compute_room_refno(&vec![7200], "LOOP", Some("LOOP 1"), &mgr.project_map.get(&db_option.project_name).unwrap()).await?;
+        let room_infos = room_infos.into_iter().map(|x| x.0).collect::<Vec<_>>();
         let map = recompute_spatial_tree(room_infos, all_insts_mgr, collider_shape_mgr, &db_option).await?;
         save_room_info_to_arangodb(&mgr, map, &db_option, &mut site_major_map).await?;
     }

@@ -89,6 +89,35 @@ pub async fn query_instance_with_refno_in_arangodb(refno: RefU64, database: &Dat
     Ok(Some(result))
 }
 
+pub async fn query_instance_with_refnos_in_arangodb(refno: Vec<RefU64>, database: &Database) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
+    let refnos = refno.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
+    let aql = AqlQuery::new("
+    FOR refno in @refnos
+        FOR c IN 0..10 inbound CONCAT('pdms_eles/',refno) pdms_edges
+            PRUNE document(@collection,c._key) != null
+            Filter document(@collection,c._key) != null
+            let f = document(@collection,c._key)
+            let p = document(@params_collection, c._key)
+            return {
+                '_key':f._key,
+                'data':f.data,
+                'params': p.geo_params,
+                'visible':f.visible,
+                'generic_type':f.generic_type,
+                'aabb':f.aabb,
+                'world_transform':f.world_transform,
+                'ptset_map':f.ptset_map,
+                'flow_pt_indexs':f.flow_pt_indexs
+            }")
+        .bind_var("refnos", refnos)
+        .bind_var("collection", "pdms_instances")
+        .bind_var("params_collection", "geo_infos");
+    let result: Vec<EleGeosInfoJson> = database.aql_query(aql).await?;
+    if result.is_empty() { return Ok(None); }
+    let result = result.into_iter().map(|x| EleGeosInfo::from_json_type(x)).collect::<Vec<_>>();
+    Ok(Some(result))
+}
+
 pub async fn query_instance_level_with_refno_in_arangodb(refno: RefU64, database: &Database) -> anyhow::Result<Vec<RefU64>> {
     let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
     let pdms_instances = "pdms_instances";

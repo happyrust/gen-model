@@ -9,7 +9,7 @@ use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::PDMS_MESH;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
-use crate::graph_db::pdms_inst_arango::query_instance_with_refno_in_arangodb;
+use crate::graph_db::pdms_inst_arango::{query_instance_with_refno_in_arangodb, query_instance_with_refnos_in_arangodb};
 use crate::negative::query_instance_refnos_negative_aql;
 use crate::options::DbOption;
 
@@ -214,6 +214,29 @@ pub async fn query_pdms_instance_mesh_from_refno(refno:RefU64,database:&Database
     }
     let hashes = hashes.into_iter().collect::<Vec<_>>();
     let mesh_mgr = query_pdms_mesh_aql(hashes,database).await.unwrap_or_default();
+    Ok(PdmsInstanceMeshData {
+        inst_mgr,
+        mesh_mgr,
+    })
+}
+
+pub async fn query_pdms_instance_mesh_from_refnos(refnos:Vec<RefU64>,database:&Database) -> anyhow::Result<PdmsInstanceMeshData> {
+    let mut inst_mgr = ShapeInstancesMgr::default();
+    let mut hashes = HashSet::new();
+    if let Some(instance) = query_instance_with_refnos_in_arangodb(refnos,database).await? {
+        for inst in instance {
+            let refno = RefU64::from_url_refno(&inst._key);
+            if refno.is_none() { continue; }
+            // 找到参考号需要那些mesh,避免重复
+            for data in &inst.data {
+                hashes.insert(data.geo_hash);
+            }
+            let refno = refno.unwrap();
+            inst_mgr.inst_map.entry(refno).or_insert(inst);
+        }
+    }
+    let hashes = hashes.into_iter().collect::<Vec<_>>();
+    let mesh_mgr = query_pdms_mesh_aql(hashes,database).await.unwrapi_or_default();
     Ok(PdmsInstanceMeshData {
         inst_mgr,
         mesh_mgr,
