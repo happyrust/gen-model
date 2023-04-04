@@ -664,8 +664,6 @@ impl AiosDBManager {
     pub async fn init(db_option: &DbOption) -> anyhow::Result<Self> {
         let dir = db_option.project_path.to_string();
         let mut project_map = DashMap::new();
-        // let mut numbdbs = vec![];
-
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         let time = Instant::now();
@@ -1147,7 +1145,8 @@ impl AiosDBManager {
                     if let Ok(lstube_att) = mgr.get_attr(lstube).await {
                         let lstube_cat_refno = lstube_att.get_foreign_refno("CATR").unwrap_or_default();
                         //todo check how to get the bore value
-                        let tubi_geoms_info = resolve_desi_comp(refno, Some(lstube_cat_refno), mgr.as_ref(), is_debug).await.unwrap_or_default();
+                        let tubi_geoms_info = resolve_desi_comp(refno, Some(lstube_cat_refno),
+                                                                mgr.as_ref(), is_debug).await.unwrap_or_default();
                         let mut has_tube_geom = false;
                         for tubi_geom in &tubi_geoms_info.geometries {
                             if let TubeImplied(d) = tubi_geom {

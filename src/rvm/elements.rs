@@ -45,7 +45,7 @@ pub async fn create_rvm_file(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow:
     let element = create_element_data_tree_test(refno, &database, &pool, aios_mgr).await.unwrap();
     // if let Ok(tree) = element {
     let tree = element;
-        data.append(&mut gen_data_from_tree(tree));
+    data.append(&mut gen_data_from_tree(tree));
     // }
     data.append(&mut create_tail_data(cntb_len));
     Ok(data)
@@ -205,7 +205,7 @@ async fn create_element_data_tree_test(cur_refno: RefU64, database: &Database, p
     node_id_map.entry(cur_refno).or_insert(root);
     // 先将树生成，然后挂数据
     let mut pending_children = VecDeque::new();
-    let children = query_children_order_aql(database,cur_refno).await?;
+    let children = query_children_order_aql(database, cur_refno).await?;
     pending_children.extend(children);
     while !pending_children.is_empty() {
         let cur_ele = pending_children.pop_front().unwrap();
@@ -214,17 +214,16 @@ async fn create_element_data_tree_test(cur_refno: RefU64, database: &Database, p
         let refno = refno.unwrap();
         if let Some(owner_id) = node_id_map.get(&cur_ele.owner) {
             let pos = query_position_from_id(refno, aios_mgr).await?.unwrap_or(Vec3::ZERO);
-            let cur_node_id = tree.insert(Node::new((refno,gen_name_position_data(&cur_ele.name,pos))),UnderNode(owner_id))?;
+            let cur_node_id = tree.insert(Node::new((refno, gen_name_position_data(&cur_ele.name, pos))), UnderNode(owner_id))?;
             node_id_map.entry(refno).or_insert(cur_node_id);
         }
-        let cur_children = query_children_order_aql(database,refno).await?;
+        let cur_children = query_children_order_aql(database, refno).await?;
         for cur_child in cur_children {
             if GENRAL_NEGATIVE_NOUN_NAMES.contains(&cur_child.noun.as_str()) {
                 continue;
             }
             pending_children.push_back(cur_child);
         }
-
     }
     let instance = query_instance_with_refno_in_arangodb(cur_refno, database).await?;
     if instance.is_none() { return Ok(tree); }
@@ -419,11 +418,12 @@ async fn test_cylinder_height() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 管道生成的测试
 /// 1. aabb 保存的值和 rvm的值对不上 ， 2. 管道的 tubi 没保存
 #[tokio::test]
 async fn test_cata_aabb() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    let refno = RefU64::from_refno_str("23584/5495").unwrap();
+    let refno = RefU64::from_refno_str("23584/5515").unwrap();
     let data = create_rvm_file(refno, &mgr).await?;
     let mut file = std::fs::File::create("test_rvm.rvm").unwrap();
     file.write_all(&data).unwrap();
