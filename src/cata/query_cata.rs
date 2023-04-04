@@ -36,7 +36,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             }
         } else {
             let spre_ref = desi_att.get_foreign_refno("SPRE").unwrap_or_default();
-            let spre = interface.get_attr(spre_ref).await?;
+            let spre = interface.get_attr(spre_ref).await.unwrap();
             if spre.contains_attr_name("CATR") {
                 scom_ref = spre.get_foreign_refno("CATR");
             } else {
@@ -244,10 +244,6 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         cur_context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
     }
     let axis_map = resolve_axis_params(scom_info, &cur_context);
-    // if is_debug {
-    //     dbg!(&cur_context);
-    //     dbg!(&axis_map);
-    // }
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
         if scom_info.plin_map.contains_key(plin.as_str()) {
             Some(scom_info.plin_map.get(plin.as_str()).unwrap().clone())

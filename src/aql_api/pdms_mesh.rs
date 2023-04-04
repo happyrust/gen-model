@@ -4,7 +4,9 @@ use aios_core::pdms_data::PdmsInstanceMeshData;
 use aios_core::pdms_types::{CachedMeshesMgr, EleGeosInfo, GeoHash, RefU64, ShapeInstancesMgr};
 use aios_core::shape::pdms_shape::{PdmsInstanceMeshMap, PdmsMesh};
 use arangors_lite::{AqlQuery, Database};
+use bevy::prelude::Transform;
 use dashmap::DashMap;
+use glam::{Quat, Vec3};
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::PDMS_MESH;
@@ -236,11 +238,25 @@ pub async fn query_pdms_instance_mesh_from_refnos(refnos:Vec<RefU64>,database:&D
         }
     }
     let hashes = hashes.into_iter().collect::<Vec<_>>();
-    let mesh_mgr = query_pdms_mesh_aql(hashes,database).await.unwrapi_or_default();
+    let mesh_mgr = query_pdms_mesh_aql(hashes,database).await.unwrap_or_default();
     Ok(PdmsInstanceMeshData {
         inst_mgr,
         mesh_mgr,
     })
+}
+
+pub async fn query_refno_transform(refno:RefU64,database:&Database) -> anyhow::Result<Option<Transform>> {
+    let aql = AqlQuery::new("return document('pdms_instances',@key).world_transform")
+        .bind_var("key",refno.to_url_refno());
+    let result:Vec<(Quat,Vec3,Vec3)> = database.aql_query(aql).await?;
+    if result.is_empty() { return Ok(None); }
+    let result = result.first().unwrap();
+    let transform = Transform {
+        translation: result.1,
+        rotation: result.0,
+        scale: result.2,
+    };
+    Ok(Some(transform))
 }
 
 fn gen_query_pdms_mesh_from_refno_sql(hash: Vec<u64>) -> String {
@@ -275,11 +291,13 @@ async fn test_query_pdms_instance_mesh_from_refno() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
-    let refno = RefU64::from_refno_str("23584/5535").unwrap();
-    let result = query_pdms_instance_mesh_from_refno(refno,&database).await?;
-    for data in result.inst_mgr.inst_map {
-        dbg!(&data.0);
-    }
-    dbg!(&result.mesh_mgr.len());
+    let refno = RefU64::from_refno_str("24383/69713").unwrap();
+    // let result = query_pdms_instance_mesh_from_refno(refno,&database).await?;
+    let result = query_refno_transform(refno,&database).await?;
+    // for data in result.inst_mgr.inst_map {
+    //     dbg!(&data.0);
+    // }
+    // dbg!(&result.mesh_mgr.len());
+    dbg!(&result);
     Ok(())
 }

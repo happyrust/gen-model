@@ -97,7 +97,7 @@ pub const GNERAL_PRIM_NOUN_NAMES: [&'static str; 20] = [
     "NPYR", "NDIS", "NXTR", "NCTO", "NRTO", "NSLC",
     "NREV", "NSCY"];
 
-pub const GENRAL_NEGATIVE_NOUN_NAMES: [&'static str;12 ] = [
+pub const GENRAL_NEGATIVE_NOUN_NAMES: [&'static str; 12] = [
     "NCYL", "NBOX", "NCON", "NSNO",
     "NPYR", "NDIS", "NXTR", "NCTO", "NRTO", "NSLC",
     "NREV", "NSCY"
@@ -649,13 +649,15 @@ impl AiosDBManager {
             dbg!(project);
             conn.execute(gen_create_project_mdb_sql().as_str()).await?;
             conn.execute(gen_create_project_mdb_json_sql().as_str()).await?;
-            self.insert_project_mdb(&project_pool, &self.info_pool).await?;
+            dbg!("execute success");
+            // self.insert_project_mdb(&project_pool, &self.info_pool).await?;
             cache_mdb_site_map(mdb, module, &project_pool).await;
             // 将 mdb对应的 module 下的所有 numbdb保存下来
             let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
             for r in results {
                 self.cache_module_numbdbs.push(r);
             }
+            dbg!(&format!("project {} cache ok", project));
         }
         Ok(())
     }
