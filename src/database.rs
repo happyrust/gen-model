@@ -146,6 +146,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             for (k, v) in db_info.noun_attr_info_map {
                 let mut attr_map = BTreeMap::new();
                 let type_name = db1_dehash(k as u32);
+                if &type_name == "HPIN" { dbg!("hello"); }
                 if type_name.is_empty() {
                     continue;
                 }
@@ -655,6 +656,7 @@ pub async fn sync_total_async_threaded(
                             continue;
                         }
                     }
+                    dbg!(&type_refnos);
                     let info_pool_clone = info_pool.clone();
                     let filename_clone = file_name_clone.clone();
                     let project_clone = project.clone();
