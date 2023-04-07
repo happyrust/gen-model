@@ -124,21 +124,23 @@ pub fn gen_prim_data_test(geo_instance: &EleGeoInstance, desi_transform: Transfo
         rotation: geo_instance.transform.0,
         scale: geo_instance.transform.2,
     };
-    let mut transform = desi_transform * geo_transform;
+    let mut transform =
+        if geo_instance.is_tubi {
+            geo_transform
+        } else {
+            desi_transform * geo_transform
+        };
     let aabb = geo_instance.aabb.scaled(&Vector::new(desi_transform.scale.x, desi_transform.scale.y, desi_transform.scale.z));
 
     if let Some(num) = geo_instance.geo_param.into_rvm_pri_num() {
         // tubi 不需要和desi进行变换
-        let translation = if geo_instance.is_tubi {
-            transform.translation
-        } else {
+        let translation = {
             match &geo_instance.geo_param {
                 PdmsGeoParam::PrimSCylinder(data) => {
-                    if data.center_in_mid {
+                    if !data.center_in_mid {
                         transform.translation + transform.rotation.mul_vec3(Vec3::new(0.0, 0.0, data.phei / 2.0))
                     } else {
                         transform.translation
-                        // transform.translation + transform.rotation.mul_vec3(Vec3::new(0.0, 0.0, data.phei / 2.0))
                     }
                 }
                 _ => {
