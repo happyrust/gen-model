@@ -94,14 +94,13 @@ pub async fn query_instance_with_refnos_in_arangodb(refno: Vec<RefU64>, database
     let aql = AqlQuery::new("
     FOR refno in @refnos
         FOR c IN 0..10 inbound CONCAT('pdms_eles/',refno) pdms_edges
-            PRUNE document(@collection,c._key) != null
             Filter document(@collection,c._key) != null
             let f = document(@collection,c._key)
-            let p = document(@params_collection, c._key)
+            // let p = document(@params_collection, c._key)
             return {
                 '_key':f._key,
                 'data':f.data,
-                'params': p.geo_params,
+                 //'params': p.geo_params,
                 'visible':f.visible,
                 'generic_type':f.generic_type,
                 'aabb':f.aabb,
