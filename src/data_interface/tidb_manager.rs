@@ -699,6 +699,7 @@ impl AiosDBManager {
             cache_mdb_site_map(mdb, module, &project_pool).await;
             // 将 mdb对应的 module 下的所有 numbdb保存下来
             let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
+            dbg!("cache success");
             for r in results {
                 self.cache_module_numbdbs.push(r);
             }
