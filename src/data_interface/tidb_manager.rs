@@ -918,11 +918,11 @@ impl AiosDBManager {
             return Ok(false);
         }
         let desi_att = mgr.get_attr(design_refno).await?;
-        dbg!(&desi_att);
+        // dbg!(&desi_att);
         let geoms = resolve_desi_comp(design_refno, None, mgr.as_ref(), is_debug)
             .await
             .unwrap_or_default();
-        dbg!(&geoms);
+        // dbg!(&geoms);
         if type_name == "SCTN"
             || type_name == "STWALL"
             || type_name == "GENSEC"
