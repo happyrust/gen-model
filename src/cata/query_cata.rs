@@ -56,13 +56,16 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
 
     //缓存备用
     if !CACHED_SCOM_INFO_MAP.contains_key(&scom_ref) {
-        if let Ok(scom_info) = query_scom_info(scom_ref, interface, is_debug).await {
-            CACHED_SCOM_INFO_MAP.insert(scom_ref, &scom_info).unwrap();
-        } else {
-            let error_info = format!("元件库: {} 解析出错", scom_ref.to_refno_string());
-            println!("{}", &error_info);
-            return Err(anyhow!(error_info));
-        };
+        match query_scom_info(scom_ref, interface, is_debug).await {
+            Ok(scom_info) => {
+                CACHED_SCOM_INFO_MAP.insert(scom_ref, &scom_info).unwrap();
+            }
+            Err(e) => {
+                let error_info = format!("元件库: {} 解析出错 {}", scom_ref.to_refno_string(), e.to_string());
+                println!("{}", &error_info);
+                return Err(anyhow!(error_info));
+            }
+        }
     }
     let scom_info = CACHED_SCOM_INFO_MAP.get(&scom_ref).unwrap();
     if is_debug {
@@ -123,9 +126,9 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
         if let Ok(gmse_am) = interface.get_attr(gmse_refno).await {
             gm_params = query_gm_params(&gmse_am, interface).await?;
-            // if is_debug {
-            //     dbg!(&gm_params);
-            // }
+            if is_debug {
+                dbg!(&gm_params);
+            }
         }
     }
     let mut plin_map = HashMap::new();

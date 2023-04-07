@@ -656,7 +656,7 @@ pub async fn sync_total_async_threaded(
                             continue;
                         }
                     }
-                    dbg!(&type_refnos);
+                    // dbg!(&type_refnos);
                     let info_pool_clone = info_pool.clone();
                     let filename_clone = file_name_clone.clone();
                     let project_clone = project.clone();

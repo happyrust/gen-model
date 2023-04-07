@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use aios_core::data_center::TubiData;
+// use aios_core::data_center::TubiData;
 use aios_core::pdms_types::RefU64;
 use aios_core::prim_geo::tubing::TubiEdgeAql;
 use arangors_lite::{AqlQuery, Database};
@@ -275,40 +275,40 @@ pub async fn insert_tubi_value(tubi_map: DashMap<(RefU64, String), f32>, pool: &
 }
 
 /// 找到bran里面所有的tubi，并过滤掉 atta ，找到tubi对应的长度和lstu（第一个元素为hstu）
-pub async fn query_tubi_lstu(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiData>> {
-    let mut result = Vec::new();
-    let tubis = query_tubi_from_bran_filter_atta(bran_refno, database).await?;
-    for tubi in tubis {
-        let from_refno = RefU64::from_arangodb_refno_str(&tubi._from);
-        if from_refno.is_none() { continue; }
-        let from_refno = from_refno.unwrap();
-        // bran下面的 tubi应该取hstu
-        let lstu = if bran_refno == from_refno {
-            query_foreign_name_aql(from_refno, vec!["HSTU", "HSTU"], database).await?
-        } else {
-            query_foreign_name_aql(from_refno, vec!["LSTU", "LSTU"], database).await?
-        };
-        if let Some(lstu) = lstu {
-            result.push(TubiData {
-                pre_refno: from_refno,
-                lstu_name: lstu,
-                length: tubi.start_pt.distance(tubi.end_pt),
-            });
-        }
-    }
-    Ok(result)
-}
+// pub async fn query_tubi_lstu(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiData>> {
+//     let mut result = Vec::new();
+//     let tubis = query_tubi_from_bran_filter_atta(bran_refno, database).await?;
+//     for tubi in tubis {
+//         let from_refno = RefU64::from_arangodb_refno_str(&tubi._from);
+//         if from_refno.is_none() { continue; }
+//         let from_refno = from_refno.unwrap();
+//         // bran下面的 tubi应该取hstu
+//         let lstu = if bran_refno == from_refno {
+//             query_foreign_name_aql(from_refno, vec!["HSTU", "HSTU"], database).await?
+//         } else {
+//             query_foreign_name_aql(from_refno, vec!["LSTU", "LSTU"], database).await?
+//         };
+//         if let Some(lstu) = lstu {
+//             result.push(TubiData {
+//                 pre_refno: from_refno,
+//                 lstu_name: lstu,
+//                 length: tubi.start_pt.distance(tubi.end_pt),
+//             });
+//         }
+//     }
+//     Ok(result)
+// }
 
 #[tokio::test]
 async fn test_query_tubi_from_bran_filter_atta() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
-    let refno = RefU64::from_refno_str("23584/5443").unwrap();
-    let results = query_tubi_lstu(refno, &database).await?;
-    dbg!(&results);
+    // use config::{Config, ConfigError, Environment, File};
+    // let s = Config::builder()
+    //     .add_source(File::with_name("DbOption"))
+    //     .build()?;
+    // let db_option: DbOption = s.try_deserialize().unwrap();
+    // let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    // let refno = RefU64::from_refno_str("23584/5443").unwrap();
+    // let results = query_tubi_lstu(refno, &database).await?;
+    // dbg!(&results);
     Ok(())
 }

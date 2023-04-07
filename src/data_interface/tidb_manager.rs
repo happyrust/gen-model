@@ -194,9 +194,6 @@ impl PdmsDataInterface for AiosDBManager {
         refno: RefU64,
         columns: Option<Vec<&str>>,
     ) -> anyhow::Result<AttrMap> {
-        // if let Some(k) = PDMS_IMPLICIT_ATT_MAP_CACHE.get(&refno) {
-        //     return Ok(k.value().clone());
-        // }
         if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr =
@@ -297,19 +294,6 @@ impl PdmsDataInterface for AiosDBManager {
             let children = query_children(refno, &project_pool).await?;
             for child in children {
                 let attr = self.get_attr(child.0).await?;
-                r.push(attr);
-            }
-        }
-        Ok(r)
-    }
-
-    async fn get_travel_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
-        let mut r = vec![];
-        if let Ok(database) = self.get_arangodb_conn().await {
-            let children = query_travel_children_aql(&database, refno).await?;
-            for child in children {
-                let child_refno = RefU64::from_refno_str(&child.refno)?;
-                let attr = self.get_attr(child_refno).await?;
                 r.push(attr);
             }
         }
@@ -582,6 +566,19 @@ impl PdmsDataInterface for AiosDBManager {
             scale: Vec3::ONE,
         }))
     }
+
+    async fn get_travel_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
+        let mut r = vec![];
+        if let Ok(database) = self.get_arangodb_conn().await {
+            let children = query_travel_children_aql(&database, refno).await?;
+            for child in children {
+                let child_refno = RefU64::from_refno_str(&child.refno)?;
+                let attr = self.get_attr(child_refno).await?;
+                r.push(attr);
+            }
+        }
+        Ok(r)
+    }
 }
 
 impl AiosDBManager {
@@ -637,7 +634,7 @@ impl AiosDBManager {
             &self.db_option.arangodb_user,
             &self.db_option.arangodb_password,
         )
-        .await?;
+            .await?;
 
         Ok(conn.db(&self.db_option.arangodb_database).await?)
     }
@@ -680,7 +677,7 @@ impl AiosDBManager {
             &db_option.mdb_name,
             &db_option.module,
         )
-        .await?;
+            .await?;
         Ok(mgr)
     }
 
@@ -748,7 +745,7 @@ impl AiosDBManager {
                 &db_option.project_name.to_uppercase()
             ),
         )
-        .await?;
+            .await?;
         let ref0_map = get_ref0_map(&info_conn).await?;
         let projects = db_option.included_projects.clone();
         println!("正在创建图数据库连接");
@@ -760,8 +757,8 @@ impl AiosDBManager {
                 (&db_option.manual_db_nums).clone(),
                 &database,
             )
-            .await
-            .unwrap_or(DashMap::new())
+                .await
+                .unwrap_or(DashMap::new())
         } else {
             DashMap::new()
         };
@@ -938,7 +935,7 @@ impl AiosDBManager {
                 &brep_shape_map,
                 mgr.as_ref(),
             )
-            .await?;
+                .await?;
         } else {
             let GeomsInfo {
                 geometries,
@@ -962,7 +959,6 @@ impl AiosDBManager {
             }
             refno_ptset_map.insert(design_refno, axis_map);
         }
-        dbg!(&brep_shape_map);
         Ok(true)
     }
 
@@ -1197,8 +1193,8 @@ impl AiosDBManager {
                             mgr.as_ref(),
                             is_debug,
                         )
-                        .await
-                        .unwrap_or_default();
+                            .await
+                            .unwrap_or_default();
                         let mut has_tube_geom = false;
                         for tubi_geom in &tubi_geoms_info.geometries {
                             if let TubeImplied(d) = tubi_geom {
@@ -1338,8 +1334,8 @@ impl AiosDBManager {
                             mgr.as_ref(),
                             is_debug,
                         )
-                        .await
-                        .unwrap_or_default();
+                            .await
+                            .unwrap_or_default();
                         let mut has_tube_geom = false;
                         for tubi_geom in &tubi_geoms_info.geometries {
                             if let TubeImplied(d) = tubi_geom {
@@ -1478,7 +1474,6 @@ impl AiosDBManager {
         let batch_size = mgr.db_option.gen_model_batch_size;
         let mdb = &db_option.mdb_name;
         let t = Instant::now();
-
         let mut has_cata_refnos = RefU64Vec::default();
         if let Some(debug_type) = &db_option.debug_refno_type {
             if debug_type == "CATA" {
@@ -1501,11 +1496,11 @@ impl AiosDBManager {
                             root_refno,
                             &CATA_ATT_TYPES,
                         )
-                        .await?
-                        .into_iter()
-                        .for_each(|child| {
-                            has_cata_refnos.push(child.refno);
-                        });
+                            .await?
+                            .into_iter()
+                            .for_each(|child| {
+                                has_cata_refnos.push(child.refno);
+                            });
                     }
                 }
             } else {
@@ -1523,7 +1518,7 @@ impl AiosDBManager {
 
         let is_debug = target_debug_refno.is_some();
         if is_debug {
-            println!("正在调试：{:?}", target_debug_refno.as_ref().unwrap());
+            println!("正在调试cata：{:?}, 数量: {has_cata_cnt}", target_debug_refno.as_ref().unwrap());
         }
 
         let batch_chunks_cnt = has_cata_cnt / batch_size + 1;
@@ -1571,8 +1566,8 @@ impl AiosDBManager {
                             target_debug_refno,
                             &mut tubi_aqls_clone,
                         )
-                        .await
-                        .unwrap_or_default();
+                            .await
+                            .unwrap_or_default();
                     } else {
                         Self::get_cata_single_geoms(
                             mgr.clone(),
@@ -1581,8 +1576,8 @@ impl AiosDBManager {
                             &refno_ptset_map,
                             target_debug_refno,
                         )
-                        .await
-                        .unwrap_or_default();
+                            .await
+                            .unwrap_or_default();
                     }
                     for (child_refno, shapes) in brep_shapes_map {
                         let trans_origin = mgr
@@ -1664,7 +1659,7 @@ impl AiosDBManager {
                                     translation.y,
                                     translation.z,
                                 )
-                                .into(),
+                                    .into(),
                             });
                             if is_tubi {
                                 has_tubi = true;
@@ -1701,7 +1696,7 @@ impl AiosDBManager {
                                     trans_origin.translation.y,
                                     trans_origin.translation.z,
                                 )
-                                .into(),
+                                    .into(),
                             }),
                         );
 
@@ -1773,9 +1768,9 @@ impl AiosDBManager {
                                     root_refno,
                                     &GNERAL_PRIM_NOUN_NAMES,
                                 )
-                                .await?
-                                .iter()
-                                .for_each(|x| prim_refnos.push(x.refno));
+                                    .await?
+                                    .iter()
+                                    .for_each(|x| prim_refnos.push(x.refno));
                             }
                         }
                     }
@@ -1875,7 +1870,7 @@ impl AiosDBManager {
                                 tr.translation.y,
                                 tr.translation.z,
                             )
-                            .into(),
+                                .into(),
                         });
                         let geom_inst = EleGeoInstance {
                             geo_hash,
@@ -1901,7 +1896,7 @@ impl AiosDBManager {
                                     trans_origin.translation.y,
                                     trans_origin.translation.z,
                                 )
-                                .into(),
+                                    .into(),
                             }),
                         );
                         inst_map.insert(refno, geos_info);
@@ -2031,9 +2026,9 @@ impl AiosDBManager {
                             root_refno,
                             &["PLOO", "LOOP"],
                         )
-                        .await?
-                        .iter()
-                        .for_each(|x| loop_refnos.push(x.refno));
+                            .await?
+                            .iter()
+                            .for_each(|x| loop_refnos.push(x.refno));
                     }
                 }
             } else {
@@ -2204,7 +2199,7 @@ impl AiosDBManager {
                                         tr.translation.y,
                                         tr.translation.z,
                                     )
-                                    .into(),
+                                        .into(),
                                 });
                                 let geom_inst = EleGeoInstance {
                                     geo_hash,
@@ -2230,7 +2225,7 @@ impl AiosDBManager {
                                             trans_origin.translation.y,
                                             trans_origin.translation.z,
                                         )
-                                        .into(),
+                                            .into(),
                                     }),
                                 );
                             } else {
@@ -2316,7 +2311,7 @@ impl AiosDBManager {
                 &url,
                 format!("PDMS_INFO_DB_{}", mgr.db_option.project_name.to_uppercase()).as_str(),
             )
-            .await?;
+                .await?;
             let pool = AiosDBManager::get_db_pool(&url, project).await?;
             let mdb_dbnos_map = mgr.query_mdb_dbnos(&pool, &info_pool).await?;
             let key_str = format!("/{mdb}");
@@ -2340,7 +2335,7 @@ impl AiosDBManager {
             let instance_mgr = CachedInstanceMgr::deserialize_from_bin_file(&format!(
                 "./assets/instance/{db_no}.inst"
             ))
-            .unwrap_or_default();
+                .unwrap_or_default();
             // dbg!(instance_mgr.inst_mgr.len());
             let instance_mgr = Arc::new(instance_mgr);
             let instance_mgr_clone = instance_mgr.clone();
@@ -2371,8 +2366,8 @@ impl AiosDBManager {
                         Some(vec![db_no]),
                         &db_option_clone,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 handles.push(handle);
             }
@@ -2388,8 +2383,8 @@ impl AiosDBManager {
                         &db_option_clone,
                         Some(vec![db_no]),
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 handles.push(handle);
             }
@@ -2405,8 +2400,8 @@ impl AiosDBManager {
                         &db_option_clone,
                         Some(vec![db_no]),
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 handles.push(handle);
             }
