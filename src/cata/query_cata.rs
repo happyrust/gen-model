@@ -1,22 +1,21 @@
-use dashmap::DashMap;
-use std::collections::{BTreeMap, HashMap};
-use aios_core::parsed_data::GeomsInfo;
-use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
-use aios_core::pdms_types::{AttrMap, RefU64};
-use aios_core::pdms_types::AttrVal::IntArrayType;
-use anyhow::anyhow;
-use dashmap::mapref::one::Ref;
-use log::{error, info};
-use sled::pin;
-use smol_str::SmolStr;
 use crate::cata::resolve::{resolve_axis_params, resolve_gms};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::defines::CACHED_SCOM_INFO_MAP;
+use aios_core::parsed_data::GeomsInfo;
+use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
+use aios_core::pdms_types::AttrVal::IntArrayType;
+use aios_core::pdms_types::{AttrMap, RefU64};
+use anyhow::anyhow;
+use dashmap::mapref::one::Ref;
+use dashmap::DashMap;
+use log::{error, info};
+use sled::pin;
+use smol_str::SmolStr;
+use std::collections::{BTreeMap, HashMap};
 
 pub const DDHEIGHT_STR: &'static str = "DDHEIGHT";
 pub const DDRADIUS_STR: &'static str = "DDRADIUS";
 pub const DDANGLE_STR: &'static str = "DDANGLE";
-
 
 ///求解design component
 pub async fn resolve_desi_comp<T: PdmsDataInterface>(
@@ -45,15 +44,19 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             }
         }
     }
+    // dbg!(scom_ref);
 
-    let scom_ref = scom_ref.ok_or(anyhow!(format!("SCOM not exist in element: {}", refno.to_refno_str())))?;
+    let scom_ref = scom_ref.ok_or(anyhow!(format!(
+        "SCOM not exist in element: {}",
+        refno.to_refno_str()
+    )))?;
     if !scom_ref.is_valid() {
         return Err(anyhow!("Scom ref is invalid".to_string()));
     }
 
     //缓存备用
     if !CACHED_SCOM_INFO_MAP.contains_key(&scom_ref) {
-        if let Ok(mut scom_info) = query_scom_info(scom_ref, interface, is_debug).await {
+        if let Ok(scom_info) = query_scom_info(scom_ref, interface, is_debug).await {
             CACHED_SCOM_INFO_MAP.insert(scom_ref, &scom_info).unwrap();
         } else {
             let error_info = format!("元件库: {} 解析出错", scom_ref.to_refno_string());
@@ -62,9 +65,9 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         };
     }
     let scom_info = CACHED_SCOM_INFO_MAP.get(&scom_ref).unwrap();
-    // if is_debug {
-    //     dbg!(&scom_info.value());
-    // }
+    if is_debug {
+        dbg!(&scom_info.value());
+    }
     let mut context: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
     if let Some(v) = desi_att.get_as_string("JUSL") {
         context.insert("JUSL".into(), v.into());
@@ -72,18 +75,9 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     context.insert("DESI_REFNO".into(), refno.to_refno_str());
     let mut desp = desi_att.get_f64_vec("DESP").unwrap_or_default();
     for i in 0..desp.len() {
-        context.insert(
-            format!("DESI{}", i + 1).into(),
-            desp[i].to_string().into(),
-        );
-        context.insert(
-            format!("DDES{}", i + 1).into(),
-            desp[i].to_string().into(),
-        );
-        context.insert(
-            format!("DESP{}", i + 1).into(),
-            desp[i].to_string().into(),
-        );
+        context.insert(format!("DESI{}", i + 1).into(), desp[i].to_string().into());
+        context.insert(format!("DDES{}", i + 1).into(), desp[i].to_string().into());
+        context.insert(format!("DESP{}", i + 1).into(), desp[i].to_string().into());
     }
     let height = desi_att.get_as_string("HEIG").unwrap_or("0.0".into());
     context.insert(DDHEIGHT_STR.into(), SmolStr::new(height.clone()));
@@ -96,12 +90,11 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     context.insert("RADI".into(), SmolStr::new(radi));
     let geom_info = resolve_cata_comp(scom_info.value(), interface, Some(context), is_debug).await;
     if geom_info.is_err() {
-        error!("{:?}",geom_info.as_ref().err());
-        error!("{:?}",desi_att.to_string_hashmap());
+        error!("{:?}", geom_info.as_ref().err());
+        error!("{:?}", desi_att.to_string_hashmap());
     }
     geom_info
 }
-
 
 ///整合SCOM对应的临时数据
 pub async fn query_scom_info<T: PdmsDataInterface>(
@@ -110,7 +103,9 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     is_debug: bool,
 ) -> anyhow::Result<ScomInfo> {
     let attr_map = interface.get_attr(refno).await.unwrap();
-    let type_noun = attr_map.get_type_cloned().ok_or(anyhow!(format!("{:?} Scom att not correct", refno)))?;
+    let type_noun = attr_map
+        .get_type_cloned()
+        .ok_or(anyhow!(format!("{:?} Scom att not correct", refno)))?;
     let is_sprf = type_noun == "SPRF";
     let ptref_name = if is_sprf { "PSTR" } else { "PTRE" };
     let mut axis_params = vec![];
@@ -128,9 +123,9 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
         if let Ok(gmse_am) = interface.get_attr(gmse_refno).await {
             gm_params = query_gm_params(&gmse_am, interface).await?;
-            if is_debug {
-                dbg!(&gm_params);
-            }
+            // if is_debug {
+            //     dbg!(&gm_params);
+            // }
         }
     }
     let mut plin_map = HashMap::new();
@@ -141,8 +136,14 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
                 plin_map.insert(
                     k,
                     PlinParam {
-                        vxy: [a.get_as_string("PX").unwrap_or("0".to_string()), a.get_as_string("PY").unwrap_or("0".to_string())],
-                        dxy: [a.get_as_string("DX").unwrap_or("0".to_string()), a.get_as_string("DY").unwrap_or("0".to_string())],
+                        vxy: [
+                            a.get_as_string("PX").unwrap_or("0".to_string()),
+                            a.get_as_string("PY").unwrap_or("0".to_string()),
+                        ],
+                        dxy: [
+                            a.get_as_string("DX").unwrap_or("0".to_string()),
+                            a.get_as_string("DY").unwrap_or("0".to_string()),
+                        ],
                         plax: a.get_as_string("PLAX").unwrap_or("unset".to_string()),
                     },
                 );
@@ -158,7 +159,8 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
             .get_as_string("PARA")
             .unwrap_or_default()
             .replace("\n", " ")
-            .replace("  ", " ").into(),
+            .replace("  ", " ")
+            .into(),
         axis_param_numbers,
         attr_map,
         plin_map,
@@ -200,12 +202,15 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
         if !child.is_visible_by_level(None).unwrap_or(true) {
             continue;
         }
-        let has_children = child.get_type_cloned().unwrap_or_default() == "SPRO";//todo add other types
-        gms.push(query_gm_param(&child, interface, has_children).await.unwrap_or_default());
+        let has_children = child.get_type_cloned().unwrap_or_default() == "SPRO"; //todo add other types
+        gms.push(
+            query_gm_param(&child, interface, has_children)
+                .await
+                .unwrap_or_default(),
+        );
     }
     Ok(gms)
 }
-
 
 ///对元件库的SCOM Element进行求值计算
 pub async fn resolve_cata_comp<T: PdmsDataInterface>(
@@ -235,11 +240,26 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     // dbg!(scom_info.attr_map.to_string_hashmap());
     let params = scom_info.attr_map.get_f64_vec("PARA").unwrap_or_default();
     for i in 0..params.len() {
-        cur_context.insert(format!("OPAR{}", i + 1).into(), params[i].to_string().into());
-        cur_context.insert(format!("APAR{}", i + 1).into(), params[i].to_string().into());
-        cur_context.insert(format!("CPAR{}", i + 1).into(), params[i].to_string().into());
-        cur_context.insert(format!("PARA{}", i + 1).into(), params[i].to_string().into());
-        cur_context.insert(format!("PARAM{}", i + 1).into(), params[i].to_string().into());
+        cur_context.insert(
+            format!("OPAR{}", i + 1).into(),
+            params[i].to_string().into(),
+        );
+        cur_context.insert(
+            format!("APAR{}", i + 1).into(),
+            params[i].to_string().into(),
+        );
+        cur_context.insert(
+            format!("CPAR{}", i + 1).into(),
+            params[i].to_string().into(),
+        );
+        cur_context.insert(
+            format!("PARA{}", i + 1).into(),
+            params[i].to_string().into(),
+        );
+        cur_context.insert(
+            format!("PARAM{}", i + 1).into(),
+            params[i].to_string().into(),
+        );
         cur_context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
         cur_context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
     }
@@ -291,9 +311,7 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             y: attr_map.get_as_smol_str("PY")?,
             z: attr_map.get_as_smol_str("PZ")?,
             distance: "".into(),
-            direction: {
-                attr_map.get_as_smol_str("PTCD").unwrap_or("Y".into())
-            },
+            direction: { attr_map.get_as_smol_str("PTCD").unwrap_or("Y".into()) },
             pconnect,
             pbore,
             pnt_index_str: None,
@@ -312,7 +330,8 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             pnt_index_str: None,
         },
         "PTPOS" => {
-            AxisParam {   //todo need fix " TPOS OF CREF"   " TDIR OF CREF"
+            AxisParam {
+                //todo need fix " TPOS OF CREF"   " TDIR OF CREF"
                 refno,
                 type_name,
                 number,
@@ -344,7 +363,11 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
 }
 
 ///获得gmse的params
-pub async fn query_gm_param(a: &AttrMap, interface: &dyn PdmsDataInterface, has_chidren: bool) -> Option<GmParam> {
+pub async fn query_gm_param(
+    a: &AttrMap,
+    interface: &dyn PdmsDataInterface,
+    has_chidren: bool,
+) -> Option<GmParam> {
     let mut paxises = a.get_attr_strings_without_default(&["PAXI", "PAAX", "PBAX", "PCAX"]);
     if let Some(val) = a.get_val("PTS") {
         match val {
@@ -383,21 +406,28 @@ pub async fn query_gm_param(a: &AttrMap, interface: &dyn PdmsDataInterface, has_
     } else {
         if has_chidren {
             for a in interface.get_children_attrs(refno).await.ok()? {
-                verts.push([SmolStr::new(a.get_as_string("PX").unwrap_or_default())
-                    , SmolStr::new(a.get_as_string("PY").unwrap_or_default()),
-                    SmolStr::new(a.get_as_string("PZ").unwrap_or_default())
+                verts.push([
+                    SmolStr::new(a.get_as_string("PX").unwrap_or_default()),
+                    SmolStr::new(a.get_as_string("PY").unwrap_or_default()),
+                    SmolStr::new(a.get_as_string("PZ").unwrap_or_default()),
                 ]);
                 frads.push(SmolStr::new(a.get_as_string("PRAD").unwrap_or_default()));
-                dxy.push([SmolStr::new(a.get_as_string("DX").unwrap_or_default()), SmolStr::new(a.get_as_string("DY").unwrap_or_default())]);
+                dxy.push([
+                    SmolStr::new(a.get_as_string("DX").unwrap_or_default()),
+                    SmolStr::new(a.get_as_string("DY").unwrap_or_default()),
+                ]);
             }
         } else {
-            verts.push([SmolStr::new(a.get_as_string("PX").unwrap_or_default()),
+            verts.push([
+                SmolStr::new(a.get_as_string("PX").unwrap_or_default()),
                 SmolStr::new(a.get_as_string("PY").unwrap_or_default()),
-                SmolStr::new(a.get_as_string("PZ").unwrap_or_default())
+                SmolStr::new(a.get_as_string("PZ").unwrap_or_default()),
             ]);
             frads.push(SmolStr::new(a.get_as_string("PRAD").unwrap_or_default()));
-            dxy.push([SmolStr::new(a.get_as_string("DX").unwrap_or_default()),
-                SmolStr::new(a.get_as_string("DY").unwrap_or_default())]);
+            dxy.push([
+                SmolStr::new(a.get_as_string("DX").unwrap_or_default()),
+                SmolStr::new(a.get_as_string("DY").unwrap_or_default()),
+            ]);
         }
     }
 
@@ -413,7 +443,9 @@ pub async fn query_gm_param(a: &AttrMap, interface: &dyn PdmsDataInterface, has_
         phei: SmolStr::new(a.get_as_string("PHEI").unwrap_or_default()),
         offset: SmolStr::new(a.get_as_string("POFF").unwrap_or_default()),
         box_lengths: a.get_attr_strings(&["PXLE", "PYLE", "PZLE"]),
-        xyz: a.get_attr_strings(&["PX", "PY", "PZ", "PBBT", "PCBT", "PBTP", "PCTP", "PBOF", "PCOF"]),
+        xyz: a.get_attr_strings(&[
+            "PX", "PY", "PZ", "PBBT", "PCBT", "PBTP", "PCTP", "PBOF", "PCOF",
+        ]),
         verts,
         frads,
         dxy,
@@ -432,7 +464,10 @@ pub async fn process_dtse_params<T: PdmsDataInterface>(
     context: &mut BTreeMap<SmolStr, SmolStr>,
 ) -> Option<bool> {
     let dtre_refno = attr_map.get_foreign_refno("DTRE")?;
-    let children = interface.get_children_attrs(dtre_refno).await.unwrap_or_default();
+    let children = interface
+        .get_children_attrs(dtre_refno)
+        .await
+        .unwrap_or_default();
     for child in children {
         let key = SmolStr::new(format!("RPRO_{}", child.get_as_string("DKEY")?));
         let exp = SmolStr::new(child.get_as_string("PPRO")?);

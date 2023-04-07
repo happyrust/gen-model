@@ -107,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut all_insts_mgr = HashMap::new();
     if db_option.gen_model_mesh {
-        dbg!("正在生成模型");
+        println!("正在生成模型");
         let mut time = Instant::now();
         AiosDBManager::cache_geos_data(mgr.clone(), db_option.clone()).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
             file.read_to_end(&mut data)?;
             let instance_mgr = bincode::deserialize::<CachedInstanceMgr>(&data)?;
             if db_option.save_model_mesh_to_graph_db {
-                dbg!("正在保存Instances");
+                // dbg!("正在保存Instances");
                 sync_instance_to_graph_db(mgr.clone(), &instance_mgr).await?;
             }
             all_insts_mgr.insert(dbno, instance_mgr);
@@ -183,7 +183,7 @@ async fn main() -> anyhow::Result<()> {
         let arch_db_nums = db_option.clone().arch_db_nums.unwrap_or_default();
         for path in children_files {
             let path = path?.path();
-            dbg!(&path);
+            // dbg!(&path);
             let filename = path.file_name().unwrap().to_str().unwrap().to_string();
             if !filename.contains("inst") {
                 continue;
@@ -198,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
             let mut data = vec![];
             file.read_to_end(&mut data)?;
             if let Ok(instance_mgr) = bincode::deserialize::<CachedInstanceMgr>(&data) {
-                dbg!(&instance_mgr.inst_mgr.inst_map.len());
+                // dbg!(&instance_mgr.inst_mgr.inst_map.len());
                 for kv in &instance_mgr.inst_mgr.inst_map {
                     if let Some(aabb) = kv.value().aabb {
                         if aabb.extents().magnitude().is_finite() {
@@ -237,7 +237,8 @@ async fn main() -> anyhow::Result<()> {
 
     if false {
         if let Some(pool) = mgr.project_map.get(&db_option.project_name) {
-            let brans = query_types_refnos(&vec!["BRAN"], &pool, db_option.manual_db_nums.clone()).await?;
+            let brans =
+                query_types_refnos(&vec!["BRAN"], &pool, db_option.manual_db_nums.clone()).await?;
             let mut tubi_map = Arc::new(DashMap::new());
             let mut handles = vec![];
             for bran in brans {
