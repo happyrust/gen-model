@@ -117,7 +117,7 @@ pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: RvmShapeTypeData, sha
     data
 }
 
-pub fn gen_prim_data_test(geo_instance: &EleGeoInstance, desi_transform: Transform) -> Vec<u8> {
+pub fn gen_prim_data_test(geo_instance: &EleGeoInstance, desi_transform: Transform,b_desi_cyli:bool) -> Vec<u8> {
     let mut data = vec![];
     let geo_transform = Transform {
         translation: geo_instance.transform.1,
@@ -137,7 +137,7 @@ pub fn gen_prim_data_test(geo_instance: &EleGeoInstance, desi_transform: Transfo
         let translation = {
             match &geo_instance.geo_param {
                 PdmsGeoParam::PrimSCylinder(data) => {
-                    if !data.center_in_mid {
+                    if !data.center_in_mid || b_desi_cyli {
                         transform.translation + transform.rotation.mul_vec3(Vec3::new(0.0, 0.0, data.phei / 2.0))
                     } else {
                         transform.translation

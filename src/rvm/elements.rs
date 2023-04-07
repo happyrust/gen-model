@@ -236,6 +236,7 @@ async fn create_element_data_tree_test(cur_refno: RefU64, database: &Database, p
         let refno = refno.unwrap();
         let child = query_ele_node(refno, pool).await?;
         if GENRAL_NEGATIVE_NOUN_NAMES.contains(&child.noun.as_str()) { continue; }
+        let mut b_desi_cyli = &child.noun == "CYLI";
         let pos = instance.world_transform.1;
         let mut b_visible = 0;
         for data in &instance.data {
@@ -251,7 +252,7 @@ async fn create_element_data_tree_test(cur_refno: RefU64, database: &Database, p
             scale: instance.world_transform.2,
         };
         for geo_instance in &instance.data {
-            data.append(&mut gen_prim_data_test(geo_instance, desi_transform));
+            data.append(&mut gen_prim_data_test(geo_instance, desi_transform,b_desi_cyli));
         }
 
         if let Some(node_id) = node_id_map.get(&refno) {
