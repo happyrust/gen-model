@@ -146,7 +146,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             for (k, v) in db_info.noun_attr_info_map {
                 let mut attr_map = BTreeMap::new();
                 let type_name = db1_dehash(k as u32);
-                if &type_name == "HPIN" { dbg!("hello"); }
                 if type_name.is_empty() {
                     continue;
                 }
@@ -1031,3 +1030,4 @@ async fn test_threads() {
         dbg!(v);
     }
 }
+

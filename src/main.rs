@@ -70,6 +70,7 @@ use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
+use bevy::prelude::system_adapter::new;
 use tokio::spawn;
 
 #[tokio::main]
@@ -203,8 +204,7 @@ async fn main() -> anyhow::Result<()> {
                     if let Some(aabb) = kv.value().aabb {
                         if aabb.extents().magnitude().is_finite() {
                             rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, *kv.key()));
-                        } else {
-                        }
+                        } else {}
                     }
                 }
             }
@@ -227,7 +227,7 @@ async fn main() -> anyhow::Result<()> {
             Some("LOOP 1"),
             &mgr.project_map.get(&db_option.project_name).unwrap(),
         )
-        .await?;
+            .await?;
         // dbg!(&room_infos);
         let room_infos = room_infos.into_iter().map(|x| x.0).collect::<Vec<_>>();
         let map = recompute_spatial_tree(room_infos, all_insts_mgr, collider_shape_mgr, &db_option)
@@ -368,4 +368,26 @@ fn test_inst_mgr() {
     if let Some(value) = map.inst_mgr.inst_map.get(&refno) {
         dbg!(&value.value());
     };
+}
+
+#[test]
+fn test_compare_attr_info_file() {
+    let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
+    let old_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info_11.json")).unwrap();
+    let old_map = old_info.noun_attr_info_map;
+    for (noun, new_attr) in new_info.noun_attr_info_map {
+        if let Some(old_attr) = old_map.get(&noun) {
+            for (new_key, new_value) in new_attr {
+                let old_value = old_attr.get(&new_key);
+                if old_value.is_none() { continue; }
+                let old_value = old_value.unwrap();
+
+                if new_value.att_type != old_value.att_type || new_value.name != old_value.name {
+                    dbg!(&noun);
+                    dbg!(&new_value);
+                    dbg!("");
+                }
+            }
+        }
+    }
 }

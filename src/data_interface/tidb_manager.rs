@@ -692,7 +692,7 @@ impl AiosDBManager {
                 .await?;
             dbg!("execute success");
             self.insert_project_mdb(&project_pool, &self.info_pool)
-                .await?;
+                .await.unwrap();
             cache_mdb_site_map(mdb, module, &project_pool).await;
             // 将 mdb对应的 module 下的所有 numbdb保存下来
             let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
