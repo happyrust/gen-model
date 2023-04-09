@@ -1,6 +1,6 @@
 use crate::cata::resolve::{resolve_axis_params, resolve_gms};
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::defines::CACHED_SCOM_INFO_MAP;
+// use crate::defines::CACHED_SCOM_INFO_MAP;
 use aios_core::parsed_data::GeomsInfo;
 use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::AttrVal::IntArrayType;
@@ -22,6 +22,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     refno: RefU64,
     mut scom_ref: Option<RefU64>,
     interface: &T,
+    scom_info_map: &DashMap<RefU64, ScomInfo>,
     is_debug: bool,
 ) -> anyhow::Result<GeomsInfo> {
     let desi_att = interface.get_attr(refno).await?;
@@ -53,12 +54,11 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     if !scom_ref.is_valid() {
         return Err(anyhow!("Scom ref is invalid".to_string()));
     }
-
     //缓存备用
-    if !CACHED_SCOM_INFO_MAP.contains_key(&scom_ref) {
+    if !scom_info_map.contains_key(&scom_ref) {
         match query_scom_info(scom_ref, interface, is_debug).await {
             Ok(scom_info) => {
-                CACHED_SCOM_INFO_MAP.insert(scom_ref, &scom_info).unwrap();
+                scom_info_map.insert(scom_ref, scom_info);
             }
             Err(e) => {
                 let error_info = format!("元件库: {} 解析出错 {}", scom_ref.to_refno_string(), e.to_string());
@@ -67,7 +67,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             }
         }
     }
-    let scom_info = CACHED_SCOM_INFO_MAP.get(&scom_ref).unwrap();
+    let scom_info = scom_info_map.get(&scom_ref).unwrap();
     if is_debug {
         dbg!(&scom_info.value());
     }
@@ -240,7 +240,6 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     cur_context.insert("IPARA0".into(), "0".into());
     cur_context.insert("IPARA".into(), "0".into());
     //PARA
-    // dbg!(scom_info.attr_map.to_string_hashmap());
     let params = scom_info.attr_map.get_f64_vec("PARA").unwrap_or_default();
     for i in 0..params.len() {
         cur_context.insert(
