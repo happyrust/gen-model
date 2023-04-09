@@ -56,7 +56,6 @@ use parry3d::shape::{Compound, ConvexPolyhedron, SharedShape};
 use parry3d::transformation::vhacd;
 use parry3d::transformation::vhacd::VHACD;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
-use parse_pdms_db::parse_file;
 use regex::internal::Input;
 use sqlx::pool::PoolConnection;
 use sqlx::Executor;
@@ -158,17 +157,13 @@ async fn main() -> anyhow::Result<()> {
                     let mut data = vec![];
                     file.read_to_end(&mut data)?;
                     let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-                    dbg!(&mesh_mgr.meshes.len());
-
                     sync_mesh_to_graph_db(&mgr, &mesh_mgr).await?;
-                    // save_pdms_mesh_tidb(mesh_mgr, project_pool.value()).await?;
                 }
             }
         }
     }
 
     //生成rtree 结构
-
     let mut collider_shape_mgr = CachedColliderShapeMgr::default();
     let mut file = fs::File::open("assets/mesh/mesh.bin")?;
     let mut data = vec![];

@@ -27,9 +27,6 @@ pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Has
             for val in vals {
                 let ref0 = val.get::<i32, _>("REF0") as u32;
                 let project_str = val.get::<String, _>("PROJECT");
-                // if ref0 == 24384 {
-                //     dbg!(&project_str);
-                // }
                 map.entry(ref0).or_insert(HashSet::new()).insert(project_str);
             }
         }

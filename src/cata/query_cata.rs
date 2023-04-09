@@ -108,7 +108,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     let attr_map = interface.get_attr(refno).await.unwrap();
     let type_noun = attr_map
         .get_type_cloned()
-        .ok_or(anyhow!(format!("{:?} Scom att not correct", refno)))?;
+        .ok_or(anyhow!(format!("Scom att not correct: {:?}", &attr_map)))?;
     let is_sprf = type_noun == "SPRF";
     let ptref_name = if is_sprf { "PSTR" } else { "PTRE" };
     let mut axis_params = vec![];

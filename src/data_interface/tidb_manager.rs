@@ -791,6 +791,7 @@ impl AiosDBManager {
     #[inline]
     pub async fn get_project_pool_by_refno(&self, refno: RefU64) -> Option<(String, Pool<MySql>)> {
         if let Some(projects) = self.ref0_map.get(&refno.get_0()) {
+            // dbg!(&projects);
             ///只有一个的时候
             if projects.len() == 1 {
                 let project = projects.value().iter().next().as_ref().unwrap().clone();
@@ -822,22 +823,23 @@ impl AiosDBManager {
         let mut mdb_map = HashMap::new();
         let mdbs = query_types_refnos(&vec!["MDB"], project_pool, None).await?;
         for mdb in mdbs {
-            let mdb_attr = query_explicit_attr(mdb, project_pool).await?;
-            let mdb_name = query_name(mdb, &project_pool).await?;
+            let Ok(mdb_attr) = query_full_attr(mdb, self, None).await else{
+                continue;
+            };
+            let Ok(mdb_name) = query_name(mdb, &project_pool).await else{
+                continue;
+            };
+            // dbg!(mdb_attr.to_string_hashmap());
+            // dbg!(&mdb_name);
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 let mut map = HashMap::new();
                 for db_refno in dbs {
+                    // dbg!(db_refno);
                     if let Some((project, pool)) = self.get_project_pool_by_refno(db_refno).await {
-                        if let Ok(att) =
-                            self.get_implicit_attr(db_refno, Some(vec!["NUMBDB"])).await
-                        {
+                        if let Ok(att) = self.get_implicit_attr(db_refno, Some(vec!["NUMBDB"])).await {
                             let dbno = att.get_i32("NUMBDB").unwrap_or_default();
-                            if let Some(db_type) =
-                                query_dbtype_from_dbno(dbno, info_pool, &project).await?
-                            {
-                                if let Some(world_refno) =
-                                    query_world_refno_by_dbno(dbno, &pool).await?
-                                {
+                            if let Ok(Some(db_type)) = query_dbtype_from_dbno(dbno, info_pool, &project).await {
+                                if let Ok(Some(world_refno)) = query_world_refno_by_dbno(dbno, &pool).await {
                                     map.entry(db_type)
                                         .or_insert_with(Vec::new)
                                         .push(world_refno);
@@ -934,8 +936,7 @@ impl AiosDBManager {
                 &geoms,
                 &brep_shape_map,
                 mgr.as_ref(),
-            )
-                .await?;
+            ).await?;
         } else {
             let GeomsInfo {
                 geometries,
@@ -1636,7 +1637,7 @@ impl AiosDBManager {
                             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
                             if bbox.is_none() {
                                 dbg!(refno.to_refno_string());
-                                dbg!(&brep_shape);
+                                // dbg!(&brep_shape);
                                 continue;
                             }
                             let mut aabb = bbox.unwrap();
@@ -2334,8 +2335,7 @@ impl AiosDBManager {
             }
             let instance_mgr = CachedInstanceMgr::deserialize_from_bin_file(&format!(
                 "./assets/instance/{db_no}.inst"
-            ))
-                .unwrap_or_default();
+            )).unwrap_or_default();
             // dbg!(instance_mgr.inst_mgr.len());
             let instance_mgr = Arc::new(instance_mgr);
             let instance_mgr_clone = instance_mgr.clone();

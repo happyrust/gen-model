@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::default::default;
@@ -26,7 +27,7 @@ use parse_pdms_db::parse_file;
 use smol_str::SmolStr;
 use sqlx::mysql::MySqlArguments;
 use sqlx::pool::PoolConnection;
-use sqlx::Executor;
+use sqlx::{Error, Executor};
 use sqlx::{Connection, MySql, MySqlPool, Pool};
 
 use crate::api::element::*;
@@ -146,7 +147,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             for (k, v) in db_info.noun_attr_info_map {
                 let mut attr_map = BTreeMap::new();
                 let type_name = db1_dehash(k as u32);
-                if &type_name == "HPIN" { dbg!("hello"); }
+                // if &type_name == "HPIN" { dbg!("hello"); }
                 if type_name.is_empty() {
                     continue;
                 }
@@ -192,8 +193,19 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         match result {
             Ok(_) => {}
             Err(e) => {
-                dbg!(&e);
-                dbg!(tables_sql.as_str());
+                match &e {
+                    Error::Database(error) => {
+                        //index already exist
+                        if error.code() == Some(Cow::from("42000")) {
+
+                        }else{
+                            dbg!(tables_sql.as_str());
+                        }
+                    }
+                    _ => {
+                        dbg!(&e);
+                    }
+                }
             }
         }
         create_tables_elapse += table_time.elapsed().as_millis();
@@ -489,7 +501,7 @@ pub async fn sync_total_async_threaded(
     info_pool: Pool<MySql>,
 ) -> anyhow::Result<()> {
     let mut data_dir = Path::new(&db_option.project_path);
-    let need_parsing_files = &db_option.included_db_files;
+    let need_parsed_files = &db_option.included_db_files;
     let project_dir = data_dir.join(&project);
     let max_sql_threads_number = db_option.sql_threads_number as usize;
     let batch_insert_sql_cnt = db_option.batch_insert_sql_cnt as usize;
@@ -536,7 +548,7 @@ pub async fn sync_total_async_threaded(
                 continue;
             }
         }
-        if need_parsing_files.is_none() || need_parsing_files.as_ref().unwrap().contains(&file_name)
+        if need_parsed_files.is_none() || need_parsed_files.as_ref().unwrap().contains(&file_name)
         {
             println!("path={:?}", &file_name);
             let project_clone = project.clone();
