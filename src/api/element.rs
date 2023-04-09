@@ -380,8 +380,11 @@ pub async fn query_world_refno_by_dbno(dbno: i32, pool: &Pool<MySql>) -> anyhow:
     let sql = gen_query_id_by_dbno_type_sql(dbno, "WORL");
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
-        Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>(0) as u64))) }
-        Err(_) => { Ok(None) }
+        Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>("ID") as u64))) }
+        Err(e) => {
+            dbg!(&e);
+            Ok(None)
+        }
     };
 }
 

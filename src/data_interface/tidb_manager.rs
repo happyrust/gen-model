@@ -690,9 +690,10 @@ impl AiosDBManager {
             conn.execute(gen_create_project_mdb_sql().as_str()).await?;
             conn.execute(gen_create_project_mdb_json_sql().as_str())
                 .await?;
-            dbg!("execute success");
+            dbg!("create success");
             self.insert_project_mdb(&project_pool, &self.info_pool)
                 .await.unwrap();
+            dbg!("insert success");
             cache_mdb_site_map(mdb, module, &project_pool).await;
             // 将 mdb对应的 module 下的所有 numbdb保存下来
             let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
@@ -826,18 +827,24 @@ impl AiosDBManager {
             let mdb_name = query_name(mdb, &project_pool).await?;
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 let mut map = HashMap::new();
+                dbg!(&dbs.len());
                 for db_refno in dbs {
+                    dbg!(&db_refno);
                     if let Some((project, pool)) = self.get_project_pool_by_refno(db_refno).await {
                         if let Ok(att) =
                             self.get_implicit_attr(db_refno, Some(vec!["NUMBDB"])).await
                         {
                             let dbno = att.get_i32("NUMBDB").unwrap_or_default();
+                            dbg!(&dbno);
                             if let Some(db_type) =
                                 query_dbtype_from_dbno(dbno, info_pool, &project).await?
                             {
+                                dbg!(&db_type);
+                                dbg!(&project);
                                 if let Some(world_refno) =
                                     query_world_refno_by_dbno(dbno, &pool).await?
                                 {
+                                   dbg!(&world_refno);
                                     map.entry(db_type)
                                         .or_insert_with(Vec::new)
                                         .push(world_refno);
