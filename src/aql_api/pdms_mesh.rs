@@ -225,8 +225,8 @@ pub async fn query_pdms_instance_mesh_from_refno(refno: RefU64, database: &Datab
 pub async fn query_pdms_instance_mesh_from_refnos(refnos: Vec<RefU64>, database: &Database) -> anyhow::Result<PdmsInstanceMeshData> {
     let mut inst_mgr = ShapeInstancesMgr::default();
     let mut hashes = HashSet::new();
+    dbg!(&refnos);
     if let Some(instance) = query_instance_with_refnos_in_arangodb(refnos, database).await? {
-        // dbg!(instance.len());
         for inst in instance {
             let refno = RefU64::from_url_refno(&inst._key);
             if refno.is_none() { continue; }

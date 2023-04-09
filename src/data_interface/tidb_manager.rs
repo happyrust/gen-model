@@ -691,7 +691,7 @@ impl AiosDBManager {
             conn.execute(gen_create_project_mdb_sql().as_str()).await?;
             conn.execute(gen_create_project_mdb_json_sql().as_str())
                 .await?;
-            dbg!("execute success");
+            dbg!("create success");
             self.insert_project_mdb(&project_pool, &self.info_pool)
                 .await?;
             cache_mdb_site_map(mdb, module, &project_pool).await;
@@ -835,7 +835,6 @@ impl AiosDBManager {
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 let mut map = HashMap::new();
                 for db_refno in dbs {
-                    // dbg!(db_refno);
                     if let Some((project, pool)) = self.get_project_pool_by_refno(db_refno).await {
                         if let Ok(att) = self.get_implicit_attr(db_refno, Some(vec!["NUMBDB"])).await {
                             let dbno = att.get_i32("NUMBDB").unwrap_or_default();
