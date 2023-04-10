@@ -5,6 +5,7 @@ pub mod pipe;
 pub mod hole;
 pub mod embed;
 pub mod equi;
+pub mod valv;
 pub (crate) mod bran;
 pub (crate) mod tubi;
 mod tee;
