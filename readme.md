@@ -14,6 +14,7 @@
 #### 5.LEVE -> 类型要修改为 INTVEC
 #### 6.PTS -> 类型要修改为 INTVEC
 #### 7.CURD -> 类型要修改为 RefU64Vec 
+#### 8.SPCO.DETR -> offset 改为 17
 
 
 ### 2.版本数据表结构设计与说明

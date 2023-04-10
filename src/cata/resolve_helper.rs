@@ -240,7 +240,6 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
             return if let Ok(mut stack) = Stack::init(&result_string) {
                 stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", &input_expr)))
             } else {
-                // dbg!(&context);
                 dbg!(&input_expr);
                 dbg!(&result_string);
                 Err(anyhow!(format!("求解失败 {}", &input_expr)))
