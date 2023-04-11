@@ -17,7 +17,7 @@ pub async fn get_inst_data(refno: RefU64, database: &Database) -> DataCenterProj
                 instance_code: if valv.name.starts_with("/") { valv.name[1..].to_string() } else { valv.name },
                 version: "A版".to_string(),
                 attributes: vec![DataCenterAttr {
-                    attribute_model_code: "COMPAD".to_string(),
+                    attribute_model_code: "COMP8".to_string(),
                     value: "1R101".to_string(),
                 },DataCenterAttr{
                     attribute_model_code: "COMPADD47".to_string(),
