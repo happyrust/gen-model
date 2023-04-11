@@ -188,6 +188,7 @@ fn insert_virtual_hole_data() -> Vec<VirtualHoleGraphNode> {
     dbg!(&virtual_data);
     virtual_data
 }
+
 ///插入虚拟埋件信息
 fn insert_virtual_embed_data() -> Vec<VirtualEmbedGraphNode> {
     let mut virtual_data = Vec::new();
@@ -594,6 +595,7 @@ pub async fn save_arangodb_with_database(json: Value, collection: &str, database
     let _result: Vec<()> = database.aql_query(aql).await?;
     Ok(())
 }
+
 
 pub async fn save_arangodb_with_db_option_create_collection(json: Value, db_option: &DbOption, collection: &str, collection_type: CollectionType) -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(db_option).await?;

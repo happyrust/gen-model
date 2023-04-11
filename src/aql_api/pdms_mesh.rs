@@ -236,7 +236,7 @@ pub async fn query_pdms_instance_mesh_from_refnos(refnos:Vec<RefU64>,database:&D
         }
     }
     let hashes = hashes.into_iter().collect::<Vec<_>>();
-    let mesh_mgr = query_pdms_mesh_aql(hashes,database).await.unwrapi_or_default();
+    let mesh_mgr = query_pdms_mesh_aql(hashes,database).await.unwrap_or_default();
     Ok(PdmsInstanceMeshData {
         inst_mgr,
         mesh_mgr,
