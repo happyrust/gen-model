@@ -530,9 +530,10 @@ pub async fn sync_total_async_threaded(
 
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
-    let is_replace = db_option.replace_dbs;
+    let mut is_replace = db_option.replace_dbs;
     let replace_types = db_option.replace_types.clone();
     let b_replace_types = replace_types.is_some();
+    if b_replace_types { is_replace = true }
     let mut uda_map: HashMap<String, AttrMap> = HashMap::new();
     let mut version_map = HashMap::new();
     let only_update_dbinfo = db_option.only_update_dbinfo;

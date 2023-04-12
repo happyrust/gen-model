@@ -378,6 +378,7 @@ pub async fn query_dbno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Opt
 /// 根据dbno，获取world
 pub async fn query_world_refno_by_dbno(dbno: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_id_by_dbno_type_sql(dbno, "WORL");
+    dbg!(&sql);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
         Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>("ID") as u64))) }

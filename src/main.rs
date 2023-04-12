@@ -97,10 +97,10 @@ async fn main() -> anyhow::Result<()> {
 
     if db_option.rebuild_ssc_tree {
         dbg!("正在同步SSC");
-        for project_db in mgr.project_map.iter() {
+        if let Some(project_db)  = mgr.project_map.get(&mgr.db_option.project_name) {
             // 保存ssc
             async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
-            set_arangodb_all_ssc_nodes(&project_db.value(), &mgr.arango_database).await?;
+            set_arangodb_all_ssc_nodes(project_db.value(), &mgr.arango_database).await?;
         }
         dbg!("SSC同步完成");
     }
@@ -318,9 +318,9 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "HPIN";
+    let noun = "SPCO";
     let hash = db1_hash(noun);
-    let str = db1_dehash(814004);
+    let str = db1_dehash(11515723);
     dbg!(hash);
     dbg!(str);
 }

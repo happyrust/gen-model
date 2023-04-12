@@ -51,7 +51,7 @@ use crate::api::attr::*;
 use crate::api::children::{cache_mdb_module_numbdbs, cache_mdb_site_map};
 use crate::api::dbno_sql::query_dbtype_from_dbno;
 use crate::api::element::*;
-use crate::api::project_mdb::{gen_insert_project_mdb_json_sql, gen_insert_project_mdb_sql};
+use crate::api::project_mdb::{gen_insert_project_mdb_json_sql, gen_insert_project_mdb_sql, query_b_contains_mdb};
 use crate::api::refno_info::{cache_plin_plax, get_ref0_map, sync_refno_basic_map};
 use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
@@ -692,8 +692,10 @@ impl AiosDBManager {
             conn.execute(gen_create_project_mdb_json_sql().as_str())
                 .await?;
             dbg!("create success");
-            self.insert_project_mdb(&project_pool, &self.info_pool)
-                .await?;
+            if let Ok(false) = query_b_contains_mdb(mdb,module,&project_pool).await {
+                self.insert_project_mdb(&project_pool, &self.info_pool)
+                    .await?;
+            }
             cache_mdb_site_map(mdb, module, &project_pool).await;
             // 将 mdb对应的 module 下的所有 numbdb保存下来
             let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
@@ -824,14 +826,12 @@ impl AiosDBManager {
         let mut mdb_map = HashMap::new();
         let mdbs = query_types_refnos(&vec!["MDB"], project_pool, None).await?;
         for mdb in mdbs {
-            let Ok(mdb_attr) = query_full_attr(mdb, self, None).await else{
+            let Ok(mdb_attr) = query_full_attr(mdb, self, None).await else {
                 continue;
             };
-            let Ok(mdb_name) = query_name(mdb, &project_pool).await else{
+            let Ok(mdb_name) = query_name(mdb, &project_pool).await else {
                 continue;
             };
-            // dbg!(mdb_attr.to_string_hashmap());
-            // dbg!(&mdb_name);
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 let mut map = HashMap::new();
                 for db_refno in dbs {
@@ -839,11 +839,15 @@ impl AiosDBManager {
                         if let Ok(att) = self.get_implicit_attr(db_refno, Some(vec!["NUMBDB"])).await {
                             let dbno = att.get_i32("NUMBDB").unwrap_or_default();
                             if let Ok(Some(db_type)) = query_dbtype_from_dbno(dbno, info_pool, &project).await {
+                                dbg!(&project);
+                                // for pool in &self.project_map {
                                 if let Ok(Some(world_refno)) = query_world_refno_by_dbno(dbno, &pool).await {
-                                    map.entry(db_type)
+                                    map.entry(db_type.clone())
                                         .or_insert_with(Vec::new)
                                         .push(world_refno);
+                                    break;
                                 }
+                                // }
                             }
                         } else {
                             dbg!(db_refno);
@@ -1824,8 +1828,7 @@ impl AiosDBManager {
                     let current_att = mgr.get_attr(refno).await.unwrap_or_default();
                     let mut refno_ptset_map = DashMap::new();
                     let cur_type = current_att.get_type();
-                    if cur_type == "BRAN" || cur_type == "HANG" {
-                    } else {
+                    if cur_type == "BRAN" || cur_type == "HANG" {} else {
                         // dbg!("get_cata_single_geoms");
                         Self::get_cata_single_geoms(
                             mgr.clone(),
