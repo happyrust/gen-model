@@ -28,7 +28,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                                                        brep_shapes_map: &CateBrepShapeMap,
                                                        interface: &T, ) -> anyhow::Result<bool> {
     let geoms = &geom_info.geometries;
-    // dbg!(geoms.len());
+    dbg!(&refno);
     if geoms.len() == 0 { return Ok(false); }
     let type_name = att.get_type();
     let mut plane_normal = Vec3::Z;
@@ -98,6 +98,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
     let drns = rot * drns;
     let drne = rot * drne;
     if spine_paths.len() == 0 {
+        dbg!(spine_paths.len());
         if let Some(poss) = att.get_poss() &&
             let Some(pose) = att.get_pose() {
             height = pose.distance(poss);
@@ -141,6 +142,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
             }
         }
     } else {
+        dbg!("1");
         for spine in spine_paths {
             for (i, geom) in geoms.iter().enumerate() {
                 if let CateGeoParam::Profile(profile) = geom {
@@ -178,6 +180,6 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
             }
         }
     }
-
+    dbg!(&brep_shapes_map.len());
     Ok(true)
 }

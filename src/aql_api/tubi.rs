@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use aios_core::data_center::TubiData;
+// use aios_core::data_center::TubiData;
 use aios_core::pdms_types::RefU64;
 use aios_core::prim_geo::tubing::TubiEdgeAql;
 use arangors_lite::{AqlQuery, Database};
@@ -12,7 +14,7 @@ use sqlx::{Executor, MySql, Pool};
 use crate::api::children::travel_children_with_type;
 use crate::api::element::query_name;
 use crate::aql_api::children::query_travel_children_with_type_aql;
-use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
+use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager, TUBI_TOL};
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
@@ -85,7 +87,8 @@ pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &Database) -> an
     Ok(results)
 }
 
-pub async fn query_tubi_from_bran_filter_atta(bran_refno:RefU64,database:&Database) -> anyhow::Result<Vec<TubiEdgeAql>> {
+/// 找到 bran 下所有的 tubi ，并过滤掉 atta
+pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiEdgeAql>> {
     let mut tubi = Vec::new();
     let key = format!("pdms_eles/{}", bran_refno.to_url_refno());
     let aql = AqlQuery::new("
@@ -117,8 +120,8 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno:RefU64,database:&Databa
             if results[i].att_type.to_uppercase().as_str() == "ATTA" {
                 let mut j = i;
                 while j < results.len() && results[j].att_type.to_uppercase().as_str() == "ATTA" {
-                    j +=1;
-                    if j < results.len() && ( results[j].att_type.to_uppercase().as_str() != "ATTA" || j == results.len() - 1 ) {
+                    j += 1;
+                    if j < results.len() && (results[j].att_type.to_uppercase().as_str() != "ATTA" || j == results.len() - 1) {
                         tubi.push(TubiEdgeAql {
                             _key: results[i]._key.to_string(),
                             _from: results[i]._from.to_string(),
@@ -272,16 +275,41 @@ pub async fn insert_tubi_value(tubi_map: DashMap<(RefU64, String), f32>, pool: &
     Ok(())
 }
 
+/// 找到bran里面所有的tubi，并过滤掉 atta ，找到tubi对应的长度和lstu（第一个元素为hstu）
+pub async fn query_tubi_lstu(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiData>> {
+    let mut result = Vec::new();
+    let tubis = query_tubi_from_bran_filter_atta(bran_refno, database).await?;
+    for tubi in tubis {
+        let from_refno = RefU64::from_arangodb_refno_str(&tubi._from);
+        if from_refno.is_none() { continue; }
+        let from_refno = from_refno.unwrap();
+        // bran下面的 tubi应该取hstu
+        let lstu = if bran_refno == from_refno {
+            query_foreign_name_aql(from_refno, vec!["HSTU", "HSTU"], database).await?
+        } else {
+            query_foreign_name_aql(from_refno, vec!["LSTU", "LSTU"], database).await?
+        };
+        if let Some(lstu) = lstu {
+            result.push(TubiData {
+                pre_refno: from_refno,
+                lstu_name: lstu,
+                length: tubi.start_pt.distance(tubi.end_pt),
+            });
+        }
+    }
+    Ok(result)
+}
+
 #[tokio::test]
-async fn test_query_tubi_from_bran_filter_atta() -> anyhow::Result<()>{
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
-    let refno = RefU64::from_refno_str("23584/6771").unwrap();
-    let results = query_tubi_from_bran_filter_atta(refno,&database).await?;
-    dbg!(&results);
+async fn test_query_tubi_from_bran_filter_atta() -> anyhow::Result<()> {
+    // use config::{Config, ConfigError, Environment, File};
+    // let s = Config::builder()
+    //     .add_source(File::with_name("DbOption"))
+    //     .build()?;
+    // let db_option: DbOption = s.try_deserialize().unwrap();
+    // let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    // let refno = RefU64::from_refno_str("23584/5443").unwrap();
+    // let results = query_tubi_lstu(refno, &database).await?;
+    // dbg!(&results);
     Ok(())
 }

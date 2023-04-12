@@ -157,6 +157,33 @@ pub async fn query_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result
     })
 }
 
+pub async fn query_ele_nodes_by_refnos(refnos: Vec<RefU64>, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {
+    let mut refno_sql = String::new();
+    for refno in refnos {
+        refno_sql.push_str(&format!("{},", refno.0));
+    }
+    if refno_sql.is_empty() { return Ok(vec![]); }
+    refno_sql.remove(refno_sql.len() - 1);
+    let sql = format!("SELECT ID,TYPE,NAME,OWNER,CHILDREN_COUNT FROM {PDMS_ELEMENTS_TABLE} WHERE ID in ({}) and IS_DEL = 0;", refno_sql);
+    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let mut nodes = Vec::new();
+    for result in results {
+        let refno = result.get::<i64, _>("ID");
+        let noun = result.get::<String, _>("TYPE");
+        let name = result.get::<String, _>("NAME");
+        let owner = RefU64::from(result.get::<i64, _>("OWNER") as u64);
+        let children_count = result.get::<i32, _>("CHILDREN_COUNT") as usize;
+        nodes.push(EleTreeNode {
+            refno: RefU64(refno as u64),
+            noun,
+            name,
+            owner,
+            children_count,
+        });
+    }
+    Ok(nodes)
+}
+
 /// 查询生成Element node ,不查询children_count 默认为 0
 pub async fn query_elenode_without_children_count(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
     let sql = format!("SELECT TYPE,NAME,OWNER FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} and IS_DEL = 0;", *refno);
@@ -297,7 +324,6 @@ pub async fn query_pdms_elements_type_name(refno: RefU64, pool: &Pool<MySql>) ->
 }
 
 
-
 /// 获得不同mdb下所有的world(因为numbdb有问题，暂时用这个替代)
 // pub async fn query_mdb_module_worlds_fix(project_name: &str, pool: &Pool<MySql>, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, HashMap<String, Vec<RefU64>>>> {
 //     let mut mdb_map = HashMap::new();
@@ -320,7 +346,6 @@ pub async fn query_pdms_elements_type_name(refno: RefU64, pool: &Pool<MySql>) ->
 // }
 
 pub type MdbWorldsMap = HashMap<String, HashMap<String, Vec<RefU64>>>;
-
 
 
 pub async fn query_types_refnos(type_names: &[&str], pool: &Pool<MySql>, dbnos: Option<Vec<i32>>) -> anyhow::Result<RefU64Vec> {
@@ -353,10 +378,14 @@ pub async fn query_dbno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Opt
 /// 根据dbno，获取world
 pub async fn query_world_refno_by_dbno(dbno: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_id_by_dbno_type_sql(dbno, "WORL");
+    dbg!(&sql);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
-        Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>(0) as u64))) }
-        Err(_) => { Ok(None) }
+        Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>("ID") as u64))) }
+        Err(e) => {
+            dbg!(&e);
+            Ok(None)
+        }
     };
 }
 
@@ -468,7 +497,7 @@ pub async fn query_project_dbno_info(project_name: &str, info_pool: &Pool<MySql>
 }
 
 ///检查refno是否存在PDMS_ELEMENTS的表中
-pub async fn check_exist_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<bool>{
+pub async fn check_exist_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<bool> {
     let sql = format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {})", refno.0);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(result.get::<bool, _>(0))
@@ -498,54 +527,63 @@ fn gen_query_id_by_dbno_type_sql(dbno: i32, type_name: &str) -> String {
     sql.push_str(&format!("SELECT ID FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND NUMBDB = {} AND IS_DEL = 0 ; ", type_name, dbno));
     sql
 }
+
 #[inline]
 fn gen_query_node_id_from_refno_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT OWNER,NAME,TYPE,CHILDREN_COUNT FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {}", refno.0));
     sql
 }
+
 #[inline]
 fn gen_query_id_name_from_dbno_type_sql(dbno: i32, type_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID ,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND NUMBDB = {} AND IS_DEL = 0 ; ", type_name, dbno));
     sql
 }
+
 #[inline]
 fn gen_query_id_name_type_from_dbno(dbno: u32) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID ,NAME, TYPE FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB = {} AND IS_DEL = 0 ; ", dbno));
     sql
 }
+
 #[inline]
 fn gen_query_dbno_from_db_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT NUMBDB FROM DB WHERE ID = {}", refno.0));
     sql
 }
+
 #[inline]
 fn gen_pdms_elements_dbno_sql(dbno: u32, type_name: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID, OWNER ,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB = {} AND TYPE = '{}' AND IS_DEL = 0 ;", dbno, type_name));
     sql
 }
+
 #[inline]
 fn gen_pdms_elements_get_children_ele_node_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID,NAME,TYPE,OWNER,ORDER_NUM,CHILDREN_COUNT FROM {PDMS_ELEMENTS_TABLE} WHERE OWNER = {} AND IS_DEL = 0 ", refno.0));
     sql
 }
+
 #[inline]
 fn gen_pdms_elements_get_all_world_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID,NAME,TYPE FROM {PDMS_ELEMENTS_TABLE} WHERE OWNER = '0/0' AND IS_DEL = 0 ;"));
     sql
 }
+
 #[inline]
 fn gen_pdms_elements_get_children_count_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT COUNT(*) FROM {PDMS_ELEMENTS_TABLE} WHERE OWNER = {} AND IS_DEL = 0", refno.0));
     sql
 }
+
 #[inline]
 pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, order: usize, children_count: usize) -> String {
     let implicit = &att.implicit_attmap;
@@ -596,12 +634,14 @@ pub fn get_order(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashM
     }
     0
 }
+
 #[inline]
 pub fn gen_query_refno_type_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT TYPE FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND IS_DEL = 0 ", refno.0));
     sql
 }
+
 #[inline]
 pub fn gen_query_type_refnos_sql(type_names: &[&str], dbnos: Option<Vec<i32>>) -> String {
     let mut sql = String::new();
@@ -624,12 +664,14 @@ pub fn gen_query_type_refnos_sql(type_names: &[&str], dbnos: Option<Vec<i32>>) -
     sql.push_str(&format!("SELECT ID FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE IN {in_sql} {dbnos_filter_sql} AND IS_DEL = 0 ORDER BY ID;"));
     sql
 }
+
 #[inline]
 pub fn gen_query_name_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT NAME FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND IS_DEL = 0;", refno.0));
     sql
 }
+
 #[inline]
 fn gen_query_all_type_name_refnos(att_type: &str) -> String {
     let mut sql = String::new();
@@ -746,7 +788,7 @@ async fn test_query_world_children_eles() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
-    let result = query_world_children_eles("ALL","DESI", &pool).await?;
+    let result = query_world_children_eles("ALL", "DESI", &pool).await?;
     dbg!(&result);
     Ok(())
 }

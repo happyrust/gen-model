@@ -50,14 +50,37 @@ pub async fn create_arangodb_conn(database: &Database, collection_name: &str, co
             let database = database.create_collection(collection_name).await;
             match database {
                 Ok(_v) => {}
-                Err(e) => { dbg!(&e); }
+                Err(e) => {
+                    match &e {
+                        ClientError::Arango(error) => {
+                            if error.code() != 409 {
+                                dbg!(&e);
+                            }
+                        }
+                        _ => {
+                            dbg!(&e);
+                        }
+                    }
+                }
             }
         }
         CollectionType::Edge => {
             let database = database.create_edge_collection(collection_name).await;
             match database {
                 Ok(_v) => {}
-                Err(e) => { dbg!(&e); }
+                Err(e) => {
+                    match &e {
+                        ClientError::Arango(error) => {
+                            if error.code() != 409 {
+                                dbg!(&e);
+                            }
+                        }
+                        _ => {
+                            dbg!(&e);
+                        }
+                    }
+
+                }
             }
         }
     }

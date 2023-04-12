@@ -20,6 +20,7 @@ use crate::defines::CACHED_REFNO_BASIC_MAP;
 pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, HashSet<String>>> {
     let mut map = DashMap::new();
     let sql = format!("SELECT REF0, PROJECT FROM {PDMS_REFNO_INFOS_TABLE}");
+    // dbg!(&sql);
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match results {
         Ok(vals) => {

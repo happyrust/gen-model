@@ -42,6 +42,7 @@ pub mod metadata;
 pub mod data_center_api;
 pub mod spatial_tree;
 pub mod negative;
+pub mod ansys;
 
 
 #[macro_use]
@@ -67,71 +68,3 @@ lazy_static! {
 }
 
 pub const BATCH_CHUNKS_CNT: usize = 50;
-
-
-//
-// ///将当前的缓存数据，保存到sled，方便下次使用
-// pub fn save_to_cache_sled_db() -> anyhow::Result<()> {
-//     let mut time = Instant::now();
-//     let db = sled::open(CACHE_SLED_NAME)?;
-//     let attrmap_tree: sled::Tree = db.open_tree(b"ATTR_MAP_CACHE")?;
-//     let mut batch = sled::Batch::default();
-//     for k in PDMS_ATT_MAP_CACHE.iter() {
-//         batch.insert(k.key(), k.value());
-//     }
-//     attrmap_tree.apply_batch(batch).map_err(|e| anyhow!(e.to_string()))?;
-//
-//     let attrmap_tree: sled::Tree = db.open_tree(b"IMPLICIT_ATTR_MAP_CACHE")?;
-//     let mut batch = sled::Batch::default();
-//     for k in PDMS_IMPLICIT_ATT_MAP_CACHE.iter() {
-//         batch.insert(k.key(), k.value());
-//     }
-//     attrmap_tree.apply_batch(batch).map_err(|e| anyhow!(e.to_string()))?;
-//
-//     let refno_basic_tree: sled::Tree = db.open_tree(b"REFNO_BASIC_CACHE")?;
-//     let mut batch = sled::Batch::default();
-//     for k in CACHED_REFNO_BASIC_MAP.iter() {
-//         batch.insert(k.key(), k.value());
-//     }
-//     refno_basic_tree.apply_batch(batch).map_err(|e| anyhow!(e.to_string()))?;
-//
-//     println!("缓存到db文件花费：{} ms", time.elapsed().as_millis());
-//     Ok(())
-// }
-//
-// ///从sled加载缓存数据
-// pub fn load_from_cache_sled_db() -> anyhow::Result<()> {
-//     let mut time = Instant::now();
-//     let db = sled::open(CACHE_SLED_NAME)?;
-//     let attrmap_tree: sled::Tree = db.open_tree(b"ATTR_MAP_CACHE")?;
-//
-//     for k in attrmap_tree.iter() {
-//         if let Ok((key, value)) = k {
-//             PDMS_ATT_MAP_CACHE.insert(key.into(), value.into());
-//         }
-//     }
-//
-//     let attrmap_tree: sled::Tree = db.open_tree(b"IMPLICIT_ATTR_MAP_CACHE")?;
-//
-//     for k in attrmap_tree.iter() {
-//         if let Ok((key, value)) = k {
-//             PDMS_IMPLICIT_ATT_MAP_CACHE.insert(key.into(), value.into());
-//         }
-//     }
-//
-//     let refno_basic_tree: sled::Tree = db.open_tree(b"REFNO_BASIC_CACHE")?;
-//
-//     for k in refno_basic_tree.iter() {
-//         if let Ok((key, value)) = k {
-//             CACHED_REFNO_BASIC_MAP.insert(key.into(), value.into());
-//         }
-//     }
-//
-//     println!("加载缓存db文件花费：{} ms", time.elapsed().as_millis());
-//     Ok(())
-//     // let mut batch = sled::Batch::default();
-//     // for k in PDMS_ATT_MAP_CACHE.iter() {
-//     //     batch.insert(&k.key().0.to_be_bytes(), bincode::serialize(k.value()).unwrap());
-//     // }
-//     // attrmap_tree.apply_batch(batch).map_err(|e| e.into())
-// }

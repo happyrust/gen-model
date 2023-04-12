@@ -6,6 +6,17 @@
 &emsp; &emsp; &emsp;都是在第0个大版本的基础上进行的 <br>
 &emsp; (4) : 除了最原始的版本，其他所有版本的数据都存放在同一张表内，方便版本数据之间的切换 <br> 
 
+### all_attr_info.json 字段手动修改说明
+#### 1. PTCDI -> 更改为 PTCD
+#### 2.PAXI -> 类型要修改为 STRING
+#### 3.PAAX -> 类型要修改为 STRING
+#### 4.PBAX PCAX -> 类型要修改为 STRING
+#### 5.LEVE -> 类型要修改为 INTVEC
+#### 6.PTS -> 类型要修改为 INTVEC
+#### 7.CURD -> 类型要修改为 RefU64Vec 
+#### 8.SPCO.DETR -> offset 改为 17
+
+
 ### 2.版本数据表结构设计与说明
 
 |      字段      |    类型    |                          说明                           |
