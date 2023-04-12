@@ -1568,16 +1568,6 @@ impl AiosDBManager {
                             .await
                             .unwrap_or_default();
                     } else {
-                        // dbg!("get_cata_single_geoms");
-                        // Self::get_cata_single_geoms(
-                        //     mgr.clone(),
-                        //     refno,
-                        //     &brep_shapes_map,
-                        //     &refno_ptset_map,
-                        //     target_debug_refno,
-                        // )
-                        //     .await
-                        //     .unwrap_or_default();
                     }
                     for (child_refno, shapes) in brep_shapes_map {
                         let trans_origin = mgr
