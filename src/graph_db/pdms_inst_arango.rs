@@ -29,7 +29,6 @@ use crate::options::DbOption;
 pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &CachedInstanceMgr) -> anyhow::Result<()> {
     let collection = "pdms_instances";
     let edge_collection = "instance_edges";
-
     let database = &get_arangodb_conn_from_db_option(&mgr.db_option).await?;
     let mut instances = vec![];
     let mut edges = vec![];
