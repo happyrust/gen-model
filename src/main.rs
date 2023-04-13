@@ -318,7 +318,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "SPCO";
+    let noun = "TRAP";
     let hash = db1_hash(noun);
     let str = db1_dehash(11515723);
     dbg!(hash);
@@ -367,8 +367,8 @@ fn test_inst_mgr() {
 
 #[test]
 fn test_compare_attr_info_file() {
-    let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
-    let old_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info_11.json")).unwrap();
+    let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info - 副本.json")).unwrap();
+    let old_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
     let old_map = old_info.noun_attr_info_map;
     for (noun, new_attr) in new_info.noun_attr_info_map {
         if let Some(old_attr) = old_map.get(&noun) {
@@ -383,6 +383,11 @@ fn test_compare_attr_info_file() {
                     dbg!("");
                 }
             }
+        } else {
+            dbg!(&noun);
+            dbg!(&db1_dehash(noun as u32));
+            dbg!("");
         }
+
     }
 }

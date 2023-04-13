@@ -193,10 +193,11 @@ async fn query_stucj_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap
 
             map.entry("STUCJ13".to_string()).or_insert(AttrValue::AttrFloat(bank_width));
 
-            let plug_type = result.get::<Option<String>, _>("PlugType").unwrap_or("Unknown".to_string());
-            let plug_type = match_plug_type_str(&plug_type[..1]);
-            map.entry("STUCJ18".to_string()).or_insert(AttrValue::AttrString(plug_type));
-            map.entry("STUCJ17".to_string()).or_insert(AttrValue::AttrBool(false));
+            let plug_type = result.get::<Option<String>, _>("PlugType");
+            // let plug_type = match_plug_type_str(&plug_type[..1]);
+            map.entry("STUCJ17".to_string()).or_insert(AttrValue::AttrBool(plug_type.is_some()));
+            map.entry("STUCJ18".to_string()).or_insert(AttrValue::AttrString(plug_type.unwrap_or("".to_string())));
+
             // map.entry("STUCJ19".to_string()).or_insert(AttrValue::AttrString("PIA100".to_string()));
             map.entry("STUCJ20".to_string()).or_insert(AttrValue::AttrString("600".to_string()));
             let b_second = result.get::<bool, _>("Second");
@@ -281,10 +282,10 @@ async fn query_stucg_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap
             map.entry("STUCG14".to_string()).or_insert(AttrValue::AttrVec3Array(vec![Vec3::ZERO, Vec3::ZERO]));
 
             map.entry("STUCG15".to_string()).or_insert(AttrValue::AttrFloat(0.0));
-            map.entry("STUCG16".to_string()).or_insert(AttrValue::AttrBool(true));
-            let plug_type = result.get::<Option<String>, _>("PlugType").unwrap_or("Unknown".to_string());
-            let plug_type = match_plug_type_str(&plug_type[..1]);
-            map.entry("STUCG17".to_string()).or_insert(AttrValue::AttrString(plug_type));
+            let plug_type = result.get::<Option<String>, _>("PlugType");
+            map.entry("STUCG16".to_string()).or_insert(AttrValue::AttrBool(plug_type.is_some()));
+            // let plug_type = match_plug_type_str(&plug_type[..1]);
+            map.entry("STUCG17".to_string()).or_insert(AttrValue::AttrString(plug_type.unwrap_or("".to_string())));
             map.entry("STUCG19".to_string()).or_insert(AttrValue::AttrString("".to_string()));
 
             let hole_work = result.get::<String, _>("HoleWork");
@@ -347,11 +348,11 @@ async fn query_stuch_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap
             let extent_length_2 = result.get::<Option<f32>, _>("ExtentLength2").unwrap_or(0.0);
             let size_throw_wall = result.get::<Option<f32>, _>("SizeThrowWall").unwrap_or(0.0);
             map.entry("STUCH10".to_string()).or_insert(AttrValue::AttrFloatArray(vec![extent_length_1, size_throw_wall, extent_length_2]));
-            let position = result.get::<Option<f32>, _>("SubsThickness").unwrap_or(0.0);
-            map.entry("STUCH11".to_string()).or_insert(AttrValue::AttrBool(true));
-            let plug_type = result.get::<Option<String>, _>("PlugType").unwrap_or("Unknown".to_string());
-            let plug_type = match_plug_type_str(&plug_type[..1]);
-            map.entry("STUCH12".to_string()).or_insert(AttrValue::AttrString(plug_type));
+            // let position = result.get::<Option<f32>, _>("SubsThickness").unwrap_or(0.0);
+            let plug_type = result.get::<Option<String>, _>("PlugType");
+            map.entry("STUCH11".to_string()).or_insert(AttrValue::AttrBool(plug_type.is_some()));
+            // let plug_type = match_plug_type_str(&plug_type[..1]);
+            map.entry("STUCH12".to_string()).or_insert(AttrValue::AttrString(plug_type.unwrap_or("".to_string())));
             map.entry("STUCH14".to_string()).or_insert(AttrValue::AttrString("600".to_string()));
 
             let hole_work = result.get::<String, _>("HoleWork");
@@ -398,7 +399,7 @@ fn get_item_ref_value(item_ref: String, h_type: HoleType) -> Vec<ItemValue> {
     let mut result = Vec::new();
     if item_ref.len() > 10 {
         match h_type {
-            HoleType::STUCJ => {
+            _ => {
                 result.push(ItemValue::String(item_ref[..1].to_string()));
                 result.push(ItemValue::String(item_ref[1..3].to_string()));
                 result.push(ItemValue::String(item_ref[3..4].to_string()));
@@ -408,20 +409,6 @@ fn get_item_ref_value(item_ref: String, h_type: HoleType) -> Vec<ItemValue> {
                 let len = item_ref.len();
                 result.push(ItemValue::String(item_ref[len - 1..len].to_string()));
             }
-            HoleType::STUCG => {
-                if item_ref.len() >= 12 {
-                    result.push(ItemValue::String(item_ref[..3].to_string()));
-                    result.push(ItemValue::String(item_ref[3..5].to_string()));
-                    result.push(ItemValue::String(item_ref[5..7].to_string()));
-                    result.push(ItemValue::String(item_ref[7..11].to_string()));
-                    result.push(ItemValue::String(item_ref[11..12].to_string()));
-                }
-            }
-            HoleType::STUCH => {}
-            HoleType::STUCK => {}
-            HoleType::STUCL => {}
-            HoleType::STUCM => {}
-            HoleType::Unknown => {}
         }
     }
     result

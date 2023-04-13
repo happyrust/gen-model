@@ -31,9 +31,10 @@ async fn query_embed_data(id: u64, pool: &Pool<MySql>) -> anyhow::Result<Option<
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     match result {
         Ok(result) => {
+            let speciality = result.try_get::<String, _>("Speciality").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC1".to_string(),
-                value: AttrValue::AttrStrArray(vec!["Tes".to_string(), "Te".to_string(), "Te".to_string(), "Test".to_string(), "T".to_string()]).into(),
+                value: AttrValue::AttrString(UdaMajorType::from_chinese_description(&speciality).to_major_str()).into(),
             });
             let code = result.try_get::<String, _>("Code").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
@@ -119,27 +120,27 @@ async fn query_embed_data(id: u64, pool: &Pool<MySql>) -> anyhow::Result<Option<
                 value: AttrValue::AttrString("Test".to_string()).into(),
             });
 
-            let fitt_id = result.try_get::<String,_>("FittID").unwrap_or("".to_string());
+            let fitt_id = result.try_get::<String, _>("FittID").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC27".to_string(),
                 value: AttrValue::AttrString(fitt_id).into(),
             });
-            let embed_bpid = result.try_get::<String,_>("EmbedBPID").unwrap_or("".to_string());
+            let embed_bpid = result.try_get::<String, _>("EmbedBPID").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC28".to_string(),
                 value: AttrValue::AttrString(embed_bpid).into(),
             });
-            let embed_b_pver = result.try_get::<String,_>("EmbedBPVER").unwrap_or("".to_string());
+            let embed_b_pver = result.try_get::<String, _>("EmbedBPVER").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC29".to_string(),
                 value: AttrValue::AttrString(embed_b_pver).into(),
             });
-            let rely_item_bpid  = result.try_get::<String,_>("RelyItemBPID").unwrap_or("".to_string());
+            let rely_item_bpid = result.try_get::<String, _>("RelyItemBPID").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC30".to_string(),
                 value: AttrValue::AttrString(rely_item_bpid).into(),
             });
-            let rely_item_bpver = result.try_get::<String,_>("RelyItemBPVER").unwrap_or("".to_string());
+            let rely_item_bpver = result.try_get::<String, _>("RelyItemBPVER").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC31".to_string(),
                 value: AttrValue::AttrString(rely_item_bpver).into(),
@@ -154,9 +155,10 @@ async fn query_embed_data(id: u64, pool: &Pool<MySql>) -> anyhow::Result<Option<
                         attribute_model_code: "STUCCA1".to_string(),
                         value: AttrValue::AttrString(stander_type).into(),
                     });
+                    let size_length = result.try_get::<f32, _>("SizeLength").unwrap_or(0.0);
                     instances.push(DataCenterAttr {
                         attribute_model_code: "STUCCA2".to_string(),
-                        value: AttrValue::AttrFloat(0.0).into(),
+                        value: AttrValue::AttrFloat(size_length).into(),
                     });
                     instances.push(DataCenterAttr {
                         attribute_model_code: "STUCCA3".to_string(),
