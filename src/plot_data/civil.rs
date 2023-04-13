@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use arangors_lite::collection::CollectionType::{Document, Edge};
 use arangors_lite::{AqlQuery, Database};
@@ -9,7 +10,6 @@ use crate::api::attr::query_full_attr;
 use crate::aql_api::children::query_children_aql;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, save_arangodb_with_database};
-use crate::options::DbOption;
 
 /// 土建出图轴网需要的数据
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

@@ -22,7 +22,7 @@ use sled::IVec;
 pub mod tables;
 pub mod database;
 pub mod consts;
-pub mod options;
+// pub mod options;
 pub mod helper;
 pub mod api;
 pub mod aql_api;

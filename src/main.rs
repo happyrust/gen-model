@@ -35,7 +35,6 @@ use aios_database::graph_db::pdms_mesh_arango::sync_mesh_to_graph_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::helper::{qualified_column_name, qualified_table_name};
 use aios_database::negative::{compute_boolean_mesh, query_negative_refnos_aql};
-use aios_database::options::DbOption;
 use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
@@ -69,6 +68,7 @@ use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
+use aios_core::options::DbOption;
 use bevy::prelude::system_adapter::new;
 use tokio::spawn;
 
@@ -318,7 +318,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "SPCO";
+    let noun = "TRAP";
     let hash = db1_hash(noun);
     let str = db1_dehash(11515723);
     dbg!(hash);
@@ -367,8 +367,8 @@ fn test_inst_mgr() {
 
 #[test]
 fn test_compare_attr_info_file() {
-    let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
-    let old_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info_11.json")).unwrap();
+    let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info - 副本.json")).unwrap();
+    let old_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
     let old_map = old_info.noun_attr_info_map;
     for (noun, new_attr) in new_info.noun_attr_info_map {
         if let Some(old_attr) = old_map.get(&noun) {
@@ -383,6 +383,11 @@ fn test_compare_attr_info_file() {
                     dbg!("");
                 }
             }
+        } else {
+            dbg!(&noun);
+            dbg!(&db1_dehash(noun as u32));
+            dbg!("");
         }
+
     }
 }
