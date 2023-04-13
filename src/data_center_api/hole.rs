@@ -24,19 +24,37 @@ pub fn get_num_from_str(input: &str) -> Option<i32> {
     None
 }
 
-async fn query_hole_data(refno: RefU64, pool: &Pool<MySql>) -> Option<DataCenterInstance> {
-    if let Ok(hole_type) = query_hole_type(refno, pool).await {
+async fn query_hole_data(id: u32, pool: &Pool<MySql>) -> Option<DataCenterInstance> {
+    if let Ok(hole_type) = query_hole_type(id, pool).await {
         let result = match hole_type {
             HoleType::STUCJ => {
                 DataCenterInstance {
                     object_model_code: "STUCJ".to_string(),
                     project_code: "1516".to_string(),
-                    instance_code: "STUCJ01".to_string(),
+                    instance_code: format!("STUCJ{}", id),
                     version: "A版".to_string(),
-                    attributes: gen_stucj_data(refno, pool).await,
+                    attributes: gen_stucj_data(id, pool).await,
                 }
             }
-            _ => { DataCenterInstance::default() }
+            HoleType::STUCG => {
+                DataCenterInstance {
+                    object_model_code: "STUCG".to_string(),
+                    project_code: "1516".to_string(),
+                    instance_code: format!("STUCG{}", id),
+                    version: "A版".to_string(),
+                    attributes: gen_stucg_data(id, pool).await,
+                }
+            }
+            HoleType::STUCH => {
+                DataCenterInstance {
+                    object_model_code: "STUCH".to_string(),
+                    project_code: "1516".to_string(),
+                    instance_code: format!("STUCH{}", id),
+                    version: "A版".to_string(),
+                    attributes: gen_stuch_data(id, pool).await,
+                }
+            }
+            _ => { return None; }
         };
         return Some(result);
     }
@@ -44,13 +62,13 @@ async fn query_hole_data(refno: RefU64, pool: &Pool<MySql>) -> Option<DataCenter
 }
 
 /// 查找改参考号属于哪种孔洞
-async fn query_hole_type(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<HoleType> {
-    let sql = gen_query_hole_type_sql(refno);
+async fn query_hole_type(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HoleType> {
+    let sql = gen_query_hole_type_sql(id);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     match result {
         Ok(result) => {
             let h_type = result.get::<String, _>("hType");
-            let material = result.get::<String, _>("SubsMaterial");
+            let material = result.get::<Option<String>, _>("SubsMaterial").unwrap_or("".to_string());
             return match h_type.as_str() {
                 "K" => { Ok(HoleType::STUCJ) }
                 "T" => { if material.as_str() == "Q235" { Ok(HoleType::STUCG) } else { Ok(HoleType::STUCH) } }
@@ -65,9 +83,9 @@ async fn query_hole_type(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Ho
     Ok(HoleType::Unknown)
 }
 
-async fn gen_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> Vec<DataCenterAttr> {
+async fn gen_stucj_data(id: u32, pool: &Pool<MySql>) -> Vec<DataCenterAttr> {
     let mut result = Vec::new();
-    if let Ok(stucj_data_map) = query_stucj_data(refno, pool).await {
+    if let Ok(stucj_data_map) = query_stucj_data(id, pool).await {
         for i in 0..33 {
             let name = format!("STUCJ{}", i);
             let value = stucj_data_map.get(&name);
@@ -82,10 +100,44 @@ async fn gen_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> Vec<DataCenterAttr
     result
 }
 
+async fn gen_stucg_data(id: u32, pool: &Pool<MySql>) -> Vec<DataCenterAttr> {
+    let mut result = Vec::new();
+    if let Ok(stucj_data_map) = query_stucg_data(id, pool).await {
+        for i in 0..33 {
+            let name = format!("STUCG{}", i);
+            let value = stucj_data_map.get(&name);
+            if value.is_none() { continue; }
+            let value = value.unwrap();
+            result.push(DataCenterAttr {
+                attribute_model_code: name,
+                value: value.clone().into(),
+            });
+        }
+    }
+    result
+}
+
+async fn gen_stuch_data(id: u32, pool: &Pool<MySql>) -> Vec<DataCenterAttr> {
+    let mut result = Vec::new();
+    if let Ok(stucj_data_map) = query_stuch_data(id, pool).await {
+        for i in 0..33 {
+            let name = format!("STUCH{}", i);
+            let value = stucj_data_map.get(&name);
+            if value.is_none() { continue; }
+            let value = value.unwrap();
+            result.push(DataCenterAttr {
+                attribute_model_code: name,
+                value: value.clone().into(),
+            });
+        }
+    }
+    result
+}
+
 /// 查找stucj的数据
-async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, AttrValue>> {
+async fn query_stucj_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, AttrValue>> {
     let mut map = HashMap::new();
-    let sql = gen_query_hole_data_sql(refno);
+    let sql = gen_query_hole_data_sql(id);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     match result {
         Ok(result) => {
@@ -100,7 +152,6 @@ async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<H
             map.entry("STUCJ4".to_string()).or_insert(AttrValue::AttrString(rely_item));
             let rely_item_ref = result.get::<String, _>("RelyItemREF");
             map.entry("STUCJ5".to_string()).or_insert(AttrValue::AttrString(rely_item_ref));
-            // let main_pipe_line = result.get::<String, _>("MainPipeline");
             let mut pipe_line_map = HashMap::new();
             pipe_line_map.entry("工艺管道".to_string()).or_insert_with(Vec::new).push("Test".to_string());
             map.entry("STUCJ6".to_string()).or_insert(AttrValue::AttrMap(pipe_line_map));
@@ -118,7 +169,7 @@ async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<H
             let mut shape_map = HashMap::new();
             match shape.as_str() {
                 "CIR" => {
-                    shape_map.entry("圆形孔洞".to_string()).or_insert(vec![size_height]);
+                    shape_map.entry("圆形孔洞".to_string()).or_insert(vec![size_width]);
                 }
                 "RECT" => {
                     shape_map.entry("方形孔洞".to_string()).or_insert(vec![size_width, size_height]);
@@ -142,87 +193,204 @@ async fn query_stucj_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<H
 
             map.entry("STUCJ13".to_string()).or_insert(AttrValue::AttrFloat(bank_width));
 
-            // map.entry("STUCJ14".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0]));
-            //
-            // map.entry("STUCJ15".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0]));
-            //
-            // map.entry("STUCJ16".to_string()).or_insert(AttrValue::AttrBool(true));
-
-            let plug_type = result.get::<Option<String>, _>("PlugType");
-            if let Some(plug_type) = plug_type {
-                let plug_type = plug_type.chars().map(|x| x.to_string()).collect::<Vec<_>>();
-                map.entry("STUCJ18".to_string()).or_insert(AttrValue::AttrString("气密".to_string()));
-                map.entry("STUCJ17".to_string()).or_insert(AttrValue::AttrBool(true));
-            } else {
-                map.entry("STUCJ18".to_string()).or_insert(AttrValue::AttrString("气密".to_string()));
-                map.entry("STUCJ17".to_string()).or_insert(AttrValue::AttrBool(false));
-            }
+            let plug_type = result.get::<Option<String>, _>("PlugType").unwrap_or("Unknown".to_string());
+            let plug_type = match_plug_type_str(&plug_type[..1]);
+            map.entry("STUCJ18".to_string()).or_insert(AttrValue::AttrString(plug_type));
+            map.entry("STUCJ17".to_string()).or_insert(AttrValue::AttrBool(false));
             // map.entry("STUCJ19".to_string()).or_insert(AttrValue::AttrString("PIA100".to_string()));
             map.entry("STUCJ20".to_string()).or_insert(AttrValue::AttrString("600".to_string()));
             let b_second = result.get::<bool, _>("Second");
             map.entry("STUCJ21".to_string()).or_insert(AttrValue::AttrBool(b_second));
 
-            map.entry("STUCJ22".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0,0.0,0.0,0.0,0.0,0.0]));
+            map.entry("STUCJ22".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
             let hole_work = result.get::<String, _>("HoleWork");
             map.entry("STUCJ23".to_string()).or_insert(AttrValue::AttrString(hole_work));
 
             let work_by = result.get::<String, _>("WorkBy");
             map.entry("STUCJ24".to_string()).or_insert(AttrValue::AttrString(work_by));
 
-            let time = result.get::<String, _>("Time").replace("/","-");
+            let time = result.get::<String, _>("Time").replace("/", "-");
             let time = convert_time_to_vec(&time);
             map.entry("STUCJ25".to_string()).or_insert(AttrValue::AttrStrArray(time));
 
             let open_item = result.try_get::<String, _>("OpenItem").unwrap_or("".to_string());
             map.entry("STUCJ26".to_string()).or_insert(AttrValue::AttrString(open_item));
 
-            let note = result.get::<String, _>("Note");
+            let note = result.get::<Option<String>, _>("Note").unwrap_or("".to_string());
             map.entry("STUCJ27".to_string()).or_insert(AttrValue::AttrString(note));
 
-            // let fitt_refno = result.get::<String, _>("FittRefNo");
-            // map.entry("STUCJ28".to_string()).or_insert(AttrValue::AttrString(fitt_refno));
-            // let hole_b_pid = result.get::<f32, _>("HoleBPID");
-            // map.entry("STUCJ29".to_string()).or_insert(AttrValue::AttrFloat(hole_b_pid));
-            //
-            // let hole_b_pver = result.get::<f32, _>("HoleBPVER");
-            // map.entry("STUCJ30".to_string()).or_insert(AttrValue::AttrFloat(hole_b_pver));
-            //
-            // let rely_item_b_pid = result.get::<f32, _>("RelyItemBPID");
-            // map.entry("STUCJ31".to_string()).or_insert(AttrValue::AttrFloat(rely_item_b_pid));
-            //
-            // let rely_item_b_pver = result.get::<f32, _>("RelyItemBPVER");
-            // map.entry("STUCJ32".to_string()).or_insert(AttrValue::AttrFloat(rely_item_b_pver));
-
-
+            let note = result.get::<Option<String>, _>("FittRefNo").unwrap_or("".to_string());
+            map.entry("STUCJ28".to_string()).or_insert(AttrValue::AttrString(note));
+            let note = result.get::<Option<String>, _>("HoleBPID").unwrap_or("".to_string());
+            map.entry("STUCJ29".to_string()).or_insert(AttrValue::AttrString(note));
+            let note = result.get::<Option<String>, _>("HoleBPVER").unwrap_or("".to_string());
+            map.entry("STUCJ30".to_string()).or_insert(AttrValue::AttrString(note));
+            let note = result.get::<Option<String>, _>("RelyItemBPID").unwrap_or("".to_string());
+            map.entry("STUCJ31".to_string()).or_insert(AttrValue::AttrString(note));
+            let note = result.get::<Option<String>, _>("RelyItemBPVER").unwrap_or("".to_string());
+            map.entry("STUCJ32".to_string()).or_insert(AttrValue::AttrString(note));
         }
         Err(err) => { dbg!(&err); }
     }
     Ok(map)
 }
 
-async fn query_stucg_data(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, AttrValue>> {
+async fn query_stucg_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, AttrValue>> {
     let mut map = HashMap::new();
-    let sql = gen_query_hole_data_sql(refno);
+    let sql = gen_query_hole_data_sql(id);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     match result {
         Ok(result) => {
             let item_ref = result.try_get::<String, _>("ItemREF").unwrap_or("".to_string());
-            let value = get_item_ref_value(item_ref, HoleType::STUCJ);
+            let value = get_item_ref_value(item_ref, HoleType::STUCG);
+            map.entry("STUCG1".to_string()).or_insert(AttrValue::AttrItemArray(value));
+            let h_type = result.get::<String, _>("hType");
+            let h_type = if &h_type == "T" { "直管".to_string() } else { "弯管".to_string() };
+            map.entry("STUCG2".to_string()).or_insert(AttrValue::AttrString(h_type));
+            let code = result.get::<String, _>("Code");
+            map.entry("STUCG3".to_string()).or_insert(AttrValue::AttrString(code));
+            let rely_item = result.get::<String, _>("RelyItem");
+            map.entry("STUCG4".to_string()).or_insert(AttrValue::AttrString(rely_item));
+            let rely_item_ref = result.get::<String, _>("RelyItemREF");
+            map.entry("STUCG5".to_string()).or_insert(AttrValue::AttrString(rely_item_ref));
+
+            let mut pipe_line_map = HashMap::new();
+            pipe_line_map.entry("工艺管道".to_string()).or_insert_with(Vec::new).push("Test".to_string());
+            map.entry("STUCG6".to_string()).or_insert(AttrValue::AttrMap(pipe_line_map));
+
+            let position = result.get::<String, _>("Position");
+            let position = get_pos_from_str(position);
+            let position = if position.len() > 2 { position } else { vec![0.0, 0.0, 0.0] };
+            map.entry("STUCG7".to_string()).or_insert(AttrValue::AttrFloatArray(position));
+            let ori = result.get::<String, _>("Ori");
+            map.entry("STUCG8".to_string()).or_insert(AttrValue::AttrString(ori));
+
+            let subs_type = result.get::<Option<String>, _>("SubsType").unwrap_or("".to_string());
+            map.entry("STUCG10".to_string()).or_insert(AttrValue::AttrString(subs_type));
+            let position = result.get::<Option<f32>, _>("SubsThickness").unwrap_or(0.0);
+            let size_width = result.get::<f32, _>("SizeWidth");
+            map.entry("STUCG11".to_string()).or_insert(AttrValue::AttrFloatArray(vec![size_width, position]));
+
+            let extent_length_1 = result.get::<Option<f32>, _>("ExtentLength1").unwrap_or(0.0);
+            let extent_length_2 = result.get::<Option<f32>, _>("ExtentLength2").unwrap_or(0.0);
+            let size_throw_wall = result.get::<Option<f32>, _>("SizeThrowWall").unwrap_or(0.0);
+            map.entry("STUCG12".to_string()).or_insert(AttrValue::AttrFloatArray(vec![extent_length_1, size_throw_wall, extent_length_2]));
+
+            let subs_material = result.get::<Option<String>, _>("SubsMaterial").unwrap_or("".to_string());
+            map.entry("STUCG13".to_string()).or_insert(AttrValue::AttrString(subs_material));
+            map.entry("STUCG14".to_string()).or_insert(AttrValue::AttrVec3Array(vec![Vec3::ZERO, Vec3::ZERO]));
+
+            map.entry("STUCG15".to_string()).or_insert(AttrValue::AttrFloat(0.0));
+            map.entry("STUCG16".to_string()).or_insert(AttrValue::AttrBool(true));
+            let plug_type = result.get::<Option<String>, _>("PlugType").unwrap_or("Unknown".to_string());
+            let plug_type = match_plug_type_str(&plug_type[..1]);
+            map.entry("STUCG17".to_string()).or_insert(AttrValue::AttrString(plug_type));
+            map.entry("STUCG19".to_string()).or_insert(AttrValue::AttrString("".to_string()));
+
+            let hole_work = result.get::<String, _>("HoleWork");
+            map.entry("STUCG21".to_string()).or_insert(AttrValue::AttrString(hole_work));
+            let work_by = result.get::<String, _>("WorkBy");
+            map.entry("STUCG22".to_string()).or_insert(AttrValue::AttrString(work_by));
+            let time = result.get::<String, _>("Time").replace("/", "-");
+            let time = convert_time_to_vec(&time);
+            map.entry("STUCG23".to_string()).or_insert(AttrValue::AttrStrArray(time));
+            let open_item = result.try_get::<String, _>("OpenItem").unwrap_or("".to_string());
+            map.entry("STUCG24".to_string()).or_insert(AttrValue::AttrString(open_item));
+            let note = result.get::<Option<String>, _>("Note").unwrap_or("".to_string());
+            map.entry("STUCG25".to_string()).or_insert(AttrValue::AttrString(note));
+
+            let note = result.get::<Option<String>, _>("FittRefNo").unwrap_or("".to_string());
+            map.entry("STUCG26".to_string()).or_insert(AttrValue::AttrString(note));
+            let note = result.get::<Option<String>, _>("HoleBPID").unwrap_or("".to_string());
+            map.entry("STUCG27".to_string()).or_insert(AttrValue::AttrString(note));
+            let note = result.get::<Option<String>, _>("HoleBPVER").unwrap_or("".to_string());
+            map.entry("STUCG28".to_string()).or_insert(AttrValue::AttrString(note));
+            let note = result.get::<Option<String>, _>("RelyItemBPID").unwrap_or("".to_string());
+            map.entry("STUCG29".to_string()).or_insert(AttrValue::AttrString(note));
+            let note = result.get::<Option<String>, _>("RelyItemBPVER").unwrap_or("".to_string());
+            map.entry("STUCG30".to_string()).or_insert(AttrValue::AttrString(note));
         }
         _ => {}
     }
     Ok(map)
 }
 
-fn gen_query_hole_data_sql(refno: RefU64) -> String {
+async fn query_stuch_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, AttrValue>> {
+    let mut map = HashMap::new();
+    let sql = gen_query_hole_data_sql(id);
+    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    match result {
+        Ok(result) => {
+            let item_ref = result.try_get::<String, _>("ItemREF").unwrap_or("".to_string());
+            let value = get_item_ref_value(item_ref, HoleType::STUCG);
+            map.entry("STUCH1".to_string()).or_insert(AttrValue::AttrItemArray(value));
+            let subs_type = result.try_get::<String, _>("SubsType").unwrap_or("".to_string());
+            map.entry("STUCH2".to_string()).or_insert(AttrValue::AttrString(subs_type));
+            let code = result.get::<String, _>("Code");
+            map.entry("STUCH3".to_string()).or_insert(AttrValue::AttrString(code));
+            let rely_item = result.get::<String, _>("RelyItem");
+            map.entry("STUCH4".to_string()).or_insert(AttrValue::AttrString(rely_item));
+            let rely_item_ref = result.get::<String, _>("RelyItemREF");
+            map.entry("STUCH5".to_string()).or_insert(AttrValue::AttrString(rely_item_ref));
+
+            let mut pipe_line_map = HashMap::new();
+            pipe_line_map.entry("工艺管道".to_string()).or_insert_with(Vec::new).push("Test".to_string());
+            map.entry("STUCH6".to_string()).or_insert(AttrValue::AttrMap(pipe_line_map));
+            let position = result.get::<String, _>("Position");
+            let position = get_pos_from_str(position);
+            let position = if position.len() > 2 { position } else { vec![0.0, 0.0, 0.0] };
+            map.entry("STUCH7".to_string()).or_insert(AttrValue::AttrFloatArray(position));
+            let ori = result.get::<String, _>("Ori");
+            map.entry("STUCH8".to_string()).or_insert(AttrValue::AttrString(ori));
+
+            let extent_length_1 = result.get::<Option<f32>, _>("ExtentLength1").unwrap_or(0.0);
+            let extent_length_2 = result.get::<Option<f32>, _>("ExtentLength2").unwrap_or(0.0);
+            let size_throw_wall = result.get::<Option<f32>, _>("SizeThrowWall").unwrap_or(0.0);
+            map.entry("STUCH10".to_string()).or_insert(AttrValue::AttrFloatArray(vec![extent_length_1, size_throw_wall, extent_length_2]));
+            let position = result.get::<Option<f32>, _>("SubsThickness").unwrap_or(0.0);
+            map.entry("STUCH11".to_string()).or_insert(AttrValue::AttrBool(true));
+            let plug_type = result.get::<Option<String>, _>("PlugType").unwrap_or("Unknown".to_string());
+            let plug_type = match_plug_type_str(&plug_type[..1]);
+            map.entry("STUCH12".to_string()).or_insert(AttrValue::AttrString(plug_type));
+            map.entry("STUCH14".to_string()).or_insert(AttrValue::AttrString("600".to_string()));
+
+            let hole_work = result.get::<String, _>("HoleWork");
+            map.entry("STUCH15".to_string()).or_insert(AttrValue::AttrString(hole_work));
+            let work_by = result.get::<String, _>("WorkBy");
+            map.entry("STUCH16".to_string()).or_insert(AttrValue::AttrString(work_by));
+            let time = result.get::<String, _>("Time").replace("/", "-");
+            let time = convert_time_to_vec(&time);
+            map.entry("STUCH17".to_string()).or_insert(AttrValue::AttrStrArray(time));
+            let open_item = result.try_get::<String, _>("OpenItem").unwrap_or("".to_string());
+            map.entry("STUCH18".to_string()).or_insert(AttrValue::AttrString(open_item));
+            let note = result.get::<Option<String>, _>("Note").unwrap_or("".to_string());
+            map.entry("STUCH19".to_string()).or_insert(AttrValue::AttrString(note));
+
+            let note = result.get::<Option<String>, _>("FittRefNo").unwrap_or("".to_string());
+            map.entry("STUCH20".to_string()).or_insert(AttrValue::AttrString(note));
+            let note = result.get::<Option<String>, _>("HoleBPID").unwrap_or("".to_string());
+            map.entry("STUCH21".to_string()).or_insert(AttrValue::AttrString(note));
+            let note = result.get::<Option<String>, _>("HoleBPVER").unwrap_or("".to_string());
+            map.entry("STUCH22".to_string()).or_insert(AttrValue::AttrString(note));
+            let note = result.get::<Option<String>, _>("RelyItemBPID").unwrap_or("".to_string());
+            map.entry("STUCH23".to_string()).or_insert(AttrValue::AttrString(note));
+            let note = result.get::<Option<String>, _>("RelyItemBPVER").unwrap_or("".to_string());
+            map.entry("STUCH24".to_string()).or_insert(AttrValue::AttrString(note));
+        }
+        _ => {}
+    }
+    Ok(map)
+}
+
+fn gen_query_hole_data_sql(id: u32) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT * FROM {HOLES_TABLE} WHERE refNo = '{}'", refno.to_refno_string()));
+    sql.push_str(&format!("SELECT * FROM {HOLES_TABLE} WHERE IntelId = {}", id));
     sql
 }
 
-fn gen_query_hole_type_sql(refno: RefU64) -> String {
+fn gen_query_hole_type_sql(id: u32) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT hType,SubsMaterial FROM {HOLES_TABLE} WHERE refNo = '{}'", refno.to_refno_string()));
+    sql.push_str(&format!("SELECT hType,SubsMaterial FROM {HOLES_TABLE} WHERE IntelId = {}", id));
     sql
 }
 
@@ -284,6 +452,25 @@ pub fn convert_time_to_vec(time: &str) -> Vec<String> {
     r
 }
 
+fn match_plug_type_str(input: &str) -> String {
+    match input.to_uppercase().as_str() {
+        "A" => { "气密封堵".to_string() }
+        "F" => { "防火封堵".to_string() }
+        "W" => { "水淹封堵".to_string() }
+        "B" => { "生物屏蔽封堵".to_string() }
+        "N" => { "压力释放".to_string() }
+        "B+" => { "重混凝土封堵".to_string() }
+        "M" => { "MCT封堵".to_string() }
+        "V" => { "无效孔洞".to_string() }
+        "N1" => { "非边界孔洞不封堵".to_string() }
+        "N2" => { "门洞、吊装洞、排水孔洞、通视孔、地漏等不封堵".to_string() }
+        "G1" => { "国标防水封堵1,按照《防水套管》02S404图集要求进行封堵".to_string() }
+        "G2" => { "国标防水封堵2,按照《消防水泵接合器装》99(03)S203图集要求使用C20细混凝材料进行封堵".to_string() }
+        "G3" => { "国标防水封堵3,待雨水斗安装完毕后,按照《其他厂房排水》技术规格书(项目文件编码)要求进行封堵".to_string() }
+        &_ => { "".to_string() }
+    }
+}
+
 #[test]
 fn test_convert_time_to_vec() {
     // let mut r = Vec::new();
@@ -305,18 +492,21 @@ async fn test_gen_stucj_data() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
-    let refno = RefU64::from_refno_str("24383/101196").unwrap();
-    let r = query_hole_data(refno, &pool).await;
-    let mut file = fs::File::create("孔洞.json")?;
-    if let Some(r) = r {
-        let data = DataCenterProject {
-            package_code: DataCenterProject::convert_package_code(),
-            project_code: "1516".to_string(),
-            owner: "KY1801-208".to_string(),
-            instances: vec![r],
-        };
-        let data = serde_json::to_string(&data).unwrap();
-        file.write_all(&data.into_bytes())?;
+    // let refno = RefU64::from_refno_str("24383/101196").unwrap();
+    let mut instances = Vec::new();
+    for i in 0..40 {
+        if let Some(r) = query_hole_data(i, &pool).await {
+            instances.push(r);
+        }
     }
+    let mut file = fs::File::create("孔洞.json")?;
+    let data = DataCenterProject {
+        package_code: DataCenterProject::convert_package_code(),
+        project_code: "1516".to_string(),
+        owner: "KY1801-208".to_string(),
+        instances,
+    };
+    let data = serde_json::to_string(&data).unwrap();
+    file.write_all(&data.into_bytes())?;
     Ok(())
 }
