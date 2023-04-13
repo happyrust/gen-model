@@ -38,12 +38,12 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::graph_db::{ForeignEdges, ParaDocument};
 use crate::helper::{qualified_column_name, qualified_table_name};
-use crate::options::DbOption;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
 use crate::tables::*;
-use crate::{options, tables, ATTR_INFO_MAP};
+use crate::{tables, ATTR_INFO_MAP};
 use parry3d::utils::hashmap::FxHasher32;
 use std::hash::{Hash, Hasher};
+use aios_core::options::DbOption;
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);

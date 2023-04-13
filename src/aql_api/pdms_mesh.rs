@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use aios_core::negative_mesh_type::NegativeEles;
+use aios_core::options::DbOption;
 use aios_core::pdms_data::PdmsInstanceMeshData;
 use aios_core::pdms_types::{CachedMeshesMgr, EleGeosInfo, GeoHash, RefU64, ShapeInstancesMgr};
 use aios_core::shape::pdms_shape::{PdmsInstanceMeshMap, PdmsMesh};
@@ -13,7 +14,6 @@ use crate::consts::PDMS_MESH;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::graph_db::pdms_inst_arango::{query_instance_with_refno_in_arangodb, query_instance_with_refnos_in_arangodb};
 use crate::negative::query_instance_refnos_negative_aql;
-use crate::options::DbOption;
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct PdmsMeshAql {

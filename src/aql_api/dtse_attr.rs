@@ -1,3 +1,4 @@
+use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use arangors_lite::{AqlQuery, Connection, Database};
 use dashmap::DashMap;
@@ -7,7 +8,6 @@ use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::para_value::query_des_para_value;
 use crate::graph_db::DataDocument;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
-use crate::options::DbOption;
 
 /// 查询 catr refno引用的 dtse下 data 的 ppro和 dpro数据
 pub async fn query_dtse_ppro_from_catr_refno(refno: RefU64, database: &Database) -> anyhow::Result<Option<DashMap<String, DataDocument>>> {

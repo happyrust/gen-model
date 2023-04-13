@@ -1,4 +1,5 @@
 use std::ops::Neg;
+use aios_core::options::DbOption;
 use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
 use arangors_lite::{AqlQuery, Connection, Database};
 use dashmap::{DashMap, DashSet};
@@ -9,7 +10,6 @@ use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::PdmsPLINAttrAql;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
-use crate::options::DbOption;
 
 /// 传入desi的参考号，返回该参考号对应的plin attr_map 和 wall 引用的 NA 等对应的数值
 pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &Database) -> anyhow::Result<DashMap<RefU64, String>> {

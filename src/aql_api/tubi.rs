@@ -18,7 +18,6 @@ use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager, TUBI_TOL};
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
-use crate::options::DbOption;
 use crate::pcf::bran::get_bran_name_and_children;
 use crate::pcf::excel_api::get_pipe_thickness_table;
 

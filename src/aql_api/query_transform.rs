@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use bevy::prelude::Vec3;
 use crate::api::attr::query_implicit_attr;
@@ -9,7 +10,6 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool};
 use crate::graph_db::pdms_arango::save_virtual_hole_value_to_arangodb;
-use crate::options::DbOption;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CylinderTransform {
