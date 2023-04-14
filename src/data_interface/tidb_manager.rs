@@ -665,17 +665,14 @@ impl AiosDBManager {
     pub async fn init_mdb(&mut self, project: &str, mdb: &str, module: &str) -> anyhow::Result<()> {
         let project_pool = self.get_project_pool(project).ok_or(anyhow!("Unknown project pool"))?;
         info!("正在初始化mdb: {mdb}");
-        //创建table, 如果已经存在，可以忽略
         let mut conn = project_pool.acquire().await?;
-        let create_sql = gen_create_project_mdb_sql();
-        // dbg!(&create_sql);
-        let _ = conn.execute(create_sql.as_str()).await;
-        // let _ = conn.execute(gen_create_project_mdb_json_sql().as_str())
-        //     .await;
-        info!("正在插入mdb数据");
-        // if !query_if_contains_mdb(mdb, module, &project_pool).await? {
-        let _ = self.insert_project_mdb(&project_pool, &self.info_pool).await;
-        // }
+        //创建table, 如果已经存在，可以忽略
+        if self.db_option.reset_mdb_project.is_some() && self.db_option.reset_mdb_project.unwrap()  {
+            let create_sql = gen_create_project_mdb_sql();
+            let _ = conn.execute(create_sql.as_str()).await;
+            info!("正在插入mdb数据");
+            let _ = self.insert_project_mdb(&project_pool, &self.info_pool).await;
+        }
         cache_mdb_site_map(mdb, module, &project_pool).await;
         // 将 mdb对应的 module 下的所有 numbdb保存下来
         let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;

@@ -5,6 +5,7 @@ incr_sync = false
 #项目设置
 project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
 included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
+#included_projects = ["AvevaMarineSample"]
 
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
@@ -13,6 +14,7 @@ gen_model_mesh = true
 gen_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 100
+reset_mdb_project = false
 
 #arangodb 配置
 arangodb_database = "ams"
@@ -42,11 +44,12 @@ save_model_mesh_to_graph_db = true
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
-replace_dbs = false
-debug_root_refnos = ["24381/46775"]
+replace_dbs = true
+debug_root_refnos = []
 #debug_branch_refno = "24381/56660"
-#debug_desi_refno = "24383/83631"
-debug_refno_types = ["CATA", "LOOP", "PRIM"]
+debug_desi_refno = "24381/48846"
+#debug_refno_types = ["CATA", "LOOP", "PRIM"]
+debug_refno_types = ["CATA"]
 debug_db_num = 7997
 #included_db_files = ["ams6890_0001"]
 #replace_types = ["SDTE"]
