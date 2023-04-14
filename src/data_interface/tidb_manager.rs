@@ -1442,10 +1442,8 @@ impl AiosDBManager {
                 has_cata_refnos = RefU64Vec(vec![
                     RefU64::from_refno_str(design_refno).unwrap_or_default()
                 ]);
-            }
-        } else {
-            if let Some(root_refnos_str) = &db_option.debug_root_refno {
-                for root_refno_str in root_refnos_str {
+            } else if !db_option.debug_root_refnos.is_empty() {
+                for root_refno_str in &db_option.debug_root_refnos {
                     if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
                         query_travel_children_with_types_aql(
                             &mgr.arango_database,
@@ -1459,11 +1457,11 @@ impl AiosDBManager {
                             });
                     }
                 }
-            } else {
-                has_cata_refnos = mgr
-                    .get_refnos_by_types(project, &CATA_ATT_TYPES, db_nos)
-                    .await?;
             }
+        } else {
+            has_cata_refnos = mgr
+                .get_refnos_by_types(project, &CATA_ATT_TYPES, db_nos)
+                .await?;
         }
         let has_cata_cnt = has_cata_refnos.len();
         let target_debug_refno = db_option
@@ -1692,7 +1690,6 @@ impl AiosDBManager {
                 .await
                 .unwrap();
         }
-        dbg!(instance_mgr.inst_mgr.len());
         println!(
             "处理元件库几何体: {} 花费时间: {} ms",
             has_cata_cnt,
@@ -1720,8 +1717,8 @@ impl AiosDBManager {
             if target_debug_refno.is_some() {
                 prim_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
             } else {
-                if let Some(root_refnos_str) = &db_option.debug_root_refno {
-                    for root_refno_str in root_refnos_str {
+                if !db_option.debug_root_refnos.is_empty() {
+                    for root_refno_str in &db_option.debug_root_refnos {
                         if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
                             query_travel_children_with_types_aql(
                                 &mgr.arango_database,
@@ -1870,7 +1867,6 @@ impl AiosDBManager {
             }
         }
         futures::future::join_all(take(&mut handles)).await;
-        dbg!(instance_mgr.inst_mgr.len());
         println!(
             "处理常规基本几何体: {} 花费时间: {} ms",
             prim_cnt,
@@ -1973,10 +1969,8 @@ impl AiosDBManager {
                 .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
             if target_debug_refno.is_some() {
                 loop_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
-            }
-        } else {
-            if let Some(root_refnos_str) = &db_option.debug_root_refno {
-                for root_refno_str in root_refnos_str {
+            }else if !db_option.debug_root_refnos.is_empty() {
+                for root_refno_str in &db_option.debug_root_refnos {
                     if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
                         query_travel_children_with_types_aql(
                             &mgr.arango_database,
@@ -1988,11 +1982,11 @@ impl AiosDBManager {
                             .for_each(|x| loop_refnos.push(x.refno));
                     }
                 }
-            } else {
-                loop_refnos = mgr
-                    .get_refnos_by_types(&db_option.project_name, &["PLOO", "LOOP"], db_nos)
-                    .await?;
             }
+        } else {
+            loop_refnos = mgr
+                .get_refnos_by_types(&db_option.project_name, &["PLOO", "LOOP"], db_nos)
+                .await?;
         }
         let loop_cnt = loop_refnos.len();
         //处理loop elements
@@ -2209,8 +2203,6 @@ impl AiosDBManager {
             }
         }
         futures::future::join_all(take(&mut handles)).await;
-
-        dbg!(instance_mgr.inst_mgr.len());
         println!(
             "处理loops几何体: {} 花费时间: {} ms",
             loop_cnt,
