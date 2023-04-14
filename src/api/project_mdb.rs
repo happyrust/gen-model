@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::env;
+use std::hash::{Hash, Hasher};
 
 use aios_core::pdms_types::RefU64;
 use anyhow::Result;
 use dashmap::DashMap;
 use futures::poll;
 use lazy_static::lazy_static;
+use parry3d::utils::hashmap::FxHasher32;
 use sqlx::{MySql, Pool, Row};
 use sqlx::Executor;
 
@@ -90,12 +92,16 @@ pub fn gen_insert_project_mdb_sql(map: &MdbQuickInfoMap) -> String {
     // sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "PROJECT"));
     // sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "WORLD_REFNO"));
     // sql.push_str(&format!(r#"{} VARCHAR(10) ,"#, "DB_TYPE"));
-    sql.push_str(&format!("REPLACE IGNORE INTO {PDMS_PROJECT_MDB_TABLE} (DB_NUM, MDB_NAME, REFNO, PROJECT, WORLD_REFNO, DB_TYPE) VALUES "));
+    sql.push_str(&format!("REPLACE INTO {PDMS_PROJECT_MDB_TABLE} (ID, DB_NUM, MDB_NAME, REFNO, PROJECT, WORLD_REFNO, DB_TYPE) VALUES "));
     for (name, vals) in map {
         for (db_type, data) in vals {
             for d in data {
-                sql.push_str(&format!("( {} , '{}', '{}', '{}', '{}', '{}' ),",
-                                      d.db_num, name, &d.refno.to_string(), &d.project, &d.world_refno.to_string(), db_type));
+                let mut s: FxHasher32 = Default::default();
+                name.hash(&mut s);
+                d.db_num.hash(&mut s);
+                let id = s.finish();
+                sql.push_str(&format!("({}, {} , '{}', '{}', '{}', '{}', '{}' ),",
+                                      id , d.db_num, name, &d.refno.to_string(), &d.project, &d.world_refno.to_string(), db_type));
             }
         }
     }

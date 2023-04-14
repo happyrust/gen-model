@@ -668,7 +668,7 @@ impl AiosDBManager {
         //创建table, 如果已经存在，可以忽略
         let mut conn = project_pool.acquire().await?;
         let create_sql = gen_create_project_mdb_sql();
-        dbg!(&create_sql);
+        // dbg!(&create_sql);
         let _ = conn.execute(create_sql.as_str()).await;
         // let _ = conn.execute(gen_create_project_mdb_json_sql().as_str())
         //     .await;
@@ -831,10 +831,10 @@ impl AiosDBManager {
                 continue;
             };
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
-                if mdb_name == "/ALL" {
-                    dbg!(mdb_refno);
-                    dbg!(&dbs);
-                }
+                // if mdb_name == "/ALL" {
+                //     dbg!(mdb_refno);
+                //     dbg!(&dbs);
+                // }
                 let mut map = HashMap::new();
                 for db_refno in dbs {
                     if let Ok(att) = self.get_implicit_attr(db_refno, Some(vec!["NUMBDB"])).await {
