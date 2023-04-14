@@ -99,8 +99,8 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
     let rot = t.rotation;
     let drns = rot * drns;
     let drne = rot * drne;
-    dbg!(to_pdms_vec_str(&drns));
-    dbg!(to_pdms_vec_str(&drne));
+    // dbg!(to_pdms_vec_str(&drns));
+    // dbg!(to_pdms_vec_str(&drne));
     if spine_paths.len() == 0 {
         dbg!(spine_paths.len());
         if let Some(poss) = att.get_poss() &&

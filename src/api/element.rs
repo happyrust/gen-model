@@ -17,7 +17,7 @@ use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use crate::api::attr::{query_explicit_attr, query_implicit_attr};
 use crate::api::children::{query_db_num_by_refno, query_numbdb_from_refnos};
 use crate::api::dbno_sql::{query_dbno_count};
-use crate::api::project_mdb::query_world_refnos;
+use crate::api::project_mdb::*;
 use crate::api::test_sample::{get_test_info_pool, get_test_sample_pool};
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -223,12 +223,14 @@ pub async fn query_elenodes_without_children_count(refnos: Vec<RefU64>, pool: &P
     Ok(eles)
 }
 
-pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<PdmsElement>> {
+pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>, mgr: &AiosDBManager) -> anyhow::Result<Option<PdmsElement>> {
     let mdb = format!("/{}", mdb);
-    let world_refnos = query_world_refnos(&mdb, module, &pool).await?;
-    let world_refno = world_refnos[0];
-    let sql = gen_query_node_id_from_refno_sql(world_refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    //需要在这里判断是哪个 project pool
+    let quicks = query_db_quick_info(&mdb, module, &pool).await?;
+    let quick = &quicks[0];
+    let sql = gen_query_node_id_from_refno_sql(quick.world_refno);
+    let world_pool = mgr.get_project_pool(&quick.project).ok_or(anyhow!("project not found"))?;
+    let result = sqlx::query(&sql).fetch_one(&mut world_pool.acquire().await?).await;
     return match result {
         Ok(val) => {
             let owner = RefU64(val.get::<i64, _>("OWNER") as u64);
@@ -236,7 +238,7 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -
             let type_name = val.get::<String, _>("TYPE");
             let children_count = val.get::<i32, _>("CHILDREN_COUNT") as usize;
             Ok(Some(PdmsElement {
-                refno: world_refno.to_string(),
+                refno: quick.world_refno.to_string(),
                 owner,
                 name,
                 noun: type_name,
@@ -245,7 +247,7 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -
             }))
         }
         Err(e) => {
-            dbg!(e);
+            dbg!(&quick);
             dbg!(sql);
             Ok(None)
         }
@@ -742,10 +744,10 @@ async fn test_query_owner_from_id() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_world_ele_node() -> anyhow::Result<()> {
-    let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let v = query_world_ele_node("SAMPLE", "DESI", &pool).await?;
-    println!("v={:?}", v);
+    // let url = env::var("DATABASE_URL")?;
+    // let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
+    // let v = query_world_ele_node("SAMPLE", "DESI", &pool).await?;
+    // println!("v={:?}", v);
     Ok(())
 }
 

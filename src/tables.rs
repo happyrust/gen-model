@@ -122,6 +122,7 @@ pub fn gen_create_project_mdb_sql() -> String {
     sql.push_str(&format!(r#"{} VARCHAR(100) ,"#, "PROJECT"));
     sql.push_str(&format!(r#"{} VARCHAR(50) ,"#, "WORLD_REFNO"));
     sql.push_str(&format!(r#"{} VARCHAR(50) "#, "DB_TYPE"));
+    sql.push_str(&format!(r#"{} INT,"#, "ORDER_NUM"));
     sql.push_str(");");
     sql
 }
