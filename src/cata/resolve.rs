@@ -10,6 +10,7 @@ use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
 use arangors_lite::Database;
+use bevy::prelude::error;
 use glam::{Vec2, Vec3};
 // use sea_orm::sea_query::IndexType::Hash;
 use smol_str::SmolStr;
@@ -55,7 +56,7 @@ pub fn resolve_gms(
                         Some(v)
                     }
                     Err(e) => {
-                        dbg!(e);
+                        error!("{}",e);
                         None
                     }
                 };

@@ -71,9 +71,20 @@ use std::time::{Instant, UNIX_EPOCH};
 use aios_core::options::DbOption;
 use bevy::prelude::system_adapter::new;
 use tokio::spawn;
+use env_logger::{fmt::Target, Builder};
+use log::{error, LevelFilter};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("log.txt")
+        .unwrap();
+    let mut builder = Builder::from_default_env();
+    builder.filter(None, LevelFilter::Error);
+    builder.target(Target::Pipe(Box::new(file))).init();
+
     use config::{Config, ConfigError, Environment, File};
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
@@ -87,7 +98,6 @@ async fn main() -> anyhow::Result<()> {
         // 把pdms数据同步到mysql
         sync_pdms(&db_option).await.unwrap();
     }
-
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     if let Some(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file("assets/mesh/mesh.bin") {
@@ -260,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
     if db_option.only_sync_sys {
         query_all_db_infos(&mgr).await?;
     }
+
     Ok(())
 }
 
@@ -367,7 +378,7 @@ fn test_inst_mgr() {
 
 #[test]
 fn test_compare_attr_info_file() {
-    let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info - 副本.json")).unwrap();
+    let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
     let old_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
     let old_map = old_info.noun_attr_info_map;
     for (noun, new_attr) in new_info.noun_attr_info_map {
@@ -390,4 +401,20 @@ fn test_compare_attr_info_file() {
         }
 
     }
+}
+
+#[test]
+fn test_log() {
+    use env_logger::{fmt::Target, Builder};
+    use log::error;
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("log.txt")
+        .unwrap();
+
+    let mut builder = Builder::from_default_env();
+    builder.target(Target::Pipe(Box::new(file))).init();
+    error!("Some error");
 }

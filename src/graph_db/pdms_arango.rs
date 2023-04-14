@@ -18,6 +18,7 @@ use bevy::prelude::dbg;
 use dashmap::{DashMap, DashSet};
 use futures::future::ok;
 use itertools::Itertools;
+use log::info;
 use parse_pdms_db::parse::WholeAttMap;
 use regex::internal::Input;
 use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};

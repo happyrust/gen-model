@@ -19,6 +19,8 @@ dotenv = "0.15.0"
 approx = "0.5.1"
 #flate2 = "1.0.23"
 log = "0.4.17"
+env_logger = "0.9.0"
+
 memchr = "2.5.0"
 nom = "7.1.1"
 nom-derive = "0.10.0"

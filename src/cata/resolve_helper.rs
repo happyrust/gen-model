@@ -6,6 +6,7 @@ use aios_core::pdms_data::{AxisParam, ScomInfo};
 use aios_core::tiny_expr::expr_eval::interp;
 use aios_core::tool::float_tool::*;
 use anyhow::anyhow;
+use bevy::log::error;
 use glam::{Vec2, Vec3};
 use itertools::any;
 use nom::Parser;
@@ -240,8 +241,8 @@ pub fn eval_str_to_f64(input_expr: &str, context: &BTreeMap<SmolStr, SmolStr>) -
             return if let Ok(mut stack) = Stack::init(&result_string) {
                 stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", &input_expr)))
             } else {
-                dbg!(&input_expr);
-                dbg!(&result_string);
+                error!("输入表达式 : {}",&input_expr);
+                error!("计算后表达式 : {}",&result_string);
                 Err(anyhow!(format!("求解失败 {}", &input_expr)))
             }
         }
