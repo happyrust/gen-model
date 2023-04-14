@@ -183,7 +183,6 @@ async fn main() -> anyhow::Result<()> {
     let mut data = vec![];
     file.read_to_end(&mut data)?;
     let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-    dbg!(&mesh_mgr.meshes.len());
     if db_option.gen_spatial_tree {
         let mut timer = Instant::now();
         let mut rstar_objs = vec![];

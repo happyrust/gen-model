@@ -682,7 +682,6 @@ impl AiosDBManager {
         for r in results {
             self.cache_module_numbdbs.push(r);
         }
-        info!("Mdb {} cache finished.", mdb);
         Ok(())
     }
 
@@ -839,7 +838,6 @@ impl AiosDBManager {
                 for db_refno in dbs {
                     if let Ok(att) = self.get_implicit_attr(db_refno, Some(vec!["NUMBDB"])).await {
                         let db_num = att.get_i32("NUMBDB").unwrap_or_default();
-                        info!("找到dbnum: {}", db_num);
                         if let Ok(Some(quick_info)) = self.query_quick_info_by_dbno(db_refno, db_num, info_pool).await {
                             if db_num == 6000 {
                                 dbg!(&quick_info);
@@ -2254,8 +2252,9 @@ impl AiosDBManager {
         if db_nos.is_empty() {
             let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
             let pool = AiosDBManager::get_db_pool(&url, project).await?;
-            let db_nos = query_db_nums_of_mdb(mdb, &db_option.module, &pool).await?;
+            db_nos = query_db_nums_of_mdb(mdb, &db_option.module, &pool).await?;
             dbg!(&db_nos);
+            info!("当前mdb的所有dbnos: {:?}", db_nos);
         }
         std::fs::create_dir_all("./assets/mesh").unwrap();
         std::fs::create_dir_all("./assets/instance").unwrap();
