@@ -804,6 +804,7 @@ impl AiosDBManager {
                         db_num,
                         db_type,
                         project,
+                        order_number: 0,
                     }));
                 }
             }
@@ -832,13 +833,11 @@ impl AiosDBManager {
                 //     dbg!(&dbs);
                 // }
                 let mut map = HashMap::new();
-                for db_refno in dbs {
-                    if let Ok(att) = self.get_implicit_attr(db_refno, Some(vec!["NUMBDB"])).await {
+                for (i, db_refno) in dbs.iter().enumerate() {
+                    if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {
                         let db_num = att.get_i32("NUMBDB").unwrap_or_default();
-                        if let Ok(Some(quick_info)) = self.query_quick_info_by_dbno(db_refno, db_num, info_pool).await {
-                            if db_num == 6000 {
-                                dbg!(&quick_info);
-                            }
+                        if let Ok(Some(mut quick_info)) = self.query_quick_info_by_dbno(*db_refno, db_num, info_pool).await {
+                            quick_info.order_number = i as _;
                             map.entry(quick_info.db_type.clone())
                                 .or_insert_with(Vec::new).push(quick_info);
                         }

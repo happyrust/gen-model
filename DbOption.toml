@@ -14,7 +14,7 @@ gen_model_mesh = true
 gen_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 100
-reset_mdb_project = false
+reset_mdb_project = true
 
 #arangodb 配置
 arangodb_database = "ams"

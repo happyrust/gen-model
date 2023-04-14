@@ -353,6 +353,7 @@ pub struct DbQuickInfo {
     pub db_num: i32,
     pub db_type: String,
     pub project: String,
+    pub order_number: i32,
 }
 
 pub type MdbQuickInfoMap = HashMap<String, HashMap<String, Vec<DbQuickInfo>>>;

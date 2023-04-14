@@ -38,6 +38,7 @@ pub async fn query_db_quick_info(mdb: &str, module: &str, pool: &Pool<MySql>) ->
             db_num: r.get::<i32, _>("DB_NUM"),
             db_type: r.get::<String, _>("DB_TYPE"),
             project: r.get::<String, _>("PROJECT"),
+            order_number: r.get::<i32, _>("ORDER_NUM"),
         } );
     }
     Ok(vec)
@@ -78,22 +79,16 @@ pub async fn query_if_contains_mdb(mdb: &str, module: &str, pool: &Pool<MySql>) 
 
 pub fn gen_insert_project_mdb_sql(map: &MdbQuickInfoMap) -> String {
     let mut sql = String::new();
-    // sql.push_str(&format!(r#"{} PRIMARY INT,"#, "DB_NUM"));
-    // sql.push_str(&format!(r#"{} VARCHAR(20) ,"#, "MDB_NAME"));
-    // sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "REFNO"));
-    // sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "PROJECT"));
-    // sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "WORLD_REFNO"));
-    // sql.push_str(&format!(r#"{} VARCHAR(10) ,"#, "DB_TYPE"));
-    sql.push_str(&format!("REPLACE INTO {PDMS_PROJECT_MDB_TABLE} (ID, DB_NUM, MDB_NAME, REFNO, PROJECT, WORLD_REFNO, DB_TYPE, ORDER) VALUES "));
+    sql.push_str(&format!("REPLACE INTO {PDMS_PROJECT_MDB_TABLE} (ID, DB_NUM, MDB_NAME, REFNO, PROJECT, WORLD_REFNO, DB_TYPE, ORDER_NUM) VALUES "));
     for (name, vals) in map {
-        for (i, (db_type, data)) in vals.iter().enumerate() {
+        for (db_type, data) in vals {
             for d in data {
                 let mut s: FxHasher32 = Default::default();
                 name.hash(&mut s);
                 d.db_num.hash(&mut s);
                 let id = s.finish();
                 sql.push_str(&format!("({}, {} , '{}', '{}', '{}', '{}', '{}', {}),",
-                                      id , d.db_num, name, &d.refno.to_string(), &d.project, &d.world_refno.to_string(), db_type, i));
+                                      id , d.db_num, name, &d.refno.to_string(), &d.project, &d.world_refno.to_string(), db_type, d.order_number));
             }
         }
     }
