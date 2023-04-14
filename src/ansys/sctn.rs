@@ -1,5 +1,6 @@
 use std::env;
 use std::io::Write;
+use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use arangors_lite::Database;
 use bevy::prelude::Transform;
@@ -13,7 +14,6 @@ use crate::aql_api::query_transform::query_cylinder_transform;
 use crate::consts::SCTN_STANDARD;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
-use crate::options::DbOption;
 use crate::consts::CHANNEL_STEEL_STANDARD;
 
 pub async fn query_single_sctn_ansys_data(refno: RefU64, aios_mgr: &AiosDBManager,database:&Database) -> anyhow::Result<Option<SctnAnsysData>> {

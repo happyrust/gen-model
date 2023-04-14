@@ -9,6 +9,7 @@ use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use aios_core::create_attas_structs::{VirtualEmbedGraphNode, VirtualHoleGraphNode};
+use aios_core::options::DbOption;
 use aios_core::pdms_types::{PdmsElement, RefU64, RefU64Vec};
 use aios_core::tool::db_tool::db1_hash;
 use anyhow::anyhow;
@@ -17,6 +18,7 @@ use bevy::prelude::dbg;
 use dashmap::{DashMap, DashSet};
 use futures::future::ok;
 use itertools::Itertools;
+use log::info;
 use parse_pdms_db::parse::WholeAttMap;
 use regex::internal::Input;
 use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
@@ -28,7 +30,6 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{DataDocument, ForeignEdges};
 use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphEdgeWithKey, PdmsEleGraphNode};
 use crate::helper::qualified_table_name;
-use crate::options::DbOption;
 
 /// 根据 db_option 的 project_name 创建 arangodb 的 database
 pub async fn set_arangodb_database_from_db_option(db_option: &DbOption) -> anyhow::Result<()> {

@@ -105,6 +105,7 @@ pub fn gen_insert_project_mdb_json_sql(mdbs: &MdbWorldsMap) -> String {
 
 fn gen_query_world_sql(mdb: &str, module: &str) -> String {
     let mut sql = String::new();
+    let mdb = if mdb.starts_with("/") { mdb.to_string() } else { format!("/{}",mdb) };
     sql.push_str(&format!("SELECT DATA FROM {PDMS_PROJECT_MDB_TABLE} WHERE MDB_NAME = '{}' and db_type = '{}' ;", mdb, module));
     sql
 }

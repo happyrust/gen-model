@@ -1,6 +1,5 @@
 use crate::aql_api::pdms_room::*;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
-use crate::options::DbOption;
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::db_number::DbNumMgr;
 use aios_core::pdms_types::UdaMajorType::{E, T, V};
@@ -11,6 +10,7 @@ use parry3d::math::{Isometry, Point};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
+use aios_core::options::DbOption;
 
 pub fn tri_tri_intersection() -> bool {
     true

@@ -14,6 +14,7 @@ use std::fmt::format;
 use std::fs::File;
 use std::io::Read;
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
+use aios_core::options::DbOption;
 use arangors_lite::{AqlQuery, Database};
 use parry3d::math::Point;
 use crate::api::children::{travel_children_with_refno, travel_children_with_type};
@@ -22,7 +23,6 @@ use crate::aql_api::{change_vec_refnos_into_vec_string, convert_refno_vec_from_v
 use crate::aql_api::children::query_travel_children_aql;
 use crate::aql_api::pdms_room::{get_room_name_split, query_all_need_compute_room_refno};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::options::DbOption;
 use crate::ssc::get_room_info_from_excel;
 
 // 缓存该参考号的 owner 和 owner 的 type

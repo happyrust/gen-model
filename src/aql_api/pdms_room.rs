@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
+use aios_core::options::DbOption;
 use aios_core::pdms_types::{NounHash, PdmsElement, RefU64, UdaMajorType};
 use aios_core::pdms_types::UdaMajorType::T;
 use arangors_lite::{AqlQuery, ClientError, Database};
@@ -14,8 +15,8 @@ use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsElementAql};
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
-use crate::options::DbOption;
 use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RoomData {

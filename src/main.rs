@@ -35,7 +35,6 @@ use aios_database::graph_db::pdms_mesh_arango::sync_mesh_to_graph_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::helper::{qualified_column_name, qualified_table_name};
 use aios_database::negative::{compute_boolean_mesh, query_negative_refnos_aql};
-use aios_database::options::DbOption;
 use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
@@ -69,11 +68,23 @@ use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, UNIX_EPOCH};
+use aios_core::options::DbOption;
 use bevy::prelude::system_adapter::new;
 use tokio::spawn;
+use env_logger::{fmt::Target, Builder};
+use log::{error, LevelFilter};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("log.txt")
+        .unwrap();
+    let mut builder = Builder::from_default_env();
+    builder.filter(None, LevelFilter::Error);
+    builder.target(Target::Pipe(Box::new(file))).init();
+
     use config::{Config, ConfigError, Environment, File};
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
@@ -87,7 +98,6 @@ async fn main() -> anyhow::Result<()> {
         // 把pdms数据同步到mysql
         sync_pdms(&db_option).await.unwrap();
     }
-
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     if let Some(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file("assets/mesh/mesh.bin") {
@@ -260,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
     if db_option.only_sync_sys {
         query_all_db_infos(&mgr).await?;
     }
+
     Ok(())
 }
 
@@ -320,7 +331,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "SPCO";
+    let noun = "TRAP";
     let hash = db1_hash(noun);
     let str = db1_dehash(11515723);
     dbg!(hash);
@@ -370,7 +381,7 @@ fn test_inst_mgr() {
 #[test]
 fn test_compare_attr_info_file() {
     let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
-    let old_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info_11.json")).unwrap();
+    let old_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
     let old_map = old_info.noun_attr_info_map;
     for (noun, new_attr) in new_info.noun_attr_info_map {
         if let Some(old_attr) = old_map.get(&noun) {
@@ -385,6 +396,27 @@ fn test_compare_attr_info_file() {
                     dbg!("");
                 }
             }
+        } else {
+            dbg!(&noun);
+            dbg!(&db1_dehash(noun as u32));
+            dbg!("");
         }
+
     }
+}
+
+#[test]
+fn test_log() {
+    use env_logger::{fmt::Target, Builder};
+    use log::error;
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("log.txt")
+        .unwrap();
+
+    let mut builder = Builder::from_default_env();
+    builder.target(Target::Pipe(Box::new(file))).init();
+    error!("Some error");
 }

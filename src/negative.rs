@@ -12,7 +12,6 @@ use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsElementAql};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager, PRIMITIVE_NOUN_NAMES};
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
-use crate::options::DbOption;
 use csg::{Mesh, Pt3};
 use dashmap::{DashMap, DashSet};
 use parry3d::bounding_volume::Aabb;

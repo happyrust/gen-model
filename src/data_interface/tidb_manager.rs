@@ -45,13 +45,15 @@ use std::f32::EPSILON;
 use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use aios_core::options::DbOption;
 use aios_core::pdms_data::ScomInfo;
+use log::error;
 
 use crate::api::attr::*;
 use crate::api::children::{cache_mdb_module_numbdbs, cache_mdb_site_map};
 use crate::api::dbno_sql::query_dbtype_from_dbno;
 use crate::api::element::*;
-use crate::api::project_mdb::{gen_insert_project_mdb_json_sql, gen_insert_project_mdb_sql, query_b_contains_mdb};
+use crate::api::project_mdb::{gen_insert_project_mdb_json_sql, gen_insert_project_mdb_sql, query_b_contains_mdb, query_mdb_contain_numbdb};
 use crate::api::refno_info::{cache_plin_plax, get_ref0_map, sync_refno_basic_map};
 use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
@@ -72,7 +74,6 @@ use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arango
 use crate::graph_db::pdms_inst_arango::sync_instance_to_graph_db;
 use crate::helper::qualified_table_name;
 use crate::mdb::get_project_mdb;
-use crate::options::DbOption;
 use crate::tables::{gen_create_project_mdb_json_sql, gen_create_project_mdb_sql};
 use crate::ATTR_INFO_MAP;
 use crate::AQL_PDMS_ELES_COLLECTION;
@@ -2256,22 +2257,24 @@ impl AiosDBManager {
 
         if db_nos.is_empty() {
             let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
-            let info_pool = AiosDBManager::get_db_pool(
-                &url,
-                format!("PDMS_INFO_DB_{}", mgr.db_option.project_name.to_uppercase()).as_str(),
-            )
-                .await?;
+            // let info_pool = AiosDBManager::get_db_pool(
+            //     &url,
+            //     format!("PDMS_INFO_DB_{}", mgr.db_option.project_name.to_uppercase()).as_str(),
+            // )
+            //     .await?;
             let pool = AiosDBManager::get_db_pool(&url, project).await?;
-            let mdb_dbnos_map = mgr.query_mdb_dbnos(&pool, &info_pool).await?;
-            let key_str = format!("/{mdb}");
-            if mdb_dbnos_map.contains_key(&key_str) {
-                db_nos = mdb_dbnos_map
-                    .get(&key_str)
-                    .unwrap()
-                    .get("DESI")
-                    .cloned()
-                    .unwrap_or_default();
-            }
+            let dbnos_query = query_mdb_contain_numbdb(mdb,&db_option.module,&pool).await?;
+            db_nos = dbnos_query;
+            // let mdb_dbnos_map = mgr.query_mdb_dbnos(&pool, &info_pool).await?;
+            // let key_str = format!("/{mdb}");
+            // if mdb_dbnos_map.contains_key(&key_str) {
+            //     db_nos = mdb_dbnos_map
+            //         .get(&key_str)
+            //         .unwrap()
+            //         .get("DESI")
+            //         .cloned()
+            //         .unwrap_or_default();
+            // }
         }
         std::fs::create_dir_all("./assets/mesh").unwrap();
         std::fs::create_dir_all("./assets/instance").unwrap();

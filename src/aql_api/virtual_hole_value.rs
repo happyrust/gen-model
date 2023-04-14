@@ -4,7 +4,6 @@ use arangors_lite::AqlQuery;
 use config::{Config, ConfigError, Environment, File};
 use arangors_lite::Database;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
-use crate::options::DbOption;
 
 
 pub async fn query_virtual_hole_value(database: &Database, refnos: Vec<RefU64>) -> anyhow::Result<Option<(Vec<VirtualHoleGraphNode>, Vec<VirtualEmbedGraphNode>)>> {

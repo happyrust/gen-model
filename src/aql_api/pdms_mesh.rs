@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use aios_core::negative_mesh_type::NegativeEles;
+use aios_core::options::DbOption;
 use aios_core::pdms_data::PdmsInstanceMeshData;
 use aios_core::pdms_types::{CachedMeshesMgr, EleGeosInfo, GeoHash, RefU64, ShapeInstancesMgr};
 use aios_core::shape::pdms_shape::{PdmsInstanceMeshMap, PdmsMesh};

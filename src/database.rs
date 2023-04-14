@@ -38,12 +38,12 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::graph_db::{ForeignEdges, ParaDocument};
 use crate::helper::{qualified_column_name, qualified_table_name};
-use crate::options::DbOption;
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
 use crate::tables::*;
-use crate::{options, tables, ATTR_INFO_MAP};
+use crate::{tables, ATTR_INFO_MAP};
 use parry3d::utils::hashmap::FxHasher32;
 use std::hash::{Hash, Hasher};
+use aios_core::options::DbOption;
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -147,7 +147,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             for (k, v) in db_info.noun_attr_info_map {
                 let mut attr_map = BTreeMap::new();
                 let type_name = db1_dehash(k as u32);
-                // if &type_name == "HPIN" { dbg!("hello"); }
                 if type_name.is_empty() {
                     continue;
                 }
@@ -635,7 +634,7 @@ pub async fn sync_total_async_threaded(
                 let mut type_handles = vec![];
                 // 将部分数据保存到图数据库
                 if !b_replace_types && !only_update_dbinfo {
-                    if db_type == "DESI" {
+                    if db_type == "CATA" || db_type == "DESI" {
                         // 将 pdms_element 部分数据保存到图数据库中
                         save_pdms_element_in_sync(
                             &db_option,
@@ -643,11 +642,10 @@ pub async fn sync_total_async_threaded(
                             &children_map_arc,
                             db_no.0 as i32,
                         )
-                        .await?;
+                            .await?;
                         // 将兄弟关系保存到图数据库中
                         save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
-                    }
-                    if db_type == "CATA" || db_type == "DESI" {
+
                         save_foreign_refno_edges_in_sync(&db_option, foreign_refnos_map).await?;
                         // 单独保存plin
                         save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc)

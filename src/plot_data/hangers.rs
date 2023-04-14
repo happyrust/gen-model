@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
+use aios_core::options::DbOption;
 use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
 use aios_core::plot_struct::hanger::*;
 use arangors_lite::{AqlQuery, Database};
@@ -24,7 +25,6 @@ use crate::api::element::query_name;
 use crate::api::ssc_data::travel_ssc_children;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, save_arangodb_with_db_option};
-use crate::options::DbOption;
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::interface::PdmsDataInterface;
 

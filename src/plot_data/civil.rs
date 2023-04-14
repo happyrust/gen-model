@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use arangors_lite::collection::CollectionType::{Document, Edge};
 use arangors_lite::{AqlQuery, Database};
