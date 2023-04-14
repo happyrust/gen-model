@@ -6,8 +6,8 @@ use std::sync::Arc;
 use arangors_lite::Database;
 use tokio::runtime::Runtime;
 use crate::graph_db::pdms_arango::*;
-use crate::options::DbOption;
 use crate::plot_data::hangers;
+use aios_core::options::DbOption;
 
 /// ams 的测试数据库
 pub fn get_test_ams_db_manager() -> AiosDBManager {

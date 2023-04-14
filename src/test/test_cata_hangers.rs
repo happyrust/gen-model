@@ -5,7 +5,6 @@ use arangors_lite::collection::CollectionType::{Document, Edge};
 use std::sync::Arc;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
-use crate::options::DbOption;
 use crate::plot_data::hangers;
 use crate::test::test_helper;
 use crate::test::test_helper::get_test_ams_db_manager;

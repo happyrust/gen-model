@@ -23,7 +23,6 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::graph_db::structs::*;
 use crate::helper::qualified_table_name;
-use crate::options::DbOption;
 use crate::AQL_PDMS_ELES_COLLECTION;
 
 // todo 改成多线程

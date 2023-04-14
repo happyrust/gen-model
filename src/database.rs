@@ -40,10 +40,12 @@ use crate::graph_db::{ForeignEdges, ParaDocument};
 use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
 use crate::tables::*;
-use crate::{tables, ATTR_INFO_MAP};
 use parry3d::utils::hashmap::FxHasher32;
 use std::hash::{Hash, Hasher};
+use aios_core::get_default_pdms_db_info;
 use aios_core::options::DbOption;
+use aios_core::pdms_data::ATTR_INFO_MAP;
+use crate::tables;
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -60,8 +62,8 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-    .execute(&mut pool)
-    .await?;
+        .execute(&mut pool)
+        .await?;
     Ok(())
 }
 
@@ -73,9 +75,9 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
             "CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};",
             project_name
         )
-        .as_str(),
+            .as_str(),
     )
-    .await?;
+        .await?;
 
     //todo 改成一对多的实现
     let mut pool =
@@ -132,7 +134,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         &default_conn_str,
         &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name),
     )
-    .await?;
+        .await?;
     let mut pdms_info_conn = pdms_info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
     dbg!("执行多线程解析");
@@ -141,44 +143,42 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
         let mut table_time = Instant::now();
         let mut tables_sql = String::new();
-        if let Ok(db_info) =
-            serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json"))
-        {
-            for (k, v) in db_info.noun_attr_info_map {
-                let mut attr_map = BTreeMap::new();
-                let type_name = db1_dehash(k as u32);
-                if type_name.is_empty() {
-                    continue;
-                }
-                let mut tmp_sets = HashSet::new();
-                for (kk, vv) in v {
-                    let att_name = vv.name.to_string();
-                    if &att_name != "unset" {
-                        if att_name.starts_with(":") || vv.offset == 0 {
-                            continue;
-                        }
-                        if !tmp_sets.contains(&att_name) {
-                            tmp_sets.insert(att_name.clone());
-                        } else {
-                            continue;
-                        }
-                        if kk == *TYPE_HASH as i32 {
-                            attr_map.insert(
-                                vv.offset,
-                                (att_name, StringType(db1_dehash(k as u32).into())),
-                            );
-                        } else {
-                            attr_map.insert(vv.offset, (att_name, vv.default_val));
-                        }
+
+        let db_info = get_default_pdms_db_info();
+        for (k, v) in db_info.noun_attr_info_map {
+            let mut attr_map = BTreeMap::new();
+            let type_name = db1_dehash(k as u32);
+            if type_name.is_empty() {
+                continue;
+            }
+            let mut tmp_sets = HashSet::new();
+            for (kk, vv) in v {
+                let att_name = vv.name.to_string();
+                if &att_name != "unset" {
+                    if att_name.starts_with(":") || vv.offset == 0 {
+                        continue;
+                    }
+                    if !tmp_sets.contains(&att_name) {
+                        tmp_sets.insert(att_name.clone());
+                    } else {
+                        continue;
+                    }
+                    if kk == *TYPE_HASH as i32 {
+                        attr_map.insert(
+                            vv.offset,
+                            (att_name, StringType(db1_dehash(k as u32).into())),
+                        );
+                    } else {
+                        attr_map.insert(vv.offset, (att_name, vv.default_val));
                     }
                 }
-                tables_sql.push_str(&tables::gen_create_implicit_tables_sql(
-                    type_name.as_str(),
-                    &attr_map,
-                ));
-                tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
-                tables_sql.push_str(&tables::gen_create_uda_tables_sql());
             }
+            tables_sql.push_str(&tables::gen_create_implicit_tables_sql(
+                type_name.as_str(),
+                &attr_map,
+            ));
+            tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
+            tables_sql.push_str(&tables::gen_create_uda_tables_sql());
         }
         let mut conn = project_pool.acquire().await?;
         tables_sql.push_str(&tables::gen_create_element_tables_sql());
@@ -195,9 +195,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 match &e {
                     Error::Database(error) => {
                         //index already exist
-                        if error.code() == Some(Cow::from("42000")) {
-
-                        }else{
+                        if error.code() == Some(Cow::from("42000")) {} else {
                             dbg!(tables_sql.as_str());
                         }
                     }
@@ -217,8 +215,8 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             project_pool.clone(),
             pdms_info_pool.clone(),
         )
-        .await
-        .expect("同步数据失败");
+            .await
+            .expect("同步数据失败");
     }
     println!("创建表花费时间: {} ms", create_tables_elapse);
     println!(
@@ -554,22 +552,22 @@ pub async fn sync_total_async_threaded(
             let project_clone = project.clone();
             let project_name = project.as_str().to_string();
             if let Ok(Ok(PdmsDbData {
-                all_attr_map,
-                total_attr_map,
-                type_ele_map,
-                refno_info_map,
-                children_map,
-                db_type,
-                db_no,
-                field_no,
-                version,
-                room_code_map,
-                foreign_refnos_map,
-                ..
-            })) = tokio::task::spawn_blocking(move || {
+                             all_attr_map,
+                             total_attr_map,
+                             type_ele_map,
+                             refno_info_map,
+                             children_map,
+                             db_type,
+                             db_no,
+                             field_no,
+                             version,
+                             room_code_map,
+                             foreign_refnos_map,
+                             ..
+                         })) = tokio::task::spawn_blocking(move || {
                 parse_file(&path, &None, &file_name, project_name.clone().as_str(), "")
             })
-            .await
+                .await
             {
                 //save dbno info first
                 let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(
@@ -727,8 +725,8 @@ pub async fn sync_total_async_threaded(
                                             &children_map_arc_clone,
                                             refno,
                                         )
-                                        .replace(r#"'"#, r#"\'"#)
-                                        .replace(r#"""#, r#"\""#);
+                                            .replace(r#"'"#, r#"\'"#)
+                                            .replace(r#"""#, r#"\""#);
                                         let order = get_order(
                                             &total_attr_map_arc_clone,
                                             &children_map_arc_clone,

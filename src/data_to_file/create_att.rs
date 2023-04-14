@@ -8,7 +8,6 @@ use futures::future::ok;
 use parse_pdms_db::test_cases::convert_str_to_bytes;
 use serde::{Serialize, Deserialize};
 use crate::api::attr::query_implicit_attr;
-use crate::ATTR_INFO_MAP;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 

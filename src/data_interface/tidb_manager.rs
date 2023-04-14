@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use aios_core::options::DbOption;
 use aios_core::pdms_data::ScomInfo;
-use log::error;
+use log::{error, info};
 
 use crate::api::attr::*;
 use crate::api::children::{cache_mdb_module_numbdbs, cache_mdb_site_map};
@@ -75,7 +75,6 @@ use crate::graph_db::pdms_inst_arango::sync_instance_to_graph_db;
 use crate::helper::qualified_table_name;
 use crate::mdb::get_project_mdb;
 use crate::tables::{gen_create_project_mdb_json_sql, gen_create_project_mdb_sql};
-use crate::ATTR_INFO_MAP;
 use crate::AQL_PDMS_ELES_COLLECTION;
 
 pub const TUBI_TOL: f32 = 10.0f32;
@@ -666,13 +665,12 @@ impl AiosDBManager {
     /// init by mdb
     pub async fn init_mdb(&mut self, project: &str, mdb: &str, module: &str) -> anyhow::Result<()> {
         if let Some(project_pool) = self.get_project_pool(project) {
-            dbg!("init mdb");
+            info!("init mdb");
             let mut conn = project_pool.acquire().await?;
-            dbg!(project);
             conn.execute(gen_create_project_mdb_sql().as_str()).await?;
             conn.execute(gen_create_project_mdb_json_sql().as_str())
                 .await?;
-            dbg!("create success");
+            info!("create mdb table success");
             if let Ok(false) = query_b_contains_mdb(mdb, module, &project_pool).await {
                 self.insert_project_mdb(&project_pool, &self.info_pool)
                     .await?;
@@ -680,11 +678,11 @@ impl AiosDBManager {
             cache_mdb_site_map(mdb, module, &project_pool).await;
             // 将 mdb对应的 module 下的所有 numbdb保存下来
             let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
-            dbg!("cache success");
+            info!("cache success");
             for r in results {
                 self.cache_module_numbdbs.push(r);
             }
-            dbg!(&format!("project {} cache ok", project));
+            info!("project {} cache ok", project);
         }
         Ok(())
     }
@@ -746,7 +744,7 @@ impl AiosDBManager {
         } else {
             DashMap::new()
         };
-        dbg!("Cache Ok");
+        info!("Cache Ok");
         Ok(Self {
             project_map,
             ref0_map,
@@ -1431,31 +1429,35 @@ impl AiosDBManager {
         db_option: &DbOption,
     ) -> anyhow::Result<bool> {
         let batch_size = mgr.db_option.gen_model_batch_size;
+        let is_debug = !db_option.debug_refno_types.is_empty();
         let mdb = &db_option.mdb_name;
         let t = Instant::now();
         let mut has_cata_refnos = RefU64Vec::default();
-        if db_option.debug_refno_types.iter().any(|x| x == "CATA") {
-            if let Some(branch_refno) = &db_option.debug_branch_refno {
-                has_cata_refnos = RefU64Vec(vec![
-                    RefU64::from_refno_str(branch_refno).unwrap_or_default()
-                ]);
-            } else if let Some(design_refno) = &db_option.debug_desi_refno {
-                has_cata_refnos = RefU64Vec(vec![
-                    RefU64::from_refno_str(design_refno).unwrap_or_default()
-                ]);
-            } else if !db_option.debug_root_refnos.is_empty() {
-                for root_refno_str in &db_option.debug_root_refnos {
-                    if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
-                        query_travel_children_with_types_aql(
-                            &mgr.arango_database,
-                            root_refno,
-                            &CATA_ATT_TYPES,
-                        )
-                            .await?
-                            .into_iter()
-                            .for_each(|child| {
-                                has_cata_refnos.push(child.refno);
-                            });
+        if is_debug {
+            if db_option.debug_refno_types.iter().any(|x| x == "CATA") {
+                if let Some(branch_refno) = &db_option.debug_branch_refno {
+                    has_cata_refnos = RefU64Vec(vec![
+                        RefU64::from_refno_str(branch_refno).unwrap_or_default()
+                    ]);
+                } else if let Some(design_refno) = &db_option.debug_desi_refno {
+                    dbg!(design_refno);
+                    has_cata_refnos = RefU64Vec(vec![
+                        RefU64::from_refno_str(design_refno).unwrap_or_default()
+                    ]);
+                } else if !db_option.debug_root_refnos.is_empty() {
+                    for root_refno_str in &db_option.debug_root_refnos {
+                        if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
+                            query_travel_children_with_types_aql(
+                                &mgr.arango_database,
+                                root_refno,
+                                &CATA_ATT_TYPES,
+                            )
+                                .await?
+                                .into_iter()
+                                .for_each(|child| {
+                                    has_cata_refnos.push(child.refno);
+                                });
+                        }
                     }
                 }
             }
@@ -1465,6 +1467,8 @@ impl AiosDBManager {
                 .await?;
         }
         let has_cata_cnt = has_cata_refnos.len();
+        dbg!(has_cata_cnt);
+        if has_cata_cnt == 0 { return Ok(true); }
         let target_debug_refno = db_option
             .debug_desi_refno
             .as_ref()
@@ -1708,27 +1712,30 @@ impl AiosDBManager {
         db_nos: Option<Vec<i32>>,
     ) -> anyhow::Result<bool> {
         let t = Instant::now();
+        let is_debug = !db_option.debug_refno_types.is_empty();
         let batch_size = mgr.db_option.gen_model_batch_size;
         let mut prim_refnos = RefU64Vec::default();
-        if db_option.debug_refno_types.iter().any(|x| x == "PRIM") {
-            let target_debug_refno = db_option
-                .debug_desi_refno
-                .as_ref()
-                .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
-            if target_debug_refno.is_some() {
-                prim_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
-            } else {
-                if !db_option.debug_root_refnos.is_empty() {
-                    for root_refno_str in &db_option.debug_root_refnos {
-                        if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
-                            query_travel_children_with_types_aql(
-                                &mgr.arango_database,
-                                root_refno,
-                                &GNERAL_PRIM_NOUN_NAMES,
-                            )
-                                .await?
-                                .iter()
-                                .for_each(|x| prim_refnos.push(x.refno));
+        if is_debug {
+            if db_option.debug_refno_types.iter().any(|x| x == "PRIM") {
+                let target_debug_refno = db_option
+                    .debug_desi_refno
+                    .as_ref()
+                    .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
+                if target_debug_refno.is_some() {
+                    prim_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
+                } else {
+                    if !db_option.debug_root_refnos.is_empty() {
+                        for root_refno_str in &db_option.debug_root_refnos {
+                            if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
+                                query_travel_children_with_types_aql(
+                                    &mgr.arango_database,
+                                    root_refno,
+                                    &GNERAL_PRIM_NOUN_NAMES,
+                                )
+                                    .await?
+                                    .iter()
+                                    .for_each(|x| prim_refnos.push(x.refno));
+                            }
                         }
                     }
                 }
@@ -1743,6 +1750,7 @@ impl AiosDBManager {
                 .await?;
         }
         let prim_cnt = prim_refnos.len();
+        if prim_cnt == 0 { return Ok(true); }
         let batch_chunks_cnt = prim_cnt / batch_size + 1;
         let mut handles = vec![];
         let all_refnos = Arc::new(prim_refnos);
@@ -1960,27 +1968,30 @@ impl AiosDBManager {
         db_nos: Option<Vec<i32>>,
     ) -> anyhow::Result<bool> {
         let t = Instant::now();
+        let is_debug = !db_option.debug_refno_types.is_empty();
         let batch_size = mgr.db_option.gen_model_batch_size;
 
         let mut loop_refnos = RefU64Vec::default();
-        if db_option.debug_refno_types.iter().any(|x| x == "LOOP") {
-            let target_debug_refno = db_option
-                .debug_desi_refno
-                .as_ref()
-                .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
-            if target_debug_refno.is_some() {
-                loop_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
-            }else if !db_option.debug_root_refnos.is_empty() {
-                for root_refno_str in &db_option.debug_root_refnos {
-                    if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
-                        query_travel_children_with_types_aql(
-                            &mgr.arango_database,
-                            root_refno,
-                            &["PLOO", "LOOP"],
-                        )
-                            .await?
-                            .iter()
-                            .for_each(|x| loop_refnos.push(x.refno));
+        if is_debug {
+            if db_option.debug_refno_types.iter().any(|x| x == "LOOP") {
+                let target_debug_refno = db_option
+                    .debug_desi_refno
+                    .as_ref()
+                    .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
+                if target_debug_refno.is_some() {
+                    loop_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
+                } else if !db_option.debug_root_refnos.is_empty() {
+                    for root_refno_str in &db_option.debug_root_refnos {
+                        if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
+                            query_travel_children_with_types_aql(
+                                &mgr.arango_database,
+                                root_refno,
+                                &["PLOO", "LOOP"],
+                            )
+                                .await?
+                                .iter()
+                                .for_each(|x| loop_refnos.push(x.refno));
+                        }
                     }
                 }
             }
@@ -1990,6 +2001,7 @@ impl AiosDBManager {
                 .await?;
         }
         let loop_cnt = loop_refnos.len();
+        if loop_cnt == 0 { return Ok(true); }
         //处理loop elements
         let batch_chunks_cnt = loop_cnt / batch_size + 1;
         let mut handles = vec![];
@@ -2263,7 +2275,7 @@ impl AiosDBManager {
             // )
             //     .await?;
             let pool = AiosDBManager::get_db_pool(&url, project).await?;
-            let dbnos_query = query_mdb_contain_numbdb(mdb,&db_option.module,&pool).await?;
+            let dbnos_query = query_mdb_contain_numbdb(mdb, &db_option.module, &pool).await?;
             db_nos = dbnos_query;
             // let mdb_dbnos_map = mgr.query_mdb_dbnos(&pool, &info_pool).await?;
             // let key_str = format!("/{mdb}");
@@ -2297,10 +2309,9 @@ impl AiosDBManager {
 
             let d_types = &db_option.debug_refno_types;
             let not_debug = db_option.debug_refno_types.is_empty();
-            let mut run_cache_loop = not_debug || d_types.iter().any(|x| x == "CATA");
+            let mut run_cache_cata = not_debug || d_types.iter().any(|x| x == "CATA");
+            let mut run_cache_loop = not_debug || d_types.iter().any(|x| x == "LOOp");
             let mut run_cache_prim = not_debug || d_types.iter().any(|x| x == "PRIM");
-            let mut run_cache_cata = not_debug || d_types.iter().any(|x| x == "LOOP");
-
 
             if run_cache_cata {
                 let project = project.clone();

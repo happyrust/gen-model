@@ -2,6 +2,7 @@ use std::{env, fs};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::mem::take;
+use aios_core::get_default_pdms_db_info;
 use aios_core::helper::{parse_to_i32, parse_to_u16, parse_to_u32};
 use aios_core::pdms_types::{AttrInfo, AttrVal, PdmsDatabaseInfo, RefI32Tuple, RefU64};
 use aios_core::pdms_types::AttrVal::{BoolType, DoubleArrayType};
@@ -497,7 +498,7 @@ pub enum GlobalPage {
 impl ModifyData {
     pub fn convert_new_modify_data(self) -> Option<Vec<u8>> {
         // 读取info文件
-        let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../../all_attr_info.json")).unwrap();
+        let info = get_default_pdms_db_info();
         // 获得最新的session_page_num
         let latest_session_page_num = parse_to_u32(&self.old_file[40..44]);
         // 获得最新的page_num

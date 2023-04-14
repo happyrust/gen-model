@@ -14,7 +14,6 @@ use crate::consts::PDMS_MESH;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::graph_db::pdms_inst_arango::*;
 use crate::negative::query_instance_refnos_negative_aql;
-use crate::options::DbOption;
 use crate::AQL_PDMS_ELES_COLLECTION;
 
 #[derive(Serialize, Deserialize, Debug, Default)]

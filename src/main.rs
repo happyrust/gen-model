@@ -1,6 +1,8 @@
 #![feature(drain_filter)]
 #![feature(let_chains)]
 #![feature(default_free_fn)]
+// 暂时屏蔽warnings
+#![allow(warnings)]
 
 #[macro_use]
 extern crate clap;
@@ -102,25 +104,25 @@ async fn main() -> anyhow::Result<()> {
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     if let Some(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file("assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(cache_mesh);
-        dbg!("read cached mesh ok.");
+        info!("read cached mesh ok.");
     }
 
     if db_option.rebuild_ssc_tree {
-        dbg!("正在同步SSC");
+        info!("正在同步SSC");
         if let Some(project_db)  = mgr.project_map.get(&mgr.db_option.project_name) {
             // 保存ssc
             async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
             set_arangodb_all_ssc_nodes(project_db.value(), &mgr.arango_database).await?;
         }
-        dbg!("SSC同步完成");
+        info!("SSC同步完成");
     }
 
     let mut all_insts_mgr = HashMap::new();
     if db_option.gen_model_mesh {
-        println!("正在生成模型");
+        info!("正在生成模型");
         let mut time = Instant::now();
         AiosDBManager::cache_geos_data(mgr.clone(), db_option.clone()).await?;
-        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+        info!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
     {
@@ -156,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let children_files = fs::read_dir("assets/mesh/")?;
-            dbg!("正在保存Meshes");
+            info!("正在保存Meshes");
             if db_option.save_model_mesh_to_graph_db {
                 for path in children_files {
                     let path = path?.path();
