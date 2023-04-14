@@ -3,16 +3,13 @@ total_sync = false
 incr_sync = false
 
 #项目设置
-project_path = "D:/AVEVA/Projects/E3D2.1"
-# E:/AVEVA/Plant/Projects12.1.SP4
-# D:/AVEVA/Projects/E3D2.1
-included_projects = ["AvevaMarineSample" , "AvevaCatalogue","AvevaPlantSample", "SCB", "ZDJ"]
-# "Sample", "Master"
-# "AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"
+project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
+included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
+
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
 module = "DESI"
-gen_model_mesh = false
+gen_model_mesh = true
 gen_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 100
@@ -25,11 +22,11 @@ arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
 
 #tidb 配置
-ip = "localhost"
+ip = "127.0.0.1"
 user = "root"
-password = "root"
-port = "3306"
-#port = "4000"
+password = ""
+#port = "3306"
+port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 800
 files_multi_thread = true
@@ -40,17 +37,16 @@ arangodb_user = "root"
 arangodb_password = ""
 
 #调试选项
-replace_mesh = false
+replace_mesh = true
 save_model_mesh_to_graph_db = true
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
 replace_dbs = false
-debug_root_refno = ["23584/7456"]
-manual_db_nums = [7200]
+#debug_root_refno = ["24381/57476"]
 #debug_branch_refno = "24381/56660"
-#debug_desi_refno = "24381/56662"
-#debug_refno_type = "CATA"  # "CATA", "LOOP", "PRIM"
-#debug_db_num = 1112
+debug_desi_refno = "24381/56685"
+debug_refno_type = "CATA"  # "CATA", "LOOP", "PRIM"
+debug_db_num = 7997
 #included_db_files = ["ams6890_0001"]
 #replace_types = ["SDTE"]
