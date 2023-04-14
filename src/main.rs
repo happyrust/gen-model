@@ -39,7 +39,7 @@ use aios_database::options::DbOption;
 use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
-use aios_database::BATCH_CHUNKS_CNT;
+use aios_database::{AQL_PDMS_ELES_COLLECTION, BATCH_CHUNKS_CNT};
 use arangors_lite::collection::CollectionType::{Document, Edge};
 use bevy::prelude::*;
 use bevy::transform::components::Transform;
@@ -291,6 +291,8 @@ async fn main() -> anyhow::Result<()> {
 //     Ok(())
 // }
 
+
+
 /// 提前创建图数据库需要的几个collection
 async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     set_arangodb_database_from_db_option(db_option).await?;
@@ -301,7 +303,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     create_arangodb_conn(&database, "instance_edges", Edge).await?;
     create_arangodb_conn(&database, "para_eles", Document).await?;
     create_arangodb_conn(&database, "pdms_edges", Edge).await?;
-    create_arangodb_conn(&database, "pdms_eles", Document).await?;
+    create_arangodb_conn(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
     create_arangodb_conn(&database, "pdms_instances", Document).await?;
     create_arangodb_conn(&database, "plin_eles", Document).await?;
     create_arangodb_conn(&database, "sibl_edges", Edge).await?;

@@ -10,6 +10,7 @@ use crate::aql_api::children::query_children_aql;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, save_arangodb_with_database};
 use crate::options::DbOption;
+use crate::AQL_PDMS_ELES_COLLECTION;
 
 /// 土建出图轴网需要的数据
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -30,7 +31,7 @@ pub struct AxisEdge {
 
 /// 将提前存好的轴网数据从图数据库取出来
 pub async fn query_axis_from_sbfr_aql(sbfr_refno: RefU64, database: &Database) -> anyhow::Result<Vec<AxisData>> {
-    let key = format!("pdms_eles/{}", sbfr_refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", sbfr_refno.to_url_refno());
     let aql = AqlQuery::new("\
     for v in 1 outbound @id axis_edge
         return {
@@ -83,7 +84,7 @@ async fn save_axis_data(sbfr_refno: RefU64, axis_data: Vec<AxisData>, database: 
         let key = sbfr_refno.hash_with_another_refno(axis_refno);
         edges.push(AxisEdge {
             _key: key.to_string(),
-            _from: format!("pdms_eles/{}", &sbfr_refno_url),
+            _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", &sbfr_refno_url),
             _to: format!("{}/{}", axis_eles_collection, axis_refno.to_url_refno()),
         })
     }

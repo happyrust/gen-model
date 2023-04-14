@@ -11,9 +11,10 @@ use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::PDMS_MESH;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
-use crate::graph_db::pdms_inst_arango::{query_instance_with_refno_in_arangodb, query_instance_with_refnos_in_arangodb};
+use crate::graph_db::pdms_inst_arango::*;
 use crate::negative::query_instance_refnos_negative_aql;
 use crate::options::DbOption;
+use crate::AQL_PDMS_ELES_COLLECTION;
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct PdmsMeshAql {
@@ -174,7 +175,7 @@ pub async fn query_pdms_mesh_from_refno_aql(refno: RefU64, database: &Database) 
 }
 
 pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &Database) -> anyhow::Result<CachedMeshesMgr> {
-    let id = format!("pdms_eles/{}", refno.to_url_refno());
+    let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
     for v in 0..5 inbound @id pdms_edges
         let r = document('negative_eles',v._key)

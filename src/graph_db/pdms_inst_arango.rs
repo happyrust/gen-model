@@ -24,6 +24,7 @@ use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::graph_db::structs::*;
 use crate::helper::qualified_table_name;
 use crate::options::DbOption;
+use crate::AQL_PDMS_ELES_COLLECTION;
 
 // todo 改成多线程
 pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &CachedInstanceMgr) -> anyhow::Result<()> {
@@ -38,7 +39,7 @@ pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &C
             let json = serde_json::to_value(k.1.to_json_type()).unwrap();
             instances.push(json);
             let edge = PdmsInstanceGraphEdge {
-                _from: format!("pdms_eles/{}", k.0.to_refno_normal_string()),
+                _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.0.to_refno_normal_string()),
                 _to: format!("{}/{}", collection, k.0.to_refno_normal_string()),
             };
             edges.push(serde_json::to_value(&edge).unwrap());
@@ -62,7 +63,7 @@ pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &C
 
 /// 传入参考号，返回该参考号下面的模型数据
 pub async fn query_instance_with_refno_in_arangodb(refno: RefU64, database: &Database) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
     FOR c IN 0..10 inbound @refno pdms_edges
         PRUNE document(@collection,c._key) != null
@@ -125,7 +126,7 @@ pub async fn query_instance_with_refnos_in_arangodb(refno: Vec<RefU64>, database
 }
 
 pub async fn query_instance_level_with_refno_in_arangodb(refno: RefU64, database: &Database) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let pdms_instances = "pdms_instances";
     let aql = AqlQuery::new("
     FOR c IN 1..15 inbound @refno pdms_edges

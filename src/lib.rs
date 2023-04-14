@@ -1,6 +1,7 @@
 #![feature(drain_filter)]
 #![feature(let_chains)]
 #![feature(default_free_fn)]
+#![feature(async_closure)]
 
 use std::any::TypeId;
 use std::collections::BTreeSet;
@@ -44,6 +45,8 @@ pub mod spatial_tree;
 pub mod negative;
 pub mod ansys;
 
+pub mod test;
+
 
 #[macro_use]
 extern crate derive_more;
@@ -68,3 +71,4 @@ lazy_static! {
 }
 
 pub const BATCH_CHUNKS_CNT: usize = 50;
+pub const AQL_PDMS_ELES_COLLECTION: &'static str = "pdms_eles";

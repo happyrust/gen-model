@@ -43,7 +43,7 @@ pub struct DbOption {
     #[clap(skip)]
     pub debug_desi_refno: Option<String>,
     #[clap(skip)]
-    pub debug_refno_type: Option<String>,
+    pub debug_refno_types: Vec<String>,
     #[clap(long)]
     pub replace_mesh: bool,
     #[clap(long)]
