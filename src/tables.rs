@@ -115,12 +115,13 @@ pub fn gen_create_data_state_tables_sql() -> String {
 pub fn gen_create_project_mdb_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_PROJECT_MDB_TABLE} ("#));
+    sql.push_str(&format!(r#"{} INT NOT NULL PRIMARY KEY,"#, "DB_NUM"));
     sql.push_str(&format!(r#"{} VARCHAR(20) ,"#, "MDB_NAME"));
+    sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "REFNO"));
+    sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "PROJECT"));
+    sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "WORLD_REFNO"));
     sql.push_str(&format!(r#"{} VARCHAR(10) ,"#, "DB_TYPE"));
-    sql.push_str(&format!(r#"{} BLOB "#, "DATA"));
     sql.push_str(");");
-
-    // sql.push_str(&format!("CREATE INDEX PROJ_MDB_DB_TYPE_IDX ON {PDMS_PROJECT_MDB_TABLE} (DB_TYPE);"));
     sql
 }
 

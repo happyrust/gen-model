@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
 use sqlx::Row;
 
-use crate::api::project_mdb::query_mdb_contain_numbdb;
+use crate::api::project_mdb::query_db_nums_of_mdb;
 use crate::aql_api::convert_refno_vec_from_vec_string;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;

@@ -1,7 +1,7 @@
 use std::env;
 use dashmap::DashSet;
 use sqlx::{MySql, Pool, Row};
-use crate::api::project_mdb::query_mdb_contain_numbdb;
+use crate::api::project_mdb::query_db_nums_of_mdb;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::consts::PDMS_ELEMENTS_TABLE;
 

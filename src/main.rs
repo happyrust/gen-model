@@ -79,12 +79,13 @@ use log::{error, LevelFilter};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
         .create(true)
-        .append(true)
-        .open("log.txt")
+        .open("database.txt")
         .unwrap();
     let mut builder = Builder::from_default_env();
-    builder.filter(None, LevelFilter::Error);
+    builder.filter(Some("aios_database"), LevelFilter::Info);
     builder.target(Target::Pipe(Box::new(file))).init();
 
     use config::{Config, ConfigError, Environment, File};
@@ -119,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut all_insts_mgr = HashMap::new();
     if db_option.gen_model_mesh {
-        info!("正在生成模型");
+        dbg!("正在生成模型");
         let mut time = Instant::now();
         AiosDBManager::cache_geos_data(mgr.clone(), db_option.clone()).await?;
         info!("生成模型花费时间: {} ms", time.elapsed().as_millis());

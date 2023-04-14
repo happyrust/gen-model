@@ -35,7 +35,7 @@ use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Vector};
 use smol_str::SmolStr;
 use sqlx::pool::PoolOptions;
-use sqlx::{Executor, MySql, MySqlPool, Pool};
+use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
 use std::boxed::Box;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::default::default;
@@ -51,9 +51,8 @@ use log::{error, info};
 
 use crate::api::attr::*;
 use crate::api::children::{cache_mdb_module_numbdbs, cache_mdb_site_map};
-use crate::api::dbno_sql::query_dbtype_from_dbno;
 use crate::api::element::*;
-use crate::api::project_mdb::{gen_insert_project_mdb_json_sql, gen_insert_project_mdb_sql, query_b_contains_mdb, query_mdb_contain_numbdb};
+use crate::api::project_mdb::*;
 use crate::api::refno_info::{cache_plin_plax, get_ref0_map, sync_refno_basic_map};
 use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
@@ -664,26 +663,26 @@ impl AiosDBManager {
 
     /// init by mdb
     pub async fn init_mdb(&mut self, project: &str, mdb: &str, module: &str) -> anyhow::Result<()> {
-        if let Some(project_pool) = self.get_project_pool(project) {
-            info!("init mdb");
-            let mut conn = project_pool.acquire().await?;
-            conn.execute(gen_create_project_mdb_sql().as_str()).await?;
-            conn.execute(gen_create_project_mdb_json_sql().as_str())
-                .await?;
-            info!("create mdb table success");
-            if let Ok(false) = query_b_contains_mdb(mdb, module, &project_pool).await {
-                self.insert_project_mdb(&project_pool, &self.info_pool)
-                    .await?;
-            }
-            cache_mdb_site_map(mdb, module, &project_pool).await;
-            // 将 mdb对应的 module 下的所有 numbdb保存下来
-            let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
-            info!("cache success");
-            for r in results {
-                self.cache_module_numbdbs.push(r);
-            }
-            info!("project {} cache ok", project);
+        let project_pool = self.get_project_pool(project).ok_or(anyhow!("Unknown project pool"))?;
+        info!("正在初始化mdb: {mdb}");
+        //创建table, 如果已经存在，可以忽略
+        let mut conn = project_pool.acquire().await?;
+        let create_sql = gen_create_project_mdb_sql();
+        dbg!(&create_sql);
+        let _ = conn.execute(create_sql.as_str()).await;
+        // let _ = conn.execute(gen_create_project_mdb_json_sql().as_str())
+        //     .await;
+        info!("正在插入mdb数据");
+        // if !query_if_contains_mdb(mdb, module, &project_pool).await? {
+        let _ = self.insert_project_mdb(&project_pool, &self.info_pool).await;
+        // }
+        cache_mdb_site_map(mdb, module, &project_pool).await;
+        // 将 mdb对应的 module 下的所有 numbdb保存下来
+        let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
+        for r in results {
+            self.cache_module_numbdbs.push(r);
         }
+        info!("Mdb {} cache finished.", mdb);
         Ok(())
     }
 
@@ -744,7 +743,6 @@ impl AiosDBManager {
         } else {
             DashMap::new()
         };
-        info!("Cache Ok");
         Ok(Self {
             project_map,
             ref0_map,
@@ -773,7 +771,6 @@ impl AiosDBManager {
     #[inline]
     pub async fn get_project_pool_by_refno(&self, refno: RefU64) -> Option<(String, Pool<MySql>)> {
         if let Some(projects) = self.ref0_map.get(&refno.get_0()) {
-            // dbg!(&projects);
             ///只有一个的时候
             if projects.len() == 1 {
                 let project = projects.value().iter().next().as_ref().unwrap().clone();
@@ -784,10 +781,8 @@ impl AiosDBManager {
                 //check if exist in pdms_elements
                 for project in projects.value() {
                     if let Some(pool) = self.get_project_pool(project) {
-                        if let Ok(s) = check_exist_refno(refno, &pool).await {
-                            if s {
-                                return Some((project.clone(), pool.clone()));
-                            }
+                        if check_exist_refno(refno, &pool).await.ok()? {
+                            return Some((project.clone(), pool.clone()));
                         }
                     }
                 }
@@ -796,40 +791,61 @@ impl AiosDBManager {
         (None)
     }
 
+    /// 获得dbnum 对应的 dbtype 和 world refno
+    pub async fn query_quick_info_by_dbno(&self, db_refno: RefU64, db_num: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<DbQuickInfo>> {
+        let mut sql = String::new();
+        //todo 参考号相同的情况，导致refno获取出来的不准
+        sql.push_str(&format!(r#"SELECT DB_TYPE, PROJECT  FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {}"#, db_num));
+        let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+        for v in result {
+            if let project = v.get::<String, _>(1) {
+                let project_pool = self.get_project_pool(&project).ok_or(anyhow!("Unknown project pool"))?;
+                if let Some(world_refno) = query_world_refno_by_dbno(db_num, &project_pool).await? {
+                    let db_type = v.get::<String, _>(0);
+                    return Ok(Some(DbQuickInfo {
+                        refno: db_refno,
+                        world_refno,
+                        db_num,
+                        db_type,
+                        project,
+                    }));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// 获得mdb下所有的world的参考号
-    pub async fn query_mdb_worlds_map(
+    pub async fn query_mdb_quickinfo_map(
         &self,
         project_pool: &Pool<MySql>,
         info_pool: &Pool<MySql>,
-    ) -> anyhow::Result<MdbWorldsMap> {
+    ) -> anyhow::Result<MdbQuickInfoMap> {
         let mut mdb_map = HashMap::new();
         let mdbs = query_types_refnos(&vec!["MDB"], project_pool, None).await?;
-        for mdb in mdbs {
-            let Ok(mdb_attr) = query_full_attr(mdb, self, None).await else {
+        for mdb_refno in mdbs {
+            let Ok(mdb_attr) = query_full_attr(mdb_refno, self, None).await else {
                 continue;
             };
-            let Ok(mdb_name) = query_name(mdb, &project_pool).await else {
+            let Ok(mdb_name) = query_name(mdb_refno, &project_pool).await else {
                 continue;
             };
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
+                if mdb_name == "/ALL" {
+                    dbg!(mdb_refno);
+                    dbg!(&dbs);
+                }
                 let mut map = HashMap::new();
                 for db_refno in dbs {
-                    if let Some((project, pool)) = self.get_project_pool_by_refno(db_refno).await {
-                        if let Ok(att) = self.get_implicit_attr(db_refno, Some(vec!["NUMBDB"])).await {
-                            let dbno = att.get_i32("NUMBDB").unwrap_or_default();
-                            if let Ok(Some(db_type)) = query_dbtype_from_dbno(dbno, info_pool, &project).await {
-                                dbg!(&project);
-                                // for pool in &self.project_map {
-                                if let Ok(Some(world_refno)) = query_world_refno_by_dbno(dbno, &pool).await {
-                                    map.entry(db_type.clone())
-                                        .or_insert_with(Vec::new)
-                                        .push(world_refno);
-                                    break;
-                                }
-                                // }
+                    if let Ok(att) = self.get_implicit_attr(db_refno, Some(vec!["NUMBDB"])).await {
+                        let db_num = att.get_i32("NUMBDB").unwrap_or_default();
+                        info!("找到dbnum: {}", db_num);
+                        if let Ok(Some(quick_info)) = self.query_quick_info_by_dbno(db_refno, db_num, info_pool).await {
+                            if db_num == 6000 {
+                                dbg!(&quick_info);
                             }
-                        } else {
-                            dbg!(db_refno);
+                            map.entry(quick_info.db_type.clone())
+                                .or_insert_with(Vec::new).push(quick_info);
                         }
                     }
                 }
@@ -845,11 +861,11 @@ impl AiosDBManager {
         project_pool: &Pool<MySql>,
         info_pool: &Pool<MySql>,
     ) -> anyhow::Result<()> {
-        let project_mdb_map = self.query_mdb_worlds_map(project_pool, info_pool).await?;
-        let project_mdb_len = project_mdb_map.len();
-        let sql = gen_insert_project_mdb_sql(&project_mdb_map);
-        let json_sql = gen_insert_project_mdb_json_sql(&project_mdb_map);
-        if project_mdb_len != 0 {
+        let project_mdb_map = self.query_mdb_quickinfo_map(project_pool, info_pool).await?;
+        if !project_mdb_map.is_empty() {
+            let sql = gen_insert_project_mdb_sql(&project_mdb_map);
+            // let json_sql = gen_insert_project_mdb_json_sql(&project_mdb_map);
+            // info!("{:?}", &json_sql);
             let mut conn = project_pool.acquire().await?;
             let result = conn.execute(sql.as_str()).await;
             match result {
@@ -859,14 +875,14 @@ impl AiosDBManager {
                     dbg!(sql.as_str());
                 }
             }
-            let json_result = conn.execute(json_sql.as_str()).await;
-            match json_result {
-                Ok(_) => {}
-                Err(e) => {
-                    dbg!(&e);
-                    dbg!(json_sql.as_str());
-                }
-            }
+            // let json_result = conn.execute(json_sql.as_str()).await;
+            // match json_result {
+            //     Ok(_) => {}
+            //     Err(e) => {
+            //         dbg!(&e);
+            //         dbg!(json_sql.as_str());
+            //     }
+            // }
         }
         Ok(())
     }
@@ -2224,38 +2240,6 @@ impl AiosDBManager {
         Ok(true)
     }
 
-    /// 获得不同mdb下所有的world
-    pub async fn query_mdb_dbnos(
-        &self,
-        pool: &Pool<MySql>,
-        info_pool: &Pool<MySql>,
-    ) -> anyhow::Result<HashMap<String, HashMap<String, Vec<i32>>>> {
-        let mut mdb_map = HashMap::new();
-        let mdbs = query_types_refnos(&vec!["MDB"], pool, None).await?;
-        for mdb in mdbs {
-            let mdb_attr = query_explicit_attr(mdb, pool).await?;
-            let mdb_name = query_name(mdb, &pool).await?;
-            if let Some(dbs) = mdb_attr.get(&NounHash(db1_hash("CURD"))) {
-                let mut map = HashMap::new();
-                let dbs = dbs.refu64_vec_value().unwrap();
-                for refno in dbs {
-                    // let att = self.get_attr(refno).await?;
-                    let att = self.get_implicit_attr(refno, Some(vec!["NUMBDB"])).await?;
-                    if let Some((project, _)) = self.get_project_pool_by_refno(refno).await {
-                        if let Some(dbno) = att.get_i32("NUMBDB") {
-                            if let Some(db_type) =
-                                query_dbtype_from_dbno(dbno, info_pool, &project).await?
-                            {
-                                map.entry(db_type).or_insert_with(Vec::new).push(dbno);
-                            }
-                        }
-                    }
-                }
-                mdb_map.entry(mdb_name).or_insert(map);
-            }
-        }
-        Ok(mdb_map)
-    }
 
     // 需要区分project，不同project的mesh，是不同的
     pub async fn cache_geos_data(
@@ -2269,24 +2253,9 @@ impl AiosDBManager {
 
         if db_nos.is_empty() {
             let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
-            // let info_pool = AiosDBManager::get_db_pool(
-            //     &url,
-            //     format!("PDMS_INFO_DB_{}", mgr.db_option.project_name.to_uppercase()).as_str(),
-            // )
-            //     .await?;
             let pool = AiosDBManager::get_db_pool(&url, project).await?;
-            let dbnos_query = query_mdb_contain_numbdb(mdb, &db_option.module, &pool).await?;
-            db_nos = dbnos_query;
-            // let mdb_dbnos_map = mgr.query_mdb_dbnos(&pool, &info_pool).await?;
-            // let key_str = format!("/{mdb}");
-            // if mdb_dbnos_map.contains_key(&key_str) {
-            //     db_nos = mdb_dbnos_map
-            //         .get(&key_str)
-            //         .unwrap()
-            //         .get("DESI")
-            //         .cloned()
-            //         .unwrap_or_default();
-            // }
+            let db_nos = query_db_nums_of_mdb(mdb, &db_option.module, &pool).await?;
+            dbg!(&db_nos);
         }
         std::fs::create_dir_all("./assets/mesh").unwrap();
         std::fs::create_dir_all("./assets/instance").unwrap();
@@ -2313,6 +2282,7 @@ impl AiosDBManager {
             let mut run_cache_loop = not_debug || d_types.iter().any(|x| x == "LOOp");
             let mut run_cache_prim = not_debug || d_types.iter().any(|x| x == "PRIM");
 
+            dbg!(run_cache_cata);
             if run_cache_cata {
                 let project = project.clone();
                 let handle = tokio::spawn(async move {

@@ -1,22 +1,9 @@
+use aios_core::pdms_types::RefU64;
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
 use crate::consts::*;
 
-/// 获得dbtype
-pub async fn query_dbtype_from_dbno(dbno: i32, pool: &Pool<MySql>, project: &str) -> anyhow::Result<Option<String>> {
-    let mut sql = String::new();
-    //todo 参考号相同的情况，导致refno获取出来的不准
-    // sql.push_str(&format!(r#"SELECT DB_TYPE FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {} AND PROJECT = '{}'"#, dbno, project));
-    sql.push_str(&format!(r#"SELECT DB_TYPE FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {}"#, dbno));
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
-    return match result {
-        Ok(v) => { Ok(Some(v.get::<String, _>(0))) }
-        Err(_) => {
-            // dbg!(&sql);
-            Ok(None)
-        }
-    };
-}
+
 
 
 

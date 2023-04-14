@@ -197,7 +197,7 @@ pub async fn query_numbdb_from_refnos(refnos: Vec<RefU64>, pool: &Pool<MySql>) -
 }
 
 /// 获取参考号属于那个dbnum
-pub async fn query_numbdb_by_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<i32> {
+pub async fn query_db_num_by_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<i32> {
     let sql = gen_query_numbdb_by_refno(refno);
     let val = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(val.try_get::<i32, _>("NUMBDB")?)
