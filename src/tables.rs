@@ -120,7 +120,7 @@ pub fn gen_create_project_mdb_sql() -> String {
     sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "REFNO"));
     sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "PROJECT"));
     sql.push_str(&format!(r#"{} VARCHAR(30) ,"#, "WORLD_REFNO"));
-    sql.push_str(&format!(r#"{} VARCHAR(10) ,"#, "DB_TYPE"));
+    sql.push_str(&format!(r#"{} VARCHAR(10) "#, "DB_TYPE"));
     sql.push_str(");");
     sql
 }
