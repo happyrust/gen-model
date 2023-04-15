@@ -20,10 +20,11 @@ use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::graph_db::pdms_inst_arango::query_rvm_instance_data_from_refno_aql;
 use std::io::Write;
 use csg::mesh::IndexedMesh;
+use crate::AQL_PDMS_ELES_COLLECTION;
 
 /// 查找需要负实体计算的instance
 pub async fn query_instance_refnos_negative_aql(refno:RefU64,database:&Database) -> anyhow::Result<Vec<RefU64>> {
-    let id = format!("pdms_eles/{}",refno.to_url_refno());
+    let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}",refno.to_url_refno());
     let aql = AqlQuery::new("
     for v in 0..10 inbound @id pdms_edges
         filter !POSITION(['NCYL' ,'NBOX','NCON', 'NSNO','NPYR', 'NDIS' ,'NXTR', 'NCTO' ,'NRTO' ,'NSLC','NREV'],v.noun)

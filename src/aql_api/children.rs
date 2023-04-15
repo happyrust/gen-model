@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
 use arangors_lite::{AqlQuery, Connection, Database};
 use serde::{Serialize, Deserialize};
-use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsElementAql, PdmsPLINAttrAql, PdmsRefnoNameAql, PdmsRefnoTypeAql};
-
+use crate::aql_api::*;
+use crate::AQL_PDMS_ELES_COLLECTION;
 
 pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let mut r = vec![];
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
     for z in 1 inbound @id pdms_edges
         return {
@@ -30,7 +30,7 @@ pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> an
 
 pub async fn query_children_order_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let mut r = vec![];
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
     let datas = (
     for v,e in 1 inbound @id pdms_edges
@@ -68,7 +68,7 @@ pub async fn query_children_order_aql(arango_database: &Database, refno: RefU64)
 }
 
 pub async fn query_children_refnos_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
     for z in 1 inbound @id pdms_edges
         return  z._key ").bind_var("id", refno_aql);
@@ -78,7 +78,7 @@ pub async fn query_children_refnos_aql(arango_database: &Database, refno: RefU64
 
 /// 找到该节点同级的上一个节点
 pub async fn query_brother_node_front(refno: RefU64, database: &Database) -> anyhow::Result<Option<(RefU64, String)>> {
-    let key = format!("pdms_eles/{}", refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
         for v in 1 outbound @key sibl_edges
             return { '_key' : v._key, 'noun': v.noun }
@@ -94,7 +94,7 @@ pub async fn query_brother_node_front(refno: RefU64, database: &Database) -> any
 /// 获取refno的children，返回Vec<(RefU64, String)>
 pub async fn query_children_with_name_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut r = vec![];
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
     FOR z in 1 INBOUND @id pdms_edges
         return {
@@ -115,7 +115,7 @@ pub async fn query_children_with_name_aql(arango_database: &Database, refno: Ref
 /// 查找该参考号的owner和 owner的type
 pub async fn query_owner_with_type_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Option<(RefU64, String)>> {
     let mut r = vec![];
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
     FOR o in 1 OUTBOUND @id pdms_edges
         return {
@@ -137,7 +137,7 @@ pub async fn query_owner_with_type_aql(arango_database: &Database, refno: RefU64
 
 /// 向上遍历父节点直到某个type
 pub async fn query_ancestor_till_type_aql(arango_database: &Database, refno: RefU64, att_type: &str) -> anyhow::Result<Option<Vec<RefU64>>> {
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
     for o in 1..10 outbound @id pdms_edges
         PRUNE o.noun == @noun
@@ -151,7 +151,7 @@ pub async fn query_ancestor_till_type_aql(arango_database: &Database, refno: Ref
 }
 
 pub async fn query_ancestor_with_name_till_type_aql(arango_database: &Database, refno: RefU64, att_type: &str) -> anyhow::Result<Vec<PdmsRefnoNameAql>> {
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
     for o in 0..10 outbound @id pdms_edges
         PRUNE o.noun == @noun
@@ -165,7 +165,7 @@ pub async fn query_ancestor_with_name_till_type_aql(arango_database: &Database, 
 
 /// 向上遍历父节点，到某个类型停止，返回该类型的 name
 pub async fn query_ancestor_name_of_type_aql(arango_database: &Database, refno: RefU64, att_type: &str) -> anyhow::Result<Option<String>> {
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
     for o in 1..10 outbound @id pdms_edges
         Filter o.noun == @noun
@@ -180,7 +180,7 @@ pub async fn query_ancestor_name_of_type_aql(arango_database: &Database, refno: 
 /// 遍历refno获取所有子节点的PdmsElement
 pub async fn query_travel_children_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let mut r = vec![];
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
     FOR z in 1..10 INBOUND @id pdms_edges
     return {
@@ -203,7 +203,7 @@ pub async fn query_travel_children_aql(arango_database: &Database, refno: RefU64
 
 /// 遍历该refno的所有子节点，不包含叶子节点
 pub async fn query_travel_children_with_out_leaf_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
     for c in 1..10 inbound @id pdms_edges
     filter length(
@@ -220,7 +220,7 @@ pub async fn query_travel_children_with_out_leaf_aql(arango_database: &Database,
 /// 遍历refno只获取指定类型数组的refnos
 pub async fn query_travel_children_with_types_aql(arango_database: &Database, refno: RefU64, att_types: &[&str]) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
     FOR z in 0..10 INBOUND @id pdms_edges
     Filter z.noun in @nouns
@@ -253,7 +253,7 @@ pub async fn query_travel_children_with_types_aql(arango_database: &Database, re
 /// 遍历refno只获取指定类型的refno
 pub async fn query_travel_children_with_type_aql(arango_database: &Database, refno: RefU64, att_type: &str) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
-    let refno_aql = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
     FOR z in 0..10 INBOUND @id pdms_edges
     Filter z.noun == @noun
@@ -314,7 +314,7 @@ pub async fn query_refno_from_site_zone_name(arango_database: &Database, site_na
 
 /// 返回同层级的所有参考号，并按照 pdms 树的顺序排序
 pub async fn query_sibl_level_refnos(refno: RefU64, database: &Database) -> anyhow::Result<Vec<RefU64>> {
-    let refno_url = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     // in 是该 refno 下面
     let aql_in = AqlQuery::new(r"
         for v in 1..1000 inbound @id sibl_edges

@@ -8,6 +8,7 @@ use aios_core::prim_geo::category::CateBrepShape;
 use aios_core::prim_geo::loft::SweepSolid;
 use aios_core::prim_geo::spine::{Line3D, Spine3D, SpineCurveType, SweepPath3D};
 use aios_core::shape::pdms_shape::BrepShapeTrait;
+use aios_core::tool::math_tool::to_pdms_vec_str;
 use anyhow::anyhow;
 use dashmap::{DashMap, DashSet};
 use glam::{Quat, Vec3};
@@ -28,13 +29,14 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                                                        brep_shapes_map: &CateBrepShapeMap,
                                                        interface: &T, ) -> anyhow::Result<bool> {
     let geoms = &geom_info.geometries;
-    dbg!(&refno);
+    // dbg!(&refno);
     if geoms.len() == 0 { return Ok(false); }
     let type_name = att.get_type();
     let mut plane_normal = Vec3::Z;
     let mut extrude_dir = Vec3::Z;
     let mut drns = att.get_vec3("DRNS").unwrap_or_default();
     let mut drne = att.get_vec3("DRNE").unwrap_or_default();
+    let parent_refno = att.get_owner().unwrap();
     let mut spine_paths = if type_name == "GENSEC" || type_name == "WALL" {
         let children_refs = interface.get_children_refs(refno).await?;
         let mut paths = vec![];
@@ -93,17 +95,19 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         paths
     } else { vec![] };
     let mut height = 0.0;
-    let t = interface.get_world_transform(refno).await.unwrap().unwrap();
-    let rot = t.rotation.inverse();
-    let drns = rot * drns;
-    let drne = rot * drne;
+    let parent_rot = interface.get_world_transform(parent_refno).await.unwrap().unwrap().rotation;
+    let current_rot = interface.get_world_transform(refno).await.unwrap().unwrap().rotation;
+    let new_rot =  current_rot.inverse() * parent_rot;
+    let drns = new_rot * drns;
+    let drne = new_rot * drne;
+    info!("refno, drns: {:?}, drne: {:?}", to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
     if spine_paths.len() == 0 {
         dbg!(spine_paths.len());
         if let Some(poss) = att.get_poss() &&
             let Some(pose) = att.get_pose() {
             height = pose.distance(poss);
             //还原成相对坐标系下的拉升方向
-            extrude_dir = rot * ((pose - poss).normalize());
+            // extrude_dir = rot * ((pose - poss).normalize());
             for (i, geom) in geoms.iter().enumerate() {
                 if let CateGeoParam::Profile(profile) = geom {
                     if let CateProfileParam::SPRO(spro) = profile {
@@ -142,7 +146,6 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
             }
         }
     } else {
-        dbg!("1");
         for spine in spine_paths {
             for (i, geom) in geoms.iter().enumerate() {
                 if let CateGeoParam::Profile(profile) = geom {
@@ -180,6 +183,5 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
             }
         }
     }
-    dbg!(&brep_shapes_map.len());
     Ok(true)
 }

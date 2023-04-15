@@ -63,5 +63,7 @@ pub trait PdmsDataInterface : Send + Sync{
 
     async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>>;
 
+    // async fn get_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>>;
+
     async fn get_travel_children_attrs(&self, refno:RefU64) -> anyhow::Result<Vec<AttrMap>>;
 }

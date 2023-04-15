@@ -7,6 +7,7 @@ use anyhow::anyhow;
 use dashmap::DashMap;
 use futures::poll;
 use itertools::Itertools;
+use log::info;
 use parse_pdms_db::parse::WholeAttMap;
 use smol_str::SmolStr;
 use sqlx::{Error, MySql, Pool, Row};
@@ -14,9 +15,9 @@ use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 
 use crate::api::attr::{query_explicit_attr, query_implicit_attr};
-use crate::api::children::{query_numbdb_by_refno, query_numbdb_from_refnos};
-use crate::api::dbno_sql::{query_dbtype_from_dbno, query_dbno_count};
-use crate::api::project_mdb::query_world_data;
+use crate::api::children::{query_db_num_by_refno, query_numbdb_from_refnos};
+use crate::api::dbno_sql::{query_dbno_count};
+use crate::api::project_mdb::*;
 use crate::api::test_sample::{get_test_info_pool, get_test_sample_pool};
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -40,12 +41,12 @@ pub async fn query_children_pdms_tree(mdb: &str, model: &str, refno: RefU64, poo
 }
 
 
+///获取当前world下所有的子节点
 pub async fn query_world_children(mdb: &str, model: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = vec![];
     let mdb = format!("/{}", mdb);
-    let world_data = query_world_data(&mdb, model, pool).await?;
-    let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
-    for world in data {
+    let world_refnos = query_world_refnos(&mdb, model, pool).await?;
+    for world in world_refnos {
         let children = query_children(world, pool).await?;
         result.push(children);
     }
@@ -56,9 +57,8 @@ pub async fn query_world_children(mdb: &str, model: &str, pool: &Pool<MySql>) ->
 pub async fn query_world_children_eles(mdb: &str, model: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
     let mut result = vec![];
     let mdb = format!("/{mdb}");
-    let world_data = query_world_data(&mdb, model, pool).await?;
-    let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
-    for world in data {
+    let world_refnos = query_world_refnos(&mdb, model, pool).await?;
+    for world in world_refnos {
         let children = query_children_eles(world, pool).await?;
         result.push(children);
     }
@@ -138,10 +138,9 @@ pub async fn query_children_eles_without_children_count(refno: RefU64, pool: &Po
 
 pub async fn query_world(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
     let mdb = format!("/{}", mdb);
-    let world_data = query_world_data(&mdb, module, pool).await?;
-    let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
-    let refno = data[0];
-    query_ele_node(refno, pool).await
+    let world_refnos = query_world_refnos(&mdb, module, pool).await?;
+    let refno = world_refnos.iter().next().ok_or(anyhow!("Not exist world refno"))?;
+    query_ele_node(*refno, pool).await
 }
 
 /// 查询生成Element node
@@ -224,13 +223,14 @@ pub async fn query_elenodes_without_children_count(refnos: Vec<RefU64>, pool: &P
     Ok(eles)
 }
 
-pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<PdmsElement>> {
+pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>, mgr: &AiosDBManager) -> anyhow::Result<Option<PdmsElement>> {
     let mdb = format!("/{}", mdb);
-    let world_data = query_world_data(&mdb, module, &pool).await?;
-    let data: Vec<RefU64> = bincode::deserialize(&world_data).unwrap();
-    let world_refno = data[0];
-    let sql = gen_query_node_id_from_refno_sql(world_refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    //需要在这里判断是哪个 project pool
+    let quicks = query_db_quick_info(&mdb, module, &pool).await?;
+    let quick = &quicks[0];
+    let sql = gen_query_node_id_from_refno_sql(quick.world_refno);
+    let world_pool = mgr.get_project_pool(&quick.project).ok_or(anyhow!("project not found"))?;
+    let result = sqlx::query(&sql).fetch_one(&mut world_pool.acquire().await?).await;
     return match result {
         Ok(val) => {
             let owner = RefU64(val.get::<i64, _>("OWNER") as u64);
@@ -238,7 +238,7 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -
             let type_name = val.get::<String, _>("TYPE");
             let children_count = val.get::<i32, _>("CHILDREN_COUNT") as usize;
             Ok(Some(PdmsElement {
-                refno: world_refno.to_string(),
+                refno: quick.world_refno.to_string(),
                 owner,
                 name,
                 noun: type_name,
@@ -247,7 +247,7 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>) -
             }))
         }
         Err(e) => {
-            dbg!(e);
+            dbg!(&quick);
             dbg!(sql);
             Ok(None)
         }
@@ -345,7 +345,18 @@ pub async fn query_pdms_elements_type_name(refno: RefU64, pool: &Pool<MySql>) ->
 //     Ok(mdb_map)
 // }
 
-pub type MdbWorldsMap = HashMap<String, HashMap<String, Vec<RefU64>>>;
+
+#[derive(Debug, Default)]
+pub struct DbQuickInfo {
+    pub refno: RefU64,
+    pub world_refno: RefU64,
+    pub db_num: i32,
+    pub db_type: String,
+    pub project: String,
+    pub order_number: i32,
+}
+
+pub type MdbQuickInfoMap = HashMap<String, HashMap<String, Vec<DbQuickInfo>>>;
 
 
 pub async fn query_types_refnos(type_names: &[&str], pool: &Pool<MySql>, dbnos: Option<Vec<i32>>) -> anyhow::Result<RefU64Vec> {
@@ -378,12 +389,11 @@ pub async fn query_dbno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Opt
 /// 根据dbno，获取world
 pub async fn query_world_refno_by_dbno(dbno: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_id_by_dbno_type_sql(dbno, "WORL");
-    dbg!(&sql);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     return match result {
         Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>("ID") as u64))) }
         Err(e) => {
-            dbg!(&e);
+            info!("query_world_refno_by_dbno error : {}", sql);
             Ok(None)
         }
     };
@@ -735,10 +745,10 @@ async fn test_query_owner_from_id() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_world_ele_node() -> anyhow::Result<()> {
-    let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let v = query_world_ele_node("SAMPLE", "DESI", &pool).await?;
-    println!("v={:?}", v);
+    // let url = env::var("DATABASE_URL")?;
+    // let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
+    // let v = query_world_ele_node("SAMPLE", "DESI", &pool).await?;
+    // println!("v={:?}", v);
     Ok(())
 }
 

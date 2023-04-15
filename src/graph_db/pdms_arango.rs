@@ -18,12 +18,13 @@ use bevy::prelude::dbg;
 use dashmap::{DashMap, DashSet};
 use futures::future::ok;
 use itertools::Itertools;
+use log::info;
 use parse_pdms_db::parse::WholeAttMap;
 use regex::internal::Input;
 use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
 use crate::api::children::query_contain_noun_refnos;
 use crate::api::element::*;
-use crate::api::project_mdb::query_mdb_contain_numbdb;
+use crate::api::project_mdb::query_db_nums_of_mdb;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{DataDocument, ForeignEdges};
@@ -281,7 +282,7 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
         for module in include_module {
             // let mut handles = vec![];
             // 只保存 指定mdb的desi的numbdb
-            let numbdbs = query_mdb_contain_numbdb(&format!("/{}", db_option.mdb_name), module, &pool).await?;
+            let numbdbs = query_db_nums_of_mdb(&format!("/{}", db_option.mdb_name), module, &pool).await?;
             let mut numbdbs_sql = String::new();
             for numbdb in numbdbs {
                 numbdbs_sql.push_str(&format!("{} ,", numbdb));

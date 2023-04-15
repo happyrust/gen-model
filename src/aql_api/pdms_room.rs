@@ -14,6 +14,8 @@ use crate::aql_api::children::query_ancestor_name_of_type_aql;
 use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsElementAql};
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_arango::*;
+use crate::AQL_PDMS_ELES_COLLECTION;
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -78,7 +80,7 @@ pub async fn save_room_info_to_arangodb(aios_mgr: &AiosDBManager, room_infos: Ha
             room_edges_json.push(RoomEdgeAql {
                 _key: hash.to_string(),
                 _from: format!("room_eles/{}", refno.to_url_refno()),
-                _to: format!("pdms_eles/{}", target_refno.to_url_refno()),
+                _to: format!("{AQL_PDMS_ELES_COLLECTION}/{}", target_refno.to_url_refno()),
                 major,
             })
         }
@@ -108,7 +110,7 @@ pub async fn query_all_need_compute_room_refno(dbno: &Vec<i32>, room_type: &str,
 
 /// 获取该参考号属于哪个房间 room_name_type : 存放房间名的类型
 pub async fn query_room_info_from_refno(refno: RefU64, room_name_type: &str, database: &Database) -> anyhow::Result<Option<String>> {
-    let refno = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
     let refno = (for v,e in 1 inbound @id room_edges
                 return v._key )[0]
@@ -157,7 +159,7 @@ fn gen_query_all_need_compute_room_refno_sql(dbnos: &Vec<i32>, room_type: &str, 
 
 /// 查找房间下的所有元件的参考号
 pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<UdaMajorType>, database: &Database) -> anyhow::Result<Vec<RefU64>> {
-    let key = format!("pdms_eles/{}", refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = if filter_major.is_none() {
         AqlQuery::new("
         for e in 0..10 inbound @key pdms_edges
@@ -182,7 +184,7 @@ pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<UdaMajorT
 /// 查找房间下的所有元件的 pdms_element
 pub async fn query_room_pdms_elements_aql(refno: RefU64, filter_major: Option<UdaMajorType>, database: &Database) -> anyhow::Result<Vec<PdmsElement>> {
     let mut r = Vec::new();
-    let key = format!("pdms_eles/{}", refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = if filter_major.is_none() {
         AqlQuery::new("
         for e in 0..10 inbound @key pdms_edges
@@ -228,7 +230,7 @@ pub fn get_room_name_split(name: &str) -> Option<RoomInfo> {
 pub async fn query_refno_belong_rooms(refno: RefU64, database: &Database) -> anyhow::Result<Vec<PdmsElement>> {
     let mut set = HashSet::new();
     let mut r = Vec::new();
-    let id = format!("pdms_eles/{}", refno.to_url_refno());
+    let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
     let elements = ( for v in 0..100 inbound @id pdms_edges
                     filter v!= null

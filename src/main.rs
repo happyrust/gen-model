@@ -1,6 +1,8 @@
 #![feature(drain_filter)]
 #![feature(let_chains)]
 #![feature(default_free_fn)]
+// 暂时屏蔽warnings
+#![allow(warnings)]
 
 #[macro_use]
 extern crate clap;
@@ -38,7 +40,7 @@ use aios_database::negative::{compute_boolean_mesh, query_negative_refnos_aql};
 use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
-use aios_database::BATCH_CHUNKS_CNT;
+use aios_database::{AQL_PDMS_ELES_COLLECTION, BATCH_CHUNKS_CNT};
 use arangors_lite::collection::CollectionType::{Document, Edge};
 use bevy::prelude::*;
 use bevy::transform::components::Transform;
@@ -71,9 +73,21 @@ use std::time::{Instant, UNIX_EPOCH};
 use aios_core::options::DbOption;
 use bevy::prelude::system_adapter::new;
 use tokio::spawn;
+use env_logger::{fmt::Target, Builder};
+use log::{error, LevelFilter};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open("database.txt")
+        .unwrap();
+    let mut builder = Builder::from_default_env();
+    builder.filter(Some("aios_database"), LevelFilter::Info);
+    builder.target(Target::Pipe(Box::new(file))).init();
+
     use config::{Config, ConfigError, Environment, File};
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
@@ -87,30 +101,29 @@ async fn main() -> anyhow::Result<()> {
         // 把pdms数据同步到mysql
         sync_pdms(&db_option).await.unwrap();
     }
-
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     if let Some(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file("assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(cache_mesh);
-        dbg!("read cached mesh ok.");
+        info!("read cached mesh ok.");
     }
 
     if db_option.rebuild_ssc_tree {
-        dbg!("正在同步SSC");
+        info!("正在同步SSC");
         if let Some(project_db)  = mgr.project_map.get(&mgr.db_option.project_name) {
             // 保存ssc
             async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
             set_arangodb_all_ssc_nodes(project_db.value(), &mgr.arango_database).await?;
         }
-        dbg!("SSC同步完成");
+        info!("SSC同步完成");
     }
 
     let mut all_insts_mgr = HashMap::new();
     if db_option.gen_model_mesh {
-        println!("正在生成模型");
+        dbg!("正在生成模型");
         let mut time = Instant::now();
         AiosDBManager::cache_geos_data(mgr.clone(), db_option.clone()).await?;
-        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+        info!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
     {
@@ -146,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let children_files = fs::read_dir("assets/mesh/")?;
-            dbg!("正在保存Meshes");
+            info!("正在保存Meshes");
             if db_option.save_model_mesh_to_graph_db {
                 for path in children_files {
                     let path = path?.path();
@@ -170,7 +183,6 @@ async fn main() -> anyhow::Result<()> {
     let mut data = vec![];
     file.read_to_end(&mut data)?;
     let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-    dbg!(&mesh_mgr.meshes.len());
     if db_option.gen_spatial_tree {
         let mut timer = Instant::now();
         let mut rstar_objs = vec![];
@@ -260,6 +272,7 @@ async fn main() -> anyhow::Result<()> {
     if db_option.only_sync_sys {
         query_all_db_infos(&mgr).await?;
     }
+
     Ok(())
 }
 
@@ -291,6 +304,8 @@ async fn main() -> anyhow::Result<()> {
 //     Ok(())
 // }
 
+
+
 /// 提前创建图数据库需要的几个collection
 async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     set_arangodb_database_from_db_option(db_option).await?;
@@ -301,7 +316,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     create_arangodb_conn(&database, "instance_edges", Edge).await?;
     create_arangodb_conn(&database, "para_eles", Document).await?;
     create_arangodb_conn(&database, "pdms_edges", Edge).await?;
-    create_arangodb_conn(&database, "pdms_eles", Document).await?;
+    create_arangodb_conn(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
     create_arangodb_conn(&database, "pdms_instances", Document).await?;
     create_arangodb_conn(&database, "plin_eles", Document).await?;
     create_arangodb_conn(&database, "sibl_edges", Edge).await?;
@@ -367,7 +382,7 @@ fn test_inst_mgr() {
 
 #[test]
 fn test_compare_attr_info_file() {
-    let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info - 副本.json")).unwrap();
+    let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
     let old_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
     let old_map = old_info.noun_attr_info_map;
     for (noun, new_attr) in new_info.noun_attr_info_map {
@@ -390,4 +405,20 @@ fn test_compare_attr_info_file() {
         }
 
     }
+}
+
+#[test]
+fn test_log() {
+    use env_logger::{fmt::Target, Builder};
+    use log::error;
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("log.txt")
+        .unwrap();
+
+    let mut builder = Builder::from_default_env();
+    builder.target(Target::Pipe(Box::new(file))).init();
+    error!("Some error");
 }

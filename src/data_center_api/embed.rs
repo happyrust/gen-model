@@ -31,10 +31,10 @@ async fn query_embed_data(id: u64, pool: &Pool<MySql>) -> anyhow::Result<Option<
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
     match result {
         Ok(result) => {
-            let speciality = result.try_get::<String, _>("Speciality").unwrap_or("".to_string());
+            let ref_str = result.try_get::<String, _>("REF").unwrap_or("".to_string());
             instances.push(DataCenterAttr {
                 attribute_model_code: "STUCC1".to_string(),
-                value: AttrValue::AttrString(UdaMajorType::from_chinese_description(&speciality).to_major_str()).into(),
+                value: AttrValue::AttrString(ref_str).into(),
             });
             let code = result.try_get::<String, _>("Code").unwrap_or("".to_string());
             instances.push(DataCenterAttr {

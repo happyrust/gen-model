@@ -21,10 +21,11 @@ pub const DDANGLE_STR: &'static str = "DDANGLE";
 pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     refno: RefU64,
     mut scom_ref: Option<RefU64>,
-    interface: &T,
+    interface: Option<&T>,
     scom_info_map: &DashMap<RefU64, ScomInfo>,
     is_debug: bool,
 ) -> anyhow::Result<GeomsInfo> {
+    let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let desi_att = interface.get_attr(refno).await?;
     if scom_ref.is_none() {
         if let Some(catref) = desi_att.get_foreign_refno("CATR") {
@@ -56,7 +57,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     //缓存备用
     if !scom_info_map.contains_key(&scom_ref) {
-        match query_scom_info(scom_ref, interface, is_debug).await {
+        match query_scom_info(scom_ref, Some(interface), is_debug).await {
             Ok(scom_info) => {
                 scom_info_map.insert(scom_ref, scom_info);
             }
@@ -69,7 +70,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     let scom_info = scom_info_map.get(&scom_ref).unwrap();
     if is_debug {
-        dbg!(&scom_info.value());
+        // dbg!(&scom_info.value());
     }
     let mut context: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
     if let Some(v) = desi_att.get_as_string("JUSL") {
@@ -91,7 +92,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     let radi = desi_att.get_as_string("RADI").unwrap_or("0.0".into());
     context.insert(DDRADIUS_STR.into(), SmolStr::new(radi.clone()));
     context.insert("RADI".into(), SmolStr::new(radi));
-    let geom_info = resolve_cata_comp(scom_info.value(), interface, Some(context), is_debug).await;
+    let geom_info = resolve_cata_comp(scom_info.value(), Some(interface), Some(context), is_debug).await;
     if geom_info.is_err() {
         error!("{:?}", geom_info.as_ref().err());
         error!("{:?}", desi_att.to_string_hashmap());
@@ -102,9 +103,10 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
 ///整合SCOM对应的临时数据
 pub async fn query_scom_info<T: PdmsDataInterface>(
     refno: RefU64,
-    interface: &T,
+    interface: Option<&T>,
     is_debug: bool,
 ) -> anyhow::Result<ScomInfo> {
+    let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let attr_map = interface.get_attr(refno).await.unwrap();
     let type_noun = attr_map
         .get_type_cloned()
@@ -115,7 +117,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     let mut axis_param_numbers = vec![];
     if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
         if let Ok(ptre_am) = interface.get_attr(ptre_refno).await {
-            if let Ok(axis_param_map) = query_axis_params(&ptre_am, interface, is_debug).await {
+            if let Ok(axis_param_map) = query_axis_params(&ptre_am, Some(interface), is_debug).await {
                 axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
                 axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
             }
@@ -125,9 +127,9 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     let mut gm_params = vec![];
     if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
         if let Ok(gmse_am) = interface.get_attr(gmse_refno).await {
-            gm_params = query_gm_params(&gmse_am, interface).await?;
+            gm_params = query_gm_params(&gmse_am, Some(interface)).await?;
             if is_debug {
-                dbg!(&gm_params);
+                // dbg!(&gm_params);
             }
         }
     }
@@ -173,10 +175,11 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
 ///查询 Axis 参数
 pub async fn query_axis_params<T: PdmsDataInterface>(
     attr_map: &AttrMap,
-    interface: &T,
+    interface: Option<&T>,
     is_debug: bool,
 ) -> anyhow::Result<BTreeMap<i32, AxisParam>> {
     // 查找ptse
+    let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let mut map = BTreeMap::new();
     let refno = attr_map.get_refno().unwrap_or_default();
     let children = interface.get_children_attrs(refno).await.unwrap();
@@ -193,8 +196,9 @@ pub async fn query_axis_params<T: PdmsDataInterface>(
 ///查询gmse的参数
 pub async fn query_gm_params<T: PdmsDataInterface>(
     attr_map: &AttrMap,
-    interface: &T,
+    interface: Option<&T>,
 ) -> anyhow::Result<Vec<GmParam>> {
+    let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
     let children = interface.get_children_attrs(refno).await?;
@@ -218,7 +222,7 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
 ///对元件库的SCOM Element进行求值计算
 pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     scom_info: &ScomInfo,
-    interface: &T,
+    interface: Option<&T>,
     context: Option<BTreeMap<SmolStr, SmolStr>>,
     is_debug: bool,
 ) -> anyhow::Result<GeomsInfo> {
@@ -265,7 +269,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         cur_context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
         cur_context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
     }
-    let axis_map = resolve_axis_params(scom_info, &cur_context);
+    let axis_map = resolve_axis_params(scom_info, &cur_context, interface);
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
         if scom_info.plin_map.contains_key(plin.as_str()) {
             Some(scom_info.plin_map.get(plin.as_str()).unwrap().clone())
@@ -277,7 +281,8 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     } else {
         None
     };
-    let geometries = resolve_gms(&scom_info.gm_params, &jusl_param, &cur_context, &axis_map);
+    //说明: 需要传递 interface, 因为可能需要取属性值
+    let geometries = resolve_gms(&scom_info.gm_params, &jusl_param, &cur_context, &axis_map, interface);
     Ok(GeomsInfo {
         geometries,
         axis_map,
@@ -462,9 +467,10 @@ pub async fn query_gm_param(
 ///获得dtse的参数信息
 pub async fn process_dtse_params<T: PdmsDataInterface>(
     attr_map: &AttrMap,
-    interface: &T,
+    interface: Option<&T>,
     context: &mut BTreeMap<SmolStr, SmolStr>,
 ) -> Option<bool> {
+    let interface = interface?;
     let dtre_refno = attr_map.get_foreign_refno("DTRE")?;
     let children = interface
         .get_children_attrs(dtre_refno)

@@ -20,6 +20,7 @@ use crate::data_interface::tidb_manager::{AiosDBManager, TUBI_TOL};
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::pcf::bran::get_bran_name_and_children;
 use crate::pcf::excel_api::get_pipe_thickness_table;
+use crate::AQL_PDMS_ELES_COLLECTION;
 
 /// 找到某个节点下所有的 bran 中的 tubi
 pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<(RefU64, String), f32>>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<()> {
@@ -57,7 +58,7 @@ pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<
 
 /// 找到 bran 下所有的 tubi
 pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiEdgeAql>> {
-    let key = format!("pdms_eles/{}", bran_refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
     let aql = AqlQuery::new("
     let bran_name = ( return document('pdms_eles',@bran_refno).name )
     for v,e in 0..1000 outbound @id tubi_edges
@@ -89,7 +90,7 @@ pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &Database) -> an
 /// 找到 bran 下所有的 tubi ，并过滤掉 atta
 pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiEdgeAql>> {
     let mut tubi = Vec::new();
-    let key = format!("pdms_eles/{}", bran_refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
     let aql = AqlQuery::new("
     let bran_name = ( return document('pdms_eles',@bran_refno).name )
     for v,e in 0..1000 outbound @id tubi_edges
@@ -231,7 +232,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &Dat
 
 /// 获取 bran 所有的 tubi_edge 的信息
 pub async fn query_bran_info(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiEdgeAql>> {
-    let key = format!("pdms_eles/{}", bran_refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
     let aql = AqlQuery::new("
     let bran_name = ( return document('pdms_eles',@bran_refno).name )
     for v,e in 0..1000 outbound @id tubi_edges

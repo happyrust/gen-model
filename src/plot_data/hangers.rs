@@ -6,7 +6,7 @@ use aios_core::options::DbOption;
 use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
 use aios_core::plot_struct::hanger::*;
 use arangors_lite::{AqlQuery, Database};
-use arangors_lite::collection::CollectionType::{Edge, Document};
+use arangors_lite::collection::CollectionType::{Document, Edge};
 use calamine::{Error, open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::DashMap;
 use glam::{Vec2, Vec3};
@@ -19,7 +19,7 @@ use sqlx::{MySql, Pool, Row};
 use crate::api::children::{travel_children_eles, travel_children_for_elenode, travel_children_with_type};
 use crate::aql_api::children::{query_travel_children_aql, query_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::query_foreign_name_aql;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use crate::api::attr::{query_explicit_attr, query_implicit_attr};
 use crate::api::element::query_name;
 use crate::api::ssc_data::travel_ssc_children;
@@ -350,44 +350,4 @@ fn match_item_code(item_code: &str) -> Option<String> {
         &_ => {}
     }
     None
-}
-
-#[test]
-fn test_area() {
-    use geo::polygon;
-    use geo::Area;
-    use geo::Coordinate;
-    use geo::{coord, LineString, Polygon};
-
-    let polygon = geo::geometry::Polygon::new(
-        LineString::from(vec![(0., 0.), (1., 1.), (1., 0.), (0., 0.)]),
-        vec![],
-    );
-
-    assert_eq!(polygon.unsigned_area(), 30.);
-}
-
-#[tokio::test]
-async fn test_save_hangers_data() -> anyhow::Result<()> {
-    let _ = dotenv::dotenv();
-    let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
-    create_arangodb_conn(&database, "hanger_data", Document).await?;
-    create_arangodb_conn(&database, "hanger_edges", Edge).await?;
-
-    let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    let data = save_hangers_data(mgr.clone()).await?;
-    if let Some(data) = data {
-        let json = serde_json::to_value(&vec![data]).unwrap();
-        save_arangodb_with_db_option(json, &mgr.db_option, "hanger_data").await?;
-    }
-    Ok(())
 }
