@@ -95,19 +95,19 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         paths
     } else { vec![] };
     let mut height = 0.0;
-    let t = interface.get_world_transform(parent_refno).await.unwrap().unwrap();
-    let rot = t.rotation;
-    let drns = rot * drns;
-    let drne = rot * drne;
-    // dbg!(to_pdms_vec_str(&drns));
-    // dbg!(to_pdms_vec_str(&drne));
+    let parent_rot = interface.get_world_transform(parent_refno).await.unwrap().unwrap().rotation;
+    let current_rot = interface.get_world_transform(refno).await.unwrap().unwrap().rotation;
+    let new_rot =  current_rot.inverse() * parent_rot;
+    let drns = new_rot * drns;
+    let drne = new_rot * drne;
+    info!("refno, drns: {:?}, drne: {:?}", to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
     if spine_paths.len() == 0 {
         dbg!(spine_paths.len());
         if let Some(poss) = att.get_poss() &&
             let Some(pose) = att.get_pose() {
             height = pose.distance(poss);
             //还原成相对坐标系下的拉升方向
-            extrude_dir = rot * ((pose - poss).normalize());
+            // extrude_dir = rot * ((pose - poss).normalize());
             for (i, geom) in geoms.iter().enumerate() {
                 if let CateGeoParam::Profile(profile) = geom {
                     if let CateProfileParam::SPRO(spro) = profile {
@@ -146,7 +146,6 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
             }
         }
     } else {
-        dbg!("1");
         for spine in spine_paths {
             for (i, geom) in geoms.iter().enumerate() {
                 if let CateGeoParam::Profile(profile) = geom {
@@ -184,6 +183,5 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
             }
         }
     }
-    dbg!(&brep_shapes_map.len());
     Ok(true)
 }

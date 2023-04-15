@@ -402,6 +402,10 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(ancestors)
     }
 
+    // async fn get_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
+    //     // self.get_transform(refno)
+    // }
+
     ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
     async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
         let mut ancestors = VecDeque::new();
@@ -1477,7 +1481,6 @@ impl AiosDBManager {
                 .await?;
         }
         let has_cata_cnt = has_cata_refnos.len();
-        dbg!(has_cata_cnt);
         if has_cata_cnt == 0 { return Ok(true); }
         let target_debug_refno = db_option
             .debug_desi_refno

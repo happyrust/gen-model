@@ -70,7 +70,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     let scom_info = scom_info_map.get(&scom_ref).unwrap();
     if is_debug {
-        dbg!(&scom_info.value());
+        // dbg!(&scom_info.value());
     }
     let mut context: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
     if let Some(v) = desi_att.get_as_string("JUSL") {
@@ -129,7 +129,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
         if let Ok(gmse_am) = interface.get_attr(gmse_refno).await {
             gm_params = query_gm_params(&gmse_am, Some(interface)).await?;
             if is_debug {
-                dbg!(&gm_params);
+                // dbg!(&gm_params);
             }
         }
     }
