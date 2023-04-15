@@ -2277,10 +2277,12 @@ impl AiosDBManager {
             let d_types = &db_option.debug_refno_types;
             let not_debug = db_option.debug_refno_types.is_empty();
             let mut run_cache_cata = not_debug || d_types.iter().any(|x| x == "CATA");
-            let mut run_cache_loop = not_debug || d_types.iter().any(|x| x == "LOOp");
+            let mut run_cache_loop = not_debug || d_types.iter().any(|x| x == "LOOP");
             let mut run_cache_prim = not_debug || d_types.iter().any(|x| x == "PRIM");
 
             dbg!(run_cache_cata);
+            dbg!(run_cache_loop);
+            dbg!(run_cache_prim);
             if run_cache_cata {
                 let project = project.clone();
                 let handle = tokio::spawn(async move {
