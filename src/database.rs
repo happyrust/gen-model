@@ -197,7 +197,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                     Error::Database(error) => {
                         //index already exist
                         if error.code() == Some(Cow::from("42000")) {
-
                         }else{
                             dbg!(tables_sql.as_str());
                         }

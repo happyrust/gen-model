@@ -2597,7 +2597,6 @@ impl AiosDBManager {
             // dbg!(instance_mgr.inst_mgr.len());
             let instance_mgr = Arc::new(instance_mgr);
             let instance_mgr_clone = instance_mgr.clone();
-
             let db_option_clone = db_option.clone();
             let mgr_clone = mgr.clone();
 
