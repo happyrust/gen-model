@@ -675,7 +675,7 @@ impl AiosDBManager {
             let create_sql = gen_create_project_mdb_sql();
             let _ = conn.execute(create_sql.as_str()).await;
             info!("正在插入mdb数据");
-            let _ = self.insert_project_mdb(&project_pool, &self.info_pool).await;
+            // let _ = self.insert_project_mdb(&project_pool, &self.info_pool).await;
         }
         cache_mdb_site_map(mdb, module, &project_pool).await;
         // 将 mdb对应的 module 下的所有 numbdb保存下来

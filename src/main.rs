@@ -229,9 +229,9 @@ async fn main() -> anyhow::Result<()> {
         let mut site_major_map = HashMap::new();
         // let room_infos = vec![RefU64::from_two_nums(24381,34919)];
         let room_infos = query_all_need_compute_room_refno(
-            &vec![7200],
-            "LOOP",
-            Some("LOOP 1"),
+            &vec![7997],
+            "FRMW",
+            Some("-RM"),
             &mgr.project_map.get(&db_option.project_name).unwrap(),
         )
             .await?;
