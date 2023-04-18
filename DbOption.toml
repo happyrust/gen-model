@@ -4,8 +4,8 @@ incr_sync = false
 
 #项目设置
 project_path = "D:/new/AVEVA/Plant/Projects12.1.SP4" #TestCatalogue
-included_projects = ["AvevaMarineSample" ,"AvevaPlantSample", "AvevaCatalogue", "SCB", "ZDJ"]
-#
+included_projects = ["AvevaMarineSample"]
+# "AvevaMarineSample" ,"AvevaPlantSample", "AvevaCatalogue", "SCB", "ZDJ"
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
 module = "DESI"
@@ -42,11 +42,12 @@ only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
 replace_dbs = false
-debug_root_refno = ["24383/66456"]
+debug_root_refnos = ["24383/66456"]
 #debug_branch_refno = "24381/56660"
 #debug_desi_refno = "24381/56662"
-#debug_refno_type = "CATA"  # "CATA", "LOOP", "PRIM"
+debug_refno_types = ["CATA","DESI"]  # "CATA", "LOOP", "PRIM"
 #debug_db_num =
 #included_db_files = ["ams6890_0001"]
 #replace_types = ["SDTE"]
 manual_db_nums = [7999]
+reset_mdb_project = true
