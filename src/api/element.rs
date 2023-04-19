@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 
 use aios_core::pdms_types::*;
@@ -507,8 +507,15 @@ pub async fn query_project_dbno_info(project_name: &str, info_pool: &Pool<MySql>
 }
 
 ///检查refno是否存在PDMS_ELEMENTS的表中
-pub async fn check_exist_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<bool> {
-    let sql = format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {})", refno.0);
+pub async fn check_exist_refno(refno: RefU64, pool: &Pool<MySql>, mdb_dbnums: &BTreeSet<i32>) -> anyhow::Result<bool> {
+    let mut in_sql = " (".to_string();
+    for d in mdb_dbnums {
+        in_sql.push_str(&format!(r#"{d},"#));
+    }
+    in_sql.remove(in_sql.len() - 1);
+    in_sql.push_str(") ");
+    let sql = format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND NUMBDB IN {} )", refno.0, in_sql);
+    // dbg!(&sql);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(result.get::<bool, _>(0))
 }

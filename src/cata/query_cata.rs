@@ -127,6 +127,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     let gmref_name = if is_sprf { "GSTR" } else { "GMRE" };
     let mut gm_params = vec![];
     if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
+        dbg!(gmse_refno);
         if let Ok(gmse_am) = interface.get_attr(gmse_refno).await {
             gm_params = query_gm_params(&gmse_am, Some(interface)).await?;
             if is_debug {
@@ -202,7 +203,9 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_children_attrs(refno).await?;
+    dbg!(refno);
+    let children = interface.get_children_attrs(refno).await.unwrap();
+    dbg!(children.len());
     // if refno == RefU64(0) { return Ok(gms); }
     // let children = interface.get_travel_children_attrs(refno).await?;
     for child in children {

@@ -36,7 +36,7 @@ use smol_str::SmolStr;
 use sqlx::pool::PoolOptions;
 use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
 use std::boxed::Box;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::default::default;
 use std::default::Default;
 use std::env;
@@ -47,12 +47,13 @@ use std::time::{Duration, Instant};
 use aios_core::options::DbOption;
 use aios_core::pdms_data::ScomInfo;
 use log::{error, info};
+use nom::combinator::map;
 
 use crate::api::attr::*;
-use crate::api::children::{cache_mdb_module_numbdbs, cache_mdb_site_map};
+use crate::api::children::*;
 use crate::api::element::*;
 use crate::api::project_mdb::*;
-use crate::api::refno_info::{cache_plin_plax, get_ref0_map, sync_refno_basic_map};
+use crate::api::refno_info::{cache_plin_plax, get_ref0_projects, sync_refno_basic_map};
 use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::para_value::{query_des_para_value, query_para_from_desi_refno};
@@ -139,7 +140,7 @@ pub struct AiosDBManager {
     //不同project的连接池子
     pub project_map: DashMap<String, Pool<MySql>>,
 
-    pub ref0_map: DashMap<u32, HashSet<String>>,
+    pub ref0_projects: DashMap<u32, Vec<String>>,
 
     pub info_pool: Pool<MySql>,
 
@@ -151,8 +152,6 @@ pub struct AiosDBManager {
 
     pub db_option: DbOption,
 
-    pub dbno_mgr: DbNumMgr,
-
     pub cached_mesh_mgr: Arc<CachedMeshesMgr>,
 
     pub mesh_instance_mgr: Arc<DashMap<i32, CachedInstanceMgr>>,
@@ -163,7 +162,9 @@ pub struct AiosDBManager {
 
     pub plin_cache_mgr: DashMap<RefU64, String>,
 
-    pub cache_module_numbdbs: Vec<i32>,
+    pub cache_module_numbdbs: BTreeSet<i32>,
+
+    pub mdb_dbnums: BTreeSet<i32>,
 }
 
 #[async_trait]
@@ -677,13 +678,35 @@ impl AiosDBManager {
             let create_sql = gen_create_project_mdb_sql();
             let _ = conn.execute(create_sql.as_str()).await;
             info!("正在插入mdb数据");
-            // let _ = self.insert_project_mdb(&project_pool, &self.info_pool).await;
+            let _ = self.insert_project_mdb(&project_pool, &self.info_pool).await;
         }
         cache_mdb_site_map(mdb, module, &project_pool).await;
+
+        self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
+
+        let time = Instant::now();
+        let need_sync_refno_basic = self.db_option.need_sync_refno_basic;
+        if need_sync_refno_basic {
+            for project in &self.db_option.included_projects {
+                if let Some(kv) = self.project_map.get(project){
+                    sync_refno_basic_map(kv.value(), &self.mdb_dbnums).await.unwrap();
+                }
+            }
+        }
+        dbg!(need_sync_refno_basic);
+        if need_sync_refno_basic {
+            CACHED_REFNO_BASIC_MAP.save_to_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
+        } else {
+            CACHED_REFNO_BASIC_MAP.load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
+        }
+        // 将对应mdb module 下所有的 numbdb 存下来
+        println!("缓存RefBasic数据花费：{}ms", time.elapsed().as_millis());
+
+
         // 将 mdb对应的 module 下的所有 numbdb保存下来
         let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
         for r in results {
-            self.cache_module_numbdbs.push(r);
+            self.cache_module_numbdbs.insert(r);
         }
         Ok(())
     }
@@ -694,34 +717,19 @@ impl AiosDBManager {
         let mut project_map = DashMap::new();
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
-        let mut dbno_mgr = DbNumMgr::default();
-        let need_sync_refno_basic = db_option.need_sync_refno_basic;
         for project in &db_option.included_projects {
             let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
-            println!("正在创建数据库连接 {project}");
             match project_pool {
                 Ok(pool) => {
-                    if need_sync_refno_basic {
-                        sync_refno_basic_map(&pool, &mut dbno_mgr).await.unwrap();
-                    }
                     println!("数据库连接成功 {project}");
                     project_map.entry(project.clone()).or_insert(pool.clone());
                 }
                 Err(_) => {
-                    println!("project: {} init failed", project);
+                    println!("项目: {} 连接创建失败", project);
                 }
             }
+            println!("正在创建数据库连接 {project}");
         }
-        dbg!(need_sync_refno_basic);
-        let time = Instant::now();
-        if need_sync_refno_basic {
-            CACHED_REFNO_BASIC_MAP.save_to_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
-        }else{
-            CACHED_REFNO_BASIC_MAP.load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
-        }
-        // 将对应mdb module 下所有的 numbdb 存下来
-        println!("缓存RefBasic数据花费：{}ms", time.elapsed().as_millis());
-        println!("正在创建数据库连接");
         let info_conn = AiosDBManager::get_db_pool(
             &default_conn,
             &format!(
@@ -731,7 +739,7 @@ impl AiosDBManager {
             ),
         )
             .await?;
-        let ref0_map = get_ref0_map(&info_conn).await?;
+        let ref0_projects = get_ref0_projects(&info_conn).await?;
         let projects = db_option.included_projects.clone();
         println!("正在创建图数据库连接");
         let database = get_arangodb_conn_from_db_option(&db_option).await.unwrap();
@@ -749,19 +757,19 @@ impl AiosDBManager {
         };
         Ok(Self {
             project_map,
-            ref0_map,
+            ref0_projects,
             info_pool: info_conn,
             projects,
             needed_parse_files: None,
             project_path: dir,
             db_option,
-            dbno_mgr,
             cached_mesh_mgr: Arc::new(Default::default()),
             mesh_instance_mgr: Arc::new(Default::default()),
             arango_database: database,
             cached_world_transforms_map: Arc::new(Default::default()),
             plin_cache_mgr,
             cache_module_numbdbs: Default::default(),
+            mdb_dbnums: Default::default(),
         })
     }
 
@@ -774,7 +782,7 @@ impl AiosDBManager {
     ///获得project 的db
     #[inline]
     pub async fn get_project_pool_by_refno(&self, refno: RefU64) -> Option<(String, Pool<MySql>)> {
-        if let Some(projects) = self.ref0_map.get(&refno.get_0()) {
+        if let Some(projects) = self.ref0_projects.get(&refno.get_0()) {
             ///只有一个的时候
             if projects.len() == 1 {
                 let project = projects.value().iter().next().as_ref().unwrap().clone();
@@ -783,9 +791,10 @@ impl AiosDBManager {
                 }
             } else {
                 //check if exist in pdms_elements
-                for project in projects.value() {
+                // for project in projects.value() {
+                for project in &self.db_option.included_projects {
                     if let Some(pool) = self.get_project_pool(project) {
-                        if check_exist_refno(refno, &pool).await.ok()? {
+                        if check_exist_refno(refno, &pool, &self.mdb_dbnums).await.ok()? {
                             return Some((project.clone(), pool.clone()));
                         }
                     }
@@ -1294,6 +1303,7 @@ impl AiosDBManager {
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
             let mut geoms = resolve_desi_comp(refno, None, Some(mgr.as_ref()), scom_info_map, is_debug).await;
             if geoms.is_err() {
+                error!("元件库解析错误: {:?}", geoms.err().unwrap());
                 continue;
             }
             let mut geoms = geoms.unwrap();
@@ -1447,39 +1457,36 @@ impl AiosDBManager {
         db_option: &DbOption,
     ) -> anyhow::Result<bool> {
         let batch_size = mgr.db_option.gen_model_batch_size;
-        let is_debug = !db_option.debug_refno_types.is_empty();
         let mdb = &db_option.mdb_name;
         let t = Instant::now();
         let mut has_cata_refnos = RefU64Vec::default();
-        if is_debug {
-            if db_option.debug_refno_types.iter().any(|x| x == "CATA") {
-                if let Some(branch_refno) = &db_option.debug_branch_refno {
-                    has_cata_refnos = RefU64Vec(vec![
-                        RefU64::from_refno_str(branch_refno).unwrap_or_default()
-                    ]);
-                } else if let Some(design_refno) = &db_option.debug_desi_refno {
-                    dbg!(design_refno);
-                    has_cata_refnos = RefU64Vec(vec![
-                        RefU64::from_refno_str(design_refno).unwrap_or_default()
-                    ]);
-                } else if !db_option.debug_root_refnos.is_empty() {
-                    for root_refno_str in &db_option.debug_root_refnos {
-                        if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
-                            query_travel_children_with_types_aql(
-                                &mgr.arango_database,
-                                root_refno,
-                                &CATA_ATT_TYPES,
-                            )
-                                .await?
-                                .into_iter()
-                                .for_each(|child| {
-                                    has_cata_refnos.push(child.refno);
-                                });
-                        }
+        if db_option.debug_refno_types.iter().any(|x| x == "CATA") {
+            if let Some(branch_refno) = &db_option.debug_branch_refno {
+                has_cata_refnos = RefU64Vec(vec![
+                    RefU64::from_refno_str(branch_refno).unwrap_or_default()
+                ]);
+            } else if let Some(design_refno) = &db_option.debug_desi_refno {
+                has_cata_refnos = RefU64Vec(vec![
+                    RefU64::from_refno_str(design_refno).unwrap_or_default()
+                ]);
+            } else if !db_option.debug_root_refnos.is_empty() {
+                for root_refno_str in &db_option.debug_root_refnos {
+                    if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
+                        query_travel_children_with_types_aql(
+                            &mgr.arango_database,
+                            root_refno,
+                            &CATA_ATT_TYPES,
+                        )
+                            .await?
+                            .into_iter()
+                            .for_each(|child| {
+                                has_cata_refnos.push(child.refno);
+                            });
                     }
                 }
             }
-        } else {
+        }
+        if has_cata_refnos.is_empty() {
             has_cata_refnos = mgr
                 .get_refnos_by_types(project, &CATA_ATT_TYPES, db_nos)
                 .await?;
@@ -1731,35 +1738,33 @@ impl AiosDBManager {
         db_nos: Option<Vec<i32>>,
     ) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let is_debug = !db_option.debug_refno_types.is_empty();
         let batch_size = mgr.db_option.gen_model_batch_size;
         let mut prim_refnos = RefU64Vec::default();
-        if is_debug {
-            if db_option.debug_refno_types.iter().any(|x| x == "PRIM") {
-                let target_debug_refno = db_option
-                    .debug_desi_refno
-                    .as_ref()
-                    .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
-                if target_debug_refno.is_some() {
-                    prim_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
-                } else {
-                    if !db_option.debug_root_refnos.is_empty() {
-                        for root_refno_str in &db_option.debug_root_refnos {
-                            if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
-                                query_travel_children_with_types_aql(
-                                    &mgr.arango_database,
-                                    root_refno,
-                                    &GNERAL_PRIM_NOUN_NAMES,
-                                )
-                                    .await?
-                                    .iter()
-                                    .for_each(|x| prim_refnos.push(x.refno));
-                            }
+        if db_option.debug_refno_types.iter().any(|x| x == "PRIM") {
+            let target_debug_refno = db_option
+                .debug_desi_refno
+                .as_ref()
+                .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
+            if target_debug_refno.is_some() {
+                prim_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
+            } else {
+                if !db_option.debug_root_refnos.is_empty() {
+                    for root_refno_str in &db_option.debug_root_refnos {
+                        if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
+                            query_travel_children_with_types_aql(
+                                &mgr.arango_database,
+                                root_refno,
+                                &GNERAL_PRIM_NOUN_NAMES,
+                            )
+                                .await?
+                                .iter()
+                                .for_each(|x| prim_refnos.push(x.refno));
                         }
                     }
                 }
             }
-        } else {
+        }
+        if prim_refnos.is_empty() {
             prim_refnos = mgr
                 .get_refnos_by_types(
                     db_option.project_name.as_str(),
@@ -1987,34 +1992,31 @@ impl AiosDBManager {
         db_nos: Option<Vec<i32>>,
     ) -> anyhow::Result<bool> {
         let t = Instant::now();
-        let is_debug = !db_option.debug_refno_types.is_empty();
         let batch_size = mgr.db_option.gen_model_batch_size;
-
         let mut loop_refnos = RefU64Vec::default();
-        if is_debug {
-            if db_option.debug_refno_types.iter().any(|x| x == "LOOP") {
-                let target_debug_refno = db_option
-                    .debug_desi_refno
-                    .as_ref()
-                    .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
-                if target_debug_refno.is_some() {
-                    loop_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
-                } else if !db_option.debug_root_refnos.is_empty() {
-                    for root_refno_str in &db_option.debug_root_refnos {
-                        if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
-                            query_travel_children_with_types_aql(
-                                &mgr.arango_database,
-                                root_refno,
-                                &["PLOO", "LOOP"],
-                            )
-                                .await?
-                                .iter()
-                                .for_each(|x| loop_refnos.push(x.refno));
-                        }
+        if db_option.debug_refno_types.iter().any(|x| x == "LOOP") {
+            let target_debug_refno = db_option
+                .debug_desi_refno
+                .as_ref()
+                .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
+            if target_debug_refno.is_some() {
+                loop_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
+            } else if !db_option.debug_root_refnos.is_empty() {
+                for root_refno_str in &db_option.debug_root_refnos {
+                    if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
+                        query_travel_children_with_types_aql(
+                            &mgr.arango_database,
+                            root_refno,
+                            &["PLOO", "LOOP"],
+                        )
+                            .await?
+                            .iter()
+                            .for_each(|x| loop_refnos.push(x.refno));
                     }
                 }
             }
-        } else {
+        }
+        if loop_refnos.is_empty() {
             loop_refnos = mgr
                 .get_refnos_by_types(&db_option.project_name, &["PLOO", "LOOP"], db_nos)
                 .await?;
@@ -2213,7 +2215,7 @@ impl AiosDBManager {
                                 }),
                             );
                         } else {
-                            println!("楼板有问题：{} ", refno.to_refno_string());
+                            error!("楼板有问题：{} ", refno.to_refno_string());
                         }
                     }
                     let ancestors = mgr.get_ancestors_refnos_without_world(refno);
@@ -2337,13 +2339,6 @@ impl AiosDBManager {
                 futures::future::join_all(vec![handle]).await;
             }
 
-            // if !db_option.multi_threads {
-            //     if !handles.is_empty() {
-            //         futures::future::join_all(take(&mut handles)).await;
-            //     }
-            // }
-
-            // futures::future::join_all(take(&mut handles)).await;
             mgr.cached_mesh_mgr
                 .serialize_to_specify_file("./assets/mesh/mesh.bin");
 
@@ -2352,8 +2347,6 @@ impl AiosDBManager {
 
             println!("{db_no} 生成完毕。");
         }
-        mgr.dbno_mgr
-            .serialize_to_specify_file("./assets/instance/dbno_mgr.num");
         println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
         Ok(true)
     }

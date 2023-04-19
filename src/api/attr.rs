@@ -47,6 +47,10 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &[&st
             //type 需要获取
             if info.offset != 0 || info.hash as u32 == *TYPE_HASH {
                 let t = info.name.as_str();
+                //todo 需要进一步查找原因
+                if t == "DETR" {
+                    continue;
+                }
                 let hash = NounHash::from(db1_hash(&info.name));
                 match info.att_type {
                     DbAttributeType::INTEGER => {
@@ -191,7 +195,10 @@ pub async fn query_uda_attr(att_type: &str, pool: &Pool<MySql>) -> anyhow::Resul
 }
 
 pub async fn query_full_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
+    // dbg!(refno);
     if let Some((project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
+        // dbg!(&project);
+        // dbg!(refno);
         let ref_basic = aios_mgr.get_refno_basic(refno);
         if ref_basic.is_none() { return Ok(AttrMap::default()); }
         let ref_basic = ref_basic.unwrap();

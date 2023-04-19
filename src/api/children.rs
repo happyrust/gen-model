@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::env;
 use std::fmt::format;
 use std::sync::Arc;
@@ -6,8 +6,9 @@ use aios_core::pdms_types::*;
 use arangors_lite::{Connection, Database};
 use calamine::Error::De;
 use dashmap::DashSet;
+use nom::combinator::value;
 use sqlx::{Error, MySql, Pool, Row};
-use crate::consts::PDMS_ELEMENTS_TABLE;
+use crate::consts::{PDMS_ELEMENTS_TABLE, PDMS_PROJECT_MDB_TABLE};
 use crate::api::element::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};
@@ -296,6 +297,18 @@ pub async fn cache_mdb_site_map(mdb: &str, module: &str, pool: &Pool<MySql>) {
             }
         }
     }
+}
+
+pub async fn query_mdb_all_dbnums(mdb: &str, pool: &Pool<MySql>) -> anyhow::Result<BTreeSet<i32>> {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT DB_NUM FROM {PDMS_PROJECT_MDB_TABLE} WHERE MDB_NAME='/{}' ORDER BY ORDER_NUM", mdb));
+    // dbg!(&sql);
+    let val = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let mut dbnums = BTreeSet::new();
+    for v in val {
+        dbnums.insert(v.get::<i32, _>(0));
+    }
+    Ok(dbnums)
 }
 
 pub async fn cache_mdb_module_numbdbs(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<i32>> {

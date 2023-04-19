@@ -86,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
     let mut builder = Builder::from_default_env();
     builder.filter(Some("aios_database"), LevelFilter::Info);
+    builder.filter(Some("aios_core"), LevelFilter::Info);
     builder.target(Target::Pipe(Box::new(file))).init();
 
     use config::{Config, ConfigError, Environment, File};
