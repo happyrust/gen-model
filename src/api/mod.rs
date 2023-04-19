@@ -17,3 +17,4 @@ pub mod pdms_user;
 pub mod test_sample;
 pub mod data_state;
 pub mod metadata_manage;
+pub mod three_dimensional_review_data;

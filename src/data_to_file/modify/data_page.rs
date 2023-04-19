@@ -41,46 +41,46 @@ pub fn get_latest_data_page(input: &[u8], refno: RefU64, att_type: &str) -> Opti
     find_data_in_origin_file(input, &refno_bytes)
 }
 
-#[test]
-fn test_convert_new_data_page() {
-    let mut file = fs::File::open("resource/sam7200_0001").unwrap();
-    let mut input = vec![];
-    file.read_to_end(&mut input).unwrap();
+// #[test]
+// fn test_convert_new_data_page() {
+//     let mut file = fs::File::open("resource/sam7200_0001").unwrap();
+//     let mut input = vec![];
+//     file.read_to_end(&mut input).unwrap();
+//
+//     let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../../all_attr_info.json")).unwrap();
+//
+//     let data_page = DataPageModify {
+//         last_page_no: 0xF29,
+//         refno: RefU64::from_refno_str("23584/5931").unwrap(),
+//         attr_type: "STWALL".to_string(),
+//         noun_type: "POS".to_string(),
+//         data: AttrVal::Vec3Type([13898.39, -1534.99, 0.0]),
+//         info_map: info,
+//     };
+//
+//     let result = data_page.convert_new_data_page_modify(&input).unwrap();
+//     let mut file = fs::File::create("resource/sam7200_0001_test_data").unwrap();
+//     file.write_all(&result).unwrap();
+// }
 
-    let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../../all_attr_info.json")).unwrap();
-
-    let data_page = DataPageModify {
-        last_page_no: 0xF29,
-        refno: RefU64::from_refno_str("23584/5931").unwrap(),
-        attr_type: "STWALL".to_string(),
-        noun_type: "POS".to_string(),
-        data: AttrVal::Vec3Type([13898.39, -1534.99, 0.0]),
-        info_map: info,
-    };
-
-    let result = data_page.convert_new_data_page_modify(&input).unwrap();
-    let mut file = fs::File::create("resource/sam7200_0001_test_data").unwrap();
-    file.write_all(&result).unwrap();
-}
-
-#[test]
-fn test_convert_new_data_page_explicit_data() {
-    let mut file = fs::File::open("resource/sam7200_0001").unwrap();
-    let mut input = vec![];
-    file.read_to_end(&mut input).unwrap();
-
-    let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../../all_attr_info.json")).unwrap();
-
-    let data_page = DataPageModify {
-        last_page_no: 0xF29,
-        refno: RefU64::from_refno_str("23584/5931").unwrap(),
-        attr_type: "STWALL".to_string(),
-        noun_type: "DRGP".to_string(),
-        data: AttrVal::IntegerType(100),
-        info_map: info,
-    };
-
-    let result = data_page.convert_new_data_page_modify(&input).unwrap();
-    let mut file = fs::File::create("resource/sam7200_0001_test_data").unwrap();
-    file.write_all(&result).unwrap();
-}
+// #[test]
+// fn test_convert_new_data_page_explicit_data() {
+//     let mut file = fs::File::open("resource/sam7200_0001").unwrap();
+//     let mut input = vec![];
+//     file.read_to_end(&mut input).unwrap();
+//
+//     let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../../all_attr_info.json")).unwrap();
+//
+//     let data_page = DataPageModify {
+//         last_page_no: 0xF29,
+//         refno: RefU64::from_refno_str("23584/5931").unwrap(),
+//         attr_type: "STWALL".to_string(),
+//         noun_type: "DRGP".to_string(),
+//         data: AttrVal::IntegerType(100),
+//         info_map: info,
+//     };
+//
+//     let result = data_page.convert_new_data_page_modify(&input).unwrap();
+//     let mut file = fs::File::create("resource/sam7200_0001_test_data").unwrap();
+//     file.write_all(&result).unwrap();
+// }

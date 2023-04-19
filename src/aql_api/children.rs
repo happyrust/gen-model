@@ -283,6 +283,41 @@ pub async fn query_travel_children_with_type_aql(arango_database: &Database, ref
     Ok(r)
 }
 
+pub async fn query_refnos_travel_children_with_type_aql(arango_database: &Database, refnos: Vec<RefU64>, att_type: &str) -> anyhow::Result<Vec<EleTreeNode>> {
+    let mut r = vec![];
+    let refno_aql = refnos.into_iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
+    let aql = AqlQuery::new("\
+    let eles = ( for refno in @id
+    FOR z in 0..100 INBOUND refno pdms_edges
+        Filter z.noun == @noun
+        return {
+            'refno':z._key,
+            'owner':z.owner,
+            'name':z.name,
+            'noun':z.noun,
+            'version':0,
+            'children_count':0,
+        })
+    return UNIQUE(eles)")
+        .bind_var("id", refno_aql)
+        .bind_var("noun", att_type);
+    let result: Vec<Vec<PdmsElementAql>> = arango_database.aql_query(aql).await?;
+    let result = result.into_iter().flatten().collect::<Vec<_>>();
+    for v in result {
+        if let Some(refno) = RefU64::from_url_refno(&v.refno) {
+            if RefU64::from_url_refno(&v.owner).is_none() { continue; }
+            r.push(EleTreeNode {
+                refno,
+                owner: RefU64::from_url_refno(&v.owner).unwrap(),
+                name: v.name,
+                noun: v.noun,
+                children_count: 0,
+            })
+        }
+    }
+    Ok(r)
+}
+
 pub async fn query_refno_from_site_zone_name(arango_database: &Database, site_name: String, zone_name: String, att_type: String) -> anyhow::Result<Vec<RefU64>> {
     return if zone_name != "\"\"" {
         let aql = AqlQuery::new(r"

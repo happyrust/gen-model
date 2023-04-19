@@ -62,8 +62,8 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-        .execute(&mut pool)
-        .await?;
+    .execute(&mut pool)
+    .await?;
     Ok(())
 }
 

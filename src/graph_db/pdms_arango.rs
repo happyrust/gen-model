@@ -620,6 +620,7 @@ pub async fn save_arangodb_with_database(json: Value, collection: &str, database
     Ok(())
 }
 
+
 pub async fn save_arangodb_with_db_option_create_collection(json: Value, db_option: &DbOption, collection: &str, collection_type: CollectionType) -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(db_option).await?;
     match collection_type {
