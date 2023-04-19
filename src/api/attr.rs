@@ -48,9 +48,9 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &[&st
             if info.offset != 0 || info.hash as u32 == *TYPE_HASH {
                 let t = info.name.as_str();
                 //todo 需要进一步查找原因
-                if t == "DETR" {
-                    continue;
-                }
+                // if t == "DETR" {
+                //     continue;
+                // }
                 let hash = NounHash::from(db1_hash(&info.name));
                 match info.att_type {
                     DbAttributeType::INTEGER => {
