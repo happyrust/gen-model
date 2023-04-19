@@ -128,6 +128,7 @@ pub async fn compute_rooms_by_projection(
 }
 
 /// 精算房间计算
+/// （1）调用投影算法，投影到2d，进行计算
 pub async fn recompute_spatial_tree(
     room_refno: Vec<RefU64>,
     all_insts_mgr: HashMap<u32, CachedInstanceMgr>,

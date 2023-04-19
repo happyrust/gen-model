@@ -2020,6 +2020,7 @@ impl AiosDBManager {
                 .await?;
         }
         let loop_cnt = loop_refnos.len();
+        dbg!(loop_cnt);
         if loop_cnt == 0 { return Ok(true); }
         //处理loop elements
         let batch_chunks_cnt = loop_cnt / batch_size + 1;
