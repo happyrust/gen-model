@@ -37,7 +37,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             }
         } else {
             let spre_ref = desi_att.get_foreign_refno("SPRE").unwrap_or_default();
-            let spre = interface.get_attr(spre_ref).await.unwrap();
+            let spre = interface.get_attr(spre_ref).await?;
             if spre.contains_attr_name("CATR") {
                 scom_ref = spre.get_foreign_refno("CATR");
             } else {
@@ -62,7 +62,8 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
                 scom_info_map.insert(scom_ref, scom_info);
             }
             Err(e) => {
-                let error_info = format!("元件库: {} 解析出错 {}", scom_ref.to_refno_string(), e.to_string());
+                let error_info = format!("Design的元件：{} 使用的元件库: {} 解析出错 {}",
+                                         refno.to_refno_string(), scom_ref.to_refno_string(), e.to_string());
                 println!("{}", &error_info);
                 return Err(anyhow!(error_info));
             }
@@ -92,7 +93,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     let radi = desi_att.get_as_string("RADI").unwrap_or("0.0".into());
     context.insert(DDRADIUS_STR.into(), SmolStr::new(radi.clone()));
     context.insert("RADI".into(), SmolStr::new(radi));
-    let geom_info = resolve_cata_comp(scom_info.value(), Some(interface), Some(context), is_debug).await;
+    let geom_info = resolve_cata_comp(refno, scom_info.value(), Some(interface), Some(context), is_debug).await;
     if geom_info.is_err() {
         error!("{:?}", geom_info.as_ref().err());
         error!("{:?}", desi_att.to_string_hashmap());
@@ -221,6 +222,7 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
 
 ///对元件库的SCOM Element进行求值计算
 pub async fn resolve_cata_comp<T: PdmsDataInterface>(
+    des_refno: RefU64,
     scom_info: &ScomInfo,
     interface: Option<&T>,
     context: Option<BTreeMap<SmolStr, SmolStr>>,
@@ -282,7 +284,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         None
     };
     //说明: 需要传递 interface, 因为可能需要取属性值
-    let geometries = resolve_gms(&scom_info.gm_params, &jusl_param, &cur_context, &axis_map, interface);
+    let geometries = resolve_gms(des_refno,&scom_info.gm_params, &jusl_param, &cur_context, &axis_map, interface);
     Ok(GeomsInfo {
         geometries,
         axis_map,

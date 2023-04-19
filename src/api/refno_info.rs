@@ -38,7 +38,7 @@ pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Has
     Ok(map)
 }
 
-/// 获取生成refno到RefBasic的映射
+/// 获取生成refno到RefBasic的映射, todo 存储有点慢，需要批量存储
 pub async fn sync_refno_basic_map(pool: &Pool<MySql>, dbno_mgr: &mut DbNumMgr) -> anyhow::Result<bool> {
     let sql = format!("SELECT ID, OWNER, TYPE, NUMBDB  FROM {PDMS_ELEMENTS_TABLE}");
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;

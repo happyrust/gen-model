@@ -29,7 +29,6 @@ use id_tree::{Node, NodeId};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use nalgebra::{Quaternion, UnitQuaternion};
-use nalgebra_glm::project;
 use once_cell::sync::Lazy;
 use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Vector};
@@ -117,6 +116,10 @@ static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> 
     m.insert("ROOM", PdmsGenericType::ROOM);
     m.insert("STRU", PdmsGenericType::STRU);
     m.insert("PANE", PdmsGenericType::PANE);
+    m.insert("CFLOOR", PdmsGenericType::CFLOOR);
+    m.insert("FLOOR", PdmsGenericType::FLOOR);
+    m.insert("EXTR", PdmsGenericType::EXTR);
+    m.insert("REVO", PdmsGenericType::REVO);
     m
 });
 
@@ -594,8 +597,7 @@ impl AiosDBManager {
             &db_option.project_name,
             &db_option.mdb_name,
             &db_option.module,
-        )
-            .await?;
+        ).await?;
         Ok(mgr)
     }
 
@@ -671,7 +673,7 @@ impl AiosDBManager {
         info!("正在初始化mdb: {mdb}");
         let mut conn = project_pool.acquire().await?;
         //创建table, 如果已经存在，可以忽略
-        if self.db_option.reset_mdb_project.is_some() && self.db_option.reset_mdb_project.unwrap()  {
+        if self.db_option.reset_mdb_project.is_some() && self.db_option.reset_mdb_project.unwrap() {
             let create_sql = gen_create_project_mdb_sql();
             let _ = conn.execute(create_sql.as_str()).await;
             info!("正在插入mdb数据");
@@ -692,30 +694,32 @@ impl AiosDBManager {
         let mut project_map = DashMap::new();
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
-        let time = Instant::now();
         let mut dbno_mgr = DbNumMgr::default();
-        let need_sync = true;
+        let need_sync_refno_basic = db_option.need_sync_refno_basic;
         for project in &db_option.included_projects {
             let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
             println!("正在创建数据库连接 {project}");
             match project_pool {
                 Ok(pool) => {
-                    //暂时保存在内存，需要序列化到heed LMDB数据库
-                    if need_sync {
+                    if need_sync_refno_basic {
                         sync_refno_basic_map(&pool, &mut dbno_mgr).await.unwrap();
                     }
                     println!("数据库连接成功 {project}");
                     project_map.entry(project.clone()).or_insert(pool.clone());
-                    // 将树节点的site层提前缓存下来
-                    // cache_mdb_site_map(&db_option.mdb_name, &db_option.module, &pool).await;
                 }
                 Err(_) => {
                     println!("project: {} init failed", project);
                 }
             }
         }
+        dbg!(need_sync_refno_basic);
+        let time = Instant::now();
+        if need_sync_refno_basic {
+            CACHED_REFNO_BASIC_MAP.save_to_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
+        }else{
+            CACHED_REFNO_BASIC_MAP.load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
+        }
         // 将对应mdb module 下所有的 numbdb 存下来
-
         println!("缓存RefBasic数据花费：{}ms", time.elapsed().as_millis());
         println!("正在创建数据库连接");
         let info_conn = AiosDBManager::get_db_pool(
@@ -1496,6 +1500,9 @@ impl AiosDBManager {
         let batch_chunks_cnt = has_cata_cnt / batch_size + 1;
         let mut handles = vec![];
         let all_refnos = Arc::new(has_cata_refnos);
+        if is_debug {
+            dbg!(&all_refnos);
+        }
         let processed_cnt = Arc::new(Mutex::new(has_cata_cnt));
         let mut tubi_aqls = Arc::new(DashMap::new());
         let replace_mesh = db_option.replace_mesh;
@@ -1671,8 +1678,7 @@ impl AiosDBManager {
                                     trans_origin.translation.x,
                                     trans_origin.translation.y,
                                     trans_origin.translation.z,
-                                )
-                                    .into(),
+                                ).into(),
                             }),
                         );
 
@@ -2050,7 +2056,13 @@ impl AiosDBManager {
                         .await
                         .unwrap_or_default()
                         .unwrap_or_default();
-
+                    *processed_cnt.lock().unwrap() -= 1;
+                    let Some(refno_basic) = mgr.get_refno_basic(refno) else {
+                        continue;
+                    };
+                    let parent_basic = mgr.get_owner_ref_basic(refno).unwrap();
+                    let target_type = parent_basic.get_type();
+                    let parent_refno = refno_basic.get_owner();
                     let mut geos_info = EleGeosInfo {
                         _key: refno.to_refno_normal_string(),
                         data: vec![],
@@ -2060,165 +2072,157 @@ impl AiosDBManager {
                             trans_origin.translation,
                             Vec3::ONE,
                         ),
-                        generic_type: mgr.get_generic_type(refno),
+                        generic_type: mgr.get_generic_type(parent_refno),
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
                         aabb: None,
                     };
                     let mut geo_insts = &mut geos_info.data;
+                    let mut target_refno = parent_refno;
+                    let mut loop_verts: Vec<Vec3> = vec![];
+                    let mut fradius_vec: Vec<f32> = vec![];
 
-                    if let Some(refno_basic) = mgr.get_refno_basic(refno) {
-                        let parent_basic = mgr.get_owner_ref_basic(refno).unwrap();
-                        let parent_type = parent_basic.get_type();
-                        let parent_refno = refno_basic.get_owner();
-                        let mut target_refno = parent_refno;
-                        let mut loop_verts: Vec<Vec3> = vec![];
-                        let mut fradius_vec: Vec<f32> = vec![];
-
-                        if let Ok(children_refs) = mgr.get_children_refs(refno).await {
-                            for x in children_refs {
-                                if let Ok(a) =
-                                    mgr.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await
-                                {
-                                    let pt = a.get_position().unwrap_or_default() /*- origin_pt*/;
-                                    if loop_verts.len() > 0 {
-                                        if pt.distance(*loop_verts.last().unwrap()) > EPSILON {
-                                            loop_verts.push(pt);
-                                            fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
-                                        }
-                                    } else {
+                    if let Ok(children_refs) = mgr.get_children_refs(refno).await {
+                        for x in children_refs {
+                            if let Ok(a) = mgr.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
+                                let pt = a.get_position().unwrap_or_default() /*- origin_pt*/;
+                                if loop_verts.len() > 0 {
+                                    if pt.distance(*loop_verts.last().unwrap()) > EPSILON {
                                         loop_verts.push(pt);
                                         fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
                                     }
+                                } else {
+                                    loop_verts.push(pt);
+                                    fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
                                 }
                             }
-                            // dbg!(&loop_verts);
-                            // dbg!(&fradius_vec);
                         }
-                        let mut parent_att = AttrMap::default();
-                        let mut geo_hash = None;
-                        let mut item_trans = Transform::default();
-                        let mut geo_param = PdmsGeoParam::Unknown;
-                        match parent_type {
-                            "REVO" => {
-                                parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
-                                let angle = parent_att.get_f32("ANGL").unwrap_or_default();
-                                if angle >= f32::EPSILON {
-                                    let revo = Box::new(Revolution {
-                                        verts: loop_verts,
-                                        fradius_vec,
-                                        angle,
-                                        ..Default::default()
-                                    });
-                                    if revo.check_valid() {
-                                        item_trans = revo.get_trans();
-                                        geo_param = revo
-                                            .convert_to_geo_param()
-                                            .unwrap_or(PdmsGeoParam::Unknown);
-                                        geo_hash =
-                                            Some(cached_mesh_mgr.gen_pdms_mesh(revo, replace_mesh));
-                                    }
-                                }
-                            }
-                            //todo 关于justline，可能需要jusline的信息才能判断中心点
-                            "AEXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
-                                let attr = mgr.get_attr(refno).await.unwrap_or_default();
-                                parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
-                                target_refno = parent_refno;
-                                let mut height = attr
-                                    .get_f32("HEIG")
-                                    .unwrap_or(parent_att.get_f32("HEIG").unwrap_or_default());
-                                let i: usize = 0;
-                                let extrusion = Box::new(Extrusion {
+                        // dbg!(&loop_verts);
+                        // dbg!(&fradius_vec);
+                    }
+                    let mut parent_att = AttrMap::default();
+                    let mut geo_hash = None;
+                    let mut item_trans = Transform::default();
+                    let mut geo_param = PdmsGeoParam::Unknown;
+                    // dbg!(&target_type);
+                    match target_type {
+                        "REVO" => {
+                            parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
+                            let angle = parent_att.get_f32("ANGL").unwrap_or_default();
+                            if angle >= f32::EPSILON {
+                                let revo = Box::new(Revolution {
                                     verts: loop_verts,
-                                    height,
                                     fradius_vec,
+                                    angle,
                                     ..Default::default()
                                 });
-                                if extrusion.check_valid() {
-                                    item_trans = extrusion.get_trans();
-                                    geo_param = extrusion
+                                if revo.check_valid() {
+                                    item_trans = revo.get_trans();
+                                    geo_param = revo
                                         .convert_to_geo_param()
                                         .unwrap_or(PdmsGeoParam::Unknown);
-                                    if let Some(sjus) = attr.get_str("SJUS") {
-                                        let off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                                            -height
-                                        } else if sjus == "UCEN" || sjus == "DCEN" {
-                                            -height / 2.0
-                                        } else {
-                                            0.0
-                                        };
-                                        item_trans.translation =
-                                            item_trans.translation + Vec3::new(0.0, 0.0, off_z);
-                                    }
-                                    let r = cached_mesh_mgr.gen_pdms_mesh(extrusion, replace_mesh);
-                                    geo_hash = Some(r);
+                                    geo_hash =
+                                        Some(cached_mesh_mgr.gen_pdms_mesh(revo, replace_mesh));
                                 }
                             }
-                            _ => {}
                         }
-
-                        if let Some(geo_hash) = geo_hash {
-                            let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
-                            let tr: Transform = item_trans;
-                            if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
-                                aabb =
-                                    aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
-                                let ele_aabb = aabb.transform_by(&Isometry {
-                                    rotation: UnitQuaternion::from_quaternion(Quaternion::new(
-                                        tr.rotation.w,
-                                        tr.rotation.x,
-                                        tr.rotation.y,
-                                        tr.rotation.z,
-                                    )),
-                                    translation: Vector::new(
-                                        tr.translation.x,
-                                        tr.translation.y,
-                                        tr.translation.z,
-                                    )
-                                        .into(),
-                                });
-                                let geom_inst = EleGeoInstance {
-                                    geo_hash,
-                                    refno,
-                                    pts: Default::default(),
-                                    aabb,
-                                    transform: (tr.rotation, tr.translation, tr.scale),
-                                    visible,
-                                    is_tubi: false,
-                                    geo_param,
-                                };
-                                geo_insts.push(geom_inst);
-                                geos_info.aabb = Some(
-                                    ele_aabb.transform_by(&Isometry {
-                                        rotation: UnitQuaternion::from_quaternion(Quaternion::new(
-                                            trans_origin.rotation.w,
-                                            trans_origin.rotation.x,
-                                            trans_origin.rotation.y,
-                                            trans_origin.rotation.z,
-                                        )),
-                                        translation: Vector::new(
-                                            trans_origin.translation.x,
-                                            trans_origin.translation.y,
-                                            trans_origin.translation.z,
-                                        )
-                                            .into(),
-                                    }),
-                                );
-                            } else {
-                                println!("楼板有问题：{} ", refno.to_refno_string());
+                        //todo 关于justline，可能需要jusline的信息才能判断中心点
+                        "AEXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
+                            let attr = mgr.get_attr(refno).await.unwrap_or_default();
+                            parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
+                            target_refno = parent_refno;
+                            let mut height = attr
+                                .get_f32("HEIG")
+                                .unwrap_or(parent_att.get_f32("HEIG").unwrap_or_default());
+                            let i: usize = 0;
+                            let extrusion = Box::new(Extrusion {
+                                verts: loop_verts,
+                                height,
+                                fradius_vec,
+                                ..Default::default()
+                            });
+                            if extrusion.check_valid() {
+                                item_trans = extrusion.get_trans();
+                                geo_param = extrusion
+                                    .convert_to_geo_param()
+                                    .unwrap_or(PdmsGeoParam::Unknown);
+                                if let Some(sjus) = attr.get_str("SJUS") {
+                                    let off_z = if sjus == "UTOP" || sjus == "DTOP" {
+                                        -height
+                                    } else if sjus == "UCEN" || sjus == "DCEN" {
+                                        -height / 2.0
+                                    } else {
+                                        0.0
+                                    };
+                                    item_trans.translation =
+                                        item_trans.translation + Vec3::new(0.0, 0.0, off_z);
+                                }
+                                let r = cached_mesh_mgr.gen_pdms_mesh(extrusion, replace_mesh);
+                                geo_hash = Some(r);
                             }
                         }
-                        let ancestors = mgr.get_ancestors_refnos_without_world(refno);
-                        for p_refno in ancestors {
-                            level_shape_mgr
-                                .entry(p_refno)
-                                .or_insert(RefU64Vec::default())
-                                .push(target_refno);
-                        }
-                        inst_map.insert(target_refno, geos_info);
+                        _ => {}
                     }
-                    *processed_cnt.lock().unwrap() -= 1;
+
+                    if let Some(geo_hash) = geo_hash {
+                        let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
+                        let tr: Transform = item_trans;
+                        if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
+                            aabb =
+                                aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
+                            let ele_aabb = aabb.transform_by(&Isometry {
+                                rotation: UnitQuaternion::from_quaternion(Quaternion::new(
+                                    tr.rotation.w,
+                                    tr.rotation.x,
+                                    tr.rotation.y,
+                                    tr.rotation.z,
+                                )),
+                                translation: Vector::new(
+                                    tr.translation.x,
+                                    tr.translation.y,
+                                    tr.translation.z,
+                                )
+                                    .into(),
+                            });
+                            let geom_inst = EleGeoInstance {
+                                geo_hash,
+                                refno,
+                                pts: Default::default(),
+                                aabb,
+                                transform: (tr.rotation, tr.translation, tr.scale),
+                                visible,
+                                is_tubi: false,
+                                geo_param,
+                            };
+                            geo_insts.push(geom_inst);
+                            geos_info.aabb = Some(
+                                ele_aabb.transform_by(&Isometry {
+                                    rotation: UnitQuaternion::from_quaternion(Quaternion::new(
+                                        trans_origin.rotation.w,
+                                        trans_origin.rotation.x,
+                                        trans_origin.rotation.y,
+                                        trans_origin.rotation.z,
+                                    )),
+                                    translation: Vector::new(
+                                        trans_origin.translation.x,
+                                        trans_origin.translation.y,
+                                        trans_origin.translation.z,
+                                    )
+                                        .into(),
+                                }),
+                            );
+                        } else {
+                            println!("楼板有问题：{} ", refno.to_refno_string());
+                        }
+                    }
+                    let ancestors = mgr.get_ancestors_refnos_without_world(refno);
+                    for p_refno in ancestors {
+                        level_shape_mgr
+                            .entry(p_refno)
+                            .or_insert(RefU64Vec::default())
+                            .push(target_refno);
+                    }
+                    inst_map.insert(target_refno, geos_info);
                 }
             });
             handles.push(handle);
@@ -2252,7 +2256,7 @@ impl AiosDBManager {
             let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
             let pool = AiosDBManager::get_db_pool(&url, project).await?;
             db_nos = query_db_nums_of_mdb(mdb, &db_option.module, &pool).await?;
-            dbg!(&db_nos);
+            // dbg!(&db_nos);
             info!("当前mdb的所有dbnos: {:?}", db_nos);
         }
         std::fs::create_dir_all("./assets/mesh").unwrap();
