@@ -183,7 +183,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         let mut conn = project_pool.acquire().await?;
         tables_sql.push_str(&tables::gen_create_element_tables_sql());
         tables_sql.push_str(&gen_create_project_mdb_sql());
-        tables_sql.push_str(&gen_create_project_mdb_json_sql());
         tables_sql.push_str(&gen_create_data_state_tables_sql());
         tables_sql.push_str(&gen_create_pdms_version_table_sql());
         tables_sql.push_str(&gen_create_room_code_table_sql());
@@ -546,8 +545,7 @@ pub async fn sync_total_async_threaded(
                 continue;
             }
         }
-        if need_parsed_files.is_none() || need_parsed_files.as_ref().unwrap().contains(&file_name)
-        {
+        if need_parsed_files.is_none() || need_parsed_files.as_ref().unwrap().contains(&file_name) {
             println!("path={:?}", &file_name);
             let project_clone = project.clone();
             let project_name = project.as_str().to_string();
@@ -566,8 +564,7 @@ pub async fn sync_total_async_threaded(
                              ..
                          })) = tokio::task::spawn_blocking(move || {
                 parse_file(&path, &None, &file_name, project_name.clone().as_str(), "")
-            })
-                .await
+            }).await
             {
                 //save dbno info first
                 let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(

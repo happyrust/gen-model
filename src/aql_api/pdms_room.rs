@@ -98,7 +98,10 @@ pub async fn save_room_info_to_arangodb(aios_mgr: &AiosDBManager, room_infos: Ha
 }
 
 /// 获取所有需要计算的房间号
-pub async fn query_all_need_compute_room_refno(dbno: &Vec<i32>, room_type: &str, filter_name: Option<&str>, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
+pub async fn query_all_need_compute_room_refno(dbno: &Vec<i32>,
+                                               room_type: &str,
+                                               filter_name: Option<&str>,
+                                               pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut refnos = vec![];
     let sql = gen_query_all_need_compute_room_refno_sql(dbno, room_type, filter_name);
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;

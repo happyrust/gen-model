@@ -86,6 +86,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap();
     let mut builder = Builder::from_default_env();
     builder.filter(Some("aios_database"), LevelFilter::Info);
+    builder.filter(Some("aios_core"), LevelFilter::Info);
     builder.target(Target::Pipe(Box::new(file))).init();
 
     use config::{Config, ConfigError, Environment, File};
@@ -233,39 +234,12 @@ async fn main() -> anyhow::Result<()> {
             "FRMW",
             Some("-RM"),
             &mgr.project_map.get(&db_option.project_name).unwrap(),
-        )
-            .await?;
+        ).await?;
         // dbg!(&room_infos);
         let room_infos = room_infos.into_iter().map(|x| x.0).collect::<Vec<_>>();
-        let map = recompute_spatial_tree(room_infos, all_insts_mgr, collider_shape_mgr, &db_option)
-            .await?;
+        let map = recompute_spatial_tree(room_infos, all_insts_mgr, collider_shape_mgr, &db_option).await?;
         save_room_info_to_arangodb(&mgr, map, &db_option, &mut site_major_map).await?;
-    }
-
-    if false {
-        if let Some(pool) = mgr.project_map.get(&db_option.project_name) {
-            let brans =
-                query_types_refnos(&vec!["BRAN"], &pool, db_option.manual_db_nums.clone()).await?;
-            let mut tubi_map = Arc::new(DashMap::new());
-            let mut handles = vec![];
-            for bran in brans {
-                let pool_clone = pool.value().clone();
-                // let db_option_clone = db_option.clone();
-                let database = mgr.arango_database.clone();
-                let mut tubi_map_clone = tubi_map.clone();
-                let handle = tokio::spawn(async move {
-                    // let database = get_arangodb_conn_from_db_option(&db_option_clone).await.unwrap();
-                    query_all_tubi_from_node(bran, &mut tubi_map_clone, &database, &pool_clone)
-                        .await
-                        .unwrap_or_default();
-                });
-                handles.push(handle);
-            }
-            futures::future::join_all(&mut handles).await;
-            let mut file = fs::File::create("tubi_map.txt")?;
-            file.write_all(&serde_json::to_vec(&tubi_map).unwrap_or_default())?;
-            insert_tubi_value(Arc::try_unwrap(tubi_map).unwrap_or_default(), pool.value()).await?;
-        }
+        dbg!("房间树保存完成");
     }
 
     if db_option.only_sync_sys {

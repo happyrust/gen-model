@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
@@ -17,7 +17,7 @@ use crate::helper::qualified_table_name;
 use crate::defines::CACHED_REFNO_BASIC_MAP;
 
 ///更新获得ref0->projects 缓存
-pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, HashSet<String>>> {
+pub async fn get_ref0_projects(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Vec<String>>> {
     let mut map = DashMap::new();
     let sql = format!("SELECT REF0, PROJECT FROM {PDMS_REFNO_INFOS_TABLE}");
     // dbg!(&sql);
@@ -27,7 +27,7 @@ pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Has
             for val in vals {
                 let ref0 = val.get::<i32, _>("REF0") as u32;
                 let project_str = val.get::<String, _>("PROJECT");
-                map.entry(ref0).or_insert(HashSet::new()).insert(project_str);
+                map.entry(ref0).or_insert(Vec::new()).push(project_str);
             }
         }
         Err(e) => {
@@ -38,9 +38,17 @@ pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Has
     Ok(map)
 }
 
-/// 获取生成refno到RefBasic的映射
-pub async fn sync_refno_basic_map(pool: &Pool<MySql>, dbno_mgr: &mut DbNumMgr) -> anyhow::Result<bool> {
-    let sql = format!("SELECT ID, OWNER, TYPE, NUMBDB  FROM {PDMS_ELEMENTS_TABLE}");
+/// 获取生成refno到RefBasic的映射, todo 存储有点慢，需要批量存储
+pub async fn sync_refno_basic_map(pool: &Pool<MySql>/*, mdb_dbnums: &BTreeSet<i32>*/) -> anyhow::Result<bool> {
+    // if mdb_dbnums.is_empty() { return Ok(false); }
+    // let mut in_sql = " (".to_string();
+    // for d in mdb_dbnums {
+    //     in_sql.push_str(&format!(r#"{d},"#));
+    // }
+    // in_sql.remove(in_sql.len() - 1);
+    // in_sql.push_str(") ");
+    // let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB in {}", in_sql);
+    let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE}");
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match results {
         Ok(vals) => {
@@ -48,13 +56,13 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>, dbno_mgr: &mut DbNumMgr) -
                 let refno = (val.get::<i64, _>("ID") as u64).into();
                 let owner = (val.get::<i64, _>("OWNER") as u64).into();
                 let type_name = val.get::<String, _>("TYPE");
-                let dbno = val.get::<i32, _>("NUMBDB");
-                dbno_mgr.insert(refno, dbno);
                 let table = qualified_table_name(type_name.as_str());
-                let _ = CACHED_REFNO_BASIC_MAP.insert(refno, &CachedRefBasic {
-                    owner,
-                    table,
-                });
+                if CACHED_REFNO_BASIC_MAP.get(&refno).is_none() {
+                    let _ = CACHED_REFNO_BASIC_MAP.insert(refno, &CachedRefBasic {
+                        owner,
+                        table,
+                    });
+                }
             }
         }
         Err(e) => {

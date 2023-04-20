@@ -19,6 +19,16 @@ fn test_parse_param_with_point_digit() {
     assert_eq!(r.unwrap(), -55.0);
 }
 
+#[test]
+fn test_parse_design_param() {
+    let input_exp = "-0.5 TIMES  DESIGN PARAM 1";
+    let mut context = BTreeMap::new();
+    context.insert("DESI1".into(), "30.0".into());
+    let r = intern_eval_str_to_f64::<AiosDBManager>(input_exp, &context, None);
+    dbg!(&r);
+    assert_eq!(r.unwrap(), -15.0);
+}
+
 ///测试带小数的表达式
 #[test]
 fn test_parse_param_with_of_operator() {

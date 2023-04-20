@@ -125,7 +125,7 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                         interface.get_attr(RefU64::from_refno_str(refno).unwrap())
                     ).unwrap_or_default()
                 };
-            dbg!(&ref_att);
+            // dbg!(&ref_att);
             //是不是需要求解的属性, 比如 LBORE
            let value =  match c1 {
                // "LBORE" => {
@@ -146,14 +146,21 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     // 将NEXT PREV 的值统一换成参考号，然后 context_params 要存储 参考号对应的 attr，要是它这个值没有求解，
     // 相当于要递归去求值
 
-    let rpro_re = Regex::new(r"(RPRO)\s+(\S+)").unwrap();
+    let rpro_re = Regex::new(r"(RPRO)\s+([a-zA-Z0-9]+)").unwrap();
     if new_exp.contains("RPRO") {
+        // dbg!(&new_exp);
         new_exp = rpro_re.replace_all(&new_exp, |caps: &Captures| {
-            format!("{}_{}", &caps[1], &caps[2])
+            let key: SmolStr = format!("{}_{}", &caps[1], &caps[2]).into();
+            let default_key: SmolStr = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
+            // dbg!(&key);
+            
+            context.get(&key).map(|x| x.to_string()).unwrap_or(
+                context.get(&default_key).map(|x| x.to_string()).unwrap_or("0".to_string())
+            )
         }).trim().to_string();
+        // dbg!(&new_exp);
     }
     let mut result_exp = new_exp.clone();
-    // dbg!(&result_exp);
     //默认两次
     let mut found_replaced = false;
     for _ in 0..5 {
@@ -167,7 +174,8 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             let c3 = caps.get(3).map_or("", |m| m.as_str());
             // println!("{} {}", c1, c3);
             // 小数向下取整
-            let k: SmolStr = format!("{}{}", c1, c3.parse::<f32>().unwrap_or_default().floor()).into();
+            let k: SmolStr = format!("{}{}", c1, c3.parse::<f32>().map(|x| x.floor().to_string()).unwrap_or_default() ).into();
+            // dbg!(&k);
             if context.contains_key(&k) {
                 result_exp = result_exp.replace(s, &context[&k]);
                 found_replaced = true;
@@ -180,8 +188,14 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         result_exp = result_exp.replace("ATTRIB", "");
         if result_exp.contains("RPRO") {
             result_exp = rpro_re.replace_all(&result_exp, |caps: &Captures| {
-                format!("{}_{}", &caps[1], &caps[2])
+                let key: SmolStr = format!("{}_{}", &caps[1], &caps[2]).into();
+                let default_key: SmolStr = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
+                
+                context.get(&key).map(|x| x.to_string()).unwrap_or(
+                    context.get(&default_key).map(|x| x.to_string()).unwrap_or("0".to_string())
+                )
             }).trim().to_string();
+            // dbg!(&result_exp);
         }
         new_exp = result_exp.clone();
         if !found_replaced {
@@ -307,8 +321,8 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             return if let Ok(mut stack) = Stack::init(&result_string) {
                 stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", &input_expr)))
             } else {
-                error!("输入表达式 : {}",&input_expr);
-                error!("计算后表达式 : {}",&result_string);
+                println!("输入表达式 : {}",&input_expr);
+                println!("计算后表达式 : {}",&result_string);
                 Err(anyhow!(format!("求解失败 {}", &input_expr)))
             };
         }
@@ -606,7 +620,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
 pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
                            scom: &ScomInfo,
                            context: &BTreeMap<SmolStr, SmolStr>,
-                           interface: Option<&T>) -> (Vec3, Vec3) {
+                           interface: Option<&T>) -> anyhow::Result<(Vec3, Vec3)> {
     let mut dir_str = axis.direction.trim();
     let mut dir = Vec3::ZERO;
     let mut pos = Vec3::ZERO;
@@ -615,18 +629,17 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
     if re.is_match(dir_str) {
         let pnt_indx = dir_str[1..].parse::<i32>().unwrap_or(i32::MAX);
         if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
-            if let Some(mut axis) = resolve_axis_param(&scom.axis_params[indx], scom, context, interface) {
-                dir = mem::take(&mut axis.dir);
-                pos = mem::take(&mut axis.pt);
-            }
+            let mut axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
+            dir = mem::take(&mut axis.dir);
+            pos = mem::take(&mut axis.pt);
         }
     } else {
-        dir = parse_str_axis_to_vec3(dir_str, context, interface).into();
+        dir = parse_str_axis_to_vec3(dir_str, context, interface)?.into();
     }
-    return (dir, pos);
+    return Ok((dir, pos));
 }
 
-pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>, interface: Option<&T>) -> Vec3 {
+pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>, interface: Option<&T>) -> anyhow::Result<Vec3> {
     let dir_str = pdir.to_uppercase().replace("AXIS", "");
     let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();
     let mut new_dir_str = dir_str.clone();
@@ -639,13 +652,12 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeM
         for cap in re.captures_iter(&dir_str) {
             if cap.len() == 6 {
                 let val_str = cap[2].to_string();
-                let val_result = intern_eval_str_to_f64(&val_str, context, interface).unwrap_or_default().to_string();
+                let val_result = intern_eval_str_to_f64(&val_str, context, interface)?.to_string();
                 new_dir_str = dir_str.replace(&val_str, &val_result);
 
                 let val_str = cap[4].to_string();
-                let val_result = intern_eval_str_to_f64(&val_str, context, interface).unwrap_or_default().to_string();
+                let val_result = intern_eval_str_to_f64(&val_str, context, interface)?.to_string();
                 new_dir_str = new_dir_str.replace(&val_str, &val_result);
-                // dbg!(&new_dir_str);
                 is_three = true;
             }
         }
@@ -664,13 +676,8 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeM
             }
         }
     }
-    // dbg!(&new_dir_str);
     let v = parse_expr_to_dir(&new_dir_str.replace(" ", ""));
-    if not_single {
-        // dbg!(&new_dir_str);
-        // dbg!(&v);
-    }
-    Vec3::new(f32_round_2(v[0]), f32_round_2(v[1]), f32_round_2(v[2]))
+    Ok(Vec3::new(f32_round_2(v[0]), f32_round_2(v[1]), f32_round_2(v[2])))
 }
 
 
