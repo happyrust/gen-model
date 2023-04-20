@@ -195,10 +195,7 @@ pub async fn query_uda_attr(att_type: &str, pool: &Pool<MySql>) -> anyhow::Resul
 }
 
 pub async fn query_full_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
-    // dbg!(refno);
     if let Some((project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
-        // dbg!(&project);
-        // dbg!(refno);
         let ref_basic = aios_mgr.get_refno_basic(refno);
         if ref_basic.is_none() { return Ok(AttrMap::default()); }
         let ref_basic = ref_basic.unwrap();

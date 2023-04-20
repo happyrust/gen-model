@@ -673,23 +673,12 @@ impl AiosDBManager {
         let project_pool = self.get_project_pool(project).ok_or(anyhow!("Unknown project pool"))?;
         info!("正在初始化mdb: {mdb}");
         let mut conn = project_pool.acquire().await?;
-        //创建table, 如果已经存在，可以忽略
-        if self.db_option.reset_mdb_project.is_some() && self.db_option.reset_mdb_project.unwrap() {
-            let create_sql = gen_create_project_mdb_sql();
-            let _ = conn.execute(create_sql.as_str()).await;
-            info!("正在插入mdb数据");
-            let _ = self.insert_project_mdb(&project_pool, &self.info_pool).await;
-        }
-        cache_mdb_site_map(mdb, module, &project_pool).await;
-
-        self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
-
         let time = Instant::now();
         let need_sync_refno_basic = self.db_option.need_sync_refno_basic;
         if need_sync_refno_basic {
             for project in &self.db_option.included_projects {
                 if let Some(kv) = self.project_map.get(project){
-                    sync_refno_basic_map(kv.value(), &self.mdb_dbnums).await.unwrap();
+                    sync_refno_basic_map(kv.value(),/* &self.mdb_dbnums*/).await.unwrap();
                 }
             }
         }
@@ -701,6 +690,16 @@ impl AiosDBManager {
         }
         // 将对应mdb module 下所有的 numbdb 存下来
         println!("缓存RefBasic数据花费：{}ms", time.elapsed().as_millis());
+        //创建table, 如果已经存在，可以忽略
+        if self.db_option.reset_mdb_project.is_some() && self.db_option.reset_mdb_project.unwrap() {
+            let create_sql = gen_create_project_mdb_sql();
+            let _ = conn.execute(create_sql.as_str()).await;
+            println!("正在插入mdb数据");
+            let _ = self.insert_project_mdb(&project_pool, &self.info_pool).await;
+        }
+        cache_mdb_site_map(mdb, module, &project_pool).await;
+
+        self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
 
 
         // 将 mdb对应的 module 下的所有 numbdb保存下来
@@ -740,6 +739,7 @@ impl AiosDBManager {
         )
             .await?;
         let ref0_projects = get_ref0_projects(&info_conn).await?;
+        // dbg!(&ref0_projects);
         let projects = db_option.included_projects.clone();
         println!("正在创建图数据库连接");
         let database = get_arangodb_conn_from_db_option(&db_option).await.unwrap();
@@ -845,10 +845,10 @@ impl AiosDBManager {
                 continue;
             };
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
-                // if mdb_name == "/ALL" {
-                //     dbg!(mdb_refno);
-                //     dbg!(&dbs);
-                // }
+                if mdb_name == "/ALL" {
+                    dbg!(mdb_refno);
+                    dbg!(&dbs);
+                }
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
                     if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {

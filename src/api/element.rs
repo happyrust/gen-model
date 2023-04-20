@@ -514,7 +514,11 @@ pub async fn check_exist_refno(refno: RefU64, pool: &Pool<MySql>, mdb_dbnums: &B
     }
     in_sql.remove(in_sql.len() - 1);
     in_sql.push_str(") ");
-    let sql = format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND NUMBDB IN {} )", refno.0, in_sql);
+    let sql = if mdb_dbnums.is_empty() {
+        format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} )", refno.0)
+    }else{
+        format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND NUMBDB IN {} )", refno.0, in_sql)
+    };
     // dbg!(&sql);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(result.get::<bool, _>(0))

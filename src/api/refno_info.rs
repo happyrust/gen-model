@@ -39,15 +39,15 @@ pub async fn get_ref0_projects(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32
 }
 
 /// 获取生成refno到RefBasic的映射, todo 存储有点慢，需要批量存储
-pub async fn sync_refno_basic_map(pool: &Pool<MySql>, mdb_dbnums: &BTreeSet<i32>) -> anyhow::Result<bool> {
-    if mdb_dbnums.is_empty() { return Ok(false); }
-    let mut in_sql = " (".to_string();
-    for d in mdb_dbnums {
-        in_sql.push_str(&format!(r#"{d},"#));
-    }
-    in_sql.remove(in_sql.len() - 1);
-    in_sql.push_str(") ");
-    let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB IN {}", in_sql);
+pub async fn sync_refno_basic_map(pool: &Pool<MySql>/*, mdb_dbnums: &BTreeSet<i32>*/) -> anyhow::Result<bool> {
+    // if mdb_dbnums.is_empty() { return Ok(false); }
+    // let mut in_sql = " (".to_string();
+    // for d in mdb_dbnums {
+    //     in_sql.push_str(&format!(r#"{d},"#));
+    // }
+    // in_sql.remove(in_sql.len() - 1);
+    // in_sql.push_str(") ");
+    let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB");
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match results {
         Ok(vals) => {

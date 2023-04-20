@@ -203,11 +203,7 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
-    dbg!(refno);
     let children = interface.get_children_attrs(refno).await.unwrap();
-    dbg!(children.len());
-    // if refno == RefU64(0) { return Ok(gms); }
-    // let children = interface.get_travel_children_attrs(refno).await?;
     for child in children {
         //暂时把 Level 的判断加到这里
         if !child.is_visible_by_level(None).unwrap_or(true) {

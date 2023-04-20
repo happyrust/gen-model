@@ -183,7 +183,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         let mut conn = project_pool.acquire().await?;
         tables_sql.push_str(&tables::gen_create_element_tables_sql());
         tables_sql.push_str(&gen_create_project_mdb_sql());
-        tables_sql.push_str(&gen_create_project_mdb_json_sql());
         tables_sql.push_str(&gen_create_data_state_tables_sql());
         tables_sql.push_str(&gen_create_pdms_version_table_sql());
         tables_sql.push_str(&gen_create_room_code_table_sql());

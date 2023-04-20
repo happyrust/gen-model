@@ -2,6 +2,7 @@
 #![feature(let_chains)]
 #![feature(default_free_fn)]
 #![feature(async_closure)]
+#![feature(exact_size_is_empty)]
 // 暂时屏蔽warnings
 #![allow(warnings)]
 
