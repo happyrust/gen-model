@@ -668,7 +668,7 @@ impl AiosDBManager {
     }
 
 
-    /// init by mdb
+    /// 初始化mdb
     pub async fn init_mdb(&mut self, project: &str, mdb: &str, module: &str) -> anyhow::Result<()> {
         let project_pool = self.get_project_pool(project).ok_or(anyhow!("Unknown project pool"))?;
         info!("正在初始化mdb: {mdb}");
@@ -710,7 +710,7 @@ impl AiosDBManager {
         Ok(())
     }
 
-    ///init the project and mdb name
+    ///初始化db manager
     pub async fn init(db_option: &DbOption) -> anyhow::Result<Self> {
         let dir = db_option.project_path.to_string();
         let mut project_map = DashMap::new();
@@ -1069,6 +1069,8 @@ impl AiosDBManager {
                         .entry(branch_refno)
                         .or_insert(Vec::new())
                         .push(shape);
+                }else{
+                    error!("{} 的直段方向有问题", branch_refno.to_refno_string());
                 }
             }
             // 将 tubi 数据保存到图数据库
@@ -1147,16 +1149,12 @@ impl AiosDBManager {
                 if is_debug && refno != debug_refno.unwrap() {
                     continue;
                 }
-                let attr = mgr.get_attr(refno).await;
-                if attr.is_err() {
+                let Ok(attr) = mgr.get_attr(refno).await else{
                     continue;
-                }
-                let attr = attr.unwrap();
-                let to_attr = mgr.get_attr(to_refno).await;
-                if to_attr.is_err() {
+                };
+                let Ok(to_attr) = mgr.get_attr(to_refno).await else{
                     continue;
-                }
-                let to_attr = to_attr.unwrap();
+                };
                 let att_type = to_attr.get_type();
                 edge.att_type = att_type.to_string();
                 // 单独存 atta 的 attype
@@ -1167,16 +1165,12 @@ impl AiosDBManager {
 
                 let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
 
-                let mut geoms = resolve_desi_comp(refno, None, Some(mgr.as_ref()), scom_info_map, is_debug).await;
-                if geoms.is_err() {
+                let Ok(mut geoms) = resolve_desi_comp(refno, None, Some(mgr.as_ref()), scom_info_map, is_debug).await else{
                     continue;
-                }
-                let mut geoms = geoms.unwrap();
-                let mut to_geoms = resolve_desi_comp(to_refno, None, Some(mgr.as_ref()), scom_info_map, is_debug).await;
-                if to_geoms.is_err() {
+                };
+                let Ok(mut to_geoms) = resolve_desi_comp(to_refno, None, Some(mgr.as_ref()), scom_info_map, is_debug).await else{
                     continue;
-                }
-                let mut to_geoms = to_geoms.unwrap();
+                };
                 let to_world_trans = mgr.get_world_transform(to_refno).await?.unwrap_or_default();
                 if let Some(arrive) = to_attr.get_i32("ARRI") {
                     if to_geoms.axis_map.contains_key(&arrive) {
@@ -1329,6 +1323,8 @@ impl AiosDBManager {
                                     .entry(refno)
                                     .or_insert(Vec::new())
                                     .push(brep_shape);
+                            }else{
+                                error!("{} 的直段方向有问题", refno.to_refno_string());
                             }
                         }
                     }
@@ -1414,6 +1410,8 @@ impl AiosDBManager {
                                 .entry(refno)
                                 .or_insert(Vec::new())
                                 .push(shape);
+                        }else{
+                            error!("{} 的直段方向有问题", refno.to_refno_string());
                         }
                     }
                 }
@@ -2255,6 +2253,7 @@ impl AiosDBManager {
             let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
             let pool = AiosDBManager::get_db_pool(&url, project).await?;
             db_nos = query_db_nums_of_mdb(mdb, &db_option.module, &pool).await?;
+            db_nos.sort();
             // dbg!(&db_nos);
             info!("当前mdb的所有dbnos: {:?}", db_nos);
         }

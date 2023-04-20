@@ -127,7 +127,6 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     let gmref_name = if is_sprf { "GSTR" } else { "GMRE" };
     let mut gm_params = vec![];
     if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
-        dbg!(gmse_refno);
         if let Ok(gmse_am) = interface.get_attr(gmse_refno).await {
             gm_params = query_gm_params(&gmse_am, Some(interface)).await?;
             if is_debug {

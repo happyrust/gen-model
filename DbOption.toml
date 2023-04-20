@@ -16,7 +16,7 @@ gen_model_batch_size = 100
 
 #arangodb 配置
 arangodb_database = "ams"
-multi_threads = true
+multi_threads = false
 only_sync_sys = false
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
@@ -47,10 +47,10 @@ only_rebuild_pdms_element = false
 replace_dbs = false
 debug_root_refnos = []
 #debug_root_refnos = []
-debug_branch_refno = "24383/68327"
+#debug_branch_refno = "24383/68327"
 #debug_desi_refno = "24383/68329"
 debug_refno_types = ["CATA"]  # "CATA", "LOOP", "PRIM"
-#debug_refno_types = ["CATA", "LOOP", "PRIM"]
+#debug_refno_types = [ "LOOP", "PRIM"]
 debug_db_num = 7999
 #included_db_files = ["ams6890_0001"]
 #replace_types = ["SDTE"]
