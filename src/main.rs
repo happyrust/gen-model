@@ -249,7 +249,6 @@ async fn main() -> anyhow::Result<()> {
             let mut tubi_map = Arc::new(DashMap::new());
             let mut handles = vec![];
             for bran in brans {
-                dbg!(&bran);
                 let pool_clone = pool.value().clone();
                 // let db_option_clone = db_option.clone();
                 let database = mgr.arango_database.clone();
@@ -328,6 +327,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     create_arangodb_conn(&database, "embed_data", Document).await?;
     create_arangodb_conn(&database, "room_edges", Edge).await?;
     create_arangodb_conn(&database, "geo_infos", Document).await?;
+    create_arangodb_conn(&database, AQL_LOCK_REFNOS_COLLECTION, Document).await?;
     Ok(())
 }
 

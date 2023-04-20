@@ -80,7 +80,6 @@ pub async fn create_arangodb_conn(database: &Database, collection_name: &str, co
                             dbg!(&e);
                         }
                     }
-
                 }
             }
         }
@@ -620,6 +619,16 @@ pub async fn save_arangodb_with_database(json: Value, collection: &str, database
     Ok(())
 }
 
+pub async fn remove_arangodb_with_refno_key(refnos: &Vec<RefU64>, collection: &str, database: &Database) -> anyhow::Result<bool> {
+    let keys = refnos.into_iter().map(|refno| refno.to_url_refno()).collect::<Vec<_>>();
+    let aql = AqlQuery::new(
+        "FOR D IN @DATA
+                    REMOVE D IN @COLLECTION")
+        .bind_var("data", keys)
+        .bind_var("collection", collection);
+    let result = database.aql_query::<Vec<()>>(aql).await;
+    Ok(!result.is_err())
+}
 
 pub async fn save_arangodb_with_db_option_create_collection(json: Value, db_option: &DbOption, collection: &str, collection_type: CollectionType) -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(db_option).await?;

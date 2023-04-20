@@ -675,7 +675,7 @@ impl AiosDBManager {
             let create_sql = gen_create_project_mdb_sql();
             let _ = conn.execute(create_sql.as_str()).await;
             info!("正在插入mdb数据");
-            // let _ = self.insert_project_mdb(&project_pool, &self.info_pool).await;
+            let _ = self.insert_project_mdb(&project_pool, &self.info_pool).await;
         }
         cache_mdb_site_map(mdb, module, &project_pool).await;
         // 将 mdb对应的 module 下的所有 numbdb保存下来
@@ -824,23 +824,24 @@ impl AiosDBManager {
     ) -> anyhow::Result<MdbQuickInfoMap> {
         let mut mdb_map = HashMap::new();
         let mdbs = query_types_refnos(&vec!["MDB"], project_pool, None).await?;
+        dbg!(&mdbs.len());
         for mdb_refno in mdbs {
+            dbg!(&mdb_refno);
             let Ok(mdb_attr) = query_full_attr(mdb_refno, self, None).await else {
                 continue;
             };
             let Ok(mdb_name) = query_name(mdb_refno, &project_pool).await else {
                 continue;
             };
+            dbg!(&mdb_name);
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
-                // if mdb_name == "/ALL" {
-                //     dbg!(mdb_refno);
-                //     dbg!(&dbs);
-                // }
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
                     if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {
                         let db_num = att.get_i32("NUMBDB").unwrap_or_default();
+                        dbg!(&db_num);
                         if let Ok(Some(mut quick_info)) = self.query_quick_info_by_dbno(*db_refno, db_num, info_pool).await {
+                            dbg!(&quick_info.db_type);
                             quick_info.order_number = i as _;
                             map.entry(quick_info.db_type.clone())
                                 .or_insert_with(Vec::new).push(quick_info);
@@ -848,6 +849,7 @@ impl AiosDBManager {
                     }
                 }
                 mdb_map.entry(mdb_name).or_insert(map);
+                dbg!("ok");
             }
         }
         Ok(mdb_map)

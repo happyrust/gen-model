@@ -1,17 +1,19 @@
 use std::fs::File;
 use std::io::Write;
 use std::sync::Arc;
-use aios_core::pdms_types::RefU64;
+use aios_core::pdms_types::{AttrVal, NounHash, PdmsElement, RefU64};
 use dashmap::DashMap;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
-use crate::api::attr::{query_full_attr, query_full_attr_with_pool};
+use crate::api::attr::{query_explicit_attr, query_full_attr, query_full_attr_with_pool};
 use crate::api::children::query_ancestor_of_type;
 use crate::api::element::query_name;
 use crate::aql_api::children::query_ancestor_till_type_aql;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::consts::TEAM_DATA_TABLE;
+use aios_core::pdms_user::PdmsElementWithUser;
 
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct AdminData {
@@ -30,7 +32,7 @@ pub async fn query_all_db_infos(mgr: &AiosDBManager) -> anyhow::Result<()> {
         let mut r = vec![];
         let all_db_refnos = query_all_db_refnos(project_db.value()).await?;
         for db_refno in all_db_refnos {
-            let db_attr = query_full_attr_with_pool(db_refno, &mgr, Some(vec!["NUMBDB","STYP"]),project_db.value()).await;
+            let db_attr = query_full_attr_with_pool(db_refno, &mgr, Some(vec!["NUMBDB", "STYP"]), project_db.value()).await;
             if db_attr.is_err() { continue; }
             let db_attr = db_attr.unwrap();
             let team_refno = query_ancestor_of_type(db_refno, "TEAM", project_db.value()).await?;
@@ -64,18 +66,27 @@ pub async fn query_all_db_infos(mgr: &AiosDBManager) -> anyhow::Result<()> {
             let stype = match_stype(s_type);
             let claim = match_claim_data(claim);
             r.push(AdminData {
-                team_name:team_name[1..].to_string(),
-                name:name[1..].to_string(),
+                team_name: team_name[1..].to_string(),
+                name: name[1..].to_string(),
                 s_type: stype,
-                db_type:"MASTER".to_string(),
+                db_type: "MASTER".to_string(),
                 db_no: numbdb,
                 claim,
                 desc: desc.to_string(),
             })
         }
-        let project_name = project_db.key();
-        let mut file = File::create(&format!("{}_db_info.json",project_name))?;
-        file.write_all(&serde_json::to_string(&r).unwrap_or("".to_string()).into_bytes())?;
+        let table_sql = gen_create_team_data_sql();
+        let result = sqlx::query(&table_sql).execute(&mut project_db.value().acquire().await?).await;
+        if let Err(e) = result { dbg!(&e); }
+        let data_sql = gen_save_team_data_sql(r);
+        let result = sqlx::query(&data_sql).execute(&mut project_db.value().acquire().await?).await;
+        if let Err(e) = result {
+            dbg!(&data_sql);
+            dbg!(&e);
+        }
+        // let project_name = project_db.key();
+        // let mut file = File::create(&format!("{}_db_info.json",project_name))?;
+        // file.write_all(&serde_json::to_string(&r).unwrap_or("".to_string()).into_bytes())?;
     }
     Ok(())
 }
@@ -96,6 +107,34 @@ pub async fn query_all_db_refnos(pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU6
         }
     }
     Ok(r)
+}
+
+pub async fn get_pdms_tree_user(elements: Vec<PdmsElement>, aios_mgr: &AiosDBManager) -> Vec<PdmsElementWithUser> {
+    let mut data = Vec::new();
+    for element in elements {
+        let refno = RefU64::from_refno_str(&element.refno);
+        if refno.is_err() { continue; }
+        let refno = refno.unwrap();
+
+        let need_query_user_noun = vec!["PIPE","SITE","ZONE","BRAN","EQUI","STRU","HVAC","REST"];
+        let user = if need_query_user_noun.contains(&element.noun.as_str()) {
+            if let Some((_, pool)) =
+                aios_mgr.get_project_pool_by_refno(refno).await {
+            if let Ok(explicit_attr) = query_explicit_attr(refno, &pool).await {
+                if let Some(user) = explicit_attr.map.get(&NounHash(642952117)) {
+                    if let AttrVal::StringType(user) = user {
+                        user.to_string()
+                    } else { "".to_string() }
+                } else { "".to_string() }
+            } else { "".to_string() }
+        } else {
+                "".to_string()
+            }
+        } else { "".to_string() };
+
+        data.push(PdmsElementWithUser::from_pdms_element(element, user));
+    }
+    data
 }
 
 fn match_stype(input: &str) -> String {
@@ -124,5 +163,32 @@ fn match_claim_data(input: i32) -> String {
 fn gen_query_all_db_refnos_sql() -> String {
     let mut sql = String::new();
     sql.push_str("SELECT ID FROM DB");
+    sql
+}
+
+fn gen_create_team_data_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(format!("
+    CREATE TABLE IF NOT EXISTS {TEAM_DATA_TABLE} (
+        TEAM_NAME VARCHAR(100) NOT NULL,
+        NAME VARCHAR(100) PRIMARY KEY,
+        S_TYPE VARCHAR(50) ,
+        DB_TYPE VARCHAR(50) ,
+        DB_NO INT ,
+        CLAIM VARCHAR(50) ,
+        `DESC` VARCHAR(255) )").as_str());
+    sql
+}
+
+fn gen_save_team_data_sql(data: Vec<AdminData>) -> String {
+    let mut sql = String::from(&format!("INSERT IGNORE INTO {TEAM_DATA_TABLE} (TEAM_NAME, NAME, S_TYPE, DB_TYPE, DB_NO, CLAIM, `DESC`) VALUES"));
+    let b_empty = data.is_empty();
+    for d in data {
+        sql.push_str(&format!("('{}','{}','{}','{}',{},'{}','{}'),", d.team_name, d.name, d.s_type, d.db_type, d.db_no, d.claim, d.desc).as_str())
+    }
+    if !b_empty {
+        sql.remove(sql.len() - 1);
+    }
+    sql.push_str(";");
     sql
 }
