@@ -230,7 +230,7 @@ impl PdmsDataInterface for AiosDBManager {
         todo!()
     }
 
-    /// 获得缓存的refno基本信息
+    /// 获得缓存的refno基本信息, todo 改成使用sql的intersect
     #[inline]
     fn get_refno_basic(&self, refno: RefU64) -> Option<Ref<RefU64, CachedRefBasic>> {
         if !refno.is_valid() {
@@ -915,12 +915,7 @@ impl AiosDBManager {
         brep_shape_map: &CateBrepShapeMap,
         refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
         scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
-        debug_refno: Option<RefU64>,
     ) -> anyhow::Result<bool> {
-        let is_debug = debug_refno.is_some();
-        if is_debug && design_refno != debug_refno.unwrap() {
-            return Ok(false);
-        }
         let cur_ele = mgr.get_refno_basic(design_refno).unwrap();
         let type_name = cur_ele.get_type();
         let owner = mgr.get_owner_ref_basic(design_refno);
@@ -928,8 +923,7 @@ impl AiosDBManager {
             return Ok(false);
         }
         let desi_att = mgr.get_attr(design_refno).await?;
-        // dbg!(&desi_att);
-        let geoms = resolve_desi_comp(design_refno, None, Some(mgr.as_ref()), scom_info_map, is_debug)
+        let geoms = resolve_desi_comp(design_refno, None, Some(mgr.as_ref()), scom_info_map)
             .await
             .unwrap_or_default();
         // dbg!(&geoms);
@@ -977,12 +971,9 @@ impl AiosDBManager {
         group_att: &AttrMap,
         brep_shape_map: &CateBrepShapeMap,
         refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
-        debug_refno: Option<RefU64>,
         tubi_aqls: &mut Arc<DashMap<u64, TubiEdgeAql>>,
-        // scom_info_map: &DashMap<RefU64, ScomInfo>,
         scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
     ) -> anyhow::Result<bool> {
-        let is_debug = debug_refno.is_some();
         let group_transform = mgr
             .get_world_transform(branch_refno)
             .await?
@@ -1020,7 +1011,7 @@ impl AiosDBManager {
             href_type = h_att.get_type().to_string();
             let h_cat_ref = h_att.get_foreign_refno("CATR").unwrap_or_default();
             let tubi_geoms_info =
-                resolve_desi_comp(branch_refno, Some(h_cat_ref), Some(mgr.as_ref()), scom_info_map, is_debug)
+                resolve_desi_comp(branch_refno, Some(h_cat_ref), Some(mgr.as_ref()), scom_info_map)
                     .await
                     .unwrap_or_default();
             let mut has_tube_geom = false;
@@ -1099,7 +1090,7 @@ impl AiosDBManager {
             if let Some(first_refno) = children.0.first() {
                 let first_attr = mgr.get_attr(*first_refno).await?;
                 let geoms = resolve_desi_comp(*first_refno, None,
-                                              Some(mgr.as_ref()), &scom_info_map, is_debug).await;
+                                              Some(mgr.as_ref()), &scom_info_map).await;
                 if let Ok(geoms) = geoms {
                     if let Some(arrive) = first_attr.get_i32("ARRI") {
                         if geoms.axis_map.contains_key(&arrive) {
@@ -1148,9 +1139,6 @@ impl AiosDBManager {
                 edge._to = format!("{AQL_PDMS_ELES_COLLECTION}/{}", to_refno.to_url_refno());
                 edge.bran_name = bran_name.to_string();
 
-                if is_debug && refno != debug_refno.unwrap() {
-                    continue;
-                }
                 let Ok(attr) = mgr.get_attr(refno).await else{
                     continue;
                 };
@@ -1167,10 +1155,10 @@ impl AiosDBManager {
 
                 let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
 
-                let Ok(mut geoms) = resolve_desi_comp(refno, None, Some(mgr.as_ref()), scom_info_map, is_debug).await else{
+                let Ok(mut geoms) = resolve_desi_comp(refno, None, Some(mgr.as_ref()), scom_info_map).await else{
                     continue;
                 };
-                let Ok(mut to_geoms) = resolve_desi_comp(to_refno, None, Some(mgr.as_ref()), scom_info_map, is_debug).await else{
+                let Ok(mut to_geoms) = resolve_desi_comp(to_refno, None, Some(mgr.as_ref()), scom_info_map).await else{
                     continue;
                 };
                 let to_world_trans = mgr.get_world_transform(to_refno).await?.unwrap_or_default();
@@ -1197,7 +1185,6 @@ impl AiosDBManager {
                             Some(lstube_cat_refno),
                             Some(mgr.as_ref()),
                             scom_info_map,
-                            is_debug,
                         )
                             .await
                             .unwrap_or_default();
@@ -1237,7 +1224,7 @@ impl AiosDBManager {
             // 保存最后一个元件
             if let Some(last_refno) = children.0.last() {
                 let last_attr = mgr.get_attr(*last_refno).await?;
-                let last_geoms = resolve_desi_comp(*last_refno, None, Some(mgr.as_ref()), scom_info_map, is_debug).await;
+                let last_geoms = resolve_desi_comp(*last_refno, None, Some(mgr.as_ref()), scom_info_map).await;
                 if let Ok(last_geoms) = last_geoms {
                     let last_world_trans = mgr
                         .get_world_transform(*last_refno)
@@ -1279,23 +1266,18 @@ impl AiosDBManager {
         let last_child = children.last().unwrap().clone();
         //第一遍完成后，然后生成tubing
         for refno in children {
-            if is_debug && refno != debug_refno.unwrap() {
+            let Ok(attr) = mgr.get_attr(refno).await else{
                 continue;
-            }
-            let attr = mgr.get_attr(refno).await;
-            if attr.is_err() {
-                continue;
-            }
-            let attr = attr.unwrap();
+            };
             println!(
                 "正在处理元件{}: {}",
                 attr.get_type(),
                 refno.to_refno_string()
             );
             let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
-            let mut geoms = resolve_desi_comp(refno, None, Some(mgr.as_ref()), scom_info_map, is_debug).await;
+            let mut geoms = resolve_desi_comp(refno, None, Some(mgr.as_ref()), scom_info_map).await;
             if geoms.is_err() {
-                error!("元件库解析错误: {:?}", geoms.err().unwrap());
+                error!("{:?}", geoms.err().unwrap());
                 continue;
             }
             let mut geoms = geoms.unwrap();
@@ -1342,7 +1324,6 @@ impl AiosDBManager {
                             Some(lstube_cat_refno),
                             Some(mgr.as_ref()),
                             scom_info_map,
-                            is_debug,
                         )
                             .await
                             .unwrap_or_default();
@@ -1503,9 +1484,9 @@ impl AiosDBManager {
         let batch_chunks_cnt = has_cata_cnt / batch_size + 1;
         let mut handles = vec![];
         let all_refnos = Arc::new(has_cata_refnos);
-        if is_debug {
-            dbg!(&all_refnos);
-        }
+        // if is_debug {
+        //     dbg!(&all_refnos);
+        // }
         let processed_cnt = Arc::new(Mutex::new(has_cata_cnt));
         let mut tubi_aqls = Arc::new(DashMap::new());
         let replace_mesh = db_option.replace_mesh;
@@ -1547,7 +1528,6 @@ impl AiosDBManager {
                             &current_att,
                             &brep_shapes_map,
                             &refno_ptset_map,
-                            target_debug_refno,
                             &mut tubi_aqls_clone,
                             &scom_info_map,
                         )
@@ -1560,7 +1540,6 @@ impl AiosDBManager {
                             &brep_shapes_map,
                             &refno_ptset_map,
                             &scom_info_map,
-                            target_debug_refno,
                         )
                             .await
                             .unwrap_or_default();
@@ -1621,7 +1600,7 @@ impl AiosDBManager {
                                 cached_mesh_mgr.gen_pdms_mesh(brep_shape.clone(), replace_mesh);
                             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
                             if bbox.is_none() {
-                                dbg!(refno.to_refno_string());
+                                // dbg!(refno.to_refno_string());
                                 // dbg!(&brep_shape);
                                 continue;
                             }
@@ -1709,7 +1688,7 @@ impl AiosDBManager {
             .into_iter()
             .map(|x| x.1)
             .collect::<Vec<_>>();
-        dbg!(&tubi_result.len());
+        // dbg!(&tubi_result.len());
         if !tubi_result.is_empty() {
             let conn = mgr.get_arangodb_conn().await.unwrap();
             let json = serde_json::to_value(tubi_result).unwrap_or_default();
@@ -1770,6 +1749,7 @@ impl AiosDBManager {
                 .await?;
         }
         let prim_cnt = prim_refnos.len();
+        dbg!(prim_cnt);
         if prim_cnt == 0 { return Ok(true); }
         let batch_chunks_cnt = prim_cnt / batch_size + 1;
         let mut handles = vec![];

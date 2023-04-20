@@ -47,7 +47,8 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>/*, mdb_dbnums: &BTreeSet<i3
     // }
     // in_sql.remove(in_sql.len() - 1);
     // in_sql.push_str(") ");
-    let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB");
+    // let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB in {}", in_sql);
+    let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE}");
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match results {
         Ok(vals) => {
