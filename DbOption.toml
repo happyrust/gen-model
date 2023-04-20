@@ -39,8 +39,8 @@ arangodb_password = ""
 #调试选项
 replace_mesh = true
 save_model_mesh_to_graph_db = true
-need_sync_refno_basic = false  #是否从新生成 refno_basic 缓存
-reset_mdb_project = false
+need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
+reset_mdb_project = false      #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
