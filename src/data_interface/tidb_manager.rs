@@ -845,10 +845,6 @@ impl AiosDBManager {
                 continue;
             };
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
-                if mdb_name == "/ALL" {
-                    dbg!(mdb_refno);
-                    dbg!(&dbs);
-                }
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
                     if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {
