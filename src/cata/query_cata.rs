@@ -12,6 +12,7 @@ use log::{error, info};
 use sled::pin;
 use smol_str::SmolStr;
 use std::collections::{BTreeMap, HashMap};
+use tokio::sync::RwLock;
 
 pub const DDHEIGHT_STR: &'static str = "DDHEIGHT";
 pub const DDRADIUS_STR: &'static str = "DDRADIUS";
@@ -22,7 +23,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     refno: RefU64,
     mut scom_ref: Option<RefU64>,
     interface: Option<&T>,
-    scom_info_map: &DashMap<RefU64, ScomInfo>,
+    scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
     is_debug: bool,
 ) -> anyhow::Result<GeomsInfo> {
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
@@ -56,10 +57,10 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         return Err(anyhow!("Scom ref is invalid".to_string()));
     }
     //缓存备用
-    if !scom_info_map.contains_key(&scom_ref) {
+    if !scom_info_map.read().await.contains_key(&scom_ref) {
         match query_scom_info(scom_ref, Some(interface), is_debug).await {
             Ok(scom_info) => {
-                scom_info_map.insert(scom_ref, scom_info);
+                // scom_info_map.insert(scom_ref, scom_info);
             }
             Err(e) => {
                 let error_info = format!("Design的元件：{} 使用的元件库: {} 解析出错 {}",
@@ -69,7 +70,9 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             }
         }
     }
-    let scom_info = scom_info_map.get(&scom_ref).unwrap();
+    let scom_read = scom_info_map.read().await;
+    let scom_info = scom_read.get(&scom_ref).unwrap();
+    // let scom_info = query_scom_info(scom_ref, Some(interface), is_debug).await?;
     if is_debug {
         // dbg!(&scom_info.value());
     }
@@ -93,7 +96,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     let radi = desi_att.get_as_string("RADI").unwrap_or("0.0".into());
     context.insert(DDRADIUS_STR.into(), SmolStr::new(radi.clone()));
     context.insert("RADI".into(), SmolStr::new(radi));
-    let geom_info = resolve_cata_comp(refno, scom_info.value(), Some(interface), Some(context), is_debug).await;
+    let geom_info = resolve_cata_comp(refno, &scom_info, Some(interface), Some(context), is_debug).await;
     if geom_info.is_err() {
         error!("{:?}", geom_info.as_ref().err());
         error!("{:?}", desi_att.to_string_hashmap());

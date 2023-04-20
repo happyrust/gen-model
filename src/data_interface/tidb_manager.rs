@@ -48,6 +48,7 @@ use aios_core::options::DbOption;
 use aios_core::pdms_data::ScomInfo;
 use log::{error, info};
 use nom::combinator::map;
+use tokio::sync::RwLock;
 
 use crate::api::attr::*;
 use crate::api::children::*;
@@ -913,7 +914,7 @@ impl AiosDBManager {
         design_refno: RefU64,
         brep_shape_map: &CateBrepShapeMap,
         refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
-        scom_info_map: &DashMap<RefU64, ScomInfo>,
+        scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
         debug_refno: Option<RefU64>,
     ) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
@@ -978,7 +979,8 @@ impl AiosDBManager {
         refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
         debug_refno: Option<RefU64>,
         tubi_aqls: &mut Arc<DashMap<u64, TubiEdgeAql>>,
-        scom_info_map: &DashMap<RefU64, ScomInfo>,
+        // scom_info_map: &DashMap<RefU64, ScomInfo>,
+        scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
     ) -> anyhow::Result<bool> {
         let is_debug = debug_refno.is_some();
         let group_transform = mgr
@@ -1507,7 +1509,7 @@ impl AiosDBManager {
         let processed_cnt = Arc::new(Mutex::new(has_cata_cnt));
         let mut tubi_aqls = Arc::new(DashMap::new());
         let replace_mesh = db_option.replace_mesh;
-        let scom_info_map: Arc<DashMap<RefU64, ScomInfo>> = Arc::new(DashMap::new());
+        let scom_info_map: Arc<RwLock<HashMap<RefU64, ScomInfo>>> = Arc::new(RwLock::new(HashMap::new()));
         for i in 0..batch_chunks_cnt as usize {
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
