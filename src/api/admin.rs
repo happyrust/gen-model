@@ -132,7 +132,7 @@ pub async fn get_pdms_tree_user(elements: Vec<PdmsElement>, aios_mgr: &AiosDBMan
             }
         } else { "".to_string() };
 
-        data.push(PdmsElementWithUser::from_pdms_element(element, user));
+        data.push(PdmsElementWithUser::from_pdms_element(element, &user));
     }
     data
 }
