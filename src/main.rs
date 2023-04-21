@@ -3,6 +3,7 @@
 #![feature(default_free_fn)]
 // 暂时屏蔽warnings
 #![allow(warnings)]
+#![recursion_limit = "256"]
 
 #[macro_use]
 extern crate clap;
@@ -75,6 +76,7 @@ use bevy::prelude::system_adapter::new;
 use tokio::spawn;
 use env_logger::{fmt::Target, Builder};
 use log::{error, LevelFilter};
+
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

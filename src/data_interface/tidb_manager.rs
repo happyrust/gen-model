@@ -872,8 +872,6 @@ impl AiosDBManager {
         let project_mdb_map = self.query_mdb_quickinfo_map(project_pool, info_pool).await?;
         if !project_mdb_map.is_empty() {
             let sql = gen_insert_project_mdb_sql(&project_mdb_map);
-            // let json_sql = gen_insert_project_mdb_json_sql(&project_mdb_map);
-            // info!("{:?}", &json_sql);
             let mut conn = project_pool.acquire().await?;
             let result = conn.execute(sql.as_str()).await;
             match result {
@@ -883,14 +881,6 @@ impl AiosDBManager {
                     dbg!(sql.as_str());
                 }
             }
-            // let json_result = conn.execute(json_sql.as_str()).await;
-            // match json_result {
-            //     Ok(_) => {}
-            //     Err(e) => {
-            //         dbg!(&e);
-            //         dbg!(json_sql.as_str());
-            //     }
-            // }
         }
         Ok(())
     }
