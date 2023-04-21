@@ -25,5 +25,6 @@ pub const CHANNEL_STEEL_STANDARD: &'static str = "CHANNEL_STEEL_STANDARD";
 // project_mdb
 // 专业表单
 pub const PROFESSION_TX_XT: &'static str = "TX_XT";
-
+pub const TEAM_DATA_TABLE: &'static str = "TEAM_DATA";
 pub const UNSET_NOUN: u32 = 28933118;
+pub const AQL_LOCK_REFNOS_COLLECTION: &'static str = "lock_refnos";
