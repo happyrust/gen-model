@@ -3,18 +3,22 @@ use std::env;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::db_number::DbNumMgr;
-use aios_core::pdms_types::{NounHash, RefU64, RefU64Vec};
+use aios_core::pdms_types::{AttrVal, NounHash, RefU64, RefU64Vec};
 use anyhow::anyhow;
 use arangors_lite::Database;
 use crate::consts::*;
 use dashmap::DashMap;
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
+use crate::api::attr::query_explicit_attr;
 use crate::api::element::query_types_refnos;
 use crate::aql_api::plin_attr::query_plin_attrs;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::helper::qualified_table_name;
 use crate::defines::CACHED_REFNO_BASIC_MAP;
+
+
+const WDJZ: i32 = 642952044;
 
 ///更新获得ref0->projects 缓存
 pub async fn get_ref0_projects(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Vec<String>>> {
@@ -87,6 +91,17 @@ pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: Option<Vec<i32>>, databa
     }
     let result = query_plin_attrs(fitt_map, database).await.unwrap_or_default();
     Ok(result)
+}
+
+/// 获取设备的底标高
+pub async fn query_refno_height_position(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<f32> {
+    let explicit_attr = query_explicit_attr(refno, pool).await?;
+    let position = explicit_attr.get(&NounHash(WDJZ as u32));
+    if let Some(AttrVal::StringType(position)) = position {
+        Ok(position.parse::<f32>().unwrap_or(0.0))
+    } else {
+        Ok(0.0)
+    }
 }
 
 fn gen_query_refnos_implicit_string_attr(table_name: &str, value: Vec<&str>, refnos: RefU64Vec) -> String {

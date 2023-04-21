@@ -4,23 +4,28 @@ use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, Data
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use arangors_lite::Database;
-use crate::aql_api::children::query_travel_children_with_type_aql;
+use sqlx::{MySql, Pool};
+use crate::api::refno_info::query_refno_height_position;
+use crate::api::room_code::query_room_code;
+use crate::aql_api::children::{query_refnos_travel_children_with_type_aql};
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 
 /// 获得机械设备的数据
-pub async fn get_machine_equi_data(refno: RefU64,database:&Database) -> Vec<DataCenterInstance> {
+pub async fn get_machine_equi_data(refnos: Vec<RefU64>,pool:&Pool<MySql>,database:&Database) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
-    if let Ok(children) = query_travel_children_with_type_aql(database,refno,"EQUI").await {
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(database,refnos,vec!["EQUI"]).await {
         for child in children {
             let name = if child.name.starts_with("/") { child.name[1..].to_string() } else { child.name };
             let mut attr = Vec::new();
+            let room_name = query_room_code(child.refno,pool).await?.unwrap_or("".to_string());
+            let position = query_refno_height_position(child.refno,pool).await?;
             attr.push(DataCenterAttr {
-                attribute_model_code: "COMP".to_string(),
-                value: AttrValue::AttrString("Test".to_string()).into(),
+                attribute_model_code: "COMP8".to_string(),
+                value: AttrValue::AttrString(room_name).into(),
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "COMPB3".to_string(),
-                value: AttrValue::AttrFloat(0.0).into(),
+                value: AttrValue::AttrFloat(position).into(),
             });
             result.push(DataCenterInstance {
                 object_model_code: "COMPB".to_string(),
@@ -31,7 +36,13 @@ pub async fn get_machine_equi_data(refno: RefU64,database:&Database) -> Vec<Data
             });
         }
     }
-    result
+    let project = DataCenterProject {
+        package_code: DataCenterProject::convert_package_code(),
+        project_code: "1516".to_string(),
+        owner: "KY1801".to_string(),
+        instances: result,
+    };
+    Ok(project)
 }
 
 #[tokio::test]

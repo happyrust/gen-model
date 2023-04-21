@@ -283,13 +283,13 @@ pub async fn query_travel_children_with_type_aql(arango_database: &Database, ref
     Ok(r)
 }
 
-pub async fn query_refnos_travel_children_with_type_aql(arango_database: &Database, refnos: Vec<RefU64>, att_type: &str) -> anyhow::Result<Vec<EleTreeNode>> {
+pub async fn query_refnos_travel_children_with_type_aql(arango_database: &Database, refnos: Vec<RefU64>, att_type: Vec<&str>) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = refnos.into_iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("\
     let eles = ( for refno in @id
     FOR z in 0..100 INBOUND refno pdms_edges
-        Filter z.noun == @noun
+        filter POSITION(@noun,z.noun)
         return {
             'refno':z._key,
             'owner':z.owner,
