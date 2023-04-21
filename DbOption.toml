@@ -1,6 +1,9 @@
 #同步文件配置
 total_sync = false
+sync_graph_db = false
+sync_tidb = false
 incr_sync = false
+replace_dbs = false
 
 #项目设置
 project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
@@ -36,19 +39,18 @@ arangodb_password = ""
 #调试选项
 replace_mesh = true
 save_model_mesh_to_graph_db = true
-need_sync_refno_basic = true  #是否重新生成 refno_basic 缓存
+need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
 reset_mdb_project = false      #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
-replace_dbs = false
-debug_root_refnos = []
 #debug_root_refnos = []
+debug_root_refnos = ["17496/8516"]
 #debug_branch_refno = "24383/100842"
-debug_desi_refno = "24383/100858"
-debug_refno_types = ["CATA"]  # "CATA", "LOOP", "PRIM"
-#debug_refno_types = ["CATA", "LOOP", "PRIM"]
-debug_db_num = 7999
-#included_db_files = ["ams7329_0001"]
+#debug_desi_refno = "24383/100858"
+#debug_refno_types = ["CATA"]  # "CATA", "LOOP", "PRIM"
+debug_refno_types = ["CATA", "LOOP", "PRIM"]
+debug_db_num = 7997
+#included_db_files = ["ams7997_0001"]
 #replace_types = ["SDTE"]
 #manual_db_nums = [7997]

@@ -57,7 +57,8 @@ glam = { version = "0.23.0" }
 #simple-process-stats = "1.0.0"
 
 #造型功能，先在database测试
-opencascade = { path = "../dslcad/crates/opencascade" }
+#opencascade = { path = "../dslcad/crates/opencascade", optional = true }
+
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }

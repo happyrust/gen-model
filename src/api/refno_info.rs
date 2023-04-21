@@ -74,7 +74,7 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>/*, mdb_dbnums: &BTreeSet<i3
     Ok(true)
 }
 
-pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: Option<Vec<i32>>, database: &Database) -> anyhow::Result<DashMap<RefU64, String>> {
+pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: Option<&[i32]>, arango_db: &Database) -> anyhow::Result<DashMap<RefU64, String>> {
     let mut fitt_map = vec![];
     let fitt_refnos = query_types_refnos(&vec!["FITT"], pool, dbnos).await?;
     if fitt_refnos.len() == 0 { return Ok(DashMap::new()); }
@@ -85,7 +85,7 @@ pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: Option<Vec<i32>>, databa
         let pos_line = result.get::<String, _>("POSL");
         fitt_map.push((refno, pos_line));
     }
-    let result = query_plin_attrs(fitt_map, database).await.unwrap_or_default();
+    let result = query_plin_attrs(fitt_map, arango_db).await.unwrap_or_default();
     Ok(result)
 }
 
