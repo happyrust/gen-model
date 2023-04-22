@@ -966,11 +966,6 @@ impl AiosDBManager {
                     let geo_hash = mgr
                         .cached_mesh_mgr
                         .gen_pdms_mesh(cate_shape.brep_shape.clone(), false);
-                    let mut bbox = mgr.cached_mesh_mgr.get_bbox(&geo_hash);
-                    if let Some(mut aabb) = bbox {
-                        let rot = cate_shape.transform.rotation;
-                        let translation = cate_shape.transform.translation;
-                    }
                     brep_shape_map
                         .entry(design_refno)
                         .or_insert(Vec::new())
@@ -1479,7 +1474,9 @@ impl AiosDBManager {
                             .for_each(|child| {
                                 has_cata_refnos.push(child.refno);
                             });
+                        if has_cata_refnos.is_empty() { has_cata_refnos.push(root_refno); }
                     }
+
                 }
                 is_debug = true;
             }

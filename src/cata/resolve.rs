@@ -22,6 +22,8 @@ use crate::cata::resolve_helper::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
+
+
 /// 求解axis的数值, 得到 {num:  }
 pub fn resolve_axis_params<T: PdmsDataInterface>(
     scom: &ScomInfo,

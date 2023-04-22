@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use crate::cata::resolve::{resolve_axis_params, resolve_gms};
 use crate::data_interface::interface::PdmsDataInterface;
 // use crate::defines::CACHED_SCOM_INFO_MAP;
@@ -17,6 +18,9 @@ use tokio::sync::RwLock;
 pub const DDHEIGHT_STR: &'static str = "DDHEIGHT";
 pub const DDRADIUS_STR: &'static str = "DDRADIUS";
 pub const DDANGLE_STR: &'static str = "DDANGLE";
+
+//当前解析的desi refno, 如果多线程可能就有问题
+// pub static RESOLVE_DESI_REFNO: OnceCell<RwLock<RefU64>> = OnceCell::new();
 
 ///求解design component
 pub async fn resolve_desi_comp<T: PdmsDataInterface>(
@@ -230,6 +234,9 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         .or_insert("0.0".into());
     //获取DTSE的expression
     process_dtse_params(&scom_info.attr_map, interface, &mut cur_context).await;
+
+    cur_context.insert("RS_DES_REFNO".into(), des_refno.to_refno_str());
+    cur_context.insert("RS_SCOM_REFNO".into(), scom_info.attr_map.get_refno().unwrap().to_refno_str());
 
     //保温层厚度
     cur_context.insert("IPARA0".into(), "0".into());

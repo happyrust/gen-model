@@ -19,6 +19,7 @@ use crate::cata::direction_parse::parse_expr_to_dir;
 use crate::cata::polish_notation::Stack;
 use crate::cata::resolve::resolve_axis_param;
 use crate::data_interface::interface::PdmsDataInterface;
+use crate::aql_api::children::query_pre_or_next_node;
 
 #[test]
 fn test_exp() {
@@ -95,7 +96,10 @@ pub fn eval_str_to_f32<T: PdmsDataInterface>(input_expr: impl AsRef<str>, contex
 //  MIN  00 00 03 F1
 
 
-pub const INTERNAL_PDMS_EXPRESS: [&'static str; 7] = ["MAX", "MIN", "COS", "SIN", "ATAN", "ATAN2", "ASIN"];
+pub const INTERNAL_PDMS_EXPRESS: [&'static str; 20] = [
+    "MAX", "MIN", "COS", "SIN", "LOG", "ABS", "POW", "SQR", "NOT", "AND", "OR",
+    "ATAN", "ACOS", "ATAN2", "ASIN", "INT", "OF", "MOD", "MINT", "NEGATE",
+];
 
 ///评估表达式的值
 pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
@@ -111,6 +115,7 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     //处理引用的情况 OF 的情况, 如果需要获取 att value，还是需要用数据库去获取值
     let mut new_exp = input_expr.replace("ATTRIB", "");
     if input_expr.contains(" OF ") {
+        // dbg!(&input_expr);
         let re = Regex::new(r"([A-Z\s]+) OF (PREV|NEXT|\d+/\d+)").unwrap();
         let interface = Arc::new(interface.ok_or(anyhow!("unknown interface"))?);
         for caps in re.captures_iter(&input_expr) {
@@ -121,20 +126,30 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                 match c2 {
                     // "PREV" => interface.get_prev_att()
                     // "NEXT" => interface.get_next_att()
-                    refno => Runtime::new().unwrap().block_on(
-                        interface.get_attr(RefU64::from_refno_str(refno).unwrap())
+                    "PREV" | "NEXT" => {
+                        let refno_str = context.get("RS_DES_REFNO").unwrap().as_str();
+                        let refno = RefU64::from_refno_str(refno_str);
+                        let att = futures::executor::block_on(
+                            interface.get_attr(RefU64::from_refno_str(refno_str).unwrap())
+                        ).unwrap_or_default();
+                        att
+                        // query_pre_or_next_node()
+                    }
+                    //
+                    refno_str => futures::executor::block_on(
+                        interface.get_attr(RefU64::from_refno_str(refno_str).unwrap())
                     ).unwrap_or_default()
                 };
             // dbg!(&ref_att);
             //是不是需要求解的属性, 比如 LBORE
-           let value =  match c1 {
-               // "LBORE" => {
-               //     //PRE
-               //     //判断 cat_ref 是否是同一个
-               //     // let cat_ref =
-               // }
+            let value = match c1 {
+                // "LBORE" => {
+                //     //PRE
+                //     //判断 cat_ref 是否是同一个
+                //     // let cat_ref =
+                // }
                 _ => {
-                    ref_att.get_as_string(c1).unwrap_or_default()
+                    ref_att.get_as_string(c1).unwrap_or("DESP[1]".to_string())
                 }
             };
             new_exp = new_exp.replace(s, &value);
@@ -153,7 +168,7 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             let key: SmolStr = format!("{}_{}", &caps[1], &caps[2]).into();
             let default_key: SmolStr = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
             // dbg!(&key);
-            
+
             context.get(&key).map(|x| x.to_string()).unwrap_or(
                 context.get(&default_key).map(|x| x.to_string()).unwrap_or("0".to_string())
             )
@@ -174,15 +189,15 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             let c3 = caps.get(3).map_or("", |m| m.as_str());
             // println!("{} {}", c1, c3);
             // 小数向下取整
-            let k: SmolStr = format!("{}{}", c1, c3.parse::<f32>().map(|x| x.floor().to_string()).unwrap_or_default() ).into();
+            let k: SmolStr = format!("{}{}", c1, c3.parse::<f32>().map(|x| x.floor().to_string()).unwrap_or_default()).into();
             // dbg!(&k);
             if context.contains_key(&k) {
                 result_exp = result_exp.replace(s, &context[&k]);
                 found_replaced = true;
-                // dbg!(&result_exp);
             } else if c1 == "DESI" || c1 == "DESP" {
                 result_exp = result_exp.replace(s, "0.0");
             }
+            // dbg!(&result_exp);
         }
         //如果有RPRO 需要执行两次处理
         result_exp = result_exp.replace("ATTRIB", "");
@@ -190,11 +205,12 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             result_exp = rpro_re.replace_all(&result_exp, |caps: &Captures| {
                 let key: SmolStr = format!("{}_{}", &caps[1], &caps[2]).into();
                 let default_key: SmolStr = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
-                
+
                 context.get(&key).map(|x| x.to_string()).unwrap_or(
                     context.get(&default_key).map(|x| x.to_string()).unwrap_or("0".to_string())
                 )
             }).trim().to_string();
+            found_replaced = true;
             // dbg!(&result_exp);
         }
         new_exp = result_exp.clone();
@@ -321,8 +337,8 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             return if let Ok(mut stack) = Stack::init(&result_string) {
                 stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", &input_expr)))
             } else {
-                println!("输入表达式 : {}",&input_expr);
-                println!("计算后表达式 : {}",&result_string);
+                println!("输入表达式 : {}", &input_expr);
+                println!("计算后表达式 : {}", &result_string);
                 Err(anyhow!(format!("求解失败 {}", &input_expr)))
             };
         }
@@ -618,9 +634,9 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
 }
 
 pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
-                           scom: &ScomInfo,
-                           context: &BTreeMap<SmolStr, SmolStr>,
-                           interface: Option<&T>) -> anyhow::Result<(Vec3, Vec3)> {
+                                                 scom: &ScomInfo,
+                                                 context: &BTreeMap<SmolStr, SmolStr>,
+                                                 interface: Option<&T>) -> anyhow::Result<(Vec3, Vec3)> {
     let mut dir_str = axis.direction.trim();
     let mut dir = Vec3::ZERO;
     let mut pos = Vec3::ZERO;
