@@ -2,8 +2,11 @@ use std::collections::HashMap;
 use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
 use arangors_lite::{AqlQuery, Connection, Database};
 use serde::{Serialize, Deserialize};
+use sqlx::{MySql, Pool};
+use crate::api::attr::query_full_attr;
 use crate::aql_api::*;
 use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::data_interface::tidb_manager::AiosDBManager;
 
 pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let mut r = vec![];
@@ -367,4 +370,28 @@ pub async fn query_sibl_level_refnos(refno: RefU64, database: &Database) -> anyh
     let mut out_refnos = convert_refno_vec_from_vec_string(result);
     out_refnos.push(refno);
     Ok([out_refnos, in_refnos].concat())
+}
+
+/// 返回该参考号的上一个或者下一个节点的attr，b_pre: true 上一个 , false 下一个
+pub async fn query_pre_or_next_node(refno: RefU64, b_pre: bool, database: &Database, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<AttrMap>> {
+    let key = format!("pdms_eles/{}", refno.to_url_refno());
+    let aql = if b_pre {
+        AqlQuery::new("\
+        for v in 1 outbound @key sibl_edges
+            return v._key
+    ").bind_var("key", key)
+    } else {
+        AqlQuery::new("\
+        for v in 1 inbound @key sibl_edges
+            return v._key
+    ").bind_var("key", key)
+    };
+    let aql_result = database.aql_query::<String>(aql).await;
+    // 如果为该层第一个或者最后一个 则返回 None
+    if aql_result.is_err() { return Ok(None); }
+    let aql_result = aql_result.unwrap();
+    let aql_result = convert_refno_vec_from_vec_string(aql_result);
+    if aql_result.is_empty() { return Ok(None); }
+    let attr = query_full_attr(aql_result[0], aios_mgr, None).await?;
+    Ok(Some(attr))
 }
