@@ -6,6 +6,8 @@
 // 暂时屏蔽warnings
 #![allow(warnings)]
 
+#![recursion_limit = "256"]
+
 use std::any::TypeId;
 use std::collections::BTreeSet;
 use std::ops::Deref;

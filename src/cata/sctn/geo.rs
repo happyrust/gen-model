@@ -168,7 +168,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                             height: 0.0,
                             path,
                         };
-                        let transform = loft.get_trans();
+                        let transform = loft.get_trans() * transform;
                         brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
                             refno,
                             brep_shape: Box::new(loft),

@@ -526,6 +526,7 @@ pub async fn sync_total_async_threaded(
 
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
+    //是否替换tidb的数据
     let mut is_replace = db_option.replace_dbs;
     let replace_types = db_option.replace_types.clone();
     let b_replace_types = replace_types.is_some();
@@ -628,7 +629,7 @@ pub async fn sync_total_async_threaded(
                 let children_map_arc = Arc::new(children_map);
                 let mut type_handles = vec![];
                 // 将部分数据保存到图数据库
-                if !b_replace_types && !only_update_dbinfo {
+                if db_option.sync_graph_db.unwrap_or(true) {
                     if db_type == "CATA" || db_type == "DESI" {
                         // 将 pdms_element 部分数据保存到图数据库中
                         save_pdms_element_in_sync(
@@ -652,6 +653,11 @@ pub async fn sync_total_async_threaded(
                             .await?;
                     }
                     println!("图数据库保存完成");
+                }
+
+                //如果不需要同步tidb，continue
+                if !db_option.sync_tidb.unwrap_or(true) {
+                    continue;
                 }
 
                 for (type_hash, type_refnos) in type_ele_map {

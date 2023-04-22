@@ -16,7 +16,7 @@ use serde::{Serialize, Deserialize};
 use sqlx::mysql::MySqlRow;
 use crate::aql_api::children::query_owner_with_type_aql;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::defines::{AiosString, CACHED_MDB_SITE_MAP};
+use crate::defines::{RString, CACHED_MDB_SITE_MAP};
 use crate::helper::qualified_table_name;
 
 /// 遍历该节点下的 children (包含自己)
@@ -289,11 +289,8 @@ pub async fn query_owner_till_type(mut refno: RefU64, types: Vec<String>, pool: 
 /// 将树节点的 site 提前保存下来
 pub async fn cache_mdb_site_map(mdb: &str, module: &str, pool: &Pool<MySql>) {
     if let Ok(world) = query_world(mdb, module, pool).await {
-        dbg!(&world.refno);
         if !CACHED_MDB_SITE_MAP.contains_key(&world.refno) {
-            dbg!("not contains");
             if let Ok(mut children) = query_world_children_eles(mdb, module, pool).await {
-                dbg!(&children.len());
                 for mut child in &mut children {
                     child.owner = world.refno;
                 }

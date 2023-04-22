@@ -11,8 +11,8 @@ use calamine::{Error, open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::DashMap;
 use glam::{Vec2, Vec3};
 use nom::Parser;
-use geo::Area;
-use geo::LineString;
+// use geo::Area;
+// use geo::LineString;
 use parse_pdms_db::parse_explict_tools::times_keep_f32_two_decimal_place;
 // use sea_orm::sea_query::IndexType::Hash;
 use sqlx::{MySql, Pool, Row};
@@ -235,7 +235,7 @@ async fn get_pfit_data(stru_children: &Vec<PdmsElement>, database: &Database) ->
 /// 获取 pane 的数据
 async fn get_pane_data(stru_children: &Vec<PdmsElement>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<Vec<HangerPaneData>> {
     let mut result = vec![];
-    let mut pane_map = HashMap::new();
+    // let mut pane_map = HashMap::new();
     for stru_child in stru_children {
         if stru_child.noun != "PANE" { continue; }
         let refno = RefU64::from_refno_str(&stru_child.refno);
@@ -277,28 +277,29 @@ async fn get_pane_data(stru_children: &Vec<PdmsElement>, database: &Database, po
             }
         }
         // 计算 pane 面积
-        dbg!(&pave_positions);
-        let polygon = geo::geometry::Polygon::new(
-            LineString::from(pave_positions),
-            vec![],
-        );
-        let area = polygon.unsigned_area();
-        // 计算体积
-        let volume = area * heig;
-        // 计算单重  单重 (kg) = 体积 * 7850kg/m³
-        let unit_weight = (volume * 0.00000785 * 100.0) as u32; // * 100 变为 u64 进行 hash 然后 再 /100
-        let count = pane_map.entry((func_name, unit_weight)).or_insert(0);
-        *count += 1;
+        // todo 注意改回去
+        // dbg!(&pave_positions);
+        // let polygon = geo::geometry::Polygon::new(
+        //     LineString::from(pave_positions),
+        //     vec![],
+        // );
+        // let area = polygon.unsigned_area();
+        // // 计算体积
+        // let volume = area * heig;
+        // // 计算单重  单重 (kg) = 体积 * 7850kg/m³
+        // let unit_weight = (volume * 0.00000785 * 100.0) as u32; // * 100 变为 u64 进行 hash 然后 再 /100
+        // let count = pane_map.entry((func_name, unit_weight)).or_insert(0);
+        // *count += 1;
     }
-    for ((func_name, unit_weight), count) in pane_map {
-        let unit_weight = (unit_weight as f32 / 100.0 * 10.0).trunc() / 10.0; // 保留 1位 小数 ，
-        result.push(HangerPaneData {
-            func_name,
-            count,
-            unit_weight,
-            total_weight: unit_weight * (count as f32),
-        })
-    }
+    // for ((func_name, unit_weight), count) in pane_map {
+    //     let unit_weight = (unit_weight as f32 / 100.0 * 10.0).trunc() / 10.0; // 保留 1位 小数 ，
+    //     result.push(HangerPaneData {
+    //         func_name,
+    //         count,
+    //         unit_weight,
+    //         total_weight: unit_weight * (count as f32),
+    //     })
+    // }
     Ok(result)
 }
 
