@@ -844,7 +844,7 @@ pub async fn sync_total_async_threaded(
     }
     // 保存 uda_map
     if uda_map.len() > 0 {
-        let mut uda_sql = format!("INSERT IGNORE INTO {PDMS_UDA_TABLE} (TYPE,DATA) VALUES");
+        let mut uda_sql = format!("INSERT IGNORE INTO {PDMS_UDA_ATT_TABLE} (TYPE,DATA) VALUES");
         for (noun, value) in uda_map.into_iter() {
             let data = value.into_compress_bytes();
             uda_sql.push_str(&format!("('{}',0x{}),", noun, hex::encode(data)))

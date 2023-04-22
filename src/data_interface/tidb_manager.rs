@@ -14,7 +14,7 @@ use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdgeAql};
 use aios_core::prim_geo::wire::CurveType;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
-use aios_core::tool::db_tool::db1_hash;
+use aios_core::tool::db_tool::{db1_hash, GLOBAL_UDA_NAME_MAP};
 use aios_core::tool::math_tool;
 use anyhow::anyhow;
 use approx::{abs_diff_eq, abs_diff_ne};
@@ -596,6 +596,8 @@ impl AiosDBManager {
     pub async fn init_form_config() -> anyhow::Result<Self> {
         let db_option = Self::get_db_option()?;
         let mut mgr = Self::init(&db_option).await?;
+        dbg!("正在初始化uda");
+        mgr.init_uda_map();
         mgr.init_mdb(
             &db_option.project_name,
             &db_option.mdb_name,
@@ -775,6 +777,22 @@ impl AiosDBManager {
             cache_module_numbdbs: Default::default(),
             mdb_dbnums: Default::default(),
         })
+    }
+
+    /// 初始化 uda_map
+    pub async fn init_uda_map(&self) -> anyhow::Result<()> {
+        for pool in &self.project_map {
+            let uda_map = query_uda_ukey_udna_all(pool.value()).await.unwrap();
+                dbg!(&uda_map);
+                for (ukey, udna) in uda_map {
+                    if ukey == 754101971 {
+                        dbg!(&udna);
+                    }
+                    GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna);
+                // }
+            }
+        }
+        Ok(())
     }
 
     /// 根据project获取连接池
