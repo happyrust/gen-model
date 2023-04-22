@@ -289,11 +289,8 @@ pub async fn query_owner_till_type(mut refno: RefU64, types: Vec<String>, pool: 
 /// 将树节点的 site 提前保存下来
 pub async fn cache_mdb_site_map(mdb: &str, module: &str, pool: &Pool<MySql>) {
     if let Ok(world) = query_world(mdb, module, pool).await {
-        dbg!(&world.refno);
         if !CACHED_MDB_SITE_MAP.contains_key(&world.refno) {
-            dbg!("not contains");
             if let Ok(mut children) = query_world_children_eles(mdb, module, pool).await {
-                dbg!(&children.len());
                 for mut child in &mut children {
                     child.owner = world.refno;
                 }

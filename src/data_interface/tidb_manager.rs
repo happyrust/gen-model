@@ -46,6 +46,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use aios_core::options::DbOption;
 use aios_core::pdms_data::ScomInfo;
+use aios_core::prim_geo;
 use log::{error, info};
 use nom::combinator::map;
 use tokio::sync::RwLock;
@@ -678,8 +679,8 @@ impl AiosDBManager {
         let need_sync_refno_basic = self.db_option.need_sync_refno_basic;
         if need_sync_refno_basic {
             for project in &self.db_option.included_projects {
-                if let Some(kv) = self.project_map.get(project){
-                    sync_refno_basic_map(kv.value(),/* &self.mdb_dbnums*/).await.unwrap();
+                if let Some(kv) = self.project_map.get(project) {
+                    sync_refno_basic_map(kv.value() /* &self.mdb_dbnums*/).await.unwrap();
                 }
             }
         }
@@ -696,13 +697,13 @@ impl AiosDBManager {
         self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
         if need_sync_refno_basic {
             for project in &self.db_option.included_projects {
-                if let Some(kv) = self.project_map.get(project){
+                if let Some(kv) = self.project_map.get(project) {
                     let dbnums = self.mdb_dbnums.iter().cloned().collect::<Vec<_>>();
                     if let Ok(m) = cache_plin_plax(
                         kv.value(),
                         Some(&dbnums),
                         &self.arango_database,
-                    ).await{
+                    ).await {
                         for (k, v) in m {
                             CACHED_PLIN_MAP.insert(k, &v.into());
                         }
@@ -1060,7 +1061,7 @@ impl AiosDBManager {
                         .entry(branch_refno)
                         .or_insert(Vec::new())
                         .push(shape);
-                }else{
+                } else {
                     error!("{} 的直段方向有问题", branch_refno.to_refno_string());
                 }
             }
@@ -1137,10 +1138,10 @@ impl AiosDBManager {
                 edge._to = format!("{AQL_PDMS_ELES_COLLECTION}/{}", to_refno.to_url_refno());
                 edge.bran_name = bran_name.to_string();
 
-                let Ok(attr) = mgr.get_attr(refno).await else{
+                let Ok(attr) = mgr.get_attr(refno).await else {
                     continue;
                 };
-                let Ok(to_attr) = mgr.get_attr(to_refno).await else{
+                let Ok(to_attr) = mgr.get_attr(to_refno).await else {
                     continue;
                 };
                 let att_type = to_attr.get_type();
@@ -1153,10 +1154,10 @@ impl AiosDBManager {
 
                 let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
 
-                let Ok(mut geoms) = resolve_desi_comp(refno, None, Some(mgr.as_ref()), scom_info_map).await else{
+                let Ok(mut geoms) = resolve_desi_comp(refno, None, Some(mgr.as_ref()), scom_info_map).await else {
                     continue;
                 };
-                let Ok(mut to_geoms) = resolve_desi_comp(to_refno, None, Some(mgr.as_ref()), scom_info_map).await else{
+                let Ok(mut to_geoms) = resolve_desi_comp(to_refno, None, Some(mgr.as_ref()), scom_info_map).await else {
                     continue;
                 };
                 let to_world_trans = mgr.get_world_transform(to_refno).await?.unwrap_or_default();
@@ -1264,7 +1265,7 @@ impl AiosDBManager {
         let last_child = children.last().unwrap().clone();
         //第一遍完成后，然后生成tubing
         for refno in children {
-            let Ok(attr) = mgr.get_attr(refno).await else{
+            let Ok(attr) = mgr.get_attr(refno).await else {
                 continue;
             };
             println!(
@@ -1305,7 +1306,7 @@ impl AiosDBManager {
                                     .entry(refno)
                                     .or_insert(Vec::new())
                                     .push(brep_shape);
-                            }else{
+                            } else {
                                 error!("{} 的直段方向有问题", refno.to_refno_string());
                             }
                         }
@@ -1391,7 +1392,7 @@ impl AiosDBManager {
                                 .entry(refno)
                                 .or_insert(Vec::new())
                                 .push(shape);
-                        }else{
+                        } else {
                             error!("{} 的直段方向有问题", refno.to_refno_string());
                         }
                     }
@@ -2074,9 +2075,8 @@ impl AiosDBManager {
                                 }
                             }
                         }
-                        // dbg!(&loop_verts);
-                        // dbg!(&fradius_vec);
                     }
+                    if loop_verts.is_empty() { continue; }
                     let mut parent_att = AttrMap::default();
                     let mut geo_hash = None;
                     let mut item_trans = Transform::default();
@@ -2112,31 +2112,56 @@ impl AiosDBManager {
                                 .get_f32("HEIG")
                                 .unwrap_or(parent_att.get_f32("HEIG").unwrap_or_default());
                             let i: usize = 0;
-                            let extrusion = Box::new(Extrusion {
-                                verts: loop_verts,
-                                height,
-                                fradius_vec,
-                                ..Default::default()
-                            });
-                            if extrusion.check_valid() {
-                                item_trans = extrusion.get_trans();
-                                geo_param = extrusion
-                                    .convert_to_geo_param()
-                                    .unwrap_or(PdmsGeoParam::Unknown);
-                                if let Some(sjus) = attr.get_str("SJUS") {
-                                    let off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                                        -height
-                                    } else if sjus == "UCEN" || sjus == "DCEN" {
-                                        -height / 2.0
-                                    } else {
-                                        0.0
-                                    };
-                                    item_trans.translation =
-                                        item_trans.translation + Vec3::new(0.0, 0.0, off_z);
+                            //fix 1516 的情况  =24381/36952，当为DBOT的时候，会变成DISH
+                            let sjus = attr.get_str("SJUS").unwrap_or_default();
+                            {
+                                //check if all the fradius are the same
+                                let r = fradius_vec[0];
+                                let all_same = fradius_vec.iter().all(|x| *x == r);
+                                let is_dbot = sjus;
+                                if all_same && sjus == "DBOT" {
+                                    let dish = Box::new(prim_geo::dish::Dish {
+                                        pdis: 0.0,
+                                        pheig: r,
+                                        pdia: r * 2.0,
+                                        ..Default::default()
+                                    });
+                                    // dbg!(&dish);
+                                    geo_param = dish
+                                        .convert_to_geo_param()
+                                        .unwrap_or(PdmsGeoParam::Unknown);
+                                    item_trans = dish.get_trans();
+                                    let r = cached_mesh_mgr.gen_pdms_mesh(dish, replace_mesh);
+                                    geo_hash = Some(r);
+                                } else {
+                                    let extrusion = Box::new(Extrusion {
+                                        verts: loop_verts,
+                                        height,
+                                        fradius_vec,
+                                        ..Default::default()
+                                    });
+                                    geo_param = extrusion
+                                        .convert_to_geo_param()
+                                        .unwrap_or(PdmsGeoParam::Unknown);
+                                    item_trans = extrusion.get_trans();
+                                    let r = cached_mesh_mgr.gen_pdms_mesh(extrusion, replace_mesh);
+                                    geo_hash = Some(r);
                                 }
-                                let r = cached_mesh_mgr.gen_pdms_mesh(extrusion, replace_mesh);
-                                geo_hash = Some(r);
-                            }
+                            };
+
+                            // if extrusion.check_valid() {
+                            // item_trans = extrusion.get_trans();
+                            let off_z = if sjus == "UTOP" || sjus == "DTOP" {
+                                -height
+                            } else if sjus == "UCEN" || sjus == "DCEN" {
+                                -height / 2.0
+                            } else {
+                                0.0
+                            };
+                            item_trans.translation =
+                                item_trans.translation + Vec3::new(0.0, 0.0, off_z);
+
+                            // }
                         }
                         _ => {}
                     }
@@ -2158,8 +2183,7 @@ impl AiosDBManager {
                                     tr.translation.x,
                                     tr.translation.y,
                                     tr.translation.z,
-                                )
-                                    .into(),
+                                ).into(),
                             });
                             let geom_inst = EleGeoInstance {
                                 geo_hash,
@@ -2184,8 +2208,7 @@ impl AiosDBManager {
                                         trans_origin.translation.x,
                                         trans_origin.translation.y,
                                         trans_origin.translation.z,
-                                    )
-                                        .into(),
+                                    ).into(),
                                 }),
                             );
                         } else {
