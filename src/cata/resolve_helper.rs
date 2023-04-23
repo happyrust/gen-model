@@ -74,7 +74,7 @@ fn test_expression_regex() {
 
 pub fn eval_str_to_f32<T: PdmsDataInterface>(input_expr: impl AsRef<str>, context: &BTreeMap<SmolStr, SmolStr>, interface: Option<&T>) -> anyhow::Result<f32> {
     let input_expr = input_expr.as_ref().trim().to_uppercase();
-    intern_eval_str_to_f64(&input_expr, context, interface).map(|x| x as f32)
+    eval_str_to_f64(&input_expr, context, interface).map(|x| x as f32)
 }
 
 //  SIN  00 00 03 85
@@ -102,9 +102,9 @@ pub const INTERNAL_PDMS_EXPRESS: [&'static str; 20] = [
 ];
 
 ///评估表达式的值
-pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
-                                                    context: &BTreeMap<SmolStr, SmolStr>,
-                                                    interface: Option<&T>) -> anyhow::Result<f64> {
+pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
+                                             context: &BTreeMap<SmolStr, SmolStr>,
+                                             interface: Option<&T>) -> anyhow::Result<f64> {
     if input_expr.is_empty() || input_expr == "UNSET" {
         return Ok(0.0);
     }
@@ -122,24 +122,24 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             let s = &caps[0];
             let c1 = caps.get(1).map_or("", |m| m.as_str());
             let c2 = caps.get(2).map_or("", |m| m.as_str());
-            let ref_att =
-                match c2 {
-                    // "PREV" => interface.get_prev_att()
-                    // "NEXT" => interface.get_next_att()
-                    "PREV" | "NEXT" => {
-                        let refno_str = context.get("RS_DES_REFNO").unwrap().as_str();
-                        let refno = RefU64::from_refno_str(refno_str);
-                        let att = futures::executor::block_on(
-                            interface.get_attr(RefU64::from_refno_str(refno_str).unwrap())
-                        ).unwrap_or_default();
-                        att
-                        // query_pre_or_next_node()
-                    }
-                    //
-                    refno_str => futures::executor::block_on(
-                        interface.get_attr(RefU64::from_refno_str(refno_str).unwrap())
-                    ).unwrap_or_default()
-                };
+            // let ref_att =
+            //     match c2 {
+            //         // "PREV" => interface.get_prev_att()
+            //         // "NEXT" => interface.get_next_att()
+            //         "PREV" | "NEXT" => {
+            //             let refno_str = context.get("RS_DES_REFNO").unwrap().as_str();
+            //             let refno = RefU64::from_refno_str(refno_str);
+            //             // let att = futures::executor::block_on(
+            //             //     interface.get_attr(RefU64::from_refno_str(refno_str).unwrap())
+            //             // ).unwrap_or_default();
+            //             att
+            //             // query_pre_or_next_node()
+            //         }
+            //         //
+            //         refno_str => futures::executor::block_on(
+            //             interface.get_attr(RefU64::from_refno_str(refno_str).unwrap())
+            //         ).unwrap_or_default()
+            //     };
             // dbg!(&ref_att);
             //是不是需要求解的属性, 比如 LBORE
             let value = match c1 {
@@ -149,7 +149,8 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                 //     // let cat_ref =
                 // }
                 _ => {
-                    ref_att.get_as_string(c1).unwrap_or("DESP[1]".to_string())
+                    // ref_att.get_as_string(c1).unwrap_or("DESP[1]".to_string())
+                    "DESP[1]".to_string()
                 }
             };
             new_exp = new_exp.replace(s, &value);
@@ -167,13 +168,19 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         new_exp = rpro_re.replace_all(&new_exp, |caps: &Captures| {
             let key: SmolStr = format!("{}_{}", &caps[1], &caps[2]).into();
             let default_key: SmolStr = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
-            // dbg!(&key);
-
-            context.get(&key).map(|x| x.to_string()).unwrap_or(
+            if key == "RPRO_FDEP" {
+                dbg!(&key);
+                dbg!(&default_key);
+                dbg!(&context);
+            }
+            let v = context.get(&key).map(|x| x.to_string()).unwrap_or("0".to_string());
+            if let Ok(t) = eval_str_to_f64(&v, &context, interface) {
+                t.to_string()
+            } else {
                 context.get(&default_key).map(|x| x.to_string()).unwrap_or("0".to_string())
-            )
+            }
         }).trim().to_string();
-        // dbg!(&new_exp);
+        dbg!(&new_exp);
     }
     let mut result_exp = new_exp.clone();
     //默认两次
@@ -187,17 +194,13 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             let c1 = caps.get(1).map_or("", |m| m.as_str());
             let c2 = caps.get(2).map_or("", |m| m.as_str());
             let c3 = caps.get(3).map_or("", |m| m.as_str());
-            // println!("{} {}", c1, c3);
             // 小数向下取整
             let k: SmolStr = format!("{}{}", c1, c3.parse::<f32>().map(|x| x.floor().to_string()).unwrap_or_default()).into();
             // dbg!(&k);
             if context.contains_key(&k) {
                 result_exp = result_exp.replace(s, &context[&k]);
                 found_replaced = true;
-            } else if c1 == "DESI" || c1 == "DESP" {
-                result_exp = result_exp.replace(s, "0.0");
             }
-            // dbg!(&result_exp);
         }
         //如果有RPRO 需要执行两次处理
         result_exp = result_exp.replace("ATTRIB", "");
@@ -211,7 +214,6 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                 )
             }).trim().to_string();
             found_replaced = true;
-            // dbg!(&result_exp);
         }
         new_exp = result_exp.clone();
         if !found_replaced {
@@ -247,9 +249,8 @@ pub fn intern_eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             }
         }
         if context.contains_key(&k) {
-            //need to replace whole word
             let re = Regex::new(format!(r"^{s}|\s{s}").as_str()).unwrap();
-            let rs = if context.contains_key(&k) { &*context[&k] } else { "0.0" };
+            let rs = if context.contains_key(&k) { &*context[&k] } else { return Err(anyhow!("{k} 不存在")) };
             new_exp = re.replace_all(&new_exp, format!(" {rs} ").as_str()).to_string();
         }
     }
@@ -668,11 +669,11 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeM
         for cap in re.captures_iter(&dir_str) {
             if cap.len() == 6 {
                 let val_str = cap[2].to_string();
-                let val_result = intern_eval_str_to_f64(&val_str, context, interface)?.to_string();
+                let val_result = eval_str_to_f64(&val_str, context, interface)?.to_string();
                 new_dir_str = dir_str.replace(&val_str, &val_result);
 
                 let val_str = cap[4].to_string();
-                let val_result = intern_eval_str_to_f64(&val_str, context, interface)?.to_string();
+                let val_result = eval_str_to_f64(&val_str, context, interface)?.to_string();
                 new_dir_str = new_dir_str.replace(&val_str, &val_result);
                 is_three = true;
             }
@@ -685,7 +686,7 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeM
                 if cap.len() == 4 {
                     let val_str = cap[2].to_string();
                     // dbg!(&val_str);
-                    let val_result = intern_eval_str_to_f64(&val_str, context, interface).unwrap_or_default().to_string();
+                    let val_result = eval_str_to_f64(&val_str, context, interface).unwrap_or_default().to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                     // dbg!(&new_dir_str);
                 }

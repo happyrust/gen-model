@@ -31,21 +31,26 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let desi_att = interface.get_attr(refno).await?;
     if scom_ref.is_none() {
-        if let Some(catref) = desi_att.get_foreign_refno("CATR") {
-            let c_att = interface.get_attr(catref).await?;
-            if c_att.contains_attr_name("CATR") {
-                scom_ref = c_att.get_foreign_refno("CATR");
-            } else {
-                scom_ref = Some(catref);
-            }
-        } else {
-            let spre_ref = desi_att.get_foreign_refno("SPRE").unwrap_or_default();
+        //"TABITE" => "PRTREF",
+
+        if let Some(spre_ref) = desi_att.get_foreign_refno("SPRE"){
             let spre = interface.get_attr(spre_ref).await?;
             if spre.contains_attr_name("CATR") {
                 scom_ref = spre.get_foreign_refno("CATR");
             } else {
                 // SFIT 的 scom 和 spre 是同一个
                 scom_ref = Some(spre_ref);
+            }
+        }else{
+            if let Some(catref) = desi_att.get_foreign_refno("CATR") {
+                let c_att = interface.get_attr(catref).await?;
+                if c_att.get_type() == "TABITE"  {
+                    let tmp_ref = c_att.get_foreign_refno("PRTREF").unwrap_or_default();
+                    let t_att = interface.get_attr(tmp_ref).await?;
+                    scom_ref = t_att.get_foreign_refno("CATR");
+                }else{
+                    scom_ref = Some(catref);
+                }
             }
         }
     }
@@ -54,7 +59,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         refno.to_refno_str()
     )))?;
     if !scom_ref.is_valid() {
-        // info!("{} 的CAT引用不存在，为 {}", refno.to_refno_str(), scom_ref.to_refno_str());
+        error!("{} 的CAT引用不存在，为 {}", refno.to_refno_str(), scom_ref.to_refno_str());
         return Ok(Default::default());
     }
     //缓存备用
@@ -123,8 +128,13 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
             }
         }
     }
-    let gmref_name = if is_sprf { "GSTR" } else { "GMRE" };
+    //if is_sprf { "GSTR" } else { "GMRE" }
+    let gmref_name = match type_noun.as_str() {
+        "SPRF" => "GSTR",
+        _ => "GMRE",
+    };
     let mut gm_params = vec![];
+    // dbg!(attr_map.to_string_hashmap());
     if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
         if let Ok(gmse_am) = interface.get_attr(gmse_refno).await {
             gm_params = query_gm_params(&gmse_am, Some(interface)).await?;

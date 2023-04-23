@@ -1588,6 +1588,7 @@ impl AiosDBManager {
                         let mut ele_aabb = Aabb::new_invalid();
                         let mut tubi_aabb = Aabb::new_invalid();
                         let mut has_tubi = false;
+                        dbg!(&shapes);
                         for shape in shapes {
                             let CateBrepShape {
                                 refno,
