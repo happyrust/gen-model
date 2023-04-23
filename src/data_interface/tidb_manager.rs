@@ -1634,13 +1634,13 @@ impl AiosDBManager {
                                 if let Some(mut tubi_aabb) = tubi_aabb {
                                     tubi_aabb.merge(&transformed_aabb);
                                 }else{
-                                    tubi_aabb = Some(Aabb::new_invalid());
+                                    tubi_aabb = Some(transformed_aabb);
                                 }
                             } else {
                                 if let Some(mut ele_aabb) = ele_aabb {
                                     ele_aabb.merge(&transformed_aabb);
                                 }else{
-                                    ele_aabb = Some(Aabb::new_invalid());
+                                    ele_aabb = Some(transformed_aabb);
                                 }
                             }
 
