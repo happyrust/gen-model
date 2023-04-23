@@ -104,9 +104,9 @@ pub const GENRAL_NEGATIVE_NOUN_NAMES: [&'static str; 12] = [
     "NCYL", "NBOX", "NCON", "NSNO", "NPYR", "NDIS", "NXTR", "NCTO", "NRTO", "NSLC", "NREV", "NSCY",
 ];
 
-pub const CATA_ATT_TYPES: [&'static str; 23] = [
-    "BRAN", "HANG", // "ELCONN",
-    "CMPF", "WALL", "STWALL", "GWALL", // "FIXING",
+pub const CATA_ATT_TYPES: [&'static str; 25] = [
+    "BRAN", "HANG", "ELCONN",
+    "CMPF", "WALL", "STWALL", "GWALL",  "FIXING",
     "PJOI", "PFIT", "GENSEC", "RNODE", "PRTELE", "GPART", "SCREED", "NOZZ", "PALJ",
     // "SUBJ",
     "CABLE", "BATT", "CMFI", "SCOJ", "SEVE", "SBFI", "SCTN", "FITT",
