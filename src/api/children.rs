@@ -289,13 +289,15 @@ pub async fn query_owner_till_type(mut refno: RefU64, types: Vec<String>, pool: 
 /// 将树节点的 site 提前保存下来
 pub async fn cache_mdb_site_map(mdb: &str, module: &str, pool: &Pool<MySql>) {
     if let Ok(world) = query_world(mdb, module, pool).await {
-        if !CACHED_MDB_SITE_MAP.contains_key(&world.refno) {
-            if let Ok(mut children) = query_world_children_eles(mdb, module, pool).await {
-                for mut child in &mut children {
-                    child.owner = world.refno;
-                }
-                CACHED_MDB_SITE_MAP.insert(world.refno, &PdmsElementVec(children)).expect("CACHED_MDB_SITE_MAP save error");
+        if CACHED_MDB_SITE_MAP.read().await.contains_key(&world.refno) {
+            return;
+        }
+        let mut lock = CACHED_MDB_SITE_MAP.write().await;
+        if let Ok(mut children) = query_world_children_eles(mdb, module, pool).await {
+            for mut child in &mut children {
+                child.owner = world.refno;
             }
+            lock.insert(world.refno, PdmsElementVec(children));//.expect("CACHED_MDB_SITE_MAP save error");
         }
     }
 }
@@ -314,9 +316,10 @@ pub async fn query_mdb_all_dbnums(mdb: &str, pool: &Pool<MySql>) -> anyhow::Resu
 
 pub async fn cache_mdb_module_numbdbs(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<i32>> {
     if let Ok(world) = query_world(mdb, module, pool).await {
-        if CACHED_MDB_SITE_MAP.contains_key(&world.refno) {
-            let children = CACHED_MDB_SITE_MAP.get(&world.refno).unwrap();
-            let children = children.value().iter()
+        let lock = CACHED_MDB_SITE_MAP.read().await;
+        if lock.contains_key(&world.refno) {
+            let children = lock.get(&world.refno).unwrap();
+            let children = children.iter()
                 .map(|x| RefU64::from_refno_str(&x.refno).unwrap_or(RefU64(0))).collect::<Vec<RefU64>>();
             let result = query_numbdb_from_refnos(children, pool).await?;
             return Ok(result);

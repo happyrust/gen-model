@@ -597,7 +597,7 @@ impl AiosDBManager {
         let db_option = Self::get_db_option()?;
         let mut mgr = Self::init(&db_option).await?;
         dbg!("正在初始化uda");
-        mgr.init_uda_map();
+        mgr.init_uda_map().await?;
         mgr.init_mdb(
             &db_option.project_name,
             &db_option.mdb_name,
@@ -782,14 +782,13 @@ impl AiosDBManager {
     /// 初始化 uda_map
     pub async fn init_uda_map(&self) -> anyhow::Result<()> {
         for pool in &self.project_map {
-            let uda_map = query_uda_ukey_udna_all(pool.value()).await.unwrap();
-                dbg!(&uda_map);
+            if let Ok(uda_map) = query_uda_ukey_udna_all(pool.value()).await {
                 for (ukey, udna) in uda_map {
                     if ukey == 754101971 {
                         dbg!(&udna);
                     }
                     GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna);
-                // }
+                }
             }
         }
         Ok(())
@@ -1476,7 +1475,6 @@ impl AiosDBManager {
                             });
                         if has_cata_refnos.is_empty() { has_cata_refnos.push(root_refno); }
                     }
-
                 }
                 is_debug = true;
             }
@@ -2363,12 +2361,12 @@ impl AiosDBManager {
     }
 
     /// 获取缓存好的site
-    pub fn get_cached_site_nodes(
+    pub async fn get_cached_site_nodes(
         &self,
         world_refno: RefU64,
     ) -> anyhow::Result<Option<Vec<PdmsElement>>> {
-        if let Some(k) = CACHED_MDB_SITE_MAP.get(&world_refno) {
-            return Ok(Some(k.value().0.clone()));
+        if let Some(k) = CACHED_MDB_SITE_MAP.read().await.get(&world_refno) {
+            return Ok(Some(k.0.clone()));
         }
         Ok(None)
     }

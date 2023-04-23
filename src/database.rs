@@ -62,8 +62,8 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-    .execute(&mut pool)
-    .await?;
+        .execute(&mut pool)
+        .await?;
     Ok(())
 }
 
@@ -526,6 +526,7 @@ pub async fn sync_total_async_threaded(
 
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
+    let mut error_sql = Arc::new(DashSet::new());
     //是否替换tidb的数据
     let mut is_replace = db_option.replace_dbs;
     let replace_types = db_option.replace_types.clone();
@@ -675,7 +676,7 @@ pub async fn sync_total_async_threaded(
                     let total_attr_map_arc = total_attr_map_arc.clone();
                     let children_map_arc = children_map_arc.clone();
                     let pool_clone = pool.clone();
-
+                    let error_sql_clone = error_sql.clone();
                     // println!("类型: {} 数量: {}", db1_dehash(type_hash), type_refnos.len());
 
                     let type_handle = tokio::spawn(async move {
@@ -692,6 +693,7 @@ pub async fn sync_total_async_threaded(
                             let children_map_arc_clone = children_map_arc.clone();
                             let all_refnos = all_refnos.clone();
                             let pool_clone = pool_clone.clone();
+                            let error_sql_clone = error_sql_clone.clone();
                             let mut implicit_values_sql = String::new();
                             let mut explicit_values_sql = String::new();
                             let mut pdms_elements_sql = String::new();
@@ -762,6 +764,7 @@ pub async fn sync_total_async_threaded(
                                             Err(e) => {
                                                 dbg!(&e);
                                                 dbg!(sql.as_str());
+                                                error_sql_clone.insert(sql);
                                             }
                                         }
 
@@ -778,6 +781,7 @@ pub async fn sync_total_async_threaded(
                                             Err(e) => {
                                                 dbg!(&e);
                                                 dbg!(sql.as_str());
+                                                error_sql_clone.insert(sql);
                                             }
                                         }
 
@@ -794,6 +798,7 @@ pub async fn sync_total_async_threaded(
                                             Err(e) => {
                                                 dbg!(&e);
                                                 dbg!(sql.as_str());
+                                                error_sql_clone.insert(sql);
                                             }
                                         }
                                     }
@@ -885,6 +890,15 @@ pub async fn sync_total_async_threaded(
                 dbg!(&e);
                 dbg!(version_sql.as_str());
             }
+        }
+    }
+    // 重新执行有问题的sql
+    println!("正在重新插入有问题的sql语句, 共 {} 条",error_sql.len());
+    let mut conn = pool.acquire().await?;
+    for sql in error_sql.iter() {
+        let r = conn.execute(sql.key().as_str()).await;
+        if r.is_ok() {
+            error_sql.remove(sql.key());
         }
     }
     Ok(())
