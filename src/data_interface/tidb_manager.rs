@@ -784,10 +784,7 @@ impl AiosDBManager {
         for pool in &self.project_map {
             if let Ok(uda_map) = query_uda_ukey_udna_all(pool.value()).await {
                 for (ukey, udna) in uda_map {
-                    if ukey == 754101971 {
-                        dbg!(&udna);
-                    }
-                    GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna);
+                    GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(format!(":{}",udna));
                 }
             }
         }
