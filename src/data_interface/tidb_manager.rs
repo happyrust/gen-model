@@ -28,10 +28,10 @@ use glam::{quat, EulerRot, Mat3, Quat, Vec2, Vec3};
 use id_tree::{Node, NodeId};
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use nalgebra::{Quaternion, UnitQuaternion};
+use nalgebra::{Point3, Quaternion, RealField, UnitQuaternion, Vector3};
 use once_cell::sync::Lazy;
 use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
-use parry3d::math::{Isometry, Vector};
+use parry3d::math::{Isometry, Real, Vector};
 use smol_str::SmolStr;
 use sqlx::pool::PoolOptions;
 use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
@@ -1442,7 +1442,6 @@ impl AiosDBManager {
         db_option: &DbOption,
     ) -> anyhow::Result<bool> {
         let batch_size = mgr.db_option.gen_model_batch_size;
-        let mdb = &db_option.mdb_name;
         let t = Instant::now();
         let mut has_cata_refnos = RefU64Vec::default();
         let mut is_debug = false;
@@ -1549,7 +1548,7 @@ impl AiosDBManager {
                             .unwrap_or_default();
                     }
                     for (child_refno, shapes) in brep_shapes_map {
-                        let trans_origin = mgr
+                        let o = mgr
                             .get_world_transform(child_refno)
                             .await
                             .unwrap_or_default()
@@ -1569,8 +1568,8 @@ impl AiosDBManager {
                             generic_type: mgr.get_generic_type(child_refno),
                             aabb: None,
                             world_transform: (
-                                trans_origin.rotation,
-                                trans_origin.translation,
+                                o.rotation,
+                                o.translation,
                                 Vec3::ONE,
                             ),
                             ptset_map: refno_ptset_map
@@ -1583,8 +1582,8 @@ impl AiosDBManager {
                             ],
                         };
                         let mut geo_insts = &mut geos_info.data;
-                        let mut ele_aabb = Aabb::new_invalid();
-                        let mut tubi_aabb = Aabb::new_invalid();
+                        let mut ele_aabb: Option<Aabb> = None;
+                        let mut tubi_aabb: Option<Aabb> = None;
                         let mut has_tubi = false;
                         for shape in shapes {
                             let CateBrepShape {
@@ -1632,9 +1631,17 @@ impl AiosDBManager {
                             });
                             if is_tubi {
                                 has_tubi = true;
-                                tubi_aabb.merge(&transformed_aabb);
+                                if let Some(mut tubi_aabb) = tubi_aabb {
+                                    tubi_aabb.merge(&transformed_aabb);
+                                }else{
+                                    tubi_aabb = Some(Aabb::new_invalid());
+                                }
                             } else {
-                                ele_aabb.merge(&transformed_aabb);
+                                if let Some(mut ele_aabb) = ele_aabb {
+                                    ele_aabb.merge(&transformed_aabb);
+                                }else{
+                                    ele_aabb = Some(Aabb::new_invalid());
+                                }
                             }
 
                             //tubi 需要特殊处理
@@ -1652,26 +1659,36 @@ impl AiosDBManager {
                             };
                             geo_insts.push(geom_inst);
                         }
-                        geos_info.aabb = Some(
-                            ele_aabb.transform_by(&Isometry {
-                                rotation: UnitQuaternion::from_quaternion(Quaternion::new(
-                                    trans_origin.rotation.w,
-                                    trans_origin.rotation.x,
-                                    trans_origin.rotation.y,
-                                    trans_origin.rotation.z,
-                                )),
-                                translation: Vector::new(
-                                    trans_origin.translation.x,
-                                    trans_origin.translation.y,
-                                    trans_origin.translation.z,
-                                ).into(),
-                            }),
-                        );
-
-                        if has_tubi {
-                            geos_info.aabb.as_mut().unwrap().merge(&tubi_aabb);
+                        if let Some(a) = ele_aabb {
+                            geos_info.aabb = Some(
+                                a.transform_by(&Isometry {
+                                    rotation: UnitQuaternion::from_quaternion(Quaternion::new(
+                                        o.rotation.w,
+                                        o.rotation.x,
+                                        o.rotation.y,
+                                        o.rotation.z,
+                                    )),
+                                    translation: Vector::new(
+                                        o.translation.x,
+                                        o.translation.y,
+                                        o.translation.z,
+                                    ).into(),
+                                }),
+                            );
                         }
 
+
+                        //todo 暂时不合并直段的包围盒
+                        if has_tubi {
+                            //geos_info.aabb.as_mut().unwrap().merge(&tubi_aabb);
+                        }
+
+                        if let Some(mut aabb) = &mut geos_info.aabb {
+                            if aabb.mins.x.is_infinite() {
+                                dbg!(&geos_info);
+                                aabb = Aabb::new(Point3::new(0., 0., 0.), Point3::new(0., 0., 0.));
+                            }
+                        }
                         inst_map.insert(child_refno, geos_info);
                     }
 
