@@ -896,10 +896,10 @@ pub async fn sync_total_async_threaded(
     println!("正在重新插入有问题的sql语句, 共 {} 条",error_sql.len());
     let mut conn = pool.acquire().await?;
     for sql in error_sql.iter() {
-        let r = conn.execute(sql.key().as_str()).await;
-        if r.is_ok() {
-            error_sql.remove(sql.key());
-        }
+        let _ = conn.execute(sql.key().as_str()).await;
+        // if r.is_ok() {
+        //     error_sql.remove(sql.key());
+        // }
     }
     Ok(())
 }
