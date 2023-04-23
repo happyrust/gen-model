@@ -168,11 +168,6 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         new_exp = rpro_re.replace_all(&new_exp, |caps: &Captures| {
             let key: SmolStr = format!("{}_{}", &caps[1], &caps[2]).into();
             let default_key: SmolStr = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
-            if key == "RPRO_FDEP" {
-                dbg!(&key);
-                dbg!(&default_key);
-                dbg!(&context);
-            }
             let v = context.get(&key).map(|x| x.to_string()).unwrap_or("0".to_string());
             if let Ok(t) = eval_str_to_f64(&v, &context, interface) {
                 t.to_string()
@@ -180,7 +175,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                 context.get(&default_key).map(|x| x.to_string()).unwrap_or("0".to_string())
             }
         }).trim().to_string();
-        dbg!(&new_exp);
+        // dbg!(&new_exp);
     }
     let mut result_exp = new_exp.clone();
     //默认两次
