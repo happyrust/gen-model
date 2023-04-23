@@ -784,7 +784,7 @@ impl AiosDBManager {
         for pool in &self.project_map {
             if let Ok(uda_map) = query_uda_ukey_udna_all(pool.value()).await {
                 for (ukey, udna) in uda_map {
-                    GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(format!(":{}",udna));
+                    GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna);
                 }
             }
         }
@@ -1457,8 +1457,8 @@ impl AiosDBManager {
                     RefU64::from_refno_str(design_refno).unwrap_or_default()
                 ]);
                 is_debug = true;
-            } else if !db_option.debug_root_refnos.is_empty() {
-                for root_refno_str in &db_option.debug_root_refnos {
+            } else if db_option.debug_root_refnos.is_some() {
+                for root_refno_str in db_option.debug_root_refnos.as_ref().unwrap() {
                     if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
                         query_travel_children_with_types_aql(
                             &mgr.arango_database,
@@ -1482,6 +1482,7 @@ impl AiosDBManager {
                 .await?;
         }
         let has_cata_cnt = has_cata_refnos.len();
+        dbg!(has_cata_cnt);
         if has_cata_cnt == 0 { return Ok(true); }
         println!("使用元件库的模型总数：{has_cata_cnt}");
         let batch_chunks_cnt = has_cata_cnt / batch_size + 1;
@@ -1585,7 +1586,6 @@ impl AiosDBManager {
                         let mut ele_aabb = Aabb::new_invalid();
                         let mut tubi_aabb = Aabb::new_invalid();
                         let mut has_tubi = false;
-                        dbg!(&shapes);
                         for shape in shapes {
                             let CateBrepShape {
                                 refno,
@@ -1729,8 +1729,8 @@ impl AiosDBManager {
                 prim_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
                 is_debug = true;
             } else {
-                if !db_option.debug_root_refnos.is_empty() {
-                    for root_refno_str in &db_option.debug_root_refnos {
+                if db_option.debug_root_refnos.is_some() {
+                    for root_refno_str in db_option.debug_root_refnos.as_ref().unwrap() {
                         if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
                             query_travel_children_with_types_aql(
                                 &mgr.arango_database,
@@ -1986,9 +1986,9 @@ impl AiosDBManager {
             if target_debug_refno.is_some() {
                 loop_refnos = RefU64Vec(vec![target_debug_refno.unwrap()]);
                 is_debug = true;
-            } else if !db_option.debug_root_refnos.is_empty() {
+            } else if db_option.debug_root_refnos.is_some() {
                 is_debug = true;
-                for root_refno_str in &db_option.debug_root_refnos {
+                for root_refno_str in db_option.debug_root_refnos.as_ref().unwrap() {
                     if let Ok(root_refno) = RefU64::from_refno_str(root_refno_str) {
                         query_travel_children_with_types_aql(
                             &mgr.arango_database,
