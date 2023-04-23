@@ -333,8 +333,9 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             return if let Ok(mut stack) = Stack::init(&result_string) {
                 stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", &input_expr)))
             } else {
-                println!("输入表达式 : {}", &input_expr);
-                println!("计算后表达式 : {}", &result_string);
+                // println!("输入表达式 : {}", &input_expr);
+                // dbg!(&context);
+                // println!("计算后表达式 : {}", &result_string);
                 Err(anyhow!(format!("求解失败 {}", &input_expr)))
             };
         }
