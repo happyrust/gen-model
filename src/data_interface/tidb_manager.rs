@@ -14,7 +14,7 @@ use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdgeAql};
 use aios_core::prim_geo::wire::CurveType;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PdmsMesh, VerifiedShape};
-use aios_core::tool::db_tool::db1_hash;
+use aios_core::tool::db_tool::{db1_hash, GLOBAL_UDA_NAME_MAP};
 use aios_core::tool::math_tool;
 use anyhow::anyhow;
 use approx::{abs_diff_eq, abs_diff_ne};
@@ -596,6 +596,8 @@ impl AiosDBManager {
     pub async fn init_form_config() -> anyhow::Result<Self> {
         let db_option = Self::get_db_option()?;
         let mut mgr = Self::init(&db_option).await?;
+        dbg!("正在初始化uda");
+        mgr.init_uda_map().await?;
         mgr.init_mdb(
             &db_option.project_name,
             &db_option.mdb_name,
@@ -775,6 +777,21 @@ impl AiosDBManager {
             cache_module_numbdbs: Default::default(),
             mdb_dbnums: Default::default(),
         })
+    }
+
+    /// 初始化 uda_map
+    pub async fn init_uda_map(&self) -> anyhow::Result<()> {
+        for pool in &self.project_map {
+            if let Ok(uda_map) = query_uda_ukey_udna_all(pool.value()).await {
+                for (ukey, udna) in uda_map {
+                    if ukey == 754101971 {
+                        dbg!(&udna);
+                    }
+                    GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 根据project获取连接池
@@ -1458,7 +1475,6 @@ impl AiosDBManager {
                             });
                         if has_cata_refnos.is_empty() { has_cata_refnos.push(root_refno); }
                     }
-
                 }
                 is_debug = true;
             }
@@ -2345,12 +2361,12 @@ impl AiosDBManager {
     }
 
     /// 获取缓存好的site
-    pub fn get_cached_site_nodes(
+    pub async fn get_cached_site_nodes(
         &self,
         world_refno: RefU64,
     ) -> anyhow::Result<Option<Vec<PdmsElement>>> {
-        if let Some(k) = CACHED_MDB_SITE_MAP.get(&world_refno) {
-            return Ok(Some(k.value().0.clone()));
+        if let Some(k) = CACHED_MDB_SITE_MAP.read().await.get(&world_refno) {
+            return Ok(Some(k.0.clone()));
         }
         Ok(None)
     }
