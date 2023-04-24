@@ -254,6 +254,8 @@ pub async fn query_travel_children_with_types_aql(arango_database: &Database, re
 }
 
 /// 遍历refno只获取指定类型的refno
+/// refno: 指定该参考号下面所有的节点来进行过滤  att_type: 需要查找的类型
+/// 实例  : query_travel_children_with_type_aql(&database,RefU64::from_refno_str("23584/107").unwrap(),"BRAN" )
 pub async fn query_travel_children_with_type_aql(arango_database: &Database, refno: RefU64, att_type: &str) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
