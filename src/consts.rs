@@ -2,7 +2,8 @@ pub const ARANGODB_SAVE_AMOUNT:usize = 10000;
 pub const PDMS_INFO_DB: &'static str = "PDMS_INFO_DB";
 
 pub const PDMS_EXPLICIT_TABLE: &'static str = "EXPLICIT_ATT";
-pub const PDMS_UDA_TABLE: &'static str = "UDA_ATT";
+pub const PDMS_UDA_ATT_TABLE: &'static str = "UDA_ATT";
+pub const PDMS_UDA_TABLE: &'static str = "UDA";
 pub const PDMS_FILE_VERSION_TABLE: &'static str = "FILE_VERSION";
 pub const PDMS_ELEMENTS_TABLE: &'static str = "PDMS_ELEMENTS";
 pub const PDMS_SSC_ELEMENTS_TABLE: &'static str = "PDMS_SSC_ELEMENTS";
@@ -25,5 +26,6 @@ pub const CHANNEL_STEEL_STANDARD: &'static str = "CHANNEL_STEEL_STANDARD";
 // project_mdb
 // 专业表单
 pub const PROFESSION_TX_XT: &'static str = "TX_XT";
-
+pub const TEAM_DATA_TABLE: &'static str = "TEAM_DATA";
 pub const UNSET_NOUN: u32 = 28933118;
+pub const AQL_LOCK_REFNOS_COLLECTION: &'static str = "lock_refnos";

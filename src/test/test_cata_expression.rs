@@ -3,7 +3,7 @@ use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
 use aios_core::tiny_expr::expr_eval::interp;
 use bevy::prelude::KeyCode::At;
 use regex::Regex;
-use crate::cata::resolve_helper::{eval_str_to_f32, intern_eval_str_to_f64, parse_str_axis_to_vec3};
+use crate::cata::resolve_helper::{eval_str_to_f32, eval_str_to_f64, parse_str_axis_to_vec3};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::test::test_helper::get_test_ams_db_manager;
 
@@ -14,9 +14,19 @@ fn test_parse_param_with_point_digit() {
     let mut context = BTreeMap::new();
     context.insert("DESI1".into(), "30.0".into());
     context.insert("DESI0".into(), "40.0".into());
-    let r = intern_eval_str_to_f64::<AiosDBManager>(input_exp, &context, None);
+    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &context, None);
     dbg!(&r);
     assert_eq!(r.unwrap(), -55.0);
+}
+
+#[test]
+fn test_parse_design_param() {
+    let input_exp = "-0.5 TIMES  DESIGN PARAM 1";
+    let mut context = BTreeMap::new();
+    context.insert("DESI1".into(), "30.0".into());
+    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &context, None);
+    dbg!(&r);
+    assert_eq!(r.unwrap(), -15.0);
 }
 
 ///测试带小数的表达式
@@ -27,7 +37,7 @@ fn test_parse_param_with_of_operator() {
     let mut context = BTreeMap::new();
     let interface = get_test_ams_db_manager();
     // 是提前准备，还是在使用的时候去获取
-    let r = intern_eval_str_to_f64::<AiosDBManager>(input_exp, &context, Some(&interface));
+    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &context, Some(&interface));
     dbg!(&r);
     assert_eq!(r.unwrap(), 850.0);
 }
@@ -49,7 +59,7 @@ fn parse_3_axis() {
     let str = "X (60.0)  Y ";
     let str = "X ( 45 )  Y ( 35 ) Z";
     let str = "TANF PARAM 2 DDANGLE";
-    let r = intern_eval_str_to_f64::<AiosDBManager>(str, &context, None);
+    let r = eval_str_to_f64::<AiosDBManager>(str, &context, None);
     dbg!(r);
 }
 
@@ -126,7 +136,7 @@ fn test_rpro() {
 fn test_math_exp() {
     let expr = "MAX ( ( ( - 31 ) + 60 ), 29.2 )";
     let context = BTreeMap::new();
-    dbg!(intern_eval_str_to_f64::<AiosDBManager>(expr, &context, None)).expect("TODO: panic message");
+    dbg!(eval_str_to_f64::<AiosDBManager>(expr, &context, None)).expect("TODO: panic message");
 }
 
 //todo fix

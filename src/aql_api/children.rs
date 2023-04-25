@@ -2,8 +2,11 @@ use std::collections::HashMap;
 use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
 use arangors_lite::{AqlQuery, Connection, Database};
 use serde::{Serialize, Deserialize};
+use sqlx::{MySql, Pool};
+use crate::api::attr::query_full_attr;
 use crate::aql_api::*;
 use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::data_interface::tidb_manager::AiosDBManager;
 
 pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let mut r = vec![];
@@ -251,6 +254,8 @@ pub async fn query_travel_children_with_types_aql(arango_database: &Database, re
 }
 
 /// 遍历refno只获取指定类型的refno
+/// refno: 指定该参考号下面所有的节点来进行过滤  att_type: 需要查找的类型
+/// 实例  : query_travel_children_with_type_aql(&database,RefU64::from_refno_str("23584/107").unwrap(),"BRAN" )
 pub async fn query_travel_children_with_type_aql(arango_database: &Database, refno: RefU64, att_type: &str) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
@@ -283,13 +288,13 @@ pub async fn query_travel_children_with_type_aql(arango_database: &Database, ref
     Ok(r)
 }
 
-pub async fn query_refnos_travel_children_with_type_aql(arango_database: &Database, refnos: Vec<RefU64>, att_type: &str) -> anyhow::Result<Vec<EleTreeNode>> {
+pub async fn query_refnos_travel_children_with_type_aql(arango_database: &Database, refnos: Vec<RefU64>, att_type: Vec<&str>) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = refnos.into_iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("\
     let eles = ( for refno in @id
     FOR z in 0..100 INBOUND refno pdms_edges
-        Filter z.noun == @noun
+        filter POSITION(@noun,z.noun)
         return {
             'refno':z._key,
             'owner':z.owner,
@@ -367,4 +372,28 @@ pub async fn query_sibl_level_refnos(refno: RefU64, database: &Database) -> anyh
     let mut out_refnos = convert_refno_vec_from_vec_string(result);
     out_refnos.push(refno);
     Ok([out_refnos, in_refnos].concat())
+}
+
+/// 返回该参考号的上一个或者下一个节点的attr，b_pre: true 上一个 , false 下一个
+pub async fn query_pre_or_next_node(refno: RefU64, b_pre: bool, database: &Database, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<AttrMap>> {
+    let key = format!("pdms_eles/{}", refno.to_url_refno());
+    let aql = if b_pre {
+        AqlQuery::new("\
+        for v in 1 outbound @key sibl_edges
+            return v._key
+    ").bind_var("key", key)
+    } else {
+        AqlQuery::new("\
+        for v in 1 inbound @key sibl_edges
+            return v._key
+    ").bind_var("key", key)
+    };
+    let aql_result = database.aql_query::<String>(aql).await;
+    // 如果为该层第一个或者最后一个 则返回 None
+    if aql_result.is_err() { return Ok(None); }
+    let aql_result = aql_result.unwrap();
+    let aql_result = convert_refno_vec_from_vec_string(aql_result);
+    if aql_result.is_empty() { return Ok(None); }
+    let attr = query_full_attr(aql_result[0], aios_mgr, None).await?;
+    Ok(Some(attr))
 }

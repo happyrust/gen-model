@@ -62,8 +62,8 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-    .execute(&mut pool)
-    .await?;
+        .execute(&mut pool)
+        .await?;
     Ok(())
 }
 
@@ -183,7 +183,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         let mut conn = project_pool.acquire().await?;
         tables_sql.push_str(&tables::gen_create_element_tables_sql());
         tables_sql.push_str(&gen_create_project_mdb_sql());
-        tables_sql.push_str(&gen_create_project_mdb_json_sql());
         tables_sql.push_str(&gen_create_data_state_tables_sql());
         tables_sql.push_str(&gen_create_pdms_version_table_sql());
         tables_sql.push_str(&gen_create_room_code_table_sql());
@@ -527,6 +526,8 @@ pub async fn sync_total_async_threaded(
 
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
+    let mut error_sql = Arc::new(DashSet::new());
+    //是否替换tidb的数据
     let mut is_replace = db_option.replace_dbs;
     let replace_types = db_option.replace_types.clone();
     let b_replace_types = replace_types.is_some();
@@ -546,8 +547,7 @@ pub async fn sync_total_async_threaded(
                 continue;
             }
         }
-        if need_parsed_files.is_none() || need_parsed_files.as_ref().unwrap().contains(&file_name)
-        {
+        if need_parsed_files.is_none() || need_parsed_files.as_ref().unwrap().contains(&file_name) {
             println!("path={:?}", &file_name);
             let project_clone = project.clone();
             let project_name = project.as_str().to_string();
@@ -566,8 +566,7 @@ pub async fn sync_total_async_threaded(
                              ..
                          })) = tokio::task::spawn_blocking(move || {
                 parse_file(&path, &None, &file_name, project_name.clone().as_str(), "")
-            })
-                .await
+            }).await
             {
                 //save dbno info first
                 let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(
@@ -631,7 +630,7 @@ pub async fn sync_total_async_threaded(
                 let children_map_arc = Arc::new(children_map);
                 let mut type_handles = vec![];
                 // 将部分数据保存到图数据库
-                if !b_replace_types && !only_update_dbinfo {
+                if db_option.sync_graph_db.unwrap_or(true) {
                     if db_type == "CATA" || db_type == "DESI" {
                         // 将 pdms_element 部分数据保存到图数据库中
                         save_pdms_element_in_sync(
@@ -657,6 +656,11 @@ pub async fn sync_total_async_threaded(
                     println!("图数据库保存完成");
                 }
 
+                //如果不需要同步tidb，continue
+                if !db_option.sync_tidb.unwrap_or(true) {
+                    continue;
+                }
+
                 for (type_hash, type_refnos) in type_ele_map {
                     if b_replace_types {
                         let replace_types = replace_types.clone().unwrap();
@@ -672,7 +676,7 @@ pub async fn sync_total_async_threaded(
                     let total_attr_map_arc = total_attr_map_arc.clone();
                     let children_map_arc = children_map_arc.clone();
                     let pool_clone = pool.clone();
-
+                    let error_sql_clone = error_sql.clone();
                     // println!("类型: {} 数量: {}", db1_dehash(type_hash), type_refnos.len());
 
                     let type_handle = tokio::spawn(async move {
@@ -689,6 +693,7 @@ pub async fn sync_total_async_threaded(
                             let children_map_arc_clone = children_map_arc.clone();
                             let all_refnos = all_refnos.clone();
                             let pool_clone = pool_clone.clone();
+                            let error_sql_clone = error_sql_clone.clone();
                             let mut implicit_values_sql = String::new();
                             let mut explicit_values_sql = String::new();
                             let mut pdms_elements_sql = String::new();
@@ -759,6 +764,7 @@ pub async fn sync_total_async_threaded(
                                             Err(e) => {
                                                 dbg!(&e);
                                                 dbg!(sql.as_str());
+                                                error_sql_clone.insert(sql);
                                             }
                                         }
 
@@ -775,6 +781,7 @@ pub async fn sync_total_async_threaded(
                                             Err(e) => {
                                                 dbg!(&e);
                                                 dbg!(sql.as_str());
+                                                error_sql_clone.insert(sql);
                                             }
                                         }
 
@@ -791,6 +798,7 @@ pub async fn sync_total_async_threaded(
                                             Err(e) => {
                                                 dbg!(&e);
                                                 dbg!(sql.as_str());
+                                                error_sql_clone.insert(sql);
                                             }
                                         }
                                     }
@@ -841,7 +849,7 @@ pub async fn sync_total_async_threaded(
     }
     // 保存 uda_map
     if uda_map.len() > 0 {
-        let mut uda_sql = format!("INSERT IGNORE INTO {PDMS_UDA_TABLE} (TYPE,DATA) VALUES");
+        let mut uda_sql = format!("INSERT IGNORE INTO {PDMS_UDA_ATT_TABLE} (TYPE,DATA) VALUES");
         for (noun, value) in uda_map.into_iter() {
             let data = value.into_compress_bytes();
             uda_sql.push_str(&format!("('{}',0x{}),", noun, hex::encode(data)))
@@ -883,6 +891,15 @@ pub async fn sync_total_async_threaded(
                 dbg!(version_sql.as_str());
             }
         }
+    }
+    // 重新执行有问题的sql
+    println!("正在重新插入有问题的sql语句, 共 {} 条",error_sql.len());
+    let mut conn = pool.acquire().await?;
+    for sql in error_sql.iter() {
+        let _ = conn.execute(sql.key().as_str()).await;
+        // if r.is_ok() {
+        //     error_sql.remove(sql.key());
+        // }
     }
     Ok(())
 }

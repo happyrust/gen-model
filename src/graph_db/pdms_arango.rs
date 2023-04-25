@@ -80,7 +80,6 @@ pub async fn create_arangodb_conn(database: &Database, collection_name: &str, co
                             dbg!(&e);
                         }
                     }
-
                 }
             }
         }
@@ -524,27 +523,6 @@ pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::
     let edges_collection = "foreign_edges";
     for project in &mgr.projects {
         if let Some(project_db) = mgr.project_map.get(project) {
-            // 找到所有带有spre或catr属性的元件
-            // for foreign in &spre_foreign_refs {
-            //     let tables = query_contain_noun_refnos(foreign.to_string(), project_db.value()).await?;
-            //     for table_name in tables {
-            //         if table_name.to_lowercase() == "spco" || table_name.to_lowercase() == "scom" { continue; } // 排除 spco 中的 catr 引用
-            //         let refnos = query_foreign_refnos_from_table(foreign, table_name.as_str(), project_db.value()).await?;
-            //         for (refno, foreign_refno) in refnos {
-            //             spre_edges.push(
-            //                 ForeignEdges {
-            //                     _from: format!("{}/{}", collection, refno.to_url_refno()),
-            //                     _to: format!("{}/{}", collection, foreign_refno.to_url_refno()),
-            //                     foreign_type: foreign.to_string(),
-            //                 }
-            //             );
-            //         }
-            //         if spre_edges.len() > 1000 {
-            //             let json = serde_json::to_value(&take(&mut spre_edges))?;
-            //             save_arangodb(json, mgr.clone(), edges_collection).await?;
-            //         }
-            //     }
-            // }
             // 找到所有的 spco  自身 refno就是 spre ，另一个返回值就是 catr
             let results = query_foreign_refnos_from_table("CATR", "SPCO", project_db.value()).await?;
             for (spre, catr) in results {
@@ -633,9 +611,13 @@ pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &st
 
 pub async fn save_arangodb_with_db_option(json: Value, db_option: &DbOption, collection: &str) -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(db_option).await?;
-    let aql = AqlQuery::new("LET data = @elements
+    let mut aql_string = "LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }".to_string();
+    if db_option.replace_dbs {
+        aql_string = aql_string.replace("INSERT", "REPLACE");
+    }
+    let aql = AqlQuery::new(&aql_string)
         .bind_var("@collection", collection)
         .bind_var("elements", json);
     let _result: Vec<()> = database.aql_query(aql).await?;
@@ -652,6 +634,16 @@ pub async fn save_arangodb_with_database(json: Value, collection: &str, database
     Ok(())
 }
 
+pub async fn remove_arangodb_with_refno_key(refnos: &Vec<RefU64>, collection: &str, database: &Database) -> anyhow::Result<bool> {
+    let keys = refnos.into_iter().map(|refno| refno.to_url_refno()).collect::<Vec<_>>();
+    let aql = AqlQuery::new(
+        "FOR D IN @DATA
+                    REMOVE D IN @COLLECTION")
+        .bind_var("data", keys)
+        .bind_var("collection", collection);
+    let result = database.aql_query::<Vec<()>>(aql).await;
+    Ok(!result.is_err())
+}
 
 pub async fn save_arangodb_with_db_option_create_collection(json: Value, db_option: &DbOption, collection: &str, collection_type: CollectionType) -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(db_option).await?;
@@ -663,9 +655,13 @@ pub async fn save_arangodb_with_db_option_create_collection(json: Value, db_opti
             database.create_edge_collection(collection).await?;
         }
     }
-    let aql = AqlQuery::new("LET data = @elements
+    let mut aql_string = "LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }".to_string();
+    if db_option.replace_dbs {
+        aql_string = aql_string.replace("INSERT", "REPLACE");
+    }
+    let aql = AqlQuery::new(&aql_string)
         .bind_var("@collection", collection)
         .bind_var("elements", json);
     let _result: Vec<()> = database.aql_query(aql).await?;

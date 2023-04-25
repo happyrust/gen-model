@@ -1,23 +1,27 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::db_number::DbNumMgr;
-use aios_core::pdms_types::{NounHash, RefU64, RefU64Vec};
+use aios_core::pdms_types::{AttrVal, NounHash, RefU64, RefU64Vec};
 use anyhow::anyhow;
 use arangors_lite::Database;
 use crate::consts::*;
 use dashmap::DashMap;
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
+use crate::api::attr::query_explicit_attr;
 use crate::api::element::query_types_refnos;
 use crate::aql_api::plin_attr::query_plin_attrs;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::helper::qualified_table_name;
 use crate::defines::CACHED_REFNO_BASIC_MAP;
 
+
+const WDJZ: i32 = 642952044;
+
 ///更新获得ref0->projects 缓存
-pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, HashSet<String>>> {
+pub async fn get_ref0_projects(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Vec<String>>> {
     let mut map = DashMap::new();
     let sql = format!("SELECT REF0, PROJECT FROM {PDMS_REFNO_INFOS_TABLE}");
     // dbg!(&sql);
@@ -27,7 +31,7 @@ pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Has
             for val in vals {
                 let ref0 = val.get::<i32, _>("REF0") as u32;
                 let project_str = val.get::<String, _>("PROJECT");
-                map.entry(ref0).or_insert(HashSet::new()).insert(project_str);
+                map.entry(ref0).or_insert(Vec::new()).push(project_str);
             }
         }
         Err(e) => {
@@ -38,9 +42,17 @@ pub async fn get_ref0_map(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32, Has
     Ok(map)
 }
 
-/// 获取生成refno到RefBasic的映射
-pub async fn sync_refno_basic_map(pool: &Pool<MySql>, dbno_mgr: &mut DbNumMgr) -> anyhow::Result<bool> {
-    let sql = format!("SELECT ID, OWNER, TYPE, NUMBDB  FROM {PDMS_ELEMENTS_TABLE}");
+/// 获取生成refno到RefBasic的映射, todo 存储有点慢，需要批量存储
+pub async fn sync_refno_basic_map(pool: &Pool<MySql>/*, mdb_dbnums: &BTreeSet<i32>*/) -> anyhow::Result<bool> {
+    // if mdb_dbnums.is_empty() { return Ok(false); }
+    // let mut in_sql = " (".to_string();
+    // for d in mdb_dbnums {
+    //     in_sql.push_str(&format!(r#"{d},"#));
+    // }
+    // in_sql.remove(in_sql.len() - 1);
+    // in_sql.push_str(") ");
+    // let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB in {}", in_sql);
+    let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE}");
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match results {
         Ok(vals) => {
@@ -48,13 +60,13 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>, dbno_mgr: &mut DbNumMgr) -
                 let refno = (val.get::<i64, _>("ID") as u64).into();
                 let owner = (val.get::<i64, _>("OWNER") as u64).into();
                 let type_name = val.get::<String, _>("TYPE");
-                let dbno = val.get::<i32, _>("NUMBDB");
-                dbno_mgr.insert(refno, dbno);
                 let table = qualified_table_name(type_name.as_str());
-                let _ = CACHED_REFNO_BASIC_MAP.insert(refno, &CachedRefBasic {
-                    owner,
-                    table,
-                });
+                if CACHED_REFNO_BASIC_MAP.get(&refno).is_none() {
+                    let _ = CACHED_REFNO_BASIC_MAP.insert(refno, &CachedRefBasic {
+                        owner,
+                        table,
+                    });
+                }
             }
         }
         Err(e) => {
@@ -66,7 +78,7 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>, dbno_mgr: &mut DbNumMgr) -
     Ok(true)
 }
 
-pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: Option<Vec<i32>>, database: &Database) -> anyhow::Result<DashMap<RefU64, String>> {
+pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: Option<&[i32]>, arango_db: &Database) -> anyhow::Result<DashMap<RefU64, String>> {
     let mut fitt_map = vec![];
     let fitt_refnos = query_types_refnos(&vec!["FITT"], pool, dbnos).await?;
     if fitt_refnos.len() == 0 { return Ok(DashMap::new()); }
@@ -77,8 +89,19 @@ pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: Option<Vec<i32>>, databa
         let pos_line = result.get::<String, _>("POSL");
         fitt_map.push((refno, pos_line));
     }
-    let result = query_plin_attrs(fitt_map, database).await.unwrap_or_default();
+    let result = query_plin_attrs(fitt_map, arango_db).await.unwrap_or_default();
     Ok(result)
+}
+
+/// 获取设备的底标高
+pub async fn query_refno_height_position(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<f32> {
+    let explicit_attr = query_explicit_attr(refno, pool).await?;
+    let position = explicit_attr.get(&NounHash(WDJZ as u32));
+    if let Some(AttrVal::StringType(position)) = position {
+        Ok(position.parse::<f32>().unwrap_or(0.0))
+    } else {
+        Ok(0.0)
+    }
 }
 
 fn gen_query_refnos_implicit_string_attr(table_name: &str, value: Vec<&str>, refnos: RefU64Vec) -> String {

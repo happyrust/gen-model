@@ -22,6 +22,8 @@ use crate::cata::resolve_helper::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
+
+
 /// 求解axis的数值, 得到 {num:  }
 pub fn resolve_axis_params<T: PdmsDataInterface>(
     scom: &ScomInfo,
@@ -30,8 +32,13 @@ pub fn resolve_axis_params<T: PdmsDataInterface>(
 ) -> BTreeMap<i32, CateAxisParam> {
     let mut map = BTreeMap::new();
     for i in 0..scom.axis_params.len() {
-        if let Some(axis) = resolve_axis_param(&scom.axis_params[i], scom, context,  interface) {
-            map.insert(scom.axis_param_numbers[i], axis);
+        match resolve_axis_param(&scom.axis_params[i], scom, context, interface) {
+            Ok(axis) => {
+                map.insert(scom.axis_param_numbers[i], axis);
+            }
+            Err(e) => {
+                error!("resolve_axis_params 出错： {:?}", &e);
+            }
         }
     }
     map
@@ -39,6 +46,7 @@ pub fn resolve_axis_params<T: PdmsDataInterface>(
 
 ///求解几何体，允许出错的情况，出错的需要跳过
 pub fn resolve_gms<T: PdmsDataInterface>(
+    des_refno: RefU64,
     gmse_raw_paras: &[GmParam],
     jusl_param: &Option<PlinParam>,
     context: &BTreeMap<SmolStr, SmolStr>,
@@ -52,13 +60,13 @@ pub fn resolve_gms<T: PdmsDataInterface>(
                 if g.gm_type == ("SPRO") && g.verts.len() == 0 {
                     return None;
                 }
-                let r = resolve_paragon_gm_params(&g, jusl_param, context, axis_params, interface);
+                let r = resolve_paragon_gm_params(des_refno, &g, jusl_param, context, axis_params, interface);
                 return match r {
                     Ok(v) => {
                         Some(v)
                     }
                     Err(e) => {
-                        error!("{}",e);
+                        error!("{}", e);
                         None
                     }
                 };
@@ -71,18 +79,22 @@ pub fn resolve_gms<T: PdmsDataInterface>(
 
 /// 解析gmes的参数
 pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
+    des_refno: RefU64,
     gm_param: &GmParam,
     jusl_param: &Option<PlinParam>,
     context: &BTreeMap<SmolStr, SmolStr>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
     interface: Option<&T>,
 ) -> anyhow::Result<CateGeoParam> {
-    if let Ok(gm_data) = resolve_gmse_params(gm_param, jusl_param, context, axis_params, interface) {
-        panic::catch_unwind(|| {
-            resolve_to_cate_geo_params(&gm_data).expect("resolve geom failed")
-        }).map_err(|e| anyhow!("Resolve error."))
-    } else {
-        Err(anyhow!(format!("几何数据解析失败: {:?}", gm_param)))
+    match resolve_gmse_params(gm_param, jusl_param, context, axis_params, interface) {
+        Ok(gm_data) => {
+            panic::catch_unwind(|| {
+                resolve_to_cate_geo_params(&gm_data).expect("resolve geom failed")
+            }).map_err(|e| anyhow!("元件库求解失败."))
+        }
+        Err(e) => {
+            Err(anyhow!(format!("几何数据解析失败: {:?}, 原因：{}", des_refno.to_refno_string(), &e)))
+        }
     }
 }
 
@@ -203,9 +215,9 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
 
     let mut verts = vec![];
     for vert in &gm.verts {
-        if let Ok(f0) = eval_str_to_f32(&vert[0], context, interface) &&
-            let Ok(f1) = eval_str_to_f32(&vert[1], context, interface) &&
-            let Ok(f2) = eval_str_to_f32(&vert[2].as_str(), context, interface)
+        if let f0 = eval_str_to_f32(&vert[0], context, interface)? &&
+            let f1 = eval_str_to_f32(&vert[1], context, interface)? &&
+            let f2 = eval_str_to_f32(&vert[2].as_str(), context, interface)?
         {
             verts.push(Vec3::new(f0, f1, f2));
         }
@@ -221,7 +233,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
 
     let mut frads = gm.frads
         .iter()
-        .map(|exp| eval_str_to_f32(&exp, context,  interface))
+        .map(|exp| eval_str_to_f32(&exp, context, interface))
         .collect::<anyhow::Result<_>>()?;
 
     let prad = eval_str_to_f32(&gm.prad, context, interface)?;
@@ -237,12 +249,12 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
 
     let box_lengths = gm.box_lengths
         .iter()
-        .map(|exp| eval_str_to_f32(&exp, context,  interface))
+        .map(|exp| eval_str_to_f32(&exp, context, interface))
         .collect::<anyhow::Result<_>>()?;
 
     let xyz = gm.xyz
         .iter()
-        .map(|exp| eval_str_to_f32(&exp, context,  interface))
+        .map(|exp| eval_str_to_f32(&exp, context, interface))
         .collect::<anyhow::Result<_>>()?;
 
     let mut paxises: Vec<CateAxisParam> = Vec::new();
@@ -272,7 +284,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
                 }
             }
         } else {
-            let dir = parse_str_axis_to_vec3(axis, context,  interface);
+            let dir = parse_str_axis_to_vec3(axis, context, interface)?;
             let axis = CateAxisParam {
                 refno: Default::default(),
                 number: 0,
@@ -285,18 +297,16 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
         }
     }
     let mut plin_verts = Vec2::ZERO;
-    // let mut plin_dxy = Vec2::ZERO;
     let mut plin_plax = Vec3::X;
     if let Some(jusl) = jusl_param {
         //直接把 jusl_dxy加上
-        plin_verts = Vec2::new(eval_str_to_f32(&jusl.vxy[0], context,  interface).unwrap_or(0.0),
-                               eval_str_to_f32(&jusl.vxy[1], context,  interface).unwrap_or(0.0))
-            + Vec2::new(eval_str_to_f32(&jusl.dxy[0], context,  interface).unwrap_or(0.0),
-                        eval_str_to_f32(&jusl.dxy[1], context,  interface).unwrap_or(0.0));
+        plin_verts = Vec2::new(eval_str_to_f32(&jusl.vxy[0], context, interface)?,
+                               eval_str_to_f32(&jusl.vxy[1], context, interface)?)
+            + Vec2::new(eval_str_to_f32(&jusl.dxy[0], context, interface)?,
+                        eval_str_to_f32(&jusl.dxy[1], context, interface)?);
 
-        plin_plax = parse_str_axis_to_vec3(&jusl.plax, context,  interface);
+        plin_plax = parse_str_axis_to_vec3(&jusl.plax, context, interface)?;
     }
-
     let type_name = gm.gm_type.clone();
     Ok(GmseParamData {
         refno: gm.refno,
@@ -332,7 +342,7 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
     scom: &ScomInfo,
     context: &BTreeMap<SmolStr, SmolStr>,
     interface: Option<&T>,
-) -> Option<CateAxisParam> {
+) -> anyhow::Result<CateAxisParam> {
     let key: SmolStr = axis_param.pconnect.replace("\n", "").replace(" ", "").into();
     let pconnect = if context.contains_key(&key) {
         let tmp = context[&key].parse::<u32>().unwrap_or(0u32);
@@ -341,12 +351,12 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
         "".to_string()
     };
     let number = axis_param.number;
-    let pbore = eval_str_to_f32(&axis_param.pbore, &context,  interface).unwrap_or_default();
+    let pbore = eval_str_to_f32(&axis_param.pbore, &context, interface)?;
     match axis_param.type_name.as_str() {
         "PTAX" => {
-            let d = eval_str_to_f32(&axis_param.distance, &context,  interface).unwrap_or_default();
-            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context,  interface);
-            Some(CateAxisParam {
+            let d = eval_str_to_f32(&axis_param.distance, &context, interface)?;
+            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)?;
+            Ok(CateAxisParam {
                 refno: axis_param.refno,
                 number,
                 pt: Vec3::new(d * dir[0] + pos[0], d * dir[1] + pos[1], d * dir[2] + pos[2]),
@@ -356,27 +366,26 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
             })
         }
         "PTCA" | "PTMI" => {
-            let x = eval_str_to_f32(&axis_param.x, &context,  interface).unwrap_or_default();
-            let y = eval_str_to_f32(&axis_param.y, &context,  interface).unwrap_or_default();
-            let z = eval_str_to_f32(&axis_param.z, &context,  interface).unwrap_or_default();
-            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context,  interface);
-            Some(CateAxisParam { refno: axis_param.refno, number, pt: Vec3::new(pos[0] + x, pos[1] + y, pos[2] + z), dir, pconnect, pbore })
+            let x = eval_str_to_f32(&axis_param.x, &context, interface)?;
+            let y = eval_str_to_f32(&axis_param.y, &context, interface)?;
+            let z = eval_str_to_f32(&axis_param.z, &context, interface)?;
+            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)?;
+            Ok(CateAxisParam { refno: axis_param.refno, number, pt: Vec3::new(pos[0] + x, pos[1] + y, pos[2] + z), dir, pconnect, pbore })
         }
         "PTPOS" => {
-            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context,  interface);
-            let pnt_index_str = axis_param.pnt_index_str.as_ref()?;
+            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)?;
+            let pnt_index_str = axis_param.pnt_index_str.as_ref().ok_or(anyhow!("pnt_index_str 错误"))?;
             let paras = pnt_index_str.split_whitespace().map(|x| x.trim().to_owned()).collect::<Vec<_>>();
             if paras.len() == 2 {
                 let pnt_index = paras[1].parse::<i32>().unwrap_or(i32::MAX);
                 if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_index) {
-                    if let Some(axis) = resolve_axis_param(&scom.axis_params[indx], scom, context,  interface) {
-                        return Some(CateAxisParam { refno: axis_param.refno, number, pt: axis.pt, dir, pconnect, pbore });
-                    }
+                    let axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
+                    return Ok(CateAxisParam { refno: axis_param.refno, number, pt: axis.pt, dir, pconnect, pbore });
                 }
             }
-            return None;
+            return Ok(CateAxisParam::default());
         }
-        _ => None
+        _ => Ok(CateAxisParam::default())
     }
 }
 

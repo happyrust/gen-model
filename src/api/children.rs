@@ -1,20 +1,22 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::env;
 use std::fmt::format;
 use std::sync::Arc;
 use aios_core::pdms_types::*;
 use arangors_lite::{Connection, Database};
+use bevy::utils::petgraph::visit::Walker;
 use calamine::Error::De;
 use dashmap::DashSet;
+use nom::combinator::value;
 use sqlx::{Error, MySql, Pool, Row};
-use crate::consts::PDMS_ELEMENTS_TABLE;
+use crate::consts::{PDMS_ELEMENTS_TABLE, PDMS_PROJECT_MDB_TABLE};
 use crate::api::element::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};
 use sqlx::mysql::MySqlRow;
 use crate::aql_api::children::query_owner_with_type_aql;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::defines::{AiosString, CACHED_MDB_SITE_MAP};
+use crate::defines::{RString, CACHED_MDB_SITE_MAP};
 use crate::helper::qualified_table_name;
 
 /// 遍历该节点下的 children (包含自己)
@@ -164,7 +166,7 @@ pub async fn fuzzy_query_refnos_by_name(att_type: String, name: String, pool: &P
     Ok(result)
 }
 
-pub async fn fuzzy_query_refnos_by_name_limit(name: String, numbdbs: &Vec<i32>, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
+pub async fn fuzzy_query_refnos_by_name_limit(name: String, numbdbs: &BTreeSet<i32>, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = vec![];
     let sql = gen_fuzzy_query_refnos_by_name_sql_limit(name, numbdbs);
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
@@ -287,22 +289,37 @@ pub async fn query_owner_till_type(mut refno: RefU64, types: Vec<String>, pool: 
 /// 将树节点的 site 提前保存下来
 pub async fn cache_mdb_site_map(mdb: &str, module: &str, pool: &Pool<MySql>) {
     if let Ok(world) = query_world(mdb, module, pool).await {
-        if !CACHED_MDB_SITE_MAP.contains_key(&world.refno) {
-            if let Ok(mut children) = query_world_children_eles(mdb, module, pool).await {
-                for mut child in &mut children {
-                    child.owner = world.refno;
-                }
-                CACHED_MDB_SITE_MAP.insert(world.refno, &PdmsElementVec(children)).expect("CACHED_MDB_SITE_MAP save error");
+        if CACHED_MDB_SITE_MAP.read().await.contains_key(&world.refno) {
+            return;
+        }
+        let mut lock = CACHED_MDB_SITE_MAP.write().await;
+        if let Ok(mut children) = query_world_children_eles(mdb, module, pool).await {
+            for mut child in &mut children {
+                child.owner = world.refno;
             }
+            lock.insert(world.refno, PdmsElementVec(children));//.expect("CACHED_MDB_SITE_MAP save error");
         }
     }
 }
 
+pub async fn query_mdb_all_dbnums(mdb: &str, pool: &Pool<MySql>) -> anyhow::Result<BTreeSet<i32>> {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT DB_NUM FROM {PDMS_PROJECT_MDB_TABLE} WHERE MDB_NAME='/{}' ORDER BY ORDER_NUM", mdb));
+    // dbg!(&sql);
+    let val = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let mut dbnums = BTreeSet::new();
+    for v in val {
+        dbnums.insert(v.get::<i32, _>(0));
+    }
+    Ok(dbnums)
+}
+
 pub async fn cache_mdb_module_numbdbs(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<i32>> {
     if let Ok(world) = query_world(mdb, module, pool).await {
-        if CACHED_MDB_SITE_MAP.contains_key(&world.refno) {
-            let children = CACHED_MDB_SITE_MAP.get(&world.refno).unwrap();
-            let children = children.value().iter()
+        let lock = CACHED_MDB_SITE_MAP.read().await;
+        if lock.contains_key(&world.refno) {
+            let children = lock.get(&world.refno).unwrap();
+            let children = children.iter()
                 .map(|x| RefU64::from_refno_str(&x.refno).unwrap_or(RefU64(0))).collect::<Vec<RefU64>>();
             let result = query_numbdb_from_refnos(children, pool).await?;
             return Ok(result);
@@ -405,7 +422,7 @@ fn gen_fuzzy_query_refnos_by_name_sql(att_type: Option<String>, name: String) ->
     sql
 }
 
-fn gen_fuzzy_query_refnos_by_name_sql_limit(name: String, numbdbs: &Vec<i32>) -> String {
+fn gen_fuzzy_query_refnos_by_name_sql_limit(name: String, numbdbs: &BTreeSet<i32>) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE NAME LIKE '%{}%' ", name));
     if !numbdbs.is_empty() {

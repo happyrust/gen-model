@@ -4,13 +4,16 @@ use aios_core::data_center::{DataCenterAttr, DataCenterInstance, DataCenterProje
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use arangors_lite::Database;
-use crate::aql_api::children::{query_travel_children_aql, query_travel_children_with_type_aql};
+use sqlx::{MySql, Pool};
+use crate::api::room_code::query_room_code;
+use crate::aql_api::children::{query_refnos_travel_children_with_type_aql, query_travel_children_aql};
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 
-pub async fn get_valv_data(refno: RefU64, database: &Database) -> DataCenterProject {
+pub async fn get_valv_data(refnos: Vec<RefU64>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<DataCenterProject> {
     let mut instance = Vec::new();
-    if let Ok(valves) = query_travel_children_with_type_aql(database, refno, "VALV").await {
+    if let Ok(valves) = query_refnos_travel_children_with_type_aql(database, refnos, vec!["VALV"]).await {
         for valv in valves {
+            let room_name = query_room_code(valv.refno, pool).await?.unwrap_or("".to_string());
             instance.push(DataCenterInstance {
                 object_model_code: "COMPBA".to_string(),
                 project_code: "1516".to_string(),
@@ -18,17 +21,17 @@ pub async fn get_valv_data(refno: RefU64, database: &Database) -> DataCenterProj
                 version: "A版".to_string(),
                 attributes: vec![DataCenterAttr {
                     attribute_model_code: "COMP8".to_string(),
-                    value: "1R101".to_string(),
+                    value: room_name,
                 }],
             });
         }
     }
-    DataCenterProject {
+    Ok(DataCenterProject {
         package_code: DataCenterProject::convert_package_code(),
         project_code: "1516".to_string(),
         owner: "KY1801".to_string(),
         instances: instance,
-    }
+    })
 }
 
 #[tokio::test]

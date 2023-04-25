@@ -47,6 +47,10 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &[&st
             //type 需要获取
             if info.offset != 0 || info.hash as u32 == *TYPE_HASH {
                 let t = info.name.as_str();
+                //todo 需要进一步查找原因
+                if t == "DETR" {
+                    continue;
+                }
                 let hash = NounHash::from(db1_hash(&info.name));
                 match info.att_type {
                     DbAttributeType::INTEGER => {
@@ -376,6 +380,19 @@ pub async fn get_site_major_from_uda(site_refno: RefU64, pool: &Pool<MySql>) -> 
     None
 }
 
+/// 获取该项目对应的所有的 uda name ，并过滤调 udna 为空的情况
+pub async fn query_uda_ukey_udna_all(pool: &Pool<MySql>) -> anyhow::Result<HashMap<u32, String>> {
+    let mut result = HashMap::new();
+    let sql = gen_query_uda_name_sql();
+    let query_results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    for query_result in query_results {
+        let u_key = query_result.get::<i32, _>("UKEY");
+        let u_name = query_result.get::<String, _>("UDNA");
+        result.entry(u_key as u32).or_insert(u_name);
+    }
+    Ok(result)
+}
+
 pub fn gen_query_explicit_attr_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT DATA FROM {PDMS_EXPLICIT_TABLE} WHERE ID = {} ;", refno.0));
@@ -384,7 +401,7 @@ pub fn gen_query_explicit_attr_sql(refno: RefU64) -> String {
 
 pub fn gen_query_uda_attr_sql(att_type: &str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT DATA FROM {PDMS_UDA_TABLE} WHERE TYPE = '{}' ;", att_type));
+    sql.push_str(&format!("SELECT DATA FROM {PDMS_UDA_ATT_TABLE} WHERE TYPE = '{}' ;", att_type));
     sql
 }
 
@@ -421,6 +438,12 @@ fn gen_query_numbdbs_by_mdb_sql(dbs: RefU64Vec) -> String {
     if !b_empty { dbs_sql.remove(dbs_sql.len() - 1); }
     let mut sql = String::new();
     sql.push_str(&format!("SELECT NUMBDB FROM DB WHERE ID IN ( {} )", dbs_sql));
+    sql
+}
+
+fn gen_query_uda_name_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT UKEY,UDNA FROM {PDMS_UDA_TABLE} WHERE UDNA != ''"));
     sql
 }
 

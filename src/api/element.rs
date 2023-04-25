@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 
 use aios_core::pdms_types::*;
@@ -359,7 +359,7 @@ pub struct DbQuickInfo {
 pub type MdbQuickInfoMap = HashMap<String, HashMap<String, Vec<DbQuickInfo>>>;
 
 
-pub async fn query_types_refnos(type_names: &[&str], pool: &Pool<MySql>, dbnos: Option<Vec<i32>>) -> anyhow::Result<RefU64Vec> {
+pub async fn query_types_refnos(type_names: &[&str], pool: &Pool<MySql>, dbnos: Option<&[i32]>) -> anyhow::Result<RefU64Vec> {
     let mut r = vec![];
     let sql = gen_query_type_refnos_sql(type_names, dbnos);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
@@ -507,8 +507,19 @@ pub async fn query_project_dbno_info(project_name: &str, info_pool: &Pool<MySql>
 }
 
 ///检查refno是否存在PDMS_ELEMENTS的表中
-pub async fn check_exist_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<bool> {
-    let sql = format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {})", refno.0);
+pub async fn check_exist_refno(refno: RefU64, pool: &Pool<MySql>, mdb_dbnums: &BTreeSet<i32>) -> anyhow::Result<bool> {
+    let mut in_sql = " (".to_string();
+    for d in mdb_dbnums {
+        in_sql.push_str(&format!(r#"{d},"#));
+    }
+    in_sql.remove(in_sql.len() - 1);
+    in_sql.push_str(") ");
+    let sql = if mdb_dbnums.is_empty() {
+        format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} )", refno.0)
+    }else{
+        format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND NUMBDB IN {} )", refno.0, in_sql)
+    };
+    // dbg!(&sql);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(result.get::<bool, _>(0))
 }
@@ -653,7 +664,7 @@ pub fn gen_query_refno_type_sql(refno: RefU64) -> String {
 }
 
 #[inline]
-pub fn gen_query_type_refnos_sql(type_names: &[&str], dbnos: Option<Vec<i32>>) -> String {
+pub fn gen_query_type_refnos_sql(type_names: &[&str], dbnos: Option<&[i32]>) -> String {
     let mut sql = String::new();
     let mut in_sql = " (".to_string();
     for type_name in type_names {
@@ -663,8 +674,7 @@ pub fn gen_query_type_refnos_sql(type_names: &[&str], dbnos: Option<Vec<i32>>) -
     in_sql.push_str(") ");
 
     let mut dbnos_filter_sql = "".to_string();
-    if dbnos.is_some() {
-        let dbnos = dbnos.unwrap();
+    if let Some(dbnos) = dbnos {
         if dbnos.len() > 0 {
             let sql_str = dbnos.iter().map(|x| x.to_string()).join(",");
             dbnos_filter_sql.push_str(&format!(" AND NUMBDB IN ({sql_str}) "));
