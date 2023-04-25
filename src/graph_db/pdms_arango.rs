@@ -150,6 +150,7 @@ pub async fn save_virtual_hole_value_to_arangodb(db_option: &DbOption) -> anyhow
 fn insert_virtual_hole_data() -> Vec<VirtualHoleGraphNode> {
     let mut virtual_data = Vec::new();
     let data = [
+        //sample测试
         ("24383_46246", 1, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "1RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
         ("24383_66592", 2, "a2b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "2RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
         ("24383_380", 3, "a3b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "3RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
@@ -170,6 +171,18 @@ fn insert_virtual_hole_data() -> Vec<VirtualHoleGraphNode> {
         ("15203_1955", 18, "a18b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "18RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
         ("15203_1961", 19, "a19b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "19RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
         ("15203_1967", 20, "a20b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "20RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
+
+
+  //AvevaMarineSample测试/
+        ("17496_98577", 101, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "1RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
+        ("17496_98584", 102, "a2b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "2RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
+        ("17496_98591", 103, "a3b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "3RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
+        ("17496_99761", 104, "a4b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "4RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
+        ("17496_100504", 105, "a5b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "5RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
+        ("17496_118293", 106, "a6b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "6RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
+        ("17496_98578", 107, "a7b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "7RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
+        ("17496_118197",108, "a8b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "8RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
+
     ];
     for i in data {
         let hole_data = VirtualHoleGraphNode {
@@ -217,6 +230,7 @@ fn insert_virtual_hole_data() -> Vec<VirtualHoleGraphNode> {
 fn insert_virtual_embed_data() -> Vec<VirtualEmbedGraphNode> {
     let mut virtual_data = Vec::new();
     let data = [
+        //sample测试
         ("24383_46246", 21, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46246", "51RS04TT0012T", "AFW", ""),
         ("24383_66592", 22, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46247", "52RS04TT0012T", "AFW", ""),
         ("24383_380", 23, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46248", "53RS04TT0012T", "AFW", ""),
@@ -237,6 +251,24 @@ fn insert_virtual_embed_data() -> Vec<VirtualEmbedGraphNode> {
         ("15203_1955", 38, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46263", "68RS04TT0012T", "AFW", ""),
         ("15203_1961", 39, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46264", "69RS04TT0012T", "AFW", ""),
         ("15203_1967", 40, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46265", "70RS04TT0012T", "AFW", ""),
+
+
+        //AvevaMarineSample测试
+        ("17496_98577", 121, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46246", "51RS04TT0012T", "AFW", ""),
+        ("17496_98584", 122, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46247", "52RS04TT0012T", "AFW", ""),
+        ("17496_98591", 123, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46248", "53RS04TT0012T", "AFW", ""),
+        ("17496_99761", 124, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46249", "54RS04TT0012T", "AFW", ""),
+        ("17496_100504",125, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46250", "55RS04TT0012T", "AFW", ""),
+        ("17496_118293",126, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46251", "56RS04TT0012T", "AFW", ""),
+        ("17496_98578",127, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46252", "57RS04TT0012T", "AFW", ""),
+        ("17496_118197",128, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46253", "58RS04TT0012T", "AFW", ""),
+
+
+
+
+
+
+
     ];
     for i in data {
         let hole_data = VirtualEmbedGraphNode {
