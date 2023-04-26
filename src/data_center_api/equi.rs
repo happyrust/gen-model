@@ -25,7 +25,7 @@ pub async fn get_machine_equi_data(refnos: Vec<RefU64>,pool:&Pool<MySql>,databas
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "COMPB3".to_string(),
-                value: AttrValue::AttrFloat(position).into(),
+                value: AttrValue::AttrString(position).into(),
             });
             result.push(DataCenterInstance {
                 object_model_code: "COMPB".to_string(),

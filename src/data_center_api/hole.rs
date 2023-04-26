@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::{env, fs};
 use std::io::Write;
+use aios_core::create_attas_structs::VirtualHoleGraphNode;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject, HoleType, ItemValue};
+use aios_core::negative_mesh_type::NegativeEdges;
 use aios_core::pdms_types::RefU64;
+use arangors_lite::{AqlQuery, Database};
 use bevy::prelude::dbg;
 use chrono::DateTime;
 use chrono::{Datelike, NaiveDateTime, Timelike};
@@ -10,8 +13,10 @@ use glam::Vec3;
 use regex::Regex;
 use sqlx::{Error, Executor, MySql, Pool, Row};
 use sqlx::mysql::{MySqlQueryResult, MySqlRow};
-use crate::consts::HOLES_TABLE;
+use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_arango::save_arangodb_with_database;
 
 /// 正则匹配字符串中的数字
 pub fn get_num_from_str(input: &str) -> Option<i32> {
@@ -24,7 +29,7 @@ pub fn get_num_from_str(input: &str) -> Option<i32> {
     None
 }
 
-async fn query_hole_data(id: u32, pool: &Pool<MySql>) -> Option<DataCenterInstance> {
+async fn query_hole_data_tidb(id: u32, pool: &Pool<MySql>) -> Option<DataCenterInstance> {
     if let Ok(hole_type) = query_hole_type(id, pool).await {
         let result = match hole_type {
             HoleType::STUCJ => {
@@ -439,6 +444,95 @@ pub fn convert_time_to_vec(time: &str) -> Vec<String> {
     r
 }
 
+pub async fn save_hole_data_to_arangodb(data: Vec<VirtualHoleGraphNode>, database: &Database) -> anyhow::Result<String> {
+    let json = serde_json::to_value(&data);
+    if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
+    let json = json.unwrap();
+    let r = save_arangodb_with_database(json, AQL_HOLE_DATA_COLLECTION, database).await;
+    let edge_r = create_hole_data_edge(&data, database).await?;
+    if let Err(r) = r {
+        Ok(r.to_string())
+    } else {
+        Ok("保存成功".to_string())
+    }
+}
+
+async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Database) -> anyhow::Result<()> {
+    let mut edges = Vec::new();
+    for d in data {
+        let refno = RefU64::from_refno_str(&d.rely_item_ref);
+        if refno.is_err() { continue; }
+        let refno = refno.unwrap();
+        let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
+        let to = format!("{}/{}", AQL_HOLE_DATA_COLLECTION, d._key);
+        let hash = hash_two_str(&from, &to);
+        edges.push(NegativeEdges {
+            _key: hash.to_string(),
+            _from: from,
+            _to: to,
+        });
+    }
+    if !edges.is_empty() {
+        let json = serde_json::to_value(&edges)?;
+        save_arangodb_with_database(json, AQL_HOLE_EDGE_COLLECTION, database).await?;
+    }
+    Ok(())
+}
+
+/// 通过孔洞依附的墙或板来查询这个墙上所有的孔洞数据
+pub async fn query_hole_data_aql(rely_refno: RefU64, database: &Database) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
+    let key = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, rely_refno.to_url_refno());
+    let aql = AqlQuery::new("
+    for c in 1 outbound @key hole_edge
+    filter c != null
+    return {
+        '_key': c._key,
+        'RelyItem': c.RelyItem,
+        'MainItem': c.MainItem,
+        'Speciality': c.Speciality,
+        'Position': c.Position,
+        'HoleWork': c.HoleWork,
+        'WorkBy': c.WorkBy,
+        'Time': c.Time,
+        'Shape': c.Shape,
+        'Ori': c.Ori,
+        'ItemREF': c.ItemREF,
+        'RelyItemREF': c.RelyItemREF,
+        'MainItemREF': c.MainItemREF,
+        'OpenItem': c.OpenItem,
+        'PlugType': c.PlugType,
+        'SizeHeight': c.SizeHeight,
+        'SizeWidth': c.SizeWidth,
+        'BankWidth': c.BankWidth,
+        'BankHeight': c.BankHeight,
+        'HotDis': c.HotDis,
+        'HeatThick': c.HeatThick,
+        'refNo': c.refNo,
+        'FittRefNo': c.FittRefNo,
+        'SubsMaterial': c.SubsMaterial,
+        'SubsThickness': c.SubsThickness,
+        'iCreate': c.iCreate,
+        'SubsType': c.SubsType,
+        'ExtentLength1': c.ExtentLength1,
+        'ExtentLength2': c.ExtentLength2,
+        'Second': c.Second,
+        'ReHole': c.ReHole,
+        'Note': c.Note,
+        'SizeThrowWall': c.SizeThrowWall,
+        'HoleBPID': c.HoleBPID,
+        'HoleBPVER': c.HoleBPVER,
+        'RelyItemBPID': c.RelyItemBPID,
+        'RelyItemBPVER': c.RelyItemBPVER,
+        'MainPipeline': c.MainPipeline,
+        'iFlowState': c.iFlowState,
+        'hType': c.hType,
+        'MainItems': c.MainItems,
+        'MainItemRefs': c.MainItemRefs
+    }").bind_var("key", key);
+    let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
+    Ok(result)
+}
+
 fn match_plug_type_str(input: &str) -> String {
     match input.to_uppercase().as_str() {
         "A" => { "气密封堵".to_string() }
@@ -456,6 +550,13 @@ fn match_plug_type_str(input: &str) -> String {
         "G3" => { "国标防水封堵3,待雨水斗安装完毕后,按照《其他厂房排水》技术规格书(项目文件编码)要求进行封堵".to_string() }
         &_ => { "".to_string() }
     }
+}
+
+pub(crate) fn hash_two_str(from: &str, to: &str) -> u64 {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(from, &mut hash);
+    std::hash::Hash::hash(to, &mut hash);
+    std::hash::Hasher::finish(&hash)
 }
 
 #[test]

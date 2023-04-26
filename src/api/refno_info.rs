@@ -94,13 +94,14 @@ pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: Option<&[i32]>, arango_d
 }
 
 /// 获取设备的底标高
-pub async fn query_refno_height_position(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<f32> {
+pub async fn query_refno_height_position(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<String> {
     let explicit_attr = query_explicit_attr(refno, pool).await?;
     let position = explicit_attr.get(&NounHash(WDJZ as u32));
     if let Some(AttrVal::StringType(position)) = position {
-        Ok(position.parse::<f32>().unwrap_or(0.0))
+        let position = position.replace("mm","").trim().to_string();
+        Ok(position.to_string())
     } else {
-        Ok(0.0)
+        Ok("0.0".to_string())
     }
 }
 

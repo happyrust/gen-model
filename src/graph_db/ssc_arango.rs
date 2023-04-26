@@ -60,9 +60,8 @@ pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: 
     let pdms_instances = "pdms_instances";
     let aql = AqlQuery::new("
     FOR c IN 0..10 inbound @refno ssc_edges
-        PRUNE document(@collection,c._key) != null
-        Filter document(@collection,c._key) != null
         let f = document(@collection,c._key)
+        Filter f != null
         return {
             '_key':f._key,
             'data':f.data,
@@ -75,9 +74,9 @@ pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: 
         }")
         .bind_var("refno", refno_aql)
         .bind_var("collection", pdms_instances);
-    let result: Vec<EleGeosInfoJson> = database.aql_query(aql).await?;
+    let result: Vec<EleGeosInfoJson> = database.aql_query(aql).await.unwrap();
     if result.is_empty() { return Ok(None); }
-    let r  = result.into_iter().map(|x| { EleGeosInfo::from_json_type(x)}).collect::<Vec<_>>();
+    let r = result.into_iter().map(|x| { EleGeosInfo::from_json_type(x) }).collect::<Vec<_>>();
     Ok(Some(r))
 }
 
