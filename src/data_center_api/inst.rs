@@ -39,18 +39,18 @@ pub async fn get_inst_data(refnos: Vec<RefU64>, database: &Database,pool:&Pool<M
     })
 }
 
-#[tokio::test]
-async fn test_valv() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
-    let refno = RefU64::from_refno_str("24381/104050").unwrap();
-    let data = get_inst_data(vec![refno], &database).await;
-    let mut file = fs::File::create("仪控.json")?;
-    let data = serde_json::to_string(&data).unwrap();
-    file.write_all(&data.into_bytes())?;
-    Ok(())
-}
+// #[tokio::test]
+// async fn test_valv() -> anyhow::Result<()> {
+//     use config::{Config, ConfigError, Environment, File};
+//     let s = Config::builder()
+//         .add_source(File::with_name("DbOption"))
+//         .build()?;
+//     let db_option: DbOption = s.try_deserialize().unwrap();
+//     let database = get_arangodb_conn_from_db_option(&db_option).await?;
+//     let refno = RefU64::from_refno_str("24381/104050").unwrap();
+//     let data = get_inst_data(refno, &database).await;
+//     let mut file = fs::File::create("仪控.json")?;
+//     let data = serde_json::to_string(&data).unwrap();
+//     file.write_all(&data.into_bytes())?;
+//     Ok(())
+// }
