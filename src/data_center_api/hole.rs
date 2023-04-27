@@ -583,7 +583,7 @@ async fn test_gen_stucj_data() -> anyhow::Result<()> {
     // let refno = RefU64::from_refno_str("24383/101196").unwrap();
     let mut instances = Vec::new();
     for i in 0..40 {
-        if let Some(r) = query_hole_data(i, &pool).await {
+        if let Some(r) = query_hole_data_tidb(i, &pool).await {
             instances.push(r);
         }
     }
