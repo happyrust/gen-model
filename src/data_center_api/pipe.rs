@@ -52,9 +52,9 @@ pub async fn get_all_metadata_pipe(pool: &Pool<MySql>) -> anyhow::Result<HashMap
     Ok(pipe_metadata_map)
 }
 
-pub async fn get_data_center_from_pipe(aios_mgr: &AiosDBManager, pipe_refno: RefU64) -> anyhow::Result<()> {
+pub async fn get_data_center_from_pipe(aios_mgr: &AiosDBManager, pipe_refno: RefU64) -> anyhow::Result<Option<DataCenterProjectWithRelations>> {
     let pool = aios_mgr.get_project_pool_by_refno(pipe_refno).await;
-    if pool.is_none() { return Ok(()); }
+    if pool.is_none() { return Ok(None); }
     let (_, pool) = pool.unwrap();
     let database = aios_mgr.get_arangodb_conn().await?;
     // 找到所有需要统计的 bran
@@ -79,10 +79,7 @@ pub async fn get_data_center_from_pipe(aios_mgr: &AiosDBManager, pipe_refno: Ref
         instances,
         relations,
     };
-    let mut file = File::create("管段.json")?;
-    let json = serde_json::to_string(&data).unwrap();
-    file.write_all(&json.into_bytes())?;
-    Ok(())
+    Ok(Some(data))
 }
 
 /// 找到所有需要收集的bran以及href tref 的参考号

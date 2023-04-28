@@ -106,7 +106,7 @@ pub const GENRAL_NEGATIVE_NOUN_NAMES: [&'static str; 12] = [
 
 pub const CATA_ATT_TYPES: [&'static str; 25] = [
     "BRAN", "HANG", "ELCONN",
-    "CMPF", "WALL", "STWALL", "GWALL",  "FIXING",
+    "CMPF", "WALL", "STWALL", "GWALL", "FIXING",
     "PJOI", "PFIT", "GENSEC", "RNODE", "PRTELE", "GPART", "SCREED", "NOZZ", "PALJ",
     // "SUBJ",
     "CABLE", "BATT", "CMFI", "SCOJ", "SEVE", "SBFI", "SCTN", "FITT",
@@ -1241,6 +1241,7 @@ impl AiosDBManager {
                     if let Some(leave) = last_attr.get_i32("LEAV") {
                         if last_geoms.axis_map.contains_key(&leave) {
                             let tref = group_att.get_foreign_refno("TREF").unwrap_or(RefU64(0));
+                            let tref_attr = mgr.get_attr(tref).await?;
                             let p = &last_geoms.axis_map[&leave].pt;
                             let l_pos = last_world_trans.transform_point(Vec3::new(
                                 p[0] as f32,
@@ -1248,10 +1249,10 @@ impl AiosDBManager {
                                 p[2] as f32,
                             ));
                             let key = last_refno.hash_with_another_refno(tref);
-                            let att_type = last_attr.get_type();
+                            let att_type = tref_attr.get_type();
                             let mut extra_type = "".to_string();
                             if att_type == "ATTA" {
-                                let attype = last_attr.get_str("ATTY").unwrap_or("");
+                                let attype = tref_attr.get_str("ATTY").unwrap_or("");
                                 extra_type = attype.to_string();
                             }
                             tubi_aqls.entry(key).or_insert(TubiEdgeAql {
@@ -1633,13 +1634,13 @@ impl AiosDBManager {
                                 has_tubi = true;
                                 if let Some(mut tubi_aabb) = tubi_aabb {
                                     tubi_aabb.merge(&transformed_aabb);
-                                }else{
+                                } else {
                                     tubi_aabb = Some(transformed_aabb);
                                 }
                             } else {
                                 if let Some(mut ele_aabb) = ele_aabb {
                                     ele_aabb.merge(&transformed_aabb);
-                                }else{
+                                } else {
                                     ele_aabb = Some(transformed_aabb);
                                 }
                             }
@@ -1709,13 +1710,12 @@ impl AiosDBManager {
             .into_iter()
             .map(|x| x.1)
             .collect::<Vec<_>>();
-        // dbg!(&tubi_result.len());
+        dbg!(&tubi_result.len());
         if !tubi_result.is_empty() {
             let conn = mgr.get_arangodb_conn().await.unwrap();
             let json = serde_json::to_value(tubi_result).unwrap_or_default();
             save_arangodb_with_database(json, "tubi_edges", &conn)
-                .await
-                .unwrap();
+                .await?;
         }
         println!(
             "处理元件库几何体: {} 花费时间: {} ms",

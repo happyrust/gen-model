@@ -259,10 +259,11 @@ async fn create_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &Da
 }
 
 /// 通过埋件依附的墙或板来查询这个墙上所有的埋件数据
-pub async fn query_embed_data_aql(rely_refno: RefU64, database: &Database) -> anyhow::Result<Vec<VirtualEmbedGraphNode>> {
-    let key = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, rely_refno.to_url_refno());
+pub async fn query_embed_data_aql(rely_refno: Vec<RefU64>, database: &Database) -> anyhow::Result<Vec<VirtualEmbedGraphNode>> {
+    let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("\
-        for c in 1 outbound @key embed_edge
+    for key in @keys
+        for c in 1 outbound key embed_edge
             filter c != null
             return {
                 '_key': c._key,
@@ -293,9 +294,62 @@ pub async fn query_embed_data_aql(rely_refno: RefU64, database: &Database) -> an
                 'RelyItemBPID': c.RelyItemBPID,
                 'RelyItemBPVER': c.RelyItemBPVER,
                 'Form': c.Form
-        }").bind_var("key", key);
+        }").bind_var("keys", keys);
     let result = database.aql_query::<VirtualEmbedGraphNode>(aql).await?;
     Ok(result)
+}
+
+pub async fn get_embed_data_total_aql(database: &Database) -> anyhow::Result<Vec<VirtualEmbedGraphNode>> {
+    let aql = AqlQuery::new("\
+    for c in @@collection
+        return {
+            '_key': c._key,
+            'RelyItem': c.RelyItem,
+            'RelyItemRef': c.RelyItemRef,
+            'MainItem': c.MainItem,
+            'Speciality': c.Speciality,
+            'Position': c.Position,
+            'Ori': c.Ori,
+            'Work': c.Work,
+            'WorkBy': c.WorkBy,
+            'Time': c.Time,
+            'StanderType': c.StanderType,
+            'OpenItem': c.OpenItem,
+            'SizeLength': c.SizeLength,
+            'SizeWidth': c.SizeWidth,
+            'SizeThickness': c.SizeThickness,
+            'MinThickness': c.MinThickness,
+            'Load': c.Load,
+            'MinDistance': c.MinDistance,
+            'SubsMaterial': c.SubsMaterial,
+            'FittID': c.FittID,
+            'REF': c.REF,
+            'Shape': c.Shape,
+            'Note': c.Note,
+            'EmbedBPID': c.EmbedBPID,
+            'EmbedBPVER': c.EmbedBPVER,
+            'RelyItemBPID': c.RelyItemBPID,
+            'RelyItemBPVER': c.RelyItemBPVER,
+            'Form': c.Form
+        }").bind_var("@collection", AQL_EMBED_DATA_COLLECTION);
+    let result = database.aql_query::<VirtualEmbedGraphNode>(aql).await?;
+    Ok(result)
+}
+
+/// 删除埋件的信息，并删除边
+pub async fn delete_embed_data_aql(keys:Vec<String>,database:&Database) -> anyhow::Result<bool> {
+    let edge_aql = AqlQuery::new("\
+    for key in @keys
+        for c,e in 1 inbound CONCAT('embed_data/',key) embed_edge
+            REMOVE e._key IN embed_edge
+    ").bind_var("keys",keys.clone());
+    let result = database.aql_query::<Vec<()>>(edge_aql).await;
+    let data_aql = AqlQuery::new("\
+    for key in @keys
+       REMOVE key IN embed_data
+    ").bind_var("keys",keys);
+    let result = database.aql_query::<Vec<()>>(data_aql).await;
+    Ok(!result.is_err())
 }
 
 fn get_relay_item(relay_item: String) -> AttrValue {

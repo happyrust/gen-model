@@ -16,7 +16,7 @@ use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use crate::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::save_arangodb_with_database;
+use crate::graph_db::pdms_arango::{remove_arangodb_with_refno_key, save_arangodb_with_database};
 
 /// 正则匹配字符串中的数字
 pub fn get_num_from_str(input: &str) -> Option<i32> {
@@ -480,57 +480,126 @@ async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Data
 }
 
 /// 通过孔洞依附的墙或板来查询这个墙上所有的孔洞数据
-pub async fn query_hole_data_aql(rely_refno: RefU64, database: &Database) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
-    let key = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, rely_refno.to_url_refno());
+pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &Database) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
+    let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("
-    for c in 1 outbound @key hole_edge
-    filter c != null
-    return {
-        '_key': c._key,
-        'RelyItem': c.RelyItem,
-        'MainItem': c.MainItem,
-        'Speciality': c.Speciality,
-        'Position': c.Position,
-        'HoleWork': c.HoleWork,
-        'WorkBy': c.WorkBy,
-        'Time': c.Time,
-        'Shape': c.Shape,
-        'Ori': c.Ori,
-        'ItemREF': c.ItemREF,
-        'RelyItemREF': c.RelyItemREF,
-        'MainItemREF': c.MainItemREF,
-        'OpenItem': c.OpenItem,
-        'PlugType': c.PlugType,
-        'SizeHeight': c.SizeHeight,
-        'SizeWidth': c.SizeWidth,
-        'BankWidth': c.BankWidth,
-        'BankHeight': c.BankHeight,
-        'HotDis': c.HotDis,
-        'HeatThick': c.HeatThick,
-        'refNo': c.refNo,
-        'FittRefNo': c.FittRefNo,
-        'SubsMaterial': c.SubsMaterial,
-        'SubsThickness': c.SubsThickness,
-        'iCreate': c.iCreate,
-        'SubsType': c.SubsType,
-        'ExtentLength1': c.ExtentLength1,
-        'ExtentLength2': c.ExtentLength2,
-        'Second': c.Second,
-        'ReHole': c.ReHole,
-        'Note': c.Note,
-        'SizeThrowWall': c.SizeThrowWall,
-        'HoleBPID': c.HoleBPID,
-        'HoleBPVER': c.HoleBPVER,
-        'RelyItemBPID': c.RelyItemBPID,
-        'RelyItemBPVER': c.RelyItemBPVER,
-        'MainPipeline': c.MainPipeline,
-        'iFlowState': c.iFlowState,
-        'hType': c.hType,
-        'MainItems': c.MainItems,
-        'MainItemRefs': c.MainItemRefs
-    }").bind_var("key", key);
+    for key in @keys
+    for c in 1 outbound key hole_edge
+        filter c != null
+        return {
+            '_key': c._key,
+            'RelyItem': c.RelyItem,
+            'MainItem': c.MainItem,
+            'Speciality': c.Speciality,
+            'Position': c.Position,
+            'HoleWork': c.HoleWork,
+            'WorkBy': c.WorkBy,
+            'Time': c.Time,
+            'Shape': c.Shape,
+            'Ori': c.Ori,
+            'ItemREF': c.ItemREF,
+            'RelyItemREF': c.RelyItemREF,
+            'MainItemREF': c.MainItemREF,
+            'OpenItem': c.OpenItem,
+            'PlugType': c.PlugType,
+            'SizeHeight': c.SizeHeight,
+            'SizeWidth': c.SizeWidth,
+            'BankWidth': c.BankWidth,
+            'BankHeight': c.BankHeight,
+            'HotDis': c.HotDis,
+            'HeatThick': c.HeatThick,
+            'refNo': c.refNo,
+            'FittRefNo': c.FittRefNo,
+            'SubsMaterial': c.SubsMaterial,
+            'SubsThickness': c.SubsThickness,
+            'iCreate': c.iCreate,
+            'SubsType': c.SubsType,
+            'ExtentLength1': c.ExtentLength1,
+            'ExtentLength2': c.ExtentLength2,
+            'Second': c.Second,
+            'ReHole': c.ReHole,
+            'Note': c.Note,
+            'SizeThrowWall': c.SizeThrowWall,
+            'HoleBPID': c.HoleBPID,
+            'HoleBPVER': c.HoleBPVER,
+            'RelyItemBPID': c.RelyItemBPID,
+            'RelyItemBPVER': c.RelyItemBPVER,
+            'MainPipeline': c.MainPipeline,
+            'iFlowState': c.iFlowState,
+            'hType': c.hType,
+            'MainItems': c.MainItems,
+            'MainItemRefs': c.MainItemRefs
+        }").bind_var("keys", keys);
     let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
     Ok(result)
+}
+
+/// 查询所有的孔洞信息
+pub async fn query_hole_data_total_aql(database: &Database) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
+    let aql = AqlQuery::new("
+    for c in @@collection
+        return {
+            '_key': c._key,
+            'RelyItem': c.RelyItem,
+            'MainItem': c.MainItem,
+            'Speciality': c.Speciality,
+            'Position': c.Position,
+            'HoleWork': c.HoleWork,
+            'WorkBy': c.WorkBy,
+            'Time': c.Time,
+            'Shape': c.Shape,
+            'Ori': c.Ori,
+            'ItemREF': c.ItemREF,
+            'RelyItemREF': c.RelyItemREF,
+            'MainItemREF': c.MainItemREF,
+            'OpenItem': c.OpenItem,
+            'PlugType': c.PlugType,
+            'SizeHeight': c.SizeHeight,
+            'SizeWidth': c.SizeWidth,
+            'BankWidth': c.BankWidth,
+            'BankHeight': c.BankHeight,
+            'HotDis': c.HotDis,
+            'HeatThick': c.HeatThick,
+            'refNo': c.refNo,
+            'FittRefNo': c.FittRefNo,
+            'SubsMaterial': c.SubsMaterial,
+            'SubsThickness': c.SubsThickness,
+            'iCreate': c.iCreate,
+            'SubsType': c.SubsType,
+            'ExtentLength1': c.ExtentLength1,
+            'ExtentLength2': c.ExtentLength2,
+            'Second': c.Second,
+            'ReHole': c.ReHole,
+            'Note': c.Note,
+            'SizeThrowWall': c.SizeThrowWall,
+            'HoleBPID': c.HoleBPID,
+            'HoleBPVER': c.HoleBPVER,
+            'RelyItemBPID': c.RelyItemBPID,
+            'RelyItemBPVER': c.RelyItemBPVER,
+            'MainPipeline': c.MainPipeline,
+            'iFlowState': c.iFlowState,
+            'hType': c.hType,
+            'MainItems': c.MainItems,
+            'MainItemRefs': c.MainItemRefs
+        }").bind_var("@collection", AQL_HOLE_DATA_COLLECTION);
+    let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
+    Ok(result)
+}
+
+/// 删除孔洞的信息，并删除边
+pub async fn delete_hole_data_aql(keys:Vec<String>,database:&Database) -> anyhow::Result<bool> {
+    let edge_aql = AqlQuery::new("\
+    for key in @keys
+        for c,e in 1 inbound CONCAT('hole_data/',key) hole_edge
+            REMOVE e._key IN hole_edge
+    ").bind_var("keys",keys.clone());
+    let result = database.aql_query::<Vec<()>>(edge_aql).await;
+    let data_aql = AqlQuery::new("\
+    for key in @keys
+       REMOVE key IN hole_data
+    ").bind_var("keys",keys);
+    let result = database.aql_query::<Vec<()>>(data_aql).await;
+    Ok(!result.is_err())
 }
 
 fn match_plug_type_str(input: &str) -> String {
