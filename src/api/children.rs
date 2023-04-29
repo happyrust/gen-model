@@ -1,8 +1,9 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::env;
 use std::fmt::format;
 use std::sync::Arc;
 use aios_core::pdms_types::*;
+use aios_core::three_dimensional_review::VagueSearchCondition;
 use arangors_lite::{Connection, Database};
 use bevy::utils::petgraph::visit::Walker;
 use calamine::Error::De;
@@ -364,6 +365,30 @@ pub async fn query_foreign_refnos_from_table(foreign_type: &str, table_name: &st
     Ok(result)
 }
 
+/// 通过用户自定义过滤条件来进行模糊查询
+pub async fn vague_query_refnos_by_name_sql_user_set(
+    name: String,
+    conditions: &HashMap<String, (VagueSearchCondition, String)>,
+    aios_mgr:&AiosDBManager ) -> anyhow::Result<Vec<(RefU64, String)>> {
+    let mut result = Vec::new();
+    // 只查询当前mdb的节点
+    if let Some(pool) = aios_mgr.get_project_pool(&aios_mgr.db_option.project_name) {
+        let mdb = aios_mgr.mdb_dbnums.clone().into_iter().collect::<Vec<_>>();
+        // 暂时先过滤 name 和 type
+        let sql = gen_vague_query_refnos_by_name_sql_user_set(&name, conditions, &mdb);
+        let query_results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+        for query_result in query_results {
+            let refno = query_result.try_get::<i64, _>("ID");
+            if refno.is_err() { continue; }
+            let refno = refno.unwrap();
+            let name = query_result.try_get::<String, _>("NAME");
+            if name.is_err() { continue; }
+            let name = name.unwrap();
+            result.push((RefU64(refno as u64), name));
+        }
+    }
+    Ok(result)
+}
 
 fn gen_query_names_from_refnos_with_type_sql(refnos: Vec<RefU64>, att_type: String) -> String {
     let mut sql = String::new();
@@ -436,6 +461,80 @@ fn gen_fuzzy_query_refnos_by_name_sql_limit(name: String, numbdbs: &BTreeSet<i32
         sql.push_str(")");
     }
     sql.push_str("LIMIT 10");
+    sql
+}
+
+fn gen_vague_query_refnos_by_name_sql_user_set(name: &String,
+                                               conditions: &HashMap<String, (VagueSearchCondition, String)>,
+                                               db_numbs: &Vec<i32>) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE "));
+    // 将 name 进行条件过滤
+    if !name.contains("*") {
+        sql.push_str(&format!("NAME == '{}' ", name));
+    } else {
+        let name = name.replace("*", "%");
+        sql.push_str(&format!("NAME like '{}' ", name));
+    }
+    // 过滤其他条件
+    for (key, (condition, filter)) in conditions {
+        let key = key.to_uppercase();
+        // pdms_element 只过滤这两种条件，其余的条件在其他表过滤
+        if !["NAME", "TYPE"].contains(&key.as_str()) {
+            continue; }
+        let mut filter_value = "".to_string();
+        // 将过滤条件进行分类处理
+        if key == "NAME" {
+            match condition {
+                VagueSearchCondition::And => {
+                    if !filter.contains("*") {
+                        filter_value = format!("AND NAME == '{}' ", filter);
+                    } else {
+                        let filter = filter.replace("*", "%");
+                        filter_value = format!("AND NAME like '{}' ", filter);
+                    }
+                }
+                VagueSearchCondition::Or => {
+                    if !filter.contains("*") {
+                        filter_value = format!("OR NAME == '{}' ", filter);
+                    } else {
+                        let filter = filter.replace("*", "%");
+                        filter_value = format!("OR NAME like '{}' ", filter);
+                    }
+                }
+                VagueSearchCondition::Not => {
+                    if !filter.contains("*") {
+                        filter_value = format!("AND NAME != '{}' ", filter);
+                    } else {
+                        let filter = filter.replace("*", "%");
+                        filter_value = format!("AND NAME NOT LIKE '{}' ", filter);
+                    }
+                }
+            }
+        } else {
+            match condition {
+                VagueSearchCondition::And => {
+                    filter_value = format!("AND {} == '{}'", key, filter)
+                }
+                VagueSearchCondition::Or => {
+                    filter_value = format!("OR {} == '{}'", key, filter)
+                }
+                VagueSearchCondition::Not => {
+                    filter_value = format!("AND {} != '{}'", key, filter)
+                }
+            }
+        }
+        sql.push_str(&filter_value);
+    }
+    // 过滤 mdb
+    let mut numbdb = String::new();
+    for db in db_numbs {
+        numbdb.push_str(&format!("{} ,", db));
+    }
+    if !db_numbs.is_empty() {
+        numbdb.remove(numbdb.len() - 1);
+        sql.push_str(&format!("AND NUMBDB IN ({})", numbdb));
+    }
     sql
 }
 
