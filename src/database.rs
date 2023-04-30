@@ -638,8 +638,7 @@ pub async fn sync_total_async_threaded(
                             &total_attr_map_arc,
                             &children_map_arc,
                             db_no.0 as i32,
-                        )
-                            .await?;
+                        ).await?;
                         // 将兄弟关系保存到图数据库中
                         save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
 
@@ -949,11 +948,11 @@ fn set_uda_attr(
 pub async fn save_pdms_mesh_tidb(mgr: CachedMeshesMgr, pool: &Pool<MySql>) -> anyhow::Result<()> {
     for chunks in &mgr.meshes.iter().chunks(1000) {
         let mut sql = format!("INSERT IGNORE INTO {PDMS_MESH} (HASH,MESH) VALUES ");
-        for map in chunks.into_iter() {
+        for (key, map)  in chunks.into_iter() {
             sql.push_str(&format!(
                 "( {}, 0x{}) ,",
-                map.key(),
-                hex::encode(&map.value().into_compress_bytes())
+                key,
+                hex::encode(&map.into_compress_bytes())
             ));
         }
         sql.remove(sql.len() - 1);

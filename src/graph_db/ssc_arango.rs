@@ -1,6 +1,7 @@
-use aios_core::pdms_types::{EleGeosInfo, EleGeosInfoJson, RefU64};
+use aios_core::pdms_types::{EleGeosInfo, RefU64};
 use arangors_lite::{AqlQuery, Database};
 use sqlx::{MySql, Pool, Row};
+use crate::AQL_PDMS_INST_COLLECTION;
 use crate::graph_db::structs::{PdmsEleGraphEdge, SSCEleGraphNode};
 
 /// 将 ssc固定节点保存到图数据库（zone下面的层级除外）
@@ -57,7 +58,7 @@ pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &Database)
 /// 传入ssc参考号，返回该参考号下面的模型数据
 pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: &Database) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
     let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
-    let pdms_instances = "pdms_instances";
+    let pdms_instances = AQL_PDMS_INST_COLLECTION;
     let aql = AqlQuery::new("
     FOR c IN 0..10 inbound @refno ssc_edges
         PRUNE document(@collection,c._key) != null
@@ -75,10 +76,10 @@ pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: 
         }")
         .bind_var("refno", refno_aql)
         .bind_var("collection", pdms_instances);
-    let result: Vec<EleGeosInfoJson> = database.aql_query(aql).await?;
+    let result: Vec<EleGeosInfo> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }
-    let r  = result.into_iter().map(|x| { EleGeosInfo::from_json_type(x)}).collect::<Vec<_>>();
-    Ok(Some(r))
+    // let r  = result.into_iter().map(|x| { EleGeosInfo::from_json_type(x)}).collect::<Vec<_>>();
+    Ok(Some(result))
 }
 
 

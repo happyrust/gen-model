@@ -115,46 +115,46 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     //处理引用的情况 OF 的情况, 如果需要获取 att value，还是需要用数据库去获取值
     let mut new_exp = input_expr.replace("ATTRIB", "");
     if input_expr.contains(" OF ") {
-        // dbg!(&input_expr);
-        let re = Regex::new(r"([A-Z\s]+) OF (PREV|NEXT|\d+/\d+)").unwrap();
-        let interface = Arc::new(interface.ok_or(anyhow!("unknown interface"))?);
-        for caps in re.captures_iter(&input_expr) {
-            let s = &caps[0];
-            let c1 = caps.get(1).map_or("", |m| m.as_str());
-            let c2 = caps.get(2).map_or("", |m| m.as_str());
-            // let ref_att =
-            //     match c2 {
-            //         // "PREV" => interface.get_prev_att()
-            //         // "NEXT" => interface.get_next_att()
-            //         "PREV" | "NEXT" => {
-            //             let refno_str = context.get("RS_DES_REFNO").unwrap().as_str();
-            //             let refno = RefU64::from_refno_str(refno_str);
-            //             // let att = futures::executor::block_on(
-            //             //     interface.get_attr(RefU64::from_refno_str(refno_str).unwrap())
-            //             // ).unwrap_or_default();
-            //             att
-            //             // query_pre_or_next_node()
-            //         }
-            //         //
-            //         refno_str => futures::executor::block_on(
-            //             interface.get_attr(RefU64::from_refno_str(refno_str).unwrap())
-            //         ).unwrap_or_default()
-            //     };
-            // dbg!(&ref_att);
-            //是不是需要求解的属性, 比如 LBORE
-            let value = match c1 {
-                // "LBORE" => {
-                //     //PRE
-                //     //判断 cat_ref 是否是同一个
-                //     // let cat_ref =
-                // }
-                _ => {
-                    // ref_att.get_as_string(c1).unwrap_or("DESP[1]".to_string())
-                    "DESP[1]".to_string()
-                }
-            };
-            new_exp = new_exp.replace(s, &value);
-        }
+        // // dbg!(&input_expr);
+        // let re = Regex::new(r"([A-Z\s]+) OF (PREV|NEXT|\d+/\d+)").unwrap();
+        // let interface = Arc::new(interface.ok_or(anyhow!("unknown interface"))?);
+        // for caps in re.captures_iter(&input_expr) {
+        //     let s = &caps[0];
+        //     let c1 = caps.get(1).map_or("", |m| m.as_str());
+        //     let c2 = caps.get(2).map_or("", |m| m.as_str());
+        //     // let ref_att =
+        //     //     match c2 {
+        //     //         // "PREV" => interface.get_prev_att()
+        //     //         // "NEXT" => interface.get_next_att()
+        //     //         "PREV" | "NEXT" => {
+        //     //             let refno_str = context.get("RS_DES_REFNO").unwrap().as_str();
+        //     //             let refno = RefU64::from_refno_str(refno_str);
+        //     //             // let att = futures::executor::block_on(
+        //     //             //     interface.get_attr(RefU64::from_refno_str(refno_str).unwrap())
+        //     //             // ).unwrap_or_default();
+        //     //             att
+        //     //             // query_pre_or_next_node()
+        //     //         }
+        //     //         //
+        //     //         refno_str => futures::executor::block_on(
+        //     //             interface.get_attr(RefU64::from_refno_str(refno_str).unwrap())
+        //     //         ).unwrap_or_default()
+        //     //     };
+        //     // dbg!(&ref_att);
+        //     //是不是需要求解的属性, 比如 LBORE
+        //     let value = match c1 {
+        //         // "LBORE" => {
+        //         //     //PRE
+        //         //     //判断 cat_ref 是否是同一个
+        //         //     // let cat_ref =
+        //         // }
+        //         _ => {
+        //             // ref_att.get_as_string(c1).unwrap_or("DESP[1]".to_string())
+        //             "DESP[1]".to_string()
+        //         }
+        //     };
+        //     new_exp = new_exp.replace(s, &value);
+        // }
     }
 
     //说明：匹配带小数的情况 PARA[1.1]

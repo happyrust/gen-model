@@ -13,11 +13,9 @@ pub struct MeshMgrArangodb {
     pub data: String,
 }
 
-pub async fn sync_mesh_to_graph_db(mgr: &AiosDBManager, mesh_mgr: &CachedMeshesMgr) -> anyhow::Result<()> {
+pub async fn sync_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &CachedMeshesMgr) -> anyhow::Result<()> {
     let mut result = vec![];
-    for kv in &mesh_mgr.meshes {
-        let hash = kv.key();
-        let mesh = kv.value();
+    for (hash, mesh) in &mesh_mgr.meshes {
         // 将 mesh 转换成二进制并压缩
         let mesh_bin = hex::encode(mesh.into_compress_bytes());
         result.push(MeshMgrArangodb {
@@ -28,6 +26,6 @@ pub async fn sync_mesh_to_graph_db(mgr: &AiosDBManager, mesh_mgr: &CachedMeshesM
     let database = mgr.get_arangodb_conn().await?;
     create_arangodb_conn(&database, "pdms_mesh", Document).await?;
     let json = serde_json::to_value(&result)?;
-    save_arangodb_with_database(json, "pdms_mesh", &database).await?;
+    save_arangodb_with_database(json, "pdms_mesh", &database, mgr.db_option.replace_dbs).await?;
     Ok(())
 }

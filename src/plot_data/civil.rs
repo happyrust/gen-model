@@ -89,8 +89,8 @@ async fn save_axis_data(sbfr_refno: RefU64, axis_data: Vec<AxisData>, database: 
         })
     }
     let edge_json = serde_json::to_value(&edges)?;
-    save_arangodb_with_database(eles_json, axis_eles_collection, database).await?;
-    save_arangodb_with_database(edge_json, axis_edge_collection, database).await?;
+    save_arangodb_with_database(eles_json, axis_eles_collection, database, false).await?;
+    save_arangodb_with_database(edge_json, axis_edge_collection, database, false).await?;
     Ok(())
 }
 

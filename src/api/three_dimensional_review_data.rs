@@ -15,7 +15,7 @@ pub async fn save_three_dimensional_review_data_to_arango(
     let data = insert_three_dimensional_review_data(review_data);
     for i in data.chunks(ARANGODB_SAVE_AMOUNT) {
         let json = serde_json::to_value(i)?;
-        save_arangodb_with_database(json, "review_data", &database).await?;
+        save_arangodb_with_database(json, "review_data", &database, false).await?;
     }
     Ok(())
 }

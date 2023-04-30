@@ -171,42 +171,42 @@ fn insert_virtual_hole_data() -> Vec<VirtualHoleGraphNode> {
         ("15203_1967", 20, "a20b7aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "FLOOR 16 of CFLOOR /1RS-WF04-F-C-F001", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[-9727.52,18702.21,3600]", "MODIFY", "SYSTEM", "2022/10/21/星期五 9:48:48", "RECT", "Y is Y and Z is -Z", "20RS04TT0012T", "24383/66569", "", "AFW", 273, 273, 0, 0, "[]", 0, "null", "null", "不锈钢材料", 6.5, 2, "φ250", 0.0, 0.0, 0, 0, "null"),
     ];
     for i in data {
-        let hole_data = VirtualHoleGraphNode {
-            _key: i.0.parse().unwrap(),
-            intelld: i.1,
-            code: i.2.parse().unwrap(),
-            relyitem: i.3.parse().unwrap(),
-            mainitem: i.4.parse().unwrap(),
-            speciality: i.5.parse().unwrap(),
-            position: i.6.parse().unwrap(),
-            holework: i.7.parse().unwrap(),
-            workby: i.8.parse().unwrap(),
-            time: i.9.parse().unwrap(),
-            shape: i.10.parse().unwrap(),
-            ori: i.11.parse().unwrap(),
-            itemref: i.12.parse().unwrap(),
-            mainitemref: i.13.parse().unwrap(),
-            openitem: i.14.parse().unwrap(),
-            plugtype: i.15.parse().unwrap(),
-            sizeheigh: i.16 as f32,
-            sizewidth: i.17 as f32,
-            bankwidth: i.18 as f32,
-            bankheight: i.19 as f32,
-            hotdis: i.20.parse().unwrap(),
-            heatthick: i.21 as f32,
-            refno: i.22.parse().unwrap(),
-            fittrefno: i.23.parse().unwrap(),
-            subsmeterial: i.24.parse().unwrap(),
-            substhickness: i.25,
-            icreate: i.26,
-            substype: i.27.parse().unwrap(),
-            extentlength1: i.28,
-            extentlength2: i.29,
-            second: i.30,
-            rehole: i.31,
-            note: i.32.parse().unwrap(),
-        };
-        virtual_data.push(hole_data);
+        // let hole_data = VirtualHoleGraphNode {
+        //     _key: i.0.parse().unwrap(),
+        //     intelld: i.1,
+        //     code: i.2.parse().unwrap(),
+        //     relyitem: i.3.parse().unwrap(),
+        //     mainitem: i.4.parse().unwrap(),
+        //     speciality: i.5.parse().unwrap(),
+        //     position: i.6.parse().unwrap(),
+        //     holework: i.7.parse().unwrap(),
+        //     workby: i.8.parse().unwrap(),
+        //     time: i.9.parse().unwrap(),
+        //     shape: i.10.parse().unwrap(),
+        //     ori: i.11.parse().unwrap(),
+        //     itemref: i.12.parse().unwrap(),
+        //     mainitemref: i.13.parse().unwrap(),
+        //     openitem: i.14.parse().unwrap(),
+        //     plugtype: i.15.parse().unwrap(),
+        //     sizeheigh: i.16 as f32,
+        //     sizewidth: i.17 as f32,
+        //     bankwidth: i.18 as f32,
+        //     bankheight: i.19 as f32,
+        //     hotdis: i.20.parse().unwrap(),
+        //     heatthick: i.21 as f32,
+        //     refno: i.22.parse().unwrap(),
+        //     fittrefno: i.23.parse().unwrap(),
+        //     subsmeterial: i.24.parse().unwrap(),
+        //     substhickness: i.25,
+        //     icreate: i.26,
+        //     substype: i.27.parse().unwrap(),
+        //     extentlength1: i.28,
+        //     extentlength2: i.29,
+        //     second: i.30,
+        //     rehole: i.31,
+        //     note: i.32.parse().unwrap(),
+        // };
+        // virtual_data.push(hole_data);
     }
     dbg!(&virtual_data);
     virtual_data
@@ -238,35 +238,35 @@ fn insert_virtual_embed_data() -> Vec<VirtualEmbedGraphNode> {
         ("15203_1967", 40, "a1aa1f2a-fd8b-4bdc-8d97-ffaa120ced7a", "CFLOOR1", "24383_46246", "CAP 1 of BRANCH /Copy-of-Copy-of-1WCC0200-168.3-NADB-R70-R312]R412", "管道", "[900,200.21,600]", "X is X and Z is -Z", "", "张三", "2022/12/21/星期一 9:48:48", "RECT", "2019/09/08", 567.89, 445.56, 50.0, 32.0, 273, 273.2, 0.0, 2000.2, "24383_46265", "70RS04TT0012T", "AFW", ""),
     ];
     for i in data {
-        let hole_data = VirtualEmbedGraphNode {
-            _key: i.0.parse().unwrap(),
-            intelld: i.1,
-            code: i.2.parse().unwrap(),
-            relyitem: i.3.parse().unwrap(),
-            relyitemref: i.4.parse().unwrap(),
-            mainitem: i.5.parse().unwrap(),
-            speciality: i.6.parse().unwrap(),
-            position: i.7.parse().unwrap(),
-            ori: i.8.parse().unwrap(),
-            work: i.9.parse().unwrap(),
-            workby: i.10.parse().unwrap(),
-            time: i.11.parse().unwrap(),
-            standertype: i.12.parse().unwrap(),
-            openitem: i.13.to_string(),
-            holework: i.14.to_string(),
-            sizelength: i.15,
-            sizewidth: i.16,
-            sizethickness: i.17 as f32,
-            minthickness: i.18 as f32,
-            load: i.19,
-            mindistance: i.20,
-            subsmeterial: i.21.to_string(),
-            fittid: i.22.parse().unwrap(),
-            _ref: i.23.parse().unwrap(),
-            shape: i.24.parse().unwrap(),
-            note: i.25.parse().unwrap(),
-        };
-        virtual_data.push(hole_data);
+        // let hole_data = VirtualEmbedGraphNode {
+        //     _key: i.0.parse().unwrap(),
+        //     intelld: i.1,
+        //     code: i.2.parse().unwrap(),
+        //     relyitem: i.3.parse().unwrap(),
+        //     relyitemref: i.4.parse().unwrap(),
+        //     mainitem: i.5.parse().unwrap(),
+        //     speciality: i.6.parse().unwrap(),
+        //     position: i.7.parse().unwrap(),
+        //     ori: i.8.parse().unwrap(),
+        //     work: i.9.parse().unwrap(),
+        //     workby: i.10.parse().unwrap(),
+        //     time: i.11.parse().unwrap(),
+        //     standertype: i.12.parse().unwrap(),
+        //     openitem: i.13.to_string(),
+        //     holework: i.14.to_string(),
+        //     sizelength: i.15,
+        //     sizewidth: i.16,
+        //     sizethickness: i.17 as f32,
+        //     minthickness: i.18 as f32,
+        //     load: i.19,
+        //     mindistance: i.20,
+        //     subsmeterial: i.21.to_string(),
+        //     fittid: i.22.parse().unwrap(),
+        //     _ref: i.23.parse().unwrap(),
+        //     shape: i.24.parse().unwrap(),
+        //     note: i.25.parse().unwrap(),
+        // };
+        // virtual_data.push(hole_data);
     }
     dbg!(&virtual_data);
     virtual_data
@@ -447,10 +447,10 @@ pub async fn sync_pdms_level_edges_to_graph_db(mgr: Arc<AiosDBManager>) -> anyho
                 if sibl_edges.len() > 1000 {
                     let database = mgr.get_arangodb_conn().await?;
                     let json = serde_json::to_value(&take(&mut sibl_edges))?;
-                    save_arangodb_with_database(json, sibl_collection, &database).await?;
+                    save_arangodb_with_database(json, sibl_collection, &database, false).await?;
                     if tubi_edges.len() != 0 {
                         let tubi_json = serde_json::to_value(&take(&mut tubi_edges))?;
-                        save_arangodb_with_database(tubi_json, tubi_collection, &database).await?;
+                        save_arangodb_with_database(tubi_json, tubi_collection, &database, false).await?;
                     }
                 }
             }
@@ -592,10 +592,14 @@ pub async fn save_arangodb_with_db_option(json: Value, db_option: &DbOption, col
     Ok(())
 }
 
-pub async fn save_arangodb_with_database(json: Value, collection: &str, database: &Database) -> anyhow::Result<()> {
-    let aql = AqlQuery::new("LET data = @elements
+pub async fn save_arangodb_with_database(json: Value, collection: &str, database: &Database, replace: bool) -> anyhow::Result<()> {
+    let mut aql_string = "LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }".to_string();
+    if replace {
+        aql_string = aql_string.replace("INSERT", "REPLACE");
+    }
+    let aql = AqlQuery::new(&aql_string)
         .bind_var("@collection", collection)
         .bind_var("elements", json);
     let _result: Vec<()> = database.aql_query(aql).await?;

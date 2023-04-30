@@ -130,7 +130,7 @@ pub fn gen_prim_data_test(geo_instance: &EleGeoInstance, desi_transform: Transfo
         } else {
             desi_transform * geo_transform
         };
-    let aabb = geo_instance.aabb.scaled(&Vector::new(desi_transform.scale.x, desi_transform.scale.y, desi_transform.scale.z));
+    let aabb = geo_instance.aabb.unwrap().scaled(&Vector::new(desi_transform.scale.x, desi_transform.scale.y, desi_transform.scale.z));
 
     if let Some(num) = geo_instance.geo_param.into_rvm_pri_num() {
         // tubi 不需要和desi进行变换

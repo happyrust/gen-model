@@ -88,11 +88,11 @@ pub async fn save_room_info_to_arangodb(aios_mgr: &AiosDBManager, room_infos: Ha
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let room_eles_json = serde_json::to_value(&room_eles_json);
     if let Ok(room_eles_json) = room_eles_json {
-        save_arangodb_with_database(room_eles_json, "room_eles", &database).await?;
+        save_arangodb_with_database(room_eles_json, "room_eles", &database, db_option.replace_dbs).await?;
     }
     let room_edges_json = serde_json::to_value(&room_edges_json);
     if let Ok(room_edges_json) = room_edges_json {
-        save_arangodb_with_database(room_edges_json, "room_edges", &database).await?;
+        save_arangodb_with_database(room_edges_json, "room_edges", &database,db_option.replace_dbs).await?;
     }
     Ok(())
 }

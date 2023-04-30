@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use aios_core::negative_mesh_type::{NegativeEdges, NegativeEles};
-use aios_core::pdms_types::{GeoHash, PdmsElement, RefU64};
+use aios_core::pdms_types::{GeoHash, PdmsElement, PRIMITIVE_NOUN_NAMES, RefU64};
 use aios_core::shape::pdms_shape::PdmsMesh;
 use arangors_lite::{AqlQuery, Database};
 use bevy::prelude::{Transform};
@@ -10,7 +10,7 @@ use sqlx::{MySql, Pool};
 use crate::aql_api::pdms_mesh::{query_catr_refnos_meshes_aql, query_refnos_meshes_aql};
 use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsElementAql};
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::{AiosDBManager, PRIMITIVE_NOUN_NAMES};
+use crate::data_interface::tidb_manager::{AiosDBManager};
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
 use csg::{Mesh, Pt3};
 use dashmap::{DashMap, DashSet};
@@ -62,79 +62,79 @@ pub async fn save_boolean_negative_mesh(negative_mesh_map: DashMap<RefU64, Index
         })
     }
     if let Ok(eles_json) = serde_json::to_value(&eles_vec) {
-        let _ = save_arangodb_with_database(eles_json, "negative_eles", database).await;
+        let _ = save_arangodb_with_database(eles_json, "negative_eles", database, false).await;
     }
     Ok(())
 }
 
 // refno : 基本体的 refno  negative_refnos ： 负实体的集合
 pub async fn compute_boolean_mesh(refno: RefU64, negative_elements: Vec<PdmsElement>, pool: &Pool<MySql>, database: &Database) -> anyhow::Result<Option<(RefU64, IndexedMesh)>> {
-    let refno_type = query_refno_type(refno, pool).await?;
-    let refno_meshes_map = query_catr_refnos_meshes_aql(refno, database).await?;
-    let negative_refnos = negative_elements.clone().iter().filter_map(|x| RefU64::from_refno_str(&x.refno).ok()).collect::<Vec<_>>();
-    let transform = query_rvm_instance_data_from_refno_aql(refno, database).await?;
-    if let Some(refno_geo_info) = transform {
-        let mut refno_csg_mesh = Mesh::default();
-        let refno_transform = Transform {
-            translation: refno_geo_info.world_transform.1,
-            rotation: refno_geo_info.world_transform.0,
-            scale: refno_geo_info.world_transform.2,
-        };
-        if PRIMITIVE_NOUN_NAMES.contains(&refno_type.as_str()) {
-            // 找到基本体的mesh
-            if let Some(refno_mesh) = refno_meshes_map.get(&refno) {
-                for data in refno_geo_info.data {
-                    let t = refno_transform * Transform {
-                        translation: data.transform.1,
-                        rotation: data.transform.0,
-                        scale: data.transform.2,
-                    };
-                    refno_csg_mesh += refno_mesh.value().into_csg_mesh(&t);
-                    // 减去负实体的 mesh
-                    for negative_refno in &negative_refnos {
-                        if let Some(negative_mesh) = refno_meshes_map.get(&negative_refno) {
-                            let transform = query_rvm_instance_data_from_refno_aql(*negative_refno, &database).await?;
-                            if let Some(geo_info) = transform {
-                                let negative_transform = Transform {
-                                    translation: geo_info.world_transform.1,
-                                    rotation: geo_info.world_transform.0,
-                                    scale: geo_info.world_transform.2,
-                                };
-                                for data in geo_info.data {
-                                    let transform = data.clone().transform;
-                                    let t = negative_transform * Transform {
-                                        translation: transform.1,
-                                        rotation: transform.0,
-                                        scale: transform.2,
-                                    };
-                                    let negative_csg_mesh = negative_mesh.into_csg_mesh(&t);
-                                    refno_csg_mesh -= negative_csg_mesh;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            for data in &refno_geo_info.data {
-                if let Some(refno_mesh) = refno_meshes_map.get(&data.refno) {
-                    let t = refno_transform * Transform {
-                        translation: data.transform.1,
-                        rotation: data.transform.0,
-                        scale: data.transform.2,
-                    };
-                    // let mut refno_csg_mesh = refno_mesh.value().into_csg_mesh(&t);
-                    if negative_refnos.contains(&data.refno) {
-                        refno_csg_mesh += refno_mesh.value().into_csg_mesh(&t);
-                    } else {
-                        refno_csg_mesh -= refno_mesh.value().into_csg_mesh(&t);
-                    }
-                }
-            }
-        }
-        let index_mesh = refno_csg_mesh.simplified(0.1);
-        return Ok(Some((refno,index_mesh)));
-    }
+    // let refno_type = query_refno_type(refno, pool).await?;
+    // let refno_meshes_map = query_catr_refnos_meshes_aql(refno, database).await?;
+    // let negative_refnos = negative_elements.clone().iter().filter_map(|x| RefU64::from_refno_str(&x.refno).ok()).collect::<Vec<_>>();
+    // let transform = query_rvm_instance_data_from_refno_aql(refno, database).await?;
+    // if let Some(refno_geo_info) = transform {
+    //     let mut refno_csg_mesh = Mesh::default();
+    //     let refno_transform = Transform {
+    //         translation: refno_geo_info.world_transform.1,
+    //         rotation: refno_geo_info.world_transform.0,
+    //         scale: refno_geo_info.world_transform.2,
+    //     };
+    //     if PRIMITIVE_NOUN_NAMES.contains(&refno_type.as_str()) {
+    //         // 找到基本体的mesh
+    //         if let Some(refno_mesh) = refno_meshes_map.get(&refno) {
+    //             for data in refno_geo_info.data {
+    //                 let t = refno_transform * Transform {
+    //                     translation: data.transform.1,
+    //                     rotation: data.transform.0,
+    //                     scale: data.transform.2,
+    //                 };
+    //                 refno_csg_mesh += refno_mesh.value().into_csg_mesh(&t);
+    //                 // 减去负实体的 mesh
+    //                 for negative_refno in &negative_refnos {
+    //                     if let Some(negative_mesh) = refno_meshes_map.get(&negative_refno) {
+    //                         let transform = query_rvm_instance_data_from_refno_aql(*negative_refno, &database).await?;
+    //                         if let Some(geo_info) = transform {
+    //                             let negative_transform = Transform {
+    //                                 translation: geo_info.world_transform.1,
+    //                                 rotation: geo_info.world_transform.0,
+    //                                 scale: geo_info.world_transform.2,
+    //                             };
+    //                             for data in geo_info.data {
+    //                                 let transform = data.clone().transform;
+    //                                 let t = negative_transform * Transform {
+    //                                     translation: transform.1,
+    //                                     rotation: transform.0,
+    //                                     scale: transform.2,
+    //                                 };
+    //                                 let negative_csg_mesh = negative_mesh.into_csg_mesh(&t);
+    //                                 refno_csg_mesh -= negative_csg_mesh;
+    //                             }
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     } else {
+    //         for data in &refno_geo_info.data {
+    //             if let Some(refno_mesh) = refno_meshes_map.get(&data.refno) {
+    //                 let t = refno_transform * Transform {
+    //                     translation: data.transform.1,
+    //                     rotation: data.transform.0,
+    //                     scale: data.transform.2,
+    //                 };
+    //                 // let mut refno_csg_mesh = refno_mesh.value().into_csg_mesh(&t);
+    //                 if negative_refnos.contains(&data.refno) {
+    //                     refno_csg_mesh += refno_mesh.value().into_csg_mesh(&t);
+    //                 } else {
+    //                     refno_csg_mesh -= refno_mesh.value().into_csg_mesh(&t);
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     let index_mesh = refno_csg_mesh.simplified(0.1);
+    //     return Ok(Some((refno,index_mesh)));
+    // }
     Ok(None)
 }
 

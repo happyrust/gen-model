@@ -24,7 +24,7 @@ use bevy::prelude::{dbg, Transform};
 use config::{Config, ConfigError, Environment, File};
 use dashmap::mapref::one::Ref;
 use dashmap::{DashMap, DashSet};
-use glam::{quat, EulerRot, Mat3, Quat, Vec2, Vec3};
+use glam::{quat, EulerRot, Mat3, Quat, Vec2, Vec3, DMat4, Mat4};
 use id_tree::{Node, NodeId};
 use itertools::Itertools;
 use lazy_static::lazy_static;
@@ -49,6 +49,7 @@ use aios_core::pdms_data::ScomInfo;
 use aios_core::prim_geo;
 use log::{error, info};
 use nom::combinator::map;
+use opencascade::{DsShape, OCCShape};
 use tokio::sync::RwLock;
 
 use crate::api::attr::*;
@@ -88,29 +89,6 @@ lazy_static! {
         s
     };
 }
-
-pub const PRIMITIVE_NOUN_NAMES: [&'static str; 8] = [
-    "BOX", "CYLI", "SPHE", "CONE", "DISH", "CTOR", "RTOR", "PYRA",
-];
-
-///基本体的名称集合
-//"SPINE", "GENS",
-pub const GNERAL_PRIM_NOUN_NAMES: [&'static str; 20] = [
-    "BOX", "CYLI", "SPHE", "CONE", "DISH", "CTOR", "RTOR", "PYRA", "NCYL", "NBOX", "NCON", "NSNO",
-    "NPYR", "NDIS", "NXTR", "NCTO", "NRTO", "NSLC", "NREV", "NSCY",
-];
-
-pub const GENRAL_NEGATIVE_NOUN_NAMES: [&'static str; 12] = [
-    "NCYL", "NBOX", "NCON", "NSNO", "NPYR", "NDIS", "NXTR", "NCTO", "NRTO", "NSLC", "NREV", "NSCY",
-];
-
-pub const CATA_ATT_TYPES: [&'static str; 25] = [
-    "BRAN", "HANG", "ELCONN",
-    "CMPF", "WALL", "STWALL", "GWALL",  "FIXING",
-    "PJOI", "PFIT", "GENSEC", "RNODE", "PRTELE", "GPART", "SCREED", "NOZZ", "PALJ",
-    // "SUBJ",
-    "CABLE", "BATT", "CMFI", "SCOJ", "SEVE", "SBFI", "SCTN", "FITT",
-];
 
 static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> = Lazy::new(|| {
     let mut m = HashMap::new();
@@ -154,15 +132,11 @@ pub struct AiosDBManager {
 
     pub db_option: DbOption,
 
-    pub cached_mesh_mgr: Arc<CachedMeshesMgr>,
-
-    pub mesh_instance_mgr: Arc<DashMap<i32, CachedInstanceMgr>>,
+    pub cached_mesh_mgr: Arc<RwLock<CachedMeshesMgr>>,
 
     pub arango_database: Database,
 
     cached_world_transforms_map: Arc<DashMap<RefU64, bevy::prelude::Transform>>,
-
-    // pub plin_cache_mgr: DashMap<RefU64, String>,
 
     pub cache_module_numbdbs: BTreeSet<i32>,
 
@@ -204,7 +178,6 @@ impl PdmsDataInterface for AiosDBManager {
             if let Some(ref_basic) = self.get_refno_basic(refno) {
                 let attr =
                     query_implicit_attr(refno, ref_basic.value(), &project_pool, columns).await?;
-                // PDMS_IMPLICIT_ATT_MAP_CACHE.insert(refno, attr.clone());
                 return Ok(attr);
             }
         }
@@ -258,6 +231,7 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(None)
     }
 
+    ///获得owner
     async fn get_owner_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>> {
         let mut node = None;
         if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
@@ -269,6 +243,7 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(node)
     }
 
+    ///获得world节点
     async fn get_world(
         &self,
         project: &str,
@@ -282,6 +257,7 @@ impl PdmsDataInterface for AiosDBManager {
         return Err(anyhow!("World not found".to_string()));
     }
 
+    ///获得子节点集合
     async fn get_children_nodes(&self, refno: RefU64) -> anyhow::Result<Vec<EleTreeNode>> {
         let mut r = vec![];
         if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
@@ -294,6 +270,7 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(r)
     }
 
+    ///获得children的属性集合
     async fn get_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
         if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
@@ -306,6 +283,7 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(r)
     }
 
+    ///获得参考号下的子节点
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
         let mut result = RefU64Vec::default();
         if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
@@ -317,6 +295,7 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(result)
     }
 
+    ///获得参考号的name
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr> {
         if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
             let name = query_name(refno, &project_pool).await?;
@@ -339,6 +318,7 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(RefU64Vec::default())
     }
 
+    /// 获得当前db的world 参考号
     async fn get_db_world(
         &self,
         project: &str,
@@ -407,10 +387,6 @@ impl PdmsDataInterface for AiosDBManager {
         }
         Ok(ancestors)
     }
-
-    // async fn get_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
-    //     // self.get_transform(refno)
-    // }
 
     ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
     async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
@@ -771,7 +747,6 @@ impl AiosDBManager {
             project_path: dir,
             db_option,
             cached_mesh_mgr: Arc::new(Default::default()),
-            mesh_instance_mgr: Arc::new(Default::default()),
             arango_database: database,
             cached_world_transforms_map: Arc::new(Default::default()),
             cache_module_numbdbs: Default::default(),
@@ -959,9 +934,6 @@ impl AiosDBManager {
             } = geoms;
             for (i, geom) in geometries.into_iter().enumerate() {
                 if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
-                    let geo_hash = mgr
-                        .cached_mesh_mgr
-                        .gen_pdms_mesh(cate_shape.brep_shape.clone(), false);
                     brep_shape_map
                         .entry(design_refno)
                         .or_insert(Vec::new())
@@ -1436,7 +1408,7 @@ impl AiosDBManager {
     /// 生成元件库的branch型几何体
     pub async fn cache_cata_geos(
         mgr: Arc<AiosDBManager>,
-        instance_mgr: Arc<CachedInstanceMgr>,
+        instance_mgr: Arc<RwLock<ShapeInstancesMgr>>,
         project: &str,
         db_nos: Option<&[i32]>,
         db_option: &DbOption,
@@ -1487,9 +1459,6 @@ impl AiosDBManager {
         let batch_chunks_cnt = has_cata_cnt / batch_size + 1;
         let mut handles = vec![];
         let all_refnos = Arc::new(has_cata_refnos);
-        // if is_debug {
-        //     dbg!(&all_refnos);
-        // }
         let processed_cnt = Arc::new(Mutex::new(has_cata_cnt));
         let mut tubi_aqls = Arc::new(DashMap::new());
         let replace_mesh = db_option.replace_mesh;
@@ -1508,6 +1477,7 @@ impl AiosDBManager {
                     end_idx = has_cata_cnt as usize;
                 }
                 println!("当前范围: {start_idx} ~ {end_idx}");
+                let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
                 for j in start_idx..end_idx {
                     let refno = all_refnos[j];
                     println!(
@@ -1516,9 +1486,7 @@ impl AiosDBManager {
                         refno.to_refno_string(),
                         processed_cnt.lock().unwrap().to_owned()
                     );
-                    let inst_map = &instance_mgr.inst_mgr;
-                    let cached_mesh_mgr = &mgr.cached_mesh_mgr;
-                    let level_shape_mgr = &instance_mgr.level_shape_mgr;
+                    let mut inst_map = instance_mgr.write().await;
                     //在这里直接处理完所有需要处理的transform
                     let brep_shapes_map = CateBrepShapeMap::new();
                     let current_att = mgr.get_attr(refno).await.unwrap_or_default();
@@ -1553,13 +1521,6 @@ impl AiosDBManager {
                             .await
                             .unwrap_or_default()
                             .unwrap_or_default();
-                        let ancestors = mgr.get_ancestors_refnos_without_world(child_refno);
-                        for p_refno in ancestors {
-                            level_shape_mgr
-                                .entry(p_refno)
-                                .or_insert(RefU64Vec::default())
-                                .push(child_refno);
-                        }
                         let child_att = mgr.get_attr(child_refno).await.unwrap_or_default();
                         let mut geos_info = EleGeosInfo {
                             _key: child_refno.to_refno_normal_string(),
@@ -1580,6 +1541,7 @@ impl AiosDBManager {
                                 child_att.get_i32("ARRI"),
                                 child_att.get_i32("LEAV"),
                             ],
+                            has_neg: false,
                         };
                         let mut geo_insts = &mut geos_info.data;
                         let mut ele_aabb: Option<Aabb> = None;
@@ -1619,27 +1581,20 @@ impl AiosDBManager {
                                 trans.scale.z,
                             ));
                             let transformed_aabb = aabb.transform_by(&Isometry {
-                                rotation: UnitQuaternion::from_quaternion(Quaternion::new(
-                                    rot.w, rot.x, rot.y, rot.z,
-                                )),
-                                translation: Vector::new(
-                                    translation.x,
-                                    translation.y,
-                                    translation.z,
-                                )
-                                    .into(),
+                                rotation: rot.into(),
+                                translation: translation.into(),
                             });
                             if is_tubi {
                                 has_tubi = true;
                                 if let Some(mut tubi_aabb) = tubi_aabb {
                                     tubi_aabb.merge(&transformed_aabb);
-                                }else{
+                                } else {
                                     tubi_aabb = Some(transformed_aabb);
                                 }
                             } else {
                                 if let Some(mut ele_aabb) = ele_aabb {
                                     ele_aabb.merge(&transformed_aabb);
-                                }else{
+                                } else {
                                     ele_aabb = Some(transformed_aabb);
                                 }
                             }
@@ -1649,30 +1604,22 @@ impl AiosDBManager {
                                 geo_hash,
                                 refno,
                                 pts,
-                                aabb,
+                                aabb: Some(aabb),
                                 transform: (rot, translation, scale),
                                 geo_param: brep_shape
                                     .convert_to_geo_param()
                                     .unwrap_or(PdmsGeoParam::Unknown),
                                 visible,
                                 is_tubi,
+                                is_neg: false,
                             };
                             geo_insts.push(geom_inst);
                         }
                         if let Some(a) = ele_aabb {
                             geos_info.aabb = Some(
                                 a.transform_by(&Isometry {
-                                    rotation: UnitQuaternion::from_quaternion(Quaternion::new(
-                                        o.rotation.w,
-                                        o.rotation.x,
-                                        o.rotation.y,
-                                        o.rotation.z,
-                                    )),
-                                    translation: Vector::new(
-                                        o.translation.x,
-                                        o.translation.y,
-                                        o.translation.z,
-                                    ).into(),
+                                    rotation: o.rotation.into(),
+                                    translation: o.translation.into(),
                                 }),
                             );
                         }
@@ -1703,7 +1650,7 @@ impl AiosDBManager {
             }
         }
         futures::future::join_all(take(&mut handles)).await;
-        println!("模型生成完毕,正在保存到数据库");
+        println!("模型生成完毕,正在保存管道到图数据库");
         let tubi_result = Arc::try_unwrap(tubi_aqls)
             .unwrap()
             .into_iter()
@@ -1713,7 +1660,7 @@ impl AiosDBManager {
         if !tubi_result.is_empty() {
             let conn = mgr.get_arangodb_conn().await.unwrap();
             let json = serde_json::to_value(tubi_result).unwrap_or_default();
-            save_arangodb_with_database(json, "tubi_edges", &conn)
+            save_arangodb_with_database(json, "tubi_edges", &conn, mgr.db_option.replace_dbs)
                 .await
                 .unwrap();
         }
@@ -1729,9 +1676,10 @@ impl AiosDBManager {
     /// 生成基本体的几何数据
     pub async fn cache_prim_geos(
         mgr: Arc<AiosDBManager>,
-        instance_mgr: Arc<CachedInstanceMgr>,
+        instance_mgr: Arc<RwLock<ShapeInstancesMgr>>,
         db_option: &DbOption,
         db_nos: Option<&[i32]>,
+        has_neg_elements: Vec<RefU64>,
     ) -> anyhow::Result<bool> {
         let t = Instant::now();
         let batch_size = mgr.db_option.gen_model_batch_size;
@@ -1792,10 +1740,8 @@ impl AiosDBManager {
                 if end_idx > prim_cnt as usize {
                     end_idx = prim_cnt as usize;
                 }
-
-                let inst_map = &instance_mgr.inst_mgr;
-                let cached_mesh_mgr = &mgr.cached_mesh_mgr;
-                let level_shape_mgr = &instance_mgr.level_shape_mgr;
+                let mut inst_map = instance_mgr.write().await;
+                let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
                 for j in start_idx..end_idx {
                     let refno = all_refnos[j];
                     let trans_origin = mgr
@@ -1803,14 +1749,6 @@ impl AiosDBManager {
                         .await
                         .unwrap_or_default()
                         .unwrap_or_default();
-                    let ancestors = mgr.get_ancestors_refnos_without_world(refno);
-                    //todo 可以使用图数据库的edge 来获取，不用提前存储，暂时可以用来做调试用
-                    for p_refno in ancestors {
-                        level_shape_mgr
-                            .entry(p_refno)
-                            .or_insert(RefU64Vec::default())
-                            .push(refno);
-                    }
                     let mut geos_info = EleGeosInfo {
                         _key: refno.to_refno_normal_string(),
                         data: vec![],
@@ -1824,12 +1762,14 @@ impl AiosDBManager {
                         ),
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
+                        has_neg: false,
                     };
                     let mut geo_insts = &mut geos_info.data;
                     let mut geo_hash = None;
                     let mut item_trans = Transform::default();
 
                     let attr = mgr.get_attr(refno).await.unwrap_or_default();
+                    dbg!(attr.get_type());
                     let mut geo_param = PdmsGeoParam::Unknown;
                     if let Some(brep_obj) = attr.create_brep_shape() {
                         if brep_obj.check_valid() {
@@ -1837,6 +1777,7 @@ impl AiosDBManager {
                             geo_param = brep_obj
                                 .convert_to_geo_param()
                                 .unwrap_or(PdmsGeoParam::Unknown);
+                            // let r = cached_mesh_mgr.gen_pdms_mesh(brep_obj, replace_mesh);
                             let r = cached_mesh_mgr.gen_pdms_mesh(brep_obj, replace_mesh);
                             geo_hash = Some(r);
                         }
@@ -1844,48 +1785,30 @@ impl AiosDBManager {
                     if let Some(geo_hash) = geo_hash {
                         let visible = attr.is_visible_by_level(None).unwrap_or(true);
                         let tr = &item_trans;
-                        let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
-                        let mut aabb = bbox.unwrap();
+                        let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) else {
+                            continue;
+                        };
                         aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
                         let ele_aabb = aabb.transform_by(&Isometry {
-                            rotation: UnitQuaternion::from_quaternion(Quaternion::new(
-                                tr.rotation.w,
-                                tr.rotation.x,
-                                tr.rotation.y,
-                                tr.rotation.z,
-                            )),
-                            translation: Vector::new(
-                                tr.translation.x,
-                                tr.translation.y,
-                                tr.translation.z,
-                            )
-                                .into(),
+                            rotation: tr.rotation.into(),
+                            translation: tr.translation.into(),
                         });
                         let geom_inst = EleGeoInstance {
                             geo_hash,
                             refno,
                             pts: Default::default(),
-                            aabb,
+                            aabb: Some(aabb),
                             transform: (tr.rotation, tr.translation, tr.scale),
                             geo_param,
                             visible,
                             is_tubi: false,
+                            is_neg: attr.is_neg(),  //是否是负实体
                         };
                         geo_insts.push(geom_inst);
                         geos_info.aabb = Some(
                             ele_aabb.transform_by(&Isometry {
-                                rotation: UnitQuaternion::from_quaternion(Quaternion::new(
-                                    trans_origin.rotation.w,
-                                    trans_origin.rotation.x,
-                                    trans_origin.rotation.y,
-                                    trans_origin.rotation.z,
-                                )),
-                                translation: Vector::new(
-                                    trans_origin.translation.x,
-                                    trans_origin.translation.y,
-                                    trans_origin.translation.z,
-                                )
-                                    .into(),
+                                rotation: trans_origin.rotation.into(),
+                                translation: trans_origin.translation.into(),
                             }),
                         );
                         inst_map.insert(refno, geos_info);
@@ -1987,7 +1910,7 @@ impl AiosDBManager {
 
     pub async fn cache_loop_geos(
         mgr: Arc<AiosDBManager>,
-        instance_mgr: Arc<CachedInstanceMgr>,
+        instance_mgr: Arc<RwLock<ShapeInstancesMgr>>,
         db_option: &DbOption,
         db_nos: Option<&[i32]>,
     ) -> anyhow::Result<bool> {
@@ -2045,10 +1968,9 @@ impl AiosDBManager {
                 if end_idx > loop_cnt as usize {
                     end_idx = loop_cnt as usize;
                 }
-
-                let inst_map = &instance_mgr.inst_mgr;
-                let cached_mesh_mgr = &mgr.cached_mesh_mgr;
-                let level_shape_mgr = &instance_mgr.level_shape_mgr;
+                let mut lock = instance_mgr.write().await;
+                let mut inst_map = &mut lock.inst_map;
+                let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
                 for j in start_idx..end_idx {
                     let refno = all_refnos[j];
                     println!(
@@ -2082,6 +2004,7 @@ impl AiosDBManager {
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
                         aabb: None,
+                        has_neg: false,
                     };
                     let mut geo_insts = &mut geos_info.data;
                     let mut target_refno = parent_refno;
@@ -2093,7 +2016,7 @@ impl AiosDBManager {
                             if let Ok(a) = mgr.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
                                 let pt = a.get_position().unwrap_or_default() /*- origin_pt*/;
                                 if loop_verts.len() > 0 {
-                                    if pt.distance(*loop_verts.last().unwrap()) > EPSILON {
+                                    if pt.distance(*loop_verts.last().unwrap()) > f32::EPSILON {
                                         loop_verts.push(pt);
                                         fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
                                     }
@@ -2111,7 +2034,7 @@ impl AiosDBManager {
                     let mut geo_param = PdmsGeoParam::Unknown;
                     // dbg!(&target_type);
                     match target_type {
-                        "REVO" => {
+                        "NREV" | "REVO" => {
                             parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
                             let angle = parent_att.get_f32("ANGL").unwrap_or_default();
                             if angle >= f32::EPSILON {
@@ -2132,7 +2055,7 @@ impl AiosDBManager {
                             }
                         }
                         //todo 关于justline，可能需要jusline的信息才能判断中心点
-                        "AEXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
+                        "AEXTR" | "NXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
                             let attr = mgr.get_attr(refno).await.unwrap_or_default();
                             parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
                             target_refno = parent_refno;
@@ -2142,6 +2065,7 @@ impl AiosDBManager {
                             let i: usize = 0;
                             //fix 1516 的情况  =24381/36952，当为DBOT的时候，会变成DISH
                             let sjus = attr.get_str("SJUS").unwrap_or_default();
+                            //开始处理有偏移的情况
                             {
                                 //check if all the fradius are the same
                                 let r = fradius_vec[0];
@@ -2176,9 +2100,6 @@ impl AiosDBManager {
                                     geo_hash = Some(r);
                                 }
                             };
-
-                            // if extrusion.check_valid() {
-                            // item_trans = extrusion.get_trans();
                             let off_z = if sjus == "UTOP" || sjus == "DTOP" {
                                 -height
                             } else if sjus == "UCEN" || sjus == "DCEN" {
@@ -2188,8 +2109,6 @@ impl AiosDBManager {
                             };
                             item_trans.translation =
                                 item_trans.translation + Vec3::new(0.0, 0.0, off_z);
-
-                            // }
                         }
                         _ => {}
                     }
@@ -2198,57 +2117,33 @@ impl AiosDBManager {
                         let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
                         let tr: Transform = item_trans;
                         if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
-                            aabb =
-                                aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
+                            aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
                             let ele_aabb = aabb.transform_by(&Isometry {
-                                rotation: UnitQuaternion::from_quaternion(Quaternion::new(
-                                    tr.rotation.w,
-                                    tr.rotation.x,
-                                    tr.rotation.y,
-                                    tr.rotation.z,
-                                )),
-                                translation: Vector::new(
-                                    tr.translation.x,
-                                    tr.translation.y,
-                                    tr.translation.z,
-                                ).into(),
+                                rotation: tr.rotation.into(),
+                                translation: tr.translation.into(),
                             });
                             let geom_inst = EleGeoInstance {
                                 geo_hash,
-                                refno,
+                                refno: parent_refno,
                                 pts: Default::default(),
-                                aabb,
+                                aabb: Some(aabb),
                                 transform: (tr.rotation, tr.translation, tr.scale),
                                 visible,
                                 is_tubi: false,
                                 geo_param,
+                                is_neg: parent_att.is_neg(),
+
                             };
                             geo_insts.push(geom_inst);
                             geos_info.aabb = Some(
                                 ele_aabb.transform_by(&Isometry {
-                                    rotation: UnitQuaternion::from_quaternion(Quaternion::new(
-                                        trans_origin.rotation.w,
-                                        trans_origin.rotation.x,
-                                        trans_origin.rotation.y,
-                                        trans_origin.rotation.z,
-                                    )),
-                                    translation: Vector::new(
-                                        trans_origin.translation.x,
-                                        trans_origin.translation.y,
-                                        trans_origin.translation.z,
-                                    ).into(),
+                                    rotation: trans_origin.rotation.into(),
+                                    translation: trans_origin.translation.into(),
                                 }),
                             );
                         } else {
-                            error!("楼板有问题：{} ", refno.to_refno_string());
+                            error!("LOOP 有问题：{} ", refno.to_refno_string());
                         }
-                    }
-                    let ancestors = mgr.get_ancestors_refnos_without_world(refno);
-                    for p_refno in ancestors {
-                        level_shape_mgr
-                            .entry(p_refno)
-                            .or_insert(RefU64Vec::default())
-                            .push(target_refno);
                     }
                     inst_map.insert(target_refno, geos_info);
                 }
@@ -2285,7 +2180,6 @@ impl AiosDBManager {
             let pool = AiosDBManager::get_db_pool(&url, project).await?;
             db_nos = query_db_nums_of_mdb(mdb, &db_option.module, &pool).await?;
             db_nos.sort();
-            // dbg!(&db_nos);
             info!("当前mdb的所有dbnos: {:?}", db_nos);
         }
         std::fs::create_dir_all("./assets/mesh").unwrap();
@@ -2295,14 +2189,9 @@ impl AiosDBManager {
             if db_option.debug_db_num.is_some() && db_no != db_option.debug_db_num.unwrap() as i32 {
                 continue;
             }
-            let instance_mgr = CachedInstanceMgr::deserialize_from_bin_file(&format!(
+            let instance_mgr = ShapeInstancesMgr::deserialize_from_bin_file(&format!(
                 "./assets/instance/{db_no}.inst"
             )).unwrap_or_default();
-            // dbg!(instance_mgr.inst_mgr.len());
-            let instance_mgr = Arc::new(instance_mgr);
-            let instance_mgr_clone = instance_mgr.clone();
-            let db_option_clone = db_option.clone();
-            let mgr_clone = mgr.clone();
 
             println!("开始处理db: {db_no}");
 
@@ -2315,6 +2204,16 @@ impl AiosDBManager {
             dbg!(run_cache_cata);
             dbg!(run_cache_loop);
             dbg!(run_cache_prim);
+
+            //找出当前db，当前refno下所有有负实体的分组
+            let has_neg_elements: Vec<RefU64> = vec![];
+
+            let instance_mgr = Arc::new(RwLock::new(instance_mgr));
+
+            let instance_mgr_clone = instance_mgr.clone();
+            let db_option_clone = db_option.clone();
+            let mgr_clone = mgr.clone();
+
             if run_cache_cata {
                 let project = project.clone();
                 let handle = tokio::spawn(async move {
@@ -2341,6 +2240,7 @@ impl AiosDBManager {
                         instance_mgr_clone.clone(),
                         &db_option_clone,
                         Some(&[db_no]),
+                        has_neg_elements,
                     )
                         .await
                         .unwrap();
@@ -2364,14 +2264,115 @@ impl AiosDBManager {
                 });
                 futures::future::join_all(vec![handle]).await;
             }
+            // dbg!(instance_mgr.inst_mgr.len());
 
-            mgr.cached_mesh_mgr
-                .serialize_to_specify_file("./assets/mesh/mesh.bin");
+            // 负实体在这里进行合并处理
+            if true {
+                let target_refno = RefU64::from_refno_str("17496/79785").unwrap();
+                let mut final_shape = None;
+                let mut pos_shapes = vec![];
+                let mut neg_shapes = vec![];
+                {
+                    let mesh_mgr = mgr.cached_mesh_mgr.read().await;
+                    let inst_mgr = instance_mgr.read().await;
+                    for (k, v) in &inst_mgr.inst_map {
+                        let pos_geo_hashes = v.get_pos_geo_hashes();
+                        // if pos_geo_hashes.is_empty() { continue; }
+                        let neg_geo_hashes = v.get_neg_geo_hashes();
+                        //正实体的处理
+                        for pos_geo_hash in pos_geo_hashes {
+                            if let Some(m) = mesh_mgr.get(&pos_geo_hash) &&
+                                let Some(o) = &m.occ_shape {
+                                let t = v.get_transform_by_hash(pos_geo_hash).unwrap_or_default();
+                                let dmat = t.compute_matrix().as_dmat4();
+                                // dbg!(&dmat);
+                                pos_shapes.push(o.g_transform(&dmat).unwrap());
+                            }
+                        }
+                        //负实体的处理
+                        for neg_geo_hash in neg_geo_hashes {
+                            if let Some(m) = mesh_mgr.get(&neg_geo_hash) &&
+                                let Some(o) = &m.occ_shape {
+                                let t = v.get_transform_by_hash(neg_geo_hash).unwrap_or_default();
+                                let dmat = t.compute_matrix().as_dmat4();
+                                // dbg!(&dmat);
+                                neg_shapes.push(o.g_transform(&dmat).unwrap());
+                            }
+                        }
+                    }
+                }
 
-            instance_mgr.serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
+                dbg!(pos_shapes.len());
+                for shape in pos_shapes {
+                    if final_shape.is_none() {
+                        final_shape = Some(shape);
+                    } else {
+                        final_shape = final_shape.map(|x| x.fuse(&shape).expect("occ shape Fuse 出错"));
+                    }
+                }
+
+                dbg!(neg_shapes.len());
+                for shape in neg_shapes {
+                    if final_shape.is_none() {
+                        final_shape = Some(shape);
+                    } else {
+                        final_shape = final_shape.map(|x| x.cut(&shape).expect("occ shape Cut 出错"));
+                    }
+                }
+
+
+                let geo_hash = *target_refno;
+                let mut mesh_mgr = mgr.cached_mesh_mgr.write().await;
+                let mut inst_mgr = instance_mgr.write().await;
+                let mut aabb = None;
+                if let Some(s) = final_shape {
+                    let mesh: PdmsMesh = s.mesh().unwrap().into();
+                    aabb = mesh.aabb;
+                    mesh_mgr.meshes.insert(geo_hash, mesh);
+                }
+
+                let o = mgr
+                    .get_world_transform(target_refno)
+                    .await
+                    .unwrap_or_default()
+                    .unwrap_or_default();
+                let att = mgr.get_attr(target_refno).await.unwrap_or_default();
+                let mut geos_info = EleGeosInfo {
+                    _key: target_refno.to_refno_normal_string(),
+                    data: vec![
+                        EleGeoInstance {
+                            geo_hash,
+                            refno: target_refno,
+                            geo_param: Default::default(),
+                            pts: vec![],
+                            aabb,
+                            transform: (Default::default(), Default::default(), Vec3::splat(1.0)),
+                            visible: true,
+                            is_tubi: false,
+                            is_neg: false,
+                        }
+                    ],
+                    visible: true,
+                    generic_type: mgr.get_generic_type(target_refno),
+                    aabb,
+                    world_transform: (
+                        o.rotation,
+                        o.translation,
+                        Vec3::ONE,
+                    ),
+                    ptset_map: default(),
+                    flow_pt_indexs: default(),
+                    has_neg: true,
+                };
+                inst_mgr.insert(target_refno, geos_info);
+            }
+            let mesh_mgr = mgr.cached_mesh_mgr.read().await;
+            let inst_mgr = instance_mgr.read().await;
+            mesh_mgr.serialize_to_specify_file("./assets/mesh/mesh.bin");
+            inst_mgr.serialize_to_specify_file(&format!("./assets/instance/{db_no}.inst"));
             println!("{db_no} 生成完毕。");
         }
-        println!("cache all geoms costs: {}ms", time.elapsed().as_millis());
+        println!("生成所有模型时间: {}ms", time.elapsed().as_millis());
         Ok(true)
     }
 

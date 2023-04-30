@@ -1,9 +1,8 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use aios_core::negative_mesh_type::NegativeEles;
 use aios_core::options::DbOption;
-use aios_core::pdms_data::PdmsInstanceMeshData;
-use aios_core::pdms_types::{CachedMeshesMgr, EleGeosInfo, GeoHash, RefU64, ShapeInstancesMgr};
-use aios_core::shape::pdms_shape::{PdmsInstanceMeshMap, PdmsMesh};
+use aios_core::pdms_types::{CachedMeshesMgr, EleGeosInfo, GeoHash, PdmsInstanceMeshData, RefU64, ShapeInstancesMgr};
+use aios_core::shape::pdms_shape::{PdmsMesh};
 use arangors_lite::{AqlQuery, Database};
 use bevy::prelude::Transform;
 use dashmap::DashMap;
@@ -137,42 +136,42 @@ pub async fn query_pdms_mesh_aql(hashes: Vec<u64>, database: &Database) -> anyho
     Ok(cache_mgr)
 }
 
-pub async fn query_pdms_mesh_from_refno_aql(refno: RefU64, database: &Database) -> anyhow::Result<PdmsInstanceMeshMap> {
-    let mut mgr = DashMap::new();
-    let mut instances = DashMap::new();
-    let key = format!("{}/{}", "pdms_eles", refno.to_url_refno());
-    let aql = AqlQuery::new("\
-    let refnos = (for v,e,p in 0..10 inbound @id pdms_edges
-                return v._key)
-    let results = ( for refno in refnos
-                let r = document('pdms_instances',refno)
-                filter r != null
-                return { refno:r._key , data:r.data } )
-    for result in results
-        let refno = result.refno
-        for d in result.data
-            let r = document('pdms_mesh',d.geo_hash)
-            return { refno:refno,hash: r._key, data: r.data }
-    ").bind_var("id", key);
-    let results: Vec<PdmsMeshAql> = database.aql_query(aql).await?;
-    for result in results {
-        let hash = result.hash.parse().unwrap_or(0);
-        let refno = RefU64::from_url_refno(&result.refno);
-        if refno.is_none() { continue; }
-        let refno = refno.unwrap();
-        instances.entry(refno).or_insert_with(Vec::new).push(hash);
-
-        let r = hex::decode(result.data)?;
-        let data = PdmsMesh::from_compress_bytes(&r);
-        if data.is_none() { continue; }
-        let data = data.unwrap();
-        mgr.entry(hash).or_insert(data);
-    }
-    Ok(PdmsInstanceMeshMap {
-        refno_map: instances,
-        mesh_map: mgr,
-    })
-}
+// pub async fn query_pdms_mesh_from_refno_aql(refno: RefU64, database: &Database) -> anyhow::Result<PdmsInstanceMeshData> {
+    // let mut mesh_mgr = CachedMeshesMgr::default();
+    // let mut inst_mgr = ShapeInstancesMgr::default();
+    // let key = format!("{}/{}", "pdms_eles", refno.to_url_refno());
+    // let aql = AqlQuery::new("\
+    // let refnos = (for v,e,p in 0..10 inbound @id pdms_edges
+    //             return v._key)
+    // let results = ( for refno in refnos
+    //             let r = document('pdms_instances',refno)
+    //             filter r != null
+    //             return { refno:r._key , data:r.data } )
+    // for result in results
+    //     let refno = result.refno
+    //     for d in result.data
+    //         let r = document('pdms_mesh',d.geo_hash)
+    //         return { refno:refno,hash: r._key, data: r.data }
+    // ").bind_var("id", key);
+    // let results: Vec<PdmsMeshAql> = database.aql_query(aql).await?;
+    // for result in results {
+    //     let hash = result.hash.parse().unwrap_or(0);
+    //     let refno = RefU64::from_url_refno(&result.refno);
+    //     if refno.is_none() { continue; }
+    //     let refno = refno.unwrap();
+    //     inst_mgr.entry(refno).or_insert_with(Vec::new).push(hash);
+    //
+    //     let r = hex::decode(result.data)?;
+    //     let data = PdmsMesh::from_compress_bytes(&r);
+    //     if data.is_none() { continue; }
+    //     let data = data.unwrap();
+    //     mesh_mgr.entry(hash).or_insert(data);
+    // }
+    // Ok(PdmsInstanceMeshData {
+    //     inst_mgr,
+    //     mesh_mgr,
+    // })
+// }
 
 pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &Database) -> anyhow::Result<CachedMeshesMgr> {
     let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
@@ -190,7 +189,6 @@ pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &Datab
         let refno = RefU64::from_url_refno(&r._key);
         if refno.is_none() { continue; }
         let refno = refno.unwrap();
-
         let mesh = PdmsMesh::from_compress_bytes(&hex::decode(r.mesh)?);
         if mesh.is_none() { continue; }
         let mesh = mesh.unwrap();
@@ -293,12 +291,6 @@ async fn test_query_pdms_instance_mesh_from_refno() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let refno = RefU64::from_refno_str("24383/69713").unwrap();
-    // let result = query_pdms_instance_mesh_from_refno(refno,&database).await?;
     let result = query_refno_transform(refno, &database).await?;
-    // for data in result.inst_mgr.inst_map {
-    //     dbg!(&data.0);
-    // }
-    // dbg!(&result.mesh_mgr.len());
-    dbg!(&result);
     Ok(())
 }

@@ -34,14 +34,14 @@ use aios_database::graph_db::pdms_arango::*;
 use aios_database::graph_db::pdms_inst_arango::{
     query_instance_with_refno_in_arangodb, sync_instance_to_graph_db,
 };
-use aios_database::graph_db::pdms_mesh_arango::sync_mesh_to_graph_db;
+use aios_database::graph_db::pdms_mesh_arango::sync_mesh_to_arango_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::helper::{qualified_column_name, qualified_table_name};
 use aios_database::negative::{compute_boolean_mesh, query_negative_refnos_aql};
 use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
-use aios_database::{AQL_PDMS_ELES_COLLECTION, BATCH_CHUNKS_CNT};
+use aios_database::{AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_COLLECTION, BATCH_CHUNKS_CNT};
 use arangors_lite::collection::CollectionType::{Document, Edge};
 use bevy::prelude::*;
 use bevy::transform::components::Transform;
@@ -70,21 +70,25 @@ use std::io::{Read, Write};
 use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use aios_core::options::DbOption;
 use bevy::prelude::system_adapter::new;
 use tokio::spawn;
 use env_logger::{fmt::Target, Builder};
 use log::{error, LevelFilter};
+use tokio::sync::RwLock;
 
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let now = chrono::offset::Local::now();
+    let filename = format!("{}-{}-{}-{}-{}-{}_dblog.txt", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
-        .open("database.txt")
+        // .append(true)
+        .open(filename)
         .unwrap();
     let mut builder = Builder::from_default_env();
     builder.filter(Some("aios_database"), LevelFilter::Info);
@@ -96,6 +100,9 @@ async fn main() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
+    create_arangodb_conns(&db_option)
+        .await
+        .expect("Failed to create arangodb conns");
     /// 是否全部同步模型
     if db_option.total_sync {
         create_arangodb_conns(&db_option)
@@ -106,8 +113,8 @@ async fn main() -> anyhow::Result<()> {
     }
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    if let Some(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file("assets/mesh/mesh.bin") {
-        Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(cache_mesh);
+    if let Ok(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
+        Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
         info!("read cached mesh ok.");
     }
 
@@ -125,6 +132,9 @@ async fn main() -> anyhow::Result<()> {
     if db_option.gen_model_mesh {
         dbg!("正在生成模型");
         let mut time = Instant::now();
+        //处理包含负实体的情况
+        // AiosDBManager::cache_neg_geos_data(mgr.clone(), db_option.clone()).await?;
+        //如果是负实体，需要拆分成一组一组的去处理
         AiosDBManager::cache_geos_data(mgr.clone(), db_option.clone()).await?;
         info!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
@@ -139,12 +149,10 @@ async fn main() -> anyhow::Result<()> {
                 continue;
             }
             let dbno: u32 = path.file_stem().unwrap().to_str().unwrap().parse().unwrap();
-            let mut file = fs::File::open(path)?;
-            let mut data = vec![];
-            file.read_to_end(&mut data)?;
-            let instance_mgr = bincode::deserialize::<CachedInstanceMgr>(&data)?;
+            let Ok(instance_mgr) = ShapeInstancesMgr::deserialize_from_bin_file(&path) else {
+                continue;
+            };
             if db_option.save_model_mesh_to_graph_db {
-                // dbg!("正在保存Instances");
                 sync_instance_to_graph_db(mgr.clone(), &instance_mgr).await?;
             }
             all_insts_mgr.insert(dbno, instance_mgr);
@@ -170,11 +178,8 @@ async fn main() -> anyhow::Result<()> {
                     if !filename.ends_with("bin") {
                         continue;
                     }
-                    let mut file = fs::File::open(path)?;
-                    let mut data = vec![];
-                    file.read_to_end(&mut data)?;
-                    let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
-                    sync_mesh_to_graph_db(&mgr, &mesh_mgr).await?;
+                    let mesh_mgr = CachedMeshesMgr::deserialize_from_bin_file(&path)?;
+                    sync_mesh_to_arango_db(&mgr, &mesh_mgr).await?;
                 }
             }
         }
@@ -182,19 +187,13 @@ async fn main() -> anyhow::Result<()> {
 
     //生成rtree 结构
     let mut collider_shape_mgr = CachedColliderShapeMgr::default();
-    let mut file = fs::File::open("assets/mesh/mesh.bin")?;
-    let mut data = vec![];
-    file.read_to_end(&mut data)?;
-    let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
     if db_option.gen_spatial_tree {
         let mut timer = Instant::now();
         let mut rstar_objs = vec![];
-
         let children_files = fs::read_dir("assets/instance/")?;
         let arch_db_nums = db_option.clone().arch_db_nums.unwrap_or_default();
         for path in children_files {
             let path = path?.path();
-            // dbg!(&path);
             let filename = path.file_name().unwrap().to_str().unwrap().to_string();
             if !filename.contains("inst") {
                 continue;
@@ -204,17 +203,12 @@ async fn main() -> anyhow::Result<()> {
             if arch_db_nums.contains(&dbno.parse().unwrap_or(0)) {
                 continue;
             }
-
-            let mut file = fs::File::open(path)?;
-            let mut data = vec![];
-            file.read_to_end(&mut data)?;
-            if let Ok(instance_mgr) = bincode::deserialize::<CachedInstanceMgr>(&data) {
-                // dbg!(&instance_mgr.inst_mgr.inst_map.len());
-                for kv in &instance_mgr.inst_mgr.inst_map {
-                    if let Some(aabb) = kv.value().aabb {
+            if let Ok(instance_mgr) = ShapeInstancesMgr::deserialize_from_bin_file(&path) {
+                for (&refno, e) in &instance_mgr.inst_map {
+                    if let Some(aabb) = e.aabb {
                         if aabb.extents().magnitude().is_finite() {
-                            rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, *kv.key()));
-                        } else {}
+                            rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, refno));
+                        }
                     }
                 }
             }
@@ -230,7 +224,6 @@ async fn main() -> anyhow::Result<()> {
 
     if db_option.save_spatial_tree_to_db {
         let mut site_major_map = HashMap::new();
-        // let room_infos = vec![RefU64::from_two_nums(24381,34919)];
         let room_infos = query_all_need_compute_room_refno(
             &vec![7997],
             "FRMW",
@@ -243,42 +236,11 @@ async fn main() -> anyhow::Result<()> {
         save_room_info_to_arangodb(&mgr, map, &db_option, &mut site_major_map).await?;
         dbg!("房间树保存完成");
     }
-
     if db_option.only_sync_sys {
         query_all_db_infos(&mgr).await?;
     }
-
     Ok(())
 }
-
-// // #[tokio::main]
-// async fn main_1() -> anyhow::Result<()> {
-//     use config::{Config, ConfigError, Environment, File};
-//     let s = Config::builder()
-//         .add_source(File::with_name("DbOption"))
-//         .build()?;
-//     let db_option: DbOption = s.try_deserialize().unwrap();
-//     let database = get_arangodb_conn_from_db_option(&db_option).await?;
-//     // let aios_mgr = AiosDBManager::init_form_config().await?;
-//     // let database = aios_mgr.get_arangodb_conn().await?;
-//     let refno = RefU64::from_refno_str("23584/5386").unwrap();
-//
-//     let negative_refnos = query_negative_refnos_aql(refno, &aios_mgr,&database).await?.get(&refno).unwrap().to_vec();
-//     let result = compute_boolean_mesh(refno, negative_refnos, &database).await?;
-//     // dbg!(&result);
-//     Ok(())
-// }
-
-// #[tokio::main]
-// async fn main() -> anyhow::Result<()> {
-//     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-//     let refno = RefU64::from_refno_str("23584/5495").unwrap();
-//     let data = create_rvm_file(refno, &mgr).await?;
-//     let mut file = std::fs::File::create("test_rvm.rvm").unwrap();
-//     file.write_all(&data).unwrap();
-//     Ok(())
-// }
-
 
 
 /// 提前创建图数据库需要的几个collection
@@ -292,7 +254,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     create_arangodb_conn(&database, "para_eles", Document).await?;
     create_arangodb_conn(&database, "pdms_edges", Edge).await?;
     create_arangodb_conn(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
-    create_arangodb_conn(&database, "pdms_instances", Document).await?;
+    create_arangodb_conn(&database, AQL_PDMS_INST_COLLECTION, Document).await?;
     create_arangodb_conn(&database, "plin_eles", Document).await?;
     create_arangodb_conn(&database, "sibl_edges", Edge).await?;
     create_arangodb_conn(&database, "ssc_edges", Edge).await?;
@@ -346,10 +308,7 @@ fn test_turn_bin_into_json() {
 
 #[test]
 fn test_inst_mgr() {
-    let mut file = File::open("assets/instance/7999.inst").unwrap();
-    let mut data = vec![];
-    file.read_to_end(&mut data).unwrap();
-    let map = bincode::deserialize::<CachedInstanceMgr>(&data).unwrap();
+    let map = CachedInstanceMgr::deserialize_from_bin_file(&"assets/instance/7999.inst").unwrap();
     let refno = RefU64::from_refno_str("24381/34919").unwrap();
     if let Some(value) = map.inst_mgr.inst_map.get(&refno) {
         dbg!(&value.value());

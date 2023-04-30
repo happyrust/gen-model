@@ -50,6 +50,8 @@ pub mod negative;
 pub mod ansys;
 pub mod test;
 
+pub mod viewer;
+
 #[macro_use]
 extern crate derive_more;
 
@@ -59,3 +61,4 @@ extern crate nom;
 
 pub const BATCH_CHUNKS_CNT: usize = 50;
 pub const AQL_PDMS_ELES_COLLECTION: &'static str = "pdms_eles";
+pub const AQL_PDMS_INST_COLLECTION: &'static str = "pdms_instances";

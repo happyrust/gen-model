@@ -102,7 +102,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
     let drne = new_rot * drne;
     info!("refno, drns: {:?}, drne: {:?}", to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
     if spine_paths.len() == 0 {
-        dbg!(spine_paths.len());
+        // dbg!(spine_paths.len());
         if let Some(poss) = att.get_poss() &&
             let Some(pose) = att.get_pose() {
             height = pose.distance(poss);
