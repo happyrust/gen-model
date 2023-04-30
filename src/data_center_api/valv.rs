@@ -1,4 +1,4 @@
-use std::fs;
+use std::{env, fs};
 use std::io::Write;
 use aios_core::data_center::{DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::options::DbOption;
@@ -7,6 +7,7 @@ use arangors_lite::Database;
 use sqlx::{MySql, Pool};
 use crate::api::room_code::query_room_code;
 use crate::aql_api::children::{query_refnos_travel_children_with_type_aql, query_travel_children_aql};
+use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 
 pub async fn get_valv_data(refnos: Vec<RefU64>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<DataCenterProject> {
@@ -36,6 +37,8 @@ pub async fn get_valv_data(refnos: Vec<RefU64>, database: &Database, pool: &Pool
 
 #[tokio::test]
 async fn test_valv() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
     use config::{Config, ConfigError, Environment, File};
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
@@ -43,7 +46,8 @@ async fn test_valv() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let refno = RefU64::from_refno_str("24383/67619").unwrap();
-    let data = get_valv_data(refno, &database).await;
+    let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
+    let data = get_valv_data(vec![refno], &database,&pool).await.unwrap();
     let mut file = fs::File::create("阀门.json")?;
     let data = serde_json::to_string(&data).unwrap();
     file.write_all(&data.into_bytes())?;

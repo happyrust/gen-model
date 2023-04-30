@@ -29,3 +29,7 @@ pub const PROFESSION_TX_XT: &'static str = "TX_XT";
 pub const TEAM_DATA_TABLE: &'static str = "TEAM_DATA";
 pub const UNSET_NOUN: u32 = 28933118;
 pub const AQL_LOCK_REFNOS_COLLECTION: &'static str = "lock_refnos";
+pub const AQL_HOLE_DATA_COLLECTION: &'static str = "hole_data";
+pub const AQL_EMBED_DATA_COLLECTION: &'static str = "embed_data";
+pub const AQL_HOLE_EDGE_COLLECTION: &'static str = "hole_edge";
+pub const AQL_EMBED_EDGE_COLLECTION: &'static str = "embed_edge";

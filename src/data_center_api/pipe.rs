@@ -11,9 +11,10 @@ use arangors_lite::Database;
 use bevy::render::render_resource::encase::private::RuntimeSizedArray;
 use sqlx::{MySql, Pool};
 use crate::api::attr::query_implicit_attr;
+use crate::api::children::travel_children_with_type;
 use crate::api::element::{query_children, query_children_eles, query_children_eles_without_children_count, query_name, query_refno_type};
 use crate::api::metadata_manage::{query_metadata_table_code_sql, query_metadata_table_sql};
-use crate::aql_api::children::{query_children_aql, query_children_refnos_aql};
+use crate::aql_api::children::{query_children_aql, query_children_refnos_aql, query_travel_children_with_type_aql};
 use crate::aql_api::tubi::{query_bran_info, query_tubi_from_bran};
 use crate::data_center_api::bran::get_data_center_bran_attr;
 use crate::data_center_api::elbo::get_data_center_elbo_attr;
@@ -51,12 +52,16 @@ pub async fn get_all_metadata_pipe(pool: &Pool<MySql>) -> anyhow::Result<HashMap
     Ok(pipe_metadata_map)
 }
 
-pub async fn get_data_center_from_pipe(aios_mgr: &AiosDBManager, pipe_refno: RefU64) -> anyhow::Result<()> {
+pub async fn get_data_center_from_pipe(aios_mgr: &AiosDBManager, pipe_refno: RefU64) -> anyhow::Result<Option<DataCenterProjectWithRelations>> {
     let pool = aios_mgr.get_project_pool_by_refno(pipe_refno).await;
-    if pool.is_none() { return Ok(()); }
+    if pool.is_none() { return Ok(None); }
     let (_, pool) = pool.unwrap();
     let database = aios_mgr.get_arangodb_conn().await?;
-    let bran_refnos = query_children_eles_without_children_count(pipe_refno, &pool).await?;
+    // 找到所有需要统计的 bran
+    let bran_refnos = query_travel_children_with_type_aql(&database,pipe_refno ,"BRAN").await?;
+    let bran_refnos = bran_refnos.into_iter().map(|x| x.into()).collect::<Vec<_>>();
+    dbg!(&bran_refnos.len());
+    // 获得 bran的信息
     let (need_compute_bran_refnos, ref_map) = get_bran_data(&bran_refnos, aios_mgr).await?;
     let metadata_map = get_all_metadata_pipe(&pool).await?;
     let (instance_map, element_map, bran_children_map) =
@@ -74,10 +79,7 @@ pub async fn get_data_center_from_pipe(aios_mgr: &AiosDBManager, pipe_refno: Ref
         instances,
         relations,
     };
-    let mut file = File::create("管段.json")?;
-    let json = serde_json::to_string(&data).unwrap();
-    file.write_all(&json.into_bytes())?;
-    Ok(())
+    Ok(Some(data))
 }
 
 /// 找到所有需要收集的bran以及href tref 的参考号
@@ -439,7 +441,7 @@ async fn test_get_all_metadata_pipe() {
 #[tokio::test]
 async fn test_get_data_center_from_pipe() -> anyhow::Result<()> {
     // let pipe_refno = RefU64::from_refno_str("24383/67155")?;
-    let pipe_refno = RefU64::from_refno_str("24383/67116")?;
+    let pipe_refno = RefU64::from_refno_str("23584/5730")?;
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     get_data_center_from_pipe(&mgr, pipe_refno).await?;
     Ok(())

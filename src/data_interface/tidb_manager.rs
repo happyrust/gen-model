@@ -310,9 +310,16 @@ impl PdmsDataInterface for AiosDBManager {
         project: &str,
         att_types: &[&str],
         dbnos: Option<&[i32]>,
+        exclude_neg_sibling:bool,
     ) -> anyhow::Result<RefU64Vec> {
         if let Some(project_pool) = self.project_map.get(project) {
             let r = query_types_refnos(att_types, project_pool.value(), dbnos).await?;
+            if exclude_neg_sibling {
+                if let Ok(database) = self.get_arangodb_conn().await {
+                    let r = filter_negative_sibl_from_refnos(&r.0, &database).await?;
+                    return Ok(RefU64Vec(r))
+                }
+            }
             return Ok(r);
         }
         Ok(RefU64Vec::default())
@@ -759,6 +766,7 @@ impl AiosDBManager {
         for pool in &self.project_map {
             if let Ok(uda_map) = query_uda_ukey_udna_all(pool.value()).await {
                 for (ukey, udna) in uda_map {
+                    let udna = format!(":{}", udna);
                     GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna);
                 }
             }
@@ -1213,6 +1221,7 @@ impl AiosDBManager {
                     if let Some(leave) = last_attr.get_i32("LEAV") {
                         if last_geoms.axis_map.contains_key(&leave) {
                             let tref = group_att.get_foreign_refno("TREF").unwrap_or(RefU64(0));
+                            let tref_attr = mgr.get_attr(tref).await?;
                             let p = &last_geoms.axis_map[&leave].pt;
                             let l_pos = last_world_trans.transform_point(Vec3::new(
                                 p[0] as f32,
@@ -1220,10 +1229,10 @@ impl AiosDBManager {
                                 p[2] as f32,
                             ));
                             let key = last_refno.hash_with_another_refno(tref);
-                            let att_type = last_attr.get_type();
+                            let att_type = tref_attr.get_type();
                             let mut extra_type = "".to_string();
                             if att_type == "ATTA" {
-                                let attype = last_attr.get_str("ATTY").unwrap_or("");
+                                let attype = tref_attr.get_str("ATTY").unwrap_or("");
                                 extra_type = attype.to_string();
                             }
                             tubi_aqls.entry(key).or_insert(TubiEdgeAql {
@@ -1435,6 +1444,7 @@ impl AiosDBManager {
                             &mgr.arango_database,
                             root_refno,
                             &CATA_ATT_TYPES,
+                            false
                         )
                             .await?
                             .into_iter()
@@ -1449,7 +1459,7 @@ impl AiosDBManager {
         }
         if !is_debug {
             has_cata_refnos = mgr
-                .get_refnos_by_types(project, &CATA_ATT_TYPES, db_nos)
+                .get_refnos_by_types(project, &CATA_ATT_TYPES, db_nos,false)
                 .await?;
         }
         let has_cata_cnt = has_cata_refnos.len();
@@ -1656,13 +1666,13 @@ impl AiosDBManager {
             .into_iter()
             .map(|x| x.1)
             .collect::<Vec<_>>();
-        // dbg!(&tubi_result.len());
+        dbg!(&tubi_result.len());
         if !tubi_result.is_empty() {
             let conn = mgr.get_arangodb_conn().await.unwrap();
             let json = serde_json::to_value(tubi_result).unwrap_or_default();
+
             save_arangodb_with_database(json, "tubi_edges", &conn, mgr.db_option.replace_dbs)
-                .await
-                .unwrap();
+                .await?;
         }
         println!(
             "处理元件库几何体: {} 花费时间: {} ms",
@@ -1701,6 +1711,7 @@ impl AiosDBManager {
                                 &mgr.arango_database,
                                 root_refno,
                                 &GNERAL_PRIM_NOUN_NAMES,
+                                false
                             )
                                 .await?
                                 .iter()
@@ -1717,6 +1728,7 @@ impl AiosDBManager {
                     db_option.project_name.as_str(),
                     &GNERAL_PRIM_NOUN_NAMES,
                     db_nos,
+                        false
                 )
                 .await?;
         }
@@ -1833,7 +1845,7 @@ impl AiosDBManager {
 
     pub async fn cache_pohe_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let pohe_refnos = mgr
-            .get_refnos_by_types(project, &vec!["POHE"], Some(&[1]))
+            .get_refnos_by_types(project, &vec!["POHE"], Some(&[1]),false)
             .await?;
         let pohe_cnt = pohe_refnos.len();
         dbg!(pohe_cnt);
@@ -1934,6 +1946,7 @@ impl AiosDBManager {
                             &mgr.arango_database,
                             root_refno,
                             &["PLOO", "LOOP"],
+                            false
                         )
                             .await?
                             .iter()
@@ -1944,7 +1957,7 @@ impl AiosDBManager {
         }
         if !is_debug {
             loop_refnos = mgr
-                .get_refnos_by_types(&db_option.project_name, &["PLOO", "LOOP"], db_nos)
+                .get_refnos_by_types(&db_option.project_name, &["PLOO", "LOOP"], db_nos,false)
                 .await?;
         }
         let loop_cnt = loop_refnos.len();

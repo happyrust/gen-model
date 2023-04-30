@@ -9,21 +9,6 @@ use crate::plot_data::hangers;
 use crate::test::test_helper;
 use crate::test::test_helper::get_test_ams_db_manager;
 
-#[test]
-fn test_area() {
-    use geo::polygon;
-    use geo::Area;
-    use geo::Coordinate;
-    use geo::{coord, LineString, Polygon};
-
-    let polygon = geo::geometry::Polygon::new(
-        LineString::from(vec![(0., 0.), (1., 1.), (1., 0.), (0., 0.)]),
-        vec![],
-    );
-
-    assert_eq!(polygon.unsigned_area(), 30.);
-}
-
 #[tokio::test]
 async fn test_save_hangers_data() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();

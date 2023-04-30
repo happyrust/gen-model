@@ -265,7 +265,10 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     create_arangodb_conn(&database, "embed_data", Document).await?;
     create_arangodb_conn(&database, "room_edges", Edge).await?;
     create_arangodb_conn(&database, "geo_infos", Document).await?;
-    create_arangodb_conn(&database, AQL_LOCK_REFNOS_COLLECTION, Document).await?;
+    create_arangodb_conn(&database, AQL_HOLE_DATA_COLLECTION, Document).await?;
+    create_arangodb_conn(&database, AQL_EMBED_DATA_COLLECTION, Document).await?;
+    create_arangodb_conn(&database, AQL_HOLE_EDGE_COLLECTION, Edge).await?;
+    create_arangodb_conn(&database, AQL_EMBED_EDGE_COLLECTION, Edge).await?;
     Ok(())
 }
 

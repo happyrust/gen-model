@@ -148,13 +148,11 @@ pub async fn query_instance_level_with_ssc_refno_in_arangodb(refno: RefU64, data
     let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
     let pdms_instances = AQL_PDMS_INST_COLLECTION;
     let aql = AqlQuery::new("
-    FOR c IN 1..20 inbound @refno ssc_edges
-        PRUNE document(@collection,c._key) != null
-        Filter document(@collection,c._key) != null
-        let f = document(@collection,c._key)
-        return f._key")
-        .bind_var("refno", refno_aql)
-        .bind_var("collection", pdms_instances);
+    FOR c IN 0..20 inbound @refno ssc_edges
+        // Filter document(@collection,c._key) != null
+        return c._key")
+        .bind_var("refno", refno_aql);
+        // .bind_var("collection", pdms_instances);
     let result: Vec<String> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(vec![]); }
     let result = convert_refno_vec_from_vec_string(result);

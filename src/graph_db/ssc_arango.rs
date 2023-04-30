@@ -61,9 +61,8 @@ pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: 
     let pdms_instances = AQL_PDMS_INST_COLLECTION;
     let aql = AqlQuery::new("
     FOR c IN 0..10 inbound @refno ssc_edges
-        PRUNE document(@collection,c._key) != null
-        Filter document(@collection,c._key) != null
         let f = document(@collection,c._key)
+        Filter f != null
         return {
             '_key':f._key,
             'data':f.data,

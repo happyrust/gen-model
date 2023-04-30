@@ -1,12 +1,17 @@
 use std::{env, fs};
 use std::io::Write;
+use aios_core::create_attas_structs::VirtualEmbedGraphNode;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject, ItemValue};
+use aios_core::negative_mesh_type::NegativeEdges;
 use aios_core::pdms_types::{RefU64, UdaMajorType};
+use arangors_lite::{AqlQuery, Database};
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
-use crate::data_center_api::hole::{convert_time_to_vec, get_pos_from_str};
-use crate::consts::EMBED_TABLE;
+use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::data_center_api::hole::{convert_time_to_vec, get_pos_from_str, hash_two_str};
+use crate::consts::{AQL_EMBED_DATA_COLLECTION, AQL_EMBED_EDGE_COLLECTION, EMBED_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_arango::save_arangodb_with_database;
 
 pub async fn create_embed_data(pool: &Pool<MySql>) -> anyhow::Result<Option<DataCenterProject>> {
     let mut instances = Vec::new();
@@ -215,6 +220,136 @@ async fn query_embed_data(id: u64, pool: &Pool<MySql>) -> anyhow::Result<Option<
         _ => {}
     }
     Ok(None)
+}
+
+/// 将埋件数据保存到图数据库
+pub async fn save_embed_data_to_arangodb(data: Vec<VirtualEmbedGraphNode>, database: &Database) -> anyhow::Result<String> {
+    let json = serde_json::to_value(&data);
+    if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
+    let json = json.unwrap();
+    let r = save_arangodb_with_database(json, AQL_EMBED_DATA_COLLECTION, database).await;
+    let _edge_r = create_embed_data_edge(&data, database).await?;
+    if let Err(r) = r {
+        Ok(r.to_string())
+    } else {
+        Ok("保存成功".to_string())
+    }
+}
+
+async fn create_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &Database) -> anyhow::Result<()> {
+    let mut edges = Vec::new();
+    for d in data {
+        let refno = RefU64::from_refno_str(&d.rely_item_ref);
+        if refno.is_err() { continue; }
+        let refno = refno.unwrap();
+        let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
+        let to = format!("{}/{}", AQL_EMBED_DATA_COLLECTION, d._key);
+        let hash = hash_two_str(&from, &to);
+        edges.push(NegativeEdges {
+            _key: hash.to_string(),
+            _from: from,
+            _to: to,
+        });
+    }
+    if !edges.is_empty() {
+        let json = serde_json::to_value(&edges)?;
+        save_arangodb_with_database(json, AQL_EMBED_EDGE_COLLECTION, database).await?;
+    }
+    Ok(())
+}
+
+/// 通过埋件依附的墙或板来查询这个墙上所有的埋件数据
+pub async fn query_embed_data_aql(rely_refno: Vec<RefU64>, database: &Database) -> anyhow::Result<Vec<VirtualEmbedGraphNode>> {
+    let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
+    let aql = AqlQuery::new("\
+    for key in @keys
+        for c in 1 outbound key embed_edge
+            filter c != null
+            return {
+                '_key': c._key,
+                'RelyItem': c.RelyItem,
+                'RelyItemRef': c.RelyItemRef,
+                'MainItem': c.MainItem,
+                'Speciality': c.Speciality,
+                'Position': c.Position,
+                'Ori': c.Ori,
+                'Work': c.Work,
+                'WorkBy': c.WorkBy,
+                'Time': c.Time,
+                'StanderType': c.StanderType,
+                'OpenItem': c.OpenItem,
+                'SizeLength': c.SizeLength,
+                'SizeWidth': c.SizeWidth,
+                'SizeThickness': c.SizeThickness,
+                'MinThickness': c.MinThickness,
+                'Load': c.Load,
+                'MinDistance': c.MinDistance,
+                'SubsMaterial': c.SubsMaterial,
+                'FittID': c.FittID,
+                'REF': c.REF,
+                'Shape': c.Shape,
+                'Note': c.Note,
+                'EmbedBPID': c.EmbedBPID,
+                'EmbedBPVER': c.EmbedBPVER,
+                'RelyItemBPID': c.RelyItemBPID,
+                'RelyItemBPVER': c.RelyItemBPVER,
+                'Form': c.Form
+        }").bind_var("keys", keys);
+    let result = database.aql_query::<VirtualEmbedGraphNode>(aql).await?;
+    Ok(result)
+}
+
+pub async fn get_embed_data_total_aql(database: &Database) -> anyhow::Result<Vec<VirtualEmbedGraphNode>> {
+    let aql = AqlQuery::new("\
+    for c in @@collection
+        return {
+            '_key': c._key,
+            'RelyItem': c.RelyItem,
+            'RelyItemRef': c.RelyItemRef,
+            'MainItem': c.MainItem,
+            'Speciality': c.Speciality,
+            'Position': c.Position,
+            'Ori': c.Ori,
+            'Work': c.Work,
+            'WorkBy': c.WorkBy,
+            'Time': c.Time,
+            'StanderType': c.StanderType,
+            'OpenItem': c.OpenItem,
+            'SizeLength': c.SizeLength,
+            'SizeWidth': c.SizeWidth,
+            'SizeThickness': c.SizeThickness,
+            'MinThickness': c.MinThickness,
+            'Load': c.Load,
+            'MinDistance': c.MinDistance,
+            'SubsMaterial': c.SubsMaterial,
+            'FittID': c.FittID,
+            'REF': c.REF,
+            'Shape': c.Shape,
+            'Note': c.Note,
+            'EmbedBPID': c.EmbedBPID,
+            'EmbedBPVER': c.EmbedBPVER,
+            'RelyItemBPID': c.RelyItemBPID,
+            'RelyItemBPVER': c.RelyItemBPVER,
+            'Form': c.Form
+        }").bind_var("@collection", AQL_EMBED_DATA_COLLECTION);
+    let result = database.aql_query::<VirtualEmbedGraphNode>(aql).await?;
+    Ok(result)
+}
+
+/// 删除埋件的信息，并删除边
+pub async fn delete_embed_data_aql(keys:Vec<String>,database:&Database) -> anyhow::Result<bool> {
+    let edge_aql = AqlQuery::new("\
+    for key in @keys
+        for c,e in 1 inbound CONCAT('embed_data/',key) embed_edge
+            REMOVE e._key IN embed_edge
+    ").bind_var("keys",keys.clone());
+    let result = database.aql_query::<Vec<()>>(edge_aql).await;
+    let data_aql = AqlQuery::new("\
+    for key in @keys
+       REMOVE key IN embed_data
+    ").bind_var("keys",keys);
+    let result = database.aql_query::<Vec<()>>(data_aql).await;
+    Ok(!result.is_err())
 }
 
 fn get_relay_item(relay_item: String) -> AttrValue {

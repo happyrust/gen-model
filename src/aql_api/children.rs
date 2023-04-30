@@ -1,12 +1,14 @@
 use std::collections::HashMap;
-use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
+use aios_core::options::DbOption;
+use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64, RefU64Vec};
 use arangors_lite::{AqlQuery, Connection, Database};
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool};
 use crate::api::attr::query_full_attr;
 use crate::aql_api::*;
 use crate::AQL_PDMS_ELES_COLLECTION;
-use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::data_interface::tidb_manager::{AiosDBManager, GENRAL_NEGATIVE_NOUN_NAMES};
+use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 
 pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let mut r = vec![];
@@ -221,10 +223,11 @@ pub async fn query_travel_children_with_out_leaf_aql(arango_database: &Database,
 }
 
 /// 遍历refno只获取指定类型数组的refnos
-pub async fn query_travel_children_with_types_aql(arango_database: &Database, refno: RefU64, att_types: &[&str]) -> anyhow::Result<Vec<EleTreeNode>> {
+pub async fn query_travel_children_with_types_aql(arango_database: &Database, refno: RefU64, att_types: &[&str], exclude_neg_sibling: bool) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = if !exclude_neg_sibling {
+        AqlQuery::new("\
     FOR z in 0..10 INBOUND @id pdms_edges
     Filter z.noun in @nouns
     return {
@@ -235,8 +238,27 @@ pub async fn query_travel_children_with_types_aql(arango_database: &Database, re
         'version':0,
         'children_count':0,
     }")
-        .bind_var("id", refno_aql)
-        .bind_var("nouns", att_types);
+            .bind_var("id", refno_aql)
+            .bind_var("nouns", att_types)
+    } else {
+        AqlQuery::new("\
+        FOR z in 0..10 INBOUND @id pdms_edges
+            Filter z.noun in @nouns
+            let contains_negativ = ( for v in 0..1000 ANY z._id sibl_edges
+                            filter POSITION(@negative_nouns,v.noun)
+                            return 1 )
+            filter Length(contains_negativ) == 0
+            return {
+                'refno':z._key,
+                'owner':z.owner,
+                'name':z.name,
+                'noun':z.noun,
+                'version':0,
+                'children_count':0,
+            }").bind_var("id", refno_aql)
+            .bind_var("nouns", att_types)
+            .bind_var("negative_nouns", GENRAL_NEGATIVE_NOUN_NAMES.to_vec())
+    };
     let result: Vec<PdmsElementAql> = arango_database.aql_query(aql).await?;
     for v in result {
         if let Some(refno) = RefU64::from_url_refno(&v.refno) {
@@ -377,17 +399,17 @@ pub async fn query_sibl_level_refnos(refno: RefU64, database: &Database) -> anyh
 
 /// 返回该参考号的上一个或者下一个节点的attr，b_pre: true 上一个 , false 下一个
 pub async fn query_pre_or_next_node(refno: RefU64, b_pre: bool, database: &Database, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<AttrMap>> {
-    let key = format!("pdms_eles/{}", refno.to_url_refno());
+    let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = if b_pre {
         AqlQuery::new("\
         for v in 1 outbound @key sibl_edges
             return v._key
-    ").bind_var("key", key)
+    ").bind_var("key", refno_url)
     } else {
         AqlQuery::new("\
         for v in 1 inbound @key sibl_edges
             return v._key
-    ").bind_var("key", key)
+    ").bind_var("key", refno_url)
     };
     let aql_result = database.aql_query::<String>(aql).await;
     // 如果为该层第一个或者最后一个 则返回 None
@@ -397,4 +419,68 @@ pub async fn query_pre_or_next_node(refno: RefU64, b_pre: bool, database: &Datab
     if aql_result.is_empty() { return Ok(None); }
     let attr = query_full_attr(aql_result[0], aios_mgr, None).await?;
     Ok(Some(attr))
+}
+
+/// 返回指定参考号下所有的负实体以及和负实体同级的其他节点
+pub async fn query_travel_children_filter_negative_sibl_nodes(refno: RefU64, database: &Database) -> anyhow::Result<HashMap<RefU64, Vec<PdmsElement>>> {
+    let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    // todo negatives并没有去掉同层级的其他节点，同层级的所有节点都查询了一遍，应该一层只用查询一遍
+    let aql = AqlQuery::new("\
+        let negatives = ( FOR v in 0..10 INBOUND @key pdms_edges
+                    filter POSITION(@negative_nouns
+                            ,v.noun)
+                    return v._id )
+        let sibls = ( for negative in negatives
+                for v in 0..1000 ANY negative sibl_edges
+                return {
+                    'refno':v._key,
+                    'owner':v.owner,
+                    'name':v.name,
+                    'noun':v.noun,
+                    'version':0,
+                    'children_count':0,
+                } )
+        return UNIQUE(sibls)"
+    ).bind_var("key", refno_url)
+        .bind_var("negative_nouns", GENRAL_NEGATIVE_NOUN_NAMES.to_vec());
+    let results = database.aql_query::<Vec<PdmsElementAql>>(aql).await?;
+    let mut negative_map = HashMap::new();
+    for result in results {
+        for r in result {
+            let ele = r.change_to_pdms_element();
+            if ele.is_none() { continue ;}
+            let ele = ele.unwrap();
+            negative_map.entry(ele.owner).or_insert_with(Vec::new).push(ele);
+        }
+    }
+    Ok(negative_map)
+}
+
+/// 过滤掉同层级拥有负实体的参考号
+pub async fn filter_negative_sibl_from_refnos(refnos:&Vec<RefU64>,database:&Database) -> anyhow::Result<Vec<RefU64>> {
+    let keys = refnos.into_iter().map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}",refno.to_url_refno())).collect::<Vec<_>>();
+    let aql = AqlQuery::new("\
+        for refno in @keys
+        let contains_negative = ( for v in 0..1000 ANY refno sibl_edges
+                            filter POSITION(@negative_nouns ,v.noun)
+                            return 1 )
+        filter Length(contains_negative) == 0
+        return refno
+    ").bind_var("keys",keys).bind_var("negative_nouns", GENRAL_NEGATIVE_NOUN_NAMES.to_vec());
+    let result = database.aql_query::<String>(aql).await?;
+    Ok(result.into_iter().filter_map(|r| RefU64::from_arangodb_refno_str(&r)).collect::<Vec<_>>())
+}
+
+#[tokio::test]
+async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let refno = RefU64::from_refno_str("17496/79566").unwrap();
+    let result = query_travel_children_filter_negative_sibl_nodes(refno,&database).await?;
+    dbg!(&result);
+    Ok(())
 }
