@@ -88,7 +88,7 @@ pub async fn query_instance_with_refno_in_arangodb(refno: RefU64, database: &Dat
 }
 
 ///查询参考号对应有哪些显示实例
-/// refno: 待查询的参考号集合
+///refno: 待查询的参考号集合
 pub async fn query_instance_with_refnos_in_arangodb(refnos: Vec<RefU64>, database: &Database) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
     let refnos = refnos.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
     let aql = AqlQuery::new(r#"
@@ -107,7 +107,7 @@ pub async fn query_instance_with_refnos_in_arangodb(refnos: Vec<RefU64>, databas
     for c in UNIQUE(refnos)
     let f = document('pdms_instances',c)
         filter f != null
-        filter f.visible AND f.has_neg
+        filter f.visible
             return {
                 '_key':f._key,
                 'data':f.data,

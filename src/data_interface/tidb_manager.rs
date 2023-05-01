@@ -310,14 +310,14 @@ impl PdmsDataInterface for AiosDBManager {
         project: &str,
         att_types: &[&str],
         dbnos: Option<&[i32]>,
-        exclude_neg_sibling:bool,
+        exclude_neg_sibling: bool,
     ) -> anyhow::Result<RefU64Vec> {
         if let Some(project_pool) = self.project_map.get(project) {
             let r = query_types_refnos(att_types, project_pool.value(), dbnos).await?;
             if exclude_neg_sibling {
                 if let Ok(database) = self.get_arangodb_conn().await {
                     let r = filter_negative_sibl_from_refnos(&r.0, &database).await?;
-                    return Ok(RefU64Vec(r))
+                    return Ok(RefU64Vec(r));
                 }
             }
             return Ok(r);
@@ -1444,7 +1444,7 @@ impl AiosDBManager {
                             &mgr.arango_database,
                             root_refno,
                             &CATA_ATT_TYPES,
-                            false
+                            false,
                         )
                             .await?
                             .into_iter()
@@ -1459,7 +1459,7 @@ impl AiosDBManager {
         }
         if !is_debug {
             has_cata_refnos = mgr
-                .get_refnos_by_types(project, &CATA_ATT_TYPES, db_nos,false)
+                .get_refnos_by_types(project, &CATA_ATT_TYPES, db_nos, false)
                 .await?;
         }
         let has_cata_cnt = has_cata_refnos.len();
@@ -1538,11 +1538,7 @@ impl AiosDBManager {
                             visible: true,
                             generic_type: mgr.get_generic_type(child_refno),
                             aabb: None,
-                            world_transform: (
-                                o.rotation,
-                                o.translation,
-                                Vec3::ONE,
-                            ),
+                            world_transform: o,
                             ptset_map: refno_ptset_map
                                 .remove(&child_refno)
                                 .map(|x| x.1)
@@ -1585,11 +1581,7 @@ impl AiosDBManager {
                             let translation =
                                 transform.translation + transform.rotation * trans.translation;
                             let scale = trans.scale;
-                            aabb = aabb.scaled(&Vector::new(
-                                trans.scale.x,
-                                trans.scale.y,
-                                trans.scale.z,
-                            ));
+                            aabb = aabb.scaled(&trans.scale.into());
                             let transformed_aabb = aabb.transform_by(&Isometry {
                                 rotation: rot.into(),
                                 translation: translation.into(),
@@ -1615,7 +1607,11 @@ impl AiosDBManager {
                                 refno,
                                 pts,
                                 aabb: Some(aabb),
-                                transform: (rot, translation, scale),
+                                transform: Transform{
+                                    translation,
+                                    rotation: rot,
+                                    scale,
+                                },
                                 geo_param: brep_shape
                                     .convert_to_geo_param()
                                     .unwrap_or(PdmsGeoParam::Unknown),
@@ -1711,7 +1707,7 @@ impl AiosDBManager {
                                 &mgr.arango_database,
                                 root_refno,
                                 &GNERAL_PRIM_NOUN_NAMES,
-                                false
+                                false,
                             )
                                 .await?
                                 .iter()
@@ -1728,7 +1724,7 @@ impl AiosDBManager {
                     db_option.project_name.as_str(),
                     &GNERAL_PRIM_NOUN_NAMES,
                     db_nos,
-                        false
+                    false,
                 )
                 .await?;
         }
@@ -1767,11 +1763,7 @@ impl AiosDBManager {
                         visible: true,
                         generic_type: mgr.get_generic_type(refno),
                         aabb: None,
-                        world_transform: (
-                            trans_origin.rotation,
-                            trans_origin.translation,
-                            Vec3::ONE,
-                        ),
+                        world_transform: trans_origin,
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
                         has_neg: false,
@@ -1789,13 +1781,13 @@ impl AiosDBManager {
                             geo_param = brep_obj
                                 .convert_to_geo_param()
                                 .unwrap_or(PdmsGeoParam::Unknown);
-                            // let r = cached_mesh_mgr.gen_pdms_mesh(brep_obj, replace_mesh);
                             let r = cached_mesh_mgr.gen_pdms_mesh(brep_obj, replace_mesh);
                             geo_hash = Some(r);
                         }
                     }
                     if let Some(geo_hash) = geo_hash {
                         let visible = attr.is_visible_by_level(None).unwrap_or(true);
+                        geos_info.visible = visible;
                         let tr = &item_trans;
                         let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) else {
                             continue;
@@ -1810,7 +1802,7 @@ impl AiosDBManager {
                             refno,
                             pts: Default::default(),
                             aabb: Some(aabb),
-                            transform: (tr.rotation, tr.translation, tr.scale),
+                            transform: *tr,
                             geo_param,
                             visible,
                             is_tubi: false,
@@ -1845,7 +1837,7 @@ impl AiosDBManager {
 
     pub async fn cache_pohe_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let pohe_refnos = mgr
-            .get_refnos_by_types(project, &vec!["POHE"], Some(&[1]),false)
+            .get_refnos_by_types(project, &vec!["POHE"], Some(&[1]), false)
             .await?;
         let pohe_cnt = pohe_refnos.len();
         dbg!(pohe_cnt);
@@ -1946,7 +1938,7 @@ impl AiosDBManager {
                             &mgr.arango_database,
                             root_refno,
                             &["PLOO", "LOOP"],
-                            false
+                            false,
                         )
                             .await?
                             .iter()
@@ -1957,7 +1949,7 @@ impl AiosDBManager {
         }
         if !is_debug {
             loop_refnos = mgr
-                .get_refnos_by_types(&db_option.project_name, &["PLOO", "LOOP"], db_nos,false)
+                .get_refnos_by_types(&db_option.project_name, &["PLOO", "LOOP"], db_nos, false)
                 .await?;
         }
         let loop_cnt = loop_refnos.len();
@@ -1972,7 +1964,6 @@ impl AiosDBManager {
         for i in 0..batch_chunks_cnt as usize {
             let mgr = mgr.clone();
             let instance_mgr = instance_mgr.clone();
-
             let all_refnos = all_refnos.clone();
             let processed_cnt = processed_cnt.clone();
             let handle = tokio::spawn(async move {
@@ -2007,12 +1998,8 @@ impl AiosDBManager {
                     let mut geos_info = EleGeosInfo {
                         _key: refno.to_refno_normal_string(),
                         data: vec![],
-                        visible: false,
-                        world_transform: (
-                            trans_origin.rotation,
-                            trans_origin.translation,
-                            Vec3::ONE,
-                        ),
+                        visible: true,
+                        world_transform: trans_origin,
                         generic_type: mgr.get_generic_type(parent_refno),
                         ptset_map: default(),
                         flow_pt_indexs: vec![],
@@ -2027,7 +2014,7 @@ impl AiosDBManager {
                     if let Ok(children_refs) = mgr.get_children_refs(refno).await {
                         for x in children_refs {
                             if let Ok(a) = mgr.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
-                                let pt = a.get_position().unwrap_or_default() /*- origin_pt*/;
+                                let pt = a.get_position().unwrap_or_default();
                                 if loop_verts.len() > 0 {
                                     if pt.distance(*loop_verts.last().unwrap()) > f32::EPSILON {
                                         loop_verts.push(pt);
@@ -2041,14 +2028,14 @@ impl AiosDBManager {
                         }
                     }
                     if loop_verts.is_empty() { continue; }
-                    let mut parent_att = AttrMap::default();
+                    let mut parent_att =  mgr.get_attr(parent_refno).await.unwrap_or_default();
                     let mut geo_hash = None;
                     let mut item_trans = Transform::default();
                     let mut geo_param = PdmsGeoParam::Unknown;
                     // dbg!(&target_type);
                     match target_type {
                         "NREV" | "REVO" => {
-                            parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
+                            // parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
                             let angle = parent_att.get_f32("ANGL").unwrap_or_default();
                             if angle >= f32::EPSILON {
                                 let revo = Box::new(Revolution {
@@ -2070,7 +2057,7 @@ impl AiosDBManager {
                         //todo 关于justline，可能需要jusline的信息才能判断中心点
                         "AEXTR" | "NXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
                             let attr = mgr.get_attr(refno).await.unwrap_or_default();
-                            parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
+                            // parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
                             target_refno = parent_refno;
                             let mut height = attr
                                 .get_f32("HEIG")
@@ -2091,7 +2078,6 @@ impl AiosDBManager {
                                         pdia: r * 2.0,
                                         ..Default::default()
                                     });
-                                    // dbg!(&dish);
                                     geo_param = dish
                                         .convert_to_geo_param()
                                         .unwrap_or(PdmsGeoParam::Unknown);
@@ -2105,6 +2091,7 @@ impl AiosDBManager {
                                         fradius_vec,
                                         ..Default::default()
                                     });
+                                    // dbg!(&extrusion);
                                     geo_param = extrusion
                                         .convert_to_geo_param()
                                         .unwrap_or(PdmsGeoParam::Unknown);
@@ -2128,6 +2115,7 @@ impl AiosDBManager {
 
                     if let Some(geo_hash) = geo_hash {
                         let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
+                        geos_info.visible = visible;
                         let tr: Transform = item_trans;
                         if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
                             aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
@@ -2140,7 +2128,7 @@ impl AiosDBManager {
                                 refno: parent_refno,
                                 pts: Default::default(),
                                 aabb: Some(aabb),
-                                transform: (tr.rotation, tr.translation, tr.scale),
+                                transform: tr,
                                 visible,
                                 is_tubi: false,
                                 geo_param,
@@ -2280,36 +2268,81 @@ impl AiosDBManager {
             // dbg!(instance_mgr.inst_mgr.len());
 
             // 负实体在这里进行合并处理
-            if true {
-                let target_refno = RefU64::from_refno_str("17496/79785").unwrap();
+            //最后再处理所有的负实体分组
+            // let result = query_travel_children_filter_negative_sibl_nodes(refno, &database).await?;
+
+            if false {
+                let target_refno = RefU64::from_refno_str("17496/80024").unwrap();
+                let w_trans = mgr
+                    .get_world_transform(target_refno)
+                    .await
+                    .unwrap_or_default()
+                    .unwrap_or_default();
                 let mut final_shape = None;
+                // let mut final_neg_shape = None;
                 let mut pos_shapes = vec![];
                 let mut neg_shapes = vec![];
+                let mut compound_bbox: Option<Aabb> = None;
                 {
                     let mesh_mgr = mgr.cached_mesh_mgr.read().await;
                     let inst_mgr = instance_mgr.read().await;
+                    let w_mat = w_trans.compute_matrix();
                     for (k, v) in &inst_mgr.inst_map {
                         let pos_geo_hashes = v.get_pos_geo_hashes();
-                        // if pos_geo_hashes.is_empty() { continue; }
+                        let mat = mgr
+                            .get_world_transform(*k)
+                            .await
+                            .unwrap_or_default()
+                            .unwrap_or_default().compute_matrix();
+                        let local_mat = w_mat.inverse() * mat;
                         let neg_geo_hashes = v.get_neg_geo_hashes();
                         //正实体的处理
                         for pos_geo_hash in pos_geo_hashes {
                             if let Some(m) = mesh_mgr.get(&pos_geo_hash) &&
                                 let Some(o) = &m.occ_shape {
-                                let t = v.get_transform_by_hash(pos_geo_hash).unwrap_or_default();
-                                let dmat = t.compute_matrix().as_dmat4();
-                                // dbg!(&dmat);
-                                pos_shapes.push(o.g_transform(&dmat).unwrap());
+                                //transform 应该基于target refno
+                                let t = v.get_transform_by_hash(pos_geo_hash).unwrap_or_default().compute_matrix();
+                                // dbg!(t);
+                                let pos_mat = ( local_mat * t);
+                                // dbg!(k);
+                                let p_bbox = m.aabb.map(|a| {
+                                    let (s, r, t) = pos_mat.to_scale_rotation_translation();
+                                    let aabb = a.scaled(&s.into());
+                                    let t_aabb = aabb.transform_by(&Isometry {
+                                        rotation: r.into(),
+                                        translation: t.into(),
+                                    });
+                                    t_aabb
+                                });
+                                if p_bbox.is_some() {
+                                    compound_bbox = compound_bbox.map(|b| Some(b.merged(&p_bbox.unwrap()))).unwrap_or(p_bbox);
+                                }
+                                // dbg!(&pos_mat.w_axis);
+                                pos_shapes.push(o.g_transform(&pos_mat.as_dmat4()).unwrap());
                             }
                         }
                         //负实体的处理
                         for neg_geo_hash in neg_geo_hashes {
                             if let Some(m) = mesh_mgr.get(&neg_geo_hash) &&
                                 let Some(o) = &m.occ_shape {
-                                let t = v.get_transform_by_hash(neg_geo_hash).unwrap_or_default();
-                                let dmat = t.compute_matrix().as_dmat4();
-                                // dbg!(&dmat);
-                                neg_shapes.push(o.g_transform(&dmat).unwrap());
+                                let inst = v.get_inst(neg_geo_hash).unwrap();
+                                let t = v.get_transform_by_hash(neg_geo_hash).unwrap_or_default().compute_matrix();
+                                // dbg!(t);
+                                let neg_mat = (local_mat * t);
+                                let n_bbox = m.aabb.map(|a| {
+                                    let (s, r, t) = neg_mat.to_scale_rotation_translation();
+                                    let aabb = a.scaled(&s.into());
+                                    let t_aabb = aabb.transform_by(&Isometry {
+                                        rotation: r.into(),
+                                        translation: t.into(),
+                                    });
+                                    t_aabb
+                                });
+                                if n_bbox.is_some() {
+                                    compound_bbox = compound_bbox.map(|b| Some(b.merged(&n_bbox.unwrap()))).unwrap_or(n_bbox);
+                                }
+
+                                neg_shapes.push(o.g_transform(&neg_mat.as_dmat4()).unwrap());
                             }
                         }
                     }
@@ -2320,35 +2353,42 @@ impl AiosDBManager {
                     if final_shape.is_none() {
                         final_shape = Some(shape);
                     } else {
+                        dbg!("Fuse");
                         final_shape = final_shape.map(|x| x.fuse(&shape).expect("occ shape Fuse 出错"));
                     }
                 }
 
                 dbg!(neg_shapes.len());
+                // for shape in neg_shapes {
+                //     if final_neg_shape.is_none() {
+                //         final_neg_shape = Some(shape);
+                //     } else {
+                //         final_neg_shape = final_neg_shape.map(|x| x.fuse(&shape).expect("occ shape Fuse 出错"));
+                //     }
+                // }
                 for shape in neg_shapes {
                     if final_shape.is_none() {
                         final_shape = Some(shape);
                     } else {
-                        final_shape = final_shape.map(|x| x.cut(&shape).expect("occ shape Cut 出错"));
+                        final_shape = final_shape.map(|x| x.cut(&shape).expect("occ shape cut 出错"));
                     }
                 }
-
-
+                // if let Some(s) = &final_neg_shape {
+                //     final_shape = final_shape.map(|x| x.cut(s).expect("occ shape Cut 出错"));
+                // }
                 let geo_hash = *target_refno;
                 let mut mesh_mgr = mgr.cached_mesh_mgr.write().await;
                 let mut inst_mgr = instance_mgr.write().await;
                 let mut aabb = None;
                 if let Some(s) = final_shape {
-                    let mesh: PdmsMesh = s.mesh().unwrap().into();
+                    let size = compound_bbox.unwrap().bounding_sphere().radius as f64;
+                    dbg!(size);
+                    let mesh: PdmsMesh = s.mesh(0.001 * size).unwrap().into();
                     aabb = mesh.aabb;
                     mesh_mgr.meshes.insert(geo_hash, mesh);
                 }
 
-                let o = mgr
-                    .get_world_transform(target_refno)
-                    .await
-                    .unwrap_or_default()
-                    .unwrap_or_default();
+
                 let att = mgr.get_attr(target_refno).await.unwrap_or_default();
                 let mut geos_info = EleGeosInfo {
                     _key: target_refno.to_refno_normal_string(),
@@ -2359,7 +2399,7 @@ impl AiosDBManager {
                             geo_param: Default::default(),
                             pts: vec![],
                             aabb,
-                            transform: (Default::default(), Default::default(), Vec3::splat(1.0)),
+                            transform: Default::default(),
                             visible: true,
                             is_tubi: false,
                             is_neg: false,
@@ -2367,12 +2407,8 @@ impl AiosDBManager {
                     ],
                     visible: true,
                     generic_type: mgr.get_generic_type(target_refno),
-                    aabb,
-                    world_transform: (
-                        o.rotation,
-                        o.translation,
-                        Vec3::ONE,
-                    ),
+                    aabb: compound_bbox,
+                    world_transform: w_trans,
                     ptset_map: default(),
                     flow_pt_indexs: default(),
                     has_neg: true,

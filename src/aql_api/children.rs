@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use aios_core::options::DbOption;
-use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64, RefU64Vec};
+use aios_core::pdms_types::{EleTreeNode, GENRAL_NEGATIVE_NOUN_NAMES, PdmsElement, RefU64, RefU64Vec};
 use arangors_lite::{AqlQuery, Connection, Database};
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool};
 use crate::api::attr::query_full_attr;
 use crate::aql_api::*;
 use crate::AQL_PDMS_ELES_COLLECTION;
-use crate::data_interface::tidb_manager::{AiosDBManager, GENRAL_NEGATIVE_NOUN_NAMES};
+use crate::data_interface::tidb_manager::{AiosDBManager};
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 
 pub async fn query_children_aql(arango_database: &Database, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
@@ -427,8 +427,7 @@ pub async fn query_travel_children_filter_negative_sibl_nodes(refno: RefU64, dat
     // todo negatives并没有去掉同层级的其他节点，同层级的所有节点都查询了一遍，应该一层只用查询一遍
     let aql = AqlQuery::new("\
         let negatives = ( FOR v in 0..10 INBOUND @key pdms_edges
-                    filter POSITION(@negative_nouns
-                            ,v.noun)
+                    filter POSITION(@negative_nouns, v.noun)
                     return v._id )
         let sibls = ( for negative in negatives
                 for v in 0..1000 ANY negative sibl_edges
@@ -471,6 +470,7 @@ pub async fn filter_negative_sibl_from_refnos(refnos:&Vec<RefU64>,database:&Data
     Ok(result.into_iter().filter_map(|r| RefU64::from_arangodb_refno_str(&r)).collect::<Vec<_>>())
 }
 
+///  测试获取负实体的集合
 #[tokio::test]
 async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
@@ -479,7 +479,7 @@ async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Resu
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
-    let refno = RefU64::from_refno_str("17496/79566").unwrap();
+    let refno = RefU64::from_refno_str("17496/79756").unwrap();
     let result = query_travel_children_filter_negative_sibl_nodes(refno,&database).await?;
     dbg!(&result);
     Ok(())
