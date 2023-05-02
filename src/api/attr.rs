@@ -15,6 +15,7 @@ use glam::{Quat, Vec3};
 use itertools::Itertools;
 use sqlx::Executor;
 use sqlx::mysql::MySqlRow;
+use crate::api::children::{query_ancestor_of_type_from_cache, query_owner_till_type};
 use crate::api::element::{query_ele_node, query_owner_from_id, query_pdms_elements_type_name, query_refno_type, query_types_refnos};
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -185,17 +186,25 @@ pub async fn query_explicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
     Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
 }
 
-pub async fn query_uda_attr(att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
+/// 查找该类型对应的所有 uda
+pub async fn query_uda_attr(att_type: Vec<i32>, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
+    let mut map = AttrMap::default();
     let sql = gen_query_uda_attr_sql(att_type);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     if result.is_err() { return Ok(AttrMap::default()); }
-    let result = result.unwrap();
-    let val = result.get::<Vec<u8>, _>("DATA");
-    Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
+    let results = result.unwrap();
+    for result in results {
+        let val = result.get::<Vec<u8>, _>("DATA");
+        let query_map = AttrMap::from_compress_bytes(&val).unwrap_or_default();
+        for (k, v) in query_map.map.into_iter() {
+            map.map.entry(k).or_insert(v);
+        }
+    }
+    Ok(map)
 }
 
 pub async fn query_full_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
-    if let Some((project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
+    if let Some((_project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
         let ref_basic = aios_mgr.get_refno_basic(refno);
         if ref_basic.is_none() { return Ok(AttrMap::default()); }
         let ref_basic = ref_basic.unwrap();
@@ -203,13 +212,19 @@ pub async fn query_full_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_nam
         let att_type = attr.get_type().to_string();
         let explicit_attr = query_explicit_attr(refno, &pool).await?;
         let ele = query_ele_node(refno, &pool).await?;
+        let b_bran = query_ancestor_of_type_from_cache(ele.refno, "PIPE").is_some();
 
         for (k, v) in explicit_attr.map {
             attr.entry(k).or_insert(v);
         }
         for pool in &aios_mgr.project_map {
             // uda 赋值需要加上元件库
-            let uda_attr = query_uda_attr(&att_type, &pool).await?;
+            let mut uda_type = vec![db1_hash(&att_type) as i32];
+            // 如果是 pipe下的类型，需要赋上 Element Type 为 ALLP 的 uda
+            if b_bran {
+                uda_type.push(db1_hash("ALLP") as i32);
+            }
+            let uda_attr = query_uda_attr(uda_type, &pool).await?;
             for (k, v) in uda_attr.map {
                 attr.entry(k).or_insert(v);
             }
@@ -241,7 +256,7 @@ pub async fn query_full_attr_with_pool(refno: RefU64, aios_mgr: &AiosDBManager, 
     }
     for pool in &aios_mgr.project_map {
         // uda 赋值需要加上元件库
-        let uda_attr = query_uda_attr(&att_type, &pool).await?;
+        let uda_attr = query_uda_attr(vec![db1_hash(&att_type) as i32], &pool).await?;
         for (k, v) in uda_attr.map {
             attr.entry(k).or_insert(v);
         }
@@ -399,9 +414,17 @@ pub fn gen_query_explicit_attr_sql(refno: RefU64) -> String {
     sql
 }
 
-pub fn gen_query_uda_attr_sql(att_type: &str) -> String {
+pub fn gen_query_uda_attr_sql(att_types: Vec<i32>) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT DATA FROM {PDMS_UDA_ATT_TABLE} WHERE TYPE = '{}' ;", att_type));
+    let mut types = String::new();
+    let is_empty = att_types.is_empty();
+    for att_type in att_types {
+        types.push_str(&format!("{} ,", att_type));
+    }
+    if !is_empty {
+        types.remove(types.len() - 1);
+    }
+    sql.push_str(&format!("SELECT TYPE,DATA FROM {PDMS_UDA_ATT_TABLE} WHERE TYPE IN ({});", types));
     sql
 }
 

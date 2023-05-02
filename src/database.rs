@@ -532,7 +532,7 @@ pub async fn sync_total_async_threaded(
     let replace_types = db_option.replace_types.clone();
     let b_replace_types = replace_types.is_some();
     if b_replace_types { is_replace = true }
-    let mut uda_map: HashMap<String, AttrMap> = HashMap::new();
+    let mut uda_map: HashMap<i32, AttrMap> = HashMap::new();
     let mut version_map = HashMap::new();
     let only_update_dbinfo = db_option.only_update_dbinfo;
     let only_sync_sys = db_option.only_sync_sys;
@@ -662,6 +662,7 @@ pub async fn sync_total_async_threaded(
                 }
 
                 for (type_hash, type_refnos) in type_ele_map {
+                    continue;
                     if b_replace_types {
                         let replace_types = replace_types.clone().unwrap();
                         let att_type = db1_dehash(type_hash);
@@ -852,7 +853,7 @@ pub async fn sync_total_async_threaded(
         let mut uda_sql = format!("INSERT IGNORE INTO {PDMS_UDA_ATT_TABLE} (TYPE,DATA) VALUES");
         for (noun, value) in uda_map.into_iter() {
             let data = value.into_compress_bytes();
-            uda_sql.push_str(&format!("('{}',0x{}),", noun, hex::encode(data)))
+            uda_sql.push_str(&format!("({},0x{}),", noun, hex::encode(data)))
         }
         let mut project_conn = pool.acquire().await.unwrap();
         uda_sql.remove(uda_sql.len() - 1);
@@ -893,7 +894,7 @@ pub async fn sync_total_async_threaded(
         }
     }
     // 重新执行有问题的sql
-    println!("正在重新插入有问题的sql语句, 共 {} 条",error_sql.len());
+    println!("正在重新插入有问题的sql语句, 共 {} 条", error_sql.len());
     let mut conn = pool.acquire().await?;
     for sql in error_sql.iter() {
         let _ = conn.execute(sql.key().as_str()).await;
@@ -908,7 +909,7 @@ pub async fn sync_total_async_threaded(
 fn set_uda_attr(
     type_ele_map: &DashMap<u32, HashSet<RefU64>>,
     total_attr_map: &DashMap<RefU64, WholeAttMap>,
-    uda_map: &mut HashMap<String, AttrMap>,
+    uda_map: &mut HashMap<i32, AttrMap>,
 ) -> anyhow::Result<()> {
     // let mut uda_map: HashMap<String, HashMap<String, String>> = HashMap::new();
     if let Some(uda_refnos) = type_ele_map.get(&db1_hash("UDA")) {
@@ -922,24 +923,27 @@ fn set_uda_attr(
             let uda_implicit_att = &uda_att.implicit_attmap;
             let uda_explicit_att = &uda_att.explicit_attmap;
 
-            let mut udna = uda_implicit_att.get_str("UDNA");
-            if udna == Some("unset") {
-                udna = uda_explicit_att.get_str("DYUDNA");
-            }
+            let ukey = uda_implicit_att.get_i32("UKEY");
+            if ukey.is_none() { continue; }
+            let ukey = ukey.unwrap();
+            // let mut udna = uda_implicit_att.get_str("UDNA");
+            // if udna == Some("") {
+            //     udna = uda_explicit_att.get_str("DYUDNA");
+            // }
             let elel = uda_explicit_att.get_i32_vec("ELEL");
-            let dflt = uda_explicit_att.get_val("DFLT");
-            if udna.is_none() || elel.is_none() || dflt.is_none() {
+            let default = uda_explicit_att.get_val("DFLT");
+            if elel.is_none() || default.is_none() {
                 continue;
             }
-            let udna = udna.unwrap();
+            // let udna = udna.unwrap();
             let elel = elel.unwrap();
-            let dflt = dflt.unwrap();
+            let default = default.unwrap();
             for noun in elel {
                 uda_map
-                    .entry(db1_dehash(noun as u32))
+                    .entry(noun)
                     .or_insert_with(AttrMap::default)
-                    .entry(NounHash(db1_hash(udna)))
-                    .or_insert(dflt.clone());
+                    .entry(NounHash(ukey as u32))
+                    .or_insert(default.clone());
             }
         }
     }
