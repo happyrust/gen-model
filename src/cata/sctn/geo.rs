@@ -5,7 +5,7 @@ use aios_core::parsed_data::{CateProfileParam, GeomsInfo};
 use aios_core::parsed_data::geo_params_data::{CateGeoParam, PdmsGeoParam};
 use aios_core::pdms_types::{AttrMap, RefU64};
 use aios_core::prim_geo::category::CateBrepShape;
-use aios_core::prim_geo::loft::SweepSolid;
+use aios_core::prim_geo::sweep_solid::SweepSolid;
 use aios_core::prim_geo::spine::{Line3D, Spine3D, SpineCurveType, SweepPath3D};
 use aios_core::shape::pdms_shape::BrepShapeTrait;
 use aios_core::tool::math_tool::to_pdms_vec_str;
@@ -29,6 +29,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                                                        brep_shapes_map: &CateBrepShapeMap,
                                                        interface: &T, ) -> anyhow::Result<bool> {
     let geoms = &geom_info.geometries;
+    dbg!(geoms.len());
     // dbg!(&refno);
     if geoms.len() == 0 { return Ok(false); }
     let type_name = att.get_type();

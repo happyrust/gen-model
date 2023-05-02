@@ -18,7 +18,7 @@ use aios_core::tool::db_tool::{db1_hash, GLOBAL_UDA_NAME_MAP};
 use aios_core::tool::math_tool;
 use anyhow::anyhow;
 use approx::{abs_diff_eq, abs_diff_ne};
-use arangors_lite::{Connection, Database};
+use arangors_lite::{AqlQuery, Connection, Database};
 use async_trait::async_trait;
 use bevy::prelude::{dbg, Transform};
 use config::{Config, ConfigError, Environment, File};
@@ -49,7 +49,6 @@ use aios_core::pdms_data::ScomInfo;
 use aios_core::prim_geo;
 use log::{error, info};
 use nom::combinator::map;
-use opencascade::{DsShape, OCCShape};
 use tokio::sync::RwLock;
 
 use crate::api::attr::*;
@@ -70,14 +69,16 @@ use crate::cata::sctn;
 use crate::cata::sctn::geo::create_profile_geos;
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::structs::AIOSAxisMap;
+use crate::data_interface::structs::{AIOSAxisMap, RefnoHasNegInfo, RefnoHasNegInfoMap, RefnoHasNegInfoTuple};
 use crate::defines::*;
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
 use crate::graph_db::pdms_inst_arango::sync_instance_to_graph_db;
-use crate::helper::qualified_table_name;
 use crate::mdb::get_project_mdb;
 use crate::tables::{gen_create_project_mdb_json_sql, gen_create_project_mdb_sql};
 use crate::AQL_PDMS_ELES_COLLECTION;
+
+#[cfg(feature = "opencascade")]
+use opencascade::{OCCShape, Wire, Edge, DsShape};
 
 pub const TUBI_TOL: f32 = 10.0f32;
 
@@ -364,6 +365,53 @@ impl PdmsDataInterface for AiosDBManager {
             result.push(cur_refno);
         }
         result
+    }
+
+    ///查询哪些有负实体的参考号
+    async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>>{
+        let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let aql = AqlQuery::new("\
+        let negatives = ( FOR v,e,p in 0..15 INBOUND @key pdms_edges
+                    PRUNE v.noun in @negative_nouns
+                    filter v.noun in @negative_nouns
+                    return p.vertices[-2]._key)
+        return UNIQUE(negatives)
+        "
+        ).bind_var("key", refno_url)
+            .bind_var("negative_nouns", GENRAL_NEGATIVE_NOUN_NAMES.to_vec());
+        let refno_strs = self.arango_database.aql_query::<Vec<String>>(aql).await?;
+        let refnos = refno_strs.iter().flatten().map(|x| RefU64::from_url_refno(x).unwrap()).collect();
+        Ok(refnos)
+    }
+
+    async fn query_refnos_has_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, RefnoHasNegInfo>>{
+        let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let aql = AqlQuery::new(r#"
+                FOR v,e,p in 0..15 INBOUND @key pdms_edges
+        PRUNE v.noun in @negative_nouns
+        OPTIONS { "order": "bfs"}
+        filter v.noun in @negative_nouns
+        collect parent = p.vertices[-2] into grouped
+        return [
+             parent._key,
+             {
+               children: grouped[*].v._key,
+               nouns: grouped[*].v.noun,
+               cur_noun: parent.noun
+            }
+        ]
+        // return {
+        //     [parent._key]: {
+        //         children: grouped[*].v._key,
+        //         nouns: grouped[*].v.noun,
+        //         cur_noun: parent.noun
+        //     }
+        "#).bind_var("key", refno_url)
+            .bind_var("negative_nouns", GENRAL_NEGATIVE_NOUN_NAMES.to_vec());
+        let result: HashMap<RefU64, RefnoHasNegInfo> = self.arango_database
+            .aql_query::<RefnoHasNegInfoTuple>(aql).await?.into_iter().map(|x| (x.0, x.1)).collect();
+
+        return Ok(result);
     }
 
     /// 获得参考号的祖先属性
@@ -1532,6 +1580,7 @@ impl AiosDBManager {
                             .unwrap_or_default()
                             .unwrap_or_default();
                         let child_att = mgr.get_attr(child_refno).await.unwrap_or_default();
+                        //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
                         let mut geos_info = EleGeosInfo {
                             _key: child_refno.to_refno_normal_string(),
                             data: vec![],
@@ -1549,6 +1598,10 @@ impl AiosDBManager {
                             ],
                             has_neg: false,
                         };
+
+                        // let mut pos_shapes: Vec<> = vec![];
+                        // let mut neg_shapes = vec![];
+
                         let mut geo_insts = &mut geos_info.data;
                         let mut ele_aabb: Option<Aabb> = None;
                         let mut tubi_aabb: Option<Aabb> = None;

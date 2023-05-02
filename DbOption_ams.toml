@@ -1,10 +1,15 @@
 #同步文件配置
+enable_log = false
 total_sync = false
+sync_graph_db = false
+sync_tidb = true
 incr_sync = false
+replace_dbs = false
 
 #项目设置
 project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
 included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
+#included_projects = ["AvevaCatalogue"]  #"AvevaPlantSample",
 
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
@@ -28,10 +33,7 @@ password = ""
 #port = "3306"
 port = "4000"
 sql_threads_number = 50
-batch_insert_sql_cnt = 800
-files_multi_thread = true
-types_multi_thread = true
-recreate_db = true
+batch_insert_sql_cnt = 500   #mysql 批量插入的数量
 server_release_ip = "localhost:9099"
 arangodb_user = "root"
 arangodb_password = ""
@@ -39,14 +41,19 @@ arangodb_password = ""
 #调试选项
 replace_mesh = true
 save_model_mesh_to_graph_db = true
+need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
+reset_mdb_project = false      #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
-replace_dbs = false
-#debug_root_refno = ["24381/57476"]
-#debug_branch_refno = "24381/56660"
-debug_desi_refno = "24381/56685"
-debug_refno_type = "CATA"  # "CATA", "LOOP", "PRIM"
-debug_db_num = 7997
-#included_db_files = ["ams6890_0001"]
+#debug_root_refnos = ["17496/80024"]
+debug_root_refnos = ["23708/26027"]
+#debug_branch_refno = "24383/100842"
+#debug_desi_refno = "17496/79786"
+#debug_refno_types = ["LOOP", "PRIM"]  # "CATA", "LOOP", "PRIM"
+debug_refno_types = ["CATA", "LOOP", "PRIM"]
+debug_db_num = 7324
+included_db_files = ["acp7320_0001"]
 #replace_types = ["SDTE"]
+#manual_db_nums = [7997]
+plat_url = ""

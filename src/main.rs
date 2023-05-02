@@ -36,7 +36,6 @@ use aios_database::graph_db::pdms_inst_arango::{
 };
 use aios_database::graph_db::pdms_mesh_arango::sync_mesh_to_arango_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
-use aios_database::helper::{qualified_column_name, qualified_table_name};
 use aios_database::negative::{compute_boolean_mesh, query_negative_refnos_aql};
 use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
@@ -81,25 +80,27 @@ use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let now = chrono::offset::Local::now();
-    let filename = format!("{}-{}-{}-{}-{}-{}_dblog.txt", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        // .append(true)
-        .open(filename)
-        .unwrap();
-    let mut builder = Builder::from_default_env();
-    builder.filter(Some("aios_database"), LevelFilter::Info);
-    builder.filter(Some("aios_core"), LevelFilter::Info);
-    builder.target(Target::Pipe(Box::new(file))).init();
-
     use config::{Config, ConfigError, Environment, File};
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
+
+    if db_option.enable_log {
+        let now = chrono::offset::Local::now();
+        let filename = format!("{}-{}-{}-{}-{}-{}_dblog.txt", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(filename)
+            .unwrap();
+        let mut builder = Builder::from_default_env();
+        builder.filter(Some("aios_database"), LevelFilter::Info);
+        builder.filter(Some("aios_core"), LevelFilter::Info);
+        builder.target(Target::Pipe(Box::new(file))).init();
+    }
+
     create_arangodb_conns(&db_option)
         .await
         .expect("Failed to create arangodb conns");

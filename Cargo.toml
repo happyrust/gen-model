@@ -66,7 +66,8 @@ rkyv = "0.7.41"
 
 #造型功能，先在database测试
 opencascade = { path = "../dslcad/crates/opencascade", optional = true }
-geo = "0.24.1"
+serde_with = "3.0.0"
+#geo = "0.24.1"
 
 
 [build-dependencies]

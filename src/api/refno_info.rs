@@ -3,6 +3,7 @@ use std::env;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::db_number::DbNumMgr;
+use aios_core::helper::table::qualified_table_name;
 use aios_core::pdms_types::{AttrVal, NounHash, RefU64, RefU64Vec};
 use anyhow::anyhow;
 use arangors_lite::Database;
@@ -14,7 +15,6 @@ use crate::api::attr::query_explicit_attr;
 use crate::api::element::query_types_refnos;
 use crate::aql_api::plin_attr::query_plin_attrs;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::helper::qualified_table_name;
 use crate::defines::CACHED_REFNO_BASIC_MAP;
 
 
@@ -44,14 +44,6 @@ pub async fn get_ref0_projects(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32
 
 /// 获取生成refno到RefBasic的映射, todo 存储有点慢，需要批量存储
 pub async fn sync_refno_basic_map(pool: &Pool<MySql>/*, mdb_dbnums: &BTreeSet<i32>*/) -> anyhow::Result<bool> {
-    // if mdb_dbnums.is_empty() { return Ok(false); }
-    // let mut in_sql = " (".to_string();
-    // for d in mdb_dbnums {
-    //     in_sql.push_str(&format!(r#"{d},"#));
-    // }
-    // in_sql.remove(in_sql.len() - 1);
-    // in_sql.push_str(") ");
-    // let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB in {}", in_sql);
     let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE}");
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match results {

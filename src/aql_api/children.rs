@@ -421,6 +421,9 @@ pub async fn query_pre_or_next_node(refno: RefU64, b_pre: bool, database: &Datab
     Ok(Some(attr))
 }
 
+
+
+
 /// 返回指定参考号下所有的负实体以及和负实体同级的其他节点
 pub async fn query_travel_children_filter_negative_sibl_nodes(refno: RefU64, database: &Database) -> anyhow::Result<HashMap<RefU64, Vec<PdmsElement>>> {
     let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
@@ -447,7 +450,7 @@ pub async fn query_travel_children_filter_negative_sibl_nodes(refno: RefU64, dat
     for result in results {
         for r in result {
             let ele = r.change_to_pdms_element();
-            if ele.is_none() { continue ;}
+            if ele.is_none() { continue; }
             let ele = ele.unwrap();
             negative_map.entry(ele.owner).or_insert_with(Vec::new).push(ele);
         }
@@ -456,8 +459,8 @@ pub async fn query_travel_children_filter_negative_sibl_nodes(refno: RefU64, dat
 }
 
 /// 过滤掉同层级拥有负实体的参考号
-pub async fn filter_negative_sibl_from_refnos(refnos:&Vec<RefU64>,database:&Database) -> anyhow::Result<Vec<RefU64>> {
-    let keys = refnos.into_iter().map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}",refno.to_url_refno())).collect::<Vec<_>>();
+pub async fn filter_negative_sibl_from_refnos(refnos: &Vec<RefU64>, database: &Database) -> anyhow::Result<Vec<RefU64>> {
+    let keys = refnos.into_iter().map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("\
         for refno in @keys
         let contains_negative = ( for v in 0..1000 ANY refno sibl_edges
@@ -465,22 +468,8 @@ pub async fn filter_negative_sibl_from_refnos(refnos:&Vec<RefU64>,database:&Data
                             return 1 )
         filter Length(contains_negative) == 0
         return refno
-    ").bind_var("keys",keys).bind_var("negative_nouns", GENRAL_NEGATIVE_NOUN_NAMES.to_vec());
+    ").bind_var("keys", keys).bind_var("negative_nouns", GENRAL_NEGATIVE_NOUN_NAMES.to_vec());
     let result = database.aql_query::<String>(aql).await?;
     Ok(result.into_iter().filter_map(|r| RefU64::from_arangodb_refno_str(&r)).collect::<Vec<_>>())
 }
 
-///  测试获取负实体的集合
-#[tokio::test]
-async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
-    let refno = RefU64::from_refno_str("17496/79756").unwrap();
-    let result = query_travel_children_filter_negative_sibl_nodes(refno,&database).await?;
-    dbg!(&result);
-    Ok(())
-}

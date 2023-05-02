@@ -31,8 +31,6 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let desi_att = interface.get_attr(refno).await?;
     if scom_ref.is_none() {
-        //"TABITE" => "PRTREF",
-
         if let Some(spre_ref) = desi_att.get_foreign_refno("SPRE"){
             let spre = interface.get_attr(spre_ref).await?;
             if spre.contains_attr_name("CATR") {
@@ -78,6 +76,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     let scom_read = scom_info_map.read().await;
     let scom_info = scom_read.get(&scom_ref).unwrap();
+    // dbg!(scom_info);
     let mut context: BTreeMap<SmolStr, SmolStr> = BTreeMap::new();
     if let Some(v) = desi_att.get_as_string("JUSL") {
         context.insert("JUSL".into(), v.into());
@@ -99,6 +98,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     context.insert(DDRADIUS_STR.into(), SmolStr::new(radi.clone()));
     context.insert("RADI".into(), SmolStr::new(radi));
     let geom_info = resolve_cata_comp(refno, &scom_info, Some(interface), Some(context)).await;
+    dbg!(&geom_info);
     if geom_info.is_err() {
         error!("{:?}", geom_info.as_ref().err());
         error!("{:?}", desi_att.to_string_hashmap());
@@ -116,8 +116,10 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     let type_noun = attr_map
         .get_type_cloned()
         .ok_or(anyhow!(format!("{} 元件库属性不正确: {:?}", refno.to_refno_string(), &attr_map)))?;
-    let is_sprf = type_noun == "SPRF";
-    let ptref_name = if is_sprf { "PSTR" } else { "PTRE" };
+    let ptref_name = match type_noun.as_str() {
+        "SPRF" => "PSTR",
+        _ => "PTRE"
+    };
     let mut axis_params = vec![];
     let mut axis_param_numbers = vec![];
     if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
@@ -128,13 +130,11 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
             }
         }
     }
-    //if is_sprf { "GSTR" } else { "GMRE" }
     let gmref_name = match type_noun.as_str() {
         "SPRF" => "GSTR",
         _ => "GMRE",
     };
     let mut gm_params = vec![];
-    // dbg!(attr_map.to_string_hashmap());
     if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
         if let Ok(gmse_am) = interface.get_attr(gmse_refno).await {
             gm_params = query_gm_params(&gmse_am, Some(interface)).await?;
@@ -277,6 +277,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         cur_context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
     }
     let axis_map = resolve_axis_params(scom_info, &cur_context, interface);
+    dbg!(&axis_map);
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
         if scom_info.plin_map.contains_key(plin.as_str()) {
             Some(scom_info.plin_map.get(plin.as_str()).unwrap().clone())
@@ -380,7 +381,7 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
 pub async fn query_gm_param(
     a: &AttrMap,
     interface: &dyn PdmsDataInterface,
-    has_chidren: bool,
+    has_children: bool,
 ) -> Option<GmParam> {
     let mut paxises = a.get_attr_strings_without_default(&["PAXI", "PAAX", "PBAX", "PCAX"]);
     if let Some(val) = a.get_val("PTS") {
@@ -418,7 +419,7 @@ pub async fn query_gm_param(
             }
         }
     } else {
-        if has_chidren {
+        if has_children {
             for a in interface.get_children_attrs(refno).await.ok()? {
                 verts.push([
                     SmolStr::new(a.get_as_string("PX").unwrap_or_default()),

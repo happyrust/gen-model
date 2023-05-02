@@ -29,7 +29,6 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{DataDocument, ForeignEdges};
 use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphEdgeWithKey, PdmsEleGraphNode};
-use crate::helper::qualified_table_name;
 
 /// 根据 db_option 的 project_name 创建 arangodb 的 database
 pub async fn set_arangodb_database_from_db_option(db_option: &DbOption) -> anyhow::Result<()> {

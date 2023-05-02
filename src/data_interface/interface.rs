@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::dbg;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::pdms_types::{AiosStr, AttrMap, EleTreeNode, PdmsTree, RefU64, RefU64Vec};
@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use dashmap::mapref::one::Ref;
 use id_tree::NodeId;
 use bevy::prelude::*;
+use crate::data_interface::structs::{RefnoHasNegInfo, RefnoHasNegInfoMap};
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 
@@ -56,6 +57,12 @@ pub trait PdmsDataInterface : Send + Sync{
     fn get_ancestors_refnos(&self, refno: RefU64) -> Vec<RefU64>;
 
     fn get_ancestors_refnos_without_world(&self, refno: RefU64) -> Vec<RefU64>;
+
+    ///查询指定参考号下哪些有负实体的参考号
+    async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>>;
+
+    ///查询指定参考号下负实体和正实体的集合
+    async fn query_refnos_has_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, RefnoHasNegInfo>>;
 
     async fn get_ancestors_attrs(&self, refno: RefU64) -> Vec<AttrMap>;
 
