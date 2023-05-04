@@ -681,13 +681,13 @@ impl PdmsDataInterface for AiosDBManager {
         }))
     }
 
-    async fn get_travel_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
+    async fn get_travel_children_attrs(&self, refno: RefU64, nouns: &[&str]) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
         if let Ok(database) = self.get_arangodb_conn().await {
-            let children = query_travel_children_aql(&database, refno).await?;
+            let children = query_deep_children_refnos_fuzzy(&database, refno, nouns).await?;
+            // dbg!(children.len());
             for child in children {
-                let child_refno = child.refno;
-                let attr = self.get_attr(child_refno).await?;
+                let attr = self.get_attr(child).await?;
                 r.push(attr);
             }
         }
@@ -1608,6 +1608,7 @@ impl AiosDBManager {
                 }
                 println!("当前范围: {start_idx} ~ {end_idx}");
                 let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
+                let mut inst_map = instance_mgr.write().await;
                 for j in start_idx..end_idx {
                     let refno = all_refnos[j];
                     println!(
@@ -1616,12 +1617,12 @@ impl AiosDBManager {
                         refno.to_refno_string(),
                         processed_cnt.lock().unwrap().to_owned()
                     );
-                    let mut inst_map = instance_mgr.write().await;
                     //在这里直接处理完所有需要处理的transform
                     let brep_shapes_map = CateBrepShapeMap::new();
                     let current_att = mgr.get_attr(refno).await.unwrap_or_default();
                     let mut refno_ptset_map = DashMap::new();
                     let cur_type = current_att.get_type();
+                    dbg!(cur_type);
                     if cur_type == "BRAN" || cur_type == "HANG" {
                         Self::get_cata_auto_tubi_geoms(
                             mgr.clone(),
@@ -1663,10 +1664,12 @@ impl AiosDBManager {
                         // dbg!(&pos_neg_map);
                         // let neg_map = mgr.query_refnos_has_neg_map(gmse_refno).await.unwrap_or_default();
                         let has_neg = !pos_neg_map.is_empty();
+                        dbg!(has_neg);
                         // let has_neg = false;
                         let mut neg_refnos = pos_neg_map.values().map(|(_, neg)| neg).flatten().cloned().collect::<Vec<_>>();
                         // dbg!(&neg_refnos);
                         let mut pos_refnos = pos_neg_map.values().map(|(pos, _)| pos).flatten().cloned().collect::<Vec<_>>();
+                        // dbg!(&pos_refnos);
                         //如果有负实体，直接合在一起，不需要再拆分
                         let mut geos_info = EleGeosInfo {
                             _key: ele_refno.to_refno_normal_string(),
@@ -1694,7 +1697,7 @@ impl AiosDBManager {
                         let mut has_tubi = false;
                         //将负实体和正实体统计出来
                         let mut w_aabb: Option<Aabb> = None;
-                        // dbg!(shapes.len());
+                        dbg!(shapes.len());
                         for shape in shapes {
                             let CateBrepShape {
                                 refno,
@@ -1757,9 +1760,11 @@ impl AiosDBManager {
                             };
 
                             if pos_refnos.contains(&refno) || neg_refnos.contains(&refno) {
+                                dbg!("grouped");
                                 if let Some(o) = cached_mesh_mgr.get_occ_shape(geo_hash) {
                                     shapes_map.insert(refno, o.g_transform(&transform.compute_matrix().as_dmat4()).unwrap());
                                 }else{
+                                    dbg!(&brep_shape);
                                     dbg!(refno);
                                 }
                             }else{  //不属于分组里面的，不需要理会
@@ -1784,11 +1789,14 @@ impl AiosDBManager {
                         if has_neg {
                             for (comp_ref, (pos, negs)) in pos_neg_map  {
                                 let mut final_shape = None;
-                                // dbg!(comp_ref);
-                                // dbg!(&pos);
-                                // dbg!(&negs);
+                                dbg!(comp_ref);
+                                dbg!(&pos);
+                                dbg!(&negs);
                                 for r in &pos {
-                                    let shape = shapes_map.get(r).unwrap().clone();
+                                    let Some(shape) = shapes_map.get(r).cloned() else{
+                                        dbg!(r);
+                                        continue;
+                                    };
                                     if final_shape.is_none() {
                                         final_shape = Some(shape);
                                     } else {

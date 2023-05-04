@@ -236,8 +236,8 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             // }
             let four = &c2[0..4];
             match four {
-               "DDES" | "WDES" => k = format!("DESI{}", c3).into(),
-                "ODES" | "ADES" | "OPAR" | "CPAR" | "APAR" | "PARA" => k = format!("{four}{}", c3).into(),
+                "DESP" | "DDES" | "WDES" => k = format!("DESI{}", c3).into(),
+                "ODES" | "ADES" | "OPAR" | "CPAR" | "APAR" | "PARA" | "IPAR" => k = format!("{four}{}", c3).into(),
                 _ => {}
             }
             // dbg!(&k);

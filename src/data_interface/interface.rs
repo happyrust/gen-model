@@ -96,6 +96,6 @@ pub trait PdmsDataInterface : Send + Sync{
 
     // async fn get_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>>;
 
-    ///获取当前节点深度遍历后的所有子节点
-    async fn get_travel_children_attrs(&self, refno:RefU64) -> anyhow::Result<Vec<AttrMap>>;
+    ///获取当前节点深度遍历后的所有子节点, 是否指定目标节点
+    async fn get_travel_children_attrs(&self, refno:RefU64, nouns: &[&str]) -> anyhow::Result<Vec<AttrMap>>;
 }

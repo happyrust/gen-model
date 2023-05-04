@@ -4,7 +4,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use aios_core::parsed_data::CateGeomsInfo;
 use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::AttrVal::IntArrayType;
-use aios_core::pdms_types::{AttrMap, RefU64};
+use aios_core::pdms_types::{AttrMap, RefU64, TOTAL_GEO_NOUN_NAMES};
 use anyhow::anyhow;
 use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
@@ -203,7 +203,9 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_travel_children_attrs(refno).await.unwrap();
+    let children = interface.get_travel_children_attrs(refno, &TOTAL_GEO_NOUN_NAMES).await.unwrap();
+    //todo 获得所有的几何数据，需要用几何type去过滤
+    // let children = interface.get_children_attrs(refno).await.unwrap();
     for geo_am in children {
         if !geo_am.is_visible_by_level(None).unwrap_or(true) {
             continue;
@@ -243,8 +245,6 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     cur_context.insert("RS_SCOM_REFNO".into(), scom_info.attr_map.get_refno().unwrap().to_refno_str());
 
     //保温层厚度
-    cur_context.insert("IPARA0".into(), "0".into());
-    cur_context.insert("IPARA".into(), "0".into());
     //PARA
     let params = scom_info.attr_map.get_f64_vec("PARA").unwrap_or_default();
     //OPAR的信息收集
@@ -263,7 +263,6 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
             format!("PARAM{}", i + 1).into(),
             params[i].to_string().into(),
         );
-        cur_context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
         cur_context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
     }
 
