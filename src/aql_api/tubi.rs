@@ -38,10 +38,10 @@ pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<
                 let from_refno = from_refno.unwrap();
                 // 如果是 tubi 在 bran 的第一个，取 bran 的 hstu
                 let spre = if from_refno == bran.refno {
-                    query_foreign_refno_aql(from_refno, vec!["HSTU", "HSTU"], database).await?.unwrap_or_default()
+                    query_foreign_refno_aql(from_refno, &["HSTU", "HSTU"], database).await?.unwrap_or_default()
                 } else {
                     // 如果 tubi 在 bran 的中间或者最后一个，则取上一个节点的 lstu
-                    query_foreign_refno_aql(from_refno, vec!["LSTU", "LSTU"], database).await?.unwrap_or_default()
+                    query_foreign_refno_aql(from_refno, &["LSTU", "LSTU"], database).await?.unwrap_or_default()
                 };
                 let spre_name = if spre == RefU64(0) {
                     "0/0".to_string()

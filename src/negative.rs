@@ -8,7 +8,7 @@ use glam::{Mat4, Vec3};
 use itertools::Itertools;
 use sqlx::{MySql, Pool};
 use crate::aql_api::pdms_mesh::{query_catr_refnos_meshes_aql, query_refnos_meshes_aql};
-use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsElementAql};
+use crate::aql_api::{convert_refno_vec_from_vec_string};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager};
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
@@ -23,15 +23,15 @@ use csg::mesh::IndexedMesh;
 use crate::AQL_PDMS_ELES_COLLECTION;
 
 /// 查找需要负实体计算的instance
-pub async fn query_instance_refnos_negative_aql(refno:RefU64,database:&Database) -> anyhow::Result<Vec<RefU64>> {
-    let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}",refno.to_url_refno());
+pub async fn query_instance_refnos_negative_aql(refno: RefU64, database: &Database) -> anyhow::Result<Vec<RefU64>> {
+    let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
     for v in 0..10 inbound @id pdms_edges
         filter !POSITION(['NCYL' ,'NBOX','NCON', 'NSNO','NPYR', 'NDIS' ,'NXTR', 'NCTO' ,'NRTO' ,'NSLC','NREV'],v.noun)
         filter document('pdms_instances',v._key) != null
         return v._key
-    ").bind_var("id",id);
-    let result:Vec<String> = database.aql_query(aql).await?;
+    ").bind_var("id", id);
+    let result: Vec<String> = database.aql_query(aql).await?;
     let refnos = convert_refno_vec_from_vec_string(result);
     Ok(refnos)
 }
@@ -41,7 +41,7 @@ async fn boolean_negative_mesh(refno: RefU64, aios_mgr: &AiosDBManager) -> anyho
     let database = aios_mgr.get_arangodb_conn().await?;
     let need_compute_refnos = query_negative_refnos_aql(refno, aios_mgr, &database).await?;
     for (refno, negative_refnos) in need_compute_refnos {
-        if let Some((_,pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
+        if let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
             if let Some((refno, mesh)) = compute_boolean_mesh(refno, negative_refnos, &pool, &database).await? {
                 negative_mesh_map.entry(refno).or_insert(mesh);
             }
@@ -145,14 +145,14 @@ pub async fn query_negative_refnos_aql(refno: RefU64, aios_mgr: &AiosDBManager, 
     let catr = attr.get_refu64("CATR").unwrap_or(RefU64(0));
 
     let catr = if catr.0 != 0 {
-        let gmre = query_foreign_refno_aql(refno, vec!["CATR", "GMRE"], database).await?;
+        let gmre = query_foreign_refno_aql(refno, &["CATR", "GMRE"], database).await?;
         if let Some(gmre) = gmre {
             gmre
         } else {
             refno
         }
     } else if spre.0 != 0 {
-        let catr = query_foreign_refno_aql(refno, vec!["SPRE", "GMRE"], database).await?;
+        let catr = query_foreign_refno_aql(refno, &["SPRE", "GMRE"], database).await?;
         if let Some(catr) = catr {
             catr
         } else {
@@ -179,12 +179,9 @@ pub async fn query_negative_refnos_aql(refno: RefU64, aios_mgr: &AiosDBManager, 
         'version':0,
         'children_count':0,
     }").bind_var("id", key);
-    let result: Vec<PdmsElementAql> = database.aql_query(aql).await?;
+    let result: Vec<PdmsElement> = database.aql_query(aql).await?;
     for v in result {
-        if let Some(pdms_element) = v.change_to_pdms_element() {
-            map.entry(refno).or_insert_with(Vec::new).push(
-                pdms_element);
-        }
+        map.entry(v.refno).or_insert_with(Vec::new).push(v);
     }
     Ok(map)
 }
@@ -199,7 +196,7 @@ async fn test_query_negative_refnos_aql() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let database = aios_mgr.get_arangodb_conn().await?;
     let refno = RefU64::from_refno_str("23584/5382").unwrap();
-    for refno in query_instance_refnos_negative_aql(refno,&database).await? {
+    for refno in query_instance_refnos_negative_aql(refno, &database).await? {
         boolean_negative_mesh(refno, &aios_mgr).await?;
     }
     // let result = compute_boolean_mesh(refno, negative_refnos, &aios_mgr).await?;

@@ -61,7 +61,7 @@ pub async fn get_room_refnos_from_spa_tree_aql(room_refno: RefU64, database: &Da
         // if b_insert_self {
         //     let children = query_travel_children_aql(database, room_refno).await?;
         //     for child in children {
-        //         let refno = RefU64::from_refno_str(&child.refno);
+        //         let refno = child.refno;
         //         if refno.is_err() { continue; }
         //         let refno = refno.unwrap();
         //         room_map.entry(name.last().unwrap_or(&"").to_string()).or_insert_with(Vec::new).push(refno);

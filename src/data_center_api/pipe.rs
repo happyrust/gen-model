@@ -87,9 +87,7 @@ async fn get_bran_data(bran_refnos: &Vec<PdmsElement>, aios_mgr: &AiosDBManager)
     let mut map = HashMap::new();
     let mut ref_map = HashMap::new(); // 存放每个bran 的 href 和 tref
     for bran_refno in bran_refnos {
-        let bran_refno = RefU64::from_refno_str(&bran_refno.refno);
-        if bran_refno.is_err() { continue; }
-        let bran_refno = bran_refno.unwrap();
+        let bran_refno = bran_refno.refno;
         let pool = aios_mgr.get_project_pool_by_refno(bran_refno).await;
         if pool.is_none() { continue; }
         let (_, pool) = pool.unwrap();
@@ -202,12 +200,8 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
     // let mut bran_infos = HashMap::new();
     // 存 bran 与 bran 之间的关系
     for i in 0..bran_infos.len() - 1 {
-        let start_refno = RefU64::from_refno_str(&bran_infos[i].refno);
-        let end_refno = RefU64::from_refno_str(&bran_infos[i + 1].refno);
-        if start_refno.is_err() || end_refno.is_err() { continue; }
-        let start_refno = start_refno.unwrap();
-        let end_refno = end_refno.unwrap();
-
+        let start_refno = bran_infos[i].refno;
+        let end_refno = bran_infos[i + 1].refno;
         let start_instance = instance_map.get(&start_refno);
         let end_instance = instance_map.get(&end_refno);
         if start_instance.is_none() || end_instance.is_none() { continue; }

@@ -1,7 +1,7 @@
 use std::default::default;
 use std::f32::EPSILON;
 use std::vec::Vec;
-use aios_core::parsed_data::{CateProfileParam, GeomsInfo};
+use aios_core::parsed_data::{CateProfileParam, CateGeomsInfo};
 use aios_core::parsed_data::geo_params_data::{CateGeoParam, PdmsGeoParam};
 use aios_core::pdms_types::{AttrMap, RefU64};
 use aios_core::prim_geo::category::CateBrepShape;
@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use parry3d::bounding_volume::Aabb;
 
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::CateBrepShapeMap;
+use crate::data_interface::structs::CateBrepShapeMap;
 
 pub struct ProfileGeosPoints {
     pub points: Vec<(Vec3, Vec3, Vec3)>,
@@ -25,7 +25,7 @@ pub struct ProfileGeosPoints {
 
 pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                                                        att: &AttrMap,
-                                                       geom_info: &GeomsInfo,
+                                                       geom_info: &CateGeomsInfo,
                                                        brep_shapes_map: &CateBrepShapeMap,
                                                        interface: &T, ) -> anyhow::Result<bool> {
     let geoms = &geom_info.geometries;

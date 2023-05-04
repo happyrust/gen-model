@@ -11,7 +11,7 @@ use sqlx::{MySql, Pool, Row};
 use crate::api::attr::{get_site_major_from_uda, query_explicit_attr};
 use crate::api::children::{get_ancestor_refno_of_type_data, query_ancestor_of_type};
 use crate::aql_api::children::query_ancestor_name_of_type_aql;
-use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsElementAql};
+use crate::aql_api::{convert_refno_vec_from_vec_string};
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
@@ -186,7 +186,6 @@ pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<UdaMajorT
 
 /// 查找房间下的所有元件的 pdms_element
 pub async fn query_room_pdms_elements_aql(refno: RefU64, filter_major: Option<UdaMajorType>, database: &Database) -> anyhow::Result<Vec<PdmsElement>> {
-    let mut r = Vec::new();
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = if filter_major.is_none() {
         AqlQuery::new("
@@ -207,13 +206,8 @@ pub async fn query_room_pdms_elements_aql(refno: RefU64, filter_major: Option<Ud
                 return { refno:v._key , owner:v.owner , name:v.name,noun:v.noun,version:0,children_count:0 }
         ").bind_var("key", key).bind_var("filter_major", filter_data)
     };
-    let results: Vec<PdmsElementAql> = database.aql_query(aql).await.unwrap();
-    for result in results {
-        if let Some(pdms_element) = result.change_to_pdms_element() {
-            r.push(pdms_element);
-        }
-    }
-    Ok(r)
+    let results: Vec<PdmsElement> = database.aql_query(aql).await.unwrap();
+    Ok(results)
 }
 
 /// 通过命名规则获取房间名
@@ -251,13 +245,11 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &Database) -> any
         .bind_var("id", id);
     let results: Vec<PdmsElement> = database.aql_query(aql).await?;
     for result in results {
-        let refno = RefU64::from_url_refno(&result.refno);
-        if refno.is_none() { continue; }
-        let refno = refno.unwrap();
+        let refno = result.refno;
         if set.contains(&refno) { continue; }
         set.insert(refno);
         r.push(PdmsElement {
-            refno: refno.to_refno_string(),
+            refno,
             owner: result.owner,
             name: result.name,
             noun: result.noun,

@@ -423,7 +423,7 @@ pub async fn sync_pdms_level_edges_to_graph_db(mgr: Arc<AiosDBManager>) -> anyho
             let sites = query_world_children_eles(&mgr.db_option.mdb_name, module, project_db.value()).await?;
             // 从site开始将所有 query_children的参考号放入队列中
             for site in &sites {
-                pending.push_back((RefU64::from_refno_str(&site.refno)?, site.noun.clone()));
+                pending.push_back((site.refno, site.noun.clone()));
             }
             set_level_edges(sites, &mut sibl_edges).await?;
             // 遍历整个pdms树
@@ -432,9 +432,9 @@ pub async fn sync_pdms_level_edges_to_graph_db(mgr: Arc<AiosDBManager>) -> anyho
                 if let Ok(children) = query_children_eles(pending_refno, project_db.value()).await {
                     if children.len() != 0 {
                         for child in &children {
-                            pending.push_back((
-                                RefU64::from_refno_str(&child.refno).unwrap(), child.noun.clone()
-                            ));
+                            pending.push_back(
+                                (child.refno, child.noun.clone())
+                            );
                         }
                         // 管道先按兄弟关系保存
                         if pending_noun == "BRAN" {
@@ -464,11 +464,8 @@ pub async fn sync_pdms_level_edges_to_graph_db(mgr: Arc<AiosDBManager>) -> anyho
 /// 将同级 children 赋上连接关系
 async fn set_level_edges(eles: Vec<PdmsElement>, mut edges: &mut Vec<PdmsEleGraphEdge>) -> anyhow::Result<()> {
     for i in 1..eles.len() {
-        let from_refno = RefU64::from_refno_str(&eles[i].refno);
-        let to_refno = RefU64::from_refno_str(&eles[i - 1].refno);
-        if from_refno.is_err() || to_refno.is_err() { continue; }
-        let from_refno = from_refno.unwrap();
-        let to_refno = to_refno.unwrap();
+        let from_refno = (eles[i].refno);
+        let to_refno = (eles[i - 1].refno);
         let edge = PdmsEleGraphEdge {
             _key: from_refno.hash_with_another_refno(to_refno).to_string(),
             _from: format!("{}/{}", "pdms_eles", from_refno.to_url_refno()),

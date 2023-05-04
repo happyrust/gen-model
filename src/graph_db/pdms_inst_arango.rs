@@ -70,7 +70,7 @@ pub async fn query_instance_with_refno_in_arangodb(refno: RefU64, database: &Dat
         let p = document(@params_collection, c._key)
         return {
             '_key':f._key,
-            'data':f.data,
+            'geo_insts':f.geo_insts,
             'params': p.geo_params,
             'visible':f.visible,
             'generic_type':f.generic_type,
@@ -110,7 +110,7 @@ pub async fn query_instance_with_refnos_in_arangodb(refnos: Vec<RefU64>, databas
         filter f.visible
             return {
                 '_key':f._key,
-                'data':f.data,
+                'geo_insts':f.geo_insts,
                 'visible':f.visible,
                 'generic_type':f.generic_type,
                 'aabb':f.aabb,
@@ -167,7 +167,7 @@ pub async fn query_rvm_instance_data_from_refno_aql(refno: RefU64, database: &Da
     return {
         '_key':r._key,
         'aabb':r.aabb,
-        'data':r.data,
+        'geo_insts':r.geo_insts,
         'world_transform':r.world_transform
     }").bind_var("key", refno_aql);
     let result = database.aql_query::<RvmGeoInfo>(aql).await;

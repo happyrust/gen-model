@@ -49,10 +49,8 @@ pub async fn travel_children_without_leaf(refno: RefU64, pool: &Pool<MySql>) -> 
         let children = query_children_eles(refno, pool).await?;
         for ele in children {
             if ele.children_count != 0 {
-                if let Ok(ele_refno) = RefU64::from_refno_str(ele.refno.as_str()) {
-                    result.push(ele_refno);
-                    deque.push_back(ele_refno);
-                }
+                result.push(ele.refno);
+                deque.push_back(ele.refno);
             }
         }
     }
@@ -68,7 +66,8 @@ pub async fn travel_children_for_elenode(refno: RefU64, pool: &Pool<MySql>) -> a
         let refno = deque.pop_front().unwrap();
         let children = query_children_eles(refno, pool).await?;
         for ele in children {
-            if let Ok(refno) = RefU64::from_refno_str(ele.refno.as_str()) {
+            {
+                let refno = ele.refno;
                 deque.push_back(refno);
                 result.push(EleTreeNode {
                     refno,
@@ -91,7 +90,8 @@ pub async fn travel_children_for_elenode_without_children_count(refno: RefU64, p
         let refno = deque.pop_front().unwrap();
         let children = query_children_eles_without_children_count(refno, pool).await?;
         for ele in children {
-            if let Ok(refno) = RefU64::from_refno_str(ele.refno.as_str()) {
+            {
+                let refno = ele.refno;
                 deque.push_back(refno);
                 result.push(EleTreeNode {
                     refno,
@@ -321,7 +321,7 @@ pub async fn cache_mdb_module_numbdbs(mdb: &str, module: &str, pool: &Pool<MySql
         if lock.contains_key(&world.refno) {
             let children = lock.get(&world.refno).unwrap();
             let children = children.iter()
-                .map(|x| RefU64::from_refno_str(&x.refno).unwrap_or(RefU64(0))).collect::<Vec<RefU64>>();
+                .map(|x| x.refno).collect::<Vec<RefU64>>();
             let result = query_numbdb_from_refnos(children, pool).await?;
             return Ok(result);
         }
@@ -369,7 +369,7 @@ pub async fn query_foreign_refnos_from_table(foreign_type: &str, table_name: &st
 pub async fn vague_query_refnos_by_name_sql_user_set(
     name: String,
     conditions: &HashMap<String, (VagueSearchCondition, String)>,
-    aios_mgr:&AiosDBManager ) -> anyhow::Result<Vec<(RefU64, String)>> {
+    aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = Vec::new();
     // 只查询当前mdb的节点
     if let Some(pool) = aios_mgr.get_project_pool(&aios_mgr.db_option.project_name) {
@@ -481,7 +481,8 @@ fn gen_vague_query_refnos_by_name_sql_user_set(name: &String,
         let key = key.to_uppercase();
         // pdms_element 只过滤这两种条件，其余的条件在其他表过滤
         if !["NAME", "TYPE"].contains(&key.as_str()) {
-            continue; }
+            continue;
+        }
         let mut filter_value = "".to_string();
         // 将过滤条件进行分类处理
         if key == "NAME" {

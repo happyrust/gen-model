@@ -65,7 +65,7 @@ pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: 
         Filter f != null
         return {
             '_key':f._key,
-            'data':f.data,
+            'geo_insts':f.geo_insts,
             'visible':f.visible,
             'generic_type':f.generic_type,
             'aabb':f.aabb,

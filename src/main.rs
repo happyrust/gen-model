@@ -16,7 +16,7 @@ use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_bin};
-use aios_database::api::admin::query_all_db_infos;
+use aios_database::api::admin::sync_system_db;
 use aios_database::api::attr::insert_attr_info;
 use aios_database::api::element::*;
 use aios_database::api::ssc_data::{get_ancestor_till_type, query_all_room_data, update_ssc_type};
@@ -124,12 +124,12 @@ async fn main() -> anyhow::Result<()> {
         if let Some(project_db)  = mgr.project_map.get(&mgr.db_option.project_name) {
             // 保存ssc
             async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
-            set_arangodb_all_ssc_nodes(project_db.value(), &mgr.arango_database).await?;
+            set_arangodb_all_ssc_nodes(project_db.value(), &mgr.arango_db).await?;
         }
         info!("SSC同步完成");
     }
 
-    let mut all_insts_mgr = HashMap::new();
+    // let mut all_insts_mgr = HashMap::new();
     if db_option.gen_model_mesh {
         dbg!("正在生成模型");
         let mut time = Instant::now();
@@ -142,22 +142,22 @@ async fn main() -> anyhow::Result<()> {
 
     {
         // 将 instance 保存到图数据库
-        let children_files = fs::read_dir("assets/instance/")?;
-        for path in children_files {
-            let path = path?.path();
-            let filename = path.file_name().unwrap().to_str().unwrap();
-            if !filename.ends_with("inst") {
-                continue;
-            }
-            let dbno: u32 = path.file_stem().unwrap().to_str().unwrap().parse().unwrap();
-            let Ok(instance_mgr) = ShapeInstancesMgr::deserialize_from_bin_file(&path) else {
-                continue;
-            };
-            if db_option.save_model_mesh_to_graph_db {
-                sync_instance_to_graph_db(mgr.clone(), &instance_mgr).await?;
-            }
-            all_insts_mgr.insert(dbno, instance_mgr);
-        }
+        // let children_files = fs::read_dir("assets/instance/")?;
+        // for path in children_files {
+        //     let path = path?.path();
+        //     let filename = path.file_name().unwrap().to_str().unwrap();
+        //     if !filename.ends_with("inst") {
+        //         continue;
+        //     }
+        //     let dbno: u32 = path.file_stem().unwrap().to_str().unwrap().parse().unwrap();
+        //     let Ok(instance_mgr) = ShapeInstancesMgr::deserialize_from_bin_file(&path) else {
+        //         continue;
+        //     };
+        //     if db_option.save_model_mesh_to_graph_db {
+        //         sync_instance_to_graph_db(mgr.clone(), &instance_mgr).await?;
+        //     }
+        //     all_insts_mgr.insert(dbno, instance_mgr);
+        // }
 
         if let Some(project_pool) = mgr.project_map.get(&db_option.project_name) {
             let create_table_sql = gen_create_pdms_mesh_table_sql();
@@ -223,22 +223,23 @@ async fn main() -> anyhow::Result<()> {
         file.write_all(serialized.as_slice()).unwrap();
     }
 
+    //房间树要重写
     if db_option.save_spatial_tree_to_db {
-        let mut site_major_map = HashMap::new();
-        let room_infos = query_all_need_compute_room_refno(
-            &vec![7997],
-            "FRMW",
-            Some("-RM"),
-            &mgr.project_map.get(&db_option.project_name).unwrap(),
-        ).await?;
-        // dbg!(&room_infos);
-        let room_infos = room_infos.into_iter().map(|x| x.0).collect::<Vec<_>>();
-        let map = recompute_spatial_tree(room_infos, all_insts_mgr, collider_shape_mgr, &db_option).await?;
-        save_room_info_to_arangodb(&mgr, map, &db_option, &mut site_major_map).await?;
-        dbg!("房间树保存完成");
+        // let mut site_major_map = HashMap::new();
+        // let room_infos = query_all_need_compute_room_refno(
+        //     &vec![7997],
+        //     "FRMW",
+        //     Some("-RM"),
+        //     &mgr.project_map.get(&db_option.project_name).unwrap(),
+        // ).await?;
+        // // dbg!(&room_infos);
+        // let room_infos = room_infos.into_iter().map(|x| x.0).collect::<Vec<_>>();
+        // let map = recompute_spatial_tree(room_infos, all_insts_mgr, collider_shape_mgr, &db_option).await?;
+        // save_room_info_to_arangodb(&mgr, map, &db_option, &mut site_major_map).await?;
+        // dbg!("房间树保存完成");
     }
     if db_option.only_sync_sys {
-        query_all_db_infos(&mgr).await?;
+        sync_system_db(&mgr).await?;
     }
     Ok(())
 }

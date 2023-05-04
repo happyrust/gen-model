@@ -206,7 +206,7 @@ pub async fn query_pdms_instance_mesh_from_refno(refno: RefU64, database: &Datab
             let refno = RefU64::from_url_refno(&inst._key);
             if refno.is_none() { continue; }
             // 找到参考号需要那些mesh,避免重复
-            for data in &inst.data {
+            for data in &inst.geo_insts {
                 hashes.insert(data.geo_hash);
             }
             let refno = refno.unwrap();
@@ -229,7 +229,7 @@ pub async fn query_pdms_instance_mesh_from_refnos(refnos: Vec<RefU64>, database:
             let refno = RefU64::from_url_refno(&inst._key);
             if refno.is_none() { continue; }
             // 找到参考号需要那些mesh,避免重复
-            for data in &inst.data {
+            for data in &inst.geo_insts {
                 hashes.insert(data.geo_hash);
             }
             let refno = refno.unwrap();

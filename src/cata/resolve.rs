@@ -4,7 +4,7 @@ use std::ops::Neg;
 use std::panic;
 use std::sync::Arc;
 use aios_core::parsed_data::{CateAxisParam, GmseParamData};
-use aios_core::parsed_data::geo_params_data::{CateGeoParam};
+use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::db1_dehash;
@@ -17,7 +17,7 @@ use smol_str::SmolStr;
 use crate::aql_api::dtse_attr::query_dtse_ppro_from_catr_refno;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::para_value::query_para_value;
-use crate::cata::query_cata::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
+use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
 use crate::cata::resolve_helper::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -112,7 +112,7 @@ pub struct CataExprContext {
 
 impl CataExprContext {
     pub async fn create(des_refno: RefU64, database: &Database) -> anyhow::Result<Option<Self>> {
-        let catr_refno = query_foreign_refno_aql(des_refno, vec!["SPRE", "CATR"], database).await?;
+        let catr_refno = query_foreign_refno_aql(des_refno, &["SPRE", "CATR"], database).await?;
         if catr_refno.is_none() { return Ok(None); }
         let catr_refno = catr_refno.unwrap();
         let params = query_para_value(catr_refno, database).await?;
@@ -178,7 +178,11 @@ impl CataExprContext {
         //保温层厚度
         context.insert("IPARA0".into(), "0".into());
         context.insert("IPARA".into(), "0".into());
+
+        // let parent_cat_ref = interface
+
         for i in 0..self.params.len() {
+            //todo OPAR需要去有catalog的父节点里去找
             context.insert(format!("OPAR{}", i + 1).into(), self.params[i].to_string().into());
             context.insert(format!("APAR{}", i + 1).into(), self.params[i].to_string().into());
             context.insert(format!("CPAR{}", i + 1).into(), self.params[i].to_string().into());

@@ -6,7 +6,7 @@ use sqlx::{MySql, Pool};
 use dashmap::{DashMap, DashSet};
 use glam::Vec3;
 use log::kv::ToValue;
-use crate::api::attr::{query_explicit_attr, query_full_attr, query_implicit_attr};
+use crate::api::attr::{query_explicit_attr, query_attr, query_implicit_attr};
 use crate::api::element::query_name;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -48,7 +48,7 @@ lazy_static! {
 pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut materials: &mut Vec<(RefU64, String)>,
                                  bran_attr: &AttrMap, start_edge: &TubiEdgeAql, thickness_map: &DashMap<String, DashMap<String, String>>,
                                  end_edge: &TubiEdgeAql, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> bool {
-    let attr = query_full_attr(refno, &aios_mgr, None).await;
+    let attr = query_attr(refno, &aios_mgr, None).await;
     if attr.is_err() { return false; }
     let attr = attr.unwrap();
     let type_name = attr.get_type();

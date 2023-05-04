@@ -195,7 +195,7 @@ pub async fn query_uda_attr(att_type: &str, pool: &Pool<MySql>) -> anyhow::Resul
     Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
 }
 
-pub async fn query_full_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
+pub async fn query_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
     if let Some((project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
         let ref_basic = aios_mgr.get_refno_basic(refno);
         if ref_basic.is_none() { return Ok(AttrMap::default()); }
@@ -209,14 +209,6 @@ pub async fn query_full_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_nam
         for (k, v) in explicit_attr.map {
             attr.entry(k).or_insert(v);
         }
-        //暂时把UDA 屏蔽
-        // for pool in &aios_mgr.project_map {
-        //     // uda 赋值需要加上元件库
-        //     let uda_attr = query_uda_attr(&att_type, &pool).await?;
-        //     for (k, v) in uda_attr.map {
-        //         attr.entry(k).or_insert(v);
-        //     }
-        // }
         //赋默认值
         if let Some(map) = ATTR_INFO_MAP.map.get(&(db1_hash(&ele.noun) as i32)) {
             for values in map.value() {

@@ -8,7 +8,7 @@ use dashmap::DashMap;
 use glam::Vec3;
 use parse_pdms_db::parse_explict_tools::times_keep_f32_two_decimal_place;
 use sqlx::{MySql, Pool};
-use crate::api::attr::{query_explicit_attr, query_full_attr, query_implicit_attr};
+use crate::api::attr::{query_explicit_attr, query_attr, query_implicit_attr};
 use crate::api::element::{query_children, query_children_eles, query_name};
 use crate::aql_api::tubi::query_bran_info;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -39,7 +39,7 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
     data.append(&mut gen_pcf_file_head().into_bytes());
     let pool = aios_mgr.project_map.get(&aios_mgr.db_option.project_name).unwrap();
     let database = aios_mgr.get_arangodb_conn().await?;
-    let bran_attr = query_full_attr(refno, &aios_mgr, None).await?;
+    let bran_attr = query_attr(refno, &aios_mgr, None).await?;
     let bran_name = bran_attr.get_name().to_string();
 
     // 先把 pipe_thickness 算好，需要的直接放进去就好了
@@ -128,7 +128,7 @@ pub async fn gen_bran_connection_data(refno: Option<RefU64>, leave_position: Vec
         let refno_table_name = refno_table_name.unwrap();
         // 如果连接的是 nozz ， 则是另一种取数据方式
         if refno_table_name.table.to_uppercase() == "NOZZ" {
-            let nozz_attr = query_full_attr(refno, aios_mgr, Some(vec!["CREF"])).await;
+            let nozz_attr = query_attr(refno, aios_mgr, Some(vec!["CREF"])).await;
             if let Ok(nozz_attr) = nozz_attr {
                 data.append(&mut gen_nozz_data(aios_mgr, &nozz_attr, pool).await);
             }

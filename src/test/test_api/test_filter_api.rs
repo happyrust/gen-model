@@ -26,7 +26,10 @@ async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Resu
 async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
     let refno = RefU64::from_refno_str("31896/10042").unwrap();
     let interface = get_test_ams_db_manager_async().await;
-    let result = interface.query_refnos_has_neg_map(refno).await?;
+    // let result = interface.query_refnos_has_neg_pos_map(refno).await?;
+    // dbg!(&result);
+    // query_refnos_has_neg_map
+    let result = interface.query_refnos_has_pos_neg_map(refno).await?;
     dbg!(&result);
     Ok(())
 }

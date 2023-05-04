@@ -241,7 +241,7 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
         // let room_ori = room_ori.value();
         if room_ori.noun == "EQUI" { continue; }
         // 该房间号所在的zone没有对应的uda，直接跳过
-        if undefined_zone_refno.contains(&room_ori.refno.to_refno_string()) {
+        if undefined_zone_refno.contains(&room_ori.refno) {
             room_data_len -= 1;
             continue;
         }

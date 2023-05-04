@@ -229,19 +229,18 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         if c1.starts_with("DESIGN") {
             k = format!("DESI{}", c3).into();  //design's params
         } else {
-            if c2.starts_with("IPAR") {
-                k = format!("IPARA{}", c3).into();
-            } else if c2.starts_with("CPAR") {
-                k = format!("IPARA{}", c3).into();
-            } else if c2.starts_with("PARA") || c2.starts_with("APAR") {
-                k = format!("PARA{}", c3).into();
-            } else if c2.starts_with("OPAR") {
-                k = format!("OPAR{}", c3).into();
-            } else if c2.starts_with("DDES") || c2.starts_with("ADES") {
-                k = format!("DESI{}", c3).into();
-            } else if c2.starts_with("ODES") || c2.starts_with("WDES") {
-                k = format!("DESI{}", c3).into();
+            // if c2.ends_with("M") {
+            //     dbg!(c2);
+            //     k = c2[..c2.len()-1].into(); //忽略结尾的M
+            //     dbg!(&k);
+            // }
+            let four = &c2[0..4];
+            match four {
+               "DDES" | "WDES" => k = format!("DESI{}", c3).into(),
+                "ODES" | "ADES" | "OPAR" | "CPAR" | "APAR" | "PARA" => k = format!("{four}{}", c3).into(),
+                _ => {}
             }
+            // dbg!(&k);
         }
         if context.contains_key(&k) {
             let re = Regex::new(format!(r"^{s}|\s{s}").as_str()).unwrap();
@@ -383,7 +382,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "LCYL" => {
+            "LCYL" | "NLCY" => {
                 // 圆柱体
                 CateGeoParam::LCylinder(CateLCylinderParam {
                     refno: gmse.refno,
@@ -417,7 +416,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "LPYR" => {
+            "LPYR" | "NPYR" => {
                 CateGeoParam::Pyramid(CatePyramidParam {
                     refno: gmse.refno,
                     pa: Some(gmse.paxises[0].clone()),
@@ -435,7 +434,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SSLC" => {
+            "SSLC" | "NSSL" => {
                 if gmse.paxises.len() >= 1 && gmse.diameters.len() >= 1 && gmse.shears.len() >= 4 {
                     CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam {
                         refno: gmse.refno,
@@ -454,7 +453,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     CateGeoParam::Unknown
                 }
             }
-            "LSNO" => {
+            "LSNO" | "NSNO" => {
                 if gmse.paxises.len() >= 2 && gmse.diameters.len() >= 2 && gmse.distances.len() >= 2 {
                     CateGeoParam::Snout(CateSnoutParam {
                         refno: gmse.refno,
@@ -472,20 +471,20 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     CateGeoParam::Unknown
                 }
             }
-            "SBOX" => {
+            "SBOX" | "NSBO" => {
                 if gmse.box_lengths.len() >= 3 && gmse.xyz.len() >= 3 {
                     CateGeoParam::Box(CateBoxParam {
                         refno: gmse.refno,
-                        size: vec![
+                        size: Vec3::new(
                             gmse.box_lengths[0],
                             gmse.box_lengths[1],
                             gmse.box_lengths[2],
-                        ],
-                        offset: vec![
+                        ),
+                        offset: Vec3::new(
                             gmse.xyz[0],
                             gmse.xyz[1],
                             gmse.xyz[2],
-                        ],
+                        ),
                         centre_line_flag: gmse.centre_line_flag,
                         tube_flag: gmse.tube_flag,
                     })
@@ -493,7 +492,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     CateGeoParam::Unknown
                 }
             }
-            "SCON" => {
+            "SCON" | "NSCO" => {
                 // 圆锥
                 CateGeoParam::Cone(CateConeParam {
                     refno: gmse.refno,
@@ -504,7 +503,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SCTO" => {
+            "SCTO" | "NSCT" => {
                 // 弯管
                 CateGeoParam::Torus(CateTorusParam {
                     refno: gmse.refno,
@@ -525,7 +524,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             //     tube_flag: gmse.tube_flag,
             // }))
             // }
-            "SDSH" => {
+            "SDSH" | "NSDS" => {
                 CateGeoParam::Dish(CateDishParam {
                     refno: gmse.refno,
                     axis: Some(gmse.paxises[0].clone()),
@@ -537,7 +536,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SEXT" => {
+            "SEXT" | "NSEX" => {
                 CateGeoParam::Extrusion(CateExtrusionParam {
                     refno: gmse.refno,
                     pa: Some(gmse.paxises[0].clone()),
@@ -562,7 +561,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SREV" => {
+            "SREV" | "NREV" => {
                 CateGeoParam::Revolution(CateRevolutionParam {
                     refno: gmse.refno,
                     pa: Some(gmse.paxises[0].clone()),
@@ -577,7 +576,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SRTO" => {
+            "SRTO" | "NRTO" => {
                 // 截面为矩形的弯管
                 CateGeoParam::RectTorus(CateRectTorusParam {
                     refno: gmse.refno,
@@ -604,7 +603,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             //     tube_flag: gmse.tube_flag,
             // }))
             // }
-            "SSPH" => {
+            "SSPH" | "NSSP" => {
                 // 球
                 CateGeoParam::Sphere(CateSphereParam {
                     refno: gmse.refno,
