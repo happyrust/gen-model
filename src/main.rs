@@ -32,9 +32,9 @@ use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::database::*;
 use aios_database::graph_db::pdms_arango::*;
 use aios_database::graph_db::pdms_inst_arango::{
-    query_instance_with_refno_in_arangodb, sync_instance_to_graph_db,
+    query_instance_with_refno_in_arangodb, save_instance_to_graph_db,
 };
-use aios_database::graph_db::pdms_mesh_arango::sync_mesh_to_arango_db;
+use aios_database::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::negative::{compute_boolean_mesh, query_negative_refnos_aql};
 use aios_database::spatial_tree::recompute_spatial_tree;
@@ -121,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
 
     if db_option.rebuild_ssc_tree {
         info!("正在同步SSC");
-        if let Some(project_db)  = mgr.project_map.get(&mgr.db_option.project_name) {
+        if let Some(project_db) = mgr.project_map.get(&mgr.db_option.project_name) {
             // 保存ssc
             async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
             set_arangodb_all_ssc_nodes(project_db.value(), &mgr.arango_db).await?;
@@ -140,88 +140,86 @@ async fn main() -> anyhow::Result<()> {
         info!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
-    {
-        // 将 instance 保存到图数据库
-        // let children_files = fs::read_dir("assets/instance/")?;
-        // for path in children_files {
-        //     let path = path?.path();
-        //     let filename = path.file_name().unwrap().to_str().unwrap();
-        //     if !filename.ends_with("inst") {
-        //         continue;
-        //     }
-        //     let dbno: u32 = path.file_stem().unwrap().to_str().unwrap().parse().unwrap();
-        //     let Ok(instance_mgr) = ShapeInstancesMgr::deserialize_from_bin_file(&path) else {
-        //         continue;
-        //     };
-        //     if db_option.save_model_mesh_to_graph_db {
-        //         sync_instance_to_graph_db(mgr.clone(), &instance_mgr).await?;
-        //     }
-        //     all_insts_mgr.insert(dbno, instance_mgr);
-        // }
+    // 将 instance 保存到图数据库
+    // let children_files = fs::read_dir("assets/instance/")?;
+    // for path in children_files {
+    //     let path = path?.path();
+    //     let filename = path.file_name().unwrap().to_str().unwrap();
+    //     if !filename.ends_with("inst") {
+    //         continue;
+    //     }
+    //     let dbno: u32 = path.file_stem().unwrap().to_str().unwrap().parse().unwrap();
+    //     let Ok(instance_mgr) = ShapeInstancesMgr::deserialize_from_bin_file(&path) else {
+    //         continue;
+    //     };
+    //     if db_option.save_model_mesh_to_graph_db {
+    //         sync_instance_to_graph_db(mgr.clone(), &instance_mgr).await?;
+    //     }
+    //     all_insts_mgr.insert(dbno, instance_mgr);
+    // }
 
-        if let Some(project_pool) = mgr.project_map.get(&db_option.project_name) {
-            let create_table_sql = gen_create_pdms_mesh_table_sql();
-            let mut conn = project_pool.acquire().await?;
-            let result = conn.execute(create_table_sql.as_str()).await;
-            match result {
-                Ok(_) => {}
-                Err(e) => {
-                    dbg!(&e);
-                }
-            }
-
-            let children_files = fs::read_dir("assets/mesh/")?;
-            info!("正在保存Meshes");
-            if db_option.save_model_mesh_to_graph_db {
-                for path in children_files {
-                    let path = path?.path();
-                    let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-                    if !filename.ends_with("bin") {
-                        continue;
-                    }
-                    let mesh_mgr = CachedMeshesMgr::deserialize_from_bin_file(&path)?;
-                    sync_mesh_to_arango_db(&mgr, &mesh_mgr).await?;
-                }
-            }
-        }
-    }
+    // if let Some(project_pool) = mgr.project_map.get(&db_option.project_name) {
+    //     let create_table_sql = gen_create_pdms_mesh_table_sql();
+    //     let mut conn = project_pool.acquire().await?;
+    //     let result = conn.execute(create_table_sql.as_str()).await;
+    //     match result {
+    //         Ok(_) => {}
+    //         Err(e) => {
+    //             dbg!(&e);
+    //         }
+    //     }
+    //
+    //     let children_files = fs::read_dir("assets/mesh/")?;
+    //     info!("正在保存Meshes");
+    //     if db_option.save_model_mesh_to_graph_db {
+    //         for path in children_files {
+    //             let path = path?.path();
+    //             let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+    //             if !filename.ends_with("bin") {
+    //                 continue;
+    //             }
+    //             let mesh_mgr = CachedMeshesMgr::deserialize_from_bin_file(&path)?;
+    //             save_mesh_to_arango_db(&mgr, &mesh_mgr).await?;
+    //         }
+    //     }
+    // }
 
     //生成rtree 结构
-    let mut collider_shape_mgr = CachedColliderShapeMgr::default();
-    if db_option.gen_spatial_tree {
-        let mut timer = Instant::now();
-        let mut rstar_objs = vec![];
-        let children_files = fs::read_dir("assets/instance/")?;
-        let arch_db_nums = db_option.clone().arch_db_nums.unwrap_or_default();
-        for path in children_files {
-            let path = path?.path();
-            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-            if !filename.contains("inst") {
-                continue;
-            }
-            let dbno_str = filename.split('.').collect::<Vec<_>>();
-            let dbno = dbno_str.first().unwrap_or(&"");
-            if arch_db_nums.contains(&dbno.parse().unwrap_or(0)) {
-                continue;
-            }
-            if let Ok(instance_mgr) = ShapeInstancesMgr::deserialize_from_bin_file(&path) {
-                for (&refno, e) in &instance_mgr.inst_map {
-                    if let Some(aabb) = e.aabb {
-                        if aabb.extents().magnitude().is_finite() {
-                            rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, refno));
-                        }
-                    }
-                }
-            }
-        }
-        println!("收集空间包围盒时间: {}s", timer.elapsed().as_secs_f32());
-        timer = Instant::now();
-        let rtree = AccelerationTree::load(rstar_objs);
-        println!("生成空间树费时: {}s", timer.elapsed().as_secs_f32());
-        let mut file = fs::File::create("assets/accel.spa").unwrap();
-        let serialized = bincode::serialize(&rtree).unwrap();
-        file.write_all(serialized.as_slice()).unwrap();
-    }
+    // let mut collider_shape_mgr = CachedColliderShapeMgr::default();
+    // if db_option.gen_spatial_tree {
+    //     let mut timer = Instant::now();
+    //     let mut rstar_objs = vec![];
+    //     let children_files = fs::read_dir("assets/instance/")?;
+    //     let arch_db_nums = db_option.clone().arch_db_nums.unwrap_or_default();
+    //     for path in children_files {
+    //         let path = path?.path();
+    //         let filename = path.file_name().unwrap().to_str().unwrap().to_string();
+    //         if !filename.contains("inst") {
+    //             continue;
+    //         }
+    //         let dbno_str = filename.split('.').collect::<Vec<_>>();
+    //         let dbno = dbno_str.first().unwrap_or(&"");
+    //         if arch_db_nums.contains(&dbno.parse().unwrap_or(0)) {
+    //             continue;
+    //         }
+    //         if let Ok(instance_mgr) = ShapeInstancesMgr::deserialize_from_bin_file(&path) {
+    //             for (&refno, e) in &instance_mgr.inst_map {
+    //                 if let Some(aabb) = e.aabb {
+    //                     if aabb.extents().magnitude().is_finite() {
+    //                         rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, refno));
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    //     println!("收集空间包围盒时间: {}s", timer.elapsed().as_secs_f32());
+    //     timer = Instant::now();
+    //     let rtree = AccelerationTree::load(rstar_objs);
+    //     println!("生成空间树费时: {}s", timer.elapsed().as_secs_f32());
+    //     let mut file = fs::File::create("assets/accel.spa").unwrap();
+    //     let serialized = bincode::serialize(&rtree).unwrap();
+    //     file.write_all(serialized.as_slice()).unwrap();
+    // }
 
     //房间树要重写
     if db_option.save_spatial_tree_to_db {
@@ -343,7 +341,6 @@ fn test_compare_attr_info_file() {
             dbg!(&db1_dehash(noun as u32));
             dbg!("");
         }
-
     }
 }
 

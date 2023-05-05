@@ -1,6 +1,7 @@
 #同步文件配置
+enable_log = false
 total_sync = false
-sync_graph_db = false
+sync_graph_db = true
 sync_tidb = false
 incr_sync = false
 replace_dbs = false
@@ -9,6 +10,7 @@ replace_dbs = false
 project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
 included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
 #included_projects = ["AvevaCatalogue"]  #"AvevaPlantSample",
+
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
 module = "DESI"
@@ -19,7 +21,7 @@ gen_model_batch_size = 100
 
 #arangodb 配置
 arangodb_database = "ams"
-multi_threads = false
+multi_threads = true
 only_sync_sys = false
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
@@ -44,13 +46,23 @@ reset_mdb_project = false      #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
-debug_root_refnos = ["24381/56660"]
+
+#joint还有问题，方位对齐的问题
+#debug_root_refnos = ["23708/26027"]
+
+#管道不出来的情况，需要查一下原因
+#debug_root_refnos = ["24381/57428"]
+
+#管道不出来的情况，需要查一下原因
+#debug_root_refnos = ["24381/57428"]
+
+debug_root_refnos = ["17496/73858"]
 #debug_branch_refno = "24383/100842"
-#debug_desi_refno = "24381/56685"
-debug_refno_types = ["CATA"]  # "CATA", "LOOP", "PRIM"
-#debug_refno_types = ["CATA", "LOOP", "PRIM"]
+#debug_desi_refno = "17496/79786"
+#debug_refno_types = ["LOOP", "PRIM"]  # "CATA", "LOOP", "PRIM"
+debug_refno_types = ["CATA", "LOOP", "PRIM"]
 debug_db_num = 7997
-#included_db_files = ["acp7002_0001"]
+included_db_files = ["acp7002_0001"]
 #replace_types = ["SDTE"]
 #manual_db_nums = [7997]
 plat_url = ""

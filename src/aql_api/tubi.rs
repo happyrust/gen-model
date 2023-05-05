@@ -2,7 +2,7 @@ use std::sync::Arc;
 use aios_core::data_center::TubiData;
 // use aios_core::data_center::TubiData;
 use aios_core::pdms_types::RefU64;
-use aios_core::prim_geo::tubing::TubiEdgeAql;
+use aios_core::prim_geo::tubing::TubiEdge;
 use arangors_lite::{AqlQuery, Database};
 use bevy::prelude::{dbg, unwrap};
 use dashmap::DashMap;
@@ -57,7 +57,7 @@ pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<
 }
 
 /// 找到 bran 下所有的 tubi
-pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiEdgeAql>> {
+pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiEdge>> {
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
     let aql = AqlQuery::new("
     let bran_name = ( return document('pdms_eles',@bran_refno).name )
@@ -78,7 +78,7 @@ pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &Database) -> an
     }")
         .bind_var("id", key)
         .bind_var("bran_refno", bran_refno.to_url_refno());
-    let mut results: Vec<TubiEdgeAql> = database.aql_query(aql).await?;
+    let mut results: Vec<TubiEdge> = database.aql_query(aql).await?;
     // 过滤不是 tubi 的数据
     results.retain(|r| {
         let distance = r.start_pt.distance(r.end_pt);
@@ -88,7 +88,7 @@ pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &Database) -> an
 }
 
 /// 找到 bran 下所有的 tubi ，并过滤掉 atta
-pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiEdgeAql>> {
+pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiEdge>> {
     let mut tubi = Vec::new();
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
     let aql = AqlQuery::new("
@@ -110,7 +110,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &Dat
     }")
         .bind_var("id", key)
         .bind_var("bran_refno", bran_refno.to_url_refno());
-    let results: Vec<TubiEdgeAql> = database.aql_query(aql).await?;
+    let results: Vec<TubiEdge> = database.aql_query(aql).await?;
     // 过滤 atta
     let mut i = 0;
     while i < results.len() {
@@ -122,7 +122,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &Dat
                 while j < results.len() && results[j].att_type.to_uppercase().as_str() == "ATTA" {
                     j += 1;
                     if j < results.len() && (results[j].att_type.to_uppercase().as_str() != "ATTA" || j == results.len() - 1) {
-                        tubi.push(TubiEdgeAql {
+                        tubi.push(TubiEdge {
                             _key: results[i]._key.to_string(),
                             _from: results[i]._from.to_string(),
                             _to: results[j]._to.to_string(),
@@ -138,7 +138,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &Dat
                     }
                 }
             } else {
-                tubi.push(TubiEdgeAql {
+                tubi.push(TubiEdge {
                     _key: results[i]._key.to_string(),
                     _from: results[i]._from.to_string(),
                     _to: results[i]._to.to_string(),
@@ -231,7 +231,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &Dat
 
 
 /// 获取 bran 所有的 tubi_edge 的信息
-pub async fn query_bran_info(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiEdgeAql>> {
+pub async fn query_bran_info(bran_refno: RefU64, database: &Database) -> anyhow::Result<Vec<TubiEdge>> {
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
     let aql = AqlQuery::new("
     let bran_name = ( return document('pdms_eles',@bran_refno).name )
@@ -252,7 +252,7 @@ pub async fn query_bran_info(bran_refno: RefU64, database: &Database) -> anyhow:
     }")
         .bind_var("id", key)
         .bind_var("bran_refno", bran_refno.to_url_refno());
-    let results: Vec<TubiEdgeAql> = database.aql_query(aql).await?;
+    let results: Vec<TubiEdge> = database.aql_query(aql).await?;
     Ok(results)
 }
 

@@ -70,7 +70,7 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>/*, mdb_dbnums: &BTreeSet<i3
     Ok(true)
 }
 
-pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: Option<&[i32]>, arango_db: &Database) -> anyhow::Result<DashMap<RefU64, String>> {
+pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: &[i32], arango_db: &Database) -> anyhow::Result<DashMap<RefU64, String>> {
     let mut fitt_map = vec![];
     let fitt_refnos = query_types_refnos(&vec!["FITT"], pool, dbnos).await?;
     if fitt_refnos.len() == 0 { return Ok(DashMap::new()); }

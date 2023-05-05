@@ -203,14 +203,11 @@ pub async fn query_pdms_instance_mesh_from_refno(refno: RefU64, database: &Datab
     let mut hashes = HashSet::new();
     if let Some(instance) = query_instance_with_refno_in_arangodb(refno, database).await? {
         for inst in instance {
-            let refno = RefU64::from_url_refno(&inst._key);
-            if refno.is_none() { continue; }
             // 找到参考号需要那些mesh,避免重复
             for data in &inst.geo_insts {
                 hashes.insert(data.geo_hash);
             }
-            let refno = refno.unwrap();
-            inst_mgr.inst_map.entry(refno).or_insert(inst);
+            inst_mgr.inst_map.entry(inst.refno).or_insert(inst);
         }
     }
     let hashes = hashes.into_iter().collect::<Vec<_>>();
@@ -226,14 +223,11 @@ pub async fn query_pdms_instance_mesh_from_refnos(refnos: Vec<RefU64>, database:
     let mut hashes = HashSet::new();
     if let Some(instance) = query_instance_with_refnos_in_arangodb(refnos, database).await? {
         for inst in instance {
-            let refno = RefU64::from_url_refno(&inst._key);
-            if refno.is_none() { continue; }
             // 找到参考号需要那些mesh,避免重复
             for data in &inst.geo_insts {
                 hashes.insert(data.geo_hash);
             }
-            let refno = refno.unwrap();
-            inst_mgr.inst_map.entry(refno).or_insert(inst);
+            inst_mgr.inst_map.entry(inst.refno).or_insert(inst);
         }
     }
     let hashes = hashes.into_iter().collect::<Vec<_>>();

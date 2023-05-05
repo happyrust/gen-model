@@ -1,5 +1,5 @@
 use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
-use aios_core::prim_geo::tubing::TubiEdgeAql;
+use aios_core::prim_geo::tubing::TubiEdge;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use sqlx::{MySql, Pool};
@@ -46,8 +46,8 @@ lazy_static! {
 
 /// 生成每个节点都存在的 pcf 数据 ，返回值为是否是cap 是cap就代表bran结束，后面的节点就不用执行了
 pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut materials: &mut Vec<(RefU64, String)>,
-                                 bran_attr: &AttrMap, start_edge: &TubiEdgeAql, thickness_map: &DashMap<String, DashMap<String, String>>,
-                                 end_edge: &TubiEdgeAql, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> bool {
+                                 bran_attr: &AttrMap, start_edge: &TubiEdge, thickness_map: &DashMap<String, DashMap<String, String>>,
+                                 end_edge: &TubiEdge, aios_mgr: &AiosDBManager, pool: &Pool<MySql>) -> bool {
     let attr = query_attr(refno, &aios_mgr, None).await;
     if attr.is_err() { return false; }
     let attr = attr.unwrap();

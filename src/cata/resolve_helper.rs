@@ -515,7 +515,6 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 })
             }
             // "SDIS" => {
-            // 圆片
             // Some(CateGeoParam::Disc(CateDiscParam {
             //     axis: Some(gmse.paxises[0].clone()),
             //     dist_to_btm: gmse.distances[0],

@@ -44,6 +44,14 @@ pub struct SiteExcelDataTest {
     pub children_att_type: Option<String>,
 }
 
+impl SiteExcelDataTest {
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.code.is_some() && self.name.is_some() && self.att_type.is_some()
+    }
+}
+
+
 /// 房间信息 excel 字段
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RoomExcelData {
@@ -73,7 +81,7 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
     let room_info = deal_room_info(room_data.clone());
     let (zone_level_map, zone_name_map, next_refno) = insert_set_ssc_node_sql(room_info.clone(), project_pool).await?;
     dbg!("SSC固定节点生成");
-    replace_ssc_room_refno(&room_info, project_pool).await?;
+    replace_ssc_room_refno(room_info, project_pool).await?;
     if room_data.len() != 0 {
         let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
         let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, next_refno, project_pool, mgr).await;
@@ -98,9 +106,9 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
 }
 
 /// 将ssc房间对应的参考号修改为pdms房间的参考号
-pub async fn replace_ssc_room_refno(room_info: &HashMap<String, RefU64>, pool: &Pool<MySql>) -> anyhow::Result<()> {
+pub async fn replace_ssc_room_refno(room_info: HashMap<String, RefU64>, pool: &Pool<MySql>) -> anyhow::Result<()> {
     // 找到 ssc 当前所有房间的参考号
-    let room_refnos = query_ssc_room_refnos(room_info, pool).await?;
+    let room_refnos = query_ssc_room_refnos(&room_info, pool).await?;
     let room_refnos_len = room_refnos.len();
     let mut handles = vec![];
     for (idx, (room_name, (old_refno, new_refno))) in room_refnos.into_iter().enumerate() {
@@ -135,23 +143,34 @@ fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, Da
     let mut zones = vec![];
     while let Some(result) = iter.next() {
         let v: SiteExcelDataTest = result?;
-        // site 的 name 、code 、att_type
-        if v.code.is_some() && v.name.is_some() && v.att_type.is_some() {
-            // 当zone_code和当前读取的值不相等时，就代表不是同一个层级了 （第一次除外,所以加了个b_first 排除第一次的情况）
-            let read_site_code = v.code.clone().unwrap(); // 从 excel 文件中读取的 site name
-            if zone_code != read_site_code && !b_first {
-                level.push((zone_name.clone(), zones.clone()));
-                zones.clear();
-            }
-
-            let read_site_name = v.name.unwrap();
-            zone_name = read_site_name.clone();
-            zone_code = read_site_code.clone();
-
-            name_map.insert(read_site_code, read_site_name);
-            b_first = false;
+        if v.is_valid() {
+            continue;
         }
+        // site 的 name 、code 、att_type
+        // 当zone_code和当前读取的值不相等时，就代表不是同一个层级了 （第一次除外,所以加了个b_first 排除第一次的情况）
+        let read_site_code = v.code.clone().unwrap(); // 从 excel 文件中读取的 site name
+        if zone_code != read_site_code && !b_first {
+            level.push((zone_name.clone(), zones.clone()));
+            zones.clear();
+        }
+
+        let read_site_name = v.name.unwrap();
+        zone_name = read_site_name.clone();
+        zone_code = read_site_code.clone();
+
+        name_map.insert(read_site_code, read_site_name);
+        b_first = false;
         // 存放 site 下的子节点
+
+        // v.children_name.as_ref().and_then(|x| {
+        //     zones.push(x.clone());
+        //     v.children_code.as_ref().and_then(|c| {
+        //         name_map.insert(c.clone(), x.clone());
+        //         None
+        //     });
+        //     None
+        // } );
+
         if v.children_name.is_some() && v.children_code.is_some() {
             let read_zone_name = v.children_name.unwrap();
             let read_zone_code = v.children_code.clone().unwrap();

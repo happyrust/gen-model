@@ -13,7 +13,7 @@ pub struct MeshMgrArangodb {
     pub data: String,
 }
 
-pub async fn sync_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &CachedMeshesMgr) -> anyhow::Result<()> {
+pub async fn save_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &CachedMeshesMgr) -> anyhow::Result<()> {
     let mut result = vec![];
     for (hash, mesh) in &mesh_mgr.meshes {
         // 将 mesh 转换成二进制并压缩

@@ -1,6 +1,6 @@
 use std::task::Poll;
 use aios_core::pdms_types::{AttrMap, RefU64};
-use aios_core::prim_geo::tubing::TubiEdgeAql;
+use aios_core::prim_geo::tubing::TubiEdge;
 use dashmap::DashMap;
 use glam::Vec3;
 use sqlx::{MySql, Pool};
@@ -14,7 +14,7 @@ use crate::pcf::pcf_api::{create_center_point_data, create_thickness_data, creat
 
 pub async fn gen_tee_data(aios_mgr: &AiosDBManager, attr: &AttrMap, bran_attr: &AttrMap,
                           pool: &Pool<MySql>, materials: &mut Vec<(RefU64, String)>,
-                          start_edge: &TubiEdgeAql, end_edge: &TubiEdgeAql, thickness_map: &DashMap<String, DashMap<String, String>>) -> Vec<u8> {
+                          start_edge: &TubiEdge, end_edge: &TubiEdge, thickness_map: &DashMap<String, DashMap<String, String>>) -> Vec<u8> {
     let mut data = vec![];
     let refno = attr.get_refno();
     if refno.is_none() { return vec![]; }

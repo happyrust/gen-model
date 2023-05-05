@@ -225,9 +225,7 @@ async fn create_element_data_tree_test(cur_refno: RefU64, database: &Database, p
 
     for instance in &instances {
         let mut data = Vec::new();
-        let refno = RefU64::from_url_refno(&instance._key);
-        if refno.is_none() { continue; }
-        let refno = refno.unwrap();
+        let refno = instance.refno;
         let child = query_ele_node(refno, pool).await?;
         if GENRAL_NEG_NOUN_NAMES.contains(&child.noun.as_str()) { continue; }
         let mut b_desi_cyli = &child.noun == "CYLI";

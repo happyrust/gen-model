@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::sync::Arc;
 use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
-use aios_core::prim_geo::tubing::TubiEdgeAql;
+use aios_core::prim_geo::tubing::TubiEdge;
 use arangors_lite::Database;
 use bevy::prelude::dbg;
 use dashmap::DashMap;

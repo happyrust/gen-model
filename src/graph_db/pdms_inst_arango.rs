@@ -25,8 +25,8 @@ use crate::graph_db::structs::*;
 use aios_core::helper::*;
 use crate::{AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_COLLECTION};
 
-// todo 改成多线程
-pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &ShapeInstancesMgr) -> anyhow::Result<()> {
+///保存instance 数据到数据库
+pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, instance_mgr: &ShapeInstancesMgr) -> anyhow::Result<()> {
     let collection = AQL_PDMS_INST_COLLECTION;
     let edge_collection = "instance_edges";
     let database = &get_arangodb_conn_from_db_option(&mgr.db_option).await?;
