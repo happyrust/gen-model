@@ -82,6 +82,9 @@ pub trait PdmsDataInterface : Send + Sync{
     ///查询指定参考号下负实体和正实体的集合
     async fn query_refnos_has_pos_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)>>;
 
+    ///查询有几何体的父节点 refno
+    async fn query_refnos_has_geos(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>>;
+
     ///查询指定参考号下负实体的集合
     async fn query_refnos_has_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, Vec<RefU64>>>;
 

@@ -29,7 +29,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                                                        brep_shapes_map: &CateBrepShapeMap,
                                                        interface: &T, ) -> anyhow::Result<bool> {
     let geoms = &geom_info.geometries;
-    dbg!(geoms.len());
+    // dbg!(geoms.len());
     // dbg!(&refno);
     if geoms.len() == 0 { return Ok(false); }
     let type_name = att.get_type();

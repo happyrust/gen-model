@@ -458,7 +458,6 @@ impl PdmsDataInterface for AiosDBManager {
                         return parent_is_pos ? PUSH(pos_vec, parent._key) : pos_vec
                      )[0],
                     (for c in children filter c.noun in @neg_nouns  return c._key)
-
                 ]
         "#).bind_var("key", refno_url)
             .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
@@ -469,6 +468,25 @@ impl PdmsDataInterface for AiosDBManager {
 
         return Ok(result);
     }
+
+
+    async fn query_refnos_has_geos(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>>{
+        let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let aql = AqlQuery::new(r#"
+            let refnos = ( FOR v,e,p in 0..15 INBOUND @key pdms_edges
+                        PRUNE v.noun in @geo_nouns
+                        OPTIONS { "order": "bfs"}
+                        filter v.noun in @geo_nouns
+                        return p.vertices[-2]._key)
+            return UNIQUE(refnos)
+        "#
+        ).bind_var("key", refno_url)
+            .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
+        let refno_strs = self.arango_db.aql_query::<Vec<String>>(aql).await?;
+        let refnos = refno_strs.iter().flatten().map(|x| RefU64::from_url_refno(x).unwrap()).collect();
+        Ok(refnos)
+    }
+
 
     ///返回有负实体的参考号集合，还有对应的NOUN
     async fn query_refnos_has_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, Vec<RefU64>>> {
@@ -1538,8 +1556,6 @@ impl AiosDBManager {
     pub async fn cache_cata_geos(
         mgr: Arc<AiosDBManager>,
         instance_mgr: Arc<RwLock<ShapeInstancesMgr>>,
-        project: &str,
-        db_nos: &[i32],
         db_option: &DbOption,
         cata_refnos: &[RefU64],
     ) -> anyhow::Result<bool> {
@@ -1624,7 +1640,6 @@ impl AiosDBManager {
                         //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
                         let pos_neg_map = mgr.query_refnos_has_pos_neg_map(gmse_refno).await.unwrap_or_default();
                         let has_neg = !pos_neg_map.is_empty();
-                        dbg!(has_neg);
                         let mut neg_refnos = pos_neg_map.values().map(|(_, neg)| neg).flatten().cloned().collect::<Vec<_>>();
                         let mut pos_refnos = pos_neg_map.values().map(|(pos, _)| pos).flatten().cloned().collect::<Vec<_>>();
                         //如果有负实体，直接合在一起，不需要再拆分
@@ -1819,7 +1834,9 @@ impl AiosDBManager {
                                 aabb = Aabb::new(Point3::new(0., 0., 0.), Point3::new(0., 0., 0.));
                             }
                         }
-                        inst_map.insert(ele_refno, geos_info);
+                        if geos_info.geo_insts.len() > 0 {
+                            inst_map.insert(ele_refno, geos_info);
+                        }
                     }
 
                     *processed_cnt.lock().unwrap() -= 1;
@@ -1860,7 +1877,6 @@ impl AiosDBManager {
         mgr: Arc<AiosDBManager>,
         instance_mgr: Arc<RwLock<ShapeInstancesMgr>>,
         db_option: &DbOption,
-        db_nos: &[i32],
         prim_refnos: &[RefU64],
     ) -> anyhow::Result<bool> {
         let t = Instant::now();
@@ -1906,7 +1922,7 @@ impl AiosDBManager {
                     };
                     let mut geo_insts = &mut geos_info.geo_insts;
                     let mut geo_hash = None;
-                    let mut item_trans = Transform::default();
+                    let mut item_trans = Transform::IDENTITY;
 
                     let attr = mgr.get_attr(refno).await.unwrap_or_default();
                     let mut geo_param = PdmsGeoParam::Unknown;
@@ -1950,7 +1966,9 @@ impl AiosDBManager {
                                 translation: trans_origin.translation.into(),
                             }),
                         );
-                        inst_map.insert(refno, geos_info);
+                        if geo_insts.len() > 0 {
+                            inst_map.insert(refno, geos_info);
+                        }
                     }
                 }
             });
@@ -2051,7 +2069,6 @@ impl AiosDBManager {
         mgr: Arc<AiosDBManager>,
         instance_mgr: Arc<RwLock<ShapeInstancesMgr>>,
         db_option: &DbOption,
-        db_nos: &[i32],
         loop_refnos: &[RefU64],
     ) -> anyhow::Result<bool> {
         let t = Instant::now();
@@ -2135,7 +2152,7 @@ impl AiosDBManager {
                     if loop_verts.is_empty() { continue; }
                     let mut parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
                     let mut geo_hash = None;
-                    let mut item_trans = Transform::default();
+                    let mut item_trans = Transform::IDENTITY;
                     let mut geo_param = PdmsGeoParam::Unknown;
                     // dbg!(&target_type);
                     match target_type {
@@ -2172,9 +2189,9 @@ impl AiosDBManager {
                             {
                                 //check if all the fradius are the same
                                 let r = fradius_vec[0];
-                                let all_same = fradius_vec.iter().all(|x| *x == r);
+                                let maybe_dish = r > 0.01 && fradius_vec.iter().all(|x| *x == r);
                                 let is_dbot = sjus;
-                                if all_same && sjus == "DBOT" {
+                                if maybe_dish && sjus == "DBOT" {
                                     let dish = Box::new(prim_geo::dish::Dish {
                                         pdis: 0.0,
                                         pheig: r,
@@ -2250,8 +2267,11 @@ impl AiosDBManager {
                         }
                     }
                     //todo 插入两个是为了都能找到PLOO对应的构件
-                    inst_map.insert(target_refno, geos_info.clone());
-                    inst_map.insert(refno, geos_info);
+                    // dbg!(&geos_info);
+                    if !geo_insts.is_empty() {
+                        inst_map.insert(target_refno, geos_info.clone());
+                        inst_map.insert(refno, geos_info);
+                    }
                 }
             });
             handles.push(handle);
@@ -2320,8 +2340,6 @@ impl AiosDBManager {
                     Self::cache_cata_geos(
                         mgr_clone.clone(),
                         instance_mgr_clone.clone(),
-                        &project,
-                        &target_dbnos,
                         &db_option_clone,
                         target_cata_refnos.as_slice(),
                     )
@@ -2329,6 +2347,14 @@ impl AiosDBManager {
                         .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
+                {
+                    let mesh_mgr = mgr.cached_mesh_mgr.read().await;
+                    let inst_mgr = instance_mgr.read().await;
+                    save_instance_to_graph_db(&mgr, &inst_mgr).await?;
+                    save_mesh_to_arango_db(&mgr, &mesh_mgr).await?;
+                }
+                mgr.cached_mesh_mgr.write().await.clear();
+                instance_mgr.write().await.clear();
             }
 
             let target_prim_refnos = mgr.get_gen_model_target_refnos(GeoEnum::PRIM, &target_dbnos).await?;
@@ -2341,7 +2367,6 @@ impl AiosDBManager {
                         mgr_clone.clone(),
                         instance_mgr_clone.clone(),
                         &db_option_clone,
-                        &target_dbnos,
                         target_prim_refnos.as_slice(),
                     )
                         .await
@@ -2360,7 +2385,6 @@ impl AiosDBManager {
                         mgr_clone.clone(),
                         instance_mgr_clone.clone(),
                         &db_option_clone,
-                        &target_dbnos,
                         &target_loop_refnos,
                     )
                         .await
@@ -2368,21 +2392,25 @@ impl AiosDBManager {
                 });
                 futures::future::join_all(vec![handle]).await;
             }
-            // dbg!(instance_mgr.inst_mgr.len());
-
-            //todo 全局复用mesh
-            //直接在处理负实体
-            // dbg!(&target_prim_refnos);
-            // dbg!(&target_loop_refnos);
 
             let root_refnos = mgr.get_gen_model_root_refnos(&target_dbnos).await?;
             dbg!(&root_refnos);
+            // let root_refnos = vec![];
 
+            let mut has_geom_refnos = vec![];
             for root_refno in root_refnos {
-                let pos_neg_map = mgr.query_refnos_has_pos_neg_map(root_refno).await.unwrap_or_default();
-                dbg!(&pos_neg_map);
+                let refnos = mgr.query_refnos_has_geos(root_refno).await?;
+                has_geom_refnos.extend_from_slice(&refnos);
+            }
+            dbg!(&has_geom_refnos);
+
+            //先找到最先出现模型的上一层，划分一下再去处理
+
+            for has_geom_refno in has_geom_refnos {
+                let pos_neg_map = mgr.query_refnos_has_pos_neg_map(has_geom_refno).await.unwrap_or_default();
+                // dbg!(&pos_neg_map);
                 let has_neg = !pos_neg_map.is_empty();
-                dbg!(has_neg);
+                // dbg!(has_neg);
                 //如果有负实体，直接合在一起，不需要再拆分
                 for (comp_refno, (pos_refnos, neg_refnos)) in pos_neg_map {
                     let mut final_shape = None;
@@ -2410,15 +2438,19 @@ impl AiosDBManager {
                             }
                             for geo_inst in &geos_info.geo_insts {
                                 let geo_refno = geo_inst.refno;
+                                // dbg!(geo_refno);
                                 let Some(occ_shape) = mesh_mgr.get_occ_shape(geo_inst.geo_hash) else {
                                     dbg!(geo_inst);
                                     continue;
                                 };
-                                let Ok(Some(pos_mat)) = mgr.get_world_transform(geo_refno).await else {
+                                // dbg!("Get shape");
+                                let Ok(Some(geo_mat)) = mgr.get_world_transform(geo_refno).await else {
                                     continue;
                                 };
-                                let local_mat = inverse_mat * pos_mat.compute_matrix() * geo_inst.transform.compute_matrix();
-                                let shape = occ_shape.g_transform(&local_mat.as_dmat4()).unwrap();
+                                let local_mat = inverse_mat * geo_mat.compute_matrix() * geo_inst.transform.compute_matrix();
+                                // dbg!(geo_refno);
+                                let shape = occ_shape.g_transform(&geo_mat.compute_matrix().as_dmat4()).unwrap();
+                                // dbg!(&w_aabb);
                                 if final_shape.is_none() {
                                     final_shape = Some(shape);
                                 } else {
