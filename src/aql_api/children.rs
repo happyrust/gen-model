@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64, RefU64Vec};
+use aios_core::three_dimensional_review::{VagueSearchCondition, VagueSearchRequest};
 use arangors_lite::{AqlQuery, Connection, Database};
+use bitvec::ptr::replace;
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool};
 use crate::api::attr::query_full_attr;
@@ -447,7 +449,7 @@ pub async fn query_travel_children_filter_negative_sibl_nodes(refno: RefU64, dat
     for result in results {
         for r in result {
             let ele = r.change_to_pdms_element();
-            if ele.is_none() { continue ;}
+            if ele.is_none() { continue; }
             let ele = ele.unwrap();
             negative_map.entry(ele.owner).or_insert_with(Vec::new).push(ele);
         }
@@ -456,8 +458,8 @@ pub async fn query_travel_children_filter_negative_sibl_nodes(refno: RefU64, dat
 }
 
 /// 过滤掉同层级拥有负实体的参考号
-pub async fn filter_negative_sibl_from_refnos(refnos:&Vec<RefU64>,database:&Database) -> anyhow::Result<Vec<RefU64>> {
-    let keys = refnos.into_iter().map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}",refno.to_url_refno())).collect::<Vec<_>>();
+pub async fn filter_negative_sibl_from_refnos(refnos: &Vec<RefU64>, database: &Database) -> anyhow::Result<Vec<RefU64>> {
+    let keys = refnos.into_iter().map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("\
         for refno in @keys
         let contains_negative = ( for v in 0..1000 ANY refno sibl_edges
@@ -465,9 +467,58 @@ pub async fn filter_negative_sibl_from_refnos(refnos:&Vec<RefU64>,database:&Data
                             return 1 )
         filter Length(contains_negative) == 0
         return refno
-    ").bind_var("keys",keys).bind_var("negative_nouns", GENRAL_NEGATIVE_NOUN_NAMES.to_vec());
+    ").bind_var("keys", keys).bind_var("negative_nouns", GENRAL_NEGATIVE_NOUN_NAMES.to_vec());
     let result = database.aql_query::<String>(aql).await?;
     Ok(result.into_iter().filter_map(|r| RefU64::from_arangodb_refno_str(&r)).collect::<Vec<_>>())
+}
+
+/// 用户自定义条件模糊查询 aql
+pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, database: &Database) -> anyhow::Result<Vec<(RefU64, String)>> {
+    let keys = request.filter_refnos.into_iter()
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
+    // 生成aql模板
+    let aql = format!("\
+    for refno in {}
+        for v in 0..1000 inbound refno pdms_edges
+        @@filter_condition
+        return {{
+            'refno':v._key,
+            'name':v.name,
+        }} ", serde_json::to_string(&keys).unwrap_or("[]".to_string()));
+    // 拼接过滤条件
+    let mut filter_condition = String::new();
+    for (key, (condition, value)) in request.filter_condition {
+        let key = key.to_lowercase().replace("type", "noun");
+        let value_aql = if value.contains("*") {
+            // 替换通配符
+            let value = value.replace("*", "%");
+            format!("like '{}'", value)
+        } else {
+            format!("= '{}'", value)
+        };
+        match condition {
+            VagueSearchCondition::And => {
+                filter_condition.push_str(&format!("filter v.{} {} ", key, value_aql));
+            }
+            VagueSearchCondition::Or => {
+                filter_condition.push_str(&format!("|| v.{} {} ", key, value_aql));
+            }
+            VagueSearchCondition::Not => {
+                filter_condition.push_str(&format!("filter v.{} !{} ", key, value_aql));
+            }
+        }
+    }
+    // 将aql和过滤条件合并在一起
+    let aql = aql.replace("@@filter_condition", &filter_condition);
+    let aql = AqlQuery::new(&aql);
+    let mut r = Vec::new();
+    let result: Vec<PdmsRefnoNameAql> = database.aql_query(aql).await?;
+    for v in result {
+        if let Some(refno) = RefU64::from_url_refno(&v.refno) {
+            r.push((refno, v.name));
+        }
+    }
+    Ok(r)
 }
 
 #[tokio::test]
@@ -479,7 +530,7 @@ async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Resu
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let refno = RefU64::from_refno_str("17496/79566").unwrap();
-    let result = query_travel_children_filter_negative_sibl_nodes(refno,&database).await?;
+    let result = query_travel_children_filter_negative_sibl_nodes(refno, &database).await?;
     dbg!(&result);
     Ok(())
 }
