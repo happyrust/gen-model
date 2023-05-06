@@ -115,14 +115,13 @@ pub async fn query_instance_with_refnos_in_arangodb(refnos: Vec<RefU64>, databas
                 'generic_type':f.generic_type,
                 'aabb':f.aabb,
                 'world_transform':f.world_transform,
-                'ptset_map':f.ptset_map,
+                // 'ptset_map':f.ptset_map,
                 'flow_pt_indexs':f.flow_pt_indexs,
                 'has_neg': f.has_neg
             }"#)
         .bind_var("refnos", refnos);
     let result: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
-    dbg!(&result);
-
+    // dbg!(&result);
     if result.is_empty() { return Ok(None); }
     Ok(Some(result))
 }

@@ -30,7 +30,7 @@ struct PdmsCatrMeshAql {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-struct PdmsMeshWithoutRefnoAql {
+struct PdmsMeshQueryData {
     pub hash: String,
     pub data: String,
 }
@@ -116,15 +116,19 @@ pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &Database) ->
 
 pub async fn query_pdms_mesh_aql(hashes: Vec<u64>, database: &Database) -> anyhow::Result<CachedMeshesMgr> {
     let mut cache_mgr = CachedMeshesMgr::default();
-    let hashes = hashes.into_iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let hash_strs = hashes.into_iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    // dbg!(&hash_strs);
     let aql = AqlQuery::new("\
     for hash in @hashes
+        let d = document('pdms_mesh',hash)
+        filter d != null
         return {
             'hash':hash,
-            'data' : document('pdms_mesh',hash).data
+            'data' : d.data
         }
-    ").bind_var("hashes", hashes);
-    let results: Vec<PdmsMeshWithoutRefnoAql> = database.aql_query(aql).await?;
+    ").bind_var("hashes", hash_strs);
+    let results: Vec<PdmsMeshQueryData> = database.aql_query(aql).await?;
+    // dbg!(&results);
     for result in results {
         let hash: u64 = result.hash.parse()?;
         let data = hex::decode(&result.data)?;
@@ -231,6 +235,7 @@ pub async fn query_pdms_instance_mesh_from_refnos(refnos: Vec<RefU64>, database:
         }
     }
     let hashes = hashes.into_iter().collect::<Vec<_>>();
+    // dbg!(&hashes);
     let mesh_mgr = query_pdms_mesh_aql(hashes, database).await.unwrap_or_default();
     Ok(PdmsInstanceMeshData {
         inst_mgr,

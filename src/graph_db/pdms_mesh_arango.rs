@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::io::Write;
 use aios_core::pdms_types::CachedMeshesMgr;
 use arangors_lite::collection::CollectionType::Document;
+use itertools::Itertools;
 use log::{error, info};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{create_arangodb_conn, save_arangodb_with_database};
@@ -15,7 +16,7 @@ pub struct MeshMgrArangodb {
 
 pub async fn save_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &CachedMeshesMgr) -> anyhow::Result<()> {
     let mut result = vec![];
-    for (hash, mesh) in &mesh_mgr.meshes {
+    for (&hash, mesh) in &mesh_mgr.meshes {
         // 将 mesh 转换成二进制并压缩
         let mesh_bin = hex::encode(mesh.into_compress_bytes());
         result.push(MeshMgrArangodb {

@@ -48,9 +48,8 @@ impl AiosDBManager {
 
         if !is_debug {
             for &db_no in db_nos {
-                if let Some((refno, db_name)) = self.get_db_world(db_option.project_name.as_str(), db_no as _).await?{
-                    target_refnos.push(refno);
-                }
+                let refnos = self.get_refnos_by_types(db_option.project_name.as_str(), &["SITE"],&[db_no]).await?;
+                target_refnos.extend_from_slice(&refnos);
             }
         }
 
@@ -105,7 +104,6 @@ impl AiosDBManager {
                     db_option.project_name.as_str(),
                     types,
                     db_nos,
-                    false,
                 )
                 .await?);
         }

@@ -47,6 +47,11 @@ only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
 
+debug_refno_types = ["CATA", "LOOP", "PRIM"]
+#included_db_files = ["acp7002_0001"]
+manual_db_nums = [8000]
+plat_url = ""
+
 #joint还有问题，方位对齐的问题
 #debug_root_refnos = ["23708/26027"]
 
@@ -57,14 +62,36 @@ only_rebuild_pdms_element = false
 #debug_root_refnos = ["24381/57428"]
 
 #debug_root_refnos = ["9304/2"]
-#拉伸体的wire共线的问题
-debug_root_refnos = ["17496/106258"]
-#debug_branch_refno = "24383/100842"
-#debug_desi_refno = "17496/79786"
-debug_refno_types = ["LOOP", "PRIM"]  # "CATA", "LOOP", "PRIM"
-#debug_refno_types = ["CATA", "LOOP", "PRIM"]
-debug_db_num = 7997
-included_db_files = ["acp7002_0001"]
-#replace_types = ["SDTE"]
-#manual_db_nums = [7997]
-plat_url = ""
+#拉伸体的wire共线的问题, 开门洞还是有问题需要调试
+#debug_root_refnos = ["17496/106258"]
+
+#生成会崩溃, 已解决
+#debug_root_refnos = ["24383/73928"]
+
+#房间计算用
+#debug_root_refnos = ["24381/36958"]
+
+#风管还有问题
+#debug_root_refnos = ["24381/57479"]
+
+#风管有问题  还剩下OF的计算没有解决
+#debug_root_refnos = ["24381/57478"]
+#风管的rtorus 生成有问题
+#debug_root_refnos = ["24381/57524"]
+
+#桥架有问题
+#debug_root_refnos = ["24384/22404"]
+
+#楼板生成有问题
+#debug_root_refnos = ["24381/34109"]
+
+#debug_root_refnos = ["24384/24932"]
+
+#生成的负实体，没有将圆柱体削成半球
+#debug_root_refnos = ["24381/36945"]
+
+debug_root_refnos = []
+
+
+
+

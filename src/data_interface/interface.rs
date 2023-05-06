@@ -65,7 +65,7 @@ pub trait PdmsDataInterface : Send + Sync{
 
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr>;
 
-    async fn get_refnos_by_types(&self, project: &str, att_types: &[&str], dbnos: &[i32],exclude_neg_sibling:bool,) -> anyhow::Result<RefU64Vec>;
+    async fn get_refnos_by_types(&self, project: &str, att_types: &[&str], dbnos: &[i32]) -> anyhow::Result<RefU64Vec>;
 
     ///获得db的world参考号
     async fn get_db_world(&self, project: &str, db_no: u32) -> anyhow::Result<Option<(RefU64, String)>>;
