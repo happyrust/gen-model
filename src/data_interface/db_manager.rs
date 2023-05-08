@@ -33,15 +33,20 @@ impl AiosDBManager {
             .debug_desi_refno
             .as_ref()
             .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
-        if target_debug_refno.is_some() {
-            target_refnos = vec![target_debug_refno.unwrap()];
+        if let Some(refno) = target_debug_refno {
+            if let Ok(name) = self.get_name(refno).await {
+                dbg!(&name);
+                target_refnos = vec![target_debug_refno.unwrap()];
+            }
             is_debug = true;
-        } else if db_option.debug_root_refnos.is_some() {
+        }  else if db_option.debug_root_refnos.is_some() {
             //是否是叶子节点
             for str in db_option.debug_root_refnos.as_ref().unwrap() {
                 is_debug = true;
                 if let Ok(root_refno) = RefU64::from_refno_str(str) {
-                    target_refnos.push(root_refno);
+                    if let Ok(name) = self.get_name(root_refno).await {
+                        target_refnos.push(root_refno);
+                    }
                 }
             }
         }
@@ -72,14 +77,20 @@ impl AiosDBManager {
             GeoEnum::ALL => TOTAL_GEO_NOUN_NAMES.as_slice(),
             _ => &[],
         };
-        if target_debug_refno.is_some() {
-            target_refnos = vec![target_debug_refno.unwrap()];
+        if let Some(refno) = target_debug_refno {
+            if let Ok(name) = self.get_name(refno).await {
+                dbg!(&name);
+                target_refnos = vec![target_debug_refno.unwrap()];
+            }
             is_debug = true;
         } else if db_option.debug_root_refnos.is_some() {
             //是否是叶子节点
             for str in db_option.debug_root_refnos.as_ref().unwrap() {
                 is_debug = true;
                 if let Ok(root_refno) = RefU64::from_refno_str(str) {
+                    let Ok(name) = self.get_name(root_refno).await else {
+                        continue
+                    };
                     let is_leaf = self.get_children_refs(root_refno).await?.len() == 0;
                     if is_leaf {
                         target_refnos.push(root_refno);

@@ -269,7 +269,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     if let Some(parent_cat_ref) = int
         .query_first_foreign_along_path(des_refno, &["SPRE", "CATR"], &["SPRE", "CATR"], &[])
         .await?{
-        dbg!(parent_cat_ref);
+        // dbg!(parent_cat_ref);
         let parent_cat_am = interface.as_ref().unwrap().get_attr(parent_cat_ref).await?;
         let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
         for i in 0..params.len() {
