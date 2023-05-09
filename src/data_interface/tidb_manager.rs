@@ -717,6 +717,7 @@ impl PdmsDataInterface for AiosDBManager {
 }
 
 impl AiosDBManager {
+
     /// 从默认配置文件初始化
     pub async fn init_form_config() -> anyhow::Result<Self> {
         let db_option = Self::get_db_option()?;
@@ -729,6 +730,12 @@ impl AiosDBManager {
             &db_option.module,
         ).await?;
         Ok(mgr)
+    }
+
+    ///重新连接arangodb
+    #[inline]
+    pub async fn reconnect_arangodb(&mut self){
+        // self.arango_db = get_arangodb_conn_from_db_option(&self.db_option).await.unwrap();
     }
 
     pub fn get_table_name(&self, refno: RefU64) -> String {
@@ -2291,7 +2298,7 @@ impl AiosDBManager {
 
     // 需要区分project，不同project的mesh，是不同的
     pub async fn cache_geos_data(
-        mgr: Arc<AiosDBManager>,
+        mut mgr: Arc<AiosDBManager>,
         db_option: DbOption,
     ) -> anyhow::Result<bool> {
         let time = Instant::now();
@@ -2437,7 +2444,6 @@ impl AiosDBManager {
                 .await;
             println!("布尔运算实体耗时 {} ms", now.elapsed().as_millis());
 
-            //每次自动保存数据，不需要序列化到文件
             {
                 let mesh_mgr = mgr.cached_mesh_mgr.read().await;
                 let inst_mgr = instance_mgr.read().await;
@@ -2503,7 +2509,7 @@ impl AiosDBManager {
 
                         // dbg!(ele_mat.to_scale_rotation_translation());
                         let local_mat = ele_mat * geo_inst.transform.compute_matrix();
-                        dbg!(&local_mat);
+                        // dbg!(&local_mat);
                         //如果scale都是一样的，只需要用transform
                         let (s, r, t) = local_mat.to_scale_rotation_translation();
                         let is_scale_same = abs_diff_eq!(s.max_element(), s.min_element(), epsilon=0.01);
@@ -2538,7 +2544,7 @@ impl AiosDBManager {
             // dbg!(neg_shapes.len());
             if let Ok(pos_compound_shape) = OCCShape::fuse_shapes(&pos_shapes) &&
                 let Ok(neg_compound_shape) = OCCShape::fuse_shapes(&neg_shapes) {
-                dbg!("Cut");
+                // dbg!("Cut");
                 let s = pos_compound_shape.cut(&neg_compound_shape, 1.0).unwrap();
                 let size = w_aabb.unwrap().bounding_sphere().radius as f64;
                 dbg!(size);

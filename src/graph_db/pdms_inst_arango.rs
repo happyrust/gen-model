@@ -20,7 +20,7 @@ use crate::api::project_mdb::query_db_nums_of_mdb;
 use crate::aql_api::convert_refno_vec_from_vec_string;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::graph_db::pdms_arango::{connect_arangodb_with_basic_auth, get_arangodb_conn_from_db_option};
 use crate::graph_db::structs::*;
 use aios_core::helper::*;
 use crate::{AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_COLLECTION};
@@ -29,9 +29,10 @@ use crate::{AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_COLLECTION};
 pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, instance_mgr: &ShapeInstancesMgr) -> anyhow::Result<()> {
     let collection = AQL_PDMS_INST_COLLECTION;
     let edge_collection = "instance_edges";
-    let database = &get_arangodb_conn_from_db_option(&mgr.db_option).await?;
+    let database = connect_arangodb_with_basic_auth(&mgr.db_option).await?;
     let mut instances = vec![];
     let mut edges = vec![];
+    println!("开始保存instance数据");
     for chunk in &instance_mgr.inst_map.iter().chunks(1000) {
         for k in chunk {
             let json = serde_json::to_value(k.1).unwrap();

@@ -44,6 +44,14 @@ pub async fn get_arangodb_conn_from_db_option(db_option: &DbOption) -> anyhow::R
     Ok(conn.db(&db_option.arangodb_database).await?)
 }
 
+//establish_basic_auth
+
+pub async fn connect_arangodb_with_basic_auth(db_option: &DbOption) -> anyhow::Result<Database> {
+    let conn = Connection::establish_basic_auth(&db_option.arangodb_url, &db_option.arangodb_user, &db_option.arangodb_password)
+        .await?;
+    Ok(conn.db(&db_option.arangodb_database).await?)
+}
+
 pub async fn create_arangodb_conn(database: &Database, collection_name: &str, collection_type: CollectionType) -> anyhow::Result<()> {
     match collection_type {
         CollectionType::Document => {
