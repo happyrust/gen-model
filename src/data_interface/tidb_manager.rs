@@ -1921,7 +1921,17 @@ impl AiosDBManager {
 
                     let attr = mgr.get_attr(refno).await.unwrap_or_default();
                     let mut geo_param = PdmsGeoParam::Unknown;
-                    if let Some(brep_obj) = attr.create_brep_shape() {
+                    //需要限制负实体的大小，太大，导致负运算失败
+                    let limit_size: Option<f32> = if GENRAL_NEG_NOUN_NAMES.contains(&attr.get_type()) {
+                        if let Some(parent_inst) = inst_map.get(&attr.get_owner().unwrap_or_default()) {
+                            parent_inst.aabb.map(|x| x.bounding_sphere().radius * 2.0)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(brep_obj) = attr.create_brep_shape(limit_size) {
                         if brep_obj.check_valid() {
                             item_trans = brep_obj.get_trans();
                             geo_param = brep_obj
@@ -2183,6 +2193,16 @@ impl AiosDBManager {
                             let sjus = attr.get_str("SJUS").unwrap_or_default();
                             //开始处理有偏移的情况
                             {
+                               if attr.get_type() == "NXTR" {
+                                    if let Some(parent_inst) = inst_map.get(&attr.get_owner().unwrap_or_default()) {
+                                        if let Some(h) = parent_inst.aabb.map(|x| x.bounding_sphere().radius * 2.0) {
+                                            height = height.min(h);
+                                            // dbg!(height);
+                                            println!("Height 太长，裁剪为: {}", height);
+                                        }
+                                    }
+                                };
+                                // dbg!(height);
                                 let extrusion = Box::new(Extrusion {
                                     verts: loop_verts,
                                     height,
@@ -2317,7 +2337,7 @@ impl AiosDBManager {
             }
 
             let target_cata_refnos = mgr.get_gen_model_target_refnos(GeoEnum::CATA, &target_dbnos).await?;
-            println!("使用元件库数量: {}",target_cata_refnos.len());
+            println!("使用元件库数量: {}", target_cata_refnos.len());
             if run_cache_cata && !target_cata_refnos.is_empty() {
                 let project = project.clone();
                 let handle = tokio::spawn(async move {
@@ -2355,8 +2375,27 @@ impl AiosDBManager {
                 continue;
             }
 
+            let target_loop_refnos = mgr.get_gen_model_target_refnos(GeoEnum::LOOP, &target_dbnos).await?;
+            println!("使用LOOP的数量: {}", target_loop_refnos.len());
+            if run_cache_loop && !target_loop_refnos.is_empty() {
+                let instance_mgr_clone = instance_mgr.clone();
+                let db_option_clone = db_option.clone();
+                let mgr_clone = mgr.clone();
+                let handle = tokio::spawn(async move {
+                    Self::cache_loop_geos(
+                        mgr_clone.clone(),
+                        instance_mgr_clone.clone(),
+                        &db_option_clone,
+                        &target_loop_refnos,
+                    )
+                        .await
+                        .unwrap();
+                });
+                futures::future::join_all(vec![handle]).await;
+            }
+
             let target_prim_refnos = mgr.get_gen_model_target_refnos(GeoEnum::PRIM, &target_dbnos).await?;
-            println!("使用基本体数量: {}",target_prim_refnos.len());
+            println!("使用基本体数量: {}", target_prim_refnos.len());
             if run_cache_prim && !target_prim_refnos.is_empty() {
                 let instance_mgr_clone = instance_mgr.clone();
                 let db_option_clone = db_option.clone();
@@ -2374,24 +2413,6 @@ impl AiosDBManager {
                 futures::future::join_all(vec![handle]).await;
             }
 
-            let target_loop_refnos = mgr.get_gen_model_target_refnos(GeoEnum::LOOP, &target_dbnos).await?;
-            println!("使用LOOP的数量: {}",target_loop_refnos.len());
-            if run_cache_loop && !target_loop_refnos.is_empty() {
-                let instance_mgr_clone = instance_mgr.clone();
-                let db_option_clone = db_option.clone();
-                let mgr_clone = mgr.clone();
-                let handle = tokio::spawn(async move {
-                    Self::cache_loop_geos(
-                        mgr_clone.clone(),
-                        instance_mgr_clone.clone(),
-                        &db_option_clone,
-                        &target_loop_refnos,
-                    )
-                        .await
-                        .unwrap();
-                });
-                futures::future::join_all(vec![handle]).await;
-            }
 
             let (tx, rx) =
                 mpsc::unbounded_channel::<(RefU64, Arc<AiosDBManager>, Arc<RwLock<ShapeInstancesMgr>>)>();
@@ -2451,6 +2472,8 @@ impl AiosDBManager {
             };
             let mut total_refnos = pos_refnos.clone();
             total_refnos.extend_from_slice(&neg_refnos);
+            // dbg!(&total_refnos);
+            // dbg!(&pos_refnos);
             let inverse_mat = w_trans.compute_matrix().inverse();
             {
                 let inst_mgr = instance_mgr.read().await;
@@ -2476,48 +2499,45 @@ impl AiosDBManager {
                         let Ok(Some(geo_mat)) = mgr.get_world_transform(geo_refno).await else {
                             continue;
                         };
-                        let local_mat = inverse_mat * geo_mat.compute_matrix() * geo_inst.transform.compute_matrix();
-                        // dbg!(&local_mat);
+                        let ele_mat = inverse_mat * geo_mat.compute_matrix();
+
+                        // dbg!(ele_mat.to_scale_rotation_translation());
+                        let local_mat = ele_mat * geo_inst.transform.compute_matrix();
+                        dbg!(&local_mat);
                         //如果scale都是一样的，只需要用transform
                         let (s, r, t) = local_mat.to_scale_rotation_translation();
-                        // dbg!((s, r, t));
                         let is_scale_same = abs_diff_eq!(s.max_element(), s.min_element(), epsilon=0.01);
                         // dbg!(is_scale_same);
                         let shape = if is_scale_same {
                             occ_shape.transform(&local_mat.as_dmat4()).unwrap()
-                        }else{
+                        } else {
                             occ_shape.g_transform(&local_mat.as_dmat4()).unwrap()
                         };
                         // let shape = occ_shape.scale();
                         // dbg!(&w_aabb);
                         // dbg!(local_mat);
                         // dbg!(local_mat.to_scale_rotation_translation());
-
-                            if pos_refnos.contains(&t_refno) {
-                                // dbg!("Fuse");
-                                // dbg!(geo_refno);
-                                pos_shapes.push(shape)
-                                // final_shape = final_shape.map(|x| x.fuse(&shape, 1.0).expect("occ shape Fuse 出错"));
-                            } else {
-                                // if geo_refno == RefU64::from_two_nums(24381, 35205) {
-                                //     continue;
-                                // }
-                                //应对建模不规范的问题
-                                let cut_shape = shape.offset(1.0).expect("Offset shape error.");
-
-                                neg_shapes.push(cut_shape);
-                                // final_shape = final_shape.map(|x| x.cut(&cut_shape, 1.0).expect("occ shape Cut 出错"));
-                                // break 'outer;
-                            }
+                        if pos_refnos.contains(&t_refno) {
+                            // dbg!(geo_refno);
+                            pos_shapes.push(shape)
+                            // final_shape = final_shape.map(|x| x.fuse(&shape, 1.0).expect("occ shape Fuse 出错"));
+                        } else {
+                            // if geo_refno == RefU64::from_two_nums(24381, 35205) {
+                            //     continue;
+                            // }
+                            // dbg!(geo_refno);
+                            let cut_shape = shape.offset(1.0).expect("Offset shape error.");
+                            neg_shapes.push(cut_shape);
+                        }
                     }
                 }
             }
             let geo_hash = *comp_refno;
             let mut inst_mgr = instance_mgr.write().await;
             let mut mesh_mgr = mgr.cached_mesh_mgr.write().await;
-            dbg!(neg_shapes.len());
+            // dbg!(neg_shapes.len());
             if let Ok(pos_compound_shape) = OCCShape::fuse_shapes(&pos_shapes) &&
-                let Ok(neg_compound_shape) = OCCShape::fuse_shapes(&neg_shapes){
+                let Ok(neg_compound_shape) = OCCShape::fuse_shapes(&neg_shapes) {
                 dbg!("Cut");
                 let s = pos_compound_shape.cut(&neg_compound_shape, 1.0).unwrap();
                 let size = w_aabb.unwrap().bounding_sphere().radius as f64;

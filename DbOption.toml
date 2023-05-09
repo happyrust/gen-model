@@ -1,15 +1,16 @@
 #同步文件配置
-enable_log = false
 total_sync = false
-sync_graph_db = true
+enable_log = false
+sync_graph_db = false
 sync_tidb = false
 incr_sync = false
-replace_dbs = true
+replace_dbs = false
 
 #项目设置
 project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
 included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
 #included_projects = ["AvevaCatalogue"]  #"AvevaPlantSample",
+#included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
 
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
@@ -23,18 +24,18 @@ gen_model_batch_size = 100
 arangodb_database = "ams"
 multi_threads = true
 only_sync_sys = false
-arangodb_url = "http://127.0.0.1:8529"
+arangodb_url = "http://192.168.31.179:8529"
 rebuild_ssc_tree = false
 
 #tidb 配置
-ip = "127.0.0.1"
+ip = "192.168.31.179"
 user = "root"
 password = ""
 #port = "3306"
 port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 500   #mysql 批量插入的数量
-server_release_ip = "localhost:9099"
+server_release_ip = "192.168.31.179:9099"
 arangodb_user = "root"
 arangodb_password = ""
 
@@ -48,8 +49,8 @@ debug_print_world_transform = false
 only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
-#included_db_files = ["acp7002_0001"]
-manual_db_nums = [7999]
+#included_db_files = ["ams1112_0001"]
+manual_db_nums = [1112]
 plat_url = ""
 
 #joint还有问题，方位对齐的问题
@@ -81,15 +82,17 @@ plat_url = ""
 #debug_root_refnos = ["24384/22404"]
 
 #楼板生成有问题
-debug_root_refnos = ["24381/40192"]
+#debug_root_refnos = ["24381/40192"]
 
 #debug_root_refnos = ["24384/24932"]
 
 #生成的负实体，没有将圆柱体削成半球
 #debug_root_refnos = ["24381/36945"]
 
-#debug_root_refnos = ["24384/22399"]
+#debug_root_refnos = ["24383/73985"]
 
+#Cut 崩溃
+debug_root_refnos = ["17496/161442"]
 
 
 

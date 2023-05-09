@@ -131,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
 
     // let mut all_insts_mgr = HashMap::new();
     if db_option.gen_model_mesh {
-        dbg!("正在生成模型");
+        println!("正在生成模型");
         let mut time = Instant::now();
         //处理包含负实体的情况
         // AiosDBManager::cache_neg_geos_data(mgr.clone(), db_option.clone()).await?;
