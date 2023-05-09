@@ -1932,6 +1932,7 @@ impl AiosDBManager {
                         None
                     };
                     if let Some(brep_obj) = attr.create_brep_shape(limit_size) {
+                        dbg!(&brep_obj);
                         if brep_obj.check_valid() {
                             item_trans = brep_obj.get_trans();
                             geo_param = brep_obj
@@ -2503,7 +2504,7 @@ impl AiosDBManager {
 
                         // dbg!(ele_mat.to_scale_rotation_translation());
                         let local_mat = ele_mat * geo_inst.transform.compute_matrix();
-                        dbg!(&local_mat);
+                        // dbg!(&local_mat);
                         //如果scale都是一样的，只需要用transform
                         let (s, r, t) = local_mat.to_scale_rotation_translation();
                         let is_scale_same = abs_diff_eq!(s.max_element(), s.min_element(), epsilon=0.01);
