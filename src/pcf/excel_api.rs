@@ -5,7 +5,7 @@ use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use crate::pcf::pcf_api::create_thickness_data;
-use crate::ssc::SiteExcelDataTest;
+use crate::ssc::SiteExcelData;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct PipeThicknessTable {

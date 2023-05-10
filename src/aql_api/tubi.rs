@@ -20,7 +20,7 @@ use crate::data_interface::tidb_manager::{AiosDBManager, TUBI_TOL};
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::pcf::bran::get_bran_name_and_children;
 use crate::pcf::excel_api::get_pipe_thickness_table;
-use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
 
 /// 找到某个节点下所有的 bran 中的 tubi
 pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<(RefU64, String), f32>>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<()> {

@@ -58,4 +58,3 @@ extern crate nom;
 
 
 pub const BATCH_CHUNKS_CNT: usize = 50;
-pub const AQL_PDMS_ELES_COLLECTION: &'static str = "pdms_eles";
