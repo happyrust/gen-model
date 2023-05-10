@@ -25,9 +25,11 @@ use crate::api::ssc_data::*;
 use crate::aql_api::children::{query_ancestor_till_type_aql, query_travel_children_aql};
 use crate::consts::{AQL_PDMS_ELES_COLLECTION, AQL_SSC_EDGE_COLLECTION, AQL_SSC_ELES_COLLECTION, PDMS_SSC_ELEMENTS_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option};
-use crate::graph_db::structs::{PdmsEleGraphEdge, SSCEleGraphNode};
+use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, save_arangodb_with_database};
+use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode, SSCEleGraphNode};
+use crate::metadata::convert_str_to_hash;
 use crate::tables;
+use aios_core::aql_types::AqlEdge;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SiteExcelData {
@@ -611,7 +613,7 @@ pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMa
     Ok((sql, zone_level_map, zone_name_map, next_refno))
 }
 
-#[derive(Serialize,Deserialize,Clone,Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub(crate) struct SSCLevelExcelData {
     pub name: Option<String>,
     pub att_type: Option<String>,
@@ -834,6 +836,64 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>, db_opti
     Ok(())
 }
 
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub(crate) struct SscLevelExcel {
+    pub name: Option<String>,
+    pub att_type: Option<String>,
+    pub owner: Option<String>,
+}
+
+impl SscLevelExcel {
+    pub fn is_valid(&self) -> bool {
+        if self.name.is_none() || self.att_type.is_none() {
+            return false;
+        }
+        true
+    }
+}
+
+/// 将 ssc_level.xlsx  ssc 固定节点保存到图数据库中
+async fn save_ssc_level_excel(database: &Database) -> anyhow::Result<()> {
+    let mut eles_results = Vec::new();
+    let mut edge_results = Vec::new();
+
+    let mut workbook: Xlsx<_> = open_workbook("resource/ssc_level.xlsx")?;
+    let range = workbook.worksheet_range("Sheet1")
+        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+
+    let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
+
+    while let Some(result) = iter.next() {
+        let v: SscLevelExcel = result?;
+        if v.is_valid() {
+            let name = v.name.unwrap();
+            let name_hash = convert_str_to_hash(&name);
+            let owner = if v.owner.is_some() { convert_str_to_hash(&v.owner.unwrap()) } else { 0 };
+            let refno = RefU64(name_hash);
+            let owner = RefU64(owner);
+            eles_results.push(PdmsEleGraphNode {
+                _key: refno.to_url_refno(),
+                noun: v.att_type.unwrap(),
+                version: 0,
+                name,
+                owner: owner.to_url_refno(),
+                dbnum: 0,
+            });
+
+            edge_results.push(AqlEdge{
+                _key: refno.hash_with_another_refno(owner).to_string(),
+                _from: format!("{}/{}",AQL_SSC_ELES_COLLECTION,refno.to_url_refno()),
+                _to: format!("{}/{}",AQL_SSC_ELES_COLLECTION,owner.to_url_refno()),
+            })
+        }
+    }
+    let eles_value = serde_json::to_value(&eles_results)?;
+    save_arangodb_with_database(eles_value, AQL_SSC_ELES_COLLECTION, database).await?;
+    let edge_value = serde_json::to_value(&edge_results)?;
+    save_arangodb_with_database(edge_value, AQL_SSC_EDGE_COLLECTION, database).await?;
+    Ok(())
+}
+
 fn gen_query_ssc_room_refnos_sql(room_info: &HashMap<String, RefU64>) -> String {
     let mut sql = String::new();
     let mut rooms = String::new();
@@ -852,19 +912,6 @@ fn gen_replace_room_refno_sql(room_name: &str, refno: RefU64, old_refno: RefU64)
     sql
 }
 
-
-#[test]
-fn test_read_excel() {
-    let result = get_room_info_from_excel().unwrap();
-    // let (level, name_map) = get_room_level_from_excel().unwrap();
-    if let Some(map) = result.get("1RX") {
-        if let Some(val) = map.get(&1) {
-            println!("val={:?}", val);
-        }
-    }
-    // dbg!(&name_map);
-}
-
 #[tokio::test]
 async fn test_set_pdms_major_from_excel() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
@@ -878,5 +925,20 @@ async fn test_set_pdms_major_from_excel() -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let excel_result = get_room_level_from_excel_refactor()?;
     set_pdms_major_from_excel(&excel_result.pdms_name_code_map, &db_option, &database, &pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_save_ssc_level_excel() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let _ = save_ssc_level_excel(&database).await?;
     Ok(())
 }
