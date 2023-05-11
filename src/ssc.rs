@@ -55,15 +55,33 @@ impl SiteExcelDataTest {
 /// 房间信息 excel 字段
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RoomExcelData {
-    pub 房间代码: Option<String>,
-    pub 所属机组: Option<u32>,
-    pub 安装厂房: Option<String>,
-    pub 区域: Option<String>,
-    pub 安装层位: Option<String>,
-    pub 厂房: Option<String>,
-    pub 分区: Option<String>,
-    pub 层位及标高: Option<String>,
-    pub 序号: Option<u32>,
+    ///房间代码
+    #[serde(rename="房间代码")]
+    pub room_code: Option<String>,
+    /// 所属机组
+    #[serde(rename="所属机组")]
+    pub aff_unit: Option<u32>,
+    ///安装厂房
+    #[serde(rename="安装厂房")]
+    pub install_plant: Option<String>,
+    ///区域
+    #[serde(rename="区域")]
+    pub zone: Option<String>,
+    ///安装层位
+    #[serde(rename="安装层位")]
+    pub install_level: Option<String>,
+    ///厂房
+    #[serde(rename="厂房")]
+    pub plant: Option<String>,
+    ///分区
+    #[serde(rename="分区")]
+    pub partion: Option<String>,
+    ///层位及标高
+    #[serde(rename="层位及标高")]
+    pub layer_elevation: Option<String>,
+    /// 序号
+    #[serde(rename="序号")]
+    pub number: Option<u32>,
 }
 
 pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
@@ -184,7 +202,7 @@ fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, Da
 }
 
 /// 解析 excel 表单 ，找到每一层下面所有的房间号 返回所有的安装厂房下对应的层位，层位下对应的房间
-pub fn get_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i32, Vec<String>>>> {
+pub fn parse_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i32, Vec<String>>>> {
     let mut r = HashMap::new();
     let mut workbook: Xlsx<_> = open_workbook("resource/test.xlsx")?;
     let range = workbook.worksheet_range("Sheet1")
@@ -192,13 +210,19 @@ pub fn get_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i32
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
 
+    // while let Some(result) = iter.next() {
+    //     let v: RoomExcelData = result.and_then(|r| {
+    //
+    //     });
+    // }
+
     while let Some(result) = iter.next() {
         let v: RoomExcelData = result?;
-        if let Some(install_workshop) = v.安装厂房 {
-            if let Some(belong_unit) = v.所属机组 {
+        if let Some(install_workshop) = v.install_plant {
+            if let Some(belong_unit) = v.aff_unit {
                 let install_workshop = format!("{}{}", belong_unit.to_string(), install_workshop);
-                if let Some(install_level) = v.安装层位 {
-                    if let Some(workshop) = v.房间代码 {
+                if let Some(install_level) = v.install_level {
+                    if let Some(workshop) = v.room_code {
                         r.entry(install_workshop).or_insert_with(BTreeMap::new)
                             .entry(install_level.parse().unwrap_or(1)).or_insert_with(Vec::new).push(workshop);
                     }
@@ -219,7 +243,7 @@ pub fn get_rooms_from_excel() -> anyhow::Result<Vec<String>> {
 
     while let Some(result) = iter.next() {
         let v: RoomExcelData = result?;
-        if let Some(workshop) = v.房间代码 {
+        if let Some(workshop) = v.room_code {
             r.push(workshop);
         }
     }
@@ -503,7 +527,7 @@ pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMa
     // 一号机组的子节点
     let mut zone_level_map = DashMap::new();
     let mut zone_name_map = DashMap::new();
-    if let Ok(map) = get_room_info_from_excel() {
+    if let Ok(map) = parse_room_info_from_excel() {
         let (zone_level_map_r, zone_name_map_r, next_refno_level) = set_ssc_level_node(map, (three_refno, n_refno), two_level_refno, &mut sql)?;
         next_refno = next_refno_level;
         zone_level_map = zone_level_map_r;
@@ -699,7 +723,7 @@ fn gen_replace_room_refno_sql(room_name: &str, refno: RefU64, old_refno: RefU64)
 
 #[test]
 fn test_read_excel() {
-    let result = get_room_info_from_excel().unwrap();
+    let result = parse_room_info_from_excel().unwrap();
     // let (level, name_map) = get_room_level_from_excel().unwrap();
     if let Some(map) = result.get("1RX") {
         if let Some(val) = map.get(&1) {
