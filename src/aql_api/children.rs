@@ -440,10 +440,7 @@ pub async fn query_travel_children_filter_negative_sibl_nodes(refno: RefU64, dat
     let mut negative_map = HashMap::new();
     for result in results {
         for r in result {
-            let ele = r.change_to_pdms_element();
-            if ele.is_none() { continue; }
-            let ele = ele.unwrap();
-            negative_map.entry(ele.owner).or_insert_with(Vec::new).push(ele);
+            negative_map.entry(r.owner).or_insert_with(Vec::new).push(r);
         }
     }
     Ok(negative_map)
@@ -459,7 +456,7 @@ pub async fn filter_negative_sibl_from_refnos(refnos: &Vec<RefU64>, database: &D
                             return 1 )
         filter Length(contains_negative) == 0
         return refno
-    ").bind_var("keys", keys).bind_var("negative_nouns", GENRAL_NEGATIVE_NOUN_NAMES.to_vec());
+    ").bind_var("keys", keys).bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
     let result = database.aql_query::<String>(aql).await?;
     Ok(result.into_iter().filter_map(|r| RefU64::from_arangodb_refno_str(&r)).collect::<Vec<_>>())
 }

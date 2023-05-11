@@ -26,6 +26,8 @@ multi_threads = true
 only_sync_sys = false
 arangodb_url = "http://192.168.31.179:8529"
 rebuild_ssc_tree = false
+arangodb_user = "root"
+arangodb_password = ""
 
 #tidb 配置
 ip = "192.168.31.179"
@@ -35,14 +37,15 @@ password = ""
 port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 500   #mysql 批量插入的数量
+
+#服务器启动配置
 server_release_ip = "192.168.31.179:9099"
-arangodb_user = "root"
-arangodb_password = ""
+
 
 #调试选项
 replace_mesh = true
 save_model_mesh_to_graph_db = true
-need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
+need_sync_refno_basic = true  #是否重新生成 refno_basic 缓存
 reset_mdb_project = false      #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false

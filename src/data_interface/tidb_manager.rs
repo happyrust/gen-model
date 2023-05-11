@@ -171,13 +171,13 @@ impl PdmsDataInterface for AiosDBManager {
     async fn get_attr_with_uda(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
         let mut attr = self.get_attr(refno).await?;
         //暂时把UDA 屏蔽
-        for pool in &self.project_map {
-            // uda 赋值需要加上元件库
-            let uda_attr = query_uda_attr(attr.get_type(), &pool).await?;
-            for (k, v) in uda_attr.map {
-                attr.entry(k).or_insert(v);
-            }
-        }
+        // for pool in &self.project_map {
+        //     // uda 赋值需要加上元件库
+        //     let uda_attr = query_uda_attr(attr.get_type(), &pool).await?;
+        //     for (k, v) in uda_attr.map {
+        //         attr.entry(k).or_insert(v);
+        //     }
+        // }
         Ok(attr)
     }
 
