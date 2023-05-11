@@ -129,7 +129,7 @@ pub async fn save_pdms_element_in_sync(db_option: &DbOption, total_attr_map: &Da
     }
     for edge in edges.chunks(ARANGODB_SAVE_AMOUNT) {
         let json = serde_json::to_value(edge)?;
-        save_arangodb_with_db_option(json, db_option, "pdms_edges").await?;
+        save_arangodb_with_db_option(json, db_option, AQL_PDMS_EDGES_COLLECTION).await?;
     }
     Ok(())
 }
@@ -298,7 +298,7 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
             let sql = format!("SELECT ID, OWNER, TYPE, NAME, NUMBDB  FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB IN ({})", numbdbs_sql);
             let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
             let collection = "pdms_eles";
-            let pdms_edge_collection = "pdms_edges";
+            let pdms_edge_collection = AQL_PDMS_EDGES_COLLECTION;
             match results {
                 Ok(vals) => {
                     //需不需要按照db numbder 来分别去生成

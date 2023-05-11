@@ -39,7 +39,7 @@ use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
-use aios_database::{AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_COLLECTION, BATCH_CHUNKS_CNT};
+use aios_database::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_COLLECTION, BATCH_CHUNKS_CNT};
 use arangors_lite::collection::CollectionType::{Document, Edge};
 use bevy::prelude::*;
 use bevy::transform::components::Transform;
@@ -100,15 +100,12 @@ async fn main() -> anyhow::Result<()> {
         builder.target(Target::Pipe(Box::new(file))).init();
     }
 
-    create_arangodb_conns(&db_option)
-        .await
-        .expect("Failed to create arangodb conns");
     /// 是否全部同步模型
     if db_option.total_sync {
         create_arangodb_conns(&db_option)
             .await
             .expect("Failed to create arangodb conns");
-        // 把pdms数据同步到mysql
+        // 同步pdms数据
         sync_pdms(&db_option).await.unwrap();
     }
     /// 创建db manager
@@ -136,7 +133,6 @@ async fn main() -> anyhow::Result<()> {
         info!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
-
     if db_option.only_sync_sys {
         sync_system_db(&mgr).await?;
     }
@@ -144,7 +140,6 @@ async fn main() -> anyhow::Result<()> {
     //房间树要重写
     if db_option.gen_spatial_tree {
         mgr.calculate_rooms().await.expect("房间计算失败");
-        // return Ok(());
     }
 
     Ok(())
@@ -160,7 +155,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     create_arangodb_conn(&database, "foreign_edges", Edge).await?;
     create_arangodb_conn(&database, "instance_edges", Edge).await?;
     create_arangodb_conn(&database, "para_eles", Document).await?;
-    create_arangodb_conn(&database, "pdms_edges", Edge).await?;
+    create_arangodb_conn(&database, AQL_PDMS_EDGES_COLLECTION, Edge).await?;
     create_arangodb_conn(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
     create_arangodb_conn(&database, AQL_PDMS_INST_COLLECTION, Document).await?;
     create_arangodb_conn(&database, "plin_eles", Document).await?;
