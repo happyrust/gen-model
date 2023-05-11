@@ -9,14 +9,16 @@ use regex::Regex;
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
 use crate::api::attr::{get_site_major_from_uda, query_explicit_attr};
-use crate::api::children::{get_ancestor_refno_of_type_data, query_ancestor_of_type};
+use crate::api::children::{query_ancestor_of_type};
 use crate::aql_api::children::query_ancestor_name_of_type_aql;
 use crate::aql_api::{convert_refno_vec_from_vec_string};
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::AQL_PDMS_ELES_COLLECTION;
-use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
+use crate::graph_db::pdms_arango::*;
+use aios_core::pdms_types::*;
+use crate::data_interface::interface::PdmsDataInterface;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RoomData {
@@ -27,14 +29,16 @@ pub struct RoomData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RoomElementAql {
-    pub _key: String,
+pub struct RoomElement {
+    #[serde(serialize_with = "ser_refno_as_key_str")]
+    #[serde(deserialize_with = "de_refno_from_key_str")]
+    #[serde(rename = "_key")]
     pub refno: RefU64,
-    pub aabb: Aabb,
+    pub name: String,   //room 名
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RoomEdgeAql {
+pub struct RoomEdge {
     pub _key: String,
     pub _from: String,
     pub _to: String,
@@ -53,48 +57,50 @@ pub struct RoomInfo {
 }
 
 /// 将房间信息保存到图数据库
-pub async fn save_room_info_to_arangodb(aios_mgr: &AiosDBManager, room_infos: HashMap<RefU64, (Aabb, Vec<RefU64>)>, db_option: &DbOption, mut major_map: &mut HashMap<RefU64, UdaMajorType>) -> anyhow::Result<()> {
-    let mut room_eles_json = vec![];
-    let mut room_edges_json = vec![];
-    for (refno, (aabb, target_refnos)) in room_infos {
-        room_eles_json.push(RoomElementAql {
-            _key: refno.to_url_refno(),
-            refno,
-            aabb,
-        });
-        for target_refno in target_refnos {
-            // 获取 target_refno 属于哪个专业
-            let site = get_ancestor_refno_of_type_data(&aios_mgr, target_refno, "SITE".to_string());
-            let mut major = UdaMajorType::NULL;
-            if let Some(r) = major_map.get(&site) {
-                major = r.clone();
-            } else {
-                if let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(site).await {
+impl AiosDBManager {
+    //mut major_map: &mut HashMap<RefU64, UdaMajorType>
+    pub(crate) async fn save_room_info_to_arangodb(&self, room_map: HashMap<RefU64, Vec<RefU64>>) -> anyhow::Result<bool> {
+        let mut room_eles_json = vec![];
+        let mut room_edges_json = vec![];
+        for (refno, target_refnos) in room_map {
+            let Ok(frmw) = self.get_ancestor_refno_of_type_data(refno, "FRMW") else {
+                continue;
+            };
+            let mut frmw_name = self.get_name(frmw).await?.to_string();
+            let name = frmw_name.split('-').last().unwrap_or_default().to_string();
+            dbg!(&name);
+            room_eles_json.push(RoomElement {
+                refno,
+                name,
+            });
+            for target_refno in target_refnos {
+                // 获取 target_refno 属于哪个专业
+                let Ok(site) = self.get_ancestor_refno_of_type_data(target_refno, "SITE") else {
+                    continue;
+                };
+                let mut major = UdaMajorType::NULL;
+                if let Some((_, pool)) = self.get_project_pool_by_refno(site).await {
                     if let Some(major_uda) = get_site_major_from_uda(site, &pool).await {
-                        major_map.insert(site, major_uda.clone());
                         major = major_uda;
                     }
                 }
+                let hash = refno.hash_with_another_refno(target_refno);
+                room_edges_json.push(RoomEdge {
+                    _key: hash.to_string(),
+                    _from: format!("room_eles/{}", refno.to_url_refno()),
+                    _to: format!("{AQL_PDMS_ELES_COLLECTION}/{}", target_refno.to_url_refno()),
+                    major,
+                })
             }
-            let hash = refno.hash_with_another_refno(target_refno);
-            room_edges_json.push(RoomEdgeAql {
-                _key: hash.to_string(),
-                _from: format!("room_eles/{}", refno.to_url_refno()),
-                _to: format!("{AQL_PDMS_ELES_COLLECTION}/{}", target_refno.to_url_refno()),
-                major,
-            })
         }
+        let database = self.get_arangodb().await?;
+        let replace = self.db_option.replace_dbs;
+        let room_eles_json = serde_json::to_value(&room_eles_json)?;
+        save_arangodb_with_database(room_eles_json, "room_eles", database, replace).await?;
+        let room_edges_json = serde_json::to_value(&room_edges_json)?;
+        save_arangodb_with_database(room_edges_json, "room_edges", database, replace).await?;
+        Ok(true)
     }
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
-    let room_eles_json = serde_json::to_value(&room_eles_json);
-    if let Ok(room_eles_json) = room_eles_json {
-        save_arangodb_with_database(room_eles_json, "room_eles", &database, db_option.replace_dbs).await?;
-    }
-    let room_edges_json = serde_json::to_value(&room_edges_json);
-    if let Ok(room_edges_json) = room_edges_json {
-        save_arangodb_with_database(room_edges_json, "room_edges", &database,db_option.replace_dbs).await?;
-    }
-    Ok(())
 }
 
 /// 获取所有需要计算的房间号

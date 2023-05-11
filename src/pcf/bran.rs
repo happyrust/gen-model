@@ -38,7 +38,7 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
     let mut materials = vec![];
     data.append(&mut gen_pcf_file_head().into_bytes());
     let pool = aios_mgr.project_map.get(&aios_mgr.db_option.project_name).unwrap();
-    let database = aios_mgr.get_arangodb_conn().await?;
+    let database = aios_mgr.get_arangodb().await?;
     let bran_attr = query_attr(refno, &aios_mgr, None).await?;
     let bran_name = bran_attr.get_name().to_string();
 

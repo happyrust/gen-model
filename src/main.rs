@@ -22,7 +22,7 @@ use aios_database::api::element::*;
 use aios_database::api::ssc_data::{get_ancestor_till_type, query_all_room_data, update_ssc_type};
 use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
 use aios_database::aql_api::pdms_room::{
-    query_all_need_compute_room_refno, save_room_info_to_arangodb, RoomEdgeAql, RoomElementAql,
+    query_all_need_compute_room_refno, RoomEdge, RoomElement,
 };
 use aios_database::aql_api::tubi::{insert_tubi_value, query_all_tubi_from_node};
 use aios_database::cata::resolve::parse_to_i32;
@@ -36,7 +36,6 @@ use aios_database::graph_db::pdms_inst_arango::{
 };
 use aios_database::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
-use aios_database::negative::{compute_boolean_mesh, query_negative_refnos_aql};
 use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
@@ -118,6 +117,8 @@ async fn main() -> anyhow::Result<()> {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
         info!("read cached mesh ok.");
     }
+
+
 
     if db_option.rebuild_ssc_tree {
         info!("正在同步SSC");
@@ -221,24 +222,17 @@ async fn main() -> anyhow::Result<()> {
     //     file.write_all(serialized.as_slice()).unwrap();
     // }
 
-    //房间树要重写
-    if db_option.save_spatial_tree_to_db {
-        // let mut site_major_map = HashMap::new();
-        // let room_infos = query_all_need_compute_room_refno(
-        //     &vec![7997],
-        //     "FRMW",
-        //     Some("-RM"),
-        //     &mgr.project_map.get(&db_option.project_name).unwrap(),
-        // ).await?;
-        // // dbg!(&room_infos);
-        // let room_infos = room_infos.into_iter().map(|x| x.0).collect::<Vec<_>>();
-        // let map = recompute_spatial_tree(room_infos, all_insts_mgr, collider_shape_mgr, &db_option).await?;
-        // save_room_info_to_arangodb(&mgr, map, &db_option, &mut site_major_map).await?;
-        // dbg!("房间树保存完成");
-    }
+
     if db_option.only_sync_sys {
         sync_system_db(&mgr).await?;
     }
+
+    //房间树要重写
+    if db_option.gen_spatial_tree {
+        mgr.calculate_rooms().await.expect("房间计算失败");
+        // return Ok(());
+    }
+
     Ok(())
 }
 

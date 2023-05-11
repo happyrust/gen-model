@@ -77,14 +77,14 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
         }
     }
     dbg!("创建SSC表完成");
-    let room_data = query_all_room_data_aql(&mgr.get_arangodb_conn().await?, project_pool, &mgr.db_option).await?;
+    let room_data = query_all_room_data_aql(mgr.get_arangodb().await?, project_pool, &mgr.db_option).await?;
     let room_info = deal_room_info(room_data.clone());
     let (zone_level_map, zone_name_map, next_refno) = insert_set_ssc_node_sql(room_info.clone(), project_pool).await?;
     dbg!("SSC固定节点生成");
     replace_ssc_room_refno(room_info, project_pool).await?;
     if room_data.len() != 0 {
         let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
-        let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, next_refno, project_pool, mgr).await;
+        let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, next_refno, project_pool, mgr).await?;
         if sqls.len() != 0 {
             for (idx, sql) in sqls.into_iter().enumerate() {
                 let sql = format!("{} {}", insert_sql, sql);
@@ -245,7 +245,7 @@ pub async fn insert_set_ssc_node_sql(room_info: HashMap<String, RefU64>, pool: &
 /// 保存房间下的元件
 pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zone_level_map: DashMap<String, RefU64>,
                                   zone_name_map: DashMap<String, String>, mut next_refno: RefU64,
-                                  pool: &Pool<MySql>, mgr: Arc<AiosDBManager>) -> Vec<String> {
+                                  pool: &Pool<MySql>, mgr: Arc<AiosDBManager>) -> anyhow::Result<Vec<String>> {
     // let mut handles = vec![];
     let mut sqls = Arc::new(DashSet::new());
     let mut under_zone_map = DashMap::new();
@@ -382,9 +382,8 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
                     }
                 } else {
                     // 如果发现该zone下 :CNPE_divco 没有值，直接把整个zone下的refno全部移除
-                    if mgr.get_arangodb_conn().await.is_err() { continue; }
-                    let database = mgr.get_arangodb_conn().await.unwrap();
-                    if let Ok(children) = query_travel_children_aql(&database, zone_refno).await {
+                    let database = mgr.get_arangodb().await?;
+                    if let Ok(children) = query_travel_children_aql(database, zone_refno).await {
                         let children_len = children.len();
                         println!("删除不符合条件的 zone {:?} 下的所有参考号,共有{}条", zone_refno, children_len);
                         for child in children.into_iter() {
@@ -448,7 +447,7 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
         insert_sql.remove(insert_sql.len() - 1);
     }
     insert_sql_vec.push(insert_sql.clone());
-    insert_sql_vec
+    Ok(insert_sql_vec)
 }
 
 /// 设置 ssc 的固定节点

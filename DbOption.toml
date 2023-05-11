@@ -1,8 +1,8 @@
 #同步文件配置
 total_sync = false
 enable_log = false
-sync_graph_db = false
-sync_tidb = false
+sync_graph_db = true
+sync_tidb = true
 incr_sync = false
 replace_dbs = false
 
@@ -16,7 +16,7 @@ mdb_name = "ALL"
 project_name = "AvevaMarineSample"
 module = "DESI"
 gen_model_mesh = true
-gen_spatial_tree = false
+gen_spatial_tree = true
 save_spatial_tree_to_db = false
 gen_model_batch_size = 100
 
@@ -50,7 +50,9 @@ only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #included_db_files = ["ams1112_0001"]
-manual_db_nums = [1112]
+included_db_files = ["acp7001_0001"]
+#manual_db_nums = [7999, 7997, 1112, 8000]
+manual_db_nums = [1112, 8000]
 plat_url = ""
 
 #joint还有问题，方位对齐的问题
@@ -81,8 +83,9 @@ plat_url = ""
 #桥架有问题 *已解决
 #debug_root_refnos = ["24384/22404"]
 
-#楼板生成有问题
+#楼板生成有问题, 需要offset，这里判断如果是extrusion，就需要offset
 #debug_root_refnos = ["24381/40192"]
+#debug_root_refnos = ["24381/40451"]
 
 #debug_root_refnos = ["24384/24932"]
 
@@ -91,8 +94,29 @@ plat_url = ""
 
 #debug_root_refnos = ["24383/73985"]
 
-#Cut 崩溃
-debug_root_refnos = ["17496/161442"]
+#Cut 崩溃, 需要一个个切
+#debug_root_refnos = ["24381/57864"]
+
+#Cut 崩溃, 被offset影响
+#debug_root_refnos = ["24383/78369"]
+
+#debug_root_refnos = ["24383/76668"]
+
+
+#transform 有不合适的值，NAN
+#debug_root_refnos = ["24381/105513"]
+
+#stwall的元件库生成模型有错误
+#debug_root_refnos = ["17496/106397"]
+
+#24381_105593
+
+#指定哪些根节点下面是房间，以FRMW为一个整体
+room_root_refnos = ["24381/35538", "24381/35622"]
+
+#room_root_refnos = ["24381/35622"]
+#24381_105593\
+
 
 
 

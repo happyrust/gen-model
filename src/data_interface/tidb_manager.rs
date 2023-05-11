@@ -28,7 +28,7 @@ use glam::{DMat4, EulerRot, Mat3, Mat4, quat, Quat, Vec2, Vec3};
 use id_tree::{Node, NodeId};
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use nalgebra::{Point3, Quaternion, RealField, UnitQuaternion, Vector3};
+use nalgebra::{Isometry3, Point3, Quaternion, RealField, UnitQuaternion, Vector3};
 use once_cell::sync::Lazy;
 use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Real, Vector};
@@ -44,6 +44,7 @@ use std::f32::EPSILON;
 use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
 use aios_core::options::DbOption;
 use aios_core::pdms_data::ScomInfo;
 use aios_core::prim_geo;
@@ -74,17 +75,19 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
-use crate::graph_db::pdms_inst_arango::save_instance_to_graph_db;
+use crate::graph_db::pdms_inst_arango::{query_instance_with_refno_in_arangodb, query_instance_with_refnos_in_arangodb, save_instance_to_graph_db};
 use crate::mdb::get_project_mdb;
 use crate::tables::{gen_create_project_mdb_json_sql, gen_create_project_mdb_sql};
-use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::{AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_COLLECTION};
 
 #[cfg(feature = "opencascade")]
 use opencascade::{DsShape, Edge, OCCShape, Wire};
+use parry3d::query::{Ray, RayCast};
 use crate::data_interface::db_manager::GeoEnum;
 use crate::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 
 pub const TUBI_TOL: f32 = 10.0f32;
 
@@ -466,7 +469,6 @@ impl PdmsDataInterface for AiosDBManager {
         return Ok(result);
     }
 
-
     async fn query_refnos_has_geos(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
         let aql = AqlQuery::new(r#"
@@ -485,7 +487,6 @@ impl PdmsDataInterface for AiosDBManager {
         let refnos = refno_strs.iter().flatten().map(|x| RefU64::from_url_refno(x).unwrap()).collect();
         Ok(refnos)
     }
-
 
     ///返回有负实体的参考号集合，还有对应的NOUN
     async fn query_refnos_has_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, Vec<RefU64>>> {
@@ -704,20 +705,17 @@ impl PdmsDataInterface for AiosDBManager {
 
     async fn get_travel_children_attrs(&self, refno: RefU64, nouns: &[&str]) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
-        if let Ok(database) = self.get_arangodb_conn().await {
-            let children = query_deep_children_refnos_fuzzy(&database, refno, nouns).await?;
-            // dbg!(children.len());
-            for child in children {
-                let attr = self.get_attr(child).await?;
-                r.push(attr);
-            }
+        let children = query_deep_children_refnos_fuzzy(self.get_arangodb().await?, refno, nouns).await?;
+        // dbg!(children.len());
+        for child in children {
+            let attr = self.get_attr(child).await?;
+            r.push(attr);
         }
         Ok(r)
     }
 }
 
 impl AiosDBManager {
-
     /// 从默认配置文件初始化
     pub async fn init_form_config() -> anyhow::Result<Self> {
         let db_option = Self::get_db_option()?;
@@ -734,16 +732,156 @@ impl AiosDBManager {
 
     ///重新连接arangodb
     #[inline]
-    pub async fn reconnect_arangodb(&mut self){
+    pub async fn reconnect_arangodb(&mut self) {
         // self.arango_db = get_arangodb_conn_from_db_option(&self.db_option).await.unwrap();
     }
 
+    pub async fn compute_aabb_tree(&self) -> anyhow::Result<AccelerationTree> {
+        //测试分页查询
+        let mut rstar_objs = vec![];
+        let mut offset = 0;
+        loop {
+            //需要排除负实体
+            let aql = AqlQuery::new(r#"
+            FOR doc IN pdms_instances
+                SORT doc._key
+                LIMIT @offset, @batch_size
+                filter doc.aabb != null
+                filter LENGTH(doc.geo_insts) > 1 or (LENGTH(doc.geo_insts) == 1 and !doc.geo_insts[0].is_neg)
+                RETURN [
+                    doc._key,
+                    doc.aabb,
+                ]
+        "#)
+                .bind_var("offset", offset)
+                .bind_var("batch_size", 1000);
+            offset += 1000;
+            // let mut query_ok = false;
+            if let Ok(refno_aabbs) = self.arango_db.aql_query::<(String, Aabb)>(aql).await {
+                if refno_aabbs.is_empty() {
+                    break;
+                }
+                for (refno_str, aabb) in refno_aabbs {
+                    if aabb.extents().magnitude().is_finite() {
+                        let refno = RefU64::from_url_refno(&refno_str).unwrap();
+                        rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, refno));
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        dbg!(offset);
+
+        let rtree = AccelerationTree::load(rstar_objs);
+        dbg!(rtree.size());
+
+        Ok(rtree)
+    }
+
+    async fn calculate_room(&self, inst: &EleGeosInfo, rtree: &AccelerationTree) -> anyhow::Result<Vec<RefU64>> {
+        let mut withing_room_refnos = vec![];
+        let room_refno = inst.refno;
+        if let Some(room_abb) = inst.aabb {
+            // dbg!(&room_abb);
+            withing_room_refnos = rtree
+                .locate_intersecting_bounds(&room_abb)
+                .collect::<Vec<_>>();
+            let hashes = inst.geo_insts.iter().map(|x| x.geo_hash).collect::<Vec<_>>();
+            let room_mesh_mgr = query_pdms_mesh_aql(hashes.clone(), &self.arango_db).await.unwrap_or_default();
+            for hash in hashes {
+                if let Some(room_mesh) = room_mesh_mgr.get_mesh(hash) {
+                    let t = inst.get_geo_world_transform(&inst.geo_insts[0]);
+                    // dbg!(&t);
+                    let collider_mesh = room_mesh.get_tri_mesh(t.compute_matrix());
+                    // let local_aabb = collider_mesh.local_aabb();
+                    // dbg!(collider_mesh.local_aabb());
+                    let mut outer_refnos = vec![];
+                    for refno in &withing_room_refnos {
+                        let world_trans = self.get_world_transform(*refno).await?.unwrap_or_default();
+                        let world_point: parry3d::math::Point<f32> = world_trans.translation.into();
+                        //check 是否包含在房间内
+                        let contain_point = match collider_mesh.cast_local_ray_and_get_normal(
+                            &Ray::new(world_point, Vector::new(0.0, 0.0, 1.0)),
+                            100000.0,
+                            false,
+                        ) {
+                            Some(intersection) => {
+                                collider_mesh.is_backface(intersection.feature)
+                            }
+                            None => false,
+                        };
+                        // dbg!(contain_point);
+                        // dbg!(outer_refnos.len());
+                        if !contain_point {
+                            outer_refnos.push(*refno);
+                        }
+                        //如果是风管，就需要这么去检测是否发生碰撞
+                        //后续需要用包围盒再去判断一次
+                        // collider_mesh.intersection_with_aabb();
+                    }
+
+                    withing_room_refnos.retain(|refno| {
+                        !outer_refnos.contains(refno) && *refno != room_refno
+                    });
+
+                    // dbg!(&withing_room_refnos);
+                }
+            }
+            //再次过滤room，通过判断位置是否在room的mesh里来判断
+        }
+
+        return Ok(withing_room_refnos);
+    }
+
+    ///计算所有房间包含的其他参考号
+    pub async fn calculate_rooms(&self) -> anyhow::Result<()> {
+        let rtree = self.compute_aabb_tree().await?;
+
+        //指定哪个site下有房间节点
+        let Some(room_root_refnos) = &self.db_option.room_root_refnos else {
+            return Ok(());
+        };
+
+        let mut room_hashmap = HashMap::new();
+        for r in room_root_refnos {
+            let Ok(room_root_refno) = RefU64::from_refno_str(r) else{
+                continue;
+            };
+            let panes = query_deep_children_refnos_fuzzy(&self.arango_db, room_root_refno, &["PANE"]).await?;
+            // dbg!(&panes);
+            let instances = query_instance_with_refnos_in_arangodb(panes,
+                                                                   &self.arango_db).await?.unwrap_or_default();
+            // dbg!(&instances);
+            let mut final_within_room_refnos = vec![];
+            for inst in &instances {
+                let r = self.calculate_room(inst, &rtree).await?;
+                final_within_room_refnos.extend_from_slice(&r);
+            }
+
+            // dbg!(&final_within_room_refnos);
+            // final_within_room_refnos.remove
+            room_hashmap.insert(room_root_refno, final_within_room_refnos);
+        }
+
+        self.save_room_info_to_arangodb(room_hashmap).await?;
+
+
+        Ok(())
+    }
+
+
+    ///快速获得table名称
     pub fn get_table_name(&self, refno: RefU64) -> String {
         CACHED_REFNO_BASIC_MAP
             .get(&refno)
             .map(|x| x.get_table_name().to_string())
             .unwrap_or("UNSET".to_string())
     }
+
+
+    ///获得db option
     #[inline]
     pub fn get_db_option() -> anyhow::Result<DbOption> {
         use config::{Config, ConfigError, Environment, File};
@@ -753,6 +891,8 @@ impl AiosDBManager {
         s.try_deserialize::<DbOption>()
             .map_err(|x| anyhow!(x.to_string()))
     }
+
+    ///获得默认的连接字符串
     #[inline]
     pub fn get_default_conn_str(d: &DbOption) -> String {
         let user = d.user.as_str();
@@ -762,6 +902,7 @@ impl AiosDBManager {
         format!("mysql://{user}:{pwd}@{ip}:{port}")
     }
 
+    ///获得默认的连接字符串
     #[inline]
     pub fn default_conn_str(&self) -> String {
         let d = &self.db_option;
@@ -784,15 +925,16 @@ impl AiosDBManager {
     }
 
     #[inline]
-    pub async fn get_arangodb_conn(&self) -> anyhow::Result<Database> {
-        let conn = Connection::establish_jwt(
-            &self.db_option.arangodb_url,
-            &self.db_option.arangodb_user,
-            &self.db_option.arangodb_password,
-        )
-            .await?;
+    pub async fn get_arangodb(&self) -> anyhow::Result<&Database> {
+        Ok(&self.arango_db)
+        // let conn = Connection::establish_jwt(
+        //     &self.db_option.arangodb_url,
+        //     &self.db_option.arangodb_user,
+        //     &self.db_option.arangodb_password,
+        // )
+        //     .await?;
 
-        Ok(conn.db(&self.db_option.arangodb_database).await?)
+        // Ok(conn.db(&self.db_option.arangodb_database).await?)
     }
 
     ///获得默认的pool
@@ -1691,6 +1833,7 @@ impl AiosDBManager {
                             }
                             let mut aabb = bbox.unwrap();
 
+                            // dbg!(&transform);
                             let rot = transform.rotation;
                             let translation =
                                 transform.translation + transform.rotation * trans.translation;
@@ -1837,6 +1980,7 @@ impl AiosDBManager {
                             }
                         }
                         if geos_info.geo_insts.len() > 0 {
+                            // dbg!(&geos_info);
                             inst_map.insert(ele_refno, geos_info);
                         }
                     }
@@ -1860,7 +2004,7 @@ impl AiosDBManager {
             .collect::<Vec<_>>();
         // dbg!(&tubi_result.len());
         if !tubi_result.is_empty() {
-            let conn = mgr.get_arangodb_conn().await.unwrap();
+            let conn = mgr.get_arangodb().await?;
             let json = serde_json::to_value(tubi_result).unwrap_or_default();
             save_arangodb_with_database(json, "tubi_edges", &conn, mgr.db_option.replace_dbs)
                 .await?;
@@ -1940,6 +2084,7 @@ impl AiosDBManager {
                     };
                     if let Some(brep_obj) = attr.create_brep_shape(limit_size) {
                         if brep_obj.check_valid() {
+                            // dbg!(&brep_obj);
                             item_trans = brep_obj.get_trans();
                             geo_param = brep_obj
                                 .convert_to_geo_param()
@@ -2200,7 +2345,7 @@ impl AiosDBManager {
                             let sjus = attr.get_str("SJUS").unwrap_or_default();
                             //开始处理有偏移的情况
                             {
-                               if attr.get_type() == "NXTR" {
+                                if attr.get_type() == "NXTR" {
                                     if let Some(parent_inst) = inst_map.get(&attr.get_owner().unwrap_or_default()) {
                                         if let Some(h) = parent_inst.aabb.map(|x| x.bounding_sphere().radius * 2.0) {
                                             height = height.min(h);
@@ -2479,11 +2624,12 @@ impl AiosDBManager {
             let mut total_refnos = pos_refnos.clone();
             total_refnos.extend_from_slice(&neg_refnos);
             // dbg!(&total_refnos);
-            // dbg!(&pos_refnos);
+            dbg!(&pos_refnos);
             let inverse_mat = w_trans.compute_matrix().inverse();
             {
                 let inst_mgr = instance_mgr.read().await;
                 let mesh_mgr = mgr.cached_mesh_mgr.read().await;
+                let mut neg_need_offset = false;
                 'outer: for t_refno in total_refnos {
                     let Some(geos_info) = inst_mgr.get(&t_refno) else {
                         continue;
@@ -2524,16 +2670,21 @@ impl AiosDBManager {
                         // dbg!(local_mat);
                         // dbg!(local_mat.to_scale_rotation_translation());
                         if pos_refnos.contains(&t_refno) {
-                            // dbg!(geo_refno);
+                            neg_need_offset = matches!(geo_inst.geo_param, PrimExtrusion(_));
+                            dbg!(neg_need_offset);
                             pos_shapes.push(shape)
                             // final_shape = final_shape.map(|x| x.fuse(&shape, 1.0).expect("occ shape Fuse 出错"));
                         } else {
                             // if geo_refno == RefU64::from_two_nums(24381, 35205) {
                             //     continue;
                             // }
-                            // dbg!(geo_refno);
-                            let cut_shape = shape.offset(1.0).expect("Offset shape error.");
-                            neg_shapes.push(cut_shape);
+                            //说明，这里特殊处理一下，如果被切割的是 extrusion,，需要将负实体扩张一下，不然生成的不对
+                            if neg_need_offset {
+                                let cut_shape = shape.offset(1.0).expect("Offset shape error.");
+                                neg_shapes.push(cut_shape);
+                            } else {
+                                neg_shapes.push(shape);
+                            }
                         }
                     }
                 }
@@ -2541,15 +2692,34 @@ impl AiosDBManager {
             let geo_hash = *comp_refno;
             let mut inst_mgr = instance_mgr.write().await;
             let mut mesh_mgr = mgr.cached_mesh_mgr.write().await;
+            // dbg!(pos_shapes.len());
             // dbg!(neg_shapes.len());
-            if let Ok(pos_compound_shape) = OCCShape::fuse_shapes(&pos_shapes) &&
-                let Ok(neg_compound_shape) = OCCShape::fuse_shapes(&neg_shapes) {
-                // dbg!("Cut");
-                let s = pos_compound_shape.cut(&neg_compound_shape, 1.0).unwrap();
+            let mut final_shape = None;
+            if let Ok(mut pos_compound_shape) = OCCShape::fuse_shapes(&pos_shapes)
+                && let Ok(neg_compound_shape) = OCCShape::fuse_shapes(&neg_shapes)
+            {
+                println!("Cut by merged.");
+                if let Ok(s) = pos_compound_shape.cut(&neg_compound_shape, 1.0) {
+                    final_shape = Some(s);
+                }
+            }
+            if final_shape.is_none() {
+                if let Ok(mut pos_compound_shape) = OCCShape::fuse_shapes(&pos_shapes) {
+                    println!("Cut by merged failed, so by each one.");
+                    for neg_shape in &neg_shapes {
+                        pos_compound_shape = pos_compound_shape.cut(neg_shape, 1.0).unwrap();
+                    }
+                    final_shape = Some(pos_compound_shape);
+                }
+            }
+
+            if let Some(s) = final_shape {
                 let size = w_aabb.unwrap().bounding_sphere().radius as f64;
                 dbg!(size);
                 let mesh: PdmsMesh = s.mesh(0.01 * size).unwrap().into();
                 mesh_mgr.insert(geo_hash, mesh);
+            } else {
+                println!("Cut 失败.");
             }
 
             let geom_inst = EleGeoInstance {

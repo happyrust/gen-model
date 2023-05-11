@@ -28,7 +28,7 @@ use crate::rvm::head::{create_head_data, create_tail_data};
 
 pub async fn create_rvm_file(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<u8>> {
     let mut data = vec![];
-    let database = aios_mgr.get_arangodb_conn().await?;
+    let database = aios_mgr.get_arangodb().await?;
     let db_option = &aios_mgr.db_option;
     let pool = aios_mgr.get_project_pool_by_refno(refno).await;
     if pool.is_none() { return Ok(data); }
@@ -389,7 +389,7 @@ async fn test_create_rvm_file() -> anyhow::Result<()> {
 async fn test_create_owner_data() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
     let refno = RefU64::from_refno_str("23584/5495").unwrap();
-    let database = mgr.get_arangodb_conn().await?;
+    let database = mgr.get_arangodb().await?;
     let data = create_owner_data(refno, &mgr, &database).await?;
     let mut file = std::fs::File::create("test_rvm.txt").unwrap();
     file.write_all(&data).unwrap();

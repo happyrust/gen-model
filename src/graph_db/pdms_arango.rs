@@ -330,7 +330,7 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
                             eles.push(element);
                             edges.push(edge);
                         }
-                        let database_clone = mgr.get_arangodb_conn().await?;
+                        let database_clone = mgr.get_arangodb().await?;
                         // let handle = tokio::spawn(async move {
                         let json = serde_json::to_value(&take(&mut eles))?;
                         //     let aql = AqlQuery::new("LET data = @elements
@@ -452,7 +452,7 @@ pub async fn sync_pdms_level_edges_to_graph_db(mgr: Arc<AiosDBManager>) -> anyho
                     }
                 }
                 if sibl_edges.len() > 1000 {
-                    let database = mgr.get_arangodb_conn().await?;
+                    let database = mgr.get_arangodb().await?;
                     let json = serde_json::to_value(&take(&mut sibl_edges))?;
                     save_arangodb_with_database(json, sibl_collection, &database, false).await?;
                     if tubi_edges.len() != 0 {
@@ -571,7 +571,7 @@ pub async fn save_dtse_value_to_arangodb(db_option: &DbOption, type_ele_map: &Da
 
 
 pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &str) -> anyhow::Result<()> {
-    let database = mgr.get_arangodb_conn().await?;
+    let database = mgr.get_arangodb().await?;
     let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")

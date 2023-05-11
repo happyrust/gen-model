@@ -11,16 +11,18 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use aios_core::options::DbOption;
+use arangors_lite::Database;
 
-pub fn tri_tri_intersection() -> bool {
-    true
-}
+
+
+
+
 
 ///投影到平面上的房间，去计算是否二维有相交
 pub async fn compute_rooms_by_projection(
     room_refno: Vec<RefU64>,
     all_insts_mgr: HashMap<u32, ShapeInstancesMgr>,
-    collider_shape_mgr: CachedColliderShapeMgr,
+    collider_shape_mgr: ColliderShapeMgr,
     db_option: &DbOption,
 ) -> anyhow::Result<HashMap<RefU64, (Aabb, Vec<RefU64>)>> {
     // let mut room_info_map = HashMap::new();
@@ -133,7 +135,7 @@ pub async fn compute_rooms_by_projection(
 pub async fn recompute_spatial_tree(
     room_refno: Vec<RefU64>,
     all_insts_mgr: HashMap<u32, ShapeInstancesMgr>,
-    collider_shape_mgr: CachedColliderShapeMgr,
+    collider_shape_mgr: ColliderShapeMgr,
     db_option: &DbOption,
 ) -> anyhow::Result<HashMap<RefU64, (Aabb, Vec<RefU64>)>> {
     // let mut room_info_map = HashMap::new();

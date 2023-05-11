@@ -34,7 +34,7 @@ pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option
     let pool = project_map.get(&mgr.db_option.project_name);
     if pool.is_none() { return Ok(None); }
     let pool = pool.unwrap();
-    let database = &mgr.get_arangodb_conn().await?;
+    let database = &mgr.get_arangodb().await?;
     let atta_name = "R320.060"; // 先拿这一个做测试
     let pipe_size_map = read_pipe_size_excel()?;
     let (hanger_map, atta_refnos) = get_all_hangers_with_atta(atta_name, pool.value()).await?;
