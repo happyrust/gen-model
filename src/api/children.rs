@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::env;
 use std::fmt::format;
 use std::sync::Arc;
+use aios_core::cache::refno::CachedRefBasic;
 use aios_core::helper::table::qualified_table_name;
 use aios_core::pdms_types::*;
 use aios_core::three_dimensional_review::VagueSearchCondition;
@@ -19,7 +20,8 @@ use serde::{Serialize, Deserialize};
 use sqlx::mysql::MySqlRow;
 use crate::aql_api::children::query_owner_with_type_aql;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::defines::{RString, CACHED_MDB_SITE_MAP};
+use crate::defines::{RString, CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
+use crate::helper::qualified_table_name;
 
 /// 遍历该节点下的 children (包含自己)
 pub async fn travel_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
@@ -240,6 +242,21 @@ pub async fn query_ancestor_of_type(mut refno: RefU64, att_type: &str, pool: &Po
         }
     }
     Ok(Some(refno))
+}
+
+/// 通过 ref_basic 缓存来查找某个节点得指定类型 祖先节点 的参考号
+pub fn query_ancestor_of_type_from_cache(refno: RefU64, att_type: &str) -> Option<(RefU64, String)> {
+    let mut query_refno = refno;
+    while CACHED_REFNO_BASIC_MAP.contains_key(&query_refno) {
+        let cache = CACHED_REFNO_BASIC_MAP.get(&query_refno).unwrap();
+        let cache_type = &cache.table;
+        if att_type == cache_type {
+            return Some((query_refno, att_type.to_string()));
+        } else {
+            query_refno = cache.owner;
+        }
+    }
+    None
 }
 
 pub async fn query_ancestor_refnos_till_type(mut refno: RefU64, att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
@@ -607,5 +624,14 @@ async fn test_query_contain_noun_refnos() -> anyhow::Result<()> {
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
     let v = query_contain_noun_refnos("SPRE".to_string(), &pool).await?;
     println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_ancestor_of_type_from_cache() -> anyhow::Result<()> {
+    let aios_mgr = AiosDBManager::init_form_config().await?;
+    let refno = RefU64::from_refno_str("23584/5442").unwrap();
+    let owner = query_ancestor_of_type_from_cache(refno,"PIPE");
+    dbg!(&owner);
     Ok(())
 }

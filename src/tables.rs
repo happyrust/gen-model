@@ -31,7 +31,7 @@ pub fn gen_create_uda_tables_sql() -> String {
     let mut sql = String::new();
     //后续可以创建一个owner表
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {PDMS_UDA_ATT_TABLE} ("#));
-    sql.push_str(&format!(r#"{} VARCHAR(8) NOT NULL PRIMARY KEY,"#, "TYPE"));  //refno 的64位
+    sql.push_str(&format!(r#"{} INT NOT NULL PRIMARY KEY,"#, "TYPE"));  //refno 的64位
     sql.push_str(&format!(r#"{} BLOB"#, "DATA"));
     sql.push_str(");");
 
