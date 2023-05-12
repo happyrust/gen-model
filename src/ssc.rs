@@ -83,26 +83,26 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
     let room_info = deal_room_info(room_data.clone());
     let (zone_level_map, zone_name_map, next_refno) = insert_set_ssc_node_sql(room_info.clone(), project_pool).await?;
     dbg!("SSC固定节点生成");
-    // replace_ssc_room_refno(&room_info, project_pool).await?;
-    // if room_data.len() != 0 {
-    //     let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
-    //     let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, next_refno, project_pool, mgr).await;
-    //     if sqls.len() != 0 {
-    //         for (idx, sql) in sqls.into_iter().enumerate() {
-    //             let sql = format!("{} {}", insert_sql, sql);
-    //             let result = conn.execute(sql.as_str()).await;
-    //             match result {
-    //                 Ok(_) => {
-    //                     println!("第 {} 条 sql 保存完成", idx);
-    //                 }
-    //                 Err(e) => {
-    //                     dbg!(sql);
-    //                     dbg!(&e);
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
+    replace_ssc_room_refno(&room_info, project_pool).await?;
+    if room_data.len() != 0 {
+        let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
+        let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, next_refno, project_pool, mgr).await;
+        if sqls.len() != 0 {
+            for (idx, sql) in sqls.into_iter().enumerate() {
+                let sql = format!("{} {}", insert_sql, sql);
+                let result = conn.execute(sql.as_str()).await;
+                match result {
+                    Ok(_) => {
+                        println!("第 {} 条 sql 保存完成", idx);
+                    }
+                    Err(e) => {
+                        dbg!(sql);
+                        dbg!(&e);
+                    }
+                }
+            }
+        }
+    }
 
     Ok(())
 }
