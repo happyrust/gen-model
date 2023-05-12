@@ -25,6 +25,7 @@ use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
 use crate::api::children::query_contain_noun_refnos;
 use crate::api::element::*;
 use crate::api::project_mdb::query_db_nums_of_mdb;
+use crate::AQL_PDMS_EDGES_COLLECTION;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{DataDocument, ForeignEdges};

@@ -101,4 +101,7 @@ pub trait PdmsDataInterface : Send + Sync{
 
     ///获取当前节点深度遍历后的所有子节点, 是否指定目标节点
     async fn get_travel_children_attrs(&self, refno:RefU64, nouns: &[&str]) -> anyhow::Result<Vec<AttrMap>>;
+
+    ///获得在一定范围的构件参考号列表
+    async fn get_refnos_within_bound_radius(&self, refno: RefU64, distance: f32) -> anyhow::Result<Vec<RefU64>>;
 }

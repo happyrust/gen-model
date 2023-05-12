@@ -703,6 +703,7 @@ impl PdmsDataInterface for AiosDBManager {
         }))
     }
 
+    ///获得子节点集合的属性
     async fn get_travel_children_attrs(&self, refno: RefU64, nouns: &[&str]) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
         let children = query_deep_children_refnos_fuzzy(self.get_arangodb().await?, refno, nouns).await?;
@@ -713,6 +714,22 @@ impl PdmsDataInterface for AiosDBManager {
         }
         Ok(r)
     }
+
+
+    ///获得在一定范围的构件参考号列表
+    async fn get_refnos_within_bound_radius(&self, refno: RefU64, distance: f32) -> anyhow::Result<Vec<RefU64>>{
+        let rtree = self.compute_aabb_tree().await?;
+
+        let instances = query_instance_with_refnos_in_arangodb(vec![refno],
+                                                               &self.arango_db).await?.unwrap_or_default();
+        if instances.is_empty() { return Ok(vec![]); }
+        let pos = instances[0].world_transform.translation;
+        let target_refnos = rtree.query_within_distance(pos, distance)
+            .collect();;
+
+        Ok(target_refnos)
+    }
+
 }
 
 impl AiosDBManager {
@@ -801,6 +818,9 @@ impl AiosDBManager {
                     for refno in &withing_room_refnos {
                         let world_trans = self.get_world_transform(*refno).await?.unwrap_or_default();
                         let world_point: parry3d::math::Point<f32> = world_trans.translation.into();
+
+                        //检查目标的坐标点不在它自身包围盒的情况，这种就需要用相交的算法去计算
+
                         //check 是否包含在房间内
                         let contain_point = match collider_mesh.cast_local_ray_and_get_normal(
                             &Ray::new(world_point, Vector::new(0.0, 0.0, 1.0)),
@@ -1688,7 +1708,6 @@ impl AiosDBManager {
         eval_str_to_f32(expr, &context, Some(self))
     }
 
-
     /// 生成元件库的branch型几何体
     pub async fn cache_cata_geos(
         mgr: Arc<AiosDBManager>,
@@ -2016,7 +2035,6 @@ impl AiosDBManager {
         );
         Ok(true)
     }
-
 
     /// 生成基本体的几何数据
     pub async fn cache_prim_geos(
