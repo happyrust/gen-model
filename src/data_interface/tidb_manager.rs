@@ -331,14 +331,14 @@ impl PdmsDataInterface for AiosDBManager {
         project: &str,
         att_types: &[&str],
         dbnos: Option<&[i32]>,
-        exclude_neg_sibling:bool,
+        exclude_neg_sibling: bool,
     ) -> anyhow::Result<RefU64Vec> {
         if let Some(project_pool) = self.project_map.get(project) {
             let r = query_types_refnos(att_types, project_pool.value(), dbnos).await?;
             if exclude_neg_sibling {
                 if let Ok(database) = self.get_arangodb_conn().await {
                     let r = filter_negative_sibl_from_refnos(&r.0, &database).await?;
-                    return Ok(RefU64Vec(r))
+                    return Ok(RefU64Vec(r));
                 }
             }
             return Ok(r);
@@ -650,6 +650,18 @@ impl AiosDBManager {
     #[inline]
     pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
         let url = &format!("{connection_str}/{}", project);
+        PoolOptions::new()
+            .max_connections(500)
+            .acquire_timeout(Duration::from_secs(10 * 60))
+            .connect(url)
+            .await
+            .map_err({ |x| anyhow!(x.to_string()) })
+    }
+
+    #[inline]
+    pub async fn get_global_pool(&self) -> anyhow::Result<Pool<MySql>> {
+        let connection_str = self.default_conn_str();
+        let url = &format!("{connection_str}/{}", GLOBAL_DATABASE);
         PoolOptions::new()
             .max_connections(500)
             .acquire_timeout(Duration::from_secs(10 * 60))
@@ -1472,7 +1484,7 @@ impl AiosDBManager {
                             &mgr.arango_database,
                             root_refno,
                             &CATA_ATT_TYPES,
-                            false
+                            false,
                         )
                             .await?
                             .into_iter()
@@ -1487,7 +1499,7 @@ impl AiosDBManager {
         }
         if !is_debug {
             has_cata_refnos = mgr
-                .get_refnos_by_types(project, &CATA_ATT_TYPES, db_nos,false)
+                .get_refnos_by_types(project, &CATA_ATT_TYPES, db_nos, false)
                 .await?;
         }
         let has_cata_cnt = has_cata_refnos.len();
@@ -1762,7 +1774,7 @@ impl AiosDBManager {
                                 &mgr.arango_database,
                                 root_refno,
                                 &GNERAL_PRIM_NOUN_NAMES,
-                                false
+                                false,
                             )
                                 .await?
                                 .iter()
@@ -1779,7 +1791,7 @@ impl AiosDBManager {
                     db_option.project_name.as_str(),
                     &GNERAL_PRIM_NOUN_NAMES,
                     db_nos,
-                        false
+                    false,
                 )
                 .await?;
         }
@@ -1921,7 +1933,7 @@ impl AiosDBManager {
 
     pub async fn cache_pohe_geos(mgr: Arc<AiosDBManager>, project: &str) -> anyhow::Result<bool> {
         let pohe_refnos = mgr
-            .get_refnos_by_types(project, &vec!["POHE"], Some(&[1]),false)
+            .get_refnos_by_types(project, &vec!["POHE"], Some(&[1]), false)
             .await?;
         let pohe_cnt = pohe_refnos.len();
         dbg!(pohe_cnt);
@@ -2022,7 +2034,7 @@ impl AiosDBManager {
                             &mgr.arango_database,
                             root_refno,
                             &["PLOO", "LOOP"],
-                            false
+                            false,
                         )
                             .await?
                             .iter()
@@ -2033,7 +2045,7 @@ impl AiosDBManager {
         }
         if !is_debug {
             loop_refnos = mgr
-                .get_refnos_by_types(&db_option.project_name, &["PLOO", "LOOP"], db_nos,false)
+                .get_refnos_by_types(&db_option.project_name, &["PLOO", "LOOP"], db_nos, false)
                 .await?;
         }
         let loop_cnt = loop_refnos.len();

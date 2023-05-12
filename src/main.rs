@@ -116,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
         info!("正在同步SSC");
         if let Some(project_db)  = mgr.project_map.get(&mgr.db_option.project_name) {
             // 保存ssc
-            async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
+            // async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
             set_arangodb_all_ssc_nodes(project_db.value(), &mgr.arango_database).await?;
         }
         info!("SSC同步完成");
@@ -301,7 +301,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     create_arangodb_conn(&database, "hole_data", Document).await?;
     create_arangodb_conn(&database, "embed_data", Document).await?;
     create_arangodb_conn(&database, "room_edges", Edge).await?;
-    create_arangodb_conn(&database, "geo_infos", Document).await?;
+    // create_arangodb_conn(&database, "geo_infos", Document).await?;
     create_arangodb_conn(&database, AQL_HOLE_DATA_COLLECTION, Document).await?;
     create_arangodb_conn(&database, AQL_EMBED_DATA_COLLECTION, Document).await?;
     create_arangodb_conn(&database, AQL_HOLE_EDGE_COLLECTION, Edge).await?;
