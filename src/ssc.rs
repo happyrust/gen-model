@@ -54,7 +54,7 @@ pub struct PdmsSscMajorCode {
     pub zone_map: HashMap<String, String>,
 }
 
-impl SiteExcelDataTest {
+impl SiteExcelData {
     #[inline]
     pub fn is_valid(&self) -> bool {
         self.code.is_some() && self.name.is_some() && self.att_type.is_some()
@@ -134,7 +134,7 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
 }
 
 pub async fn async_total_ssc_data_refactor(mgr: &AiosDBManager) -> anyhow::Result<()> {
-    let database = mgr.get_arangodb_conn().await?;
+    let database = mgr.get_arangodb().await?;
     // 创建图数据库连接
     create_arangodb_conn(&database, AQL_SSC_EDGE_COLLECTION, Edge).await?;
     create_arangodb_conn(&database, AQL_SSC_ELES_COLLECTION, Document).await?;
@@ -919,9 +919,9 @@ async fn save_ssc_level_excel(database: &Database) -> anyhow::Result<()> {
         }
     }
     let eles_value = serde_json::to_value(&eles_results)?;
-    save_arangodb_with_database(eles_value, AQL_SSC_ELES_COLLECTION, database).await?;
+    save_arangodb_with_database(eles_value, AQL_SSC_ELES_COLLECTION, database, false).await?;
     let edge_value = serde_json::to_value(&edge_results)?;
-    save_arangodb_with_database(edge_value, AQL_SSC_EDGE_COLLECTION, database).await?;
+    save_arangodb_with_database(edge_value, AQL_SSC_EDGE_COLLECTION, database, false).await?;
     Ok(())
 }
 

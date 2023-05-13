@@ -22,14 +22,14 @@ pub async fn save_three_dimensional_review_data_to_arango(
 
 //保存来自普华的数据
 pub async fn save_threed_review_data_to_arango(
-    database: Database,
+    database: &Database,
     review_data: ThreeDimensionalModelDataCrate,
 ) -> anyhow::Result<()>
 {
     let data = insert_three_dimensional_review_data(review_data);
     for i in data.chunks(ARANGODB_SAVE_AMOUNT) {
         let json = serde_json::to_value(i)?;
-        save_arangodb_with_database(json, "threed_review", &database).await?;
+        save_arangodb_with_database(json, "threed_review", &database, false).await?;
     }
     Ok(())
 }

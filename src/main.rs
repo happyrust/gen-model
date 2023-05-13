@@ -39,7 +39,7 @@ use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
-use aios_database::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_COLLECTION, BATCH_CHUNKS_CNT};
+use aios_database::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_INST_COLLECTION, BATCH_CHUNKS_CNT};
 use arangors_lite::collection::CollectionType::{Document, Edge};
 use bevy::prelude::*;
 use bevy::transform::components::Transform;
@@ -75,7 +75,6 @@ use tokio::spawn;
 use env_logger::{Builder, fmt::Target};
 use log::{error, LevelFilter};
 use tokio::sync::RwLock;
-use aios_database::consts::AQL_PDMS_ELES_COLLECTION;
 
 
 #[tokio::main]
