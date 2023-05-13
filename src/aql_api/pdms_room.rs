@@ -15,7 +15,7 @@ use crate::aql_api::{convert_refno_vec_from_vec_string};
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
-use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
 
 #[derive(Debug, Default, Serialize, Deserialize)]

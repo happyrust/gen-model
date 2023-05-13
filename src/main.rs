@@ -22,7 +22,7 @@ use aios_database::api::element::*;
 use aios_database::api::ssc_data::{get_ancestor_till_type, query_all_room_data, update_ssc_type};
 use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
 use aios_database::aql_api::pdms_room::{
-    query_all_need_compute_room_refno, save_room_info_to_arangodb, RoomEdgeAql, RoomElementAql,
+    query_all_need_compute_room_refno, RoomEdgeAql, RoomElementAql, save_room_info_to_arangodb,
 };
 use aios_database::aql_api::tubi::{insert_tubi_value, query_all_tubi_from_node};
 use aios_database::cata::resolve::parse_to_i32;
@@ -73,9 +73,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use aios_core::options::DbOption;
 use bevy::prelude::system_adapter::new;
 use tokio::spawn;
-use env_logger::{fmt::Target, Builder};
+use env_logger::{Builder, fmt::Target};
 use log::{error, LevelFilter};
 use tokio::sync::RwLock;
+use aios_database::consts::AQL_PDMS_ELES_COLLECTION;
 
 
 #[tokio::main]
@@ -257,14 +258,12 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     create_arangodb_conn(&database, AQL_PDMS_INST_COLLECTION, Document).await?;
     create_arangodb_conn(&database, "plin_eles", Document).await?;
     create_arangodb_conn(&database, "sibl_edges", Edge).await?;
-    create_arangodb_conn(&database, "ssc_edges", Edge).await?;
-    create_arangodb_conn(&database, "ssc_eles", Document).await?;
     create_arangodb_conn(&database, "tubi_edges", Edge).await?;
     create_arangodb_conn(&database, "room_eles", Document).await?;
     create_arangodb_conn(&database, "hole_data", Document).await?;
     create_arangodb_conn(&database, "embed_data", Document).await?;
     create_arangodb_conn(&database, "room_edges", Edge).await?;
-    create_arangodb_conn(&database, "geo_infos", Document).await?;
+    // create_arangodb_conn(&database, "geo_infos", Document).await?;
     create_arangodb_conn(&database, AQL_HOLE_DATA_COLLECTION, Document).await?;
     create_arangodb_conn(&database, AQL_EMBED_DATA_COLLECTION, Document).await?;
     create_arangodb_conn(&database, AQL_HOLE_EDGE_COLLECTION, Edge).await?;

@@ -13,7 +13,7 @@ use glam::Vec3;
 use regex::Regex;
 use sqlx::{Error, Executor, MySql, Pool, Row};
 use sqlx::mysql::{MySqlQueryResult, MySqlRow};
-use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{remove_arangodb_with_refno_key, save_arangodb_with_database};

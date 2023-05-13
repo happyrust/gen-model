@@ -77,7 +77,7 @@ use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arango
 use crate::graph_db::pdms_inst_arango::save_instance_to_graph_db;
 use crate::mdb::get_project_mdb;
 use crate::tables::{gen_create_project_mdb_json_sql, gen_create_project_mdb_sql};
-use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
 
 #[cfg(feature = "opencascade")]
 use opencascade::{DsShape, Edge, OCCShape, Wire};
@@ -768,6 +768,18 @@ impl AiosDBManager {
     #[inline]
     pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
         let url = &format!("{connection_str}/{}", project);
+        PoolOptions::new()
+            .max_connections(500)
+            .acquire_timeout(Duration::from_secs(10 * 60))
+            .connect(url)
+            .await
+            .map_err({ |x| anyhow!(x.to_string()) })
+    }
+
+    #[inline]
+    pub async fn get_global_pool(&self) -> anyhow::Result<Pool<MySql>> {
+        let connection_str = self.default_conn_str();
+        let url = &format!("{connection_str}/{}", GLOBAL_DATABASE);
         PoolOptions::new()
             .max_connections(500)
             .acquire_timeout(Duration::from_secs(10 * 60))

@@ -9,7 +9,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 pub async fn get_project_mdb(project_pool: &Pool<MySql>) -> anyhow::Result<DashMap<String, Vec<u32>>> {
     let mut result = DashMap::new();
     // 获取到所有的 mdb
-    let mdb = query_types_refnos_names(&vec!["MDB"], project_pool).await?;
+    let mdb = query_types_refnos_names(&vec!["MDB"], project_pool,None).await?;
     for (mdb_refno, mut mdb_name) in mdb {
         if mdb_name.starts_with("/") { mdb_name.remove(0); }
         let mdb_attr = query_explicit_attr(mdb_refno, project_pool).await?;

@@ -48,6 +48,7 @@ pub mod spatial_tree;
 pub mod negative;
 pub mod ansys;
 pub mod test;
+pub mod other_plat;
 
 pub mod viewer;
 
