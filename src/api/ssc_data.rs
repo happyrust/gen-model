@@ -23,7 +23,7 @@ use crate::aql_api::{change_vec_refnos_into_vec_string, convert_refno_vec_from_v
 use crate::aql_api::children::query_travel_children_aql;
 use crate::aql_api::pdms_room::{get_room_name_split, query_all_need_compute_room_refno};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::ssc::get_room_info_from_excel;
+use crate::ssc::parse_room_info_from_excel;
 
 // 缓存该参考号的 owner 和 owner 的 type
 lazy_static! {
@@ -106,7 +106,7 @@ pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<HashMap<R
 
 pub async fn query_all_room_data_aql(database: &Database, pool: &Pool<MySql>, db_option: &DbOption) -> anyhow::Result<HashMap<RefU64, SscEleNode>> {
     let mut result = HashMap::new();
-    let all_room = get_room_info_from_excel()?;
+    let all_room = parse_room_info_from_excel()?;
     let room_map = query_all_need_compute_room_refno(&db_option.clone().arch_db_nums.unwrap_or_default(), "FRMW", Some("-RM"), pool).await?;
     for (room_refno, room_name) in room_map.iter() {
         // 通过命名规则获取到需要的房间名

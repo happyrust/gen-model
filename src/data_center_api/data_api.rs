@@ -21,9 +21,7 @@ pub async fn get_inst_data_from_inst_major(refno: RefU64, mgr: &AiosDBManager) -
     let pool = mgr.get_project_pool_by_refno(refno).await;
     if pool.is_none() { return Ok(result); }
     let (_, pool) = pool.unwrap();
-    let database = mgr.get_arangodb_conn().await;
-    if database.is_err() { return Ok(result); }
-    let database = database.unwrap();
+    let database = mgr.get_arangodb().await?;
     let refno_cache = mgr.get_refno_basic(refno);
     if refno_cache.is_none() { return Ok(result); }
     let refno_cache = refno_cache.unwrap();
@@ -65,17 +63,15 @@ pub async fn get_valv_data_from_pipe_major(refno:RefU64,mgr:&AiosDBManager) -> a
     let pool = mgr.get_project_pool_by_refno(refno).await;
     if pool.is_none() { return Ok(result); }
     let (_, pool) = pool.unwrap();
-    let database = mgr.get_arangodb_conn().await;
-    if database.is_err() { return Ok(result); }
-    let database = database.unwrap();
+    let database = mgr.get_arangodb().await?;
     let refno_cache = mgr.get_refno_basic(refno);
     if refno_cache.is_none() { return Ok(result); }
     let refno_cache = refno_cache.unwrap();
     let table_name = &refno_cache.table;
     if table_name.to_lowercase() != "zone" { return Ok(result); }
-    let refnos = query_travel_children_with_type_aql(&database, refno, "VALV").await?;
+    let refnos = query_travel_children_with_type_aql(database, refno, "VALV").await?;
     for refno in refnos {
-        let name = query_room_info_from_refno(refno.refno, "FRMW", &database).await?.unwrap_or("".to_string());
+        let name = query_room_info_from_refno(refno.refno, "FRMW", database).await?.unwrap_or("".to_string());
         // 1516 的房间命名格式
         let mut room_code = "R101".to_string();
         let room_name = get_room_name_split(&name);
@@ -97,20 +93,18 @@ pub async fn get_equi_data_from_electric_major(refno:RefU64,mgr:&AiosDBManager) 
     let pool = mgr.get_project_pool_by_refno(refno).await;
     if pool.is_none() { return Ok(result); }
     let (_, pool) = pool.unwrap();
-    let database = mgr.get_arangodb_conn().await;
-    if database.is_err() { return Ok(result); }
-    let database = database.unwrap();
+    let database = mgr.get_arangodb().await?;
     let refno_cache = mgr.get_refno_basic(refno);
     if refno_cache.is_none() { return Ok(result); }
     let refno_cache = refno_cache.unwrap();
     let table_name = &refno_cache.table;
     if table_name.to_lowercase() != "zone" { return Ok(result); }
-    let refnos = query_travel_children_with_type_aql(&database, refno, "EQUI").await?;
+    let refnos = query_travel_children_with_type_aql(database, refno, "EQUI").await?;
     for refno in refnos {
         let pos = mgr.get_world_transform(refno.refno).await?;
         if pos.is_none() { continue; }
         let pos = pos.unwrap().translation;
-        let name = query_room_info_from_refno(refno.refno, "FRMW", &database).await?.unwrap_or("".to_string());
+        let name = query_room_info_from_refno(refno.refno, "FRMW", database).await?.unwrap_or("".to_string());
         // 1516 的房间命名格式
         let mut room_code = "R101".to_string();
         let room_name = get_room_name_split(&name);

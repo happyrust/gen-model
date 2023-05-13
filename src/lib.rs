@@ -45,7 +45,6 @@ pub mod rvm;
 pub mod metadata;
 pub mod data_center_api;
 pub mod spatial_tree;
-pub mod negative;
 pub mod ansys;
 pub mod test;
 pub mod other_plat;
@@ -61,4 +60,5 @@ extern crate nom;
 
 pub const BATCH_CHUNKS_CNT: usize = 50;
 pub const AQL_PDMS_ELES_COLLECTION: &'static str = "pdms_eles";
+pub const AQL_PDMS_EDGES_COLLECTION: &'static str = "pdms_edges";
 pub const AQL_PDMS_INST_COLLECTION: &'static str = "pdms_instances";

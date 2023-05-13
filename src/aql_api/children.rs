@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{EleTreeNode, GENRAL_NEG_NOUN_NAMES, PdmsElement, RefU64, RefU64Vec};
+use aios_core::three_dimensional_review::{VagueSearchCondition, VagueSearchRequest};
 use arangors_lite::{AqlQuery, Connection, Database};
 use bitvec::ptr::replace;
 use serde::{Serialize, Deserialize};

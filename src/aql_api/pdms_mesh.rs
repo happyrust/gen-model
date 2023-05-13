@@ -12,8 +12,7 @@ use sqlx::{MySql, Pool, Row};
 use crate::consts::PDMS_MESH;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 use crate::graph_db::pdms_inst_arango::*;
-use crate::negative::query_instance_refnos_negative_aql;
-use crate::consts::AQL_PDMS_ELES_COLLECTION;
+use crate::AQL_PDMS_ELES_COLLECTION;
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct PdmsMeshAql {
@@ -113,6 +112,7 @@ pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &Database) ->
     }
     Ok(map)
 }
+
 
 pub async fn query_pdms_mesh_aql(hashes: Vec<u64>, database: &Database) -> anyhow::Result<CachedMeshesMgr> {
     let mut cache_mgr = CachedMeshesMgr::default();
@@ -235,7 +235,6 @@ pub async fn query_pdms_instance_mesh_from_refnos(refnos: Vec<RefU64>, database:
         }
     }
     let hashes = hashes.into_iter().collect::<Vec<_>>();
-    // dbg!(&hashes);
     let mesh_mgr = query_pdms_mesh_aql(hashes, database).await.unwrap_or_default();
     Ok(PdmsInstanceMeshData {
         inst_mgr,

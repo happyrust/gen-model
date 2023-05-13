@@ -25,6 +25,7 @@ use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
 use crate::api::children::query_contain_noun_refnos;
 use crate::api::element::*;
 use crate::api::project_mdb::query_db_nums_of_mdb;
+use crate::AQL_PDMS_EDGES_COLLECTION;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{DataDocument, ForeignEdges};
@@ -40,6 +41,14 @@ pub async fn set_arangodb_database_from_db_option(db_option: &DbOption) -> anyho
 
 pub async fn get_arangodb_conn_from_db_option(db_option: &DbOption) -> anyhow::Result<Database> {
     let conn = Connection::establish_jwt(&db_option.arangodb_url, &db_option.arangodb_user, &db_option.arangodb_password)
+        .await?;
+    Ok(conn.db(&db_option.arangodb_database).await?)
+}
+
+//establish_basic_auth
+
+pub async fn connect_arangodb_with_basic_auth(db_option: &DbOption) -> anyhow::Result<Database> {
+    let conn = Connection::establish_basic_auth(&db_option.arangodb_url, &db_option.arangodb_user, &db_option.arangodb_password)
         .await?;
     Ok(conn.db(&db_option.arangodb_database).await?)
 }
@@ -121,7 +130,7 @@ pub async fn save_pdms_element_in_sync(db_option: &DbOption, total_attr_map: &Da
     }
     for edge in edges.chunks(ARANGODB_SAVE_AMOUNT) {
         let json = serde_json::to_value(edge)?;
-        save_arangodb_with_db_option(json, db_option, "pdms_edges").await?;
+        save_arangodb_with_db_option(json, db_option, AQL_PDMS_EDGES_COLLECTION).await?;
     }
     Ok(())
 }
@@ -290,7 +299,7 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
             let sql = format!("SELECT ID, OWNER, TYPE, NAME, NUMBDB  FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB IN ({})", numbdbs_sql);
             let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
             let collection = "pdms_eles";
-            let pdms_edge_collection = "pdms_edges";
+            let pdms_edge_collection = AQL_PDMS_EDGES_COLLECTION;
             match results {
                 Ok(vals) => {
                     //需不需要按照db numbder 来分别去生成
@@ -322,7 +331,7 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
                             eles.push(element);
                             edges.push(edge);
                         }
-                        let database_clone = mgr.get_arangodb_conn().await?;
+                        let database_clone = mgr.get_arangodb().await?;
                         // let handle = tokio::spawn(async move {
                         let json = serde_json::to_value(&take(&mut eles))?;
                         //     let aql = AqlQuery::new("LET data = @elements
@@ -444,7 +453,7 @@ pub async fn sync_pdms_level_edges_to_graph_db(mgr: Arc<AiosDBManager>) -> anyho
                     }
                 }
                 if sibl_edges.len() > 1000 {
-                    let database = mgr.get_arangodb_conn().await?;
+                    let database = mgr.get_arangodb().await?;
                     let json = serde_json::to_value(&take(&mut sibl_edges))?;
                     save_arangodb_with_database(json, sibl_collection, &database, false).await?;
                     if tubi_edges.len() != 0 {
@@ -563,7 +572,7 @@ pub async fn save_dtse_value_to_arangodb(db_option: &DbOption, type_ele_map: &Da
 
 
 pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &str) -> anyhow::Result<()> {
-    let database = mgr.get_arangodb_conn().await?;
+    let database = mgr.get_arangodb().await?;
     let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")

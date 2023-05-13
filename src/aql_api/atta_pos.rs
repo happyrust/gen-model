@@ -8,19 +8,13 @@ use glam::Vec3;
 use bevy::prelude::dbg;
 
 
-pub async fn get_atta_pos(brans: Vec<(RefU64, f32)>, mgr: Arc<AiosDBManager>) -> ATTAPosVec {
-// #[tokio::test]
-// pub async fn get_atta_pos() -> anyhow::Result<()> {
-//     let mut brans = Vec::new();
-//     brans.push((RefU64::from_refno_str("24383/66741").unwrap(), 550.0));
-//     let mut mgr = &AiosDBManager::init_form_config().await;
-//     let database = mgr.as_ref().expect("REASON").get_arangodb_conn().await.unwrap().clone();
-    let database = mgr.get_arangodb_conn().await.unwrap().clone();
+pub async fn get_atta_pos(brans: Vec<(RefU64, f32)>, mgr: Arc<AiosDBManager>) -> anyhow::Result<ATTAPosVec> {
+    let database = mgr.get_arangodb().await?;
     let mut atta_pos_vec = ATTAPosVec::default();
     for bran in brans {
         let mut pos_vec = Vec::new();
         // 取arrive，leave
-        let data = query_bran_info(bran.0, &database).await.unwrap();
+        let data = query_bran_info(bran.0, database).await.unwrap();
         //取hpos,取tpos
         let len = data.len();
         let hpos = data[0].start_pt;
@@ -84,7 +78,7 @@ pub async fn get_atta_pos(brans: Vec<(RefU64, f32)>, mgr: Arc<AiosDBManager>) ->
         }
         atta_pos_vec.data.push(atta_vec);
     }
-    return atta_pos_vec;
+    return Ok(atta_pos_vec);
     // Ok(())
 }
 

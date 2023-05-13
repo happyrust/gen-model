@@ -56,7 +56,7 @@ pub async fn get_data_center_from_pipe(aios_mgr: &AiosDBManager, pipe_refno: Ref
     let pool = aios_mgr.get_project_pool_by_refno(pipe_refno).await;
     if pool.is_none() { return Ok(None); }
     let (_, pool) = pool.unwrap();
-    let database = aios_mgr.get_arangodb_conn().await?;
+    let database = aios_mgr.get_arangodb().await?;
     // 找到所有需要统计的 bran
     let bran_refnos = query_travel_children_with_type_aql(&database,pipe_refno ,"BRAN").await?;
     let bran_refnos = bran_refnos.into_iter().map(|x| x.into()).collect::<Vec<_>>();
