@@ -67,8 +67,10 @@ pub async fn query_threed_review_data(database: &Database, key_value: &str) -> a
 
 
 pub async fn query_threed_review_data_by_name(database: &Database, name: &str) -> anyhow::Result<Option<Vec<ThreeDimensionalModelDataToArango>>> {
-    let aql = AqlQuery::new("return document('threed_review',@UserCode)")
-        .bind_var("UserCode", name);
+    let aql = AqlQuery::new("FOR u IN @@collection FILTER u.UserCode==@name RETURN u")
+        .bind_var("@collection", "threed_review")
+        .bind_var("name", name)
+        ;
     let data_vec: Vec<ThreeDimensionalModelDataToArango> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }
