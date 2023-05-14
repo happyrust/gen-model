@@ -49,7 +49,6 @@ fn insert_three_dimensional_review_data(review_data: ThreeDimensionalModelDataCr
     review_data_vec.push(data);
     review_data_vec
 }
-
 pub async fn query_three_dimensional_review_data(database: &Database, key_value: &str) -> anyhow::Result<Option<Vec<ThreeDimensionalModelDataToArango>>> {
     let aql = AqlQuery::new("return document('review_data',@_key)")
         .bind_var("_key", key_value);

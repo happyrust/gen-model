@@ -76,7 +76,6 @@ use env_logger::{Builder, fmt::Target};
 use log::{error, LevelFilter};
 use tokio::sync::RwLock;
 
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
