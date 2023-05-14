@@ -37,12 +37,12 @@ use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::graph_db::{ForeignEdges, ParaDocument};
-use crate::helper::{qualified_column_name, qualified_table_name};
 use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
 use crate::tables::*;
 use parry3d::utils::hashmap::FxHasher32;
 use std::hash::{Hash, Hasher};
 use aios_core::get_default_pdms_db_info;
+use aios_core::helper::table::{qualified_column_name, qualified_table_name};
 use aios_core::options::DbOption;
 use aios_core::pdms_data::ATTR_INFO_MAP;
 use crate::tables;
@@ -638,8 +638,7 @@ pub async fn sync_total_async_threaded(
                             &total_attr_map_arc,
                             &children_map_arc,
                             db_no.0 as i32,
-                        )
-                            .await?;
+                        ).await?;
                         // 将兄弟关系保存到图数据库中
                         save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
 
@@ -953,11 +952,11 @@ fn set_uda_attr(
 pub async fn save_pdms_mesh_tidb(mgr: CachedMeshesMgr, pool: &Pool<MySql>) -> anyhow::Result<()> {
     for chunks in &mgr.meshes.iter().chunks(1000) {
         let mut sql = format!("INSERT IGNORE INTO {PDMS_MESH} (HASH,MESH) VALUES ");
-        for map in chunks.into_iter() {
+        for (key, map)  in chunks.into_iter() {
             sql.push_str(&format!(
                 "( {}, 0x{}) ,",
-                map.key(),
-                hex::encode(&map.value().into_compress_bytes())
+                key,
+                hex::encode(&map.into_compress_bytes())
             ));
         }
         sql.remove(sql.len() - 1);

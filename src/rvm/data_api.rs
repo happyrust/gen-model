@@ -106,8 +106,8 @@ pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: RvmShapeTypeData, sha
     let aabb = rvm_instance.aabb.unwrap();
     data.append(&mut gen_prim_head_data());
     data.append(&mut format!("     {}\r\n", shape_type.get_shape_number()).into_bytes());
-    data.append(&mut gen_prim_scale_position_data(rvm_instance.world_transform.0, Vec3::ONE,
-                                                  rvm_instance.world_transform.1));
+    data.append(&mut gen_prim_scale_position_data(rvm_instance.world_transform.rotation, Vec3::ONE,
+                                                  rvm_instance.world_transform.translation));
     match shape_module {
         ShapeModule::Desi => { data.append(&mut gen_desi_prim_aabb_data(aabb, rvm_instance.world_transform, &PdmsGeoParam::default())); }
         ShapeModule::Cata => { data.append(&mut gen_cata_prim_aabb_data(aabb)); }
@@ -117,21 +117,16 @@ pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: RvmShapeTypeData, sha
     data
 }
 
-pub fn gen_prim_data_test(geo_instance: &EleGeoInstance, desi_transform: Transform,b_desi_cyli:bool) -> Vec<u8> {
+pub fn gen_prim_data_test(geo_instance: &EleGeoInstance, desi_transform: Transform, b_desi_cyli: bool) -> Vec<u8> {
     let mut data = vec![];
-    let geo_transform = Transform {
-        translation: geo_instance.transform.1,
-        rotation: geo_instance.transform.0,
-        scale: geo_instance.transform.2,
-    };
+    let geo_transform = geo_instance.transform;
     let mut transform =
         if geo_instance.is_tubi {
             geo_transform
         } else {
             desi_transform * geo_transform
         };
-    let aabb = geo_instance.aabb.scaled(&Vector::new(desi_transform.scale.x, desi_transform.scale.y, desi_transform.scale.z));
-
+    let aabb = geo_instance.aabb.unwrap().scaled(&Vector::new(desi_transform.scale.x, desi_transform.scale.y, desi_transform.scale.z));
     if let Some(num) = geo_instance.geo_param.into_rvm_pri_num() {
         // tubi 不需要和desi进行变换
         let translation = {
@@ -218,27 +213,27 @@ fn gen_prim_scale_position_data(rotation: Quat, scale: Vec3, position: Vec3) -> 
     data
 }
 
-fn gen_desi_prim_aabb_data(aabb: Aabb, world_transform: (Quat, Vec3, Vec3), geo_param: &PdmsGeoParam) -> Vec<u8> {
+fn gen_desi_prim_aabb_data(a: Aabb, world_transform: Transform, geo_param: &PdmsGeoParam) -> Vec<u8> {
     let max = if let PdmsGeoParam::PrimSCylinder(data) = geo_param {
         if data.center_in_mid {
-            Vec3::from((aabb.maxs.x, aabb.maxs.y, aabb.maxs.z / 2.0))
+            Vec3::from((a.maxs.x, a.maxs.y, a.maxs.z / 2.0))
         } else {
             // Vec3::from((aabb.maxs.x, aabb.maxs.y, aabb.maxs.z))
-            Vec3::from((aabb.maxs.x, aabb.maxs.y, aabb.maxs.z / 2.0))
+            Vec3::from((a.maxs.x, a.maxs.y, a.maxs.z / 2.0))
         }
     } else {
-        Vec3::from((aabb.maxs.x, aabb.maxs.y, aabb.maxs.z))
+        Vec3::from((a.maxs.x, a.maxs.y, a.maxs.z))
     };
 
     let min = if let PdmsGeoParam::PrimSCylinder(data) = geo_param {
         if data.center_in_mid {
-            Vec3::from((aabb.mins.x, aabb.mins.y, -aabb.maxs.z / 2.0))
+            Vec3::from((a.mins.x, a.mins.y, -a.maxs.z / 2.0))
         } else {
             // Vec3::from((aabb.mins.x, aabb.mins.y, aabb.mins.z))
-            Vec3::from((aabb.mins.x, aabb.mins.y, -aabb.maxs.z / 2.0))
+            Vec3::from((a.mins.x, a.mins.y, -a.maxs.z / 2.0))
         }
     } else {
-        Vec3::from((aabb.mins.x, aabb.mins.y, aabb.mins.z))
+        Vec3::from((a.mins.x, a.mins.y, a.mins.z))
     };
 
     let mut data = Vec::new();

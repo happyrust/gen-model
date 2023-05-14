@@ -23,6 +23,7 @@ pub const HOLES_TABLE: &'static str = "HOLEDATATABLE";
 pub const EMBED_TABLE: &'static str = "EMBEDDATATABLE";
 pub const SCTN_STANDARD: &'static str = "SCTN_STANDARD";
 pub const CHANNEL_STEEL_STANDARD: &'static str = "CHANNEL_STEEL_STANDARD";
+pub const GLOBAL_DATABASE: &'static str = "PROJECT_INFO";
 // project_mdb
 // 专业表单
 pub const PROFESSION_TX_XT: &'static str = "TX_XT";

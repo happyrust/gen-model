@@ -1,6 +1,5 @@
 use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
 use arangors_lite::{AqlQuery, Database};
-use crate::aql_api::PdmsElementAql;
 
 /// 通过图数据库查询 children
 pub async fn query_ssc_children_aql(refno: RefU64, database: &Database) -> anyhow::Result<Vec<EleTreeNode>> {
@@ -18,18 +17,15 @@ pub async fn query_ssc_children_aql(refno: RefU64, database: &Database) -> anyho
                             return 1 ),
     }
     ").bind_var("id", refno_aql);
-    let result: Vec<PdmsElementAql> = database.aql_query(aql).await?;
+    let result: Vec<PdmsElement> = database.aql_query(aql).await?;
     for v in result {
-        if let Some(refno) = RefU64::from_url_refno(&v.refno) {
-            if RefU64::from_url_refno(&v.owner).is_none() { continue; }
             r.push(EleTreeNode {
                 refno,
-                owner: RefU64::from_url_refno(&v.owner).unwrap(),
+                owner: v.owner,
                 name: v.name,
                 noun: v.noun,
                 children_count: v.children_count,
             })
-        }
     }
     Ok(r)
 }

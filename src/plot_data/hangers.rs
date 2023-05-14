@@ -34,7 +34,7 @@ pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option
     let pool = project_map.get(&mgr.db_option.project_name);
     if pool.is_none() { return Ok(None); }
     let pool = pool.unwrap();
-    let database = &mgr.get_arangodb_conn().await?;
+    let database = &mgr.get_arangodb().await?;
     let atta_name = "R320.060"; // 先拿这一个做测试
     let pipe_size_map = read_pipe_size_excel()?;
     let (hanger_map, atta_refnos) = get_all_hangers_with_atta(atta_name, pool.value()).await?;
@@ -78,9 +78,7 @@ pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option
 
     let pcla_refnos = query_travel_children_aql(database, *rest_refno.value()).await?;
     for pcla_refno in &pcla_refnos {
-        let refno = RefU64::from_refno_str(&pcla_refno.refno);
-        if refno.is_err() { continue; }
-        refnos.push(refno.unwrap());
+        refnos.push(pcla_refno.refno);
     }
     // 查找 pcla 的 数据
     let pcla_data = get_pcla_data(pcla_refnos, database).await?;
@@ -88,9 +86,7 @@ pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option
     // 查找 stru下的所有参考号
     let stru_children = query_travel_children_aql(database, *stru_refno.value()).await?;
     for stru_child in &stru_children {
-        let refno = RefU64::from_refno_str(&stru_child.refno);
-        if refno.is_err() { continue; }
-        refnos.push(refno.unwrap());
+        refnos.push(stru_child.refno);
     }
     // 统计 sctn的数据
     let sctn_datas = get_sctn_data(&stru_children, database, pool.value()).await?;
@@ -139,9 +135,7 @@ async fn get_pcla_data(pcla_refnos: Vec<PdmsElement>, database: &Database) -> an
     let mut pcla_map = HashMap::new(); // pcla 只记录 spre的 name 和 相同 spre的数量
     for pcla_refno in pcla_refnos {
         if pcla_refno.noun != "PCLA" { continue; }
-        let refno = RefU64::from_refno_str(&pcla_refno.refno);
-        if refno.is_err() { continue; }
-        let refno = refno.unwrap();
+        let refno = pcla_refno.refno;
         let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], database).await?;
         if spre_name.is_none() { continue; }
         let spre_name = spre_name.unwrap();
@@ -168,9 +162,7 @@ async fn get_sctn_data(stru_children: &Vec<PdmsElement>, database: &Database, po
     let mut sctn_map = HashMap::new();
     for child in stru_children {
         if child.noun != "SCTN" { continue; }
-        let refno = RefU64::from_refno_str(&child.refno);
-        if refno.is_err() { continue; }
-        let refno = refno.unwrap();
+        let refno = child.refno;
         let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], database).await?;
         if spre_name.is_none() { continue; }
         let spre_name = spre_name.unwrap();
@@ -211,9 +203,7 @@ async fn get_pfit_data(stru_children: &Vec<PdmsElement>, database: &Database) ->
     let mut pfit_map = HashMap::new();
     for stru_child in stru_children {
         if stru_child.noun != "PFIT" { continue; }
-        let refno = RefU64::from_refno_str(&stru_child.refno);
-        if refno.is_err() { continue; }
-        let refno = refno.unwrap();
+        let refno = stru_child.refno;
         let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], database).await?;
         if spre_name.is_none() { continue; }
         let spre_name = spre_name.unwrap();
@@ -238,9 +228,7 @@ async fn get_pane_data(stru_children: &Vec<PdmsElement>, database: &Database, po
     // let mut pane_map = HashMap::new();
     for stru_child in stru_children {
         if stru_child.noun != "PANE" { continue; }
-        let refno = RefU64::from_refno_str(&stru_child.refno);
-        if refno.is_err() { continue; }
-        let refno = refno.unwrap();
+        let refno = stru_child.refno;
         // 获取 func 的属性
         let stru_attr = query_explicit_attr(refno, pool).await?;
         let func_name = stru_attr.get_str("FUNC");
@@ -264,10 +252,7 @@ async fn get_pane_data(stru_children: &Vec<PdmsElement>, database: &Database, po
             }
             // 获取 pave 的 pos
             if child.noun == "PAVE" {
-                // let pave_refno = RefU64::from_refno_str(&child.refno);
                 let pave_refno = child.refno;
-                // if pave_refno.is_err() { continue; }
-                // let pave_refno = pave_refno.unwrap();
                 let ref_basic = CachedRefBasic { owner: child.owner, table: child.noun.to_string() };
                 let implicit_attr = query_implicit_attr(pave_refno, &ref_basic, pool, Some(vec!["POS"])).await?;
                 let pos = implicit_attr.get_vec3("POS");

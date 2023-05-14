@@ -201,8 +201,7 @@ async fn test_query_single_sctn_ansys_data() -> anyhow::Result<()> {
     let children = query_children_order_aql(&database, refno).await?;
     let mut sctns = Vec::new();
     for child in children {
-        let refno = RefU64::from_refno_str(&child.refno).unwrap();
-        let sctn = query_single_sctn_ansys_data_test(refno, &pool, &cata_pool, &database).await?;
+        let sctn = query_single_sctn_ansys_data_test(child.refno, &pool, &cata_pool, &database).await?;
         if sctn.is_none() { continue; }
         sctns.push(sctn.unwrap());
     }

@@ -227,7 +227,7 @@ pub async fn save_embed_data_to_arangodb(data: Vec<VirtualEmbedGraphNode>, datab
     let json = serde_json::to_value(&data);
     if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
     let json = json.unwrap();
-    let r = save_arangodb_with_database(json, AQL_EMBED_DATA_COLLECTION, database).await;
+    let r = save_arangodb_with_database(json, AQL_EMBED_DATA_COLLECTION, database, false).await;
     let _edge_r = create_embed_data_edge(&data, database).await?;
     if let Err(r) = r {
         Ok(r.to_string())
@@ -253,7 +253,7 @@ async fn create_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &Da
     }
     if !edges.is_empty() {
         let json = serde_json::to_value(&edges)?;
-        save_arangodb_with_database(json, AQL_EMBED_EDGE_COLLECTION, database).await?;
+        save_arangodb_with_database(json, AQL_EMBED_EDGE_COLLECTION, database, false).await?;
     }
     Ok(())
 }

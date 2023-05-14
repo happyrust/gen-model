@@ -96,7 +96,7 @@ pub async fn query_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
         let order = val.get::<i32, _>("ORDER_NUM");
         let children_count = val.get::<i32, _>("CHILDREN_COUNT");
         b_map.insert(order, PdmsElement {
-            refno: child_refno.to_string(),
+            refno: child_refno,
             owner,
             name,
             noun: type_name,
@@ -122,7 +122,7 @@ pub async fn query_children_eles_without_children_count(refno: RefU64, pool: &Po
         let owner = RefU64(val.get::<i64, _>("OWNER") as u64);
         let order = val.get::<i32, _>("ORDER_NUM");
         b_map.insert(order, PdmsElement {
-            refno: child_refno.to_string(),
+            refno: child_refno,
             owner,
             name,
             noun: type_name,
@@ -238,7 +238,7 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>, m
             let type_name = val.get::<String, _>("TYPE");
             let children_count = val.get::<i32, _>("CHILDREN_COUNT") as usize;
             Ok(Some(PdmsElement {
-                refno: quick.world_refno.to_string(),
+                refno: quick.world_refno,
                 owner,
                 name,
                 noun: type_name,
@@ -357,7 +357,7 @@ pub struct DbQuickInfo {
 pub type MdbQuickInfoMap = HashMap<String, HashMap<String, Vec<DbQuickInfo>>>;
 
 
-pub async fn query_types_refnos(type_names: &[&str], pool: &Pool<MySql>, dbnos: Option<&[i32]>) -> anyhow::Result<RefU64Vec> {
+pub async fn query_types_refnos(type_names: &[&str], pool: &Pool<MySql>, dbnos: &[i32]) -> anyhow::Result<RefU64Vec> {
     let mut r = vec![];
     let sql = gen_query_type_refnos_sql(type_names, dbnos);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
@@ -670,7 +670,7 @@ pub fn gen_query_refno_type_sql(refno: RefU64) -> String {
 }
 
 #[inline]
-pub fn gen_query_type_refnos_sql(type_names: &[&str], dbnos: Option<&[i32]>) -> String {
+pub fn gen_query_type_refnos_sql(type_names: &[&str], dbnos: &[i32]) -> String {
     let mut sql = String::new();
     let mut in_sql = " (".to_string();
     for type_name in type_names {
@@ -680,11 +680,9 @@ pub fn gen_query_type_refnos_sql(type_names: &[&str], dbnos: Option<&[i32]>) -> 
     in_sql.push_str(") ");
 
     let mut dbnos_filter_sql = "".to_string();
-    if let Some(dbnos) = dbnos {
-        if dbnos.len() > 0 {
-            let sql_str = dbnos.iter().map(|x| x.to_string()).join(",");
-            dbnos_filter_sql.push_str(&format!(" AND NUMBDB IN ({sql_str}) "));
-        }
+    if dbnos.len() > 0 {
+        let sql_str = dbnos.iter().map(|x| x.to_string()).join(",");
+        dbnos_filter_sql.push_str(&format!(" AND NUMBDB IN ({sql_str}) "));
     }
 
     sql.push_str(&format!("SELECT ID FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE IN {in_sql} {dbnos_filter_sql} AND IS_DEL = 0 ORDER BY ID;"));

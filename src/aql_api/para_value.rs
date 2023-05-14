@@ -6,7 +6,7 @@ use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 
 pub async fn query_para_from_desi_refno(refno: RefU64, database: &Database) -> anyhow::Result<Option<Vec<f64>>> {
-    let catr_refno = query_foreign_refno_aql(refno, vec!["SPRE", "CATR"], database).await?;
+    let catr_refno = query_foreign_refno_aql(refno,  &["SPRE", "CATR"], database).await?;
     if catr_refno.is_none() { return Ok(None); }
     query_para_value(catr_refno.unwrap(), database).await
 }

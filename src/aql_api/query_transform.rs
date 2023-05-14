@@ -26,10 +26,10 @@ pub async fn query_cylinder_transform(refno: RefU64, mgr: Arc<AiosDBManager>) ->
         let att_type = query_refno_type(refno, &project_db).await?;
         if att_type != "EQUI" { return Ok(vec![]); }
         // 获得设备下的 cyli
-        let children = query_travel_children_aql(&mgr.get_arangodb_conn().await?, refno).await?;
+        let children = query_travel_children_aql(mgr.get_arangodb().await?, refno).await?;
         for child in children {
             if child.noun != "CYLI" { continue; }
-            let child_refno = RefU64::from_refno_str(&child.refno)?;
+            let child_refno = child.refno;
             if mgr.get_refno_basic(child_refno).is_none() { continue; }
             let refno_basic = mgr.get_refno_basic(child_refno).unwrap();
             // 取得 cyli 的 heig ori属性

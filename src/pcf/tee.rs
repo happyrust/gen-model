@@ -1,6 +1,6 @@
 use std::task::Poll;
 use aios_core::pdms_types::{AttrMap, RefU64};
-use aios_core::prim_geo::tubing::TubiEdgeAql;
+use aios_core::prim_geo::tubing::TubiEdge;
 use dashmap::DashMap;
 use glam::Vec3;
 use sqlx::{MySql, Pool};
@@ -14,7 +14,7 @@ use crate::pcf::pcf_api::{create_center_point_data, create_thickness_data, creat
 
 pub async fn gen_tee_data(aios_mgr: &AiosDBManager, attr: &AttrMap, bran_attr: &AttrMap,
                           pool: &Pool<MySql>, materials: &mut Vec<(RefU64, String)>,
-                          start_edge: &TubiEdgeAql, end_edge: &TubiEdgeAql, thickness_map: &DashMap<String, DashMap<String, String>>) -> Vec<u8> {
+                          start_edge: &TubiEdge, end_edge: &TubiEdge, thickness_map: &DashMap<String, DashMap<String, String>>) -> Vec<u8> {
     let mut data = vec![];
     let refno = attr.get_refno();
     if refno.is_none() { return vec![]; }
@@ -51,7 +51,7 @@ pub async fn gen_tee_data(aios_mgr: &AiosDBManager, attr: &AttrMap, bran_attr: &
 pub async fn create_tee_branch_point_data(aios_mgr: &AiosDBManager, attr: &AttrMap, pool: &Pool<MySql>) -> Vec<u8> {
     let refno = attr.get_refno().unwrap(); // 在调用本方法之前已经判断过 attr 中是否存在 refno
     if let Some(cref_refno) = attr.get_refu64("CREF") {
-        let database = aios_mgr.get_arangodb_conn().await;
+        let database = aios_mgr.get_arangodb().await;
         if database.is_err() { return vec![]; }
         let database = database.unwrap();
         let bran_infos = query_bran_info(cref_refno, &database).await;

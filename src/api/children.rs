@@ -4,8 +4,10 @@ use std::fmt::format;
 use std::process::id;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
+use aios_core::helper::table::qualified_table_name;
 use aios_core::pdms_types::*;
 use aios_core::three_dimensional_review::VagueSearchCondition;
+use anyhow::anyhow;
 use arangors_lite::{Connection, Database};
 use bevy::utils::petgraph::visit::Walker;
 use calamine::Error::De;
@@ -20,7 +22,6 @@ use sqlx::mysql::MySqlRow;
 use crate::aql_api::children::query_owner_with_type_aql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::defines::{RString, CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
-use crate::helper::qualified_table_name;
 
 /// 遍历该节点下的 children (包含自己)
 pub async fn travel_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
@@ -51,10 +52,8 @@ pub async fn travel_children_without_leaf(refno: RefU64, pool: &Pool<MySql>) -> 
         let children = query_children_eles(refno, pool).await?;
         for ele in children {
             if ele.children_count != 0 {
-                if let Ok(ele_refno) = RefU64::from_refno_str(ele.refno.as_str()) {
-                    result.push(ele_refno);
-                    deque.push_back(ele_refno);
-                }
+                result.push(ele.refno);
+                deque.push_back(ele.refno);
             }
         }
     }
@@ -70,7 +69,8 @@ pub async fn travel_children_for_elenode(refno: RefU64, pool: &Pool<MySql>) -> a
         let refno = deque.pop_front().unwrap();
         let children = query_children_eles(refno, pool).await?;
         for ele in children {
-            if let Ok(refno) = RefU64::from_refno_str(ele.refno.as_str()) {
+            {
+                let refno = ele.refno;
                 deque.push_back(refno);
                 result.push(EleTreeNode {
                     refno,
@@ -93,7 +93,8 @@ pub async fn travel_children_for_elenode_without_children_count(refno: RefU64, p
         let refno = deque.pop_front().unwrap();
         let children = query_children_eles_without_children_count(refno, pool).await?;
         for ele in children {
-            if let Ok(refno) = RefU64::from_refno_str(ele.refno.as_str()) {
+            {
+                let refno = ele.refno;
                 deque.push_back(refno);
                 result.push(EleTreeNode {
                     refno,
@@ -218,17 +219,20 @@ pub async fn query_owner_type_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyh
     Ok(None)
 }
 
-
-pub fn get_ancestor_refno_of_type_data(aios_mgr: &AiosDBManager, mut refno: RefU64, att_type: String) -> RefU64 {
-    let att_type = qualified_table_name(&att_type).to_lowercase();
-    while let Some(basic) = aios_mgr.get_refno_basic(refno) {
-        if &basic.get_type().to_lowercase() == &att_type {
-            return refno;
+impl AiosDBManager{
+    pub fn get_ancestor_refno_of_type_data(&self, mut refno: RefU64, att_type: &str) -> anyhow::Result<RefU64> {
+        let att_type = qualified_table_name(&att_type).to_lowercase();
+        while let Some(basic) = self.get_refno_basic(refno) {
+            if &basic.get_type().to_lowercase() == &att_type {
+                return Ok(refno);
+            }
+            refno = basic.get_owner();
         }
-        refno = basic.get_owner();
+        Err(anyhow!("not exist"))
     }
-    RefU64(0)
 }
+
+
 
 pub async fn query_ancestor_of_type(mut refno: RefU64, att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     while let Some((owner_refno, owner_type)) = query_owner_type_from_id(refno, pool).await? {
@@ -269,9 +273,9 @@ pub async fn query_ancestor_refnos_till_type(mut refno: RefU64, att_type: &str, 
 }
 
 pub async fn query_ancestor_refnos_till_type_aql(mut refno: RefU64, att_type: &str, mgr: Arc<AiosDBManager>) -> anyhow::Result<Vec<RefU64>> {
-    let database = mgr.get_arangodb_conn().await?;
+    let database = mgr.get_arangodb().await?;
     let mut result = vec![];
-    while let Some((owner_refno, owner_type)) = query_owner_with_type_aql(&database, refno).await? {
+    while let Some((owner_refno, owner_type)) = query_owner_with_type_aql(database, refno).await? {
         result.push(refno);
         refno = owner_refno;
         if owner_type == att_type {
@@ -338,7 +342,7 @@ pub async fn cache_mdb_module_numbdbs(mdb: &str, module: &str, pool: &Pool<MySql
         if lock.contains_key(&world.refno) {
             let children = lock.get(&world.refno).unwrap();
             let children = children.iter()
-                .map(|x| RefU64::from_refno_str(&x.refno).unwrap_or(RefU64(0))).collect::<Vec<RefU64>>();
+                .map(|x| x.refno).collect::<Vec<RefU64>>();
             let result = query_numbdb_from_refnos(children, pool).await?;
             return Ok(result);
         }

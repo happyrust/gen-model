@@ -7,7 +7,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
-use crate::api::attr::{query_explicit_attr, query_full_attr, query_full_attr_with_pool};
+use crate::api::attr::{query_explicit_attr, query_attr, query_full_attr_with_pool};
 use crate::api::children::query_ancestor_of_type;
 use crate::api::element::query_name;
 use crate::aql_api::children::query_ancestor_till_type_aql;
@@ -15,6 +15,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::consts::TEAM_DATA_TABLE;
 use aios_core::pdms_user::PdmsElementWithUser;
 
+///管理员信息
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct AdminData {
     pub team_name: String,
@@ -26,7 +27,8 @@ pub struct AdminData {
     pub desc: String,
 }
 
-pub async fn query_all_db_infos(mgr: &AiosDBManager) -> anyhow::Result<()> {
+///同步system db的信息
+pub async fn sync_system_db(mgr: &AiosDBManager) -> anyhow::Result<()> {
     let mut team_name_map = DashMap::new();
     for project_db in mgr.project_map.iter() {
         let mut r = vec![];
@@ -84,9 +86,6 @@ pub async fn query_all_db_infos(mgr: &AiosDBManager) -> anyhow::Result<()> {
             dbg!(&data_sql);
             dbg!(&e);
         }
-        // let project_name = project_db.key();
-        // let mut file = File::create(&format!("{}_db_info.json",project_name))?;
-        // file.write_all(&serde_json::to_string(&r).unwrap_or("".to_string()).into_bytes())?;
     }
     Ok(())
 }
@@ -112,27 +111,25 @@ pub async fn query_all_db_refnos(pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU6
 pub async fn get_pdms_tree_user(elements: Vec<PdmsElement>, aios_mgr: &AiosDBManager) -> Vec<PdmsElementWithUser> {
     let mut data = Vec::new();
     for element in elements {
-        let refno = RefU64::from_refno_str(&element.refno);
-        if refno.is_err() { continue; }
-        let refno = refno.unwrap();
-
-        let need_query_user_noun = vec!["PIPE","SITE","ZONE","BRAN","EQUI","STRU","HVAC","REST"];
-        let user = if need_query_user_noun.contains(&element.noun.as_str()) {
-            if let Some((_, pool)) =
-                aios_mgr.get_project_pool_by_refno(refno).await {
+        let refno = element.refno;
+        let need_query_user_noun = vec!["PIPE", "SITE", "ZONE", "BRAN", "EQUI", "STRU", "HVAC", "REST"];
+        let mut final_user = String::new();
+        if need_query_user_noun.contains(&element.noun.as_str()) {
+            let Some((_, pool)) =
+                aios_mgr.get_project_pool_by_refno(refno).await else {
+                continue;
+            };
             if let Ok(explicit_attr) = query_explicit_attr(refno, &pool).await {
+                //todo change to use str att name
+                // explicit_attr.get_str("");
                 if let Some(user) = explicit_attr.map.get(&NounHash(642952117)) {
-                    if let AttrVal::StringType(user) = user {
-                        user.to_string()
-                    } else { "".to_string() }
-                } else { "".to_string() }
-            } else { "".to_string() }
-        } else {
-                "".to_string()
+                    if let AttrVal::StringType(u) = user {
+                        final_user = u.to_string();
+                    }
+                }
             }
-        } else { "".to_string() };
-
-        data.push(PdmsElementWithUser::from_pdms_element(element, &user));
+        }
+        data.push(PdmsElementWithUser::from_pdms_element(element, &final_user));
     }
     data
 }

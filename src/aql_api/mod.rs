@@ -30,37 +30,13 @@ pub struct PdmsRefnoNameAql {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct PdmsRefnoTypeAql {
+pub struct PdmsRefnoTypeAql {
     pub refno: String,
     pub noun: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct PdmsElementAql {
-    pub refno: String,
-    pub owner: String,
-    pub name: String,
-    pub noun: String,
-    pub version: u32,
-    pub children_count: usize,
-}
 
-impl PdmsElementAql {
-    pub fn change_to_pdms_element(self) -> Option<PdmsElement> {
-        if let Some(refno) = RefU64::from_url_refno(&self.refno) {
-            if RefU64::from_url_refno(&self.owner).is_none() { return None; }
-            return Some(PdmsElement {
-                refno: refno.to_refno_string(),
-                owner: RefU64::from_url_refno(&self.owner).unwrap(),
-                name: self.name,
-                noun: self.noun,
-                version: self.version,
-                children_count: self.children_count,
-            });
-        }
-        None
-    }
-}
+
 
 /// todo 需要放到 RefU64的 成员方法中
 pub fn convert_refno_vec_from_vec_string(string_vec: Vec<String>) -> Vec<RefU64> {

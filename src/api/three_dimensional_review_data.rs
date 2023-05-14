@@ -8,28 +8,28 @@ use arangors_lite::AqlQuery;
 
 //编校审数据存入图数据库
 pub async fn save_three_dimensional_review_data_to_arango(
-    database: Database,
+    database: &Database,
     review_data: ThreeDimensionalModelDataCrate,
 ) -> anyhow::Result<()>
 {
     let data = insert_three_dimensional_review_data(review_data);
     for i in data.chunks(ARANGODB_SAVE_AMOUNT) {
         let json = serde_json::to_value(i)?;
-        save_arangodb_with_database(json, "review_data", &database).await?;
+        save_arangodb_with_database(json, "review_data", database, false).await?;
     }
     Ok(())
 }
 
 //保存来自普华的数据
 pub async fn save_threed_review_data_to_arango(
-    database: Database,
+    database: &Database,
     review_data: ThreeDimensionalModelDataCrate,
 ) -> anyhow::Result<()>
 {
     let data = insert_three_dimensional_review_data(review_data);
     for i in data.chunks(ARANGODB_SAVE_AMOUNT) {
         let json = serde_json::to_value(i)?;
-        save_arangodb_with_database(json, "threed_review", &database).await?;
+        save_arangodb_with_database(json, "threed_review", &database, false).await?;
     }
     Ok(())
 }

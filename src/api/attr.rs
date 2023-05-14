@@ -3,6 +3,7 @@ use std::env;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::consts::*;
+use aios_core::helper::table::qualified_table_name;
 use aios_core::pdms_data::ATTR_INFO_MAP;
 use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64, RefU64Vec, UdaMajorType};
 use aios_core::pdms_types::AttrVal::StringType;
@@ -13,6 +14,7 @@ use smol_str::SmolStr;
 use dashmap::DashMap;
 use glam::{Quat, Vec3};
 use itertools::Itertools;
+use lazy_static::lazy_static;
 use sqlx::Executor;
 use sqlx::mysql::MySqlRow;
 use crate::api::children::{query_ancestor_of_type_from_cache, query_owner_till_type};
@@ -20,7 +22,6 @@ use crate::api::element::{query_ele_node, query_owner_from_id, query_pdms_elemen
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::helper::qualified_table_name;
 
 /// 指定从特定的表查询数据，根据owner查询
 pub async fn query_implicit_attrs_by_owner(owner: RefU64, type_name: &str, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>> {
@@ -203,11 +204,12 @@ pub async fn query_uda_attr(att_type: Vec<i32>, pool: &Pool<MySql>) -> anyhow::R
     Ok(map)
 }
 
-pub async fn query_full_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
-    if let Some((_project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
+pub async fn query_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
+    if let Some((project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
         let ref_basic = aios_mgr.get_refno_basic(refno);
         if ref_basic.is_none() { return Ok(AttrMap::default()); }
         let ref_basic = ref_basic.unwrap();
+        //need to use join
         let mut attr = query_implicit_attr(refno, ref_basic.value(), &pool, column_names).await?;
         let att_type = attr.get_type().to_string();
         let explicit_attr = query_explicit_attr(refno, &pool).await?;
@@ -217,18 +219,18 @@ pub async fn query_full_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_nam
         for (k, v) in explicit_attr.map {
             attr.entry(k).or_insert(v);
         }
-        for pool in &aios_mgr.project_map {
-            // uda 赋值需要加上元件库
-            let mut uda_type = vec![db1_hash(&att_type) as i32];
-            // 如果是 pipe下的类型，需要赋上 Element Type 为 ALLP 的 uda
-            if b_bran {
-                uda_type.push(db1_hash("ALLP") as i32);
-            }
-            let uda_attr = query_uda_attr(uda_type, &pool).await?;
-            for (k, v) in uda_attr.map {
-                attr.entry(k).or_insert(v);
-            }
-        }
+        // for pool in &aios_mgr.project_map {
+        //     // uda 赋值需要加上元件库
+        //     let mut uda_type = vec![db1_hash(&att_type) as i32];
+        //     // 如果是 pipe下的类型，需要赋上 Element Type 为 ALLP 的 uda
+        //     if b_bran {
+        //         uda_type.push(db1_hash("ALLP") as i32);
+        //     }
+        //     let uda_attr = query_uda_attr(uda_type, &pool).await?;
+        //     for (k, v) in uda_attr.map {
+        //         attr.entry(k).or_insert(v);
+        //     }
+        // }
         // 赋默认值
         if let Some(map) = ATTR_INFO_MAP.map.get(&(db1_hash(&ele.noun) as i32)) {
             for values in map.value() {

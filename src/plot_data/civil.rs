@@ -6,7 +6,7 @@ use arangors_lite::{AqlQuery, Database};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool};
-use crate::api::attr::query_full_attr;
+use crate::api::attr::query_attr;
 use crate::aql_api::children::query_children_aql;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, save_arangodb_with_database};
@@ -50,10 +50,8 @@ pub async fn query_axis_from_sbfr(sbfr_refno: RefU64, database: &Database, aios_
     let mut result = vec![];
     let sctns = query_children_aql(database, sbfr_refno).await?;
     for sctn in sctns {
-        let refno = RefU64::from_refno_str(&sctn.refno);
-        if refno.is_err() { continue; }
-        let refno = refno.unwrap();
-        let attr = query_full_attr(refno, &aios_mgr, Some(vec!["GTYP", "POSS", "POSE"])).await?;
+        let refno = sctn.refno;
+        let attr = query_attr(refno, &aios_mgr, Some(vec!["GTYP", "POSS", "POSE"])).await?;
         let gtype = attr.get_str("GTYP").unwrap_or("");
         if gtype != "XGRD" && gtype != "YGRD" { continue; }
         let desc = attr.get_str("DESC").unwrap_or("");
@@ -89,8 +87,8 @@ async fn save_axis_data(sbfr_refno: RefU64, axis_data: Vec<AxisData>, database: 
         })
     }
     let edge_json = serde_json::to_value(&edges)?;
-    save_arangodb_with_database(eles_json, axis_eles_collection, database).await?;
-    save_arangodb_with_database(edge_json, axis_edge_collection, database).await?;
+    save_arangodb_with_database(eles_json, axis_eles_collection, database, false).await?;
+    save_arangodb_with_database(edge_json, axis_edge_collection, database, false).await?;
     Ok(())
 }
 

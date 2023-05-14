@@ -3,7 +3,7 @@ use std::io::Write;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-use aios_core::pdms_types::{PdmsElement, RefU64};
+use aios_core::pdms_types::{GENRAL_NEG_NOUN_NAMES, PdmsElement, RefU64};
 use arangors_lite::Database;
 use bevy::prelude::{dbg, Transform};
 use bitvec::macros::internal::funty::Floating;
@@ -21,14 +21,14 @@ use crate::api::element::{query_children_eles, query_ele_node};
 use crate::aql_api::children::*;
 use crate::aql_api::PdmsRefnoNameAql;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::{AiosDBManager, GENRAL_NEGATIVE_NOUN_NAMES};
+use crate::data_interface::tidb_manager::{AiosDBManager};
 use crate::graph_db::pdms_inst_arango::{query_instance_with_refno_in_arangodb, query_rvm_instance_data_from_refno_aql};
 use crate::rvm::data_api::*;
 use crate::rvm::head::{create_head_data, create_tail_data};
 
 pub async fn create_rvm_file(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<u8>> {
     let mut data = vec![];
-    let database = aios_mgr.get_arangodb_conn().await?;
+    let database = aios_mgr.get_arangodb().await?;
     let db_option = &aios_mgr.db_option;
     let pool = aios_mgr.get_project_pool_by_refno(refno).await;
     if pool.is_none() { return Ok(data); }
@@ -86,9 +86,7 @@ async fn create_ancestor_data(refno: RefU64, ancestor: Vec<PdmsRefnoNameAql>, ai
 async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager, mut data: &mut Vec<u8>, position: Vec3, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let children = query_children_eles(refno, &pool).await?;
     for child in children {
-        let refno = RefU64::from_refno_str(&child.refno);
-        if refno.is_err() { continue; }
-        let refno = refno.unwrap();
+        let refno = child.refno;
         let instance = query_rvm_instance_data_from_refno_aql(refno, database).await?;
         if instance.is_none() { continue; }
         let instance = instance.unwrap();
@@ -131,7 +129,7 @@ async fn create_element_data_tree(cur_refno: RefU64, aios_mgr: &AiosDBManager, m
     let mut tree = Tree::new();
     // 将选中节点设为头节点
     let current_element = PdmsElement {
-        refno: current_element.refno.to_refno_string(),
+        refno: current_element.refno,
         owner: current_element.owner,
         name: current_element.name,
         noun: current_element.noun,
@@ -143,9 +141,7 @@ async fn create_element_data_tree(cur_refno: RefU64, aios_mgr: &AiosDBManager, m
     while !pending_children.is_empty() {
         let child = pending_children.pop_front().unwrap();
         let mut data = Vec::new();
-        let refno = RefU64::from_refno_str(&child.refno);
-        if refno.is_err() { continue; }
-        let refno = refno.unwrap();
+        let refno = child.refno;
         let children = query_children_eles(refno, &pool).await?;
         pending_children.extend(children.into_iter());
         let instance = query_rvm_instance_data_from_refno_aql(refno, database).await?;
@@ -209,9 +205,7 @@ async fn create_element_data_tree_test(cur_refno: RefU64, database: &Database, p
     pending_children.extend(children);
     while !pending_children.is_empty() {
         let cur_ele = pending_children.pop_front().unwrap();
-        let refno = RefU64::from_refno_str(&cur_ele.refno);
-        if refno.is_err() { continue; }
-        let refno = refno.unwrap();
+        let refno = cur_ele.refno;
         if let Some(owner_id) = node_id_map.get(&cur_ele.owner) {
             let pos = query_position_from_id(refno, aios_mgr).await?.unwrap_or(Vec3::ZERO);
             let cur_node_id = tree.insert(Node::new((refno, gen_name_position_data(&cur_ele.name, pos))), UnderNode(owner_id))?;
@@ -219,7 +213,7 @@ async fn create_element_data_tree_test(cur_refno: RefU64, database: &Database, p
         }
         let cur_children = query_children_order_aql(database, refno).await?;
         for cur_child in cur_children {
-            if GENRAL_NEGATIVE_NOUN_NAMES.contains(&cur_child.noun.as_str()) {
+            if GENRAL_NEG_NOUN_NAMES.contains(&cur_child.noun.as_str()) {
                 continue;
             }
             pending_children.push_back(cur_child);
@@ -231,27 +225,21 @@ async fn create_element_data_tree_test(cur_refno: RefU64, database: &Database, p
 
     for instance in &instances {
         let mut data = Vec::new();
-        let refno = RefU64::from_url_refno(&instance._key);
-        if refno.is_none() { continue; }
-        let refno = refno.unwrap();
+        let refno = instance.refno;
         let child = query_ele_node(refno, pool).await?;
-        if GENRAL_NEGATIVE_NOUN_NAMES.contains(&child.noun.as_str()) { continue; }
+        if GENRAL_NEG_NOUN_NAMES.contains(&child.noun.as_str()) { continue; }
         let mut b_desi_cyli = &child.noun == "CYLI";
-        let pos = instance.world_transform.1;
+        let pos = instance.world_transform.translation;
         let mut b_visible = 0;
-        for data in &instance.data {
+        for data in &instance.geo_insts {
             if !data.visible { b_visible += 1; }
         }
-        if b_visible >= instance.data.len() {
+        if b_visible >= instance.geo_insts.len() {
             continue;
         }
         data.append(&mut gen_name_position_data(&child.name, pos));
-        let desi_transform = Transform {
-            translation: instance.world_transform.1,
-            rotation: instance.world_transform.0,
-            scale: instance.world_transform.2,
-        };
-        for geo_instance in &instance.data {
+        let desi_transform = instance.world_transform;
+        for geo_instance in &instance.geo_insts {
             data.append(&mut gen_prim_data_test(geo_instance, desi_transform,b_desi_cyli));
         }
 
@@ -401,7 +389,7 @@ async fn test_create_rvm_file() -> anyhow::Result<()> {
 async fn test_create_owner_data() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
     let refno = RefU64::from_refno_str("23584/5495").unwrap();
-    let database = mgr.get_arangodb_conn().await?;
+    let database = mgr.get_arangodb().await?;
     let data = create_owner_data(refno, &mgr, &database).await?;
     let mut file = std::fs::File::create("test_rvm.txt").unwrap();
     file.write_all(&data).unwrap();

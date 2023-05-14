@@ -20,21 +20,22 @@ use crate::api::project_mdb::query_db_nums_of_mdb;
 use crate::aql_api::convert_refno_vec_from_vec_string;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::graph_db::pdms_arango::{connect_arangodb_with_basic_auth, get_arangodb_conn_from_db_option};
 use crate::graph_db::structs::*;
-use crate::helper::qualified_table_name;
-use crate::consts::AQL_PDMS_ELES_COLLECTION;
+use aios_core::helper::*;
+use crate::{AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_COLLECTION};
 
-// todo 改成多线程
-pub async fn sync_instance_to_graph_db(mgr: Arc<AiosDBManager>, instance_mgr: &CachedInstanceMgr) -> anyhow::Result<()> {
-    let collection = "pdms_instances";
+///保存instance 数据到数据库
+pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, instance_mgr: &ShapeInstancesMgr) -> anyhow::Result<()> {
+    let collection = AQL_PDMS_INST_COLLECTION;
     let edge_collection = "instance_edges";
-    let database = &get_arangodb_conn_from_db_option(&mgr.db_option).await?;
+    let database = connect_arangodb_with_basic_auth(&mgr.db_option).await?;
     let mut instances = vec![];
     let mut edges = vec![];
-    for chunk in &instance_mgr.inst_mgr.inst_map.clone().into_iter().chunks(1000) {
+    println!("开始保存instance数据");
+    for chunk in &instance_mgr.inst_map.iter().chunks(1000) {
         for k in chunk {
-            let json = serde_json::to_value(k.1.to_json_type()).unwrap();
+            let json = serde_json::to_value(k.1).unwrap();
             instances.push(json);
             let edge = PdmsInstanceGraphEdge {
                 _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.0.to_refno_normal_string()),
@@ -64,69 +65,69 @@ pub async fn query_instance_with_refno_in_arangodb(refno: RefU64, database: &Dat
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
     FOR c IN 0..10 inbound @refno pdms_edges
-        PRUNE document(@collection,c._key) != null
         Filter document(@collection,c._key) != null
         let f = document(@collection,c._key)
         let p = document(@params_collection, c._key)
         return {
             '_key':f._key,
-            'data':f.data,
+            'geo_insts':f.geo_insts,
             'params': p.geo_params,
             'visible':f.visible,
             'generic_type':f.generic_type,
             'aabb':f.aabb,
             'world_transform':f.world_transform,
             'ptset_map':f.ptset_map,
-            'flow_pt_indexs':f.flow_pt_indexs
+            'flow_pt_indexs':f.flow_pt_indexs,
+            'has_neg': f.has_neg,
         }")
         .bind_var("refno", refno_aql)
-        .bind_var("collection", "pdms_instances")
+        .bind_var("collection", AQL_PDMS_INST_COLLECTION)
         .bind_var("params_collection", "geo_infos");
-    let result: Vec<EleGeosInfoJson> = database.aql_query(aql).await?;
+    let result: Vec<EleGeosInfo> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }
-    let result = result.into_iter().map(|x| EleGeosInfo::from_json_type(x)).collect::<Vec<_>>();
     Ok(Some(result))
 }
 
-pub async fn query_instance_with_refnos_in_arangodb(refno: Vec<RefU64>, database: &Database) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
-    let refnos = refno.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
-    let aql = AqlQuery::new("
-    let refnos = (
-        FOR refno in @refnos
-            FOR c IN 0..10 inbound CONCAT('pdms_eles/',refno) pdms_edges
-            filter c != null
-            return c._key
-        )
-    for c in UNIQUE(refnos)
-    let f = document('pdms_instances',c)
-        Filter f != null
-        filter f.aabb != null
-        filter f.world_transform != null
-        filter f.generic_type != null
-        filter f.data != null
-        filter f.visible != null
-        filter f.ptset_map != null
-        filter f.flow_pt_indexs != null
-            return {
-                '_key':f._key,
-                'data':f.data,
-                'visible':f.visible,
-                'generic_type':f.generic_type,
-                'aabb':f.aabb,
-                'world_transform':f.world_transform,
-                'ptset_map':f.ptset_map,
-                'flow_pt_indexs':f.flow_pt_indexs
-            }")
-        .bind_var("refnos", refnos);
-    let result: Vec<EleGeosInfoJson> = database.aql_query(aql).await?;
+// let inst_refnos = (
+// for i in pdms_instances
+// return i._key
+// )
+///查询参考号对应有哪些显示实例, 跳过负实体的实例
+///refno: 待查询的参考号集合
+pub async fn query_instance_with_refnos_in_arangodb(refnos: Vec<RefU64>, database: &Database) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
+    let refnos = refnos.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
+    let aql = AqlQuery::new(r#"
+            FOR refno in @refnos
+                FOR c,e,p IN 0..10 inbound CONCAT('pdms_eles/',refno) pdms_edges
+                    PRUNE c.noun in @neg_nouns
+                    OPTIONS { order: "bfs"  }
+                    let parent = p.vertices[-2]
+                    let f = document('pdms_instances', c._key)
+                    filter f != null and (parent == null or document('pdms_instances', parent._key) == null)
+                    return {
+                    '_key':f._key,
+                    'geo_insts':f.geo_insts,
+                    'visible':f.visible,
+                    'generic_type':f.generic_type,
+                    'aabb':f.aabb,
+                    'world_transform':f.world_transform,
+                    // 'ptset_map':f.ptset_map,
+                    'flow_pt_indexs':f.flow_pt_indexs,
+                    'has_neg': f.has_neg
+                }
+            "#)
+        .bind_var("refnos", refnos)
+        .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
+        ;
+    let result: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
+    // dbg!(&result);
     if result.is_empty() { return Ok(None); }
-    let result = result.into_iter().map(|x| EleGeosInfo::from_json_type(x)).collect::<Vec<_>>();
     Ok(Some(result))
 }
 
 pub async fn query_instance_level_with_refno_in_arangodb(refno: RefU64, database: &Database) -> anyhow::Result<Vec<RefU64>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let pdms_instances = "pdms_instances";
+    let pdms_instances = AQL_PDMS_INST_COLLECTION;
     let aql = AqlQuery::new("
     FOR c IN 1..15 inbound @refno pdms_edges
         PRUNE document(@collection,c._key) != null
@@ -143,7 +144,7 @@ pub async fn query_instance_level_with_refno_in_arangodb(refno: RefU64, database
 
 pub async fn query_instance_level_with_ssc_refno_in_arangodb(refno: RefU64, database: &Database) -> anyhow::Result<Vec<RefU64>> {
     let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
-    let pdms_instances = "pdms_instances";
+    let pdms_instances = AQL_PDMS_INST_COLLECTION;
     let aql = AqlQuery::new("
     FOR c IN 0..20 inbound @refno ssc_edges
         // Filter document(@collection,c._key) != null
@@ -164,7 +165,7 @@ pub async fn query_rvm_instance_data_from_refno_aql(refno: RefU64, database: &Da
     return {
         '_key':r._key,
         'aabb':r.aabb,
-        'data':r.data,
+        'geo_insts':r.geo_insts,
         'world_transform':r.world_transform
     }").bind_var("key", refno_aql);
     let result = database.aql_query::<RvmGeoInfo>(aql).await;

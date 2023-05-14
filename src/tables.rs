@@ -6,8 +6,10 @@ use serde_json::from_str;
 use sqlx::{Error, MySql, MySqlPool, Pool};
 use sqlx::mysql::MySqlQueryResult;
 use sqlx::pool::PoolConnection;
+use aios_core::helper::*;
 use crate::consts::*;
-use crate::helper::*;
+use aios_core::helper::*;
+use aios_core::helper::table::{qualified_column_name, qualified_table_name};
 
 #[inline]
 pub fn gen_create_explicit_tables_sql() -> String {

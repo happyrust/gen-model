@@ -25,9 +25,11 @@ use crate::api::ssc_data::*;
 use crate::aql_api::children::{query_ancestor_till_type_aql, query_travel_children_aql};
 use crate::consts::{AQL_PDMS_ELES_COLLECTION, AQL_SSC_EDGE_COLLECTION, AQL_SSC_ELES_COLLECTION, PDMS_SSC_ELEMENTS_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option};
-use crate::graph_db::structs::{PdmsEleGraphEdge, SSCEleGraphNode};
+use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, save_arangodb_with_database};
+use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode, SSCEleGraphNode};
+use crate::metadata::convert_str_to_hash;
 use crate::tables;
+use aios_core::aql_types::AqlEdge;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SiteExcelData {
@@ -52,18 +54,44 @@ pub struct PdmsSscMajorCode {
     pub zone_map: HashMap<String, String>,
 }
 
+impl SiteExcelData {
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.code.is_some() && self.name.is_some() && self.att_type.is_some()
+    }
+}
+
+
 /// 房间信息 excel 字段
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RoomExcelData {
-    pub 房间代码: Option<String>,
-    pub 所属机组: Option<u32>,
-    pub 安装厂房: Option<String>,
-    pub 区域: Option<String>,
-    pub 安装层位: Option<String>,
-    pub 厂房: Option<String>,
-    pub 分区: Option<String>,
-    pub 层位及标高: Option<String>,
-    pub 序号: Option<u32>,
+    ///房间代码
+    #[serde(rename="房间代码")]
+    pub room_code: Option<String>,
+    /// 所属机组
+    #[serde(rename="所属机组")]
+    pub aff_unit: Option<u32>,
+    ///安装厂房
+    #[serde(rename="安装厂房")]
+    pub install_plant: Option<String>,
+    ///区域
+    #[serde(rename="区域")]
+    pub zone: Option<String>,
+    ///安装层位
+    #[serde(rename="安装层位")]
+    pub install_level: Option<String>,
+    ///厂房
+    #[serde(rename="厂房")]
+    pub plant: Option<String>,
+    ///分区
+    #[serde(rename="分区")]
+    pub partion: Option<String>,
+    ///层位及标高
+    #[serde(rename="层位及标高")]
+    pub layer_elevation: Option<String>,
+    /// 序号
+    #[serde(rename="序号")]
+    pub number: Option<u32>,
 }
 
 pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
@@ -77,36 +105,36 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
         }
     }
     dbg!("创建SSC表完成");
-    let room_data = query_all_room_data_aql(&mgr.get_arangodb_conn().await?, project_pool, &mgr.db_option).await?;
+    let room_data = query_all_room_data_aql(mgr.get_arangodb().await?, project_pool, &mgr.db_option).await?;
     let room_info = deal_room_info(room_data.clone());
     let (zone_level_map, zone_name_map, next_refno) = insert_set_ssc_node_sql(room_info.clone(), project_pool).await?;
     dbg!("SSC固定节点生成");
-    // replace_ssc_room_refno(&room_info, project_pool).await?;
-    // if room_data.len() != 0 {
-    //     let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
-    //     let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, next_refno, project_pool, mgr).await;
-    //     if sqls.len() != 0 {
-    //         for (idx, sql) in sqls.into_iter().enumerate() {
-    //             let sql = format!("{} {}", insert_sql, sql);
-    //             let result = conn.execute(sql.as_str()).await;
-    //             match result {
-    //                 Ok(_) => {
-    //                     println!("第 {} 条 sql 保存完成", idx);
-    //                 }
-    //                 Err(e) => {
-    //                     dbg!(sql);
-    //                     dbg!(&e);
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
+    replace_ssc_room_refno(room_info, project_pool).await?;
+    if room_data.len() != 0 {
+        let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
+        let sqls = insert_ssc_room_node(room_data, zone_level_map, zone_name_map, next_refno, project_pool, mgr).await?;
+        if sqls.len() != 0 {
+            for (idx, sql) in sqls.into_iter().enumerate() {
+                let sql = format!("{} {}", insert_sql, sql);
+                let result = conn.execute(sql.as_str()).await;
+                match result {
+                    Ok(_) => {
+                        println!("第 {} 条 sql 保存完成", idx);
+                    }
+                    Err(e) => {
+                        dbg!(sql);
+                        dbg!(&e);
+                    }
+                }
+            }
+        }
+    }
 
     Ok(())
 }
 
 pub async fn async_total_ssc_data_refactor(mgr: &AiosDBManager) -> anyhow::Result<()> {
-    let database = mgr.get_arangodb_conn().await?;
+    let database = mgr.get_arangodb().await?;
     // 创建图数据库连接
     create_arangodb_conn(&database, AQL_SSC_EDGE_COLLECTION, Edge).await?;
     create_arangodb_conn(&database, AQL_SSC_ELES_COLLECTION, Document).await?;
@@ -115,9 +143,9 @@ pub async fn async_total_ssc_data_refactor(mgr: &AiosDBManager) -> anyhow::Resul
 }
 
 /// 将ssc房间对应的参考号修改为pdms房间的参考号
-pub async fn replace_ssc_room_refno(room_info: &HashMap<String, RefU64>, pool: &Pool<MySql>) -> anyhow::Result<()> {
+pub async fn replace_ssc_room_refno(room_info: HashMap<String, RefU64>, pool: &Pool<MySql>) -> anyhow::Result<()> {
     // 找到 ssc 当前所有房间的参考号
-    let room_refnos = query_ssc_room_refnos(room_info, pool).await?;
+    let room_refnos = query_ssc_room_refnos(&room_info, pool).await?;
     let room_refnos_len = room_refnos.len();
     let mut handles = vec![];
     for (idx, (room_name, (old_refno, new_refno))) in room_refnos.into_iter().enumerate() {
@@ -175,9 +203,9 @@ fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, Da
                 }
             }
 
-            let read_site_name = v.name.unwrap();
-            zone_name = read_site_name.clone();
-            zone_code = read_site_code.clone();
+        let read_site_name = v.name.unwrap();
+        zone_name = read_site_name.clone();
+        zone_code = read_site_code.clone();
 
 
             name_map.insert(read_site_code, read_site_name);
@@ -279,7 +307,7 @@ fn get_room_level_from_excel_refactor() -> anyhow::Result<SscMajorCodeExcel> {
 }
 
 /// 解析 excel 表单 ，找到每一层下面所有的房间号 返回所有的安装厂房下对应的层位，层位下对应的房间
-pub fn get_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i32, Vec<String>>>> {
+pub fn parse_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i32, Vec<String>>>> {
     let mut r = HashMap::new();
     let mut workbook: Xlsx<_> = open_workbook("resource/ssc_room.xlsx")?;
     let range = workbook.worksheet_range("Sheet1")
@@ -287,13 +315,19 @@ pub fn get_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i32
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
 
+    // while let Some(result) = iter.next() {
+    //     let v: RoomExcelData = result.and_then(|r| {
+    //
+    //     });
+    // }
+
     while let Some(result) = iter.next() {
         let v: RoomExcelData = result?;
-        if let Some(install_workshop) = v.安装厂房 {
-            if let Some(belong_unit) = v.所属机组 {
+        if let Some(install_workshop) = v.install_plant {
+            if let Some(belong_unit) = v.aff_unit {
                 let install_workshop = format!("{}{}", belong_unit.to_string(), install_workshop);
-                if let Some(install_level) = v.安装层位 {
-                    if let Some(workshop) = v.房间代码 {
+                if let Some(install_level) = v.install_level {
+                    if let Some(workshop) = v.room_code {
                         r.entry(install_workshop).or_insert_with(BTreeMap::new)
                             .entry(install_level.parse().unwrap_or(1)).or_insert_with(Vec::new).push(workshop);
                     }
@@ -314,7 +348,7 @@ pub fn get_rooms_from_excel() -> anyhow::Result<Vec<String>> {
 
     while let Some(result) = iter.next() {
         let v: RoomExcelData = result?;
-        if let Some(workshop) = v.房间代码 {
+        if let Some(workshop) = v.room_code {
             r.push(workshop);
         }
     }
@@ -340,7 +374,7 @@ pub async fn insert_set_ssc_node_sql(room_info: HashMap<String, RefU64>, pool: &
 /// 保存房间下的元件
 pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zone_level_map: DashMap<String, RefU64>,
                                   zone_name_map: DashMap<String, String>, mut next_refno: RefU64,
-                                  pool: &Pool<MySql>, mgr: Arc<AiosDBManager>) -> Vec<String> {
+                                  pool: &Pool<MySql>, mgr: Arc<AiosDBManager>) -> anyhow::Result<Vec<String>> {
     // let mut handles = vec![];
     let mut sqls = Arc::new(DashSet::new());
     let mut under_zone_map = DashMap::new();
@@ -355,7 +389,7 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
         // let room_ori = room_ori.value();
         if room_ori.noun == "EQUI" { continue; }
         // 该房间号所在的zone没有对应的uda，直接跳过
-        if undefined_zone_refno.contains(&room_ori.refno.to_refno_string()) {
+        if undefined_zone_refno.contains(&room_ori.refno) {
             room_data_len -= 1;
             continue;
         }
@@ -477,9 +511,8 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
                     }
                 } else {
                     // 如果发现该zone下 :CNPE_divco 没有值，直接把整个zone下的refno全部移除
-                    if mgr.get_arangodb_conn().await.is_err() { continue; }
-                    let database = mgr.get_arangodb_conn().await.unwrap();
-                    if let Ok(children) = query_travel_children_aql(&database, zone_refno).await {
+                    let database = mgr.get_arangodb().await?;
+                    if let Ok(children) = query_travel_children_aql(database, zone_refno).await {
                         let children_len = children.len();
                         println!("删除不符合条件的 zone {:?} 下的所有参考号,共有{}条", zone_refno, children_len);
                         for child in children.into_iter() {
@@ -543,7 +576,7 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
         insert_sql.remove(insert_sql.len() - 1);
     }
     insert_sql_vec.push(insert_sql.clone());
-    insert_sql_vec
+    Ok(insert_sql_vec)
 }
 
 /// 设置 ssc 的固定节点
@@ -599,7 +632,7 @@ pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMa
     // 一号机组的子节点
     let mut zone_level_map = DashMap::new();
     let mut zone_name_map = DashMap::new();
-    if let Ok(map) = get_room_info_from_excel() {
+    if let Ok(map) = parse_room_info_from_excel() {
         let (zone_level_map_r, zone_name_map_r, next_refno_level) = set_ssc_level_node(map, (three_refno, n_refno), two_level_refno, &mut sql)?;
         next_refno = next_refno_level;
         zone_level_map = zone_level_map_r;
@@ -611,7 +644,7 @@ pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMa
     Ok((sql, zone_level_map, zone_name_map, next_refno))
 }
 
-#[derive(Serialize,Deserialize,Clone,Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub(crate) struct SSCLevelExcelData {
     pub name: Option<String>,
     pub att_type: Option<String>,
@@ -834,6 +867,64 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>, db_opti
     Ok(())
 }
 
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub(crate) struct SscLevelExcel {
+    pub name: Option<String>,
+    pub att_type: Option<String>,
+    pub owner: Option<String>,
+}
+
+impl SscLevelExcel {
+    pub fn is_valid(&self) -> bool {
+        if self.name.is_none() || self.att_type.is_none() {
+            return false;
+        }
+        true
+    }
+}
+
+/// 将 ssc_level.xlsx  ssc 固定节点保存到图数据库中
+async fn save_ssc_level_excel(database: &Database) -> anyhow::Result<()> {
+    let mut eles_results = Vec::new();
+    let mut edge_results = Vec::new();
+
+    let mut workbook: Xlsx<_> = open_workbook("resource/ssc_level.xlsx")?;
+    let range = workbook.worksheet_range("Sheet1")
+        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+
+    let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
+
+    while let Some(result) = iter.next() {
+        let v: SscLevelExcel = result?;
+        if v.is_valid() {
+            let name = v.name.unwrap();
+            let name_hash = convert_str_to_hash(&name);
+            let owner = if v.owner.is_some() { convert_str_to_hash(&v.owner.unwrap()) } else { 0 };
+            let refno = RefU64(name_hash);
+            let owner = RefU64(owner);
+            eles_results.push(PdmsEleGraphNode {
+                _key: refno.to_url_refno(),
+                noun: v.att_type.unwrap(),
+                version: 0,
+                name,
+                owner: owner.to_url_refno(),
+                dbnum: 0,
+            });
+
+            edge_results.push(AqlEdge{
+                _key: refno.hash_with_another_refno(owner).to_string(),
+                _from: format!("{}/{}",AQL_SSC_ELES_COLLECTION,refno.to_url_refno()),
+                _to: format!("{}/{}",AQL_SSC_ELES_COLLECTION,owner.to_url_refno()),
+            })
+        }
+    }
+    let eles_value = serde_json::to_value(&eles_results)?;
+    save_arangodb_with_database(eles_value, AQL_SSC_ELES_COLLECTION, database, false).await?;
+    let edge_value = serde_json::to_value(&edge_results)?;
+    save_arangodb_with_database(edge_value, AQL_SSC_EDGE_COLLECTION, database, false).await?;
+    Ok(())
+}
+
 fn gen_query_ssc_room_refnos_sql(room_info: &HashMap<String, RefU64>) -> String {
     let mut sql = String::new();
     let mut rooms = String::new();
@@ -852,19 +943,6 @@ fn gen_replace_room_refno_sql(room_name: &str, refno: RefU64, old_refno: RefU64)
     sql
 }
 
-
-#[test]
-fn test_read_excel() {
-    let result = get_room_info_from_excel().unwrap();
-    // let (level, name_map) = get_room_level_from_excel().unwrap();
-    if let Some(map) = result.get("1RX") {
-        if let Some(val) = map.get(&1) {
-            println!("val={:?}", val);
-        }
-    }
-    // dbg!(&name_map);
-}
-
 #[tokio::test]
 async fn test_set_pdms_major_from_excel() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
@@ -878,5 +956,20 @@ async fn test_set_pdms_major_from_excel() -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let excel_result = get_room_level_from_excel_refactor()?;
     set_pdms_major_from_excel(&excel_result.pdms_name_code_map, &db_option, &database, &pool).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_save_ssc_level_excel() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let _ = save_ssc_level_excel(&database).await?;
     Ok(())
 }
