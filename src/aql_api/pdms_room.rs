@@ -256,7 +256,7 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &Database) -> any
         set.insert(refno);
         r.push(PdmsElement {
             refno,
-            owner: result.owner,
+            owner:result.owner,
             name: result.name,
             noun: result.noun,
             version: 0,
@@ -266,6 +266,21 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &Database) -> any
     Ok(r)
 }
 
+
+
+#[tokio::test]
+async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let refno = RefU64::from_url_refno("24383_68084").unwrap();
+    let name = query_refno_belong_rooms(refno, &database).await?;
+    dbg!(&name);
+    Ok(())
+}
 #[tokio::test]
 async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
@@ -281,19 +296,7 @@ async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
-    let refno = RefU64::from_url_refno("24383_68084").unwrap();
-    let name = query_refno_belong_rooms(refno, &database).await?;
-    dbg!(&name);
-    Ok(())
-}
+
 
 #[test]
 fn test_json() {
