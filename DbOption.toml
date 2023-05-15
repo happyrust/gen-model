@@ -52,7 +52,7 @@ debug_refno_types = ["CATA"]  # "CATA", "LOOP", "PRIM"
 debug_db_num = 7997
 #included_db_files = ["acp7002_0001"]
 #replace_types = ["SDTE"]
-#manual_db_nums = [7997]
+manual_db_nums = [7997]
 plat_url = ""
 enable_log = false
 
