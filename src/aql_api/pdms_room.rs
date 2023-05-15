@@ -247,9 +247,9 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &Database) -> any
         for v in 0..10 outbound id pdms_edges
             filter v!= null
             filter v.noun == 'FRMW'
-            return { refno:v._key , owner:0 , name:v.name,noun:v.noun,version:0,children_count:1 }")
+            return { refno:v._key , owner:'0/0' , name:v.name,noun:v.noun,version:0,children_count:1 }")
         .bind_var("id", id);
-    let results: Vec<PdmsElement> = database.aql_query(aql).await?;
+    let results: Vec<PdmsElement> = database.aql_query(aql).await.unwrap();
     for result in results {
         let refno = result.refno;
         if set.contains(&refno) { continue; }

@@ -1,3 +1,4 @@
+use std::env;
 use std::sync::Arc;
 use aios_core::plat_user::PuHuaPlatUser;
 use sqlx::{Executor, MySql, Pool, Row};
@@ -25,9 +26,30 @@ pub async fn b_exit_user(aios_mgr: &AiosDBManager, user: &str) -> anyhow::Result
     Ok(b_exit)
 }
 
+/// 查询所有的普华的用户
+///
+/// 在此之前需要调用save接口 save_plat_user
+pub async fn query_all_plat_user(pool: &Pool<MySql>) -> anyhow::Result<Vec<String>> {
+    let mut result = Vec::new();
+    let sql = gen_query_all_plat_user_sql();
+    let mut conn = pool.acquire().await?;
+    let Ok(query_results) = conn.fetch_all(sql.as_str()).await else { return Ok(vec![]); };
+    for query_result in query_results {
+        let name = query_result.get::<String, _>("work_num");
+        result.push(name);
+    }
+    Ok(result)
+}
+
 fn gen_b_exit_user_sql(user: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT COUNT(1) FROM PuHuaPlatUser WHERE NAME = '{}'", user));
+    sql
+}
+
+fn gen_query_all_plat_user_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT work_num FROM PuHuaPlatUser"));
     sql
 }
 
@@ -49,4 +71,14 @@ fn create_plat_user_aql() -> String {
         name VARCHAR(255) NOT NULL,
         depart VARCHAR(255) NOT NULL
     );")
+}
+
+#[tokio::test]
+async fn test_query_all_plat_user() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "project_info").await?;
+    let result = query_all_plat_user(&pool).await?;
+    dbg!(&result);
+    Ok(())
 }
