@@ -37,3 +37,4 @@ pub const AQL_EMBED_EDGE_COLLECTION: &'static str = "embed_edge";
 pub const AQL_PDMS_ELES_COLLECTION: &'static str = "pdms_eles";
 pub const AQL_SSC_ELES_COLLECTION: &'static str = "ssc_eles";
 pub const AQL_SSC_EDGE_COLLECTION: &'static str = "ssc_edges";
+pub const AQL_THREED_REVIEW_COLLECTION: &'static str = "threed_review";

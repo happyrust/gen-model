@@ -109,11 +109,10 @@ async fn main() -> anyhow::Result<()> {
     }
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    if let Ok(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
-        Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
-        info!("read cached mesh ok.");
-    }
-
+    // if let Ok(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
+    //     Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
+    //     info!("read cached mesh ok.");
+    // }
     ///生成ssc 树
     if db_option.rebuild_ssc_tree {
         info!("正在同步SSC");
@@ -124,7 +123,6 @@ async fn main() -> anyhow::Result<()> {
         }
         info!("SSC同步完成");
     }
-
 
     if db_option.only_sync_sys {
         sync_system_db(&mgr).await?;

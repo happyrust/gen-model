@@ -1135,7 +1135,8 @@ impl AiosDBManager {
         let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
         for v in result {
             if let project = v.get::<String, _>(1) {
-                let project_pool = self.get_project_pool(&project).ok_or(anyhow!("Unknown project pool"))?;
+                dbg!(&project);
+                let Some(project_pool) = self.get_project_pool(&project) else { continue };
                 if let Some(world_refno) = query_world_refno_by_dbno(db_num, &project_pool).await? {
                     let db_type = v.get::<String, _>(0);
                     return Ok(Some(DbQuickInfo {
@@ -1160,24 +1161,20 @@ impl AiosDBManager {
     ) -> anyhow::Result<MdbQuickInfoMap> {
         let mut mdb_map = HashMap::new();
         let mdbs = query_types_refnos(&vec!["MDB"], project_pool, &[]).await?;
-        dbg!(&mdbs.len());
         for mdb_refno in mdbs {
-            dbg!(&mdb_refno);
             let Ok(mdb_attr) = query_attr(mdb_refno, self, None).await else {
                 continue;
             };
             let Ok(mdb_name) = query_name(mdb_refno, &project_pool).await else {
                 continue;
             };
-            dbg!(&mdb_name);
+            // if &mdb_name != "/ALL" { continue; }
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
                     if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {
                         let db_num = att.get_i32("NUMBDB").unwrap_or_default();
-                        dbg!(&db_num);
                         if let Ok(Some(mut quick_info)) = self.query_quick_info_by_dbno(*db_refno, db_num, info_pool).await {
-                            dbg!(&quick_info.db_type);
                             quick_info.order_number = i as _;
                             map.entry(quick_info.db_type.clone())
                                 .or_insert_with(Vec::new).push(quick_info);
