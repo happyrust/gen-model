@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync = false
+total_sync = true
 sync_graph_db = false
 sync_tidb = false
 incr_sync = false
@@ -7,7 +7,8 @@ replace_dbs = false
 
 #项目设置
 project_path = "D:/new/AVEVA/Plant/Projects12.1.SP4"  #TestCatalogue
-included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
+included_projects = ["AvevaMarineSample" ]
+#, "AvevaCatalogue", "SCB", "ZDJ"
 #included_projects = ["AvevaCatalogue"]  #"AvevaPlantSample",
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
@@ -52,7 +53,7 @@ debug_refno_types = ["CATA"]  # "CATA", "LOOP", "PRIM"
 debug_db_num = 7997
 #included_db_files = ["acp7002_0001"]
 #replace_types = ["SDTE"]
-manual_db_nums = [7997]
+manual_db_nums = [7999]
 plat_url = ""
 enable_log = false
 
