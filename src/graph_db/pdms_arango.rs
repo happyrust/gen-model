@@ -607,7 +607,7 @@ pub async fn save_arangodb_with_database(json: Value, collection: &str, database
     let aql = AqlQuery::new(&aql_string)
         .bind_var("@collection", collection)
         .bind_var("elements", json);
-    let _result: Vec<()> = database.aql_query(aql).await?;
+    let _ = database.aql_query::<Vec<()>>(aql).await?;
     Ok(())
 }
 
