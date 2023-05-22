@@ -858,35 +858,36 @@ impl AiosDBManager {
     ///计算所有房间包含的其他参考号
     pub async fn calculate_rooms(&self) -> anyhow::Result<()> {
         let rtree = self.compute_aabb_tree().await?;
+        dbg!("r tree ok");
 
         //指定哪个site下有房间节点
         let Some(room_root_refnos) = &self.db_option.room_root_refnos else {
             return Ok(());
         };
-
+        dbg!(&room_root_refnos);
         let mut room_hashmap = HashMap::new();
         for r in room_root_refnos {
             let Ok(room_root_refno) = RefU64::from_refno_str(r) else{
                 continue;
             };
             let panes = query_deep_children_refnos_fuzzy(&self.arango_db, room_root_refno, &["PANE"]).await?;
-            // dbg!(&panes);
+            dbg!(&panes.len());
             let instances = query_instance_with_refnos_in_arangodb(panes,
                                                                    &self.arango_db).await?.unwrap_or_default();
-            // dbg!(&instances);
+            dbg!(&instances.len());
             let mut final_within_room_refnos = vec![];
             for inst in &instances {
                 let r = self.calculate_room(inst, &rtree).await?;
                 final_within_room_refnos.extend_from_slice(&r);
             }
 
-            // dbg!(&final_within_room_refnos);
+            dbg!(&final_within_room_refnos.len());
             // final_within_room_refnos.remove
             room_hashmap.insert(room_root_refno, final_within_room_refnos);
         }
 
         self.save_room_info_to_arangodb(room_hashmap).await?;
-
+        dbg!("save ok");
 
         Ok(())
     }

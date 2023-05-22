@@ -59,7 +59,7 @@ pub async fn query_children_order_aql(arango_database: &Database, refno: RefU64)
             'children_count':length(for c in 1 inbound child._id pdms_edges
                                 return 1 ),
         }").bind_var("id", refno_aql);
-    let results: Vec<PdmsElement> = arango_database.aql_query(aql).await.unwrap();
+    let results: Vec<PdmsElement> = arango_database.aql_query(aql).await?;
     Ok(results)
 }
 
