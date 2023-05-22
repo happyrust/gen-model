@@ -4,6 +4,7 @@ use std::io::Write;
 use aios_core::create_attas_structs::VirtualHoleGraphNode;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject, HoleType, ItemValue};
 use aios_core::negative_mesh_type::NegativeEdges;
+use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use arangors_lite::{AqlQuery, Database};
 use bevy::prelude::dbg;
@@ -16,7 +17,7 @@ use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{remove_arangodb_with_refno_key, save_arangodb_with_database};
+use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, remove_arangodb_with_refno_key, save_arangodb_with_database};
 
 /// 正则匹配字符串中的数字
 pub fn get_num_from_str(input: &str) -> Option<i32> {
@@ -66,6 +67,47 @@ async fn query_hole_data_tidb(id: u32, pool: &Pool<MySql>) -> Option<DataCenterI
     None
 }
 
+async fn gen_hole_datacenter_instance_aql(keys: Vec<String>, database: &Database) -> Vec<DataCenterInstance> {
+    let mut instances_result = Vec::new();
+    let Ok(instances) = query_hole_data_by_keys_aql(keys, database).await else { return instances_result; };
+    for (idx, instance) in instances.into_iter().enumerate() {
+        if let Ok(hole_type) = query_hole_type_aql(&instance).await {
+            let result = match hole_type {
+                HoleType::STUCJ => {
+                    DataCenterInstance {
+                        object_model_code: "STUCJ".to_string(),
+                        project_code: "1516".to_string(),
+                        instance_code: format!("STUCJ{}", idx),
+                        version: "A版".to_string(),
+                        attributes: gen_stucj_data_aql(instance).await,
+                    }
+                }
+                HoleType::STUCG => {
+                    DataCenterInstance {
+                        object_model_code: "STUCG".to_string(),
+                        project_code: "1516".to_string(),
+                        instance_code: format!("STUCG{}", idx),
+                        version: "A版".to_string(),
+                        attributes: gen_stucg_data_aql(instance).await,
+                    }
+                }
+                HoleType::STUCH => {
+                    DataCenterInstance {
+                        object_model_code: "STUCH".to_string(),
+                        project_code: "1516".to_string(),
+                        instance_code: format!("STUCH{}", idx),
+                        version: "A版".to_string(),
+                        attributes: gen_stuch_data_aql(instance).await,
+                    }
+                }
+                _ => { continue; }
+            };
+            instances_result.push(result);
+        }
+    }
+    instances_result
+}
+
 /// 查找改参考号属于哪种孔洞
 async fn query_hole_type(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HoleType> {
     let sql = gen_query_hole_type_sql(id);
@@ -88,9 +130,39 @@ async fn query_hole_type(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HoleType
     Ok(HoleType::Unknown)
 }
 
+async fn query_hole_type_aql(hole_data: &VirtualHoleGraphNode) -> anyhow::Result<HoleType> {
+    let h_type = &hole_data.h_type;
+    let material = &hole_data.subs_material;
+    match h_type.as_str() {
+        "K" => { Ok(HoleType::STUCJ) }
+        "T" => { if material.as_str() == "Q235" { Ok(HoleType::STUCG) } else { Ok(HoleType::STUCH) } }
+        "G" => { Ok(HoleType::STUCK) }
+        "S" => { Ok(HoleType::STUCL) }
+        "X" | "Y" => { Ok(HoleType::STUCM) }
+        _ => { Ok(HoleType::Unknown) }
+    }
+}
+
 async fn gen_stucj_data(id: u32, pool: &Pool<MySql>) -> Vec<DataCenterAttr> {
     let mut result = Vec::new();
     if let Ok(stucj_data_map) = query_stucj_data(id, pool).await {
+        for i in 0..33 {
+            let name = format!("STUCJ{}", i);
+            let value = stucj_data_map.get(&name);
+            if value.is_none() { continue; }
+            let value = value.unwrap();
+            result.push(DataCenterAttr {
+                attribute_model_code: name,
+                value: value.clone().into(),
+            });
+        }
+    }
+    result
+}
+
+async fn gen_stucj_data_aql(hole_data: VirtualHoleGraphNode) -> Vec<DataCenterAttr> {
+    let mut result = Vec::new();
+    if let Ok(stucj_data_map) = query_stucj_data_aql(hole_data).await {
         for i in 0..33 {
             let name = format!("STUCJ{}", i);
             let value = stucj_data_map.get(&name);
@@ -122,9 +194,44 @@ async fn gen_stucg_data(id: u32, pool: &Pool<MySql>) -> Vec<DataCenterAttr> {
     result
 }
 
+async fn gen_stucg_data_aql(hole_data: VirtualHoleGraphNode) -> Vec<DataCenterAttr> {
+    let mut result = Vec::new();
+    if let Ok(stucj_data_map) = query_stucg_data_aql(hole_data).await {
+        for i in 0..33 {
+            let name = format!("STUCG{}", i);
+            let value = stucj_data_map.get(&name);
+            if value.is_none() { continue; }
+            let value = value.unwrap();
+            result.push(DataCenterAttr {
+                attribute_model_code: name,
+                value: value.clone().into(),
+            });
+        }
+    }
+    result
+}
+
+
 async fn gen_stuch_data(id: u32, pool: &Pool<MySql>) -> Vec<DataCenterAttr> {
     let mut result = Vec::new();
     if let Ok(stucj_data_map) = query_stuch_data(id, pool).await {
+        for i in 0..33 {
+            let name = format!("STUCH{}", i);
+            let value = stucj_data_map.get(&name);
+            if value.is_none() { continue; }
+            let value = value.unwrap();
+            result.push(DataCenterAttr {
+                attribute_model_code: name,
+                value: value.clone().into(),
+            });
+        }
+    }
+    result
+}
+
+async fn gen_stuch_data_aql(hole_data: VirtualHoleGraphNode) -> Vec<DataCenterAttr> {
+    let mut result = Vec::new();
+    if let Ok(stucj_data_map) = query_stuch_data_aql(hole_data).await {
         for i in 0..33 {
             let name = format!("STUCH{}", i);
             let value = stucj_data_map.get(&name);
@@ -241,6 +348,96 @@ async fn query_stucj_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap
     Ok(map)
 }
 
+async fn query_stucj_data_aql(hole_data: VirtualHoleGraphNode) -> anyhow::Result<HashMap<String, AttrValue>> {
+    let mut map = HashMap::new();
+    let item_ref = hole_data.item_ref;
+    let value = get_item_ref_value(item_ref, HoleType::STUCJ);
+    map.entry("STUCJ1".to_string()).or_insert(AttrValue::AttrItemArray(value));
+    let h_type = hole_data.h_type;
+    map.entry("STUCJ2".to_string()).or_insert(AttrValue::AttrString(h_type));
+    let code = hole_data._key;
+    map.entry("STUCJ3".to_string()).or_insert(AttrValue::AttrString(code));
+    let rely_item = hole_data.rely_item;
+    map.entry("STUCJ4".to_string()).or_insert(AttrValue::AttrString(rely_item));
+    let rely_item_ref = hole_data.rely_item_ref;
+    map.entry("STUCJ5".to_string()).or_insert(AttrValue::AttrString(rely_item_ref));
+    let mut pipe_line_map = HashMap::new();
+    pipe_line_map.entry("工艺管道".to_string()).or_insert_with(Vec::new).push("Test".to_string());
+    map.entry("STUCJ6".to_string()).or_insert(AttrValue::AttrMap(pipe_line_map));
+
+    let position = hole_data.position;
+    let position = get_pos_from_str(position);
+    let position = if position.len() > 2 { position } else { vec![0.0, 0.0, 0.0] };
+    map.entry("STUCJ7".to_string()).or_insert(AttrValue::AttrFloatArray(position));
+    let ori = hole_data.ori;
+    map.entry("STUCJ8".to_string()).or_insert(AttrValue::AttrString(ori));
+
+    let shape = hole_data.shape;
+    let size_height = hole_data.size_height;
+    let size_width = hole_data.size_width;
+    let mut shape_map = HashMap::new();
+    match shape.as_str() {
+        "CIR" => {
+            shape_map.entry("圆形孔洞".to_string()).or_insert(vec![size_width]);
+        }
+        "RECT" => {
+            shape_map.entry("方形孔洞".to_string()).or_insert(vec![size_width, size_height]);
+        }
+        _ => {}
+    };
+    map.entry("STUCJ10".to_string()).or_insert(AttrValue::AttrMapFloatArray(shape_map));
+
+    let bank_height = hole_data.bank_height;
+    let bank_width = hole_data.bank_width;
+    if bank_height != 0.0 && bank_width != 0.0 {
+        map.entry("STUCJ11".to_string()).or_insert(AttrValue::AttrString("Y".to_string()));
+    } else {
+        map.entry("STUCJ11".to_string()).or_insert(AttrValue::AttrString("N".to_string()));
+    }
+
+    map.entry("STUCJ12".to_string()).or_insert(AttrValue::AttrFloat(bank_height));
+
+    map.entry("STUCJ13".to_string()).or_insert(AttrValue::AttrFloat(bank_width));
+
+    let plug_type = hole_data.plug_type;
+    // let plug_type = match_plug_type_str(&plug_type[..1]);
+    map.entry("STUCJ17".to_string()).or_insert(AttrValue::AttrBool(plug_type.is_empty()));
+    map.entry("STUCJ18".to_string()).or_insert(AttrValue::AttrString(plug_type));
+
+    map.entry("STUCJ20".to_string()).or_insert(AttrValue::AttrString("600".to_string()));
+    let b_second = hole_data.second;
+    map.entry("STUCJ21".to_string()).or_insert(AttrValue::AttrBool(b_second));
+
+    map.entry("STUCJ22".to_string()).or_insert(AttrValue::AttrFloatArray(vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0]));
+    let hole_work = hole_data.hole_work;
+    map.entry("STUCJ23".to_string()).or_insert(AttrValue::AttrString(hole_work));
+
+    let work_by = hole_data.work_by;
+    map.entry("STUCJ24".to_string()).or_insert(AttrValue::AttrString(work_by));
+
+    let time = hole_data.time.replace("/", "-");
+    let time = convert_time_to_vec(&time);
+    map.entry("STUCJ25".to_string()).or_insert(AttrValue::AttrStrArray(time));
+
+    let open_item = hole_data.open_item;
+    map.entry("STUCJ26".to_string()).or_insert(AttrValue::AttrString(open_item));
+
+    let note = hole_data.note;
+    map.entry("STUCJ27".to_string()).or_insert(AttrValue::AttrString(note));
+
+    let fitt_refno = hole_data.fitt_refno;
+    map.entry("STUCJ28".to_string()).or_insert(AttrValue::AttrString(fitt_refno));
+    let hole_b_pid = hole_data.hole_bpid;
+    map.entry("STUCJ29".to_string()).or_insert(AttrValue::AttrString(hole_b_pid));
+    let hole_b_pver = hole_data.hole_bpver;
+    map.entry("STUCJ30".to_string()).or_insert(AttrValue::AttrString(hole_b_pver));
+    let rely_item_b_pid = hole_data.rely_item_bpid;
+    map.entry("STUCJ31".to_string()).or_insert(AttrValue::AttrString(rely_item_b_pid));
+    let rely_item_b_pver = hole_data.rely_item_bpver;
+    map.entry("STUCJ32".to_string()).or_insert(AttrValue::AttrString(rely_item_b_pver));
+    Ok(map)
+}
+
 async fn query_stucg_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, AttrValue>> {
     let mut map = HashMap::new();
     let sql = gen_query_hole_data_sql(id);
@@ -321,6 +518,79 @@ async fn query_stucg_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap
     Ok(map)
 }
 
+async fn query_stucg_data_aql(hole_data: VirtualHoleGraphNode) -> anyhow::Result<HashMap<String, AttrValue>> {
+    let mut map = HashMap::new();
+    let item_ref = hole_data.item_ref;
+    let value = get_item_ref_value(item_ref, HoleType::STUCG);
+    map.entry("STUCG1".to_string()).or_insert(AttrValue::AttrItemArray(value));
+    let h_type = hole_data.h_type;
+    let h_type = if &h_type == "T" { "直管".to_string() } else { "弯管".to_string() };
+    map.entry("STUCG2".to_string()).or_insert(AttrValue::AttrString(h_type));
+    let code = hole_data._key;
+    map.entry("STUCG3".to_string()).or_insert(AttrValue::AttrString(code));
+    let rely_item = hole_data.rely_item;
+    map.entry("STUCG4".to_string()).or_insert(AttrValue::AttrString(rely_item));
+    let rely_item_ref = hole_data.rely_item_ref;
+    map.entry("STUCG5".to_string()).or_insert(AttrValue::AttrString(rely_item_ref));
+
+    let mut pipe_line_map = HashMap::new();
+    pipe_line_map.entry("工艺管道".to_string()).or_insert_with(Vec::new).push("Test".to_string());
+    map.entry("STUCG6".to_string()).or_insert(AttrValue::AttrMap(pipe_line_map));
+
+    let position = hole_data.position;
+    let position = get_pos_from_str(position);
+    let position = if position.len() > 2 { position } else { vec![0.0, 0.0, 0.0] };
+    map.entry("STUCG7".to_string()).or_insert(AttrValue::AttrFloatArray(position));
+    let ori = hole_data.ori;
+    map.entry("STUCG8".to_string()).or_insert(AttrValue::AttrString(ori));
+
+    let subs_type = hole_data.subs_type;
+    map.entry("STUCG10".to_string()).or_insert(AttrValue::AttrString(subs_type));
+    let subs_thickness = hole_data.subs_thickness;
+    let size_width = hole_data.size_width;
+    map.entry("STUCG11".to_string()).or_insert(AttrValue::AttrFloatArray(vec![size_width, subs_thickness]));
+
+    let extent_length_1 = hole_data.extent_length1;
+    let extent_length_2 = hole_data.extent_length2;
+    let size_throw_wall = hole_data.size_throw_wall;
+    map.entry("STUCG12".to_string()).or_insert(AttrValue::AttrFloatArray(vec![extent_length_1, size_throw_wall, extent_length_2]));
+
+    let subs_material = hole_data.subs_material;
+    map.entry("STUCG13".to_string()).or_insert(AttrValue::AttrString(subs_material));
+    map.entry("STUCG14".to_string()).or_insert(AttrValue::AttrVec3Array(vec![Vec3::ZERO, Vec3::ZERO]));
+
+    map.entry("STUCG15".to_string()).or_insert(AttrValue::AttrFloat(0.0));
+    let plug_type = hole_data.plug_type;
+    map.entry("STUCG16".to_string()).or_insert(AttrValue::AttrBool(plug_type.is_empty()));
+    // let plug_type = match_plug_type_str(&plug_type[..1]);
+    map.entry("STUCG17".to_string()).or_insert(AttrValue::AttrString(plug_type));
+    map.entry("STUCG19".to_string()).or_insert(AttrValue::AttrString("".to_string()));
+
+    let hole_work = hole_data.hole_work;
+    map.entry("STUCG21".to_string()).or_insert(AttrValue::AttrString(hole_work));
+    let work_by = hole_data.work_by;
+    map.entry("STUCG22".to_string()).or_insert(AttrValue::AttrString(work_by));
+    let time = hole_data.time.replace("/", "-");
+    let time = convert_time_to_vec(&time);
+    map.entry("STUCG23".to_string()).or_insert(AttrValue::AttrStrArray(time));
+    let open_item = hole_data.open_item;
+    map.entry("STUCG24".to_string()).or_insert(AttrValue::AttrString(open_item));
+    let note = hole_data.note;
+    map.entry("STUCG25".to_string()).or_insert(AttrValue::AttrString(note));
+
+    let fitt_refno = hole_data.fitt_refno;
+    map.entry("STUCG26".to_string()).or_insert(AttrValue::AttrString(fitt_refno));
+    let hole_b_pid = hole_data.hole_bpid;
+    map.entry("STUCG27".to_string()).or_insert(AttrValue::AttrString(hole_b_pid));
+    let hole_b_pver = hole_data.hole_bpver;
+    map.entry("STUCG28".to_string()).or_insert(AttrValue::AttrString(hole_b_pver));
+    let rely_item_b_pid = hole_data.rely_item_bpid;
+    map.entry("STUCG29".to_string()).or_insert(AttrValue::AttrString(rely_item_b_pid));
+    let rely_item_b_pver = hole_data.rely_item_bpver;
+    map.entry("STUCG30".to_string()).or_insert(AttrValue::AttrString(rely_item_b_pver));
+    Ok(map)
+}
+
 async fn query_stuch_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, AttrValue>> {
     let mut map = HashMap::new();
     let sql = gen_query_hole_data_sql(id);
@@ -385,6 +655,64 @@ async fn query_stuch_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap
         }
         _ => {}
     }
+    Ok(map)
+}
+
+async fn query_stuch_data_aql(hole_data: VirtualHoleGraphNode) -> anyhow::Result<HashMap<String, AttrValue>> {
+    let mut map = HashMap::new();
+    let item_ref = hole_data.item_ref;
+    let value = get_item_ref_value(item_ref, HoleType::STUCG);
+    map.entry("STUCH1".to_string()).or_insert(AttrValue::AttrItemArray(value));
+    let subs_type = hole_data.subs_type;
+    map.entry("STUCH2".to_string()).or_insert(AttrValue::AttrString(subs_type));
+    let code = hole_data._key;
+    map.entry("STUCH3".to_string()).or_insert(AttrValue::AttrString(code));
+    let rely_item = hole_data.rely_item;
+    map.entry("STUCH4".to_string()).or_insert(AttrValue::AttrString(rely_item));
+    let rely_item_ref = hole_data.rely_item_ref;
+    map.entry("STUCH5".to_string()).or_insert(AttrValue::AttrString(rely_item_ref));
+
+    let mut pipe_line_map = HashMap::new();
+    pipe_line_map.entry("工艺管道".to_string()).or_insert_with(Vec::new).push("Test".to_string());
+    map.entry("STUCH6".to_string()).or_insert(AttrValue::AttrMap(pipe_line_map));
+    let position = hole_data.position;
+    let position = get_pos_from_str(position);
+    let position = if position.len() > 2 { position } else { vec![0.0, 0.0, 0.0] };
+    map.entry("STUCH7".to_string()).or_insert(AttrValue::AttrFloatArray(position));
+    let ori = hole_data.ori;
+    map.entry("STUCH8".to_string()).or_insert(AttrValue::AttrString(ori));
+
+    let extent_length_1 = hole_data.extent_length1;
+    let extent_length_2 = hole_data.extent_length2;
+    let size_throw_wall = hole_data.size_throw_wall;
+    map.entry("STUCH10".to_string()).or_insert(AttrValue::AttrFloatArray(vec![extent_length_1, size_throw_wall, extent_length_2]));
+    let plug_type = hole_data.plug_type;
+    map.entry("STUCH11".to_string()).or_insert(AttrValue::AttrBool(plug_type.is_empty()));
+    map.entry("STUCH12".to_string()).or_insert(AttrValue::AttrString(plug_type));
+    map.entry("STUCH14".to_string()).or_insert(AttrValue::AttrString("600".to_string()));
+
+    let hole_work = hole_data.hole_work;
+    map.entry("STUCH15".to_string()).or_insert(AttrValue::AttrString(hole_work));
+    let work_by = hole_data.work_by;
+    map.entry("STUCH16".to_string()).or_insert(AttrValue::AttrString(work_by));
+    let time = hole_data.time.replace("/", "-");
+    let time = convert_time_to_vec(&time);
+    map.entry("STUCH17".to_string()).or_insert(AttrValue::AttrStrArray(time));
+    let open_item = hole_data.open_item;
+    map.entry("STUCH18".to_string()).or_insert(AttrValue::AttrString(open_item));
+    let note = hole_data.note;
+    map.entry("STUCH19".to_string()).or_insert(AttrValue::AttrString(note));
+
+    let fitt_refno = hole_data.fitt_refno;
+    map.entry("STUCH20".to_string()).or_insert(AttrValue::AttrString(fitt_refno));
+    let hole_b_pid = hole_data.hole_bpid;
+    map.entry("STUCH21".to_string()).or_insert(AttrValue::AttrString(hole_b_pid));
+    let hole_b_pver = hole_data.hole_bpver;
+    map.entry("STUCH22".to_string()).or_insert(AttrValue::AttrString(hole_b_pver));
+    let rely_item_b_pid = hole_data.rely_item_bpid;
+    map.entry("STUCH23".to_string()).or_insert(AttrValue::AttrString(rely_item_b_pid));
+    let rely_item_b_pver = hole_data.rely_item_bpver;
+    map.entry("STUCH24".to_string()).or_insert(AttrValue::AttrString(rely_item_b_pver));
     Ok(map)
 }
 
@@ -534,6 +862,61 @@ pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &Database) -
     Ok(result)
 }
 
+pub async fn query_hole_data_by_keys_aql(keys: Vec<String>, database: &Database) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
+    let aql = AqlQuery::new("
+    for key in @keys
+        let c = document(@@hole_collection,key)
+        filter c != null
+        return {
+            '_key': c._key,
+            'RelyItem': c.RelyItem,
+            'MainItem': c.MainItem,
+            'Speciality': c.Speciality,
+            'Position': c.Position,
+            'HoleWork': c.HoleWork,
+            'WorkBy': c.WorkBy,
+            'Time': c.Time,
+            'Shape': c.Shape,
+            'Ori': c.Ori,
+            'ItemREF': c.ItemREF,
+            'RelyItemREF': c.RelyItemREF,
+            'MainItemREF': c.MainItemREF,
+            'OpenItem': c.OpenItem,
+            'PlugType': c.PlugType,
+            'SizeHeight': c.SizeHeight,
+            'SizeWidth': c.SizeWidth,
+            'BankWidth': c.BankWidth,
+            'BankHeight': c.BankHeight,
+            'HotDis': c.HotDis,
+            'HeatThick': c.HeatThick,
+            'refNo': c.refNo,
+            'FittRefNo': c.FittRefNo,
+            'SubsMaterial': c.SubsMaterial,
+            'SubsThickness': c.SubsThickness,
+            'iCreate': c.iCreate,
+            'SubsType': c.SubsType,
+            'ExtentLength1': c.ExtentLength1,
+            'ExtentLength2': c.ExtentLength2,
+            'Second': c.Second,
+            'ReHole': c.ReHole,
+            'Note': c.Note,
+            'SizeThrowWall': c.SizeThrowWall,
+            'HoleBPID': c.HoleBPID,
+            'HoleBPVER': c.HoleBPVER,
+            'RelyItemBPID': c.RelyItemBPID,
+            'RelyItemBPVER': c.RelyItemBPVER,
+            'MainPipeline': c.MainPipeline,
+            'iFlowState': c.iFlowState,
+            'hType': c.hType,
+            'MainItems': c.MainItems,
+            'MainItemRefs': c.MainItemRefs
+        }")
+        .bind_var("keys", keys)
+        .bind_var("@hole_collection", AQL_HOLE_DATA_COLLECTION);
+    let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
+    Ok(result)
+}
+
 /// 查询所有的孔洞信息
 pub async fn query_hole_data_total_aql(database: &Database) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
     let aql = AqlQuery::new("
@@ -587,17 +970,17 @@ pub async fn query_hole_data_total_aql(database: &Database) -> anyhow::Result<Ve
 }
 
 /// 删除孔洞的信息，并删除边
-pub async fn delete_hole_data_aql(keys:Vec<String>,database:&Database) -> anyhow::Result<bool> {
+pub async fn delete_hole_data_aql(keys: Vec<String>, database: &Database) -> anyhow::Result<bool> {
     let edge_aql = AqlQuery::new("\
     for key in @keys
         for c,e in 1 inbound CONCAT('hole_data/',key) hole_edge
             REMOVE e._key IN hole_edge
-    ").bind_var("keys",keys.clone());
+    ").bind_var("keys", keys.clone());
     let result = database.aql_query::<Vec<()>>(edge_aql).await;
     let data_aql = AqlQuery::new("\
     for key in @keys
        REMOVE key IN hole_data
-    ").bind_var("keys",keys);
+    ").bind_var("keys", keys);
     let result = database.aql_query::<Vec<()>>(data_aql).await;
     Ok(!result.is_err())
 }
@@ -657,6 +1040,28 @@ async fn test_gen_stucj_data() -> anyhow::Result<()> {
         }
     }
     let mut file = fs::File::create("孔洞.json")?;
+    let data = DataCenterProject {
+        package_code: DataCenterProject::convert_package_code(),
+        project_code: "1516".to_string(),
+        owner: "KY1801-208".to_string(),
+        instances,
+    };
+    let data = serde_json::to_string(&data).unwrap();
+    file.write_all(&data.into_bytes())?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_gen_stucj_data_aql() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let keys = vec!["8DB55F00DF18E30-B32E-19".to_string()];
+    let instances = gen_hole_datacenter_instance_aql(keys, &database).await;
+    let mut file = fs::File::create("孔洞_aql.json")?;
     let data = DataCenterProject {
         package_code: DataCenterProject::convert_package_code(),
         project_code: "1516".to_string(),

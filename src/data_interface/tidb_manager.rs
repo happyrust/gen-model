@@ -123,7 +123,7 @@ static GENRIC_NOUN_NAMES: Lazy<Vec<SmolStr>> = Lazy::new(|| {
     ]
 });
 
-#[derive(Debug)]
+// #[derive(Debug)]
 pub struct AiosDBManager {
     //不同project的连接池子
     pub project_map: DashMap<String, Pool<MySql>>,
@@ -149,6 +149,8 @@ pub struct AiosDBManager {
     pub cache_module_numbdbs: BTreeSet<i32>,
 
     pub mdb_dbnums: BTreeSet<i32>,
+
+    pub rtree: AccelerationTree,
 }
 
 #[async_trait]
@@ -717,19 +719,20 @@ impl PdmsDataInterface for AiosDBManager {
 
 
     ///获得在一定范围的构件参考号列表
-    async fn get_refnos_within_bound_radius(&self, refno: RefU64, distance: f32) -> anyhow::Result<Vec<RefU64>>{
-        let rtree = self.compute_aabb_tree().await?;
+    async fn get_refnos_within_bound_radius(&self, refno: RefU64, distance: f32) -> anyhow::Result<Vec<RefU64>> {
+        // let rtree = self.compute_aabb_tree().await?;
+        let rtree = &self.rtree;
 
         let instances = query_instance_with_refnos_in_arangodb(vec![refno],
                                                                &self.arango_db).await?.unwrap_or_default();
         if instances.is_empty() { return Ok(vec![]); }
         let pos = instances[0].world_transform.translation;
         let target_refnos = rtree.query_within_distance(pos, distance)
-            .collect();;
+            .collect();
+        ;
 
         Ok(target_refnos)
     }
-
 }
 
 impl AiosDBManager {
@@ -744,6 +747,7 @@ impl AiosDBManager {
             &db_option.mdb_name,
             &db_option.module,
         ).await?;
+        mgr.init_rtree().await?;
         Ok(mgr)
     }
 
@@ -857,38 +861,32 @@ impl AiosDBManager {
 
     ///计算所有房间包含的其他参考号
     pub async fn calculate_rooms(&self) -> anyhow::Result<()> {
-        let rtree = self.compute_aabb_tree().await?;
-        dbg!("r tree ok");
+        // let rtree = self.compute_aabb_tree().await?;
+        let rtree = &self.rtree;
 
         //指定哪个site下有房间节点
         let Some(room_root_refnos) = &self.db_option.room_root_refnos else {
             return Ok(());
         };
-        dbg!(&room_root_refnos);
         let mut room_hashmap = HashMap::new();
         for r in room_root_refnos {
-            let Ok(room_root_refno) = RefU64::from_refno_str(r) else{
+            let Ok(room_root_refno) = RefU64::from_refno_str(r) else {
                 continue;
             };
             let panes = query_deep_children_refnos_fuzzy(&self.arango_db, room_root_refno, &["PANE"]).await?;
-            dbg!(&panes.len());
             let instances = query_instance_with_refnos_in_arangodb(panes,
                                                                    &self.arango_db).await?.unwrap_or_default();
-            dbg!(&instances.len());
             let mut final_within_room_refnos = vec![];
             for inst in &instances {
                 let r = self.calculate_room(inst, &rtree).await?;
                 final_within_room_refnos.extend_from_slice(&r);
             }
 
-            dbg!(&final_within_room_refnos.len());
             // final_within_room_refnos.remove
             room_hashmap.insert(room_root_refno, final_within_room_refnos);
         }
 
         self.save_room_info_to_arangodb(room_hashmap).await?;
-        dbg!("save ok");
-
         Ok(())
     }
 
@@ -1081,6 +1079,7 @@ impl AiosDBManager {
             cached_world_transforms_map: Arc::new(Default::default()),
             cache_module_numbdbs: Default::default(),
             mdb_dbnums: Default::default(),
+            rtree: Default::default(),
         })
     }
 
@@ -1137,7 +1136,7 @@ impl AiosDBManager {
         for v in result {
             if let project = v.get::<String, _>(1) {
                 dbg!(&project);
-                let Some(project_pool) = self.get_project_pool(&project) else { continue };
+                let Some(project_pool) = self.get_project_pool(&project) else { continue; };
                 if let Some(world_refno) = query_world_refno_by_dbno(db_num, &project_pool).await? {
                     let db_type = v.get::<String, _>(0);
                     return Ok(Some(DbQuickInfo {
@@ -1263,6 +1262,12 @@ impl AiosDBManager {
             return Ok(Some(k.0.clone()));
         }
         Ok(None)
+    }
+
+    pub async fn init_rtree(&mut self) -> anyhow::Result<()> {
+        let rtree = self.compute_aabb_tree().await?;
+        self.rtree = rtree;
+        Ok(())
     }
 }
 
