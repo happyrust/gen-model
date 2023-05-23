@@ -41,6 +41,9 @@ pub async fn query_all_plat_user(pool: &Pool<MySql>) -> anyhow::Result<Vec<Strin
     Ok(result)
 }
 
+
+
+
 fn gen_b_exit_user_sql(user: &str) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT COUNT(1) FROM PuHuaPlatUser WHERE NAME = '{}'", user));
@@ -52,7 +55,11 @@ fn gen_query_all_plat_user_sql() -> String {
     sql.push_str(&format!("SELECT work_num FROM PuHuaPlatUser"));
     sql
 }
-
+pub fn gen_query_all_personnel_info_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT work_num,name FROM PuHuaPlatUser"));
+    sql
+}
 /// 生成人员信息的插入语句
 fn gen_insert_plat_user_sql(users: Vec<PuHuaPlatUser>) -> String {
     let mut sql = String::from("INSERT IGNORE INTO PuHuaPlatUser (id, work_num, name, depart) VALUES ");
