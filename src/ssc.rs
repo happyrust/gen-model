@@ -315,12 +315,6 @@ pub fn parse_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
 
-    // while let Some(result) = iter.next() {
-    //     let v: RoomExcelData = result.and_then(|r| {
-    //
-    //     });
-    // }
-
     while let Some(result) = iter.next() {
         let v: RoomExcelData = result?;
         if let Some(install_workshop) = v.install_plant {
