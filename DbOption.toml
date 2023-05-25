@@ -1,26 +1,26 @@
 #同步文件配置
 total_sync = true
 sync_graph_db = false
-sync_tidb = false
+sync_tidb = true
 incr_sync = false
 replace_dbs = false
 
 #项目设置
-project_path = "D:/new/AVEVA/Plant/Projects12.1.SP4"  #TestCatalogue
-included_projects = ["AvevaMarineSample" ]
+project_path = "D:/AVEVA/Projects/E3D2.1"  #TestCatalogue
+included_projects = ["AvevaMarineSample"]
 #, "AvevaCatalogue", "SCB", "ZDJ"
-#included_projects = ["AvevaCatalogue"]  #"AvevaPlantSample",
+#included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]  #"AvevaPlantSample",
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
 module = "DESI"
 gen_model_mesh = true
-gen_spatial_tree = false
+gen_spatial_tree = true
 save_spatial_tree_to_db = false
 gen_model_batch_size = 100
 
 #arangodb 配置
 arangodb_database = "ams"
-multi_threads = false
+multi_threads = true
 only_sync_sys = false
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
@@ -28,33 +28,38 @@ rebuild_ssc_tree = false
 #tidb 配置
 ip = "127.0.0.1"
 user = "root"
-password = ""
+password = "root"
 port = "3306"
 #port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 500   #mysql 批量插入的数量
-server_release_ip ="127.0.0.1:9099"
+server_release_ip = "127.0.0.1:9099"
 arangodb_user = "root"
 arangodb_password = ""
+# 普华数据库连接
+puhua_database_ip = "pms.powerpms.net:23306"
+puhua_database_user = "ZY_User"
+puhua_database_password = "ZYuser@123"
 
 #调试选项
-replace_mesh = true
+replace_mesh = false
 save_model_mesh_to_graph_db = true
-need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
+need_sync_refno_basic = true  #是否重新生成 refno_basic 缓存
 reset_mdb_project = false      #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
-debug_root_refnos = ["24381/56660"]
+debug_root_refnos = ["24383/66456"]
 #debug_branch_refno = "24383/100842"
 #debug_desi_refno = "24381/56685"
-debug_refno_types = ["CATA"]  # "CATA", "LOOP", "PRIM"
+debug_refno_types = ["CATA", "LOOP", "PRIM"]  # "CATA", "LOOP", "PRIM"
 #debug_refno_types = ["CATA", "LOOP", "PRIM"]
-debug_db_num = 7997
+#debug_db_num = 7997
 #included_db_files = ["acp7002_0001"]
-#replace_types = ["SDTE"]
+#replace_types = ["MDB"]
 manual_db_nums = [7999]
 plat_url = ""
 enable_log = false
+room_root_refnos = ["24381/34919"]
 
 
