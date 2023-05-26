@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync = false
+total_sync = true
 enable_log = false
 sync_graph_db = true
 sync_tidb = true
@@ -24,13 +24,13 @@ gen_model_batch_size = 100
 arangodb_database = "ams"
 multi_threads = true
 only_sync_sys = false
-arangodb_url = "http://192.168.31.179:8529"
+arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
 arangodb_user = "root"
 arangodb_password = ""
 
 #tidb 配置
-ip = "192.168.31.179"
+ip = "127.0.0.1"
 user = "root"
 password = ""
 #port = "3306"
@@ -39,7 +39,7 @@ sql_threads_number = 50
 batch_insert_sql_cnt = 500   #mysql 批量插入的数量
 
 #服务器启动配置
-server_release_ip = "192.168.31.179:9099"
+server_release_ip = "127.0.0.1:9099"
 
 
 #调试选项
@@ -52,8 +52,8 @@ debug_print_world_transform = false
 only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
-#included_db_files = ["ams1112_0001"]
-included_db_files = ["acp7001_0001"]
+included_db_files = ["ams1112_0001"]
+#included_db_files = ["acp7001_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 manual_db_nums = [1112, 8000]
 plat_url = ""

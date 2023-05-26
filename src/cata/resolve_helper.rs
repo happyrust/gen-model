@@ -9,7 +9,7 @@ use aios_core::tiny_expr::expr_eval::interp;
 use aios_core::tool::float_tool::*;
 use anyhow::anyhow;
 use bevy::log::error;
-use glam::{Vec2, Vec3};
+use glam::{Mat3, Quat, Vec2, Vec3};
 use itertools::any;
 use nom::Parser;
 use regex::{Captures, NoExpand, Regex};
@@ -650,6 +650,58 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
     return Ok((dir, pos));
 }
 
+//Y is N and Z is U
+pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(ori_str: &str, context: &BTreeMap<SmolStr, SmolStr>, interface: Option<&T>) -> anyhow::Result<Quat> {
+    let dir_strs = ori_str.split(" and ").collect::<Vec<_>>();
+    // dbg!(&dir_strs);
+    if dir_strs.len() < 2 {
+        return Err(anyhow!("不是方位字符串"));
+    };
+    let mut mat = Mat3::IDENTITY;
+    let mut comb_dir_str = String::new();
+    for i in 0..2 {
+        let d = dir_strs[i].trim();
+        let strs = d.split("is").collect::<Vec<_>>();
+        // dbg!(&strs);
+        if strs.len() != 2 {
+            return Err(anyhow!("不是方位字符串"));
+        }
+
+        // dbg!(d.chars().next().unwrap());
+        let f = strs[0].trim().to_uppercase();
+        // dbg!(&f);
+
+        let dir_str = strs[1].trim()
+            .replace("E", "X")
+            .replace("W", "-X")
+            .replace("N", "Y")
+            .replace("S", "-Y")
+            .replace("U", "Z")
+            .replace("D", "-Z");
+        // dbg!(&dir_str);
+        let dir = parse_str_axis_to_vec3(&dir_str, context, interface)?;
+        // dbg!(dir);
+        comb_dir_str.push_str(f.as_str());
+        match f.as_str() {
+            "X" => mat.x_axis = dir,
+            "Y" => mat.y_axis = dir,
+            "Z" => mat.z_axis = dir,
+            _ => {}
+        }
+    }
+
+    match comb_dir_str.as_str() {
+        "XY" => mat.z_axis = mat.x_axis.cross(mat.y_axis).normalize_or_zero(),
+        "YZ" => mat.x_axis = mat.y_axis.cross(mat.z_axis).normalize_or_zero(),
+        "XZ" => mat.y_axis = mat.z_axis.cross(mat.x_axis).normalize_or_zero(),
+        _ => {}
+    }
+
+    dbg!(&mat);
+
+    Ok(Quat::from_mat3(&mat))
+}
+
 pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>, interface: Option<&T>) -> anyhow::Result<Vec3> {
     let dir_str = pdir.to_uppercase().replace("AXIS", "");
     let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();
@@ -687,7 +739,7 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeM
             }
         }
     }
-    let v = parse_expr_to_dir(&new_dir_str.replace(" ", ""));
+    let v = parse_expr_to_dir(&new_dir_str.replace(" ", "")).ok_or(anyhow!("方向字符串不正确。"))?;
     Ok(Vec3::new(f32_round_2(v[0]), f32_round_2(v[1]), f32_round_2(v[2])))
 }
 

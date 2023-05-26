@@ -3,7 +3,7 @@ use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
 use aios_core::tiny_expr::expr_eval::interp;
 use bevy::prelude::KeyCode::At;
 use regex::Regex;
-use crate::cata::resolve_helper::{eval_str_to_f32, eval_str_to_f64, parse_str_axis_to_vec3};
+use crate::cata::resolve_helper::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::test::test_helper::get_test_ams_db_manager;
 
@@ -64,26 +64,6 @@ fn parse_3_axis() {
 }
 
 
-
-//AXIS -Y ( ATAN ( ( DESP[2 ] / 2 + DESP[10 ] ) / ( DESP[3 ] / 2 - DESP[11 ] ) ) ) X
-#[test]
-fn parse_axis() {
-    // let str = "X ( 45 )  Y ( 35 ) Z";
-    //-X (DESIGN PARAM 14 ) -Y
-    let mut context = BTreeMap::new();
-    context.insert("DESP4".into(), "800.0".into());
-    context.insert("DESP5".into(), "300.0".into());
-    context.insert("DESP10".into(), "200.0".into());
-    context.insert("DESP11".into(), "0.0".into());
-    // context.insert("RPRO_CPAR".into(), "DESIGN PARAM 14".into());
-    let str = "AXIS -Y ( ATAN ( ( DESP[2 ] / 2 + DESP[10 ] ) / ( DESP[3 ] / 2 - DESP[11 ] ) ) ) X";
-    let r = parse_str_axis_to_vec3::<AiosDBManager>(str, &context, None);
-    dbg!(r);
-    //AXIS -Y ( ATANT ( 0 - DESP[10 ] - ( DESP[4 ] - DESP[5 ] ) / 2 , 0 - DESP[11 ] ) ) -X
-    let str = "AXIS -Y (ATANT((DESP[10]-(DESP[4]-DESP[5])/2),(0-DESP[11]))) X";
-    let r = parse_str_axis_to_vec3::<AiosDBManager>(str, &context, None);
-    dbg!(r);
-}
 
 
 //[(.*[^-])([-?X|Y|Z])]?

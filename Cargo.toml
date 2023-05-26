@@ -6,7 +6,7 @@ edition = "2021"
 [features]
 default = ["opencascade"]
 truck = []
-#opencascade = []  #"dep:opencascade"
+opencascade = ["dep:opencascade"]  #"dep:opencascade"
 viewer = []  #是否开启视图
 
 [dependencies]

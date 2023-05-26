@@ -661,7 +661,7 @@ impl PdmsDataInterface for AiosDBManager {
                     plin_pos = Vec3::new(x, y, 0.0);
                 }
                 if let Some(v) = CACHED_PLIN_MAP.get(&refno) {
-                    pline_plax = parse_expr_to_dir(&v.value());
+                    pline_plax = parse_expr_to_dir(&v.value()).unwrap_or(Vec3::Z);
                 }
                 let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
                 let y_axis = Vec3::Z;
