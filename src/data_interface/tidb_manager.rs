@@ -976,7 +976,7 @@ impl AiosDBManager {
         if need_sync_refno_basic {
             for project in &self.db_option.included_projects {
                 if let Some(kv) = self.project_map.get(project) {
-                    sync_refno_basic_map(kv.value() /* &self.mdb_dbnums*/).await.unwrap();
+                    sync_refno_basic_map(kv.value()).await.unwrap();
                 }
             }
         }
@@ -1101,8 +1101,6 @@ impl AiosDBManager {
                     return Some((project.clone(), project_pool.value().clone()));
                 }
             } else {
-                //check if exist in pdms_elements
-                // for project in projects.value() {
                 for project in &self.db_option.included_projects {
                     if let Some(pool) = self.get_project_pool(project) {
                         if check_exist_refno(refno, &pool, &self.mdb_dbnums).await.ok()? {
@@ -1163,9 +1161,9 @@ impl AiosDBManager {
                 for (i, db_refno) in dbs.iter().enumerate() {
                     if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {
                         let db_num = att.get_i32("NUMBDB").unwrap_or_default();
-                        dbg!(&db_num);
+                        // dbg!(&db_num);
                         if let Ok(Some(mut quick_info)) = self.query_quick_info_by_dbno(*db_refno, db_num, info_pool).await {
-                            dbg!(&quick_info.db_type);
+                            // dbg!(&quick_info.db_type);
                             quick_info.order_number = i as _;
                             map.entry(quick_info.db_type.clone())
                                 .or_insert_with(Vec::new).push(quick_info);
@@ -1566,7 +1564,7 @@ impl AiosDBManager {
             }
             let mut geoms = geoms.unwrap();
             //有隐含管段
-            if has_tubi && !attr.is_type("ATTA") {
+            if has_tubi && (!attr.is_type("ATTA") && !attr.is_type("WELD")) {
                 bran_comp_vec.push(attr.get_refno().unwrap());
                 if let Some(arrive) = attr.get_i32("ARRI") {
                     if geoms.axis_map.contains_key(&arrive) {
@@ -1653,10 +1651,6 @@ impl AiosDBManager {
             if has_tubi {
                 //最后一段的管道
                 if refno == last_child {
-                    // dbg!(refno);
-                    // dbg!(bran_comp_vec.last());
-                    // dbg!(bran_ttube_pt);
-                    // dbg!(current_tubing.start_pt);
                     if !current_tubing.finished
                         && bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL
                     {
@@ -1782,6 +1776,7 @@ impl AiosDBManager {
                     }
                     ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
                     for (ele_refno, shapes) in brep_shapes_map {
+                        // dbg!(&shapes);
                         let o = mgr
                             .get_world_transform(ele_refno)
                             .await
@@ -1847,6 +1842,7 @@ impl AiosDBManager {
                                 cached_mesh_mgr.gen_pdms_mesh(brep_shape.clone(), replace_mesh);
                             // dbg!(geo_hash);
                             let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
+                            // dbg!(&bbox);
                             if bbox.is_none() {
                                 continue;
                             }
@@ -2601,7 +2597,7 @@ impl AiosDBManager {
             rx_stream
                 .for_each_concurrent(20, {
                     |(has_geom_refno, mgr_cloned, inst_mgr_cloned)| async move {
-                        Self::process_boolean_operations(has_geom_refno, mgr_cloned, inst_mgr_cloned).await;
+                        Self::process_csg_boolean_operations(has_geom_refno, mgr_cloned, inst_mgr_cloned).await;
                     }
                 })
                 .await;
@@ -2622,13 +2618,171 @@ impl AiosDBManager {
         Ok(true)
     }
 
-
-    async fn process_boolean_operations(has_geom_refno: RefU64, mgr: Arc<AiosDBManager>, instance_mgr: Arc<RwLock<ShapeInstancesMgr>>) -> anyhow::Result<bool> {
+    async fn process_csg_boolean_operations(has_geom_refno: RefU64, mgr: Arc<AiosDBManager>, instance_mgr: Arc<RwLock<ShapeInstancesMgr>>) -> anyhow::Result<bool> {
         let pos_neg_map = mgr.query_refnos_has_pos_neg_map(has_geom_refno).await.unwrap_or_default();
         // dbg!(&pos_neg_map);
         let has_neg = !pos_neg_map.is_empty();
         // dbg!(has_neg);
         //如果有负实体，直接合在一起，不需要再拆分
+        //有点太慢了，todo 改用manifold 库试试
+        for (comp_refno, (pos_refnos, neg_refnos)) in pos_neg_map {
+            dbg!(comp_refno);
+            let mut pos_meshes = vec![];
+            let mut neg_meshes = vec![];
+            let mut w_aabb: Option<Aabb> = None;
+            //没有正实体的情况，直接跳过
+            if pos_refnos.is_empty() { continue; }
+            let Ok(Some(w_trans)) = mgr.get_world_transform(comp_refno).await else {
+                continue;
+            };
+            let mut total_refnos = pos_refnos.clone();
+            total_refnos.extend_from_slice(&neg_refnos);
+            // dbg!(&total_refnos);
+            dbg!(&pos_refnos);
+            let inverse_mat = w_trans.compute_matrix().inverse();
+            {
+                let inst_mgr = instance_mgr.read().await;
+                let mesh_mgr = mgr.cached_mesh_mgr.read().await;
+                let mut neg_need_offset = false;
+                'outer: for t_refno in total_refnos {
+                    let Some(geos_info) = inst_mgr.get(&t_refno) else {
+                        continue;
+                    };
+                    // dbg!(geos_info);
+                    if let Some(mut w_aabb) = w_aabb {
+                        w_aabb.merge(&geos_info.aabb.unwrap());
+                    } else {
+                        w_aabb = geos_info.aabb;
+                    }
+                    for geo_inst in &geos_info.geo_insts {
+                        let geo_refno = geo_inst.refno;
+                        // dbg!(geo_refno);
+                        let Some(mesh) = mesh_mgr.get_mesh(geo_inst.geo_hash) else {
+                            // dbg!(geo_inst);
+                            continue;
+                        };
+                        // dbg!("Get shape");
+                        let Ok(Some(geo_mat)) = mgr.get_world_transform(geo_refno).await else {
+                            continue;
+                        };
+                        let ele_mat = inverse_mat * geo_mat.compute_matrix();
+
+                        // dbg!(ele_mat.to_scale_rotation_translation());
+                        let local_mat = ele_mat * geo_inst.transform.compute_matrix();
+
+                        let csg_mesh = mesh.into_csg_mesh(&local_mat);
+
+                        // dbg!(&local_mat);
+                        //如果scale都是一样的，只需要用transform
+                        // let (s, r, t) = local_mat.to_scale_rotation_translation();
+                        // let is_scale_same = abs_diff_eq!(s.max_element(), s.min_element(), epsilon=0.01);
+                        // dbg!(is_scale_same);
+                        // let shape = if is_scale_same {
+                        //     occ_shape.transform(&local_mat.as_dmat4()).unwrap()
+                        // } else {
+                        //     occ_shape.g_transform(&local_mat.as_dmat4()).unwrap()
+                        // };
+
+                        if pos_refnos.contains(&t_refno) {
+                            // neg_need_offset = matches!(geo_inst.geo_param, PrimExtrusion(_));
+                            // dbg!(neg_need_offset);
+                            pos_meshes.push(csg_mesh)
+                        } else {
+                            // if geo_refno == RefU64::from_two_nums(24381, 35205) {
+                            //     continue;
+                            // }
+                            // dbg!(t_refno);
+                            //说明，这里特殊处理一下，如果被切割的是 extrusion,，需要将负实体扩张一下，不然生成的不对
+                            // if neg_need_offset {
+                            //     let cut_shape = shape.offset(1.0).expect("Offset shape error.");
+                            //     neg_shapes.push(cut_shape);
+                            // } else {
+                            neg_meshes.push(csg_mesh);
+                            // }
+                        }
+                    }
+                }
+            }
+            let geo_hash = *comp_refno;
+            let mut inst_mgr = instance_mgr.write().await;
+            let mut mesh_mgr = mgr.cached_mesh_mgr.write().await;
+            if pos_meshes.is_empty() { return Ok(false); }
+            let mut final_mesh = pos_meshes.pop().unwrap();
+            for pos_mesh in pos_meshes {
+                final_mesh = final_mesh + pos_mesh;
+            }
+            for neg_mesh in neg_meshes {
+                final_mesh = final_mesh - neg_mesh;
+            }
+            mesh_mgr.insert(geo_hash, final_mesh.into());
+            // dbg!(pos_shapes.len());
+            // dbg!(neg_shapes.len());
+            // let mut final_shape = None;
+            // if let Ok(mut pos_compound_shape) = OCCShape::fuse_shapes(&pos_shapes)
+            //     && let Ok(neg_compound_shape) = OCCShape::fuse_shapes(&neg_shapes)
+            // {
+            //     println!("Cut by merged.");
+            //     if let Ok(s) = pos_compound_shape.cut(&neg_compound_shape, 1.0) {
+            //         final_shape = Some(s);
+            //     }
+            // }
+            // if final_shape.is_none() {
+            //     if let Ok(mut pos_compound_shape) = OCCShape::fuse_shapes(&pos_shapes) {
+            //         println!("Cut by merged failed, so by each one.");
+            //         for neg_shape in &neg_shapes {
+            //             pos_compound_shape = pos_compound_shape.cut(neg_shape, 1.0).unwrap();
+            //         }
+            //         final_shape = Some(pos_compound_shape);
+            //     }
+            // }
+
+            // if let Some(s) = final_shape {
+            //     let size = w_aabb.unwrap().bounding_sphere().radius as f64;
+            //     dbg!(size);
+            //     let mesh: PdmsMesh = s.mesh(0.01 * size).unwrap().into();
+            //     mesh_mgr.insert(geo_hash, mesh);
+            // } else {
+            //     println!("Cut 失败.");
+            // }
+
+            let geom_inst = EleGeoInstance {
+                geo_hash,
+                refno: comp_refno,
+                pts: vec![],
+                aabb: None,
+                transform: Transform::IDENTITY,
+                geo_param: PdmsGeoParam::CompoundShape,
+                visible: true,
+                is_tubi: false,
+                is_neg: false,
+            };
+
+            let mut geos_info = EleGeosInfo {
+                refno: comp_refno,
+                geo_insts: vec![geom_inst],
+                // geo_insts: vec![],
+                visible: true,
+                generic_type: mgr.get_generic_type(comp_refno),
+                aabb: w_aabb,
+                world_transform: w_trans,
+                ptset_map: default(),
+                flow_pt_indexs: default(),
+                has_neg: true,
+            };
+            // dbg!(&geos_info);
+            inst_mgr.insert(comp_refno, geos_info);
+        }
+
+        return Ok(true);
+    }
+
+    async fn process_occ_boolean_operations(has_geom_refno: RefU64, mgr: Arc<AiosDBManager>, instance_mgr: Arc<RwLock<ShapeInstancesMgr>>) -> anyhow::Result<bool> {
+        let pos_neg_map = mgr.query_refnos_has_pos_neg_map(has_geom_refno).await.unwrap_or_default();
+        // dbg!(&pos_neg_map);
+        let has_neg = !pos_neg_map.is_empty();
+        // dbg!(has_neg);
+        //如果有负实体，直接合在一起，不需要再拆分
+        //有点太慢了，todo 改用manifold 库试试
         for (comp_refno, (pos_refnos, neg_refnos)) in pos_neg_map {
             dbg!(comp_refno);
             let mut pos_shapes = vec![];
@@ -2683,26 +2837,23 @@ impl AiosDBManager {
                         } else {
                             occ_shape.g_transform(&local_mat.as_dmat4()).unwrap()
                         };
-                        // let shape = occ_shape.scale();
-                        // dbg!(&w_aabb);
-                        // dbg!(local_mat);
-                        // dbg!(local_mat.to_scale_rotation_translation());
+
                         if pos_refnos.contains(&t_refno) {
                             neg_need_offset = matches!(geo_inst.geo_param, PrimExtrusion(_));
                             dbg!(neg_need_offset);
                             pos_shapes.push(shape)
-                            // final_shape = final_shape.map(|x| x.fuse(&shape, 1.0).expect("occ shape Fuse 出错"));
                         } else {
                             // if geo_refno == RefU64::from_two_nums(24381, 35205) {
                             //     continue;
                             // }
+                            dbg!(t_refno);
                             //说明，这里特殊处理一下，如果被切割的是 extrusion,，需要将负实体扩张一下，不然生成的不对
-                            if neg_need_offset {
-                                let cut_shape = shape.offset(1.0).expect("Offset shape error.");
-                                neg_shapes.push(cut_shape);
-                            } else {
+                            // if neg_need_offset {
+                            //     let cut_shape = shape.offset(1.0).expect("Offset shape error.");
+                            //     neg_shapes.push(cut_shape);
+                            // } else {
                                 neg_shapes.push(shape);
-                            }
+                            // }
                         }
                     }
                 }
@@ -2713,14 +2864,14 @@ impl AiosDBManager {
             // dbg!(pos_shapes.len());
             // dbg!(neg_shapes.len());
             let mut final_shape = None;
-            if let Ok(mut pos_compound_shape) = OCCShape::fuse_shapes(&pos_shapes)
-                && let Ok(neg_compound_shape) = OCCShape::fuse_shapes(&neg_shapes)
-            {
-                println!("Cut by merged.");
-                if let Ok(s) = pos_compound_shape.cut(&neg_compound_shape, 1.0) {
-                    final_shape = Some(s);
-                }
-            }
+            // if let Ok(mut pos_compound_shape) = OCCShape::fuse_shapes(&pos_shapes)
+            //     && let Ok(neg_compound_shape) = OCCShape::fuse_shapes(&neg_shapes)
+            // {
+            //     println!("Cut by merged.");
+            //     if let Ok(s) = pos_compound_shape.cut(&neg_compound_shape, 1.0) {
+            //         final_shape = Some(s);
+            //     }
+            // }
             if final_shape.is_none() {
                 if let Ok(mut pos_compound_shape) = OCCShape::fuse_shapes(&pos_shapes) {
                     println!("Cut by merged failed, so by each one.");

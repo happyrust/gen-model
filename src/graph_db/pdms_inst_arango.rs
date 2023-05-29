@@ -43,16 +43,16 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, instance_mgr: &Shape
             };
             edges.push(serde_json::to_value(&edge).unwrap());
         }
-        let aql = AqlQuery::new("LET data = @elements
+        let aql = AqlQuery::new(r#"LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true }")
+                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
             .bind_var("elements", take(&mut instances));
         database.aql_query::<Vec<()>>(aql).await?;
 
-        let aql = AqlQuery::new("LET data = @edges
+        let aql = AqlQuery::new(r#"LET data = @edges
                     FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
             .bind_var("@collection", edge_collection)
             .bind_var("edges", take(&mut edges));
         database.aql_query::<Vec<()>>(aql).await?;

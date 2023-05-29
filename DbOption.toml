@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync = true
+total_sync = false
 enable_log = false
 sync_graph_db = true
 sync_tidb = true
@@ -15,8 +15,8 @@ included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
 module = "DESI"
-gen_model_mesh = false
-gen_spatial_tree = true
+gen_model_mesh = true
+gen_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 100
 
@@ -55,7 +55,7 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 included_db_files = ["ams1112_0001"]
 #included_db_files = ["acp7001_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
-manual_db_nums = [1112, 8000]
+manual_db_nums = [1112]  #, 8000
 plat_url = ""
 
 #joint还有问题，方位对齐的问题
@@ -113,6 +113,9 @@ plat_url = ""
 #debug_root_refnos = ["17496/106397"]
 
 #24381_105593
+
+debug_root_refnos = ["17496/167201"]
+#debug_root_refnos = ["17496/169950"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]

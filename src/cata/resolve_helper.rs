@@ -603,6 +603,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             // }))
             // }
             "SSPH" | "NSSP" => {
+                // dbg!(&gmse);
                 // 球
                 CateGeoParam::Sphere(CateSphereParam {
                     refno: gmse.refno,

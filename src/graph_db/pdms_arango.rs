@@ -573,9 +573,9 @@ pub async fn save_dtse_value_to_arangodb(db_option: &DbOption, type_ele_map: &Da
 
 pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &str) -> anyhow::Result<()> {
     let database = mgr.get_arangodb().await?;
-    let aql = AqlQuery::new("LET data = @elements
+    let aql = AqlQuery::new(r#"LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
         .bind_var("@collection", collection)
         .bind_var("elements", json);
     let _result: Vec<()> = database.aql_query(aql).await?;
@@ -584,12 +584,12 @@ pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &st
 
 pub async fn save_arangodb_with_db_option(json: Value, db_option: &DbOption, collection: &str) -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(db_option).await?;
-    let mut aql_string = "LET data = @elements
+    let mut aql_string = r#"LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }".to_string();
-    if db_option.replace_dbs {
-        aql_string = aql_string.replace("INSERT", "REPLACE");
-    }
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#.to_string();
+    // if db_option.replace_dbs {
+    //     aql_string = aql_string.replace("INSERT", "REPLACE");
+    // }
     let aql = AqlQuery::new(&aql_string)
         .bind_var("@collection", collection)
         .bind_var("elements", json);
@@ -598,13 +598,13 @@ pub async fn save_arangodb_with_db_option(json: Value, db_option: &DbOption, col
 }
 
 pub async fn save_arangodb_with_database(json: Value, collection: &str, database: &Database, replace: bool) -> anyhow::Result<()> {
-    let mut aql_string = "LET data = @elements
+    let mut aql_str = r#"LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }".to_string();
-    if replace {
-        aql_string = aql_string.replace("INSERT", "REPLACE");
-    }
-    let aql = AqlQuery::new(&aql_string)
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#;
+    // if replace {
+    //     aql_string = aql_string.replace("INSERT", "REPLACE");
+    // }
+    let aql = AqlQuery::new(aql_str)
         .bind_var("@collection", collection)
         .bind_var("elements", json);
     let _result: Vec<()> = database.aql_query(aql).await?;
@@ -632,12 +632,12 @@ pub async fn save_arangodb_with_db_option_create_collection(json: Value, db_opti
             database.create_edge_collection(collection).await?;
         }
     }
-    let mut aql_string = "LET data = @elements
+    let mut aql_string = r#"LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }".to_string();
-    if db_option.replace_dbs {
-        aql_string = aql_string.replace("INSERT", "REPLACE");
-    }
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#.to_string();
+    // if db_option.replace_dbs {
+    //     aql_string = aql_string.replace("INSERT", "REPLACE");
+    // }
     let aql = AqlQuery::new(&aql_string)
         .bind_var("@collection", collection)
         .bind_var("elements", json);

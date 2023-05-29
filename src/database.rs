@@ -661,7 +661,7 @@ pub async fn sync_total_async_threaded(
                 }
 
                 for (type_hash, type_refnos) in type_ele_map {
-                    continue;
+                    // continue;
                     if b_replace_types {
                         let replace_types = replace_types.clone().unwrap();
                         let att_type = db1_dehash(type_hash);

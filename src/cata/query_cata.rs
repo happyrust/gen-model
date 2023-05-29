@@ -4,7 +4,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use aios_core::parsed_data::CateGeomsInfo;
 use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::AttrVal::IntArrayType;
-use aios_core::pdms_types::{AttrMap, RefU64, TOTAL_GEO_NOUN_NAMES};
+use aios_core::pdms_types::{AttrMap, RefU64, TOTAL_CATA_GEO_NOUN_NAMES, TOTAL_GEO_NOUN_NAMES};
 use anyhow::anyhow;
 use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
@@ -28,6 +28,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     //todo 改到使用图数据库去查找
     if scom_ref.is_none() {
         if let Some(spre_ref) = desi_att.get_foreign_refno("SPRE") {
+            // dbg!(spre_ref);
             let spre = interface.get_attr(spre_ref).await?;
             if spre.contains_attr_name("CATR") {
                 scom_ref = spre.get_foreign_refno("CATR");
@@ -48,12 +49,13 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             }
         }
     }
+    // dbg!(scom_ref);
     let scom_ref = scom_ref.ok_or(anyhow!(format!(
         "SCOM not exist in element: {}",
         refno.to_refno_str()
     )))?;
     if !scom_ref.is_valid() {
-        error!("{} 的CAT引用不存在，为 {}", refno.to_refno_str(), scom_ref.to_refno_str());
+        println!("{} 的CAT引用不存在，为 {}", refno.to_refno_str(), scom_ref.to_refno_str());
         return Ok(Default::default());
     }
     //缓存备用
@@ -203,7 +205,8 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_travel_children_attrs(refno, &TOTAL_GEO_NOUN_NAMES).await.unwrap();
+    let children = interface.get_travel_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
+    dbg!(children.len());
     //todo 获得所有的几何数据，需要用几何type去过滤
     // let children = interface.get_children_attrs(refno).await.unwrap();
     for geo_am in children {
