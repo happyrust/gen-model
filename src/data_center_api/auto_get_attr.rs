@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use aios_core::data_center::DataCenterAttr;
 use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
 use anyhow::anyhow;
@@ -15,6 +15,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use dashmap::DashMap;
 use sqlx::{Executor, MySql, Pool, Row};
 use crate::consts::PUHUA_MATERIAL_TABLE;
+use crate::data_center_api::pipe::get_datacenter_bran_data;
 
 lazy_static! {
    pub static ref MATERIAL_MAP: DashMap<String, DashMap<String,String>> = {
@@ -43,13 +44,16 @@ pub struct DataCenterMetadata {
 }
 
 /// 通过处理后的元数据表，根据用户填的function获取部分数据
-pub async fn auto_get_datacenter_attr(refno: RefU64, aios_mgr: &AiosDBManager, metadata_excel_map: &HashMap<String, Vec<DataCenterMetadata>>) -> anyhow::Result<()> {
-    let attr = aios_mgr.get_attr(refno).await?;
+pub async fn auto_get_datacenter_attr(refno: RefU64, aios_mgr: &AiosDBManager,attr:&AttrMap,
+                                      metadata_excel_map: &HashMap<String, Vec<DataCenterMetadata>>) -> anyhow::Result<BTreeMap<String, DataCenterAttr>> {
+    let mut map = BTreeMap::new();
     let att_type = attr.get_type();
-    let Some(metadata) = metadata_excel_map.get(att_type) else { return Ok(()); };
+    let Some(metadata) = metadata_excel_map.get(att_type) else { return Ok(map); };
     let values = auto_get_attr_from_metadata_excel(refno, &attr, metadata, aios_mgr).await;
-    dbg!(&values);
-    Ok(())
+    for value in values {
+        map.entry(value.attribute_model_code.clone()).or_insert(value);
+    }
+    Ok(map)
 }
 
 /// 读取处理后的专业元数据表单,将可以自动获取数据的条目返回
@@ -233,7 +237,7 @@ async fn test_read_data_center_metadata_excel() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let path = "./resource/附录I-工艺布置管件类元数据.xlsx";
     let result = read_data_center_metadata_excel(path).unwrap();
-    let refno = RefU64::from_refno_str("24383/66460")?;
-    auto_get_datacenter_attr(refno, &aios_mgr, &result).await?;
+    let refno = RefU64::from_refno_str("24383/66509")?;
+    get_datacenter_bran_data(&aios_mgr, refno, &result).await?;
     Ok(())
 }
