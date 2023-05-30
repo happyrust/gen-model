@@ -9,7 +9,7 @@ pub mod embed;
 pub mod equi;
 pub mod valv;
 pub mod inst;
-pub (crate) mod bran;
+pub mod bran;
 pub (crate) mod tubi;
 mod tee;
 mod elbo;
