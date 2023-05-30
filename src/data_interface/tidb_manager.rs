@@ -931,6 +931,16 @@ impl AiosDBManager {
         let port = d.port.as_str();
         format!("mysql://{user}:{pwd}@{ip}:{port}")
     }
+
+    #[inline]
+    pub fn puhua_conn_str(&self) -> String {
+        let d = &self.db_option;
+        let user = d.puhua_database_user.as_str();
+        let pwd = d.puhua_database_password.as_str();
+        let ip = d.puhua_database_ip.as_str();
+        format!("mysql://{user}:{pwd}@{ip}")
+    }
+
     /// 获得pool
     #[inline]
     pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
@@ -947,6 +957,18 @@ impl AiosDBManager {
     pub async fn get_global_pool(&self) -> anyhow::Result<Pool<MySql>> {
         let connection_str = self.default_conn_str();
         let url = &format!("{connection_str}/{}", GLOBAL_DATABASE);
+        PoolOptions::new()
+            .max_connections(500)
+            .acquire_timeout(Duration::from_secs(10 * 60))
+            .connect(url)
+            .await
+            .map_err({ |x| anyhow!(x.to_string()) })
+    }
+
+    #[inline]
+    pub async fn get_puhua_pool(&self) -> anyhow::Result<Pool<MySql>> {
+        let conn = self.puhua_conn_str();
+        let url = &format!("{conn}/{}", PUHUA_MATERIAL_DATABASE);
         PoolOptions::new()
             .max_connections(500)
             .acquire_timeout(Duration::from_secs(10 * 60))

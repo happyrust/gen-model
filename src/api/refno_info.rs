@@ -85,7 +85,7 @@ pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: &[i32], arango_db: &Data
     Ok(result)
 }
 
-/// 获取设备的底标高
+/// 通过uda，获取设备的底标高
 pub async fn query_refno_height_position(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<String> {
     let explicit_attr = query_explicit_attr(refno, pool).await?;
     let position = explicit_attr.get(&NounHash(WDJZ as u32));

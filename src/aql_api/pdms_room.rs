@@ -117,6 +117,24 @@ pub async fn query_all_need_compute_room_refno(dbno: &Vec<i32>,
     Ok(refnos)
 }
 
+/// 传入参考号 返回该参考号所在的房间
+pub async fn query_room_name_from_refno_aql(refno: RefU64, database: &Database) -> anyhow::Result<Option<String>> {
+    let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let aql = AqlQuery::new("
+    for v,e in 1 inbound @id room_edges
+         return v.name )
+    ").bind_var("id", refno);
+    let result = database.aql_query::<String>(aql).await;
+    match result {
+        Ok(data) => {
+            Ok(Some(data[0].to_string()))
+        }
+        Err(_) => {
+            Ok(None)
+        }
+    }
+}
+
 /// 获取该参考号属于哪个房间 room_name_type : 存放房间名的类型
 pub async fn query_room_info_from_refno(refno: RefU64, room_name_type: &str, database: &Database) -> anyhow::Result<Option<String>> {
     let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
@@ -256,7 +274,7 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &Database) -> any
         set.insert(refno);
         r.push(PdmsElement {
             refno,
-            owner:result.owner,
+            owner: result.owner,
             name: result.name,
             noun: result.noun,
             version: 0,
@@ -265,7 +283,6 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &Database) -> any
     }
     Ok(r)
 }
-
 
 
 #[tokio::test]
@@ -281,6 +298,7 @@ async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
     dbg!(&name);
     Ok(())
 }
+
 #[tokio::test]
 async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
@@ -295,7 +313,6 @@ async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
     dbg!(&room_name);
     Ok(())
 }
-
 
 
 #[test]
