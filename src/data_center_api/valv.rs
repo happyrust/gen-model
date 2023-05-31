@@ -8,7 +8,9 @@ use sqlx::{MySql, Pool};
 use crate::api::children::query_owner_till_type;
 use crate::api::element::{query_name, query_owner_from_id};
 use crate::api::room_code::query_room_code;
-use crate::aql_api::children::{query_owner_with_type_aql, query_refnos_travel_children_with_type_aql, query_travel_children_aql};
+use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_owner_with_type_aql, query_refnos_travel_children_with_type_aql, query_travel_children_aql};
+use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
+use crate::data_center_api::data_api::get_quarantine_room_name;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
 
@@ -38,14 +40,15 @@ pub async fn get_valv_data(refnos: Vec<RefU64>, database: &Database, pool: &Pool
 }
 
 /// 获取防火阀数据 通风专业
-pub async fn get_tf_fireproof_valv_data(refnos: Vec<RefU64>, database: &Database,pool:&Pool<MySql>) -> anyhow::Result<DataCenterProject> {
+pub async fn get_tf_fireproof_valv_data(refnos: Vec<RefU64>, aios_mgr:&AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut instance = Vec::new();
+    let database = aios_mgr.get_arangodb().await?;
     if let Ok(valves) = query_refnos_travel_children_with_type_aql(database, refnos, vec!["DAMP"]).await {
         for valv in valves {
             let name = if valv.name.starts_with("/") { valv.name[1..].to_string() } else { valv.name };
             if name.len() < 10 { continue; }
             let mut attr = Vec::new();
-            let replace_name = name.replace("-","");
+            let replace_name = name.replace("-", "");
             attr.push(DataCenterAttr {
                 attribute_model_code: "COMP1".to_string(),
                 value: AttrValue::AttrString(replace_name[..1].to_string()).into(),
@@ -66,27 +69,35 @@ pub async fn get_tf_fireproof_valv_data(refnos: Vec<RefU64>, database: &Database
                 attribute_model_code: "COMP6".to_string(),
                 value: AttrValue::AttrString(name.to_string()).into(),
             });
-            let bran_name = query_name(valv.owner,pool).await?;
-            let bran_name_split = bran_name.split("-").collect::<Vec<_>>();
-            let mut hvac_name = "".to_string();
-            for bran_name in bran_name_split {
-                if bran_name.len() == 1 && bran_name != "/" {
-                    hvac_name = bran_name.to_string();
-                }
-                if !hvac_name.is_empty() { break; }
+            // let bran_name = query_name(valv.owner,pool).await?;
+            // let bran_name_split = bran_name.split("-").collect::<Vec<_>>();
+            // let mut hvac_name = "".to_string();
+            // for bran_name in bran_name_split {
+            //     if bran_name.len() == 1 && bran_name != "/" {
+            //         hvac_name = bran_name.to_string();
+            //     }
+            //     if !hvac_name.is_empty() { break; }
+            // }
+            // attr.push(DataCenterAttr {
+            //     attribute_model_code: "HVAC26".to_string(),
+            //     value: AttrValue::AttrString(hvac_name).into(),
+            // });
+            let room_name = get_quarantine_room_name(valv.refno, database).await?;
+            let Some(zone_name) = query_ancestor_name_of_type_aql(database, valv.refno, "ZONE").await? else { continue; };
+
+            let mut room_model_code = "COMPBBA2".to_string();
+            let mut object_model_code = "COMPBBA".to_string();
+            if zone_name.contains("VES") {
+                room_model_code = "COMPBBB1".to_string();
+                object_model_code = "COMPBBB".to_string();
             }
             attr.push(DataCenterAttr {
-                attribute_model_code: "HVAC21".to_string(),
-                value: AttrValue::AttrString(hvac_name).into(),
+                attribute_model_code: room_model_code,
+                value: AttrValue::AttrStrArray(vec![room_name.0, room_name.1]).into(),
             });
-            let room_name = query_room_code(valv.refno, pool).await?.unwrap_or("".to_string());
-            attr.push(DataCenterAttr {
-                attribute_model_code: "COMPBBB1".to_string(),
-                value: AttrValue::AttrString(room_name).into(),
-            });
-            instance.push(DataCenterInstance{
-                object_model_code: "COMPBBA".to_string(),
-                project_code: "1516".to_string(),
+            instance.push(DataCenterInstance {
+                object_model_code,
+                project_code: aios_mgr.db_option.project_code.to_string(),
                 instance_code: name,
                 version: "A版".to_string(),
                 attributes: attr,
@@ -114,7 +125,7 @@ async fn test_valv() -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let refno = RefU64::from_refno_str("24383/67619").unwrap();
     let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
-    let data = get_valv_data(vec![refno], &database,&pool).await.unwrap();
+    let data = get_valv_data(vec![refno], &database, &pool).await.unwrap();
     let mut file = fs::File::create("阀门.json")?;
     let data = serde_json::to_string(&data).unwrap();
     file.write_all(&data.into_bytes())?;

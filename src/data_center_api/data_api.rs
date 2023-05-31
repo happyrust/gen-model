@@ -1,5 +1,6 @@
 use aios_core::data_center::DataCenterAttr;
 use aios_core::pdms_types::{AttrMap, RefU64};
+use arangors_lite::Database;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -8,7 +9,7 @@ use crate::api::children::travel_children_with_type;
 use crate::api::element::{query_name, query_refno_type, query_types_refnos};
 use crate::aql_api::children::query_travel_children_with_type_aql;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
-use crate::aql_api::pdms_room::{get_room_name_split, query_room_info_from_refno};
+use crate::aql_api::pdms_room::{get_room_name_split, query_room_info_from_refno, query_room_name_from_refno_aql};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
@@ -160,6 +161,12 @@ pub async fn get_rtext_from_attr(attr: &AttrMap, aios_mgr: &AiosDBManager) -> an
 /// spre_code: 元件编码
 pub fn get_thickness_pressure_level(thickness:&str,thickness_value:&str,pressure_level:&str,spre_code:&str) -> Vec<DataCenterAttr> {
     vec![]
+}
+
+/// 获取该元件的房间号，和离该元件最近的其他房间的房间号
+pub async fn get_quarantine_room_name(refno:RefU64,database:&Database) -> anyhow::Result<(String,String)> {
+    let room_name = query_room_name_from_refno_aql(refno, database).await?.unwrap_or("".to_string());
+    Ok((room_name,"".to_string()))
 }
 
 #[tokio::test]

@@ -91,7 +91,7 @@ pub async fn get_inst_equi_data(refnos: Vec<RefU64>, aios_mgr:&AiosDBManager) ->
                 });
             }
             instance.push(DataCenterInstance{
-                object_model_code: "COMP".to_string(),
+                object_model_code: "COMPAD".to_string(),
                 project_code: "1516".to_string(),
                 instance_code: name,
                 version: "A版".to_string(),
@@ -101,7 +101,7 @@ pub async fn get_inst_equi_data(refnos: Vec<RefU64>, aios_mgr:&AiosDBManager) ->
     }
     Ok(DataCenterProject {
         package_code: DataCenterProject::convert_package_code(),
-        project_code: "1516".to_string(),
+        project_code: aios_mgr.db_option.project_code.to_string(),
         owner: "KY1801".to_string(),
         instances: instance,
     })
