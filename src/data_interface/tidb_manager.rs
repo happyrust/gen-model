@@ -41,6 +41,7 @@ use std::default::default;
 use std::default::Default;
 use std::env;
 use std::f32::EPSILON;
+use std::fmt::{Debug, Formatter};
 use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -123,7 +124,7 @@ static GENRIC_NOUN_NAMES: Lazy<Vec<SmolStr>> = Lazy::new(|| {
     ]
 });
 
-#[derive(Debug)]
+// #[derive(Debug)]
 pub struct AiosDBManager {
     //不同project的连接池子
     pub project_map: DashMap<String, Pool<MySql>>,
@@ -149,6 +150,14 @@ pub struct AiosDBManager {
     pub cache_module_numbdbs: BTreeSet<i32>,
 
     pub mdb_dbnums: BTreeSet<i32>,
+
+    pub rtree: Option<AccelerationTree>,
+}
+
+impl Debug for AiosDBManager{
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "db manager project is {}", &self.project_path)
+    }
 }
 
 #[async_trait]
@@ -718,7 +727,8 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获得在一定范围的构件参考号列表
     async fn get_refnos_within_bound_radius(&self, refno: RefU64, distance: f32) -> anyhow::Result<Vec<RefU64>>{
-        let rtree = self.compute_aabb_tree().await?;
+        // let rtree = self.compute_aabb_tree().await?;
+        let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
 
         let instances = query_instance_with_refnos_in_arangodb(vec![refno],
                                                                &self.arango_db).await?.unwrap_or_default();
@@ -744,16 +754,11 @@ impl AiosDBManager {
             &db_option.mdb_name,
             &db_option.module,
         ).await?;
+        mgr.compute_aabb_tree().await?;
         Ok(mgr)
     }
 
-    ///重新连接arangodb
-    #[inline]
-    pub async fn reconnect_arangodb(&mut self) {
-        // self.arango_db = get_arangodb_conn_from_db_option(&self.db_option).await.unwrap();
-    }
-
-    pub async fn compute_aabb_tree(&self) -> anyhow::Result<AccelerationTree> {
+    pub async fn compute_aabb_tree(&mut self) -> anyhow::Result<bool> {
         //测试分页查询
         let mut rstar_objs = vec![];
         let mut offset = 0;
@@ -771,9 +776,8 @@ impl AiosDBManager {
                 ]
         "#)
                 .bind_var("offset", offset)
-                .bind_var("batch_size", 1000);
-            offset += 1000;
-            // let mut query_ok = false;
+                .bind_var("batch_size", 5000);
+            offset += 5000;
             if let Ok(refno_aabbs) = self.arango_db.aql_query::<(String, Aabb)>(aql).await {
                 if refno_aabbs.is_empty() {
                     break;
@@ -791,10 +795,10 @@ impl AiosDBManager {
 
         dbg!(offset);
 
-        let rtree = AccelerationTree::load(rstar_objs);
-        dbg!(rtree.size());
+        self.rtree = Some(AccelerationTree::load(rstar_objs));
+        dbg!(self.rtree.as_ref().unwrap().size());
 
-        Ok(rtree)
+        Ok(true)
     }
 
     async fn calculate_room(&self, inst: &EleGeosInfo, rtree: &AccelerationTree) -> anyhow::Result<Vec<RefU64>> {
@@ -857,8 +861,7 @@ impl AiosDBManager {
 
     ///计算所有房间包含的其他参考号
     pub async fn calculate_rooms(&self) -> anyhow::Result<()> {
-        let rtree = self.compute_aabb_tree().await?;
-
+        let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
         //指定哪个site下有房间节点
         let Some(room_root_refnos) = &self.db_option.room_root_refnos else {
             return Ok(());
@@ -871,17 +874,18 @@ impl AiosDBManager {
             };
             let panes = query_deep_children_refnos_fuzzy(&self.arango_db, room_root_refno, &["PANE"]).await?;
             // dbg!(&panes);
+            println!("房间下的panel数量为: {}", panes.len());
             let instances = query_instance_with_refnos_in_arangodb(panes,
                                                                    &self.arango_db).await?.unwrap_or_default();
             // dbg!(&instances);
             let mut final_within_room_refnos = vec![];
             for inst in &instances {
-                let r = self.calculate_room(inst, &rtree).await?;
+                let r = self.calculate_room(inst, rtree).await?;
                 final_within_room_refnos.extend_from_slice(&r);
             }
 
             // dbg!(&final_within_room_refnos);
-            // final_within_room_refnos.remove
+            println!("房间内元件的数量为：{}", final_within_room_refnos.len());
             room_hashmap.insert(room_root_refno, final_within_room_refnos);
         }
 
@@ -1068,6 +1072,7 @@ impl AiosDBManager {
             cached_world_transforms_map: Arc::new(Default::default()),
             cache_module_numbdbs: Default::default(),
             mdb_dbnums: Default::default(),
+            rtree: None,
         })
     }
 

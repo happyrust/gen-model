@@ -54,8 +54,8 @@ only_rebuild_pdms_element = false
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 included_db_files = ["ams1112_0001"]
 #included_db_files = ["acp7001_0001"]
-#manual_db_nums = [7999, 7997, 1112, 8000]
-manual_db_nums = [1112]  #, 8000
+manual_db_nums = [7999, 7997, 1112, 8000]
+#manual_db_nums = [1112]  #, 8000
 plat_url = ""
 
 #joint还有问题，方位对齐的问题
@@ -114,7 +114,7 @@ plat_url = ""
 
 #24381_105593
 
-debug_root_refnos = ["17496/167201"]
+#debug_root_refnos = ["17496/167201"]
 #debug_root_refnos = ["17496/169950"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体

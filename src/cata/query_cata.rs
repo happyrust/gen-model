@@ -206,7 +206,7 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
     let children = interface.get_travel_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
-    dbg!(children.len());
+    // dbg!(children.len());
     //todo 获得所有的几何数据，需要用几何type去过滤
     // let children = interface.get_children_attrs(refno).await.unwrap();
     for geo_am in children {
@@ -293,7 +293,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     if let Some(link_cat_ref) = int
         .query_foreign_refno(des_refno, &[&["CREF"], &["SPRE", "CATR"]], &["SPRE", "CATR"],&[])
         .await?{
-        dbg!(link_cat_ref);
+        // dbg!(link_cat_ref);
         let link_cat_am = interface.as_ref().unwrap().get_attr(link_cat_ref).await?;
         let params = link_cat_am.get_f64_vec("PARA").unwrap_or_default();
         for i in 0..params.len() {
