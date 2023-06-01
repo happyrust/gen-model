@@ -164,7 +164,7 @@ pub async fn query_ancestor_with_name_till_type_aql(arango_database: &Database, 
 pub async fn query_ancestor_name_of_type_aql(arango_database: &Database, refno: RefU64, att_type: &str) -> anyhow::Result<Option<String>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
-    for o in 1..10 outbound @id pdms_edges
+    for o in 0..10 outbound @id pdms_edges
         Filter o.noun == @noun
         return o.name")
         .bind_var("id", refno_aql)

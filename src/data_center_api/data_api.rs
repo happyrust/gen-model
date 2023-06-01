@@ -164,9 +164,35 @@ pub fn get_thickness_pressure_level(thickness:&str,thickness_value:&str,pressure
 }
 
 /// 获取该元件的房间号，和离该元件最近的其他房间的房间号
-pub async fn get_quarantine_room_name(refno:RefU64,database:&Database) -> anyhow::Result<(String,String)> {
+pub(crate) async fn get_quarantine_room_name(refno:RefU64,database:&Database) -> anyhow::Result<(String,String)> {
     let room_name = query_room_name_from_refno_aql(refno, database).await?.unwrap_or("".to_string());
     Ok((room_name,"".to_string()))
+}
+
+/// 获取元件的desc （ catr.desc）
+pub(crate) async fn get_refno_desc(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<String> {
+    let database = aios_mgr.get_arangodb().await?;
+    let Some(catr) = query_foreign_refno_aql(refno, &vec!["SPRE", "CATR"], database).await?
+        else { return Ok("".to_string()); };
+    let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok("".to_string()); };
+    let attr = aios_mgr.get_attr(refno).await?;
+    Ok(attr.get_str("DESC").unwrap_or("").to_string())
+}
+
+/// 获取元件的 desp
+pub(crate) async fn get_refno_desp(refno:RefU64,aios_mgr:&AiosDBManager) -> anyhow::Result<Vec<f64>> {
+    let attr = aios_mgr.get_attr(refno).await?;
+    Ok(attr.get_f64_vec("DESP").unwrap_or(vec![]))
+}
+
+/// 获取元件的 para
+pub(crate) async fn get_refno_paras(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<f64>> {
+    let database = aios_mgr.get_arangodb().await?;
+    let Some(catr) = query_foreign_refno_aql(refno, &vec!["SPRE", "CATR"], database).await?
+        else { return Ok(vec![]); };
+    let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok(vec![]); };
+    let attr = aios_mgr.get_attr(refno).await?;
+    Ok(attr.get_f64_vec("PARA").unwrap_or(vec![]))
 }
 
 #[tokio::test]

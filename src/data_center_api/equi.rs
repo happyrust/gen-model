@@ -58,7 +58,6 @@ pub async fn get_sg_fire_hydrant_equi_data(refnos: Vec<RefU64>, database: &Datab
             let mut attr = Vec::new();
             if !split_equi_name(&name, &mut attr) { continue; }
             let room_name = query_room_name_from_refno_aql(child.refno, database).await?.unwrap_or("".to_string());
-            // let position = query_refno_height_position(child.refno, pool).await?;
             attr.push(DataCenterAttr {
                 attribute_model_code: "COMP8".to_string(),
                 value: AttrValue::AttrString(room_name).into(),
@@ -94,17 +93,18 @@ pub async fn get_dq_cross_element_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMan
             if !child.name.contains("ZZZ") && child.name.len() < 4 { continue; };
             let mut attr = Vec::new();
             let machine_num = get_site_name_first_char(child.refno, database).await?;
+            let name = if child.name.starts_with("/") { child.name[1..].to_string() } else { child.name.to_string() };
             attr.push(DataCenterAttr {
                 attribute_model_code: "COMP1".to_string(),
                 value: AttrValue::AttrString(machine_num).into(),
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "COMP2".to_string(),
-                value: AttrValue::AttrString(child.name[..4].to_string()).into(),
+                value: AttrValue::AttrString(name[..3].to_string()).into(),
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "COMP3".to_string(),
-                value: AttrValue::AttrString(child.name[4..].to_string()).into(),
+                value: AttrValue::AttrString(name[4..].to_string()).into(),
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "COMP4".to_string(),
@@ -146,7 +146,7 @@ async fn get_site_name_first_char(refno: RefU64, database: &Database) -> anyhow:
     let site = query_ancestor_name_of_type_aql(database, refno, "SITE").await?;
     let Some(site_name) = site else { return Ok("".to_string()); };
     if site_name.len() == 0 { return Ok("".to_string()); }
-    Ok(site_name[..1].to_string())
+    Ok(site_name[1..2].to_string())
 }
 
 /// 获取电气设备信息
@@ -190,24 +190,39 @@ pub async fn get_dq_equi_data(refnos: Vec<RefU64>, database: &Database, project_
 /// 返回 false 代表 name 长度小于9
 fn split_equi_name(name: &str, mut datacenter_vec: &mut Vec<DataCenterAttr>) -> bool {
     let name = if name.starts_with("/") { name[1..].to_string() } else { name.to_string() };
-    if name.len() < 9 { return false; };
+    if name.len() < 8 { return false; };
     let replace_name = name.replace("-", "");
     datacenter_vec.push(DataCenterAttr {
         attribute_model_code: "COMP1".to_string(),
         value: AttrValue::AttrString(replace_name[..1].to_string()).into(),
     });
-    datacenter_vec.push(DataCenterAttr {
-        attribute_model_code: "COMP2".to_string(),
-        value: AttrValue::AttrString(replace_name[1..4].to_string()).into(),
-    });
-    datacenter_vec.push(DataCenterAttr {
-        attribute_model_code: "COMP3".to_string(),
-        value: AttrValue::AttrString(replace_name[4..7].to_string()).into(),
-    });
-    datacenter_vec.push(DataCenterAttr {
-        attribute_model_code: "COMP4".to_string(),
-        value: AttrValue::AttrString(replace_name[7..9].to_string()).into(),
-    });
+    if name.len() == 8 {
+        datacenter_vec.push(DataCenterAttr {
+            attribute_model_code: "COMP2".to_string(),
+            value: AttrValue::AttrString(replace_name[1..3].to_string()).into(),
+        });
+        datacenter_vec.push(DataCenterAttr {
+            attribute_model_code: "COMP3".to_string(),
+            value: AttrValue::AttrString(replace_name[3..6].to_string()).into(),
+        });
+        datacenter_vec.push(DataCenterAttr {
+            attribute_model_code: "COMP4".to_string(),
+            value: AttrValue::AttrString(replace_name[6..8].to_string()).into(),
+        });
+    } else {
+        datacenter_vec.push(DataCenterAttr {
+            attribute_model_code: "COMP2".to_string(),
+            value: AttrValue::AttrString(replace_name[1..4].to_string()).into(),
+        });
+        datacenter_vec.push(DataCenterAttr {
+            attribute_model_code: "COMP3".to_string(),
+            value: AttrValue::AttrString(replace_name[4..7].to_string()).into(),
+        });
+        datacenter_vec.push(DataCenterAttr {
+            attribute_model_code: "COMP4".to_string(),
+            value: AttrValue::AttrString(replace_name[7..9].to_string()).into(),
+        });
+    }
     datacenter_vec.push(DataCenterAttr {
         attribute_model_code: "COMP6".to_string(),
         value: name.to_string(),
@@ -234,20 +249,11 @@ async fn test_get_machine_equi_data() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn convert_to_fraction(inches: f64) -> (i32, i32) {
-    let numerator = (inches * 16.0).ceil() as i32;
-    let denominator = 16;
-    (numerator, denominator)
-}
-
-fn convert_to_imperial(dn: f64) -> (i32, i32) {
-    let inches = dn / 25.4;
-    convert_to_fraction(inches)
-}
-
 #[test]
-fn test_unit() {
-    let dn: f64 = 0.7938; // 公制单位（毫米）
-    let (numerator, denominator) = convert_to_imperial(dn);
-    println!("英制单位: {}/{}", numerator, denominator);
+fn test_split() {
+    let input = "ZZZL762";
+    let first = &input[..4];
+    let seconde = &input[4..];
+    dbg!(&first);
+    dbg!(&seconde);
 }

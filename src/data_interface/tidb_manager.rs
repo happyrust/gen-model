@@ -873,7 +873,9 @@ impl AiosDBManager {
             let Ok(room_root_refno) = RefU64::from_refno_str(r) else {
                 continue;
             };
-            let panes = query_deep_children_refnos_fuzzy(&self.arango_db, room_root_refno, &["PANE"]).await?;
+            // let panes = query_deep_children_refnos_fuzzy(&self.arango_db, room_root_refno, &["PANE"]).await?;
+            let panes = query_travel_children_with_type_aql(&self.arango_db, room_root_refno, "PANE").await?;
+            let panes = panes.into_iter().map(|x| x.refno).collect::<Vec<_>>();
             let instances = query_instance_with_refnos_in_arangodb(panes,
                                                                    &self.arango_db).await?.unwrap_or_default();
             let mut final_within_room_refnos = vec![];
