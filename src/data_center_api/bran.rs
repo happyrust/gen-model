@@ -10,7 +10,7 @@ use crate::api::attr::query_explicit_attr;
 use crate::aql_api::children::{query_children_aql, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
-use crate::data_center_api::data_api::{get_refno_desc, get_refno_desp, get_refno_paras};
+use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_paras};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
@@ -165,7 +165,6 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
             }
             let desc = get_refno_desc(bran.refno,aios_mgr).await?;
             let b_partition = if desc.is_empty() { false } else { true };
-
             for child in bran_children {
                 let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], database).await?.unwrap_or_default();
                 let mut object_code = None;
@@ -179,15 +178,15 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
                 if object_code.is_none() { continue };
 
                 let mut attr = Vec::new();
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "ERECB1".to_string(),
-                    value: AttrValue::AttrString(bran.name.clone()).into(),
-                });
-
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "ERECB3".to_string(),
-                    value: AttrValue::AttrString(room_name.clone()).into(),
-                });
+                // attr.push(DataCenterAttr {
+                //     attribute_model_code: "ERECB1".to_string(),
+                //     value: AttrValue::AttrString(bran.name.clone()).into(),
+                // });
+                //
+                // attr.push(DataCenterAttr {
+                //     attribute_model_code: "ERECB3".to_string(),
+                //     value: AttrValue::AttrString(room_name.clone()).into(),
+                // });
 
                 let world_transform = aios_mgr.get_world_transform(child.refno).await?.unwrap_or_default();
                 attr.push(DataCenterAttr {
@@ -195,15 +194,21 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
                     value: AttrValue::AttrVec3(world_transform.translation).into(),
                 });
 
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "ERECB31".to_string(),
-                    value: AttrValue::AttrString(kind.clone()).into(),
-                });
+                let stander_num = get_refno_desc(child.refno, aios_mgr).await.unwrap_or_default();
                 attr.push(DataCenterAttr {
                     attribute_model_code: "PARTE4".to_string(),
-                    value: AttrValue::AttrString(get_refno_desc(child.refno, aios_mgr).await.unwrap_or_default()).into(),
+                    value: AttrValue::AttrString(stander_num.to_string()).into(),
                 });
-
+                let material_map = get_dq_material_code(&spre_name,
+                                                        &stander_num,&vec!["ItemCode".to_string(),"Unit".to_string()],aios_mgr).await.unwrap_or_default();
+                attr.push(DataCenterAttr {
+                    attribute_model_code: "PARTE5".to_string(),
+                    value: AttrValue::AttrString(material_map.get("ItemCode").unwrap_or(&"".to_string()).to_string()).into(),
+                });
+                attr.push(DataCenterAttr {
+                    attribute_model_code: "PARTE12".to_string(),
+                    value: AttrValue::AttrString(material_map.get("Unit").unwrap_or(&"".to_string()).to_string()).into(),
+                });
                 attr.push(DataCenterAttr {
                     attribute_model_code: "PARTE15".to_string(),
                     value: AttrValue::AttrString(tray_width.to_string()).into(),
@@ -212,28 +217,33 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
                     attribute_model_code: "PARTE16".to_string(),
                     value: AttrValue::AttrString(tray_height.to_string()).into(),
                 });
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "ERECB33".to_string(),
-                    value: AttrValue::AttrBool(b_paint).into(),
-                });
-                let desp = get_refno_desp(child.refno,aios_mgr).await?;
-                let mut b_cover = if desp.len() < 3 { false } else { if desp[3] == 1.0 { true } else { false } };
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "PARTEF29".to_string(),
-                    value: AttrValue::AttrBool(b_cover).into(),
-                });
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "ERECB32".to_string(),
-                    value: AttrValue::AttrString(color.to_string()).into(),
-                });
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "ERECB34".to_string(),
-                    value: AttrValue::AttrBool(b_partition).into(),
-                });
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "ERECB35".to_string(),
-                    value: AttrValue::AttrString(bridge_dir.to_string()).into(),
-                });
+
+                // let desp = get_refno_desp(child.refno,aios_mgr).await.unwrap_or_default();
+                // let mut b_cover = if desp.len() < 4 { false } else { if desp[3] == 1.0 { true } else { false } };
+                // attr.push(DataCenterAttr {
+                //     attribute_model_code: "PARTEF29".to_string(),
+                //     value: AttrValue::AttrBool(b_cover).into(),
+                // });
+                // attr.push(DataCenterAttr {
+                //     attribute_model_code: "ERECB31".to_string(),
+                //     value: AttrValue::AttrString(kind.clone()).into(),
+                // });
+                // attr.push(DataCenterAttr {
+                //     attribute_model_code: "ERECB32".to_string(),
+                //     value: AttrValue::AttrString(color.to_string()).into(),
+                // });
+                // attr.push(DataCenterAttr {
+                //     attribute_model_code: "ERECB33".to_string(),
+                //     value: AttrValue::AttrBool(b_paint).into(),
+                // });
+                // attr.push(DataCenterAttr {
+                //     attribute_model_code: "ERECB34".to_string(),
+                //     value: AttrValue::AttrBool(b_partition).into(),
+                // });
+                // attr.push(DataCenterAttr {
+                //     attribute_model_code: "ERECB35".to_string(),
+                //     value: AttrValue::AttrString(bridge_dir.to_string()).into(),
+                // });
                 result.push(DataCenterInstance {
                     object_model_code: object_code.unwrap().to_string(),
                     project_code: aios_mgr.db_option.project_code.to_string(),
@@ -251,4 +261,3 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
         instances: result,
     })
 }
-
