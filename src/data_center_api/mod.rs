@@ -11,6 +11,7 @@ pub mod valv;
 pub mod inst;
 pub mod bran;
 pub (crate) mod tubi;
+pub mod supp;
 mod tee;
 mod elbo;
 mod flan;

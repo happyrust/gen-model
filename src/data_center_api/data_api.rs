@@ -1,15 +1,18 @@
+use std::collections::HashMap;
 use aios_core::data_center::DataCenterAttr;
 use aios_core::pdms_types::{AttrMap, RefU64};
 use arangors_lite::Database;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
+use sqlx::{Executor, Row};
 use crate::api::attr::query_explicit_attr;
 use crate::api::children::travel_children_with_type;
-use crate::api::element::{query_name, query_refno_type, query_types_refnos};
+use crate::api::element::{query_id_from_name, query_name, query_refno_type, query_types_refnos};
 use crate::aql_api::children::query_travel_children_with_type_aql;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::pdms_room::{get_room_name_split, query_room_info_from_refno, query_room_name_from_refno_aql};
+use crate::consts::PUHUA_DQ_MATERIAL_TABLE;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
@@ -159,14 +162,14 @@ pub async fn get_rtext_from_attr(attr: &AttrMap, aios_mgr: &AiosDBManager) -> an
 ///
 /// thickness , thickness_value , pressure_level 为 壁厚,壁厚值,压力等级 在元数据表中对应的属性编码,
 /// spre_code: 元件编码
-pub fn get_thickness_pressure_level(thickness:&str,thickness_value:&str,pressure_level:&str,spre_code:&str) -> Vec<DataCenterAttr> {
+pub fn get_thickness_pressure_level(thickness: &str, thickness_value: &str, pressure_level: &str, spre_code: &str) -> Vec<DataCenterAttr> {
     vec![]
 }
 
 /// 获取该元件的房间号，和离该元件最近的其他房间的房间号
-pub(crate) async fn get_quarantine_room_name(refno:RefU64,database:&Database) -> anyhow::Result<(String,String)> {
+pub(crate) async fn get_quarantine_room_name(refno: RefU64, database: &Database) -> anyhow::Result<(String, String)> {
     let room_name = query_room_name_from_refno_aql(refno, database).await?.unwrap_or("".to_string());
-    Ok((room_name,"".to_string()))
+    Ok((room_name, "".to_string()))
 }
 
 /// 获取元件的desc （ catr.desc）
@@ -180,7 +183,7 @@ pub(crate) async fn get_refno_desc(refno: RefU64, aios_mgr: &AiosDBManager) -> a
 }
 
 /// 获取元件的 desp
-pub(crate) async fn get_refno_desp(refno:RefU64,aios_mgr:&AiosDBManager) -> anyhow::Result<Vec<f64>> {
+pub(crate) async fn get_refno_desp(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<f64>> {
     let attr = aios_mgr.get_attr(refno).await?;
     Ok(attr.get_f64_vec("DESP").unwrap_or(vec![]))
 }
@@ -195,11 +198,68 @@ pub(crate) async fn get_refno_paras(refno: RefU64, aios_mgr: &AiosDBManager) -> 
     Ok(attr.get_f64_vec("PARA").unwrap_or(vec![]))
 }
 
+/// 获取电气专业的标准号
+///
+/// BRAN的 DESC为某个元件的NAME，然后取元件的CATREF的DESC
+pub(crate) async fn get_refno_stander_num(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<String>> {
+    let desc = get_refno_desc(refno, aios_mgr).await?;
+    let desc = if desc.starts_with("/") { desc } else { format!("/{}", desc) };
+    let Some(pool) = aios_mgr.get_project_pool(&aios_mgr.db_option.project_name) else { return Ok(None); };
+    let refno = query_id_from_name(&desc, None, &pool).await?;
+    if refno.is_empty() { return Ok(None); }
+    let desc = get_refno_desc(refno[0], aios_mgr).await?;
+    Ok(Some(desc))
+}
+
+/// 获取电气专业大宗材料信息
+///
+/// stander_num :  BRAN的 DESC为某个元件的NAME，然后取元件的CATREF的DESC
+///
+/// fileds: 需要大宗材料的哪些字段
+pub(crate) async fn get_dq_material_code(spre_name: &str, stander_num: &str, fileds: &Vec<String>, aios_mgr: &AiosDBManager)
+                                         -> anyhow::Result<HashMap<String, String>> {
+    let spre_name_split = spre_name.split("/").collect::<Vec<_>>();
+    let Some(spre_name_split_last) = spre_name_split.last() else { return Ok(HashMap::default()); };
+    let sql = gen_dq_material_code_sql(spre_name_split_last, stander_num, fileds);
+    let pool = aios_mgr.get_puhua_pool().await?;
+    let mut conn = pool.acquire().await?;
+    let query_result = conn.fetch_one(sql.as_str()).await?;
+    let mut map = HashMap::new();
+    for filed in fileds {
+        let Ok(r) = query_result.try_get::<String, _>(filed.as_str()) else { continue; };
+        map.entry(filed.to_string()).or_insert(r);
+    }
+    Ok(map)
+}
+
+fn gen_dq_material_code_sql(spre_name_split: &str, stander_num: &str, fileds: &Vec<String>) -> String {
+    let mut sql = String::from("SELECT ");
+    for filed in fileds {
+        sql.push_str(&format!("{} ,", filed));
+    }
+    sql.remove(sql.len() - 1 );
+    sql.push_str(&format!("FROM `{}` ",PUHUA_DQ_MATERIAL_TABLE));
+    sql.push_str(&format!("WHERE ComponentName = '{}' AND StandardNum = '{}'", spre_name_split, stander_num));
+    sql
+}
+
 #[tokio::test]
 async fn test_get_inst_data_from_inst_major() -> anyhow::Result<()> {
     let mgr = AiosDBManager::init_form_config().await?;
     let refno = RefU64::from_refno_str("24381/103249").unwrap();
     let data = get_inst_data_from_inst_major(refno, &mgr).await?;
     dbg!(data);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_dq_material_code() -> anyhow::Result<()> {
+    let aios_mgr = AiosDBManager::init_form_config().await?;
+    let spre_name = "/ACP1000-Trough/ACP1000-TFVL:50".to_string();
+    let stander_num = "233";
+    let fileds = vec!["ItemCode".to_string(),"Unit".to_string()];
+    let material_map = get_dq_material_code(&spre_name,
+                                            &stander_num,&fileds,&aios_mgr).await?;
+    dbg!(&material_map);
     Ok(())
 }

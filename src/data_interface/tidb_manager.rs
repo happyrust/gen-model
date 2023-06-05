@@ -885,6 +885,7 @@ impl AiosDBManager {
             }
 
             // final_within_room_refnos.remove
+            println!("房间 {} ,包含 {} 个元件", room_root_refno, final_within_room_refnos.len());
             room_hashmap.insert(room_root_refno, final_within_room_refnos);
         }
 

@@ -26,6 +26,7 @@ pub const CHANNEL_STEEL_STANDARD: &'static str = "CHANNEL_STEEL_STANDARD";
 pub const GLOBAL_DATABASE: &'static str = "PROJECT_INFO";
 pub const PUHUA_MATERIAL_DATABASE: &'static str = "hdey_powerpmdb";
 pub const PUHUA_MATERIAL_TABLE: &'static str = "pdms_mat_gy";
+pub const PUHUA_DQ_MATERIAL_TABLE: &'static str = "pdms_traymotlist";
 // project_mdb
 // 专业表单
 pub const PROFESSION_TX_XT: &'static str = "TX_XT";
