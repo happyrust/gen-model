@@ -70,7 +70,7 @@ pub struct RoomExcelData {
     pub room_code: Option<String>,
     /// 所属机组
     #[serde(rename="所属机组")]
-    pub aff_unit: Option<u32>,
+    pub aff_unit: Option<String>,
     ///安装厂房
     #[serde(rename="安装厂房")]
     pub install_plant: Option<String>,
@@ -329,6 +329,7 @@ pub fn parse_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i
     }
     Ok(r)
 }
+
 
 pub fn get_rooms_from_excel() -> anyhow::Result<Vec<String>> {
     let mut r = vec![];
@@ -963,5 +964,12 @@ async fn test_save_ssc_level_excel() -> anyhow::Result<()> {
     let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let _ = save_ssc_level_excel(&database).await?;
+    Ok(())
+}
+
+#[test]
+fn test_parse_room_info_from_excel() -> anyhow::Result<()> {
+    let result = parse_room_info_from_excel()?;
+    dbg!(&result);
     Ok(())
 }

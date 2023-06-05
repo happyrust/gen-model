@@ -635,7 +635,7 @@ async fn test_query_embed_data_by_keys() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let keys = vec!["7f80f3a5-66a4-481f-afd1-22242966de80".to_string()];
-    let r = create_embed_data_aql(keys, &database).await?;
+    let r = create_embed_data_aql(keys, &db_option.project_code,&database).await?;
     // if let Some(r) = r {
     //     let mut file = fs::File::create("埋件_aql.json")?;
     //     let data = serde_json::to_string(&r).unwrap();
