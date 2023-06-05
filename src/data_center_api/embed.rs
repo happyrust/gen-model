@@ -31,20 +31,21 @@ pub async fn create_embed_data(pool: &Pool<MySql>) -> anyhow::Result<Option<Data
     Ok(Some(project))
 }
 
-pub async fn create_embed_data_aql(keys:Vec<String>,database:&Database) -> anyhow::Result<Option<DataCenterProject>> {
+pub async fn create_embed_data_aql(keys: Vec<String>, database: &Database) -> anyhow::Result<Option<Vec<DataCenterInstance>>> {
     let mut instances = Vec::new();
-    let embed_datas = query_embed_data_by_keys_aql(keys,database).await?;
-    for (idx,embed_data) in embed_datas.into_iter().enumerate() {
+    let embed_datas = query_embed_data_by_keys_aql(keys, database).await?;
+    for (idx, embed_data) in embed_datas.into_iter().enumerate() {
         let Some(instance) = get_embed_data_aql(idx, embed_data).await? else { continue; };
         instances.push(instance);
     }
-    let project = DataCenterProject {
-        package_code: DataCenterProject::convert_package_code(),
-        project_code: "1516".to_string(),
-        owner: "KY1801".to_string(),
-        instances,
-    };
-    Ok(Some(project))
+    // let project = DataCenterProject {
+    //     package_code: DataCenterProject::convert_package_code(),
+    //     project_code: "1516".to_string(),
+    //     owner: "KY1801".to_string(),
+    //     instances,
+    // };
+    Ok(Some(instances))
+    // instances
 }
 
 async fn query_embed_data(id: u64, pool: &Pool<MySql>) -> anyhow::Result<Option<DataCenterInstance>> {
@@ -239,7 +240,7 @@ async fn query_embed_data(id: u64, pool: &Pool<MySql>) -> anyhow::Result<Option<
     Ok(None)
 }
 
-async fn get_embed_data_aql(idx:usize,embed_data: VirtualEmbedGraphNode) -> anyhow::Result<Option<DataCenterInstance>> {
+async fn get_embed_data_aql(idx: usize, embed_data: VirtualEmbedGraphNode) -> anyhow::Result<Option<DataCenterInstance>> {
     let mut instances = Vec::new();
     let ref_str = embed_data.ref_standard;
     instances.push(DataCenterAttr {
@@ -634,11 +635,11 @@ async fn test_query_embed_data_by_keys() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let keys = vec!["7f80f3a5-66a4-481f-afd1-22242966de80".to_string()];
-    let r = create_embed_data_aql(keys,&database).await?;
-    if let Some(r) = r {
-        let mut file = fs::File::create("埋件_aql.json")?;
-        let data = serde_json::to_string(&r).unwrap();
-        file.write_all(&data.into_bytes())?;
-    }
+    let r = create_embed_data_aql(keys, &database).await?;
+    // if let Some(r) = r {
+    //     let mut file = fs::File::create("埋件_aql.json")?;
+    //     let data = serde_json::to_string(&r).unwrap();
+    //     file.write_all(&data.into_bytes())?;
+    // }
     Ok(())
 }
