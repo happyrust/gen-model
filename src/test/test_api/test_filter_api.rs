@@ -2,7 +2,7 @@ use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use crate::aql_api::children::query_travel_children_filter_negative_sibl_nodes;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::graph_db::pdms_arango::ArDatabase;
 use crate::test::test_helper::{get_test_ams_db_manager, get_test_ams_db_manager_async};
 
 ///  测试获取包含负实体的集合 （也包含了正实体）

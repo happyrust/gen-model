@@ -6,7 +6,7 @@ use aios_core::db_number::DbNumMgr;
 use aios_core::helper::table::qualified_table_name;
 use aios_core::pdms_types::{AttrVal, NounHash, RefU64, RefU64Vec};
 use anyhow::anyhow;
-use arangors_lite::Database;
+use bb8_arangodb::arangors::Database;
 use crate::consts::*;
 use dashmap::DashMap;
 use sqlx::{Error, MySql, Pool, Row};
@@ -16,6 +16,7 @@ use crate::api::element::query_types_refnos;
 use crate::aql_api::plin_attr::query_plin_attrs;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::defines::CACHED_REFNO_BASIC_MAP;
+use crate::graph_db::pdms_arango::ArDatabase;
 
 
 const WDJZ: i32 = 642952044;
@@ -70,7 +71,7 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>/*, mdb_dbnums: &BTreeSet<i3
     Ok(true)
 }
 
-pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: &[i32], arango_db: &Database) -> anyhow::Result<DashMap<RefU64, String>> {
+pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: &[i32], arango_db: &ArDatabase) -> anyhow::Result<DashMap<RefU64, String>> {
     let mut fitt_map = vec![];
     let fitt_refnos = query_types_refnos(&vec!["FITT"], pool, dbnos).await?;
     if fitt_refnos.len() == 0 { return Ok(DashMap::new()); }

@@ -46,7 +46,10 @@ parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path = "../crates/aios-core" , features = ["opencascade"] }
 bevy = { path = "../crates/bevy", default-features = false }
 csg = { path = "../crates/csgrs/csg" }
-arangors_lite = { path = "../crates/arangors-lite"}
+#arangors_lite = { path = "../crates/arangors-lite"}
+bb8-arangodb = { path = "../crates/bb8-arangodb" }
+arangors = { path = "../crates/arangors"}
+bb8 = "0.8.1"
 
 clap = { version = "3.1.18", features = ["derive"] }
 dashmap = { version = "5.4.0", features = ["serde"] }

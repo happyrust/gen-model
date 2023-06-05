@@ -1,15 +1,15 @@
 use std::sync::Arc;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use arangors_lite::collection::CollectionType::{Document, Edge};
-use arangors_lite::{AqlQuery, Database};
+use bb8_arangodb::arangors::collection::CollectionType::{Document, Edge};
+use bb8_arangodb::arangors::{AqlQuery, Database};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool};
 use crate::api::attr::query_attr;
 use crate::aql_api::children::query_children_aql;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, save_arangodb_with_database};
+use crate::graph_db::pdms_arango::{ArDatabase, create_arango_document, save_arangodb_doc};
 use crate::AQL_PDMS_ELES_COLLECTION;
 
 /// 土建出图轴网需要的数据
@@ -30,9 +30,9 @@ pub struct AxisEdge {
 }
 
 /// 将提前存好的轴网数据从图数据库取出来
-pub async fn query_axis_from_sbfr_aql(sbfr_refno: RefU64, database: &Database) -> anyhow::Result<Vec<AxisData>> {
+pub async fn query_axis_from_sbfr_aql(sbfr_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<AxisData>> {
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", sbfr_refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::builder().query("\
     for v in 1 outbound @id axis_edge
         return {
         '_key':v._key,
@@ -40,13 +40,13 @@ pub async fn query_axis_from_sbfr_aql(sbfr_refno: RefU64, database: &Database) -
         'gtype':v.gtype,
         'pose':v.pose,
         'poss':v.poss,
-    } ").bind_var("id", key);
+    } ").bind_var("id", key).build();
     let result: Vec<AxisData> = database.aql_query(aql).await?;
     Ok(result)
 }
 
 /// 通过 sbfr 参考号 获取下面轴网需要的数据
-pub async fn query_axis_from_sbfr(sbfr_refno: RefU64, database: &Database, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<AxisData>> {
+pub async fn query_axis_from_sbfr(sbfr_refno: RefU64, database: &ArDatabase, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<AxisData>> {
     let mut result = vec![];
     let sctns = query_children_aql(database, sbfr_refno).await?;
     for sctn in sctns {
@@ -71,7 +71,7 @@ pub async fn query_axis_from_sbfr(sbfr_refno: RefU64, database: &Database, aios_
     Ok(result)
 }
 
-async fn save_axis_data(sbfr_refno: RefU64, axis_data: Vec<AxisData>, database: &Database) -> anyhow::Result<()> {
+async fn save_axis_data(sbfr_refno: RefU64, axis_data: Vec<AxisData>, database: &ArDatabase) -> anyhow::Result<()> {
     let axis_eles_collection = "axis_eles";
     let axis_edge_collection = "axis_edge";
     let eles_json = serde_json::to_value(&axis_data)?;
@@ -87,8 +87,8 @@ async fn save_axis_data(sbfr_refno: RefU64, axis_data: Vec<AxisData>, database: 
         })
     }
     let edge_json = serde_json::to_value(&edges)?;
-    save_arangodb_with_database(eles_json, axis_eles_collection, database, false).await?;
-    save_arangodb_with_database(edge_json, axis_edge_collection, database, false).await?;
+    save_arangodb_doc(eles_json, axis_eles_collection, database, false).await?;
+    save_arangodb_doc(edge_json, axis_edge_collection, database, false).await?;
     Ok(())
 }
 
@@ -98,8 +98,8 @@ async fn test_query_axis_from_sbfr() -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option(&mgr.db_option).await?;
     let axis_eles_collection = "axis_eles";
     let axis_edge_collection = "axis_edge";
-    let _ = create_arangodb_conn(&database, axis_eles_collection, Document).await;
-    let _ = create_arangodb_conn(&database, axis_edge_collection, Edge).await;
+    let _ = create_arango_document(&database, axis_eles_collection, Document).await;
+    let _ = create_arango_document(&database, axis_edge_collection, Edge).await;
 
     // 暂时只测这一个轴网
     let refno = RefU64::from_refno_str("23584/56802").unwrap();

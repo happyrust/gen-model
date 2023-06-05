@@ -207,8 +207,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         create_tables_elapse += table_time.elapsed().as_millis();
 
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
-
+        let arrango_pool = connect_arangodb(db_option).await?;
         sync_total_async_threaded(
+            arrango_pool.clone(),
             &db_option,
             project,
             project_pool.clone(),
@@ -491,6 +492,7 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
 
 ///多线程同步数据
 pub async fn sync_total_async_threaded(
+    arango_pool: ArPool,
     db_option: &DbOption,
     project: &str,
     pool: Pool<MySql>,
@@ -632,24 +634,25 @@ pub async fn sync_total_async_threaded(
                 // 将部分数据保存到图数据库
                 if db_option.sync_graph_db.unwrap_or(true) {
                     if db_type == "CATA" || db_type == "DESI" {
+                        let database = arango_pool.get().await?.db(&db_option.arangodb_database).await?;
                         // 将 pdms_element 部分数据保存到图数据库中
                         save_pdms_element_in_sync(
-                            &db_option,
+                            &database,
                             &total_attr_map_arc,
                             &children_map_arc,
                             db_no.0 as i32,
                         ).await?;
                         // 将兄弟关系保存到图数据库中
-                        save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
+                        save_pdms_level_edges_in_sync(&database, &children_map_arc).await?;
 
-                        save_foreign_refno_edges_in_sync(&db_option, foreign_refnos_map).await?;
+                        save_foreign_refno_edges_in_sync(&database, foreign_refnos_map).await?;
                         // 单独保存plin
-                        save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc)
+                        save_plin_attr_arangodb(&database, &type_ele_map, &total_attr_map_arc)
                             .await?;
                         // 将 para 和 des_para保存的图数据库中
-                        save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
+                        save_paras_into_arangodb(&database, &total_attr_map_arc).await?;
                         // 将 dtse下的data部分数据保存到图数据库
-                        save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc)
+                        save_dtse_value_to_arangodb(&database, &type_ele_map, &total_attr_map_arc)
                             .await?;
                     }
                     println!("图数据库保存完成");
@@ -676,6 +679,7 @@ pub async fn sync_total_async_threaded(
                     let total_attr_map_arc = total_attr_map_arc.clone();
                     let children_map_arc = children_map_arc.clone();
                     let pool_clone = pool.clone();
+                    let arango_pool_clone = arango_pool.clone();
                     let error_sql_clone = error_sql.clone();
                     // println!("类型: {} 数量: {}", db1_dehash(type_hash), type_refnos.len());
 
@@ -693,6 +697,7 @@ pub async fn sync_total_async_threaded(
                             let children_map_arc_clone = children_map_arc.clone();
                             let all_refnos = all_refnos.clone();
                             let pool_clone = pool_clone.clone();
+                            let arango_pool_clone = arango_pool_clone.clone();
                             let error_sql_clone = error_sql_clone.clone();
                             let mut implicit_values_sql = String::new();
                             let mut explicit_values_sql = String::new();
@@ -974,7 +979,7 @@ pub async fn save_pdms_mesh_tidb(mgr: CachedMeshesMgr, pool: &Pool<MySql>) -> an
 
 /// 将部分type的数据单独保存到图数据库中
 async fn save_plin_attr_arangodb(
-    db_option: &DbOption,
+    database: &ArDatabase,
     type_ele_map: &DashMap<u32, HashSet<RefU64>>,
     total_attr_map: &DashMap<RefU64, WholeAttMap>,
 ) -> anyhow::Result<()> {
@@ -996,14 +1001,14 @@ async fn save_plin_attr_arangodb(
         }
         if refno_attrs.len() > 0 {
             let json = serde_json::to_value(&take(&mut refno_attrs))?;
-            save_arangodb_with_db_option(json, &db_option, "plin_eles").await?;
+            save_arangodb_with_db_option(database, json, "plin_eles").await?;
         }
     }
     Ok(())
 }
 
 async fn save_paras_into_arangodb(
-    db_option: &DbOption,
+    database: &ArDatabase,
     total_attr_map: &DashMap<RefU64, WholeAttMap>,
 ) -> anyhow::Result<()> {
     let mut para_map = Vec::new();
@@ -1033,12 +1038,11 @@ async fn save_paras_into_arangodb(
     }
     for para in para_map.chunks(ARANGODB_SAVE_AMOUNT) {
         let para_json = serde_json::to_value(para)?;
-
-        save_arangodb_with_db_option(para_json, db_option, "para_eles").await?;
+        save_arangodb_with_db_option(database, para_json,  "para_eles").await?;
     }
     for des_para in des_para_map.chunks(ARANGODB_SAVE_AMOUNT) {
         let des_para_json = serde_json::to_value(des_para)?;
-        save_arangodb_with_db_option(des_para_json, db_option, "despara_eles").await?;
+        save_arangodb_with_db_option(database, des_para_json,  "despara_eles").await?;
     }
     Ok(())
 }

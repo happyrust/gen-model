@@ -9,7 +9,7 @@ use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
-use arangors_lite::Database;
+use bb8_arangodb::arangors::Database;
 use bevy::prelude::error;
 use glam::{Vec2, Vec3};
 // use sea_orm::sea_query::IndexType::Hash;
@@ -21,7 +21,7 @@ use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
 use crate::cata::resolve_helper::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-
+use crate::graph_db::pdms_arango::ArDatabase;
 
 
 /// 求解axis的数值, 得到 {num:  }
@@ -111,7 +111,7 @@ pub struct CataExprContext {
 }
 
 impl CataExprContext {
-    pub async fn create(des_refno: RefU64, database: &Database) -> anyhow::Result<Option<Self>> {
+    pub async fn create(des_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Self>> {
         let catr_refno = query_foreign_refno_aql(des_refno, &["SPRE", "CATR"], database).await?;
         if catr_refno.is_none() { return Ok(None); }
         let catr_refno = catr_refno.unwrap();

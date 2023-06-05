@@ -1,15 +1,15 @@
 use aios_core::create_attas_structs::{VirtualEmbedGraphNode, VirtualHoleGraphNode};
 use aios_core::pdms_types::RefU64;
-use arangors_lite::AqlQuery;
+use bb8_arangodb::arangors::AqlQuery;
 use config::{Config, ConfigError, Environment, File};
-use arangors_lite::Database;
-use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use bb8_arangodb::arangors::Database;
+use crate::graph_db::pdms_arango::ArDatabase;
 
 
-pub async fn query_virtual_hole_value(database: &Database, refnos: Vec<RefU64>) -> anyhow::Result<Option<(Vec<VirtualHoleGraphNode>, Vec<VirtualEmbedGraphNode>)>> {
+pub async fn query_virtual_hole_value(database: &ArDatabase, refnos: Vec<RefU64>) -> anyhow::Result<Option<(Vec<VirtualHoleGraphNode>, Vec<VirtualEmbedGraphNode>)>> {
     let mut hole: Vec<VirtualHoleGraphNode> = Vec::new();
     for refno in &refnos {
-        let aql = AqlQuery::new("
+        let aql = AqlQuery::builder().query("
         let a =  document(@collection,@refno)
         return {
             '_key':a._key,
@@ -48,12 +48,13 @@ pub async fn query_virtual_hole_value(database: &Database, refnos: Vec<RefU64>) 
         }
         ")
             .bind_var("collection", "hole_data")
-            .bind_var("refno", refno.to_url_refno());
+            .bind_var("refno", refno.to_url_refno())
+            .build();
         hole.append(&mut database.aql_query(aql).await?);
     }
     let mut embed: Vec<VirtualEmbedGraphNode> = Vec::new();
     for refno in &refnos {
-        let aql = AqlQuery::new("
+        let aql = AqlQuery::builder().query("
         let a =  document(@collection,@refno)
         return {
             '_key':a._key,
@@ -85,7 +86,7 @@ pub async fn query_virtual_hole_value(database: &Database, refnos: Vec<RefU64>) 
         }
         ")
             .bind_var("collection", "embed_data")
-            .bind_var("refno", refno.to_url_refno());
+            .bind_var("refno", refno.to_url_refno()).build();
         embed.append(&mut database.aql_query(aql).await?);
     }
     return Ok(Some((hole, embed)));

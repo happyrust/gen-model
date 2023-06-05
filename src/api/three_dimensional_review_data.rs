@@ -1,21 +1,21 @@
 use aios_core::three_dimensional_review::{ThreeDimensionalModelDataCrate, ThreeDimensionalModelDataToArango};
 use crate::consts::ARANGODB_SAVE_AMOUNT;
-use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
-use arangors_lite::Database;
+use crate::graph_db::pdms_arango::{ArDatabase, save_arangodb_doc};
+use bb8_arangodb::arangors::Database;
 // use crate::options::DbOption;
-use arangors_lite::AqlQuery;
+use bb8_arangodb::arangors::AqlQuery;
 
 
 //编校审数据存入图数据库
 pub async fn save_three_dimensional_review_data_to_arango(
-    database: &Database,
+    database: &ArDatabase,
     review_data: ThreeDimensionalModelDataCrate,
 ) -> anyhow::Result<()>
 {
     let data = insert_three_dimensional_review_data(review_data);
     for i in data.chunks(ARANGODB_SAVE_AMOUNT) {
         let json = serde_json::to_value(i)?;
-        save_arangodb_with_database(json, "review_data", database, false).await?;
+        save_arangodb_doc(json, "review_data", database, false).await?;
     }
     Ok(())
 }
@@ -37,9 +37,9 @@ fn insert_three_dimensional_review_data(review_data: ThreeDimensionalModelDataCr
     review_data_vec
 }
 
-pub async fn query_three_dimensional_review_data(database: &Database, key_value: &str) -> anyhow::Result<Option<Vec<ThreeDimensionalModelDataToArango>>> {
-    let aql = AqlQuery::new("return document('review_data',@_key)")
-        .bind_var("_key", key_value);
+pub async fn query_three_dimensional_review_data(database: &ArDatabase, key_value: &str) -> anyhow::Result<Option<Vec<ThreeDimensionalModelDataToArango>>> {
+    let aql = AqlQuery::builder().query("return document('review_data',@_key)")
+        .bind_var("_key", key_value).build();
     let data_vec: Vec<ThreeDimensionalModelDataToArango> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }

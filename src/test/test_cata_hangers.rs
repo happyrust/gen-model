@@ -1,7 +1,7 @@
 use crate::graph_db::pdms_arango::save_arangodb_with_db_option;
 use config::{Config, ConfigError, Environment, File};
 use std::env;
-use arangors_lite::collection::CollectionType::{Document, Edge};
+use bb8_arangodb::arangors::collection::CollectionType::{Document, Edge};
 use std::sync::Arc;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
@@ -16,9 +16,9 @@ async fn test_save_hangers_data() -> anyhow::Result<()> {
     let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
 
 
-    let database = test_helper::get_test_ams_arrango_db().await;
-    create_arangodb_conn(&database, "hanger_data", Document).await?;
-    create_arangodb_conn(&database, "hanger_edges", Edge).await?;
+    let database = test_helper::connect_test_ams_arrango_db().await;
+    create_arango_document(&database, "hanger_data", Document).await?;
+    create_arango_document(&database, "hanger_edges", Edge).await?;
 
     let mgr = Arc::new(test_helper::get_test_ams_db_manager());
     let data = hangers::save_hangers_data(mgr.clone()).await?;

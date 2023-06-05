@@ -7,7 +7,7 @@ use std::sync::Arc;
 use aios_core::data_center::{DataCenterAttr, DataCenterInstance, DataCenterProject, DataCenterProjectWithRelations, DataCenterRelations};
 use aios_core::data_center::AttrValue::AttrString;
 use aios_core::pdms_types::{PdmsElement, RefU64};
-use arangors_lite::Database;
+use bb8_arangodb::arangors::Database;
 use bevy::render::render_resource::encase::private::RuntimeSizedArray;
 use sqlx::{MySql, Pool};
 use crate::api::attr::query_implicit_attr;
@@ -24,6 +24,7 @@ use crate::data_center_api::tee::get_data_center_tee_attr;
 use crate::data_center_api::tubi::get_data_center_tubi_attr;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager, TUBI_TOL};
+use crate::graph_db::pdms_arango::ArDatabase;
 use crate::metadata::{convert_str_to_hash, get_characters_in_str};
 
 macro_rules! query_metadata {
@@ -56,7 +57,7 @@ pub async fn get_data_center_from_pipe(aios_mgr: &AiosDBManager, pipe_refno: Ref
     let pool = aios_mgr.get_project_pool_by_refno(pipe_refno).await;
     if pool.is_none() { return Ok(None); }
     let (_, pool) = pool.unwrap();
-    let database = aios_mgr.get_arangodb().await?;
+    let database = aios_mgr.get_arango_db().await?;
     // 找到所有需要统计的 bran
     let bran_refnos = query_travel_children_with_type_aql(&database,pipe_refno ,"BRAN").await?;
     let bran_refnos = bran_refnos.into_iter().map(|x| x.into()).collect::<Vec<_>>();
@@ -117,7 +118,7 @@ async fn get_bran_data(bran_refnos: &Vec<PdmsElement>, aios_mgr: &AiosDBManager)
 
 /// ref_map: 每个 bran 对应的 href 和 tref
 async fn get_instances_data(compute_refnos: HashMap<String, HashSet<RefU64>>, metadata_map: HashMap<String, Vec<String>>,
-                            pool: &Pool<MySql>, database: &Database) -> anyhow::Result<(HashMap<RefU64, DataCenterInstance>, HashMap<RefU64, Vec<RefU64>>, HashMap<RefU64, Vec<RefU64>>)> {
+                            pool: &Pool<MySql>, database: &ArDatabase) -> anyhow::Result<(HashMap<RefU64, DataCenterInstance>, HashMap<RefU64, Vec<RefU64>>, HashMap<RefU64, Vec<RefU64>>)> {
     // let mut bran_instances_map = HashMap::new(); // 将 bran 及其 href tref 的 instance 存在 map 中
     let mut instances = HashMap::new();
     let mut bran_children_map = HashMap::new();

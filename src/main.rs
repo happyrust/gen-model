@@ -40,7 +40,7 @@ use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
 use aios_database::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_COLLECTION, BATCH_CHUNKS_CNT};
-use arangors_lite::collection::CollectionType::{Document, Edge};
+use bb8_arangodb::arangors::collection::CollectionType::{Document, Edge};
 use bevy::prelude::*;
 use bevy::transform::components::Transform;
 use chrono::{Datelike, Timelike};
@@ -121,7 +121,7 @@ async fn main() -> anyhow::Result<()> {
         if let Some(project_db) = mgr.project_map.get(&mgr.db_option.project_name) {
             // 保存ssc
             async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
-            set_arangodb_all_ssc_nodes(project_db.value(), &mgr.arango_db).await?;
+            set_arangodb_all_ssc_nodes(project_db.value(), &mgr.get_arango_db().await?).await?;
         }
         info!("SSC同步完成");
     }
@@ -148,30 +148,30 @@ async fn main() -> anyhow::Result<()> {
 
 /// 提前创建图数据库需要的几个collection
 async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
-    set_arangodb_database_from_db_option(db_option).await?;
-    let database = get_arangodb_conn_from_db_option(db_option).await?;
-    create_arangodb_conn(&database, "data_eles", Document).await?;
-    create_arangodb_conn(&database, "despara_eles", Document).await?;
-    create_arangodb_conn(&database, "foreign_edges", Edge).await?;
-    create_arangodb_conn(&database, "instance_edges", Edge).await?;
-    create_arangodb_conn(&database, "para_eles", Document).await?;
-    create_arangodb_conn(&database, AQL_PDMS_EDGES_COLLECTION, Edge).await?;
-    create_arangodb_conn(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
-    create_arangodb_conn(&database, AQL_PDMS_INST_COLLECTION, Document).await?;
-    create_arangodb_conn(&database, "plin_eles", Document).await?;
-    create_arangodb_conn(&database, "sibl_edges", Edge).await?;
-    create_arangodb_conn(&database, "ssc_edges", Edge).await?;
-    create_arangodb_conn(&database, "ssc_eles", Document).await?;
-    create_arangodb_conn(&database, "tubi_edges", Edge).await?;
-    create_arangodb_conn(&database, "room_eles", Document).await?;
-    create_arangodb_conn(&database, "hole_data", Document).await?;
-    create_arangodb_conn(&database, "embed_data", Document).await?;
-    create_arangodb_conn(&database, "room_edges", Edge).await?;
-    create_arangodb_conn(&database, "geo_infos", Document).await?;
-    create_arangodb_conn(&database, AQL_HOLE_DATA_COLLECTION, Document).await?;
-    create_arangodb_conn(&database, AQL_EMBED_DATA_COLLECTION, Document).await?;
-    create_arangodb_conn(&database, AQL_HOLE_EDGE_COLLECTION, Edge).await?;
-    create_arangodb_conn(&database, AQL_EMBED_EDGE_COLLECTION, Edge).await?;
+    let pool = connect_arangodb(db_option).await?;
+    let database = pool.get().await?.db(db_option.arangodb_database.as_str()).await?;
+    create_arango_document(&database, "data_eles", Document).await?;
+    create_arango_document(&database, "despara_eles", Document).await?;
+    create_arango_document(&database, "foreign_edges", Edge).await?;
+    create_arango_document(&database, "instance_edges", Edge).await?;
+    create_arango_document(&database, "para_eles", Document).await?;
+    create_arango_document(&database, AQL_PDMS_EDGES_COLLECTION, Edge).await?;
+    create_arango_document(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
+    create_arango_document(&database, AQL_PDMS_INST_COLLECTION, Document).await?;
+    create_arango_document(&database, "plin_eles", Document).await?;
+    create_arango_document(&database, "sibl_edges", Edge).await?;
+    create_arango_document(&database, "ssc_edges", Edge).await?;
+    create_arango_document(&database, "ssc_eles", Document).await?;
+    create_arango_document(&database, "tubi_edges", Edge).await?;
+    create_arango_document(&database, "room_eles", Document).await?;
+    create_arango_document(&database, "hole_data", Document).await?;
+    create_arango_document(&database, "embed_data", Document).await?;
+    create_arango_document(&database, "room_edges", Edge).await?;
+    create_arango_document(&database, "geo_infos", Document).await?;
+    create_arango_document(&database, AQL_HOLE_DATA_COLLECTION, Document).await?;
+    create_arango_document(&database, AQL_EMBED_DATA_COLLECTION, Document).await?;
+    create_arango_document(&database, AQL_HOLE_EDGE_COLLECTION, Edge).await?;
+    create_arango_document(&database, AQL_EMBED_EDGE_COLLECTION, Edge).await?;
     Ok(())
 }
 

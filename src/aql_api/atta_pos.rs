@@ -9,12 +9,12 @@ use bevy::prelude::dbg;
 
 
 pub async fn get_atta_pos(brans: Vec<(RefU64, f32)>, mgr: Arc<AiosDBManager>) -> anyhow::Result<ATTAPosVec> {
-    let database = mgr.get_arangodb().await?;
+    let database = mgr.get_arango_db().await?;
     let mut atta_pos_vec = ATTAPosVec::default();
     for bran in brans {
         let mut pos_vec = Vec::new();
         // 取arrive，leave
-        let data = query_bran_info(bran.0, database).await.unwrap();
+        let data = query_bran_info(bran.0, &database).await.unwrap();
         //取hpos,取tpos
         let len = data.len();
         let hpos = data[0].start_pt;

@@ -13,7 +13,7 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
     let test_room_refno = RefU64::from_refno_str("24381/35621").unwrap();
     // let mgr = get_test_ams_db_manager_async().await;
     // let result = interface.query_refnos_has_neg_pos_map(refno).await?;
-    let arango_db = test_helper::get_test_ams_arrango_db().await;
+    let arango_db = test_helper::connect_test_ams_arrango_db().await;
     // dbg!(&result);
     // query_refnos_has_neg_map
     let result = query_room_refnos_aql(test_room_refno, None, &arango_db).await?;

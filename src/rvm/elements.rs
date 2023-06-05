@@ -4,7 +4,7 @@ use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::{GENRAL_NEG_NOUN_NAMES, PdmsElement, RefU64};
-use arangors_lite::Database;
+use bb8_arangodb::arangors::Database;
 use bevy::prelude::{dbg, Transform};
 use bitvec::macros::internal::funty::Floating;
 use dashmap::{DashMap, DashSet};
@@ -22,13 +22,14 @@ use crate::aql_api::children::*;
 use crate::aql_api::PdmsRefnoNameAql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager};
+use crate::graph_db::pdms_arango::ArDatabase;
 use crate::graph_db::pdms_inst_arango::{query_instance_with_refno_in_arangodb, query_rvm_instance_data_from_refno_aql};
 use crate::rvm::data_api::*;
 use crate::rvm::head::{create_head_data, create_tail_data};
 
 pub async fn create_rvm_file(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<u8>> {
     let mut data = vec![];
-    let database = aios_mgr.get_arangodb().await?;
+    let database = aios_mgr.get_arango_db().await?;
     let db_option = &aios_mgr.db_option;
     let pool = aios_mgr.get_project_pool_by_refno(refno).await;
     if pool.is_none() { return Ok(data); }
@@ -51,7 +52,7 @@ pub async fn create_rvm_file(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow:
     Ok(data)
 }
 
-pub async fn create_owner_data(refno: RefU64, aios_mgr: &AiosDBManager, database: &Database) -> anyhow::Result<Vec<u8>> {
+pub async fn create_owner_data(refno: RefU64, aios_mgr: &AiosDBManager, database: &ArDatabase) -> anyhow::Result<Vec<u8>> {
     let mut data = vec![];
     let ancestor = query_ancestor_with_name_till_type_aql(database, refno, "SITE").await?;
     if ancestor.is_empty() { return Ok(data); }
@@ -83,7 +84,7 @@ async fn create_ancestor_data(refno: RefU64, ancestor: Vec<PdmsRefnoNameAql>, ai
 }
 
 /// position: ancestor到本层级的相对坐标
-async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager, mut data: &mut Vec<u8>, position: Vec3, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<()> {
+async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager, mut data: &mut Vec<u8>, position: Vec3, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let children = query_children_eles(refno, &pool).await?;
     for child in children {
         let refno = child.refno;
@@ -119,7 +120,7 @@ async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager, mut data: 
     Ok(())
 }
 
-async fn create_element_data_tree(cur_refno: RefU64, aios_mgr: &AiosDBManager, mut position: Vec3, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<Tree<(RefU64, Vec<u8>)>> {
+async fn create_element_data_tree(cur_refno: RefU64, aios_mgr: &AiosDBManager, mut position: Vec3, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<Tree<(RefU64, Vec<u8>)>> {
     let mut pending_children = VecDeque::new();
     let current_element = query_ele_node(cur_refno, pool).await; // 返回选中节点的elenode数据
     if current_element.is_err() { return Ok(Tree::default()); }
@@ -188,7 +189,7 @@ async fn create_element_data_tree(cur_refno: RefU64, aios_mgr: &AiosDBManager, m
     Ok(tree)
 }
 
-async fn create_element_data_tree_test(cur_refno: RefU64, database: &Database, pool: &Pool<MySql>, aios_mgr: &AiosDBManager) -> anyhow::Result<Tree<(RefU64, Vec<u8>)>> {
+async fn create_element_data_tree_test(cur_refno: RefU64, database: &ArDatabase, pool: &Pool<MySql>, aios_mgr: &AiosDBManager) -> anyhow::Result<Tree<(RefU64, Vec<u8>)>> {
     let current_element = query_ele_node(cur_refno, pool).await; // 返回选中节点的elenode数据
     if current_element.is_err() { return Ok(Tree::default()); }
     let mut node_id_map = HashMap::new();
@@ -270,7 +271,7 @@ pub async fn convert_shape_type_data(refno: RefU64, aios_mgr: &AiosDBManager) ->
     };
 }
 
-pub async fn convert_shape_type_data_database(refno: RefU64, database: &Database) -> anyhow::Result<Option<RvmShapeTypeData>> {
+pub async fn convert_shape_type_data_database(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<RvmShapeTypeData>> {
     let instance = query_instance_with_refno_in_arangodb(refno, database).await?;
     if let Some(instances) = instance {
         for instance in instances {}
@@ -389,7 +390,7 @@ async fn test_create_rvm_file() -> anyhow::Result<()> {
 async fn test_create_owner_data() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
     let refno = RefU64::from_refno_str("23584/5495").unwrap();
-    let database = mgr.get_arangodb().await?;
+    let database = mgr.get_arango_db().await?;
     let data = create_owner_data(refno, &mgr, &database).await?;
     let mut file = std::fs::File::create("test_rvm.txt").unwrap();
     file.write_all(&data).unwrap();

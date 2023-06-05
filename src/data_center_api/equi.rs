@@ -3,16 +3,16 @@ use std::io::Write;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use arangors_lite::Database;
+use bb8_arangodb::arangors::Database;
 use sqlx::{MySql, Pool};
 use crate::api::refno_info::query_refno_height_position;
 use crate::api::room_code::query_room_code;
 use crate::aql_api::children::{query_refnos_travel_children_with_type_aql};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::graph_db::pdms_arango::ArDatabase;
 
 /// 获得机械设备的数据
-pub async fn get_machine_equi_data(refnos: Vec<RefU64>,pool:&Pool<MySql>,database:&Database) -> anyhow::Result<DataCenterProject> {
+pub async fn get_machine_equi_data(refnos: Vec<RefU64>,pool:&Pool<MySql>,database:&ArDatabase) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
     if let Ok(children) = query_refnos_travel_children_with_type_aql(database,refnos,vec!["EQUI"]).await {
         for child in children {

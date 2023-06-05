@@ -3,14 +3,14 @@ use std::io::Write;
 use aios_core::data_center::{DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use arangors_lite::Database;
+use bb8_arangodb::arangors::Database;
 use sqlx::{MySql, Pool};
 use crate::api::room_code::query_room_code;
 use crate::aql_api::children::{query_refnos_travel_children_with_type_aql, query_travel_children_aql};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::graph_db::pdms_arango::ArDatabase;
 
-pub async fn get_valv_data(refnos: Vec<RefU64>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<DataCenterProject> {
+pub async fn get_valv_data(refnos: Vec<RefU64>, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<DataCenterProject> {
     let mut instance = Vec::new();
     if let Ok(valves) = query_refnos_travel_children_with_type_aql(database, refnos, vec!["VALV"]).await {
         for valv in valves {

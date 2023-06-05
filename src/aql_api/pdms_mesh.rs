@@ -3,14 +3,14 @@ use aios_core::negative_mesh_type::NegativeEles;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{CachedMeshesMgr, EleGeosInfo, GeoHash, PdmsInstanceMeshData, RefU64, ShapeInstancesMgr};
 use aios_core::shape::pdms_shape::{PdmsMesh};
-use arangors_lite::{AqlQuery, Database};
+use bb8_arangodb::arangors::{AqlQuery, Database};
 use bevy::prelude::Transform;
 use dashmap::DashMap;
 use glam::{Quat, Vec3};
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::PDMS_MESH;
-use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::graph_db::pdms_arango::ArDatabase;
 use crate::graph_db::pdms_inst_arango::*;
 use crate::AQL_PDMS_ELES_COLLECTION;
 
@@ -51,10 +51,10 @@ pub async fn query_pdms_mesh_from_refno(hash: Vec<u64>, pool: &Pool<MySql>) -> a
     Ok(cache_mgr)
 }
 
-pub async fn query_refnos_meshes_aql(refno: RefU64, database: &Database) -> anyhow::Result<DashMap<RefU64, PdmsMesh>> {
+pub async fn query_refnos_meshes_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<DashMap<RefU64, PdmsMesh>> {
     let mut map = DashMap::new();
     let key = format!("{}/{}", "pdms_eles", refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::builder().query("\
     let refnos = (for v,e,p in 0..10 inbound @id pdms_edges
                 return v._key)
     let results = ( for refno in refnos
@@ -66,7 +66,7 @@ pub async fn query_refnos_meshes_aql(refno: RefU64, database: &Database) -> anyh
         for d in result.data
             let r = document('pdms_mesh',d.geo_hash)
             return { refno:refno,hash: r._key, data: r.data }
-    ").bind_var("id", key);
+    ").bind_var("id", key).build();
     if let Ok(results) = database.aql_query::<PdmsMeshAql>(aql).await {
         if !results.is_empty() {
             for result in results {
@@ -83,10 +83,10 @@ pub async fn query_refnos_meshes_aql(refno: RefU64, database: &Database) -> anyh
     Ok(map)
 }
 
-pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &Database) -> anyhow::Result<DashMap<RefU64, PdmsMesh>> {
+pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<DashMap<RefU64, PdmsMesh>> {
     let mut map = DashMap::new();
     let key = format!("{}/{}", "pdms_eles", refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::builder().query("\
     let refnos = (for v,e,p in 0..10 inbound @id pdms_edges
                 return v._key)
     let results = ( for refno in refnos
@@ -98,7 +98,7 @@ pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &Database) ->
         for d in result.data
             let r = document('pdms_mesh',d.geo_hash)
             return { refno:d.refno,hash: r._key, data: r.data }
-    ").bind_var("id", key);
+    ").bind_var("id", key).build();
     if let Ok(results) = database.aql_query::<PdmsCatrMeshAql>(aql).await {
         if !results.is_empty() {
             for result in results {
@@ -114,11 +114,11 @@ pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &Database) ->
 }
 
 
-pub async fn query_pdms_mesh_aql(hashes: Vec<u64>, database: &Database) -> anyhow::Result<CachedMeshesMgr> {
+pub async fn query_pdms_mesh_aql(hashes: Vec<u64>, database: &ArDatabase) -> anyhow::Result<CachedMeshesMgr> {
     let mut cache_mgr = CachedMeshesMgr::default();
     let hash_strs = hashes.into_iter().map(|x| x.to_string()).collect::<Vec<_>>();
     // dbg!(&hash_strs);
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::builder().query("\
     for hash in @hashes
         let d = document('pdms_mesh',hash)
         filter d != null
@@ -126,7 +126,7 @@ pub async fn query_pdms_mesh_aql(hashes: Vec<u64>, database: &Database) -> anyho
             'hash':hash,
             'data' : d.data
         }
-    ").bind_var("hashes", hash_strs);
+    ").bind_var("hashes", hash_strs).build();
     let results: Vec<PdmsMeshQueryData> = database.aql_query(aql).await?;
     // dbg!(&results);
     for result in results {
@@ -140,11 +140,11 @@ pub async fn query_pdms_mesh_aql(hashes: Vec<u64>, database: &Database) -> anyho
     Ok(cache_mgr)
 }
 
-// pub async fn query_pdms_mesh_from_refno_aql(refno: RefU64, database: &Database) -> anyhow::Result<PdmsInstanceMeshData> {
+// pub async fn query_pdms_mesh_from_refno_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<PdmsInstanceMeshData> {
     // let mut mesh_mgr = CachedMeshesMgr::default();
     // let mut inst_mgr = ShapeInstancesMgr::default();
     // let key = format!("{}/{}", "pdms_eles", refno.to_url_refno());
-    // let aql = AqlQuery::new("\
+    // let aql = AqlQuery::builder().query("\
     // let refnos = (for v,e,p in 0..10 inbound @id pdms_edges
     //             return v._key)
     // let results = ( for refno in refnos
@@ -177,16 +177,16 @@ pub async fn query_pdms_mesh_aql(hashes: Vec<u64>, database: &Database) -> anyho
     // })
 // }
 
-pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &Database) -> anyhow::Result<CachedMeshesMgr> {
+pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<CachedMeshesMgr> {
     let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("
+    let aql = AqlQuery::builder().query("
     for v in 0..5 inbound @id pdms_edges
         let r = document('negative_eles',v._key)
         filter r!= null
         return {
             '_key': r._key,
             'mesh': r.mesh
-        }").bind_var("id", id);
+        }").bind_var("id", id).build();
     let results: Vec<NegativeEles> = database.aql_query(aql).await?;
     let mut cache_mgr = CachedMeshesMgr::default();
     for r in results {
@@ -202,7 +202,7 @@ pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &Datab
 }
 
 /// 通过参考号获取参考后下面所有的instance 和 对应的 mesh
-pub async fn query_pdms_instance_mesh_from_refno(refno: RefU64, database: &Database) -> anyhow::Result<PdmsInstanceMeshData> {
+pub async fn query_pdms_instance_mesh_from_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<PdmsInstanceMeshData> {
     let mut inst_mgr = ShapeInstancesMgr::default();
     let mut hashes = HashSet::new();
     if let Some(instance) = query_instance_with_refno_in_arangodb(refno, database).await? {
@@ -222,7 +222,7 @@ pub async fn query_pdms_instance_mesh_from_refno(refno: RefU64, database: &Datab
     })
 }
 
-pub async fn query_pdms_instance_mesh_from_refnos(refnos: Vec<RefU64>, database: &Database) -> anyhow::Result<PdmsInstanceMeshData> {
+pub async fn query_pdms_instance_mesh_from_refnos(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<PdmsInstanceMeshData> {
     let mut inst_mgr = ShapeInstancesMgr::default();
     let mut hashes = HashSet::new();
     if let Some(instance) = query_instance_with_refnos_in_arangodb(refnos, database).await? {
@@ -242,9 +242,10 @@ pub async fn query_pdms_instance_mesh_from_refnos(refnos: Vec<RefU64>, database:
     })
 }
 
-pub async fn query_refno_transform(refno: RefU64, database: &Database) -> anyhow::Result<Option<Transform>> {
-    let aql = AqlQuery::new("return document('pdms_instances',@key).world_transform")
-        .bind_var("key", refno.to_url_refno());
+pub async fn query_refno_transform(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Transform>> {
+    let aql = AqlQuery::builder().query("return document('pdms_instances',@key).world_transform")
+        .bind_var("key", refno.to_url_refno())
+        .build();
     let result: Vec<(Quat, Vec3, Vec3)> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }
     let result = result.first().unwrap();

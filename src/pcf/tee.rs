@@ -51,7 +51,7 @@ pub async fn gen_tee_data(aios_mgr: &AiosDBManager, attr: &AttrMap, bran_attr: &
 pub async fn create_tee_branch_point_data(aios_mgr: &AiosDBManager, attr: &AttrMap, pool: &Pool<MySql>) -> Vec<u8> {
     let refno = attr.get_refno().unwrap(); // 在调用本方法之前已经判断过 attr 中是否存在 refno
     if let Some(cref_refno) = attr.get_refu64("CREF") {
-        let database = aios_mgr.get_arangodb().await;
+        let database = aios_mgr.get_arango_db().await;
         if database.is_err() { return vec![]; }
         let database = database.unwrap();
         let bran_infos = query_bran_info(cref_refno, &database).await;

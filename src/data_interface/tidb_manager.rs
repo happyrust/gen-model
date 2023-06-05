@@ -18,7 +18,7 @@ use aios_core::tool::db_tool::{db1_hash, GLOBAL_UDA_NAME_MAP};
 use aios_core::tool::math_tool;
 use anyhow::anyhow;
 use approx::{abs_diff_eq, abs_diff_ne};
-use arangors_lite::{AqlQuery, Connection, Database};
+use bb8_arangodb::arangors::{AqlQuery, Database};
 use async_trait::async_trait;
 use bevy::prelude::{dbg, Transform};
 use config::{Config, ConfigError, Environment, File};
@@ -75,11 +75,13 @@ use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
-use crate::graph_db::pdms_arango::{get_arangodb_conn_from_db_option, save_arangodb_with_database};
+use crate::graph_db::pdms_arango::{ArDatabase, ArPool, connect_arangodb, save_arangodb_doc};
 use crate::graph_db::pdms_inst_arango::{query_instance_with_refno_in_arangodb, query_instance_with_refnos_in_arangodb, save_instance_to_graph_db};
 use crate::mdb::get_project_mdb;
 use crate::tables::{gen_create_project_mdb_json_sql, gen_create_project_mdb_sql};
 use crate::{AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_COLLECTION};
+// use bb8_arangodb::bb8::Pool as ArangoPool;
+use bb8_arangodb::{ArangoConnectionManager, AuthenticationMethod};
 
 #[cfg(feature = "opencascade")]
 use opencascade::{DsShape, Edge, OCCShape, Wire};
@@ -143,7 +145,7 @@ pub struct AiosDBManager {
 
     pub cached_mesh_mgr: Arc<RwLock<CachedMeshesMgr>>,
 
-    pub arango_db: Database,
+    pub arango_pool: ArPool,
 
     cached_world_transforms_map: Arc<DashMap<RefU64, bevy::prelude::Transform>>,
 
@@ -202,14 +204,14 @@ impl PdmsDataInterface for AiosDBManager {
 
     /// t_types 为目标的类型
     async fn query_foreign_refno(&self, refno: RefU64, start_types: &[&[&str]], end_types: &[&str], t_types: &[&str]) -> anyhow::Result<Option<RefU64>> {
-        let t_refno = query_foreign_refno_fuzzy(&self.arango_db, refno, start_types, end_types, t_types).await;
+        let t_refno = query_foreign_refno_fuzzy(&self.get_arango_db().await?, refno, start_types, end_types, t_types).await;
         t_refno
     }
 
     ///沿着owner path找到需要找的第一个foreign目标节点，可以找到父节点，也可以找到子节点
     async fn query_first_foreign_along_path(&self, refno: RefU64, start_types: &[&str], end_types: &[&str], t_types: &[&str]) -> anyhow::Result<Option<RefU64>> {
         let id = format!("{}/{}", "pdms_eles", refno.to_url_refno());
-        let aql = AqlQuery::new(r#"
+        let aql = AqlQuery::builder().query(r#"
             FOR v,e,p in 1..15 OUTBOUND @id pdms_edges
                 filter document(v._id) != null
                 let xx = (for ver, edge, path in 1..10 OUTBOUND v._id foreign_edges
@@ -230,8 +232,9 @@ impl PdmsDataInterface for AiosDBManager {
             .bind_var("start_types", start_types)
             .bind_var("end_types", end_types)
             .bind_var("t_types", t_types)
+            .build()
             ;
-        let results: Vec<String> = self.arango_db.aql_query(aql).await?;
+        let results: Vec<String> = self.get_arango_db().await?.aql_query(aql).await?;
         for result in results {
             if let Some(refno) = RefU64::from_url_refno(&result) {
                 return Ok(Some(refno));
@@ -435,7 +438,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///查询哪些有负实体的参考号
     async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-        let aql = AqlQuery::new("\
+        let aql = AqlQuery::builder().query("\
         let negatives = ( FOR v,e,p in 0..15 INBOUND @key pdms_edges
                     PRUNE v.noun in @negative_nouns
                     filter v.noun in @negative_nouns
@@ -443,8 +446,9 @@ impl PdmsDataInterface for AiosDBManager {
         return UNIQUE(negatives)
         "
         ).bind_var("key", refno_url)
-            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
-        let refno_strs = self.arango_db.aql_query::<Vec<String>>(aql).await?;
+            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
+            .build();
+        let refno_strs = self.get_arango_db().await?.aql_query::<Vec<String>>(aql).await?;
         let refnos = refno_strs.iter().flatten().map(|x| RefU64::from_url_refno(x).unwrap()).collect();
         Ok(refnos)
     }
@@ -452,7 +456,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///返回有负实体和正实体的参考号集合，还有对应的NOUN
     async fn query_refnos_has_pos_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-        let aql = AqlQuery::new(r#"
+        let aql = AqlQuery::builder().query(r#"
                 FOR v,e,p in 0..15 INBOUND @key pdms_edges
                 PRUNE v.noun in @neg_nouns
                 OPTIONS { "order": "bfs"}
@@ -471,8 +475,9 @@ impl PdmsDataInterface for AiosDBManager {
         "#).bind_var("key", refno_url)
             .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
             .bind_var("pos_nouns", GENRAL_POS_NOUN_NAMES.to_vec())
+            .build()
             ;
-        let result: HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)> = self.arango_db
+        let result: HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)> = self.get_arango_db().await?
             .aql_query::<RefnoHasNegPosInfoTuple>(aql).await?.into_iter().map(|x| (x.0, (x.1, x.2))).collect();
 
         return Ok(result);
@@ -480,7 +485,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     async fn query_refnos_has_geos(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-        let aql = AqlQuery::new(r#"
+        let aql = AqlQuery::builder().query(r#"
             let refnos = ( FOR v,e,p in 0..15 INBOUND @key pdms_edges
                         PRUNE v.noun in @geo_nouns
                         OPTIONS { "order": "bfs"}
@@ -491,8 +496,8 @@ impl PdmsDataInterface for AiosDBManager {
             return UNIQUE(refnos)
         "#
         ).bind_var("key", refno_url)
-            .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
-        let refno_strs = self.arango_db.aql_query::<Vec<String>>(aql).await?;
+            .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec()).build();
+        let refno_strs = self.get_arango_db().await?.aql_query::<Vec<String>>(aql).await?;
         let refnos = refno_strs.iter().flatten().map(|x| RefU64::from_url_refno(x).unwrap()).collect();
         Ok(refnos)
     }
@@ -500,7 +505,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///返回有负实体的参考号集合，还有对应的NOUN
     async fn query_refnos_has_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, Vec<RefU64>>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-        let aql = AqlQuery::new(r#"
+        let aql = AqlQuery::builder().query(r#"
             FOR v,e,p in 0..15 INBOUND @key pdms_edges
                 PRUNE v.noun in @negative_nouns
                 OPTIONS { "order": "bfs"}
@@ -511,8 +516,9 @@ impl PdmsDataInterface for AiosDBManager {
                      (for v in grouped[*].v filter v.noun in @negative_nouns  return v._key),
                 ]
         "#).bind_var("key", refno_url)
-            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
-        let result: HashMap<RefU64, Vec<RefU64>> = self.arango_db
+            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
+            .build();
+        let result: HashMap<RefU64, Vec<RefU64>> = self.get_arango_db().await?
             .aql_query::<RefnoHasNegInfoTuple>(aql).await?.into_iter().map(|x| (x.0, x.1)).collect();
 
         return Ok(result);
@@ -553,6 +559,7 @@ impl PdmsDataInterface for AiosDBManager {
         let mut rotation = Quat::IDENTITY;
         let mut translation = Vec3::ZERO;
         let mut cur_refno = refno;
+        let database = self.get_arango_db().await?;
         while let Some(ref_basic) = self.get_refno_basic(cur_refno) {
             //后面是不是要缓存这个层级结构
             if self.cached_world_transforms_map.contains_key(&cur_refno) {
@@ -574,7 +581,7 @@ impl PdmsDataInterface for AiosDBManager {
             let mut quat = Quat::IDENTITY;
             let type_name = att.get_type();
             if let Some(jusl) = att.get_str("JUSL") {
-                if let Some(exps) = query_pline_value(refno, jusl, &self.arango_db).await? {
+                if let Some(exps) = query_pline_value(refno, jusl, &database).await? {
                     let x = self.resolve_expression_to_f32(&exps[0], refno).await?;
                     let y = self.resolve_expression_to_f32(&exps[1], refno).await?;
                     jusl_vec = Vec3::new(x, y, 0.0);
@@ -659,7 +666,7 @@ impl PdmsDataInterface for AiosDBManager {
                 let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
                 let bangle = att.get_f32("BANG").unwrap_or_default();
                 let pos_line =
-                    query_pline_value(att.get_owner().unwrap(), pos_line, &self.arango_db)
+                    query_pline_value(att.get_owner().unwrap(), pos_line, &database)
                         .await?;
                 if let Some(pos_line) = pos_line {
                     // dbg!(&pos_line);
@@ -715,7 +722,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///获得子节点集合的属性
     async fn get_travel_children_attrs(&self, refno: RefU64, nouns: &[&str]) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
-        let children = query_deep_children_refnos_fuzzy(self.get_arangodb().await?, refno, nouns).await?;
+        let children = query_deep_children_refnos_fuzzy(&self.get_arango_db().await?, refno, nouns).await?;
         // dbg!(children.len());
         for child in children {
             let attr = self.get_attr(child).await?;
@@ -731,7 +738,7 @@ impl PdmsDataInterface for AiosDBManager {
         let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
 
         let instances = query_instance_with_refnos_in_arangodb(vec![refno],
-                                                               &self.arango_db).await?.unwrap_or_default();
+                                                               &self.get_arango_db().await?).await?.unwrap_or_default();
         if instances.is_empty() { return Ok(vec![]); }
         let pos = instances[0].world_transform.translation;
         let target_refnos = rtree.query_within_distance(pos, distance)
@@ -762,9 +769,10 @@ impl AiosDBManager {
         //测试分页查询
         let mut rstar_objs = vec![];
         let mut offset = 0;
+        let database = self.get_arango_db().await?;
         loop {
             //需要排除负实体
-            let aql = AqlQuery::new(r#"
+            let aql = AqlQuery::builder().query(r#"
             FOR doc IN pdms_instances
                 SORT doc._key
                 LIMIT @offset, @batch_size
@@ -776,9 +784,10 @@ impl AiosDBManager {
                 ]
         "#)
                 .bind_var("offset", offset)
-                .bind_var("batch_size", 5000);
+                .bind_var("batch_size", 5000)
+                .build();
             offset += 5000;
-            if let Ok(refno_aabbs) = self.arango_db.aql_query::<(String, Aabb)>(aql).await {
+            if let Ok(refno_aabbs) = database.aql_query::<(String, Aabb)>(aql).await {
                 if refno_aabbs.is_empty() {
                     break;
                 }
@@ -804,13 +813,14 @@ impl AiosDBManager {
     async fn calculate_room(&self, inst: &EleGeosInfo, rtree: &AccelerationTree) -> anyhow::Result<Vec<RefU64>> {
         let mut withing_room_refnos = vec![];
         let room_refno = inst.refno;
+        let database = self.get_arango_db().await?;
         if let Some(room_abb) = inst.aabb {
             // dbg!(&room_abb);
             withing_room_refnos = rtree
                 .locate_intersecting_bounds(&room_abb)
                 .collect::<Vec<_>>();
             let hashes = inst.geo_insts.iter().map(|x| x.geo_hash).collect::<Vec<_>>();
-            let room_mesh_mgr = query_pdms_mesh_aql(hashes.clone(), &self.arango_db).await.unwrap_or_default();
+            let room_mesh_mgr = query_pdms_mesh_aql(hashes.clone(), &database).await.unwrap_or_default();
             for hash in hashes {
                 if let Some(room_mesh) = room_mesh_mgr.get_mesh(hash) {
                     let t = inst.get_geo_world_transform(&inst.geo_insts[0]);
@@ -862,6 +872,7 @@ impl AiosDBManager {
     ///计算所有房间包含的其他参考号
     pub async fn calculate_rooms(&self) -> anyhow::Result<()> {
         let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
+        let database = self.get_arango_db().await?;
         //指定哪个site下有房间节点
         let Some(room_root_refnos) = &self.db_option.room_root_refnos else {
             return Ok(());
@@ -872,11 +883,11 @@ impl AiosDBManager {
             let Ok(room_root_refno) = RefU64::from_refno_str(r) else{
                 continue;
             };
-            let panes = query_deep_children_refnos_fuzzy(&self.arango_db, room_root_refno, &["PANE"]).await?;
+            let panes = query_deep_children_refnos_fuzzy(&database, room_root_refno, &["PANE"]).await?;
             // dbg!(&panes);
             println!("房间下的panel数量为: {}", panes.len());
             let instances = query_instance_with_refnos_in_arangodb(panes,
-                                                                   &self.arango_db).await?.unwrap_or_default();
+                                                                   &database).await?.unwrap_or_default();
             // dbg!(&instances);
             let mut final_within_room_refnos = vec![];
             for inst in &instances {
@@ -949,17 +960,10 @@ impl AiosDBManager {
     }
 
     #[inline]
-    pub async fn get_arangodb(&self) -> anyhow::Result<&Database> {
-        Ok(&self.arango_db)
-        // let conn = Connection::establish_jwt(
-        //     &self.db_option.arangodb_url,
-        //     &self.db_option.arangodb_user,
-        //     &self.db_option.arangodb_password,
-        // )
-        //     .await?;
-
-        // Ok(conn.db(&self.db_option.arangodb_database).await?)
+    pub async fn get_arango_db(&self) -> anyhow::Result<ArDatabase> {
+        Ok(self.arango_pool.get().await?.db(&self.db_option.arangodb_database).await?)
     }
+
 
     ///获得默认的pool
     #[inline]
@@ -994,6 +998,7 @@ impl AiosDBManager {
         }
         cache_mdb_site_map(mdb, module, &project_pool).await;
         self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
+        let database = self.get_arango_db().await?;
         if need_sync_refno_basic {
             for project in &self.db_option.included_projects {
                 if let Some(kv) = self.project_map.get(project) {
@@ -1001,7 +1006,7 @@ impl AiosDBManager {
                     if let Ok(m) = cache_plin_plax(
                         kv.value(),
                         &dbnums,
-                        &self.arango_db,
+                        &database,
                     ).await {
                         for (k, v) in m {
                             CACHED_PLIN_MAP.insert(k, &v.into());
@@ -1058,7 +1063,7 @@ impl AiosDBManager {
         // dbg!(&ref0_projects);
         let projects = db_option.included_projects.clone();
         println!("正在创建图数据库连接");
-        let database = get_arangodb_conn_from_db_option(&db_option).await.unwrap();
+        let arango_pool = connect_arangodb(&db_option).await?;
         Ok(Self {
             project_map,
             ref0_projects,
@@ -1068,7 +1073,7 @@ impl AiosDBManager {
             project_path: dir,
             db_option,
             cached_mesh_mgr: Arc::new(Default::default()),
-            arango_db: database,
+            arango_pool,
             cached_world_transforms_map: Arc::new(Default::default()),
             cache_module_numbdbs: Default::default(),
             mdb_dbnums: Default::default(),
@@ -1693,10 +1698,11 @@ impl AiosDBManager {
         expr: &str,
         desi_refno: RefU64,
     ) -> anyhow::Result<f32> {
+        let database = self.get_arango_db().await?;
         let cata_context = if let Some(cata) = CATAEXPRCONTEXT_MAP.get(&desi_refno) {
             cata.value().clone()
         } else {
-            let cata = CataExprContext::create(desi_refno, &self.arango_db)
+            let cata = CataExprContext::create(desi_refno, &database)
                 .await
                 .unwrap_or_default()
                 .unwrap_or_default();
@@ -2024,9 +2030,9 @@ impl AiosDBManager {
             .collect::<Vec<_>>();
         // dbg!(&tubi_result.len());
         if !tubi_result.is_empty() {
-            let conn = mgr.get_arangodb().await?;
+            let conn = mgr.get_arango_db().await?;
             let json = serde_json::to_value(tubi_result).unwrap_or_default();
-            save_arangodb_with_database(json, "tubi_edges", &conn, mgr.db_option.replace_dbs)
+            save_arangodb_doc(json, "tubi_edges", &conn, mgr.db_option.replace_dbs)
                 .await?;
         }
         println!(

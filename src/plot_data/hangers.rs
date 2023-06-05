@@ -5,8 +5,8 @@ use aios_core::cache::refno::CachedRefBasic;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
 use aios_core::plot_struct::hanger::*;
-use arangors_lite::{AqlQuery, Database};
-use arangors_lite::collection::CollectionType::{Document, Edge};
+use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors::collection::CollectionType::{Document, Edge};
 use calamine::{Error, open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::DashMap;
 use glam::{Vec2, Vec3};
@@ -24,7 +24,7 @@ use crate::api::attr::{query_explicit_attr, query_implicit_attr};
 use crate::api::element::query_name;
 use crate::api::ssc_data::travel_ssc_children;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, save_arangodb_with_db_option};
+use crate::graph_db::pdms_arango::{ArDatabase, create_arango_document, save_arangodb_with_db_option};
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::interface::PdmsDataInterface;
 
@@ -34,7 +34,7 @@ pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option
     let pool = project_map.get(&mgr.db_option.project_name);
     if pool.is_none() { return Ok(None); }
     let pool = pool.unwrap();
-    let database = &mgr.get_arangodb().await?;
+    let database = &mgr.get_arango_db().await?;
     let atta_name = "R320.060"; // 先拿这一个做测试
     let pipe_size_map = read_pipe_size_excel()?;
     let (hanger_map, atta_refnos) = get_all_hangers_with_atta(atta_name, pool.value()).await?;
@@ -130,7 +130,7 @@ async fn get_all_hangers_with_atta(atta_name: &str, pool: &Pool<MySql>) -> anyho
 }
 
 /// 获取需要的 pcla 的数据
-async fn get_pcla_data(pcla_refnos: Vec<PdmsElement>, database: &Database) -> anyhow::Result<Vec<HangerPclaData>> {
+async fn get_pcla_data(pcla_refnos: Vec<PdmsElement>, database: &ArDatabase) -> anyhow::Result<Vec<HangerPclaData>> {
     let mut pcla_datas = vec![];
     let mut pcla_map = HashMap::new(); // pcla 只记录 spre的 name 和 相同 spre的数量
     for pcla_refno in pcla_refnos {
@@ -157,7 +157,7 @@ async fn get_pcla_data(pcla_refnos: Vec<PdmsElement>, database: &Database) -> an
 }
 
 /// 获取 sctn 的数据
-async fn get_sctn_data(stru_children: &Vec<PdmsElement>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<Vec<HangerSctnData>> {
+async fn get_sctn_data(stru_children: &Vec<PdmsElement>, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<Vec<HangerSctnData>> {
     let mut result = vec![];
     let mut sctn_map = HashMap::new();
     for child in stru_children {
@@ -198,7 +198,7 @@ async fn get_sctn_data(stru_children: &Vec<PdmsElement>, database: &Database, po
 }
 
 /// 获取 pfit 的数据
-async fn get_pfit_data(stru_children: &Vec<PdmsElement>, database: &Database) -> anyhow::Result<Vec<HangerPfitData>> {
+async fn get_pfit_data(stru_children: &Vec<PdmsElement>, database: &ArDatabase) -> anyhow::Result<Vec<HangerPfitData>> {
     let mut result = Vec::new();
     let mut pfit_map = HashMap::new();
     for stru_child in stru_children {
@@ -223,7 +223,7 @@ async fn get_pfit_data(stru_children: &Vec<PdmsElement>, database: &Database) ->
 }
 
 /// 获取 pane 的数据
-async fn get_pane_data(stru_children: &Vec<PdmsElement>, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<Vec<HangerPaneData>> {
+async fn get_pane_data(stru_children: &Vec<PdmsElement>, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<Vec<HangerPaneData>> {
     let mut result = vec![];
     // let mut pane_map = HashMap::new();
     for stru_child in stru_children {
@@ -295,10 +295,10 @@ fn gen_query_stru_and_rest_with_atta_name_sql(atta_name: &str) -> String {
 }
 
 /// 从图数据库获取单个hanger需要的数据
-pub async fn query_hangers_element(atta_name: &str, database: &Database) -> anyhow::Result<Vec<HangerData>> {
-    let aql = AqlQuery::new("\
+pub async fn query_hangers_element(atta_name: &str, database: &ArDatabase) -> anyhow::Result<Vec<HangerData>> {
+    let aql = AqlQuery::builder().query("\
         return document('hanger_data',@name)
-    ").bind_var("name", atta_name);
+    ").bind_var("name", atta_name).build();
     let result: Vec<HangerData> = database.aql_query(aql).await?;
     Ok(result)
 }

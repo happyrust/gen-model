@@ -6,7 +6,7 @@ use std::mem::transmute;
 use std::sync::Arc;
 use aios_core::pdms_types::{AttrVal, EleTreeNode, RefU64, RefU64Vec};
 use anyhow::anyhow;
-use arangors_lite::{AqlQuery, Database};
+use bb8_arangodb::arangors::{AqlQuery, Database};
 use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::{DashMap, DashSet};
 use futures::future::OkInto;
@@ -95,7 +95,7 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
         }
     }
     dbg!("创建SSC表完成");
-    let room_data = query_all_room_data_aql(mgr.get_arangodb().await?, project_pool, &mgr.db_option).await?;
+    let room_data = query_all_room_data_aql(&mgr.get_arango_db().await?, project_pool, &mgr.db_option).await?;
     let room_info = deal_room_info(room_data.clone());
     let (zone_level_map, zone_name_map, next_refno) = insert_set_ssc_node_sql(room_info.clone(), project_pool).await?;
     dbg!("SSC固定节点生成");
@@ -406,8 +406,8 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
                     }
                 } else {
                     // 如果发现该zone下 :CNPE_divco 没有值，直接把整个zone下的refno全部移除
-                    let database = mgr.get_arangodb().await?;
-                    if let Ok(children) = query_travel_children_aql(database, zone_refno).await {
+                    let database = mgr.get_arango_db().await?;
+                    if let Ok(children) = query_travel_children_aql(&database, zone_refno).await {
                         let children_len = children.len();
                         println!("删除不符合条件的 zone {:?} 下的所有参考号,共有{}条", zone_refno, children_len);
                         for child in children.into_iter() {

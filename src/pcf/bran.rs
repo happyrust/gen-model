@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::Arc;
 use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
 use aios_core::prim_geo::tubing::TubiEdge;
-use arangors_lite::Database;
+use bb8_arangodb::arangors::Database;
 use bevy::prelude::dbg;
 use dashmap::DashMap;
 use glam::Vec3;
@@ -38,7 +38,7 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
     let mut materials = vec![];
     data.append(&mut gen_pcf_file_head().into_bytes());
     let pool = aios_mgr.project_map.get(&aios_mgr.db_option.project_name).unwrap();
-    let database = aios_mgr.get_arangodb().await?;
+    let database = aios_mgr.get_arango_db().await?;
     let bran_attr = query_attr(refno, &aios_mgr, None).await?;
     let bran_name = bran_attr.get_name().to_string();
 

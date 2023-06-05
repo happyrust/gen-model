@@ -7,7 +7,7 @@ use aios_core::helper::table::qualified_table_name;
 use aios_core::pdms_types::*;
 use aios_core::three_dimensional_review::VagueSearchCondition;
 use anyhow::anyhow;
-use arangors_lite::{Connection, Database};
+use bb8_arangodb::arangors::Database;
 use bevy::utils::petgraph::visit::Walker;
 use calamine::Error::De;
 use dashmap::DashSet;
@@ -21,6 +21,7 @@ use sqlx::mysql::MySqlRow;
 use crate::aql_api::children::query_owner_with_type_aql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::defines::{RString, CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
+use crate::graph_db::pdms_arango::ArDatabase;
 
 /// 遍历该节点下的 children (包含自己)
 pub async fn travel_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
@@ -271,8 +272,8 @@ pub async fn query_ancestor_refnos_till_type(mut refno: RefU64, att_type: &str, 
     Ok(result)
 }
 
-pub async fn query_ancestor_refnos_till_type_aql(mut refno: RefU64, att_type: &str, mgr: Arc<AiosDBManager>) -> anyhow::Result<Vec<RefU64>> {
-    let database = mgr.get_arangodb().await?;
+pub async fn query_ancestor_refnos_till_type_aql(database: &ArDatabase, mut refno: RefU64, att_type: &str) -> anyhow::Result<Vec<RefU64>> {
+    // let database = mgr.get_arango_db().await?;
     let mut result = vec![];
     while let Some((owner_refno, owner_type)) = query_owner_with_type_aql(database, refno).await? {
         result.push(refno);

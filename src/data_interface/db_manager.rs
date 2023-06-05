@@ -64,6 +64,7 @@ impl AiosDBManager {
     ///获取待调试或者整个db的参考号集合
     pub async fn get_gen_model_target_refnos(&self, geo_type: GeoEnum, db_nos: &[i32]) -> anyhow::Result<Vec<RefU64>> {
         let db_option = &self.db_option;
+        let database = self.get_arango_db().await?;
         let mut target_refnos = vec![];
         let mut is_debug = false;
         let target_debug_refno = db_option
@@ -96,7 +97,7 @@ impl AiosDBManager {
                         target_refnos.push(root_refno);
                     } else {
                         query_travel_children_with_types_aql(
-                            &self.arango_db,
+                            &database,
                             root_refno,
                             types,
                             false,

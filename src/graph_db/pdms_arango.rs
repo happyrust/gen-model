@@ -3,7 +3,7 @@ use sqlx::Row;
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
 use crate::consts::*;
-use arangors_lite::{AqlQuery, ClientError, Collection, Connection, Database};
+use bb8_arangodb::arangors::{AqlQuery, ClientError, Collection, Database};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::take;
 use std::sync::{Arc, Mutex};
@@ -13,7 +13,9 @@ use aios_core::options::DbOption;
 use aios_core::pdms_types::{PdmsElement, RefU64, RefU64Vec};
 use aios_core::tool::db_tool::db1_hash;
 use anyhow::anyhow;
-use arangors_lite::collection::CollectionType;
+use bb8_arangodb::{ArangoConnectionManager, AuthenticationMethod};
+use bb8_arangodb::arangors::collection::CollectionType;
+use bb8_arangodb::bb8::Pool;
 use bevy::prelude::dbg;
 use dashmap::{DashMap, DashSet};
 use futures::future::ok;
@@ -30,30 +32,21 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{DataDocument, ForeignEdges};
 use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphEdgeWithKey, PdmsEleGraphNode};
+use arangors::uclient::reqwest::ReqwestClient;
 
-/// 根据 db_option 的 project_name 创建 arangodb 的 database
-pub async fn set_arangodb_database_from_db_option(db_option: &DbOption) -> anyhow::Result<()> {
-    let conn = Connection::establish_jwt(&db_option.arangodb_url, &db_option.arangodb_user, &db_option.arangodb_password)
-        .await?;
-    let _ = conn.create_database(&db_option.arangodb_database).await;
-    Ok(())
+pub type ArDatabase = Database<ReqwestClient>;
+pub type ArPool = Pool<ArangoConnectionManager<ReqwestClient>>;
+
+
+pub async fn connect_arangodb(db_option: &DbOption) -> anyhow::Result<ArPool> {
+    let manager = ArangoConnectionManager::<ReqwestClient>::new(
+        db_option.arangodb_url.to_string(),
+        AuthenticationMethod::JWTAuth(db_option.arangodb_user.to_string(), db_option.arangodb_password.to_string()),
+    );
+    Ok(Pool::builder().max_size(40).build(manager).await?)
 }
 
-pub async fn get_arangodb_conn_from_db_option(db_option: &DbOption) -> anyhow::Result<Database> {
-    let conn = Connection::establish_jwt(&db_option.arangodb_url, &db_option.arangodb_user, &db_option.arangodb_password)
-        .await?;
-    Ok(conn.db(&db_option.arangodb_database).await?)
-}
-
-//establish_basic_auth
-
-pub async fn connect_arangodb_with_basic_auth(db_option: &DbOption) -> anyhow::Result<Database> {
-    let conn = Connection::establish_basic_auth(&db_option.arangodb_url, &db_option.arangodb_user, &db_option.arangodb_password)
-        .await?;
-    Ok(conn.db(&db_option.arangodb_database).await?)
-}
-
-pub async fn create_arangodb_conn(database: &Database, collection_name: &str, collection_type: CollectionType) -> anyhow::Result<()> {
+pub async fn create_arango_document(database: &ArDatabase, collection_name: &str, collection_type: CollectionType) -> anyhow::Result<()> {
     match collection_type {
         CollectionType::Document => {
             let database = database.create_collection(collection_name).await;
@@ -96,7 +89,7 @@ pub async fn create_arangodb_conn(database: &Database, collection_name: &str, co
 }
 
 /// 在同步的时候就将 pdms_element 保存到图数据库
-pub async fn save_pdms_element_in_sync(db_option: &DbOption, total_attr_map: &DashMap<RefU64, WholeAttMap>
+pub async fn save_pdms_element_in_sync(database: &ArDatabase, total_attr_map: &DashMap<RefU64, WholeAttMap>
                                        , children_map: &HashMap<RefU64, RefU64Vec>, dbnum: i32) -> anyhow::Result<()> {
     let mut results = Vec::new();
     let mut edges = Vec::new();
@@ -126,11 +119,11 @@ pub async fn save_pdms_element_in_sync(db_option: &DbOption, total_attr_map: &Da
     }
     for result in results.chunks(ARANGODB_SAVE_AMOUNT) {
         let json = serde_json::to_value(result)?;
-        save_arangodb_with_db_option(json, db_option, "pdms_eles").await?;
+        save_arangodb_with_db_option(database, json, "pdms_eles").await?;
     }
     for edge in edges.chunks(ARANGODB_SAVE_AMOUNT) {
         let json = serde_json::to_value(edge)?;
-        save_arangodb_with_db_option(json, db_option, AQL_PDMS_EDGES_COLLECTION).await?;
+        save_arangodb_with_db_option(database, json, AQL_PDMS_EDGES_COLLECTION).await?;
     }
     Ok(())
 }
@@ -141,13 +134,13 @@ pub async fn save_virtual_hole_value_to_arangodb(db_option: &DbOption) -> anyhow
     // let hole_data = insert_virtual_hole_data();
     // for data in hole_data.chunks(ARANGODB_SAVE_AMOUNT) {
     //     let json = serde_json::to_value(data)?;
-    //     save_arangodb_with_db_option(json, db_option, "hole_data").await?;
+    //     save_arangodb_with_db_option(database, json,  "hole_data").await?;
     // }
     //
     // let embed_data = insert_virtual_embed_data();
     // for data in embed_data.chunks(ARANGODB_SAVE_AMOUNT) {
     //     let json = serde_json::to_value(data)?;
-    //     save_arangodb_with_db_option(json, db_option, "embed_data").await?;
+    //     save_arangodb_with_db_option(database, json,  "embed_data").await?;
     // }
 
     Ok(())
@@ -331,10 +324,10 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
                             eles.push(element);
                             edges.push(edge);
                         }
-                        let database_clone = mgr.get_arangodb().await?;
+                        let database_clone = mgr.get_arango_db().await?;
                         // let handle = tokio::spawn(async move {
                         let json = serde_json::to_value(&take(&mut eles))?;
-                        //     let aql = AqlQuery::new("LET data = @elements
+                        //     let aql = AqlQuery::builder().query("LET data = @elements
                         // FOR d IN data
                         //     INSERT d INTO @@collection OPTIONS { ignoreErrors: true } ")
                         //         .bind_var("@collection", collection)
@@ -342,11 +335,12 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
                         //     let _result: Vec<()> = database_clone.aql_query(aql).await?;
 
                         let json = serde_json::to_value(&take(&mut edges))?;
-                        let aql = AqlQuery::new("LET data = @edges
+                        let aql = AqlQuery::builder().query("LET data = @edges
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
                             .bind_var("@collection", pdms_edge_collection)
-                            .bind_var("edges", json);
+                            .bind_var("edges", json)
+                            .build();
                         let _result: Vec<()> = database_clone.aql_query(aql).await?;
                         // });
                         // handles.push(handle);
@@ -365,7 +359,7 @@ pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption)
     Ok(())
 }
 
-pub async fn save_pdms_level_edges_in_sync(db_option: &DbOption, children_map: &HashMap<RefU64, RefU64Vec>) -> anyhow::Result<()> {
+pub async fn save_pdms_level_edges_in_sync(database: &ArDatabase, children_map: &HashMap<RefU64, RefU64Vec>) -> anyhow::Result<()> {
     let mut results = vec![];
     for (_refno, children_map) in children_map {
         if children_map.len() == 0 { continue; }
@@ -383,14 +377,14 @@ pub async fn save_pdms_level_edges_in_sync(db_option: &DbOption, children_map: &
     if !results.is_empty() {
         for result in results.chunks(ARANGODB_SAVE_AMOUNT) {
             let json = serde_json::to_value(result)?;
-            save_arangodb_with_db_option(json, db_option, "sibl_edges").await?;
+            save_arangodb_with_db_option(database, json, "sibl_edges").await?;
         }
     }
     Ok(())
 }
 
 /// 将外部引用的参考号保存到图数据库中
-pub async fn save_foreign_refno_edges_in_sync(db_option: &DbOption, foreign_refnos_map: DashMap<RefU64, DashMap<String, RefU64>>) -> anyhow::Result<()> {
+pub async fn save_foreign_refno_edges_in_sync(database: &ArDatabase, foreign_refnos_map: DashMap<RefU64, DashMap<String, RefU64>>) -> anyhow::Result<()> {
     let mut foreign_edges = vec![];
     let mut foreign_edges_refnos = DashSet::new(); // 防止edges重复
     for foreign_refnos in foreign_refnos_map.into_iter() {
@@ -411,7 +405,7 @@ pub async fn save_foreign_refno_edges_in_sync(db_option: &DbOption, foreign_refn
     if foreign_edges.len() > 0 {
         for foreign_edge in foreign_edges.chunks(ARANGODB_SAVE_AMOUNT) {
             let json = serde_json::to_value(foreign_edge)?;
-            save_arangodb_with_db_option(json, &db_option, "foreign_edges").await?;
+            save_arangodb_with_db_option(database, json, "foreign_edges").await?;
         }
     }
     Ok(())
@@ -453,12 +447,12 @@ pub async fn sync_pdms_level_edges_to_graph_db(mgr: Arc<AiosDBManager>) -> anyho
                     }
                 }
                 if sibl_edges.len() > 1000 {
-                    let database = mgr.get_arangodb().await?;
+                    let database = mgr.get_arango_db().await?;
                     let json = serde_json::to_value(&take(&mut sibl_edges))?;
-                    save_arangodb_with_database(json, sibl_collection, &database, false).await?;
+                    save_arangodb_doc(json, sibl_collection, &database, false).await?;
                     if tubi_edges.len() != 0 {
                         let tubi_json = serde_json::to_value(&take(&mut tubi_edges))?;
-                        save_arangodb_with_database(tubi_json, tubi_collection, &database, false).await?;
+                        save_arangodb_doc(tubi_json, tubi_collection, &database, false).await?;
                     }
                 }
             }
@@ -545,7 +539,7 @@ pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::
 }
 
 /// 将dtse下的data中的dkey和ppro保存到图数据库中
-pub async fn save_dtse_value_to_arangodb(db_option: &DbOption, type_ele_map: &DashMap<u32,
+pub async fn save_dtse_value_to_arangodb(database: &ArDatabase, type_ele_map: &DashMap<u32,
     HashSet<RefU64>>, total_attr_map: &DashMap<RefU64, WholeAttMap>) -> anyhow::Result<()> {
     if let Some(data_refnos) = type_ele_map.get(&db1_hash("DATA")) {
         let mut result = vec![];
@@ -565,65 +559,65 @@ pub async fn save_dtse_value_to_arangodb(db_option: &DbOption, type_ele_map: &Da
             })
         }
         let json = serde_json::to_value(&result)?;
-        save_arangodb_with_db_option(json, db_option, "data_eles").await?;
+        save_arangodb_with_db_option(database, json, "data_eles").await?;
     }
     Ok(())
 }
 
 
 pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &str) -> anyhow::Result<()> {
-    let database = mgr.get_arangodb().await?;
-    let aql = AqlQuery::new(r#"LET data = @elements
+    let database = mgr.get_arango_db().await?;
+    let aql = AqlQuery::builder().query(r#"LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
         .bind_var("@collection", collection)
-        .bind_var("elements", json);
+        .bind_var("elements", json)
+        .build();
     let _result: Vec<()> = database.aql_query(aql).await?;
     Ok(())
 }
 
-pub async fn save_arangodb_with_db_option(json: Value, db_option: &DbOption, collection: &str) -> anyhow::Result<()> {
-    let database = get_arangodb_conn_from_db_option(db_option).await?;
+pub async fn save_arangodb_with_db_option(database: &ArDatabase, json: Value, collection: &str) -> anyhow::Result<()> {
     let mut aql_string = r#"LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#.to_string();
-    // if db_option.replace_dbs {
-    //     aql_string = aql_string.replace("INSERT", "REPLACE");
-    // }
-    let aql = AqlQuery::new(&aql_string)
-        .bind_var("@collection", collection)
-        .bind_var("elements", json);
+    let aql = //AqlQuery::builder().query(&aql_string)
+        AqlQuery::builder().query(&aql_string)
+            .bind_var("@collection", collection)
+            .bind_var("elements", json)
+            .build();
     let _result: Vec<()> = database.aql_query(aql).await?;
     Ok(())
 }
 
-pub async fn save_arangodb_with_database(json: Value, collection: &str, database: &Database, replace: bool) -> anyhow::Result<()> {
+pub async fn save_arangodb_doc(json: Value, collection: &str, database: &ArDatabase, replace: bool) -> anyhow::Result<()> {
     let mut aql_str = r#"LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#;
     // if replace {
     //     aql_string = aql_string.replace("INSERT", "REPLACE");
     // }
-    let aql = AqlQuery::new(aql_str)
+    let aql = AqlQuery::builder().query(aql_str)
         .bind_var("@collection", collection)
-        .bind_var("elements", json);
+        .bind_var("elements", json)
+        .build();
     let _result: Vec<()> = database.aql_query(aql).await?;
     Ok(())
 }
 
-pub async fn remove_arangodb_with_refno_key(refnos: &Vec<RefU64>, collection: &str, database: &Database) -> anyhow::Result<bool> {
+pub async fn remove_arangodb_with_refno_key(refnos: &Vec<RefU64>, collection: &str, database: &ArDatabase) -> anyhow::Result<bool> {
     let keys = refnos.into_iter().map(|refno| refno.to_url_refno()).collect::<Vec<_>>();
-    let aql = AqlQuery::new(
+    let aql = AqlQuery::builder().query(
         "FOR D IN @DATA
                     REMOVE D IN @COLLECTION")
         .bind_var("data", keys)
-        .bind_var("collection", collection);
+        .bind_var("collection", collection)
+        .build();
     let result = database.aql_query::<Vec<()>>(aql).await;
     Ok(!result.is_err())
 }
 
-pub async fn save_arangodb_with_db_option_create_collection(json: Value, db_option: &DbOption, collection: &str, collection_type: CollectionType) -> anyhow::Result<()> {
-    let database = get_arangodb_conn_from_db_option(db_option).await?;
+pub async fn save_arangodb_with_db_option_create_collection(database: &ArDatabase, json: Value,  collection: &str, collection_type: CollectionType) -> anyhow::Result<()> {
     match collection_type {
         CollectionType::Document => {
             database.create_collection(collection).await?;
@@ -638,9 +632,10 @@ pub async fn save_arangodb_with_db_option_create_collection(json: Value, db_opti
     // if db_option.replace_dbs {
     //     aql_string = aql_string.replace("INSERT", "REPLACE");
     // }
-    let aql = AqlQuery::new(&aql_string)
+    let aql = AqlQuery::builder().query(&aql_string)
         .bind_var("@collection", collection)
-        .bind_var("elements", json);
+        .bind_var("elements", json)
+        .build();
     let _result: Vec<()> = database.aql_query(aql).await?;
     Ok(())
 }
