@@ -20,7 +20,7 @@ pub struct CylinderTransform {
     pub ori_down: glam::Vec3,
 }
 
-pub async fn query_cylinder_transform(mgr: Arc<AiosDBManager>, refno: RefU64) -> anyhow::Result<Vec<CylinderTransform>> {
+pub async fn query_cylinder_transform(mgr: &AiosDBManager, refno: RefU64) -> anyhow::Result<Vec<CylinderTransform>> {
     let mut result = vec![];
     if let Some((_, project_db)) = mgr.get_project_pool_by_refno(refno).await {
         let att_type = query_refno_type(refno, &project_db).await?;

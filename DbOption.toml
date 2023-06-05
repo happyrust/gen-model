@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync = true
+total_sync = false
 enable_log = false
 sync_graph_db = true
 sync_tidb = true
@@ -52,10 +52,11 @@ debug_print_world_transform = false
 only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
+#debug_refno_types = ["CATA"]
 included_db_files = ["ams1112_0001"]
 #included_db_files = ["acp7001_0001"]
-manual_db_nums = [7999, 7997, 1112, 8000]
-#manual_db_nums = [1112]  #, 8000
+#manual_db_nums = [7999, 7997, 1112, 8000]
+manual_db_nums = [7999]  #, 8000
 plat_url = ""
 
 #joint还有问题，方位对齐的问题
