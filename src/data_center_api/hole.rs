@@ -67,7 +67,7 @@ async fn query_hole_data_tidb(id: u32, pool: &Pool<MySql>) -> Option<DataCenterI
     None
 }
 
-async fn gen_hole_datacenter_instance_aql(keys: Vec<String>, database: &Database) -> Vec<DataCenterInstance> {
+pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>, database: &Database) -> Vec<DataCenterInstance> {
     let mut instances_result = Vec::new();
     let Ok(instances) = query_hole_data_by_keys_aql(keys, database).await else { return instances_result; };
     for (idx, instance) in instances.into_iter().enumerate() {

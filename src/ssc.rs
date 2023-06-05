@@ -184,7 +184,6 @@ fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, Da
     while let Some(result) = iter.next() {
         let v: SiteExcelData = result?;
         // site 的 name 、code 、att_type
-        dbg!(&v.code);
         if v.code.is_some() && v.name.is_some() && v.att_type.is_some() {
             let read_site_code = v.code.clone().unwrap(); // 从 excel 文件中读取的 site name
             // 当zone_code和当前读取的值不相等时，就代表不是同一个层级了 （第一次除外,所以加了个b_first 排除第一次的情况）
@@ -226,13 +225,12 @@ fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, Da
     }
     // 查询结束时 还需要剩最后一条数据没插入
     level.push((zone_name.clone(), zones.clone()));
-    dbg!(&pdms_ssc_major_codes);
     Ok((level, name_map))
 }
 
 /// ssc专业配置excel表 返回的对应数据
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub(crate) struct SscMajorCodeExcel {
+pub struct SscMajorCodeExcel {
     /// key : site 的 name (中文名) value : site 下对应的zone 的 name
     pub level: Vec<(String, Vec<String>)>,
     /// 英文 code 对应的中文名
@@ -242,7 +240,7 @@ pub(crate) struct SscMajorCodeExcel {
 }
 
 /// 读取 专业分类 excel表 ，返回需要的值
-fn get_room_level_from_excel_refactor() -> anyhow::Result<SscMajorCodeExcel> {
+pub fn get_room_level_from_excel_refactor() -> anyhow::Result<SscMajorCodeExcel> {
     let mut level: Vec<(String, Vec<String>)> = Vec::new();
     let mut name_map = DashMap::new();
     let mut pdms_zone_name_map = HashMap::new();
