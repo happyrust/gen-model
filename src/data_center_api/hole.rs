@@ -67,9 +67,9 @@ async fn query_hole_data_tidb(id: u32, pool: &Pool<MySql>) -> Option<DataCenterI
     None
 }
 
-async fn gen_hole_datacenter_instance_aql(keys: Vec<String>, database: &Database) -> Vec<DataCenterInstance> {
+pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>, database: &Database) -> Option<Vec<DataCenterInstance>> {
     let mut instances_result = Vec::new();
-    let Ok(instances) = query_hole_data_by_keys_aql(keys, database).await else { return instances_result; };
+    let Ok(instances) = query_hole_data_by_keys_aql(keys, database).await else { return Some(instances_result); };
     for (idx, instance) in instances.into_iter().enumerate() {
         if let Ok(hole_type) = query_hole_type_aql(&instance).await {
             let result = match hole_type {
@@ -105,7 +105,7 @@ async fn gen_hole_datacenter_instance_aql(keys: Vec<String>, database: &Database
             instances_result.push(result);
         }
     }
-    instances_result
+    Some(instances_result)
 }
 
 /// 查找改参考号属于哪种孔洞
