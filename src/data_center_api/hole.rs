@@ -67,7 +67,7 @@ async fn query_hole_data_tidb(id: u32, pool: &Pool<MySql>) -> Option<DataCenterI
     None
 }
 
-pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>, database: &Database) -> Option<Vec<DataCenterInstance>> {
+pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>,project_code:&str, database: &Database) -> Option<Vec<DataCenterInstance>> {
     let mut instances_result = Vec::new();
     let Ok(instances) = query_hole_data_by_keys_aql(keys, database).await else { return Some(instances_result); };
     for (idx, instance) in instances.into_iter().enumerate() {
@@ -76,7 +76,7 @@ pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>, database: &Data
                 HoleType::STUCJ => {
                     DataCenterInstance {
                         object_model_code: "STUCJ".to_string(),
-                        project_code: "1516".to_string(),
+                        project_code: project_code.to_string(),
                         instance_code: format!("STUCJ{}", idx),
                         version: "A版".to_string(),
                         attributes: gen_stucj_data_aql(instance).await,
@@ -85,7 +85,7 @@ pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>, database: &Data
                 HoleType::STUCG => {
                     DataCenterInstance {
                         object_model_code: "STUCG".to_string(),
-                        project_code: "1516".to_string(),
+                        project_code: project_code.to_string(),
                         instance_code: format!("STUCG{}", idx),
                         version: "A版".to_string(),
                         attributes: gen_stucg_data_aql(instance).await,
@@ -94,7 +94,7 @@ pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>, database: &Data
                 HoleType::STUCH => {
                     DataCenterInstance {
                         object_model_code: "STUCH".to_string(),
-                        project_code: "1516".to_string(),
+                        project_code: project_code.to_string(),
                         instance_code: format!("STUCH{}", idx),
                         version: "A版".to_string(),
                         attributes: gen_stuch_data_aql(instance).await,
@@ -1060,7 +1060,7 @@ async fn test_gen_stucj_data_aql() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option(&db_option).await?;
     let keys = vec!["8DB55F00DF18E30-B32E-19".to_string()];
-    let instances = gen_hole_datacenter_instance_aql(keys, &database).await;
+    let instances = gen_hole_datacenter_instance_aql(keys, &db_option.project_code,&database).await.unwrap_or_default();
     let mut file = fs::File::create("孔洞_aql.json")?;
     let data = DataCenterProject {
         package_code: DataCenterProject::convert_package_code(),

@@ -31,11 +31,11 @@ pub async fn create_embed_data(pool: &Pool<MySql>) -> anyhow::Result<Option<Data
     Ok(Some(project))
 }
 
-pub async fn create_embed_data_aql(keys: Vec<String>, database: &Database) -> anyhow::Result<Option<Vec<DataCenterInstance>>> {
+pub async fn create_embed_data_aql(keys: Vec<String>,project_code:&str, database: &Database) -> anyhow::Result<Option<Vec<DataCenterInstance>>> {
     let mut instances = Vec::new();
     let embed_datas = query_embed_data_by_keys_aql(keys, database).await?;
     for (idx, embed_data) in embed_datas.into_iter().enumerate() {
-        let Some(instance) = get_embed_data_aql(idx, embed_data).await? else { continue; };
+        let Some(instance) = get_embed_data_aql(idx,embed_data, project_code).await? else { continue; };
         instances.push(instance);
     }
     // let project = DataCenterProject {
@@ -240,7 +240,7 @@ async fn query_embed_data(id: u64, pool: &Pool<MySql>) -> anyhow::Result<Option<
     Ok(None)
 }
 
-async fn get_embed_data_aql(idx: usize, embed_data: VirtualEmbedGraphNode) -> anyhow::Result<Option<DataCenterInstance>> {
+async fn get_embed_data_aql(idx: usize, embed_data: VirtualEmbedGraphNode,project_code:&str) -> anyhow::Result<Option<DataCenterInstance>> {
     let mut instances = Vec::new();
     let ref_str = embed_data.ref_standard;
     instances.push(DataCenterAttr {
@@ -380,7 +380,7 @@ async fn get_embed_data_aql(idx: usize, embed_data: VirtualEmbedGraphNode) -> an
             });
             Ok(Some(DataCenterInstance {
                 object_model_code: "STUCCA".to_string(),
-                project_code: "1516".to_string(),
+                project_code: project_code.to_string(),
                 instance_code: format!("STUCCA{}", idx),
                 version: "A版".to_string(),
                 attributes: instances,
@@ -411,7 +411,7 @@ async fn get_embed_data_aql(idx: usize, embed_data: VirtualEmbedGraphNode) -> an
             });
             Ok(Some(DataCenterInstance {
                 object_model_code: "STUCCB".to_string(),
-                project_code: "1516".to_string(),
+                project_code: project_code.to_string(),
                 instance_code: format!("STCUCCB{}", idx),
                 version: "A版".to_string(),
                 attributes: instances,
