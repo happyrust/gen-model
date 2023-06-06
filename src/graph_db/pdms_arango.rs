@@ -611,6 +611,18 @@ pub async fn save_arangodb_with_database(json: Value, collection: &str, database
     Ok(())
 }
 
+pub async fn replace_arangodb_with_database(json: Value, collection: &str, database: &Database) -> anyhow::Result<()> {
+    let mut aql_string = "LET data = @elements
+                    FOR d IN data
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true ,overwriteMode: 'replace' }".to_string();
+    let aql = AqlQuery::new(&aql_string)
+        .bind_var("@collection", collection)
+        .bind_var("elements", json);
+    let _ = database.aql_query::<Vec<()>>(aql).await?;
+    Ok(())
+}
+
+
 pub async fn remove_arangodb_with_refno_key(refnos: &Vec<RefU64>, collection: &str, database: &Database) -> anyhow::Result<bool> {
     let keys = refnos.into_iter().map(|refno| refno.to_url_refno()).collect::<Vec<_>>();
     let aql = AqlQuery::new(

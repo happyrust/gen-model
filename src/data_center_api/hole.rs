@@ -17,7 +17,7 @@ use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, remove_arangodb_with_refno_key, save_arangodb_with_database};
+use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, remove_arangodb_with_refno_key, replace_arangodb_with_database, save_arangodb_with_database};
 
 /// 正则匹配字符串中的数字
 pub fn get_num_from_str(input: &str) -> Option<i32> {
@@ -785,6 +785,36 @@ pub async fn save_hole_data_to_arangodb(data: Vec<VirtualHoleGraphNode>, databas
     }
 }
 
+/// 替换孔洞数据
+pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, database: &Database) -> anyhow::Result<String> {
+    // 删除边
+    let keys = datas.iter().map(|x| x._key.clone()).collect::<Vec<_>>();
+    let edge_aql = AqlQuery::new("\
+    for key in @keys
+        for c,e in 1 inbound CONCAT('hole_data/',key) hole_edge
+            REMOVE e._key IN hole_edge
+    ").bind_var("keys", keys);
+    let result = database.aql_query::<Vec<()>>(edge_aql).await?;
+    // 重新插入新的边
+    match replace_hole_data_edge(&datas,database).await{
+        Ok(_) => {}
+        Err(e) => {
+            return Ok(e.to_string())
+        }
+    }
+    // 替换数据
+    let json = serde_json::to_value(&datas);
+    if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
+    let json = json.unwrap();
+    match replace_arangodb_with_database(json, AQL_HOLE_DATA_COLLECTION, database).await {
+        Ok(_) => {}
+        Err(e) => {
+            return Ok(e.to_string())
+        }
+    }
+    Ok(format!("替换 {} 条数据 成功",datas.len()))
+}
+
 async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Database) -> anyhow::Result<()> {
     let mut edges = Vec::new();
     for d in data {
@@ -806,6 +836,29 @@ async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Data
     }
     Ok(())
 }
+
+async fn replace_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Database) -> anyhow::Result<()> {
+    let mut edges = Vec::new();
+    for d in data {
+        let refno = RefU64::from_refno_str(&d.rely_item_ref);
+        if refno.is_err() { continue; }
+        let refno = refno.unwrap();
+        let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
+        let to = format!("{}/{}", AQL_HOLE_DATA_COLLECTION, d._key);
+        let hash = hash_two_str(&from, &to);
+        edges.push(NegativeEdges {
+            _key: hash.to_string(),
+            _from: from,
+            _to: to,
+        });
+    }
+    if !edges.is_empty() {
+        let json = serde_json::to_value(&edges)?;
+        replace_arangodb_with_database(json, AQL_HOLE_EDGE_COLLECTION, database).await?;
+    }
+    Ok(())
+}
+
 
 /// 通过孔洞依附的墙或板来查询这个墙上所有的孔洞数据
 pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &Database) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
