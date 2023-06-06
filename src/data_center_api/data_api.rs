@@ -232,13 +232,24 @@ pub(crate) async fn get_dq_material_code(spre_name: &str, stander_num: &str, fil
     Ok(map)
 }
 
+/// 获取该节点的世界坐标下的poss和pose
+pub(crate) async fn get_refno_world_poss_pose(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<(Vec3, Vec3)>> {
+    let Some(world_transform) = aios_mgr.get_world_transform(refno).await? else { return Ok(None); };
+    let attr = aios_mgr.get_attr(refno).await?;
+    let Some(poss) = attr.get_vec3("POSS") else { return Ok(None); };
+    let Some(pose) = attr.get_vec3("POSE") else { return Ok(None); };
+    let world_poss = world_transform.transform_point(poss);
+    let world_pose = world_transform.transform_point(pose);
+    Ok(Some((world_poss, world_pose)))
+}
+
 fn gen_dq_material_code_sql(spre_name_split: &str, stander_num: &str, fileds: &Vec<String>) -> String {
     let mut sql = String::from("SELECT ");
     for filed in fileds {
         sql.push_str(&format!("{} ,", filed));
     }
-    sql.remove(sql.len() - 1 );
-    sql.push_str(&format!("FROM `{}` ",PUHUA_DQ_MATERIAL_TABLE));
+    sql.remove(sql.len() - 1);
+    sql.push_str(&format!("FROM `{}` ", PUHUA_DQ_MATERIAL_TABLE));
     sql.push_str(&format!("WHERE ComponentName = '{}' AND StandardNum = '{}'", spre_name_split, stander_num));
     sql
 }
@@ -257,9 +268,9 @@ async fn test_get_dq_material_code() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let spre_name = "/ACP1000-Trough/ACP1000-TFVL:50".to_string();
     let stander_num = "233";
-    let fileds = vec!["ItemCode".to_string(),"Unit".to_string()];
+    let fileds = vec!["ItemCode".to_string(), "Unit".to_string()];
     let material_map = get_dq_material_code(&spre_name,
-                                            &stander_num,&fileds,&aios_mgr).await?;
+                                            &stander_num, &fileds, &aios_mgr).await?;
     dbg!(&material_map);
     Ok(())
 }

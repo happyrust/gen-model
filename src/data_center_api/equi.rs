@@ -49,8 +49,9 @@ pub async fn get_gy_equi_data(refnos: Vec<RefU64>, database: &Database) -> anyho
 }
 
 /// 获取消防栓的信息 给排水专业
-pub async fn get_sg_fire_hydrant_equi_data(refnos: Vec<RefU64>, database: &Database) -> anyhow::Result<DataCenterProject> {
+pub async fn get_sg_fire_hydrant_equi_data(refnos: Vec<RefU64>, aios_mgr:&AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
+    let database = aios_mgr.get_arangodb().await?;
     if let Ok(children) = query_refnos_travel_children_with_type_aql(database, refnos, vec!["EQUI"]).await {
         for child in children {
             if !child.name.ends_with("RJ") { continue; };
@@ -68,7 +69,7 @@ pub async fn get_sg_fire_hydrant_equi_data(refnos: Vec<RefU64>, database: &Datab
             // });
             result.push(DataCenterInstance {
                 object_model_code: "COMPBTHA".to_string(),
-                project_code: "1516".to_string(),
+                project_code: aios_mgr.db_option.project_code.to_string(),
                 instance_code: name,
                 version: "A版".to_string(),
                 attributes: attr,
@@ -77,7 +78,7 @@ pub async fn get_sg_fire_hydrant_equi_data(refnos: Vec<RefU64>, database: &Datab
     }
     let project = DataCenterProject {
         package_code: DataCenterProject::convert_package_code(),
-        project_code: "1516".to_string(),
+        project_code: aios_mgr.db_option.project_code.to_string(),
         owner: "KY1801".to_string(),
         instances: result,
     };
