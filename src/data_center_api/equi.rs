@@ -10,6 +10,7 @@ use crate::api::room_code::query_room_code;
 use crate::aql_api::children::{query_refnos_travel_children_with_type_aql};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
+use crate::test::common::get_arangodb_conn_from_db_option;
 
 /// 获得机械设备的数据
 pub async fn get_machine_equi_data(refnos: Vec<RefU64>,pool:&Pool<MySql>,database:&ArDatabase) -> anyhow::Result<DataCenterProject> {

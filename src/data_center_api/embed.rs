@@ -7,7 +7,7 @@ use aios_core::pdms_types::{RefU64, UdaMajorType};
 use bb8_arangodb::arangors::{AqlQuery, Database};
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
-use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::data_center_api::hole::{convert_time_to_vec, get_pos_from_str, hash_two_str};
 use crate::consts::{AQL_EMBED_DATA_COLLECTION, AQL_EMBED_EDGE_COLLECTION, EMBED_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;

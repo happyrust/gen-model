@@ -16,11 +16,12 @@ use crate::api::element::query_name;
 use crate::aql_api::children::query_travel_children_with_type_aql;
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::{AiosDBManager, TUBI_TOL};
+use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::pcf::bran::get_bran_name_and_children;
 use crate::pcf::excel_api::get_pipe_thickness_table;
-use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
+use crate::data_interface::db_model::TUBI_TOL;
 
 /// 找到某个节点下所有的 bran 中的 tubi
 pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<(RefU64, String), f32>>, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<()> {

@@ -9,6 +9,7 @@ use crate::api::room_code::query_room_code;
 use crate::aql_api::children::{query_refnos_travel_children_with_type_aql, query_travel_children_aql};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
+use crate::test::common::get_arangodb_conn_from_db_option;
 
 pub async fn get_valv_data(refnos: Vec<RefU64>, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<DataCenterProject> {
     let mut instance = Vec::new();

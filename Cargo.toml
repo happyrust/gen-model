@@ -29,7 +29,7 @@ env_logger = "0.9.0"
 
 memchr = "2.5.0"
 nom = "7.1.1"
-nom-derive = "0.10.0"
+nom-derive = "0.10.1"
 regex = "1.5.6"
 calamine = "0.19.1"
 #append-only-vec = "0.1.2"

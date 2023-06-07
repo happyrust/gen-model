@@ -1,7 +1,7 @@
 use aios_core::pdms_types::{EleGeosInfo, RefU64};
 use bb8_arangodb::arangors::{AqlQuery, Database};
 use sqlx::{MySql, Pool, Row};
-use crate::AQL_PDMS_INST_COLLECTION;
+use crate::consts::AQL_PDMS_INST_INFO_COLLECTION;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::graph_db::structs::{PdmsEleGraphEdge, SSCEleGraphNode};
 
@@ -61,7 +61,7 @@ pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &ArDatabas
 /// 传入ssc参考号，返回该参考号下面的模型数据
 pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
     let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
-    let pdms_instances = AQL_PDMS_INST_COLLECTION;
+    let pdms_inst_infos = AQL_PDMS_INST_INFO_COLLECTION;
     let aql = AqlQuery::builder().query("
     FOR c IN 0..10 inbound @refno ssc_edges
         let f = document(@collection,c._key)
@@ -77,7 +77,7 @@ pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: 
             'flow_pt_indexs':f.flow_pt_indexs
         }")
         .bind_var("refno", refno_aql)
-        .bind_var("collection", pdms_instances)
+        .bind_var("collection", pdms_inst_infos)
         .build();
     let result: Vec<EleGeosInfo> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }

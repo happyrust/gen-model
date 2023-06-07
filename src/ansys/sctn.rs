@@ -15,6 +15,7 @@ use crate::consts::SCTN_STANDARD;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::consts::CHANNEL_STEEL_STANDARD;
+use crate::test::common::get_arangodb_conn_from_db_option;
 
 pub async fn query_single_sctn_ansys_data(refno: RefU64, aios_mgr: &AiosDBManager,database:&ArDatabase) -> anyhow::Result<Option<SctnAnsysData>> {
     // 查找pdms中 sctn 对应的属性

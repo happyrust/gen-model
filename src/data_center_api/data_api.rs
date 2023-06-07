@@ -58,7 +58,7 @@ pub struct PipeRoomCodeData {
 }
 
 /// 获取阀门所处的房间号，工艺专业
-pub async fn get_valv_data_from_pipe_major(refno:RefU64,mgr:&AiosDBManager) -> anyhow::Result<Vec<PipeRoomCodeData>> {
+pub async fn get_valv_data_from_pipe_major(refno: RefU64, mgr: &AiosDBManager) -> anyhow::Result<Vec<PipeRoomCodeData>> {
     let mut result = vec![];
     let pool = mgr.get_project_pool_by_refno(refno).await;
     if pool.is_none() { return Ok(result); }
@@ -78,7 +78,7 @@ pub async fn get_valv_data_from_pipe_major(refno:RefU64,mgr:&AiosDBManager) -> a
         if let Some(room_name) = room_name {
             room_code = room_name.room_name;
         }
-        result.push(PipeRoomCodeData{
+        result.push(PipeRoomCodeData {
             refno: refno.refno.to_refno_string(),
             room_code,
         })
@@ -87,8 +87,7 @@ pub async fn get_valv_data_from_pipe_major(refno:RefU64,mgr:&AiosDBManager) -> a
 }
 
 
-
-pub async fn get_equi_data_from_electric_major(refno:RefU64,mgr:&AiosDBManager) -> anyhow::Result<Vec<InstPositionData>> {
+pub async fn get_equi_data_from_electric_major(refno: RefU64, mgr: &AiosDBManager) -> anyhow::Result<Vec<InstPositionData>> {
     let mut result = vec![];
     let pool = mgr.get_project_pool_by_refno(refno).await;
     if pool.is_none() { return Ok(result); }
@@ -124,7 +123,7 @@ pub async fn get_equi_data_from_electric_major(refno:RefU64,mgr:&AiosDBManager) 
 async fn test_get_inst_data_from_inst_major() -> anyhow::Result<()> {
     let mgr = AiosDBManager::init_form_config().await?;
     let refno = RefU64::from_refno_str("24381/103249").unwrap();
-    let data = get_inst_data_from_inst_major(refno,&mgr).await?;
+    let data = get_inst_data_from_inst_major(refno, &mgr).await?;
     dbg!(data);
     Ok(())
 }

@@ -5,6 +5,7 @@ use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::virtual_hole_value::query_virtual_hole_value;
 // use crate::graph_db::pdms_arango::{ArDatabase, get_arangodb_conn_from_db_option};
 use crate::graph_db::pdms_arango::ArDatabase;
+use crate::test::common::get_arangodb_conn_from_db_option;
 
 pub async fn query_para_from_desi_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Vec<f64>>> {
     let catr_refno = query_foreign_refno_aql(refno,  &["SPRE", "CATR"], database).await?;

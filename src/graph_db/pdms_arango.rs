@@ -27,7 +27,7 @@ use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
 use crate::api::children::query_contain_noun_refnos;
 use crate::api::element::*;
 use crate::api::project_mdb::query_db_nums_of_mdb;
-use crate::AQL_PDMS_EDGES_COLLECTION;
+use crate::consts::AQL_PDMS_EDGES_COLLECTION;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{DataDocument, ForeignEdges};
@@ -89,8 +89,8 @@ pub async fn create_arango_document(database: &ArDatabase, collection_name: &str
 }
 
 /// 在同步的时候就将 pdms_element 保存到图数据库
-pub async fn save_pdms_element_in_sync(database: &ArDatabase, total_attr_map: &DashMap<RefU64, WholeAttMap>
-                                       , children_map: &HashMap<RefU64, RefU64Vec>, dbnum: i32) -> anyhow::Result<()> {
+pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: &DashMap<RefU64, WholeAttMap>
+                                         , children_map: &HashMap<RefU64, RefU64Vec>, dbnum: i32) -> anyhow::Result<()> {
     let mut results = Vec::new();
     let mut edges = Vec::new();
     for (refno, whole_attr) in total_attr_map.clone() {
@@ -107,6 +107,7 @@ pub async fn save_pdms_element_in_sync(database: &ArDatabase, total_attr_map: &D
             noun: noun.to_string(),
             version: 0,
             dbnum,
+            cata_hash: whole_attr.merge_implicit_explicit_into_attr().cal_cata_hash(),
         };
         let key = refno.hash_with_another_refno(owner);
         let pdms_edges = PdmsEleGraphEdgeWithKey {
@@ -273,92 +274,7 @@ pub async fn save_virtual_hole_value_to_arangodb(db_option: &DbOption) -> anyhow
 //     virtual_data
 // }
 
-pub async fn sync_pdms_to_graph_db(mgr: Arc<AiosDBManager>, db_option: DbOption) -> anyhow::Result<()> {
-    let mut time = Instant::now();
-    for project in &db_option.included_projects {
-        let default_conn = AiosDBManager::get_default_conn_str(&db_option);
-        let pool = AiosDBManager::get_db_pool(&default_conn, project).await.unwrap();
-        let include_module = vec!["DESI", "CATA"];
-        for module in include_module {
-            // let mut handles = vec![];
-            // 只保存 指定mdb的desi的numbdb
-            let numbdbs = query_db_nums_of_mdb(&format!("/{}", db_option.mdb_name), module, &pool).await?;
-            let mut numbdbs_sql = String::new();
-            for numbdb in numbdbs {
-                numbdbs_sql.push_str(&format!("{} ,", numbdb));
-            }
-            numbdbs_sql.remove(numbdbs_sql.len() - 1);
-
-            let sql = format!("SELECT ID, OWNER, TYPE, NAME, NUMBDB  FROM {PDMS_ELEMENTS_TABLE} WHERE NUMBDB IN ({})", numbdbs_sql);
-            let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
-            let collection = "pdms_eles";
-            let pdms_edge_collection = AQL_PDMS_EDGES_COLLECTION;
-            match results {
-                Ok(vals) => {
-                    //需不需要按照db numbder 来分别去生成
-                    for val_chunk in vals.chunks(1000) {
-                        let mut eles = vec![];
-                        let mut edges = vec![];
-                        for val in val_chunk {
-                            let refno = (val.get::<i64, _>("ID") as u64).into();
-                            let owner = (val.get::<i64, _>("OWNER") as u64).into();
-                            let name = val.get::<String, _>("NAME");
-                            let type_name = val.get::<String, _>("TYPE");
-                            let dbnum = val.get::<i32, _>("NUMBDB");
-                            let refno_str = RefU64(refno).to_refno_normal_string();
-                            let owner_str = RefU64(owner).to_refno_normal_string();
-                            let element = PdmsEleGraphNode {
-                                _key: refno_str.clone(),
-                                owner: owner_str.clone(),
-                                name,
-                                noun: type_name,
-                                version: 0,
-                                dbnum,
-                            };
-                            let key = RefU64(refno).hash_with_another_refno(RefU64(owner));
-                            let edge = PdmsEleGraphEdgeWithKey {
-                                _key: key.to_string(),
-                                _from: format!("{}/{refno_str}", &collection),
-                                _to: format!("{}/{owner_str}", &collection),
-                            };
-                            eles.push(element);
-                            edges.push(edge);
-                        }
-                        let database_clone = mgr.get_arango_db().await?;
-                        // let handle = tokio::spawn(async move {
-                        let json = serde_json::to_value(&take(&mut eles))?;
-                        //     let aql = AqlQuery::builder().query("LET data = @elements
-                        // FOR d IN data
-                        //     INSERT d INTO @@collection OPTIONS { ignoreErrors: true } ")
-                        //         .bind_var("@collection", collection)
-                        //         .bind_var("elements", json);
-                        //     let _result: Vec<()> = database_clone.aql_query(aql).await?;
-
-                        let json = serde_json::to_value(&take(&mut edges))?;
-                        let aql = AqlQuery::builder().query("LET data = @edges
-                    FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
-                            .bind_var("@collection", pdms_edge_collection)
-                            .bind_var("edges", json)
-                            .build();
-                        let _result: Vec<()> = database_clone.aql_query(aql).await?;
-                        // });
-                        // handles.push(handle);
-                    }
-                    // futures::future::join_all(take(&mut handles)).await;
-                }
-                Err(e) => {
-                    dbg!(&e);
-                    dbg!(sql);
-                    return Err(anyhow!(e.to_string()));
-                }
-            }
-        }
-    }
-    println!("sync graph db costs: {}ms", time.elapsed().as_millis());
-    Ok(())
-}
-
+///保存层级关系到图数据库
 pub async fn save_pdms_level_edges_in_sync(database: &ArDatabase, children_map: &HashMap<RefU64, RefU64Vec>) -> anyhow::Result<()> {
     let mut results = vec![];
     for (_refno, children_map) in children_map {

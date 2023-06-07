@@ -10,7 +10,8 @@ use crate::api::attr::query_attr;
 use crate::aql_api::children::query_children_aql;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{ArDatabase, create_arango_document, save_arangodb_doc};
-use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
+use crate::test::common::get_arangodb_conn_from_db_option;
 
 /// 土建出图轴网需要的数据
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

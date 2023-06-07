@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 use aios_core::options::DbOption;
-use aios_core::pdms_types::{EleTreeNode, GENRAL_NEG_NOUN_NAMES, PdmsElement, RefU64, RefU64Vec};
+use aios_core::pdms_types::{CataHashRefnoKV, EleTreeNode, GENRAL_NEG_NOUN_NAMES, PdmsElement, RefU64, RefU64Vec};
 use aios_core::three_dimensional_review::{VagueSearchCondition, VagueSearchRequest};
 use bb8_arangodb::arangors::{AqlQuery, Database};
 use bitvec::ptr::replace;
@@ -9,7 +9,7 @@ use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool};
 use crate::api::attr::query_attr;
 use crate::aql_api::*;
-use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::data_interface::tidb_manager::{AiosDBManager};
 use crate::graph_db::pdms_arango::ArDatabase;
 
@@ -51,7 +51,7 @@ pub async fn query_children_order_aql(arango_database: &ArDatabase, refno: RefU6
     for child in children
         filter child._key != null
         return {
-            'refno':child._key,
+            '_key':child._key,
             'owner':child.owner,
             'name':child.name,
             'noun':child.noun,
@@ -189,7 +189,7 @@ pub async fn query_deep_children_refnos_fuzzy(arango_database: &ArDatabase, refn
         .bind_var("nouns", nouns)
         .build();
     let results: Vec<RefU64> = arango_database.aql_query::<String>(aql).await?.iter()
-                        .map(|x| RefU64::from_str(x).unwrap_or_default()).collect();
+        .map(|x| RefU64::from_str(x).unwrap_or_default()).collect();
     Ok(results)
 }
 
@@ -231,45 +231,75 @@ pub async fn query_travel_children_with_out_leaf_aql(arango_database: &ArDatabas
 }
 
 /// 遍历refno只获取指定类型数组的refnos
-pub async fn query_travel_children_with_types_aql(arango_database: &ArDatabase, refno: RefU64, att_types: &[&str], exclude_neg_sibling: bool) -> anyhow::Result<Vec<EleTreeNode>> {
-    let mut r = vec![];
+pub async fn query_travel_children_with_types_and_cata_hash(arango_database: &ArDatabase, refno: RefU64,
+                                                            att_types: &[&str], is_parent: bool, skip_exist: bool) -> anyhow::Result<Vec<CataHashRefnoKV>> {
+    // let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = if !exclude_neg_sibling {
+    let aql = if is_parent {
         AqlQuery::builder().query("\
-    FOR z in 0..10 INBOUND @id pdms_edges
-    Filter z.noun in @nouns
+FOR v,e,p in 0..10 INBOUND @id pdms_edges
+    let parent = p.vertices[-2]
+    filter parent.noun in @nouns
+    let s = document(pdms_inst_geos, to_string(v.cata_hash))
+    filter !@skip_exist or s == null
+    COLLECT exist = s, cata_group=v.cata_hash into g
     return {
-        'refno':z._key,
-        'owner':z.owner,
-        'name':z.name,
-        'noun':z.noun,
-        'version':0,
-        'children_count':0,
-    }")
+        cata_hash: cata_group,
+        exist_geo: exist,
+        group_refnos: g[*].v._key,
+    }
+    ")
+            .bind_var("skip_exist", skip_exist)
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
             .build()
-    } else {
+    }else{
         AqlQuery::builder().query("\
-        FOR z in 0..10 INBOUND @id pdms_edges
-            Filter z.noun in @nouns
-            let contains_negativ = ( for v in 0..1000 ANY z._id sibl_edges
-                            filter POSITION(@negative_nouns,v.noun)
-                            return 1 )
-            filter Length(contains_negativ) == 0
-            return {
-                'refno':z._key,
-                'owner':z.owner,
-                'name':z.name,
-                'noun':z.noun,
-                'version':0,
-                'children_count':0,
-            }").bind_var("id", refno_aql)
+FOR v,e,p in 0..10 INBOUND @id pdms_edges
+    filter v.noun in @nouns
+    let s = document(pdms_inst_geos, to_string(v.cata_hash))
+    filter !@skip_exist or s == null
+    COLLECT exist = s, cata_group=v.cata_hash into g
+    return {
+        cata_hash: cata_group,
+        exist_geo: exist,
+        group_refnos: g[*].v._key,
+    }
+    ")
+            .bind_var("skip_exist", skip_exist)
+            .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
-            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
             .build()
     };
+    let r: Vec<CataHashRefnoKV> = arango_database.aql_query(aql).await?;
+    Ok(r)
+}
+
+/// 遍历refno只获取指定类型数组的refnos
+pub async fn query_travel_children_with_types_aql(arango_database: &ArDatabase, refno: RefU64, att_types: &[&str], is_parent: bool) -> anyhow::Result<Vec<EleTreeNode>> {
+    let mut r = vec![];
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let aql = if is_parent {
+        AqlQuery::builder().query("\
+    FOR v,e,p in 0..10 INBOUND @id pdms_edges
+    let parent = p.vertices[-2]
+    Filter parent.noun in @nouns
+    return v")
+            .bind_var("id", refno_aql)
+            .bind_var("nouns", att_types)
+            .build()
+    }else{
+        AqlQuery::builder().query("\
+    FOR v in 0..10 INBOUND @id pdms_edges
+    Filter v.noun in @nouns
+    return v")
+            .bind_var("id", refno_aql)
+            .bind_var("nouns", att_types)
+            .build()
+    };
+    // dbg!(&aql);
     let result: Vec<PdmsElement> = arango_database.aql_query(aql).await?;
+    // dbg!(result.len());
     for v in result {
         r.push(EleTreeNode {
             refno: v.refno,
@@ -527,14 +557,14 @@ pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, databa
 
 #[tokio::test]
 async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
-    let refno = RefU64::from_refno_str("17496/79566").unwrap();
-    let result = query_travel_children_filter_negative_sibl_nodes(refno, &database).await?;
-    dbg!(&result);
+    // use config::{Config, ConfigError, Environment, File};
+    // let s = Config::builder()
+    //     .add_source(File::with_name("DbOption"))
+    //     .build()?;
+    // let db_option: DbOption = s.try_deserialize().unwrap();
+    // let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    // let refno = RefU64::from_refno_str("17496/79566").unwrap();
+    // let result = query_travel_children_filter_negative_sibl_nodes(refno, &database).await?;
+    // dbg!(&result);
     Ok(())
 }

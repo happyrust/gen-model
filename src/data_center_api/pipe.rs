@@ -22,8 +22,9 @@ use crate::data_center_api::flan::get_data_center_flan_attr;
 use crate::data_center_api::redu::get_data_center_redu_attr;
 use crate::data_center_api::tee::get_data_center_tee_attr;
 use crate::data_center_api::tubi::get_data_center_tubi_attr;
+use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::{AiosDBManager, TUBI_TOL};
+use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::metadata::{convert_str_to_hash, get_characters_in_str};
 

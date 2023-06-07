@@ -1,5 +1,5 @@
 use std::ops::Mul;
-use aios_core::pdms_types::{EleGeoInstance, EleGeosInfo, RefU64};
+use aios_core::pdms_types::{EleInstGeo, EleGeosInfo, RefU64};
 use aios_core::geom_types::RvmGeoInfo;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use bb8_arangodb::arangors::Database;
@@ -117,7 +117,7 @@ pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: RvmShapeTypeData, sha
     data
 }
 
-pub fn gen_prim_data_test(geo_instance: &EleGeoInstance, desi_transform: Transform, b_desi_cyli: bool) -> Vec<u8> {
+pub fn gen_prim_data_test(geo_instance: &EleInstGeo, desi_transform: Transform, b_desi_cyli: bool) -> Vec<u8> {
     let mut data = vec![];
     let geo_transform = geo_instance.transform;
     let mut transform =

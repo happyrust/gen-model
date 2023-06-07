@@ -15,10 +15,11 @@ use crate::aql_api::{convert_refno_vec_from_vec_string};
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
-use crate::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::graph_db::pdms_arango::*;
 use aios_core::pdms_types::*;
 use crate::data_interface::interface::PdmsDataInterface;
+use crate::test::common::get_arangodb_conn_from_db_option;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RoomData {
@@ -58,7 +59,6 @@ pub struct RoomInfo {
 
 /// 将房间信息保存到图数据库
 impl AiosDBManager {
-    //mut major_map: &mut HashMap<RefU64, UdaMajorType>
     pub(crate) async fn save_room_info_to_arangodb(&self, room_map: HashMap<RefU64, Vec<RefU64>>) -> anyhow::Result<bool> {
         let mut room_eles_json = vec![];
         let mut room_edges_json = vec![];

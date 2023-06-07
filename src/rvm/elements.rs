@@ -23,7 +23,7 @@ use crate::aql_api::PdmsRefnoNameAql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager};
 use crate::graph_db::pdms_arango::ArDatabase;
-use crate::graph_db::pdms_inst_arango::{query_instance_with_refno_in_arangodb, query_rvm_instance_data_from_refno_aql};
+use crate::graph_db::pdms_inst_arango::*;
 use crate::rvm::data_api::*;
 use crate::rvm::head::{create_head_data, create_tail_data};
 
@@ -43,7 +43,7 @@ pub async fn create_rvm_file(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow:
     // let mut element_data = vec![];
     // let element = create_element_data(refno, aios_mgr, &mut element_data, ancestor_data.1, &database, &pool).await;
     // let element = create_element_data_tree(refno, aios_mgr, ancestor_data.1, &database, &pool).await;
-    let element = create_element_data_tree_test(refno, &database, &pool, aios_mgr).await.unwrap();
+    let element = create_element_data_rvm_tree(refno, &database, &pool, aios_mgr).await.unwrap();
     // if let Ok(tree) = element {
     let tree = element;
     data.append(&mut gen_data_from_tree(tree));
@@ -189,66 +189,66 @@ async fn create_element_data_tree(cur_refno: RefU64, aios_mgr: &AiosDBManager, m
     Ok(tree)
 }
 
-async fn create_element_data_tree_test(cur_refno: RefU64, database: &ArDatabase, pool: &Pool<MySql>, aios_mgr: &AiosDBManager) -> anyhow::Result<Tree<(RefU64, Vec<u8>)>> {
-    let current_element = query_ele_node(cur_refno, pool).await; // 返回选中节点的elenode数据
-    if current_element.is_err() { return Ok(Tree::default()); }
-    let mut node_id_map = HashMap::new();
-    let current_element: PdmsElement = current_element.unwrap().into();
-
+async fn create_element_data_rvm_tree(cur_refno: RefU64, database: &ArDatabase, pool: &Pool<MySql>, aios_mgr: &AiosDBManager) -> anyhow::Result<Tree<(RefU64, Vec<u8>)>> {
+    // let current_element = query_ele_node(cur_refno, pool).await; // 返回选中节点的elenode数据
+    // if current_element.is_err() { return Ok(Tree::default()); }
+    // let mut node_id_map = HashMap::new();
+    // let current_element: PdmsElement = current_element.unwrap().into();
+    //
     let mut tree = Tree::new();
-    // 将选中节点设为头节点
-    let pos = query_position_from_id(cur_refno, aios_mgr).await?.unwrap_or(Vec3::ZERO);
-    let root = tree.insert(Node::new((cur_refno, gen_name_position_data(&current_element.name, pos))), AsRoot)?;
-    node_id_map.entry(cur_refno).or_insert(root);
-    // 先将树生成，然后挂数据
-    let mut pending_children = VecDeque::new();
-    let children = query_children_order_aql(database, cur_refno).await?;
-    pending_children.extend(children);
-    while !pending_children.is_empty() {
-        let cur_ele = pending_children.pop_front().unwrap();
-        let refno = cur_ele.refno;
-        if let Some(owner_id) = node_id_map.get(&cur_ele.owner) {
-            let pos = query_position_from_id(refno, aios_mgr).await?.unwrap_or(Vec3::ZERO);
-            let cur_node_id = tree.insert(Node::new((refno, gen_name_position_data(&cur_ele.name, pos))), UnderNode(owner_id))?;
-            node_id_map.entry(refno).or_insert(cur_node_id);
-        }
-        let cur_children = query_children_order_aql(database, refno).await?;
-        for cur_child in cur_children {
-            if GENRAL_NEG_NOUN_NAMES.contains(&cur_child.noun.as_str()) {
-                continue;
-            }
-            pending_children.push_back(cur_child);
-        }
-    }
-    let instance = query_instance_with_refno_in_arangodb(cur_refno, database).await?;
-    if instance.is_none() { return Ok(tree); }
-    let instances = instance.unwrap();
-
-    for instance in &instances {
-        let mut data = Vec::new();
-        let refno = instance.refno;
-        let child = query_ele_node(refno, pool).await?;
-        if GENRAL_NEG_NOUN_NAMES.contains(&child.noun.as_str()) { continue; }
-        let mut b_desi_cyli = &child.noun == "CYLI";
-        let pos = instance.world_transform.translation;
-        let mut b_visible = 0;
-        for data in &instance.geo_insts {
-            if !data.visible { b_visible += 1; }
-        }
-        if b_visible >= instance.geo_insts.len() {
-            continue;
-        }
-        data.append(&mut gen_name_position_data(&child.name, pos));
-        let desi_transform = instance.world_transform;
-        for geo_instance in &instance.geo_insts {
-            data.append(&mut gen_prim_data_test(geo_instance, desi_transform,b_desi_cyli));
-        }
-
-        if let Some(node_id) = node_id_map.get(&refno) {
-            let mut tree_data = tree.get_mut(node_id).unwrap().data_mut();
-            tree_data.1 = data;
-        }
-    }
+    // // 将选中节点设为头节点
+    // let pos = query_position_from_id(cur_refno, aios_mgr).await?.unwrap_or(Vec3::ZERO);
+    // let root = tree.insert(Node::new((cur_refno, gen_name_position_data(&current_element.name, pos))), AsRoot)?;
+    // node_id_map.entry(cur_refno).or_insert(root);
+    // // 先将树生成，然后挂数据
+    // let mut pending_children = VecDeque::new();
+    // let children = query_children_order_aql(database, cur_refno).await?;
+    // pending_children.extend(children);
+    // while !pending_children.is_empty() {
+    //     let cur_ele = pending_children.pop_front().unwrap();
+    //     let refno = cur_ele.refno;
+    //     if let Some(owner_id) = node_id_map.get(&cur_ele.owner) {
+    //         let pos = query_position_from_id(refno, aios_mgr).await?.unwrap_or(Vec3::ZERO);
+    //         let cur_node_id = tree.insert(Node::new((refno, gen_name_position_data(&cur_ele.name, pos))), UnderNode(owner_id))?;
+    //         node_id_map.entry(refno).or_insert(cur_node_id);
+    //     }
+    //     let cur_children = query_children_order_aql(database, refno).await?;
+    //     for cur_child in cur_children {
+    //         if GENRAL_NEG_NOUN_NAMES.contains(&cur_child.noun.as_str()) {
+    //             continue;
+    //         }
+    //         pending_children.push_back(cur_child);
+    //     }
+    // }
+    // let instance = query_instance_with_refno_in_arangodb(cur_refno, database).await?;
+    // if instance.is_none() { return Ok(tree); }
+    // let instances = instance.unwrap();
+    //
+    // for instance in &instances {
+    //     // let mut data = Vec::new();
+    //     // let refno = instance.refno;
+    //     // let child = query_ele_node(refno, pool).await?;
+    //     // if GENRAL_NEG_NOUN_NAMES.contains(&child.noun.as_str()) { continue; }
+    //     // let mut b_desi_cyli = &child.noun == "CYLI";
+    //     // let pos = instance.world_transform.translation;
+    //     // // let mut b_visible = 0;
+    //     // // for data in &instance.geo_basics {
+    //     // //     if !data.visible { b_visible += 1; }
+    //     // // }
+    //     // // if b_visible >= instance.geo_basics.len() {
+    //     // //     continue;
+    //     // // }
+    //     // data.append(&mut gen_name_position_data(&child.name, pos));
+    //     // let desi_transform = instance.world_transform;
+    //     // for geo_instance in &instance.geo_basics {
+    //     //     data.append(&mut gen_prim_data_test(geo_instance, desi_transform, b_desi_cyli));
+    //     // }
+    //     //
+    //     // if let Some(node_id) = node_id_map.get(&refno) {
+    //     //     let mut tree_data = tree.get_mut(node_id).unwrap().data_mut();
+    //     //     tree_data.1 = data;
+    //     // }
+    // }
     Ok(tree)
 }
 
@@ -271,13 +271,6 @@ pub async fn convert_shape_type_data(refno: RefU64, aios_mgr: &AiosDBManager) ->
     };
 }
 
-pub async fn convert_shape_type_data_database(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<RvmShapeTypeData>> {
-    let instance = query_instance_with_refno_in_arangodb(refno, database).await?;
-    if let Some(instances) = instance {
-        for instance in instances {}
-    }
-    Ok(None)
-}
 
 async fn get_box_shape_data(refno: RefU64, cache_basic: &CachedRefBasic, pool: &Pool<MySql>) -> anyhow::Result<Option<RvmShapeTypeData>> {
     let attr = query_implicit_attr(refno, cache_basic, pool, Some(vec!["XLEN", "YLEN", "ZLEN"])).await?;

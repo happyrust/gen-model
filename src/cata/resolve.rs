@@ -89,11 +89,11 @@ pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
 ) -> anyhow::Result<CateGeoParam> {
     match resolve_gmse_params(gm_param, jusl_param, context, axis_params, interface) {
         Ok(gm_data) => {
-            // panic::catch_unwind(|| {
+            panic::catch_unwind(|| {
                 resolve_to_cate_geo_params(&gm_data)
-                    //.expect("resolve geom failed")
-            // })
-        // .map_err(|e| anyhow!("元件库求解失败."))
+                    .expect("resolve geom failed")
+            })
+                .map_err(|e| anyhow!("元件库求解失败."))
         }
         Err(e) => {
             Err(anyhow!(format!("几何数据解析失败: {:?}, 原因：{}", des_refno.to_refno_string(), &e)))
@@ -286,7 +286,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
                             axis_param_map[&index].clone()
                         });
                     } else {
-                        return Err(anyhow!("Axis index not exist".to_string()));
+                        return Err(anyhow!(format!("Axis: '{axis_str}' index not exist")));
                     }
                 }
             }

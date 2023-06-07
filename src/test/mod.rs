@@ -6,3 +6,4 @@ pub mod test_room;
 pub mod test_dir;
 
 pub mod test_api;
+pub mod common;

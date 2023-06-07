@@ -31,15 +31,12 @@ use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::database::*;
 use aios_database::graph_db::pdms_arango::*;
-use aios_database::graph_db::pdms_inst_arango::{
-    query_instance_with_refno_in_arangodb, save_instance_to_graph_db,
-};
+use aios_database::graph_db::pdms_inst_arango::*;
 use aios_database::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
-use aios_database::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_COLLECTION, BATCH_CHUNKS_CNT};
 use bb8_arangodb::arangors::collection::CollectionType::{Document, Edge};
 use bevy::prelude::*;
 use bevy::transform::components::Transform;
@@ -72,9 +69,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use aios_core::options::DbOption;
 use bevy::prelude::system_adapter::new;
 use tokio::spawn;
-use env_logger::{fmt::Target, Builder};
+use env_logger::{Builder, fmt::Target};
 use log::{error, LevelFilter};
 use tokio::sync::RwLock;
+use aios_database::consts::*;
 
 
 #[tokio::main]
@@ -100,17 +98,20 @@ async fn main() -> anyhow::Result<()> {
         builder.target(Target::Pipe(Box::new(file))).init();
     }
 
+    create_arangodb_docs(&db_option)
+        .await
+        .expect("Failed to create arangodb conns");
     /// 是否全部同步模型
     if db_option.total_sync {
-        create_arangodb_conns(&db_option)
+        create_arangodb_docs(&db_option)
             .await
-            .expect("Failed to create arangodb conns");
+            .expect("Failed to create arangodb docs");
         // 同步pdms数据
         sync_pdms(&db_option).await.unwrap();
     }
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    if let Ok(cache_mesh) = CachedMeshesMgr::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
+    if let Ok(cache_mesh) = MeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
         info!("read cached mesh ok.");
     }
@@ -147,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
 
 
 /// 提前创建图数据库需要的几个collection
-async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
+async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     let pool = connect_arangodb(db_option).await?;
     let database = pool.get().await?.db(db_option.arangodb_database.as_str()).await?;
     create_arango_document(&database, "data_eles", Document).await?;
@@ -157,7 +158,9 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, "para_eles", Document).await?;
     create_arango_document(&database, AQL_PDMS_EDGES_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
-    create_arango_document(&database, AQL_PDMS_INST_COLLECTION, Document).await?;
+    create_arango_document(&database, AQL_PDMS_INST_INFO_COLLECTION, Document).await?;
+    create_arango_document(&database, AQL_PDMS_INST_GEO_COLLECTION, Document).await?;
+    create_arango_document(&database, AQL_PDMS_INST_EDGE_COLLECTION, Edge).await?;
     create_arango_document(&database, "plin_eles", Document).await?;
     create_arango_document(&database, "sibl_edges", Edge).await?;
     create_arango_document(&database, "ssc_edges", Edge).await?;
@@ -220,7 +223,7 @@ fn test_turn_bin_into_json() {
 fn test_inst_mgr() {
     let map = CachedInstanceMgr::deserialize_from_bin_file(&"assets/instance/7999.inst").unwrap();
     let refno = RefU64::from_refno_str("24381/34919").unwrap();
-    if let Some(value) = map.inst_mgr.inst_map.get(&refno) {
+    if let Some(value) = map.inst_data.inst_map.get(&refno) {
         dbg!(&value.value());
     };
 }

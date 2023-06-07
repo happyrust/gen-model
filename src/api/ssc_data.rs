@@ -53,7 +53,8 @@ pub async fn get_room_refnos_from_spa_tree_aql(room_refno: RefU64, database: &Ar
         return {
             'refno':v._key,
         }").bind_var("id", refno)
-        .bind_var("id", room_refno.to_url_refno()).build();
+        .bind_var("id", room_refno.to_url_refno())
+        .build();
     let results: Vec<String> = database.aql_query(aql).await?;
     let results = convert_refno_vec_from_vec_string(results);
     // let mut b_insert_self = true; // 需要将自己也加到 target_refnos 里面 方便显示 pane
