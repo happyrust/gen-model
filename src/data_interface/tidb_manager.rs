@@ -742,6 +742,7 @@ impl AiosDBManager {
         let mut mgr = Self::init(&db_option).await?;
         dbg!("正在初始化uda");
         mgr.init_uda_map().await?;
+        dbg!("uda初始化完毕");
         mgr.init_mdb(
             &db_option.project_name,
             &db_option.mdb_name,
