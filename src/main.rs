@@ -155,6 +155,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
     create_arangodb_conn(&database, "room_eles", Document).await?;
     create_arangodb_conn(&database, "hole_data", Document).await?;
     create_arangodb_conn(&database, "embed_data", Document).await?;
+    create_arangodb_conn(&database, "threed_review", Document).await?;
     create_arangodb_conn(&database, "room_edges", Edge).await?;
     // create_arangodb_conn(&database, "geo_infos", Document).await?;
     create_arangodb_conn(&database, AQL_HOLE_DATA_COLLECTION, Document).await?;
