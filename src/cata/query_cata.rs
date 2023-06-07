@@ -18,9 +18,9 @@ use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
 
 ///求解design component
 pub async fn resolve_desi_comp<T: PdmsDataInterface>(
+    interface: Option<&T>,
     refno: RefU64,
     mut scom_ref: Option<RefU64>,
-    interface: Option<&T>,
     scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
 ) -> anyhow::Result<CateGeomsInfo> {
     let interface = interface.ok_or(anyhow!("unknown interface"))?;

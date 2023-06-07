@@ -18,7 +18,7 @@ pub async fn query_children_aql(arango_db: &ArDatabase, refno: RefU64) -> anyhow
     let aql = AqlQuery::builder().query("\
     for z in 1 inbound @id pdms_edges
         return {
-        'refno':z._key,
+        '_key':z._key,
         'owner':z.owner,
         'name':z.name,
         'noun':z.noun,
@@ -30,7 +30,7 @@ pub async fn query_children_aql(arango_db: &ArDatabase, refno: RefU64) -> anyhow
     Ok(results)
 }
 
-pub async fn query_children_order_aql(arango_database: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
+pub async fn query_children_order_aql(adb: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::builder().query("\
     let datas = (
@@ -59,7 +59,7 @@ pub async fn query_children_order_aql(arango_database: &ArDatabase, refno: RefU6
             'children_count':length(for c in 1 inbound child._id pdms_edges
                                 return 1 ),
         }").bind_var("id", refno_aql).build();
-    let results: Vec<PdmsElement> = arango_database.aql_query(aql).await.unwrap();
+    let results: Vec<PdmsElement> = adb.aql_query(aql).await.unwrap();
     Ok(results)
 }
 

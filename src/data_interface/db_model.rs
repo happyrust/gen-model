@@ -27,6 +27,8 @@ use std::default::default;
 use bevy::prelude::Transform;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use std::mem::take;
+use aios_core::prim_geo::cylinder::SCylinder;
+use aios_core::prim_geo::TUBI_GEO_HASH;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use approx::abs_diff_eq;
 use opencascade::{DsShape, OCCShape};
@@ -38,7 +40,7 @@ use crate::api::children::{cache_mdb_module_numbdbs, cache_mdb_site_map, query_m
 use crate::api::element::{check_exist_refno, DbQuickInfo, MdbQuickInfoMap, query_name, query_types_refnos, query_world_refno_by_dbno};
 use crate::api::project_mdb::{gen_insert_project_mdb_sql, query_db_nums_of_mdb};
 use crate::api::refno_info::{cache_plin_plax, get_ref0_projects, sync_refno_basic_map};
-use crate::aql_api::children::query_deep_children_refnos_fuzzy;
+use crate::aql_api::children::{query_children_order_aql, query_deep_children_refnos_fuzzy};
 use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
@@ -690,6 +692,8 @@ impl AiosDBManager {
         std::fs::create_dir_all("./assets/mesh").unwrap();
         std::fs::create_dir_all("./assets/instance").unwrap();
 
+        let adb = mgr.get_arango_db().await?;
+
         dbg!(&db_nos);
         let scom_info_map: Arc<RwLock<HashMap<RefU64, ScomInfo>>> = Arc::new(RwLock::new(HashMap::new()));
 
@@ -702,10 +706,33 @@ impl AiosDBManager {
             let mut run_cache_prim = not_debug || d_types.iter().any(|x| x == "PRIM");
 
 
+
             //找出当前db，当前refno下所有有负实体的分组
-            let instance_mgr = Arc::new(RwLock::new(ShapeInstancesData::default()));
+            let mut shape_insts_data = ShapeInstancesData::default();
+            let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
+            shape_insts_data.insert_geos_data(TUBI_GEO_HASH, EleInstGeosData {
+                inst_key: TUBI_GEO_HASH,
+                refno: Default::default(),
+                insts: vec![EleInstGeo {
+                    geo_hash: TUBI_GEO_HASH,
+                    refno: Default::default(),
+                    geo_param: PdmsGeoParam::PrimSCylinder(SCylinder::default()),
+                    pts: vec![],
+                    aabb: Some(unit_cyli_aabb),
+                    transform: Default::default(),
+                    visible: true,
+                    is_tubi: true,
+                    geo_type: GeoBasicType::Pos,
+                }],
+                aabb: Some(unit_cyli_aabb),
+                type_name: "TUBI".to_string(),
+                ptset_map: Default::default(),
+                flow_pt_indexs: vec![],
+            });
+            let instance_mgr = Arc::new(RwLock::new(shape_insts_data));
 
             let instance_mgr_clone = instance_mgr.clone();
+
             let db_option_clone = db_option.clone();
             let mgr_clone = mgr.clone();
             let mgr_clone_new = mgr.clone();
@@ -719,31 +746,70 @@ impl AiosDBManager {
             }
 
             //求出有多少个是一样的模型
-            let target_cata_refnos = mgr.get_gen_model_target_refnos(GeoEnum::CATA_ONLY_TUBI, &target_dbnos, true).await?;
-            let target_cata_map = mgr.get_gen_model_target_refnos_by_cata_hash(GeoEnum::CATA_ONLY_TUBI, &target_dbnos, true, false).await?;
-            dbg!(&target_cata_map);
-            println!("使用元件库数量: {}", target_cata_refnos.len());
-            if run_cache_cata && !target_cata_map.is_empty() {
-                let scom_info_map = scom_info_map.clone();
-                let handle = tokio::spawn(async move {
-                    cache_cata_geos(
-                        mgr_clone.clone(),
-                        instance_mgr_clone.clone(),
-                        scom_info_map.clone(),
-                        &db_option_clone,
-                        // target_cata_refnos.as_slice(),
-                        Arc::new(target_cata_map),
-                    )
-                        .await
-                        .unwrap();
-                });
-                futures::future::join_all(vec![handle]).await;
+            let target_cata_refnos = mgr.get_gen_model_target_refnos(GeoEnum::CATA_ONLY_TUBI, &target_dbnos, false).await?;
+            println!("使用管道元件库数量: {}", target_cata_refnos.len());
+            //查询出branch 和 branch 下的子节点
+            let mut branch_refnos_map = DashMap::new();
+            for refno in target_cata_refnos {
+                let children = query_children_order_aql(&adb, refno).await?;
+                if children.is_empty() { continue; }
+                branch_refnos_map.insert(refno, children);
+            }
+
+            // dbg!(&branch_refnos_map);
+            let target_bran_cata_map = mgr.get_gen_model_target_refnos_by_cata_hash(GeoEnum::CATA_ONLY_TUBI, &target_dbnos, true, false).await?;
+            let target_single_cata_map = mgr.get_gen_model_target_refnos_by_cata_hash(GeoEnum::CATA, &target_dbnos, false, false).await?;
+            dbg!(&target_single_cata_map);
+            if run_cache_cata  {
+                let mut handles = vec![];
+                if !target_bran_cata_map.is_empty(){
+                    let scom_info_map_clone = scom_info_map.clone();
+                    let mgr_clone = mgr.clone();
+                    let instance_mgr_clone = instance_mgr.clone();
+                    let db_option_clone = db_option.clone();
+                    let handle = tokio::spawn(async move {
+                        cache_cata_geos(
+                            mgr_clone,
+                            instance_mgr_clone,
+                            scom_info_map_clone,
+                            &db_option_clone,
+                            Arc::new(target_bran_cata_map),
+                            Arc::new(branch_refnos_map),
+                        )
+                            .await
+                            .unwrap();
+                    });
+                    handles.push(handle);
+                }
+
+                if !target_single_cata_map.is_empty(){
+                    let mgr_clone = mgr.clone();
+                    let scom_info_map_clone = scom_info_map.clone();
+                    let instance_mgr_clone = instance_mgr.clone();
+                    let db_option_clone = db_option.clone();
+                    let handle = tokio::spawn(async move {
+                        cache_cata_geos(
+                            mgr_clone,
+                            instance_mgr_clone,
+                            scom_info_map_clone,
+                            &db_option_clone,
+                            Arc::new(target_single_cata_map),
+                            Arc::new(Default::default()),
+                        )
+                            .await
+                            .unwrap();
+                    });
+                    handles.push(handle);
+                }
+
+                futures::future::join_all(handles).await;
                 {
                     let mesh_mgr = mgr.cached_mesh_mgr.read().await;
                     let inst_data = instance_mgr.read().await;
                     println!("当前db下的元件库生成统计：");
                     dbg!(mesh_mgr.len());
                     dbg!(inst_data.inst_info_map.len());
+                    dbg!(inst_data.inst_tubi_map.len());
                     save_instance_to_graph_db(&mgr, &inst_data).await?;
                     save_mesh_to_arango_db(&mgr, &mesh_mgr).await?;
                 }
@@ -864,7 +930,6 @@ impl AiosDBManager {
             {
                 let inst_data = instance_mgr.read().await;
                 let mesh_mgr = mgr.cached_mesh_mgr.read().await;
-                let mut neg_need_offset = false;
                 'outer: for t_refno in total_refnos {
                     let Some(geos_info) = inst_data.get_info(&t_refno) else {
                         continue;
@@ -934,11 +999,13 @@ impl AiosDBManager {
             };
             // dbg!(&geos_info);
             inst_data.insert_info(comp_refno, geos_info);
+            let comp_type = mgr.get_refno_basic(comp_refno).unwrap().get_type().to_string();
             inst_data.insert_geos_data(*comp_refno, EleInstGeosData{
                 inst_key: *comp_refno,
                 refno: comp_refno,
                 insts: vec![geom_inst],
                 aabb: None,
+                type_name: comp_type,
                 ptset_map: Default::default(),
                 flow_pt_indexs: vec![],
             });

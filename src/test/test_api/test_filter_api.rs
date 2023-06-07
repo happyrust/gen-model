@@ -30,13 +30,13 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
     let interface = get_test_ams_db_manager_async().await;
     let database = interface.get_arango_db().await?;
     println!("here");
-    let d = query_insts_shape_data(&database, &[RefU64::from_two_nums(17496, 161644)]).await?;
+    let d = query_insts_shape_data(&database, &[RefU64::from_two_nums(25688, 4138)]).await?;
     dbg!(d);
     // let result = interface.query_refnos_has_neg_pos_map(refno).await?;
     // dbg!(&result);
     // query_refnos_has_neg_map
-    let refno = RefU64::from_refno_str("31896/10042").unwrap();
-    let result = interface.query_refnos_has_pos_neg_map(refno).await?;
+    // let refno = RefU64::from_refno_str("31896/10042").unwrap();
+    // let result = interface.query_refnos_has_pos_neg_map(refno).await?;
     // dbg!(&result);
     Ok(())
 }

@@ -160,6 +160,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_INFO_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_GEO_COLLECTION, Document).await?;
+    create_arango_document(&database, AQL_PDMS_INST_TUBI_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_EDGE_COLLECTION, Edge).await?;
     create_arango_document(&database, "plin_eles", Document).await?;
     create_arango_document(&database, "sibl_edges", Edge).await?;

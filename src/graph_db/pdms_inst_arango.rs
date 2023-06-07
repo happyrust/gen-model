@@ -47,6 +47,21 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
         database.aql_query::<Vec<()>>(aql).await?;
     }
 
+    //保存tubi的数据
+    let collection = AQL_PDMS_INST_TUBI_COLLECTION;
+    for chunk in &inst_mgr.inst_tubi_map.iter().chunks(1000) {
+        for (_, k) in chunk {
+            let json = serde_json::to_value(k).unwrap();
+            instances.push(json);
+        }
+        let aql = AqlQuery::builder().query(r#"LET data = @elements
+                    FOR d IN data
+                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
+            .bind_var("@collection", collection)
+            .bind_var("elements", take(&mut instances))
+            .build();
+        database.aql_query::<Vec<()>>(aql).await?;
+    }
 
     // let collection = AQL_PDMS_INST_EDGE_COLLECTION;
     // for chunk in &inst_mgr.geo_edges.iter().chunks(1000) {
@@ -115,12 +130,15 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
         ;
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     if geos_info.is_empty() { return Ok(ShapeInstancesData::default()); }
-    let inst_keys = geos_info.iter().map(|x| x.get_inst_key().to_string()).collect::<Vec<_>>();
     let mut inst_info_map = HashMap::new();
+    let mut inst_keys = geos_info.iter().map(|x| x.get_inst_key().to_string()).collect::<Vec<_>>();
     for g in geos_info {
         inst_info_map.insert(g.refno, g);
     }
 
+    //还有的直段会放在branch上，需要特殊处理
+
+    inst_keys.push("2".to_string());
     // dbg!(&inst_keys);
     let mut inst_geos_map = HashMap::new();
     // let mut geo_hashes = BTreeSet::new();
@@ -139,8 +157,25 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
         inst_geos_map.insert(g.inst_key, g);
     }
 
+    let mut inst_tubi_map = HashMap::new();
+    let all_refnos = inst_info_map.keys().map(|x| x.to_url_refno()).collect::<Vec<_>>();
+    let aql = AqlQuery::builder().query(r#"
+            FOR r in @refnos
+                let f = document('pdms_inst_tubis', r)
+                filter f != null
+                return f
+            "#)
+        .bind_var("refnos", all_refnos)
+        .build();
+    let inst_tubi: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
+    for g in inst_tubi {
+        inst_tubi_map.insert(g.refno, g);
+    }
+    // dbg!(inst_tubi_map.len());
+
     return Ok(ShapeInstancesData{
         inst_info_map,
+        inst_tubi_map,
         inst_geos_map,
     });
 }

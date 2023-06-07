@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::default::default;
+use std::io::Read;
 use std::mem::take;
 use std::sync::Arc;
+use std::time::Instant;
+use aios_core::consts::CYLI_HASH;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::CateGeomsInfo;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::TubeImplied;
@@ -9,6 +12,8 @@ use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_data::ScomInfo;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::category::{CateBrepShape, convert_to_brep_shapes};
+use aios_core::prim_geo::cylinder::{LCylinder, SCylinder};
+use aios_core::prim_geo::TUBI_GEO_HASH;
 use aios_core::prim_geo::extrusion::Extrusion;
 use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
@@ -16,11 +21,10 @@ use aios_core::shape::pdms_shape::{BrepShapeTrait, VerifiedShape};
 use anyhow::anyhow;
 use bevy::log::error;
 use bevy::prelude::Transform;
-use cached::instant::Instant;
 use dashmap::{DashMap, DashSet};
 use glam::Vec3;
 use nalgebra::Point3;
-use opencascade::DsShape;
+use opencascade::{DsShape, Shape};
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Vector};
 use tokio::sync::{Mutex, RwLock};
@@ -151,6 +155,7 @@ pub async fn cache_prim_geos(
                             refno,
                             insts: geo_insts,
                             aabb: None,
+                            type_name: attr.get_type().to_string(),
                             ptset_map: Default::default(),
                             flow_pt_indexs: vec![],
                         });
@@ -366,8 +371,6 @@ pub async fn cache_loop_geos(
                 //todo 插入两个是为了都能找到PLOO对应的构件
                 // dbg!(&geo_insts);
                 if !geo_insts.is_empty() {
-                    // inst_map.insert(target_refno, geos_info.clone());
-                    // inst_map.insert(refno, geos_info);
                     shape_insts_data.insert_info(target_refno, geos_info.clone());
                     shape_insts_data.insert_info(refno, geos_info);
                     shape_insts_data.insert_geos_data(*refno, EleInstGeosData {
@@ -375,6 +378,7 @@ pub async fn cache_loop_geos(
                         refno,
                         insts: geo_insts,
                         aabb: None,
+                        type_name: parent_att.get_type().to_string(),
                         ptset_map: Default::default(),
                         flow_pt_indexs: vec![],
                     });
@@ -412,7 +416,7 @@ pub async fn gen_cata_single_geoms(
         return Ok(false);
     }
     let desi_att = mgr.get_attr(design_refno).await?;
-    let geoms = resolve_desi_comp(design_refno, None, Some(mgr.as_ref()), scom_info_map)
+    let geoms = resolve_desi_comp(Some(mgr.as_ref()), design_refno, None, scom_info_map)
         .await
         .unwrap_or_default();
     // dbg!(geoms.geometries.len());
@@ -447,438 +451,26 @@ pub async fn gen_cata_single_geoms(
     Ok(true)
 }
 
-async fn gen_cata_auto_tubi_geoms(
-    mgr: Arc<AiosDBManager>,
-    branch_refno: RefU64,
-    group_att: &AttrMap,
-    brep_shape_map: &CateBrepShapeMap,
-    refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
-    tubi_aqls: &mut Arc<DashMap<u64, TubiEdge>>,
-    scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
-) -> anyhow::Result<bool> {
-    let group_transform = mgr
-        .get_world_transform(branch_refno)
-        .await?
-        .unwrap_or_default();
-    let htube_pt = group_transform.transform_point(
-        group_att
-            .get_vec3("HPOS")
-            .ok_or(anyhow!("HPOS not exist".to_string()))?,
-    );
-    let hdir = group_transform
-        .transform_point(
-            group_att
-                .get_vec3("HDIR")
-                .ok_or(anyhow!("HDIR not exist".to_string()))?,
-        )
-        .normalize_or_zero();
-    let bran_ttube_pt = group_transform.transform_point(
-        group_att
-            .get_vec3("TPOS")
-            .ok_or(anyhow!("TPOS not exist".to_string()))?,
-    );
 
-    let is_hang = group_att.get_type() == "HANG";
-
-    let h_ref = group_att
-        .get_foreign_refno(if is_hang { "HREF" } else { "HSTU" })
-        .unwrap_or_default();
-    let hconnect = group_att.get_as_string("HCON").unwrap_or_default();
-    let bran_name = group_att.get_name().0.to_string();
-    let mut has_tubi = true;
-    let mut bore = 0.0f32;
-    let mut href_type = "".to_string();
-    //头节点的处理
-    if let Ok(h_att) = mgr.get_attr(h_ref).await {
-        href_type = h_att.get_type().to_string();
-        let h_cat_ref = h_att.get_foreign_refno("CATR").unwrap_or_default();
-        let tubi_geoms_info =
-            resolve_desi_comp(branch_refno, Some(h_cat_ref), Some(mgr.as_ref()), scom_info_map)
-                .await
-                .unwrap_or_default();
-        let mut has_tube_geom = false;
-        for tubi_geom in &tubi_geoms_info.geometries {
-            if let TubeImplied(d) = tubi_geom {
-                bore = d.diameter;
-                has_tube_geom = true;
-                break;
-            }
-        }
-
-        if !has_tube_geom {
-            let h_cat_att = mgr.get_attr(h_cat_ref).await?;
-            let params = h_cat_att.get_f64_vec("PARA").unwrap_or_default();
-            if params.len() >= 2 {
-                bore = params[if is_hang { 0 } else { 1 }] as f32;
-            }
-        }
-    }
-    let mut current_tubing = PdmsTubing {
-        refno: branch_refno,
-        start_pt: htube_pt,
-        end_pt: Vec3::ZERO,
-        desire_leave_dir: hdir,
-        desire_arrive_dir: Default::default(),
-        _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", h_ref.to_url_refno()),
-        _to: Default::default(),
-        bore,
-        finished: false,
-    };
-    let children = mgr
-        .get_children_refs(branch_refno)
-        .await
-        .unwrap_or_default();
-
-    // 整个 bran 就一个 tubi
-    if children.len() == 0 {
-        if !current_tubing.finished
-            && bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL
-        {
-            current_tubing.end_pt = bran_ttube_pt;
-            current_tubing.finished = true;
-            //需要检查href的方位
-            current_tubing.desire_arrive_dir = -current_tubing.get_dir();
-            //检查一下方向是否一致，不一致的，不显示，或者加标记位
-            if current_tubing.is_dir_ok() {
-                let shape = current_tubing.convert_to_shape();
-                brep_shape_map
-                    .entry(branch_refno)
-                    .or_insert(Vec::new())
-                    .push(shape);
-            } else {
-                error!("{} 的直段方向有问题", branch_refno.to_refno_string());
-            }
-        }
-        // 将 tubi 数据保存到图数据库
-        let tref = group_att
-            .get_foreign_refno(if is_hang { "TREF" } else { "LSTU" })
-            .unwrap_or_default();
-        let key = h_ref.hash_with_another_refno(tref);
-        tubi_aqls.entry(key).or_insert(TubiEdge {
-            _key: key.to_string(),
-            _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", h_ref.to_url_refno()),
-            _to: format!("{AQL_PDMS_ELES_COLLECTION}/{}", tref.to_url_refno()),
-            start_pt: current_tubing.start_pt,
-            end_pt: current_tubing.end_pt,
-            att_type: group_att.get_type().to_string(),
-            extra_type: "".to_string(),
-            bore,
-            bran_name: bran_name.to_string(),
-        });
-        return Ok(true);
-    }
-    // 将 bran 保存到 tubi_edges 中
-    // 保存bran 和 第一个子节点的连接关系
-    if let Some(first_refno) = children.0.first() {
-        let first_attr = mgr.get_attr(*first_refno).await?;
-        let geoms = resolve_desi_comp(*first_refno, None,
-                                      Some(mgr.as_ref()), &scom_info_map).await;
-        dbg!(geoms.is_ok());
-        if let Ok(geoms) = geoms {
-            dbg!(geoms.geometries.len());
-            if let Some(arrive) = first_attr.get_i32("ARRI") {
-                if geoms.axis_map.contains_key(&arrive) {
-                    let first_world_trans = mgr
-                        .get_world_transform(*first_refno)
-                        .await?
-                        .unwrap_or_default();
-                    let a_pos = first_world_trans.transform_point(geoms.axis_map[&arrive].pt);
-                    let key = branch_refno.hash_with_another_refno(*first_refno);
-                    let att_type = first_attr.get_type();
-                    let mut extra_type = "".to_string();
-                    if att_type == "ATTA" {
-                        let attype = first_attr.get_str("ATTY").unwrap_or("");
-                        extra_type = attype.to_string();
-                    }
-                    tubi_aqls.entry(key).or_insert(TubiEdge {
-                        _key: key.to_string(),
-                        _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", branch_refno.to_url_refno()),
-                        _to: format!("{AQL_PDMS_ELES_COLLECTION}/{}", first_refno.to_url_refno()),
-                        start_pt: htube_pt,
-                        end_pt: a_pos,
-                        att_type: att_type.to_string(),
-                        extra_type,
-                        bore,
-                        bran_name: bran_name.to_string(),
-                    });
-                }
-            }
-        }
-    }
-    // 保存元件之间的距离
-    for (idx, refno) in children.clone().into_iter().enumerate() {
-        let mut edge = TubiEdge::default();
-        edge._from = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-        if idx >= children.len() - 1 {
-            break;
-        }
-        let to_refno = children[idx + 1];
-        let key = refno.hash_with_another_refno(to_refno);
-        edge._key = key.to_string();
-        edge._to = format!("{AQL_PDMS_ELES_COLLECTION}/{}", to_refno.to_url_refno());
-        edge.bran_name = bran_name.to_string();
-
-        let Ok(attr) = mgr.get_attr(refno).await else {
-            continue;
-        };
-        let Ok(to_attr) = mgr.get_attr(to_refno).await else {
-            continue;
-        };
-        let att_type = to_attr.get_type();
-        edge.att_type = att_type.to_string();
-        // 单独存 atta 的 attype
-        if att_type == "ATTA" {
-            let attype = to_attr.get_str("ATTY").unwrap_or("");
-            edge.extra_type = attype.to_string();
-        }
-
-        let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
-
-        let Ok(mut geoms) = resolve_desi_comp(refno, None, Some(mgr.as_ref()), scom_info_map).await else {
-            continue;
-        };
-        let Ok(mut to_geoms) = resolve_desi_comp(to_refno, None, Some(mgr.as_ref()), scom_info_map).await else {
-            continue;
-        };
-        let to_world_trans = mgr.get_world_transform(to_refno).await?.unwrap_or_default();
-        if let Some(arrive) = to_attr.get_i32("ARRI") {
-            if to_geoms.axis_map.contains_key(&arrive) {
-                let p = to_geoms.axis_map[&arrive].pt;
-                let a_pos = to_world_trans.transform_point(p);
-                edge.end_pt = a_pos;
-            } else {
-                //need debug
-                // dbg!(&to_refno);
-                // dbg!(&arrive);
-            }
-        }
-        if let Some(lstube) = attr.get_foreign_refno(if is_hang { "LSRO" } else { "LSTU" }) {
-            if let Ok(lstube_att) = mgr.get_attr(lstube).await {
-                let lstube_cat_refno =
-                    lstube_att.get_foreign_refno("CATR").unwrap_or_default();
-                let tubi_geoms_info = resolve_desi_comp(
-                    refno,
-                    Some(lstube_cat_refno),
-                    Some(mgr.as_ref()),
-                    scom_info_map,
-                )
-                    .await
-                    .unwrap_or_default();
-                let mut has_tube_geom = false;
-                for tubi_geom in &tubi_geoms_info.geometries {
-                    if let TubeImplied(d) = tubi_geom {
-                        edge.bore = d.diameter;
-                        has_tube_geom = true;
-                        break;
-                    }
-                }
-                if !has_tube_geom {
-                    let lstube_cat_att = mgr.get_attr(lstube_cat_refno).await?;
-                    let params = lstube_cat_att.get_f64_vec("PARA").unwrap_or_default();
-                    if params.len() >= 2 {
-                        edge.bore = params[if is_hang { 0 } else { 1 }] as f32;
-                    }
-                }
-            }
-        }
-        if let Some(leave) = attr.get_i32("LEAV") {
-            if geoms.axis_map.contains_key(&leave) {
-                let p = geoms.axis_map[&leave].pt;
-                let l_pos = world_trans.transform_point(p);
-                edge.start_pt = l_pos;
-            }
-        }
-        if !edge._key.is_empty() {
-            // bran children 之间的关系
-            tubi_aqls.entry(key).or_insert(edge);
-        }
-    }
-    // 保存最后一个元件
-    if let Some(last_refno) = children.0.last() {
-        let last_attr = mgr.get_attr(*last_refno).await?;
-        let last_geoms = resolve_desi_comp(*last_refno, None, Some(mgr.as_ref()), scom_info_map).await;
-        if let Ok(last_geoms) = last_geoms {
-            let last_world_trans = mgr
-                .get_world_transform(*last_refno)
-                .await?
-                .unwrap_or_default();
-            if let Some(leave) = last_attr.get_i32("LEAV") {
-                if last_geoms.axis_map.contains_key(&leave) {
-                    let tref = group_att.get_foreign_refno("TREF").unwrap_or(RefU64(0));
-                    let tref_attr = mgr.get_attr(tref).await?;
-                    let p = last_geoms.axis_map[&leave].pt;
-                    let l_pos = last_world_trans.transform_point(p);
-                    let key = last_refno.hash_with_another_refno(tref);
-                    let att_type = tref_attr.get_type();
-                    let mut extra_type = "".to_string();
-                    if att_type == "ATTA" {
-                        let attype = tref_attr.get_str("ATTY").unwrap_or("");
-                        extra_type = attype.to_string();
-                    }
-                    tubi_aqls.entry(key).or_insert(TubiEdge {
-                        _key: key.to_string(),
-                        _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", last_refno.to_url_refno()),
-                        _to: format!("{AQL_PDMS_ELES_COLLECTION}/{}", tref.to_url_refno()),
-                        start_pt: l_pos,
-                        end_pt: bran_ttube_pt,
-                        att_type: att_type.to_string(),
-                        extra_type,
-                        bore,
-                        bran_name: bran_name.to_string(),
-                    });
-                }
-            }
-        }
-    }
-
-    let last_child = children.last().unwrap().clone();
-    //不包含atta的元件集合
-    let mut bran_comp_vec = vec![];
-    //第一遍完成后，然后生成tubing
-    for refno in children {
-        let Ok(attr) = mgr.get_attr(refno).await else {
-            continue;
-        };
-        println!(
-            "正在处理元件{}: {}",
-            attr.get_type(),
-            refno.to_refno_string()
-        );
-        let world_trans = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        let mut geoms = resolve_desi_comp(refno, None, Some(mgr.as_ref()), scom_info_map).await;
-        if geoms.is_err() {
-            error!("{:?}", geoms.err().unwrap());
-            continue;
-        }
-        let mut geoms = geoms.unwrap();
-        //有隐含管段
-        if has_tubi && (!attr.is_type("ATTA") && !attr.is_type("WELD")) {
-            bran_comp_vec.push(attr.get_refno().unwrap());
-            if let Some(arrive) = attr.get_i32("ARRI") {
-                if geoms.axis_map.contains_key(&arrive) {
-                    let a_pos = world_trans.transform_point(geoms.axis_map[&arrive].pt);
-                    let dir = geoms.axis_map[&arrive].dir;
-                    let a_dir = world_trans.transform_vec3(dir).normalize_or_zero();
-                    let arrive_refno = geoms.axis_map[&arrive].refno;
-                    if !current_tubing.finished
-                        && a_pos.distance(current_tubing.start_pt) > TUBI_TOL
-                    {
-                        current_tubing.refno = refno;
-                        current_tubing.end_pt = a_pos;
-                        current_tubing.desire_arrive_dir = a_dir;
-                        current_tubing.finished = true;
-                        if current_tubing.is_dir_ok() {
-                            let brep_shape = current_tubing.convert_to_shape();
-                            brep_shape_map
-                                .entry(refno)
-                                .or_insert(Vec::new())
-                                .push(brep_shape);
-                        } else {
-                            error!("{} 的直段方向有问题", refno.to_refno_string());
-                        }
-                    }
-                }
-            }
-            if let Some(lstube) = attr.get_foreign_refno(if is_hang { "LSRO" } else { "LSTU" })
-            {
-                if let Ok(lstube_att) = mgr.get_attr(lstube).await {
-                    let lstube_cat_refno =
-                        lstube_att.get_foreign_refno("CATR").unwrap_or_default();
-                    //todo check how to get the bore value
-                    let tubi_geoms_info = resolve_desi_comp(
-                        refno,
-                        Some(lstube_cat_refno),
-                        Some(mgr.as_ref()),
-                        scom_info_map,
-                    )
-                        .await
-                        .unwrap_or_default();
-                    let mut has_tube_geom = false;
-                    for tubi_geom in &tubi_geoms_info.geometries {
-                        if let TubeImplied(d) = tubi_geom {
-                            current_tubing.bore = d.diameter;
-                            has_tube_geom = true;
-                            break;
-                        }
-                    }
-                    if !has_tube_geom {
-                        let lstube_cat_att = mgr.get_attr(lstube_cat_refno).await?;
-                        let params = lstube_cat_att.get_f64_vec("PARA").unwrap_or_default();
-                        if params.len() >= 2 {
-                            current_tubing.bore = params[if is_hang { 0 } else { 1 }] as f32;
-                        }
-                    }
-                }
-            }
-            if let Some(leave) = attr.get_i32("LEAV") {
-                if geoms.axis_map.contains_key(&leave) {
-                    let dir = geoms.axis_map[&leave].dir;
-                    let l_dir = world_trans.transform_vec3(dir).normalize_or_zero();
-                    let l_pos = world_trans.transform_point(geoms.axis_map[&leave].pt);
-                    current_tubing.start_pt = l_pos;
-                    current_tubing.desire_leave_dir = l_dir;
-                    current_tubing.finished = false;
-                }
-            }
-        }
-        //管件的生成
-        let CateGeomsInfo {
-            geometries,
-            axis_map,
-        } = geoms;
-        for (i, geom) in geometries.into_iter().enumerate() {
-            // dbg!((i, &geom));
-            if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
-                brep_shape_map
-                    .entry(refno)
-                    .or_insert(Vec::new())
-                    .push(cate_shape);
-            }
-        }
-        refno_ptset_map.insert(refno, axis_map);
-        //有隐含管段
-        if has_tubi {
-            //最后一段的管道
-            if refno == last_child {
-                if !current_tubing.finished
-                    && bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL
-                {
-                    //检查是否有一端是世界坐标原点
-                    current_tubing.refno = refno;
-                    current_tubing.end_pt = bran_ttube_pt;
-                    current_tubing.finished = true;
-                    //todo 需要取得连接到的，tref的点对应的arrive方向
-                    current_tubing.desire_arrive_dir = -current_tubing.desire_leave_dir;
-
-                    if current_tubing.is_dir_ok()
-                    {
-                        // dbg!("Last tube");
-                        let shape = current_tubing.convert_to_shape();
-                        let last_component_refno = *bran_comp_vec.last().unwrap();
-                        brep_shape_map
-                            .entry(last_component_refno)
-                            .or_insert(Vec::new())
-                            .push(shape);
-                    } else {
-                        dbg!(current_tubing.desire_arrive_dir);
-                        error!("{} 的直段方向有问题", refno.to_refno_string());
-                    }
-                }
-            }
-        }
-    }
-    Ok(true)
+#[inline]
+fn aabb_apply_transform(aabb: &Aabb, t: &Transform) -> Aabb {
+    let a = aabb.scaled(&t.scale.into());
+    let transformed_aabb = a.transform_by(&Isometry {
+        rotation: t.rotation.into(),
+        translation: t.translation.into(),
+    });
+    transformed_aabb
 }
-
 
 /// 生成元件库的branch型几何体
 pub async fn cache_cata_geos(
     mgr: Arc<AiosDBManager>,
-    instance_mgr: Arc<RwLock<ShapeInstancesData>>,
+    main_instance_mgr: Arc<RwLock<ShapeInstancesData>>,
     scom_info_map: Arc<RwLock<HashMap<RefU64, ScomInfo>>>,
     db_option: &DbOption,
     target_cata_map: Arc<DashMap<u64, CataHashRefnoKV>>,
-    //将branch的情况也放在这里处理
+    //branch 下按顺序的清单
+    branch_map: Arc<DashMap<RefU64, Vec<PdmsElement>>>,
 ) -> anyhow::Result<bool> {
     let batch_size = mgr.db_option.gen_model_batch_size;
     let t = Instant::now();
@@ -898,10 +490,11 @@ pub async fn cache_cata_geos(
     //只需要处理参数不一样的一些元件
     //将不重复的构件先生成
 
+    // let mut local_inst_mgr = Arc::new(RwLock::new(ShapeInstancesData::default()));
 
     for i in 0..batch_chunks_cnt as usize {
         let mgr = mgr.clone();
-        let instance_mgr = instance_mgr.clone();
+        let instance_mgr = main_instance_mgr.clone();
         let all_unique_keys = all_unique_keys.clone();
         let processed_cnt = processed_cnt.clone();
         // let mut tubi_aqls_clone = tubi_aqls.clone();
@@ -920,10 +513,9 @@ pub async fn cache_cata_geos(
                 let target_cata = target_cata_map.get(&cata_hash).unwrap();
                 let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
                 let mut shape_insts_data = instance_mgr.write().await;
-                let mut target_geo_data = None;
-                if target_cata.exist_geo.is_none()  {
+                let mut target_geo_data_option = None;
+                if target_cata.exist_geo.is_none() {
                     //如果没有已有的，需要生成
-                    // target_refno = Some(target_cata.group_refnos[0]);
                     let refno = target_cata.group_refnos[0];
                     println!(
                         "正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}",
@@ -953,12 +545,14 @@ pub async fn cache_cata_geos(
                             .await
                             .unwrap_or_default()
                             .unwrap_or_default();
-                        let ele_att = mgr.get_attr(ele_refno).await.unwrap_or_default();
-                        let Ok(Some(gmse_refno)) = mgr.query_foreign_refno(ele_refno,
-                                                                           &[&["SPRE", "CATR"]], &["GMRE", "GSTR"],
-                                                                           &[]).await else {
+                        let Ok(ele_att) = mgr.get_attr(ele_refno).await else {
                             continue;
                         };
+                        // let Ok(Some(gmse_refno)) = mgr.query_foreign_refno(ele_refno,
+                        //                                                    &[&["SPRE", "CATR"]], &["GMRE", "GSTR"],
+                        //                                                    &[]).await else {
+                        //     continue;
+                        // };
                         // dbg!(gmse_refno);
                         // dbg!(ele_refno);
                         //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
@@ -977,16 +571,10 @@ pub async fn cache_cata_geos(
 
                         };
 
-                        // let mut shapes_map = HashMap::new();
                         let mut geo_insts = vec![];
-                        // let mut ele_aabb: Option<Aabb> = None;
                         let mut cata_aabb: Option<Aabb> = None;
-                        // let mut tubi_aabb: Option<Aabb> = None;
-                        let mut has_tubi = false;
                         //将负实体和正实体统计出来
                         let mut merged_cata_aabb: Option<Aabb> = None;
-                        // dbg!(shapes.len());
-                        // dbg!(ele_refno);
                         for shape in shapes {
                             let CateBrepShape {
                                 refno,
@@ -1022,21 +610,12 @@ pub async fn cache_cata_geos(
                                 rotation: rot.into(),
                                 translation: translation.into(),
                             });
-                            // if is_tubi {
-                            //     has_tubi = true;
-                            //     if let Some(mut tubi_aabb) = tubi_aabb {
-                            //         tubi_aabb.merge(&transformed_aabb);
-                            //     } else {
-                            //         tubi_aabb = Some(transformed_aabb);
-                            //     }
-                            // } else {
+
                             if let Some(mut cata_aabb) = cata_aabb {
                                 cata_aabb.merge(&transformed_aabb);
                             } else {
                                 cata_aabb = Some(transformed_aabb);
                             }
-                            // }
-
                             if cata_aabb.is_some() {
                                 if let Some(mut a) = merged_cata_aabb {
                                     a.merge(cata_aabb.as_ref().unwrap());
@@ -1051,15 +630,6 @@ pub async fn cache_cata_geos(
                                 rotation: rot,
                                 scale,
                             };
-
-                            // if pos_refnos.contains(&refno) || neg_refnos.contains(&refno) {
-                            //     if let Some(o) = cached_mesh_mgr.get_occ_shape(geo_hash) {
-                            //         shapes_map.insert(refno, o.g_transform(&transform.compute_matrix().as_dmat4()).unwrap());
-                            //     } else {
-                            //         dbg!(&brep_shape);
-                            //         dbg!(refno);
-                            //     }
-                            // } else {  //不属于分组里面的，不需要理会
                             let geom_inst = EleInstGeo {
                                 geo_hash,
                                 refno,
@@ -1075,62 +645,6 @@ pub async fn cache_cata_geos(
                             };
                             geo_insts.push(geom_inst);
                         }
-                        // }
-
-                        //有负实体的是一个整体，需要合并处理
-                        // if has_neg {
-                        //     for (comp_ref, (pos, negs)) in pos_neg_map {
-                        //         let mut final_shape = None;
-                        //         for r in &pos {
-                        //             let Some(shape) = shapes_map.get(r).cloned() else {
-                        //                 dbg!(r);
-                        //                 continue;
-                        //             };
-                        //             if final_shape.is_none() {
-                        //                 final_shape = Some(shape);
-                        //             } else {
-                        //                 final_shape = final_shape.map(|x| x.fuse(&shape, 1.0).expect("occ shape Fuse 出错"));
-                        //             }
-                        //         }
-                        //         for r in &negs {
-                        //             let Some(shape) = shapes_map.get(r).cloned() else {
-                        //                 dbg!(r);
-                        //                 continue;
-                        //             };
-                        //             if final_shape.is_none() {
-                        //                 final_shape = Some(shape);
-                        //             } else {
-                        //                 dbg!(r);
-                        //                 final_shape = final_shape.map(|x| x.cut(&shape, 1.0).expect("occ shape cut 出错"));
-                        //             }
-                        //         }
-                        //
-                        //         let geo_hash = *comp_ref;
-                        //         if let Some(s) = final_shape {
-                        //             let size = w_aabb.unwrap().bounding_sphere().radius as f64;
-                        //             dbg!(size);
-                        //             let mesh: PlantMesh = s.mesh(0.008 * size).unwrap().into();
-                        //             cached_mesh_mgr.meshes.insert(geo_hash, mesh);
-                        //         }
-                        //
-                        //         let geom_inst = EleGeoInstance {
-                        //             geo_hash,
-                        //             refno: comp_ref,
-                        //             pts: vec![],
-                        //             aabb: w_aabb,
-                        //             transform: Transform::IDENTITY,
-                        //             geo_param: PdmsGeoParam::CompoundShape,
-                        //             visible: true,
-                        //             is_tubi: false,
-                        //             is_neg: false,
-                        //         };
-                        //         // dbg!(&geom_inst);
-                        //         // dbg!(cached_mesh_mgr.meshes.keys());
-                        //         geo_insts.push(geom_inst);
-                        //     }
-                        // }
-                        //
-
                         //需要变换成世界坐标系下的aabb
                         if let Some(a) = merged_cata_aabb {
                             geos_info.aabb = Some(
@@ -1139,12 +653,6 @@ pub async fn cache_cata_geos(
                                     translation: o.translation.into(),
                                 }),
                             );
-                        }
-
-
-                        //todo 暂时不合并直段的包围盒
-                        if has_tubi {
-                            //geos_info.aabb.as_mut().unwrap().merge(&tubi_aabb);
                         }
 
                         if let Some(mut aabb) = &mut geos_info.aabb {
@@ -1162,6 +670,7 @@ pub async fn cache_cata_geos(
                                 refno: ele_refno,
                                 insts: geo_insts,
                                 aabb: merged_cata_aabb,
+                                type_name: cur_type.to_string(),
                                 ptset_map: refno_ptset_map
                                     .remove(&ele_refno)
                                     .map(|x| x.1)
@@ -1171,18 +680,18 @@ pub async fn cache_cata_geos(
                                     ele_att.get_i32("LEAV").unwrap_or(-1),
                                 ],
                             };
-                            target_geo_data = Some(d.clone());
+                            target_geo_data_option = Some(d.clone());
                             shape_insts_data.insert_geos_data(inst_key, d);
                         }
                         //只有一个，现在不采用branch的方式去生成了
                         break;
                     }
-                }else{
-                    target_geo_data = target_cata.exist_geo.clone();
+                } else {
+                    target_geo_data_option = target_cata.exist_geo.clone();
                 }
 
                 //排除一些特殊情况
-                let Some(target_geo_data) = target_geo_data else{
+                let Some(target_geo_data) = target_geo_data_option else {
                     continue;
                 };
                 if target_geo_data.aabb.is_none() { continue; }
@@ -1203,19 +712,21 @@ pub async fn cache_cata_geos(
                         cata_hash: Some(cata_hash),
                         visible: true,
                         generic_type: mgr.get_generic_type(ele_refno),
-                        aabb: None,
+                        aabb: Some(aabb_apply_transform(target_geo_data.aabb.as_ref().unwrap(), &o)),
                         world_transform: o,
                     };
                     //需要变换成世界坐标系下的aabb
-                    if let Some(a) = target_geo_data.aabb {
-                        geos_info.aabb = Some(
-                            a.transform_by(&Isometry {
-                                rotation: o.rotation.into(),
-                                translation: o.translation.into(),
-                            }),
-                        );
-                    }
+                    // if let Some(a) = target_geo_data.aabb {
+                    //     geos_info.aabb = Some(
+                    //         a.transform_by(&Isometry {
+                    //             rotation: o.rotation.into(),
+                    //             translation: o.translation.into(),
+                    //         }),
+                    //     );
+                    // }
+                    let inst_key = geos_info.get_inst_key();
                     shape_insts_data.insert_info(ele_refno, geos_info);
+                    shape_insts_data.insert_geos_data(inst_key, target_geo_data.clone());
                 }
 
                 *processed_cnt.lock().await -= 1;
@@ -1229,7 +740,269 @@ pub async fn cache_cata_geos(
         }
     }
     futures::future::join_all(take(&mut handles)).await;
-    println!("模型生成完毕,正在保存管道到图数据库");
+
+    //先暂时维持和之前一样
+    //还是把tubi 抽出来，创造一个tubi geos
+
+    let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
+    //直段需要插入一个单位的cylinder
+
+    let mut inst_tubi_map = HashMap::new();
+    //todo 重用直段的生成
+    let mut time = Instant::now();
+    for b in branch_map.iter() {
+        let shape_insts_data = main_instance_mgr.read().await;
+        let branch_refno = *b.key();
+        let children = b.value();
+        let group_att = mgr.get_attr(branch_refno).await?;
+        //可能只有branch 元素需要做一遍求解
+        let group_transform = mgr
+            .get_world_transform(branch_refno)
+            .await?
+            .unwrap_or_default();
+        let htube_pt = group_transform.transform_point(
+            group_att
+                .get_vec3("HPOS")
+                .ok_or(anyhow!("HPOS not exist".to_string()))?,
+        );
+        let hdir = group_transform
+            .transform_point(
+                group_att
+                    .get_vec3("HDIR")
+                    .ok_or(anyhow!("HDIR not exist".to_string()))?,
+            )
+            .normalize_or_zero();
+        let bran_ttube_pt = group_transform.transform_point(
+            group_att
+                .get_vec3("TPOS")
+                .ok_or(anyhow!("TPOS not exist".to_string()))?,
+        );
+
+        let is_hang = group_att.get_type() == "HANG";
+        let h_ref = group_att
+            .get_foreign_refno(if is_hang { "HREF" } else { "HSTU" })
+            .unwrap_or_default();
+        dbg!(h_ref);
+
+        let bran_name = group_att.get_name().0.to_string();
+        let mut bore = 0.0f32;
+        let mut href_type = "".to_string();
+        //头节点的处理
+        // if let Ok(h_att) = mgr.get_attr(h_ref).await {
+        //     href_type = h_att.get_type().to_string();
+        //     let h_cat_ref = h_att.get_foreign_refno("CATR").unwrap_or_default();
+        //     //只是为了获得外径而已
+        //     let tubi_geoms_info =
+        //         resolve_desi_comp(Some(mgr.as_ref()), branch_refno, Some(h_cat_ref), &scom_info_map)
+        //             .await
+        //             .unwrap_or_default();
+        //     let mut has_tube_geom = false;
+        //     for tubi_geom in &tubi_geoms_info.geometries {
+        //         if let TubeImplied(d) = tubi_geom {
+        //             bore = d.diameter;
+        //             has_tube_geom = true;
+        //             break;
+        //         }
+        //     }
+        //
+        //     if !has_tube_geom {
+        //         let h_cat_att = mgr.get_attr(h_cat_ref).await?;
+        //         let params = h_cat_att.get_f64_vec("PARA").unwrap_or_default();
+        //         if params.len() >= 2 {
+        //             bore = params[if is_hang { 0 } else { 1 }] as f32;
+        //         }
+        //     }
+        //     dbg!(bore);
+        // }
+
+        let mut current_tubing = PdmsTubing {
+            refno: branch_refno,
+            start_pt: htube_pt,
+            end_pt: Vec3::ZERO,
+            desire_leave_dir: hdir,
+            desire_arrive_dir: Default::default(),
+            _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", h_ref.to_url_refno()),
+            _to: Default::default(),
+            bore,
+            finished: false,
+        };
+
+        // 整个 bran 就一个 tubi, 没有children的情况
+        // 需要求解出 leave bore
+        if children.len() == 0 {
+            // if !current_tubing.finished
+            //     && bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL
+            // {
+            //     current_tubing.end_pt = bran_ttube_pt;
+            //     current_tubing.finished = true;
+            //     //需要检查href的方位
+            //     current_tubing.desire_arrive_dir = -current_tubing.get_dir();
+            //     //检查一下方向是否一致，不一致的，不显示，或者加标记位
+            //     if current_tubing.is_dir_ok() {
+            //         if let Some(t) = current_tubing.get_transform() {
+            //             inst_tubi_map
+            //                 .insert(branch_refno, EleGeosInfo {
+            //                     refno: branch_refno,
+            //                     cata_hash: Some(TUBI_GEO_HASH),
+            //                     visible: true,
+            //                     generic_type: mgr.get_generic_type(branch_refno),
+            //                     aabb: Some(aabb_apply_transform(&unit_cyli_aabb, &t)),
+            //                     world_transform: t,
+            //                 });
+            //         }
+            //     } else {
+            //         error!("{} 的直段方向有问题", branch_refno.to_refno_string());
+            //     }
+            // }
+            // // 将 tubi 数据保存到图数据库
+            // let tref = group_att
+            //     .get_foreign_refno(if is_hang { "TREF" } else { "LSTU" })
+            //     .unwrap_or_default();
+            // let key = h_ref.hash_with_another_refno(tref);
+            // tubi_aqls.entry(key).or_insert(TubiEdge {
+            //     _key: key.to_string(),
+            //     _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", h_ref.to_url_refno()),
+            //     _to: format!("{AQL_PDMS_ELES_COLLECTION}/{}", tref.to_url_refno()),
+            //     start_pt: current_tubing.start_pt,
+            //     end_pt: current_tubing.end_pt,
+            //     att_type: group_att.get_type().to_string(),
+            //     extra_type: "".to_string(),
+            //     bore,
+            //     bran_name: bran_name.clone(),
+            // });
+            // continue;
+        }
+
+        let last_child = children.last().unwrap().clone();
+        //不包含atta的元件集合
+        let mut bran_comp_vec = vec![];
+        //第一遍完成后，然后生成tubing
+        for ele in children {
+            let refno = ele.refno;
+            let cur_type = ele.noun.as_str();
+            if cur_type == "ATTA"  {
+                continue;
+            }
+            // let Ok(attr) = mgr.get_attr(refno).await else {
+            //     continue;
+            // };
+            let Some(inst_info) = shape_insts_data.get_inst_info(refno) else {
+                dbg!(refno);
+                continue;
+            };
+            let Some(inst_geos_data) = shape_insts_data.get_inst_geos_data(inst_info) else {
+                dbg!(inst_info);
+                continue;
+            };
+            //
+            // shape_insts_data
+            println!(
+                "正在处理直段{}: {}",
+                cur_type,
+                refno.to_refno_string()
+            );
+            let world_trans = inst_info.world_transform;
+            let axis_map = &inst_geos_data.ptset_map;
+            let arrive = inst_geos_data.flow_pt_indexs[0];
+            let leave = inst_geos_data.flow_pt_indexs[1];
+            //有隐含管段
+            {
+                bran_comp_vec.push(refno);
+                if axis_map.contains_key(&arrive) {
+                    let a_pos = world_trans.transform_point(axis_map[&arrive].pt);
+                    let dir = axis_map[&arrive].dir;
+                    let a_dir = world_trans.transform_vec3(dir).normalize_or_zero();
+                    if !current_tubing.finished
+                        && a_pos.distance(current_tubing.start_pt) > TUBI_TOL {
+                        current_tubing.refno = refno;
+                        current_tubing.end_pt = a_pos;
+                        current_tubing.bore = axis_map[&arrive].pbore;
+                        current_tubing.desire_arrive_dir = a_dir;
+                        current_tubing.finished = true;
+                        if current_tubing.is_dir_ok() {
+                            if let Some(t) = current_tubing.get_transform() {
+                                inst_tubi_map
+                                    .insert(refno, EleGeosInfo {
+                                        refno,
+                                        cata_hash: Some(TUBI_GEO_HASH),
+                                        visible: true,
+                                        generic_type: mgr.get_generic_type(refno),
+                                        aabb: Some(aabb_apply_transform(&unit_cyli_aabb, &t)),
+                                        world_transform: t,
+                                    });
+                            }
+                        } else {
+                            error!("{} 的直段方向有问题", refno.to_refno_string());
+                        }
+                    }
+                }
+                if axis_map.contains_key(&leave) {
+                    let dir = axis_map[&leave].dir;
+                    let bore = axis_map[&leave].pbore;
+                    // dbg!(bore);
+                    let l_dir = world_trans.transform_vec3(dir).normalize_or_zero();
+                    let l_pos = world_trans.transform_point(axis_map[&leave].pt);
+                    current_tubing.start_pt = l_pos;
+                    current_tubing.desire_leave_dir = l_dir;
+                    current_tubing.bore = bore;
+                    current_tubing.finished = false;
+                }
+            }
+            //有隐含管段
+            //最后一段的管道
+            if refno == last_child.refno {
+                if !current_tubing.finished
+                    && bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL
+                {
+                    //检查是否有一端是世界坐标原点
+                    current_tubing.refno = refno;
+                    current_tubing.end_pt = bran_ttube_pt;
+                    current_tubing.finished = true;
+                    //todo 需要取得连接到的，tref的点对应的arrive方向
+                    current_tubing.desire_arrive_dir = -current_tubing.desire_leave_dir;
+
+                    if current_tubing.is_dir_ok() {
+                        // dbg!("Last tube");
+                        // let shape = current_tubing.convert_to_shape();
+                        let last_component_refno = *bran_comp_vec.last().unwrap();
+                        if let Some(t) = current_tubing.get_transform() {
+                            inst_tubi_map
+                                .insert(last_component_refno, EleGeosInfo {
+                                    refno: last_component_refno,
+                                    cata_hash: Some(TUBI_GEO_HASH),
+                                    visible: true,
+                                    generic_type: mgr.get_generic_type(last_component_refno),
+                                    aabb: Some(aabb_apply_transform(&unit_cyli_aabb, &t)),
+                                    world_transform: t,
+                                });
+                        }
+                    } else {
+                        dbg!(current_tubing.desire_arrive_dir);
+                        error!("{} 的直段方向有问题", refno.to_refno_string());
+                    }
+                }
+            }
+        }
+        // dbg!(&inst_tubi_map);
+    }
+
+    // dbg!(time.el)
+
+    {
+        let mut main = main_instance_mgr.write().await;
+        // let m = Arc::try_unwrap(local_inst_mgr).unwrap();
+        // let m = local_inst_mgr.
+        // let mut local_inst_mgr = m.into_inner();
+        // let l = local_inst_mgr.read().await;
+        // main.merge_ref(&l);
+        for (k, v) in inst_tubi_map {
+            main.insert_tubi(k, v);
+        }
+        // dbg!(shape_insts_data.inst_tubi_map.len());
+    }
+
+
+    println!("模型生成完毕,正在保存直段到图数据库");
     // let tubi_result = Arc::try_unwrap(tubi_aqls)
     //     .unwrap()
     //     .into_iter()
