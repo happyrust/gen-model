@@ -31,17 +31,7 @@ impl AiosDBManager {
         let db_option = &self.db_option;
         let mut target_refnos = vec![];
         let mut is_debug = false;
-        let target_debug_refno = db_option
-            .debug_desi_refno
-            .as_ref()
-            .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
-        if let Some(refno) = target_debug_refno {
-            if let Ok(name) = self.get_name(refno).await {
-                dbg!(&name);
-                target_refnos = vec![target_debug_refno.unwrap()];
-            }
-            is_debug = true;
-        } else if db_option.debug_root_refnos.is_some() {
+        if db_option.debug_root_refnos.is_some() {
             //是否是叶子节点
             for str in db_option.debug_root_refnos.as_ref().unwrap() {
                 is_debug = true;
@@ -70,10 +60,6 @@ impl AiosDBManager {
         let database = self.get_arango_db().await?;
         let mut target_refnos = vec![];
         let mut is_debug = false;
-        let target_debug_refno = db_option
-            .debug_desi_refno
-            .as_ref()
-            .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
         let types = match geo_type {
             GeoEnum::PRIM => GNERAL_PRIM_NOUN_NAMES.as_slice(),
             GeoEnum::LOOP => GNERAL_LOOP_NOUN_NAMES.as_slice(),
@@ -82,13 +68,7 @@ impl AiosDBManager {
             GeoEnum::ALL => TOTAL_GEO_NOUN_NAMES.as_slice(),
             _ => &[],
         };
-        if let Some(refno) = target_debug_refno {
-            if let Ok(name) = self.get_name(refno).await {
-                dbg!(&name);
-                target_refnos = vec![target_debug_refno.unwrap()];
-            }
-            is_debug = true;
-        } else if db_option.debug_root_refnos.is_some() {
+        if db_option.debug_root_refnos.is_some() {
             //是否是叶子节点
             for str in db_option.debug_root_refnos.as_ref().unwrap() {
                 is_debug = true;
@@ -133,10 +113,6 @@ impl AiosDBManager {
         let database = self.get_arango_db().await?;
         let mut target_refnos_map = DashMap::new();
         let mut is_debug = false;
-        let target_debug_refno = db_option
-            .debug_desi_refno
-            .as_ref()
-            .map(|x| RefU64::from_refno_str(x).unwrap_or_default());
         let types = match geo_type {
             GeoEnum::PRIM => GNERAL_PRIM_NOUN_NAMES.as_slice(),
             GeoEnum::LOOP => GNERAL_LOOP_NOUN_NAMES.as_slice(),
@@ -145,52 +121,43 @@ impl AiosDBManager {
             GeoEnum::ALL => TOTAL_GEO_NOUN_NAMES.as_slice(),
             _ => &[],
         };
-        if let Some(refno) = target_debug_refno {
-            // if let Ok(name) = self.get_name(refno).await {
-            //     dbg!(&name);
-            //     target_refnos_map = vec![target_debug_refno.unwrap()];
-            // }
+
+        let mut root_refnos =
+            if let Some(d) = &db_option.debug_root_refnos {
+                d.iter().map(|x| RefU64::from_refno_str(x).unwrap_or_default()).collect::<Vec<_>>()
+            } else {
+                self
+                    .get_refnos_by_types(
+                        db_option.project_name.as_str(),
+                        &["SITE"],
+                        db_nos,
+                    ).await?.0
+            };
+
+        //是否是叶子节点
+        for root_refno in root_refnos {
             is_debug = true;
-        } else if db_option.debug_root_refnos.is_some() {
-            //是否是叶子节点
-            for str in db_option.debug_root_refnos.as_ref().unwrap() {
-                is_debug = true;
-                if let Ok(root_refno) = RefU64::from_refno_str(str) {
-                    let Ok(name) = self.get_name(root_refno).await else {
-                        continue;
-                    };
-                    let is_leaf = self.get_children_refs(root_refno).await?.len() == 0;
-                    let mut is_parent = is_parent;
-                    if is_leaf {
-                        is_parent = false;
-                        // target_refnos_map.push(root_refno);
-                    }
-                    let s = query_travel_children_with_types_and_cata_hash(
-                        &database,
-                        root_refno,
-                        types,
-                        is_parent,
-                        skip_exist,
-                    )
-                        .await?;
-                    for k in s {
-                        target_refnos_map.insert(k.cata_hash, k);
-                    }
-                    // .iter()
-                    // .for_each(|x| target_refnos_map.push(x.refno));
-                }
+            let Ok(name) = self.get_name(root_refno).await else {
+                continue;
+            };
+            let is_leaf = self.get_children_refs(root_refno).await?.len() == 0;
+            let mut is_parent = is_parent;
+            if is_leaf {
+                is_parent = false;
+            }
+            let s = query_travel_children_with_types_and_cata_hash(
+                &database,
+                root_refno,
+                types,
+                is_parent,
+                skip_exist,
+            )
+                .await?;
+            // dbg!(s.len());
+            for k in s {
+                target_refnos_map.insert(k.cata_hash, k);
             }
         }
-
-        // if !is_debug {
-        //     target_refnos_map.extend_from_slice(&self
-        //         .get_refnos_by_types(
-        //             db_option.project_name.as_str(),
-        //             types,
-        //             db_nos,
-        //         )
-        //         .await?);
-        // }
 
         Ok(target_refnos_map)
     }

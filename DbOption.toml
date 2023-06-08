@@ -4,7 +4,7 @@ enable_log = false
 sync_graph_db = true
 sync_tidb = true
 incr_sync = false
-replace_dbs = false
+replace_dbs = true
 
 #项目设置
 project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
@@ -16,6 +16,7 @@ mdb_name = "ALL"
 project_name = "AvevaMarineSample"
 module = "DESI"
 gen_model_mesh = true
+apply_boolean_operation = true
 gen_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 100
@@ -36,14 +37,14 @@ password = ""
 #port = "3306"
 port = "4000"
 sql_threads_number = 50
-batch_insert_sql_cnt = 500   #mysql 批量插入的数量
+batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"
 
 
 #调试选项
-replace_mesh = false
+replace_mesh = true
 save_model_mesh_to_graph_db = true
 need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
 reset_mdb_project = false      #是否重新生成 mdb 缓存
@@ -51,12 +52,13 @@ only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
 
-debug_refno_types = ["CATA", "LOOP", "PRIM"]
+#debug_refno_types = ["CATA", "LOOP", "PRIM"]
+debug_refno_types = ["PRIM"]
 #debug_refno_types = ["CATA"]
-included_db_files = ["ams1112_0001"]
+included_db_files = ["ams7997_0001"]
 #included_db_files = ["acp7001_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
-manual_db_nums = [1112]  #, 8000
+manual_db_nums = [7997]  #, 8000
 plat_url = ""
 
 #joint还有问题，方位对齐的问题
@@ -115,9 +117,24 @@ plat_url = ""
 
 #24381_105593
 
-#debug_root_refnos = ["17496/167201"]
-debug_root_refnos = ["25688/4135"]
+#debug_root_refnos = ["17496/169982"]
+#debug_root_refnos = ["25688/4135"]
 #debug_root_refnos = ["25688/4160"]
+#debug_root_refnos = ["9304/2"]
+
+#rtor显示问题
+#debug_root_refnos = ["24381/159849"]
+
+#管道测试
+#debug_root_refnos = ["24381/159849"]
+
+#大量负实体测试
+debug_root_refnos = ["24381/101405"]
+
+#SCTN测试
+#debug_root_refnos = ["25688/4377"]
+
+#debug_root_refnos = ["24381/152445"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]

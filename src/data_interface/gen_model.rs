@@ -69,6 +69,12 @@ pub async fn cache_prim_geos(
                 let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
                 let mut shape_insts_data = instance_mgr.write().await;
                 let refno = all_refnos[j];
+                println!(
+                    "正在处理基本体的模型，索引：{}, 当前参考号：{}, 剩余: {}",
+                    j,
+                    refno.to_refno_string(),
+                    processed_cnt.lock().await.to_owned()
+                );
                 let trans_origin = mgr
                     .get_world_transform(refno)
                     .await
@@ -82,8 +88,6 @@ pub async fn cache_prim_geos(
                     world_transform: trans_origin,
                     cata_hash: None,
                 };
-
-                // let mut geo_edges = vec![];
                 let mut geo_insts = vec![];
                 let mut geo_hash = None;
                 let mut item_trans = Transform::IDENTITY;
@@ -102,7 +106,6 @@ pub async fn cache_prim_geos(
                 };
                 if let Some(brep_obj) = attr.create_brep_shape(limit_size) {
                     if brep_obj.check_valid() {
-                        // dbg!(&brep_obj);
                         item_trans = brep_obj.get_trans();
                         geo_param = brep_obj
                             .convert_to_geo_param()
@@ -111,56 +114,51 @@ pub async fn cache_prim_geos(
                         geo_hash = Some(r);
                     }
                 }
-                if let Some(geo_hash) = geo_hash {
-                    let visible = attr.is_visible_by_level(None).unwrap_or(true);
-                    geos_info.visible = visible;
-                    let tr = &item_trans;
-                    let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) else {
-                        continue;
-                    };
-                    aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
-                    let ele_aabb = aabb.transform_by(&Isometry {
-                        rotation: tr.rotation.into(),
-                        translation: tr.translation.into(),
-                    });
-                    let inst_geo = EleInstGeo {
-                        geo_hash,
+                let Some(geo_hash) = geo_hash else {
+                    continue;
+                };
+                let visible = attr.is_visible_by_level(None).unwrap_or(true);
+                geos_info.visible = visible;
+                let tr = &item_trans;
+                let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) else {
+                    continue;
+                };
+                aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
+                let ele_aabb = aabb.transform_by(&Isometry {
+                    rotation: tr.rotation.into(),
+                    translation: tr.translation.into(),
+                });
+                let inst_geo = EleInstGeo {
+                    geo_hash,
+                    refno,
+                    pts: Default::default(),
+                    aabb: Some(aabb),
+                    transform: *tr,
+                    geo_param,
+                    visible,
+                    is_tubi: false,
+                    geo_type: if attr.is_neg() { GeoBasicType::Neg } else { GeoBasicType::Pos },
+                };
+                geo_insts.push(inst_geo);
+                geos_info.aabb = Some(
+                    ele_aabb.transform_by(&Isometry {
+                        rotation: trans_origin.rotation.into(),
+                        translation: trans_origin.translation.into(),
+                    }),
+                );
+                if geo_insts.len() > 0 {
+                    shape_insts_data.insert_info(refno, geos_info);
+                    shape_insts_data.insert_geos_data(*refno, EleInstGeosData {
+                        inst_key: *refno,
                         refno,
-                        pts: Default::default(),
-                        aabb: Some(aabb),
-                        transform: *tr,
-                        geo_param,
-                        visible,
-                        is_tubi: false,
-                        geo_type: if attr.is_neg() { GeoBasicType::Neg } else { GeoBasicType::Pos },
-                    };
-                    // geo_edges.push(GeoEdge{
-                    //     refno,
-                    //     geo_type: if attr.is_neg() { GeoBasicType::Neg } else { GeoBasicType::Pos },
-                    //     geo_hash,
-                    //     cata_hash: None,
-                    // });
-                    geo_insts.push(inst_geo);
-                    // shape_insts_data.insert_geo(inst_geo.geo_hash, inst_geo);
-                    geos_info.aabb = Some(
-                        ele_aabb.transform_by(&Isometry {
-                            rotation: trans_origin.rotation.into(),
-                            translation: trans_origin.translation.into(),
-                        }),
-                    );
-                    if geo_insts.len() > 0 {
-                        shape_insts_data.insert_info(refno, geos_info);
-                        shape_insts_data.insert_geos_data(*refno, EleInstGeosData {
-                            inst_key: *refno,
-                            refno,
-                            insts: geo_insts,
-                            aabb: None,
-                            type_name: attr.get_type().to_string(),
-                            ptset_map: Default::default(),
-                            flow_pt_indexs: vec![],
-                        });
-                    }
+                        insts: geo_insts,
+                        aabb: None,
+                        type_name: attr.get_type().to_string(),
+                        ptset_map: Default::default(),
+                        flow_pt_indexs: vec![],
+                    });
                 }
+                *processed_cnt.lock().await -= 1;
             }
         });
         handles.push(handle);
@@ -488,12 +486,6 @@ pub async fn cache_cata_geos(
     let replace_mesh = db_option.replace_mesh;
 
     let all_unique_keys = Arc::new(target_cata_map.iter().map(|x| x.cata_hash).collect::<Vec<_>>());
-
-    //只需要处理参数不一样的一些元件
-    //将不重复的构件先生成
-
-    // let mut local_inst_mgr = Arc::new(RwLock::new(ShapeInstancesData::default()));
-
     for i in 0..batch_chunks_cnt as usize {
         let mgr = mgr.clone();
         let instance_mgr = main_instance_mgr.clone();
@@ -751,7 +743,6 @@ pub async fn cache_cata_geos(
 
     let mut inst_tubi_map = HashMap::new();
     //todo 重用直段的生成
-    let mut time = Instant::now();
     for b in branch_map.iter() {
         let shape_insts_data = main_instance_mgr.read().await;
         let branch_refno = *b.key();
@@ -784,7 +775,7 @@ pub async fn cache_cata_geos(
         let h_ref = group_att
             .get_foreign_refno(if is_hang { "HREF" } else { "HSTU" })
             .unwrap_or_default();
-        dbg!(h_ref);
+        // dbg!(h_ref);
 
         let bran_name = group_att.get_name().0.to_string();
         let mut bore = 0.0f32;
@@ -814,7 +805,7 @@ pub async fn cache_cata_geos(
                     bore = params[if is_hang { 0 } else { 1 }] as f32;
                 }
             }
-            dbg!(bore);
+            // dbg!(bore);
         }
 
         // let lstube = refno_lstube_map.get(&refno).map(|x| *x.value()).unwrap_or_default();
@@ -886,7 +877,7 @@ pub async fn cache_cata_geos(
         for ele in children {
             let refno = ele.refno;
             let cur_type = ele.noun.as_str();
-            if cur_type == "ATTA"  {
+            if cur_type == "ATTA" {
                 continue;
             }
             // let Ok(attr) = mgr.get_attr(refno).await else {
@@ -969,7 +960,6 @@ pub async fn cache_cata_geos(
 
                     if current_tubing.is_dir_ok() {
                         // dbg!("Last tube");
-                        // let shape = current_tubing.convert_to_shape();
                         let last_component_refno = *bran_comp_vec.last().unwrap();
                         if let Some(t) = current_tubing.get_transform() {
                             inst_tubi_map
@@ -984,7 +974,7 @@ pub async fn cache_cata_geos(
                         }
                     } else {
                         dbg!(current_tubing.desire_arrive_dir);
-                        error!("{} 的直段方向有问题", refno.to_refno_string());
+                        println!("{} 的直段方向有问题", refno.to_refno_string());
                     }
                 }
             }

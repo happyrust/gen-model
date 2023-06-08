@@ -43,7 +43,7 @@ pub async fn connect_arangodb(db_option: &DbOption) -> anyhow::Result<ArPool> {
         db_option.arangodb_url.to_string(),
         AuthenticationMethod::JWTAuth(db_option.arangodb_user.to_string(), db_option.arangodb_password.to_string()),
     );
-    Ok(Pool::builder().max_size(40).build(manager).await?)
+    Ok(Pool::builder().max_size(100).build(manager).await?)
 }
 
 pub async fn create_arango_document(database: &ArDatabase, collection_name: &str, collection_type: CollectionType) -> anyhow::Result<()> {

@@ -239,6 +239,7 @@ pub async fn query_travel_children_with_types_and_cata_hash(arango_database: &Ar
         AqlQuery::builder().query("\
 FOR v,e,p in 0..10 INBOUND @id pdms_edges
     let parent = p.vertices[-2]
+    filter v.cata_hash != null
     filter parent.noun in @nouns
     let s = document(pdms_inst_geos, to_string(v.cata_hash))
     filter !@skip_exist or s == null
@@ -257,6 +258,7 @@ FOR v,e,p in 0..10 INBOUND @id pdms_edges
         AqlQuery::builder().query("\
 FOR v,e,p in 0..10 INBOUND @id pdms_edges
     filter v.noun in @nouns
+    filter v.cata_hash != null
     let s = document(pdms_inst_geos, to_string(v.cata_hash))
     filter !@skip_exist or s == null
     COLLECT exist = s, cata_group=v.cata_hash into g
@@ -271,6 +273,7 @@ FOR v,e,p in 0..10 INBOUND @id pdms_edges
             .bind_var("nouns", att_types)
             .build()
     };
+    // dbg!(&aql);
     let r: Vec<CataHashRefnoKV> = arango_database.aql_query(aql).await?;
     Ok(r)
 }

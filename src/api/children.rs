@@ -319,7 +319,7 @@ pub async fn cache_mdb_site_map(mdb: &str, module: &str, pool: &Pool<MySql>) {
             for mut child in &mut children {
                 child.owner = world.refno;
             }
-            lock.insert(world.refno, PdmsElementVec(children));//.expect("CACHED_MDB_SITE_MAP save error");
+            lock.insert(world.refno, PdmsElementVec(children));
         }
     }
 }

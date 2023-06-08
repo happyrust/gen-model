@@ -9,7 +9,7 @@ pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], sta
     let ids = refnos.into_iter().map(|x| format!("{}/{}", "pdms_eles", x.to_url_refno())).collect::<Vec<_>>();
     let mut aql = r#"
         for id in @ids
-            for ver, edge, path in 1..15 outbound id foreign_edges
+            let t = (for ver, edge, path in 1..15 outbound id foreign_edges
                    OPTIONS { order: "bfs"  }
                    FILTER LENGTH(@t_types) == 0 and length(for c in 1 INBOUND ver._id foreign_edges
                         return 0 )
@@ -18,7 +18,9 @@ pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], sta
                    filter LENGTH(@t_types) == 0 or (ver.noun in @t_types)
                    filter ver != null
                    filter LENGTH(path.edges) <= @depth
-                   return ver._key"#;
+                   return ver._key)
+            return LENGTH(t) == 0 ? "0/0" : t[0]
+                   "#;
     let mut start_aql = String::new();
     for i in 0..start_types.len() {
         let in_str = start_types[i].iter().map(|&x| format!(" \"{x}\" ")).collect::<Vec<_>>().join(",");

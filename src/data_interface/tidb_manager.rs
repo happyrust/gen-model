@@ -428,10 +428,13 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///返回有负实体和正实体的参考号集合，还有对应的NOUN
-    async fn query_refnos_has_pos_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)>> {
-        let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    async fn query_refnos_has_pos_neg_map(&self, refnos: &[RefU64]) -> anyhow::Result<HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)>> {
+        let refno_urls = refnos.iter()
+            .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+            .collect::<Vec<_>>();
         let aql = AqlQuery::builder().query(r#"
-                FOR v,e,p in 0..15 INBOUND @key pdms_edges
+            for key in @keys
+                FOR v,e,p in 0..15 INBOUND key pdms_edges
                 PRUNE v.noun in @neg_nouns
                 OPTIONS { "order": "bfs"}
                 filter v.noun in @neg_nouns
@@ -446,7 +449,7 @@ impl PdmsDataInterface for AiosDBManager {
                      )[0],
                     (for c in children filter c.noun in @neg_nouns  return c._key)
                 ]
-        "#).bind_var("key", refno_url)
+        "#).bind_var("keys", refno_urls)
             .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
             .bind_var("pos_nouns", GENRAL_POS_NOUN_NAMES.to_vec())
             .build()
@@ -473,6 +476,25 @@ impl PdmsDataInterface for AiosDBManager {
             .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec()).build();
         let refno_strs = self.get_arango_db().await?.aql_query::<Vec<String>>(aql).await?;
         let refnos = refno_strs.iter().flatten().map(|x| RefU64::from_url_refno(x).unwrap()).collect();
+        Ok(refnos)
+    }
+
+    async fn query_parent_refnos_has_neg_geos(&self, refnos: &[RefU64]) -> anyhow::Result<Vec<RefU64>> {
+        let refno_urls = refnos.iter()
+            .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+            .collect::<Vec<_>>();
+        let aql = AqlQuery::builder().query(r#"
+            for key in @keys
+                FOR v,e,p in 0..15 INBOUND key pdms_edges
+                    filter v.noun in @neg_geo_nouns
+                    filter LENGTH(p.vertices) >= 2
+                    let parent = p.vertices[-2]
+                    return distinct parent._key
+        "#
+        ).bind_var("keys", refno_urls)
+            .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec()).build();
+        let refno_strs = self.get_arango_db().await?.aql_query::<String>(aql).await?;
+        let refnos = refno_strs.iter().map(|x| RefU64::from_url_refno(x).unwrap()).collect();
         Ok(refnos)
     }
 
@@ -607,6 +629,9 @@ impl PdmsDataInterface for AiosDBManager {
                 } else {
                     Vec3::Z
                 };
+                if extru_dir.is_nan() {
+                    return Ok(None);
+                }
                 let d = extru_dir.dot(Vec3::Z).abs();
                 let mut ref_axis = if abs_diff_eq!(1.0, d) {
                     Vec3::Y
@@ -670,6 +695,10 @@ impl PdmsDataInterface for AiosDBManager {
                 translation = translation + rotation * pos;
                 rotation = rotation * quat;
             }
+            if rotation.is_nan() {
+                // dbg!(&rotation);
+                return Ok(None);
+            }
 
             self.cached_world_transforms_map
                 .entry(refno)
@@ -680,7 +709,6 @@ impl PdmsDataInterface for AiosDBManager {
                 });
         }
         //将rotation 还原为角度
-        // let angles = rotation.to_euler(EulerRot::XYZ);
         if self.db_option.debug_print_world_transform {
             let rot_mat = Mat3::from_quat(rotation);
             let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
