@@ -483,7 +483,7 @@ pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, databa
             let value = value.replace("*", "%");
             format!("like '{}'", value)
         } else {
-            format!("= '{}'", value)
+            format!("== '{}'", value)
         };
         match condition {
             VagueSearchCondition::And => {
@@ -493,6 +493,7 @@ pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, databa
                 filter_condition.push_str(&format!("|| v.{} {} ", key, value_aql));
             }
             VagueSearchCondition::Not => {
+                let value_aql = if value_aql.starts_with("=") { value_aql[1..].to_string() } else { value_aql };
                 filter_condition.push_str(&format!("filter v.{} !{} ", key, value_aql));
             }
         }
