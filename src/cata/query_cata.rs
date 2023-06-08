@@ -290,24 +290,26 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         }
     }
 
-    if let Some(link_cat_ref) = int
-        .query_foreign_refno(des_refno, &[&["CREF"], &["SPRE", "CATR"]], &["SPRE", "CATR"],&[])
-        .await?{
-        // dbg!(link_cat_ref);
-        let link_cat_am = interface.as_ref().unwrap().get_attr(link_cat_ref).await?;
-        let params = link_cat_am.get_f64_vec("PARA").unwrap_or_default();
-        for i in 0..params.len() {
-            cur_context.insert(
-                format!("APAR{}", i + 1).into(),
-                params[i].to_string().into(),
-            );
-        }
-        let desp = link_cat_am.get_f64_vec("DESP").unwrap_or_default();
-        for i in 0..desp.len() {
-            cur_context.insert(
-                format!("ADES{}", i + 1).into(),
-                desp[i].to_string().into(),
-            );
+    if let Ok(link_cat_refs) = int
+        .query_foreign_refnos(&[des_refno], &[&["CREF"], &["SPRE", "CATR"]], &["SPRE", "CATR"],&[], 4)
+        .await{
+        if !link_cat_refs.is_empty() {
+            let link_cat_ref = link_cat_refs[0];
+            let link_cat_am = interface.as_ref().unwrap().get_attr(link_cat_ref).await?;
+            let params = link_cat_am.get_f64_vec("PARA").unwrap_or_default();
+            for i in 0..params.len() {
+                cur_context.insert(
+                    format!("APAR{}", i + 1).into(),
+                    params[i].to_string().into(),
+                );
+            }
+            let desp = link_cat_am.get_f64_vec("DESP").unwrap_or_default();
+            for i in 0..desp.len() {
+                cur_context.insert(
+                    format!("ADES{}", i + 1).into(),
+                    desp[i].to_string().into(),
+                );
+            }
         }
     }
 

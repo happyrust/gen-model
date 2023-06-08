@@ -8,7 +8,7 @@ use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBo
 use parry3d::query::{Ray, RayCast};
 use parry3d::math::{Isometry, Vector};
 use anyhow::anyhow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use aios_core::options::DbOption;
 use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
 use sqlx::pool::PoolOptions;
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use log::{error, info};
 use dashmap::DashMap;
 use std::sync::{Arc, Mutex};
-use aios_core::tool::db_tool::GLOBAL_UDA_NAME_MAP;
+use aios_core::tool::db_tool::{db1_dehash, db1_hash, GLOBAL_UDA_NAME_MAP};
 use tokio::sync::{mpsc, RwLock};
 use aios_core::pdms_data::ScomInfo;
 use aios_core::parsed_data::CateGeomsInfo;
@@ -41,6 +41,7 @@ use crate::api::element::{check_exist_refno, DbQuickInfo, MdbQuickInfoMap, query
 use crate::api::project_mdb::{gen_insert_project_mdb_sql, query_db_nums_of_mdb};
 use crate::api::refno_info::{cache_plin_plax, get_ref0_projects, sync_refno_basic_map};
 use crate::aql_api::children::{query_children_order_aql, query_deep_children_refnos_fuzzy};
+use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
 use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
@@ -707,7 +708,6 @@ impl AiosDBManager {
 
 
 
-            //找出当前db，当前refno下所有有负实体的分组
             let mut shape_insts_data = ShapeInstancesData::default();
             let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
             shape_insts_data.insert_geos_data(TUBI_GEO_HASH, EleInstGeosData {
@@ -745,21 +745,51 @@ impl AiosDBManager {
                 continue;
             }
 
+            //元件库的模型计算
             //求出有多少个是一样的模型
             let target_cata_refnos = mgr.get_gen_model_target_refnos(GeoEnum::CATA_ONLY_TUBI, &target_dbnos, false).await?;
             println!("使用管道元件库数量: {}", target_cata_refnos.len());
             //查询出branch 和 branch 下的子节点
             let mut branch_refnos_map = DashMap::new();
+            let mut refno_lstube_map = DashMap::new();
+            let mut lstube_bores_map = DashMap::new();
+            let mut bran_comp_eles = vec![];
             for refno in target_cata_refnos {
                 let children = query_children_order_aql(&adb, refno).await?;
                 if children.is_empty() { continue; }
+                bran_comp_eles.extend(children.iter().map(|x| x.refno));
+                //求出元件对应的outside bore
                 branch_refnos_map.insert(refno, children);
             }
 
-            // dbg!(&branch_refnos_map);
+            let lstube_refnos = mgr.query_foreign_refnos(&bran_comp_eles,
+                                                         &[&["LSRO", "LSTU"]], &["CATR"],
+                                                         &[], 2).await?;
+            // dbg!(&bran_comp_eles);
+            // dbg!(&lstube_refnos);
+            for c in 0..bran_comp_eles.len() {
+                refno_lstube_map.insert(bran_comp_eles[c], lstube_refnos[c]);
+            }
+            let lstube_set = lstube_refnos.into_iter()
+                .collect::<HashSet<_>>()
+                .into_iter();
+            for l in lstube_set{
+                let att = mgr.get_attr(l).await?;
+                let params = att.get_f64_vec("PARA").unwrap_or_default();
+                let gtype = att.get_as_string("GTYP").unwrap_or_default();
+                if params.len() >= 2 {
+                    // dbg!(&params);
+                    // let type_noun = u32::from_be_bytes((params[2] as u32).to_be_bytes().try_into().unwrap());
+                    // let type_name = db1_dehash(type_noun);
+                    // dbg!(type_name);
+                    let bore = params[if gtype.as_str() == "TUBE" { 1 } else { 0 }] as f32;
+                    lstube_bores_map.insert(l, bore);
+                }
+            }
+            // dbg!(&lstube_bores_map);
             let target_bran_cata_map = mgr.get_gen_model_target_refnos_by_cata_hash(GeoEnum::CATA_ONLY_TUBI, &target_dbnos, true, false).await?;
             let target_single_cata_map = mgr.get_gen_model_target_refnos_by_cata_hash(GeoEnum::CATA, &target_dbnos, false, false).await?;
-            dbg!(&target_single_cata_map);
+            // dbg!(&target_single_cata_map);
             if run_cache_cata  {
                 let mut handles = vec![];
                 if !target_bran_cata_map.is_empty(){
@@ -775,6 +805,8 @@ impl AiosDBManager {
                             &db_option_clone,
                             Arc::new(target_bran_cata_map),
                             Arc::new(branch_refnos_map),
+                            Arc::new(refno_lstube_map),
+                            Arc::new(lstube_bores_map),
                         )
                             .await
                             .unwrap();
@@ -794,6 +826,8 @@ impl AiosDBManager {
                             scom_info_map_clone,
                             &db_option_clone,
                             Arc::new(target_single_cata_map),
+                            Arc::new(Default::default()),
+                            Arc::new(Default::default()),
                             Arc::new(Default::default()),
                         )
                             .await

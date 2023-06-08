@@ -61,7 +61,7 @@ use crate::api::element::*;
 use crate::api::project_mdb::*;
 use crate::api::refno_info::{cache_plin_plax, get_ref0_projects, sync_refno_basic_map};
 use crate::aql_api::children::*;
-use crate::aql_api::foreign_refnos::{query_foreign_refno_aql, query_foreign_refno_fuzzy};
+use crate::aql_api::foreign_refnos::{query_foreign_refno_aql, query_foreign_refnos_fuzzy};
 use crate::aql_api::para_value::{query_des_para_value, query_para_from_desi_refno};
 use crate::aql_api::plin_attr::{match_jusline_attr, query_plin_attrs, query_pline_value};
 use crate::cata::consts::{BANG_WIT_EXTRU_TYPES, JUSLINE_TYPES};
@@ -176,9 +176,10 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     /// t_types 为目标的类型
-    async fn query_foreign_refno(&self, refno: RefU64, start_types: &[&[&str]], end_types: &[&str], t_types: &[&str]) -> anyhow::Result<Option<RefU64>> {
-        let t_refno = query_foreign_refno_fuzzy(&self.get_arango_db().await?, refno, start_types, end_types, t_types).await;
-        t_refno
+    #[inline]
+    async fn query_foreign_refnos(&self, refnos: &[RefU64], start_types: &[&[&str]], end_types: &[&str], t_types: &[&str], depth: u32) -> anyhow::Result<Vec<RefU64>> {
+        let t_refnos = query_foreign_refnos_fuzzy(&self.get_arango_db().await?, refnos, start_types, end_types, t_types, depth).await;
+        t_refnos
     }
 
     ///沿着owner path找到需要找的第一个foreign目标节点，可以找到父节点，也可以找到子节点

@@ -471,6 +471,8 @@ pub async fn cache_cata_geos(
     target_cata_map: Arc<DashMap<u64, CataHashRefnoKV>>,
     //branch 下按顺序的清单
     branch_map: Arc<DashMap<RefU64, Vec<PdmsElement>>>,
+    refno_lstube_map: Arc<DashMap<RefU64, RefU64>>,
+    lstube_bores_map: Arc<DashMap<RefU64, f32>>,
 ) -> anyhow::Result<bool> {
     let batch_size = mgr.db_option.gen_model_batch_size;
     let t = Instant::now();
@@ -514,7 +516,7 @@ pub async fn cache_cata_geos(
                 let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
                 let mut shape_insts_data = instance_mgr.write().await;
                 let mut target_geo_data_option = None;
-                if target_cata.exist_geo.is_none() {
+                if replace_mesh || target_cata.exist_geo.is_none() {
                     //如果没有已有的，需要生成
                     let refno = target_cata.group_refnos[0];
                     println!(
@@ -787,33 +789,37 @@ pub async fn cache_cata_geos(
         let bran_name = group_att.get_name().0.to_string();
         let mut bore = 0.0f32;
         let mut href_type = "".to_string();
-        //头节点的处理
-        // if let Ok(h_att) = mgr.get_attr(h_ref).await {
-        //     href_type = h_att.get_type().to_string();
-        //     let h_cat_ref = h_att.get_foreign_refno("CATR").unwrap_or_default();
-        //     //只是为了获得外径而已
-        //     let tubi_geoms_info =
-        //         resolve_desi_comp(Some(mgr.as_ref()), branch_refno, Some(h_cat_ref), &scom_info_map)
-        //             .await
-        //             .unwrap_or_default();
-        //     let mut has_tube_geom = false;
-        //     for tubi_geom in &tubi_geoms_info.geometries {
-        //         if let TubeImplied(d) = tubi_geom {
-        //             bore = d.diameter;
-        //             has_tube_geom = true;
-        //             break;
-        //         }
-        //     }
-        //
-        //     if !has_tube_geom {
-        //         let h_cat_att = mgr.get_attr(h_cat_ref).await?;
-        //         let params = h_cat_att.get_f64_vec("PARA").unwrap_or_default();
-        //         if params.len() >= 2 {
-        //             bore = params[if is_hang { 0 } else { 1 }] as f32;
-        //         }
-        //     }
-        //     dbg!(bore);
-        // }
+        //todo 头节点的处理
+        if let Ok(h_att) = mgr.get_attr(h_ref).await {
+            href_type = h_att.get_type().to_string();
+            let h_cat_ref = h_att.get_foreign_refno("CATR").unwrap_or_default();
+            //只是为了获得外径而已
+            let tubi_geoms_info =
+                resolve_desi_comp(Some(mgr.as_ref()), branch_refno, Some(h_cat_ref), &scom_info_map)
+                    .await
+                    .unwrap_or_default();
+            let mut has_tube_geom = false;
+            for tubi_geom in &tubi_geoms_info.geometries {
+                if let TubeImplied(d) = tubi_geom {
+                    bore = d.diameter;
+                    has_tube_geom = true;
+                    break;
+                }
+            }
+
+            if !has_tube_geom {
+                let h_cat_att = mgr.get_attr(h_cat_ref).await?;
+                let params = h_cat_att.get_f64_vec("PARA").unwrap_or_default();
+                if params.len() >= 2 {
+                    bore = params[if is_hang { 0 } else { 1 }] as f32;
+                }
+            }
+            dbg!(bore);
+        }
+
+        // let lstube = refno_lstube_map.get(&refno).map(|x| *x.value()).unwrap_or_default();
+        // let bore = lstube_bores_map.get(&lstube).map(|x| *x.value()).unwrap_or_default();
+        // dbg!(hbore);
 
         let mut current_tubing = PdmsTubing {
             refno: branch_refno,
@@ -916,9 +922,9 @@ pub async fn cache_cata_geos(
                         && a_pos.distance(current_tubing.start_pt) > TUBI_TOL {
                         current_tubing.refno = refno;
                         current_tubing.end_pt = a_pos;
-                        current_tubing.bore = axis_map[&arrive].pbore;
                         current_tubing.desire_arrive_dir = a_dir;
                         current_tubing.finished = true;
+                        // dbg!(current_tubing.bore);
                         if current_tubing.is_dir_ok() {
                             if let Some(t) = current_tubing.get_transform() {
                                 inst_tubi_map
@@ -938,13 +944,13 @@ pub async fn cache_cata_geos(
                 }
                 if axis_map.contains_key(&leave) {
                     let dir = axis_map[&leave].dir;
-                    let bore = axis_map[&leave].pbore;
-                    // dbg!(bore);
                     let l_dir = world_trans.transform_vec3(dir).normalize_or_zero();
                     let l_pos = world_trans.transform_point(axis_map[&leave].pt);
+                    let lstube = refno_lstube_map.get(&refno).map(|x| *x.value()).unwrap_or_default();
+                    let bore = lstube_bores_map.get(&lstube).map(|x| *x.value()).unwrap_or_default();
+                    current_tubing.bore = bore;
                     current_tubing.start_pt = l_pos;
                     current_tubing.desire_leave_dir = l_dir;
-                    current_tubing.bore = bore;
                     current_tubing.finished = false;
                 }
             }
