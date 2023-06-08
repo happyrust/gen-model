@@ -906,12 +906,9 @@ impl AiosDBManager {
             let rx_stream = UnboundedReceiverStream::new(rx);
 
             //todo 优化负实体的计算
+            dbg!(&root_refnos);
             let has_pos_neg_map = mgr.query_refnos_has_pos_neg_map(&root_refnos).await.unwrap_or_default();
             dbg!(has_pos_neg_map.len());
-            if has_pos_neg_map.is_empty() {
-                println!("当前节点下面没有需要参与负实体计算的几何体");
-                continue;
-            }
 
             // Spawn a separate task to send messages
 
@@ -922,7 +919,7 @@ impl AiosDBManager {
             // });
 
 
-            if db_option.apply_boolean_operation {
+            if db_option.apply_boolean_operation && !has_pos_neg_map.is_empty() {
                 let now = Instant::now();
                 let mut trans_map = DashMap::new();
                 let mut mesh_result_map: Arc<DashMap<u64, PlantMesh>> = Arc::new(DashMap::new());
@@ -967,10 +964,10 @@ impl AiosDBManager {
                             } else {
                                 w_aabb = geos_info.aabb;
                             }
-                            let Some(inst_geos) = inst_data.get_inst_geos(geos_info) else {
+                            let Some(inst_geos) = inst_data.get_inst_geos_data(geos_info) else {
                                 continue;
                             };
-                            for geo_inst in inst_geos {
+                            for geo_inst in &inst_geos.insts {
                                 let geo_refno = geo_inst.refno;
                                 // dbg!(geo_refno);
                                 let Some(mesh) = mesh_mgr_clone.get_mesh(geo_inst.geo_hash) else {
@@ -979,7 +976,7 @@ impl AiosDBManager {
                                 // let Ok(Some(geo_mat)) = mgr.get_world_transform(geo_refno).await else {
                                 //     continue;
                                 // };
-                                let geo_mat = geo_inst.transform * geos_info.world_transform;
+                                let geo_mat = geos_info.world_transform;
                                 let ele_mat = inverse_mat * geo_mat.compute_matrix();
                                 let local_mat = ele_mat * geo_inst.transform.compute_matrix();
                                 let csg_mesh = mesh.into_csg_mesh(&local_mat);
@@ -1055,7 +1052,10 @@ impl AiosDBManager {
                         mesh_mgr.insert(k, v);
                     }
                 }
+            }else{
+                println!("当前节点下面没有需要参与负实体计算的几何体");
             }
+
             {
                 let inst_data = instance_mgr.read().await;
                 println!("当前db下的基本体生成统计：");
