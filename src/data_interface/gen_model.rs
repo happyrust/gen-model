@@ -120,19 +120,15 @@ pub async fn cache_prim_geos(
                 let visible = attr.is_visible_by_level(None).unwrap_or(true);
                 geos_info.visible = visible;
                 let tr = &item_trans;
-                let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) else {
+                let Some(mut geo_aabb) = cached_mesh_mgr.get_bbox(&geo_hash) else {
                     continue;
                 };
-                aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
-                let ele_aabb = aabb.transform_by(&Isometry {
-                    rotation: tr.rotation.into(),
-                    translation: tr.translation.into(),
-                });
+                let ele_aabb = aabb_apply_transform(&geo_aabb, &tr);
                 let inst_geo = EleInstGeo {
                     geo_hash,
                     refno,
                     pts: Default::default(),
-                    aabb: Some(aabb),
+                    aabb: Some(geo_aabb),
                     transform: *tr,
                     geo_param,
                     visible,
@@ -152,7 +148,7 @@ pub async fn cache_prim_geos(
                         inst_key: *refno,
                         refno,
                         insts: geo_insts,
-                        aabb: None,
+                        aabb: Some(geo_aabb),
                         type_name: attr.get_type().to_string(),
                         ptset_map: Default::default(),
                         flow_pt_indexs: vec![],
@@ -236,7 +232,6 @@ pub async fn cache_loop_geos(
                     generic_type: mgr.get_generic_type(parent_refno),
                     aabb: None,
                 };
-                let mut geo_insts = vec![];
                 let mut target_refno = parent_refno;
                 let mut loop_verts: Vec<Vec3> = vec![];
                 let mut fradius_vec: Vec<f32> = vec![];
@@ -339,11 +334,7 @@ pub async fn cache_loop_geos(
                     geos_info.visible = visible;
                     let tr: Transform = item_trans;
                     if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
-                        aabb = aabb.scaled(&Vector::new(tr.scale.x, tr.scale.y, tr.scale.z));
-                        let ele_aabb = aabb.transform_by(&Isometry {
-                            rotation: tr.rotation.into(),
-                            translation: tr.translation.into(),
-                        });
+                        let ele_aabb = aabb_apply_transform(&aabb, &tr);
                         let geom_inst = EleInstGeo {
                             geo_hash,
                             refno,
@@ -355,31 +346,23 @@ pub async fn cache_loop_geos(
                             geo_param,
                             geo_type: if parent_att.is_neg() { GeoBasicType::Neg } else { GeoBasicType::Pos },
                         };
-                        geo_insts.push(geom_inst);
-                        geos_info.aabb = Some(
-                            ele_aabb.transform_by(&Isometry {
-                                rotation: trans_origin.rotation.into(),
-                                translation: trans_origin.translation.into(),
-                            }),
-                        );
+                        // geo_insts.push(geom_inst);
+                        geos_info.aabb = Some(aabb_apply_transform(&ele_aabb, &trans_origin));
+
+                        shape_insts_data.insert_info(target_refno, geos_info.clone());
+                        shape_insts_data.insert_info(refno, geos_info);
+                        shape_insts_data.insert_geos_data(*refno, EleInstGeosData {
+                            inst_key: *refno,
+                            refno,
+                            insts: vec![geom_inst],
+                            aabb: Some(ele_aabb),
+                            type_name: parent_att.get_type().to_string(),
+                            ptset_map: Default::default(),
+                            flow_pt_indexs: vec![],
+                        });
                     } else {
                         error!("LOOP 有问题：{} ", refno.to_refno_string());
                     }
-                }
-                //todo 插入两个是为了都能找到PLOO对应的构件
-                // dbg!(&geo_insts);
-                if !geo_insts.is_empty() {
-                    shape_insts_data.insert_info(target_refno, geos_info.clone());
-                    shape_insts_data.insert_info(refno, geos_info);
-                    shape_insts_data.insert_geos_data(*refno, EleInstGeosData {
-                        inst_key: *refno,
-                        refno,
-                        insts: geo_insts,
-                        aabb: None,
-                        type_name: parent_att.get_type().to_string(),
-                        ptset_map: Default::default(),
-                        flow_pt_indexs: vec![],
-                    });
                 }
             }
         });
@@ -449,7 +432,7 @@ pub async fn gen_cata_single_geoms(
     Ok(true)
 }
 
-
+///针对aabb，应用transform
 #[inline]
 fn aabb_apply_transform(aabb: &Aabb, t: &Transform) -> Aabb {
     let a = aabb.scaled(&t.scale.into());

@@ -129,7 +129,7 @@ plat_url = ""
 
 #大量负实体测试
 #debug_root_refnos = ["24381/101405"]
-debug_root_refnos = ["17496/169987"]
+#debug_root_refnos = ["17496/169987"]
 
 #SCTN测试
 #debug_root_refnos = ["25688/4377"]
