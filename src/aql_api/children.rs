@@ -59,7 +59,7 @@ pub async fn query_children_order_aql(adb: &ArDatabase, refno: RefU64) -> anyhow
             'children_count':length(for c in 1 inbound child._id pdms_edges
                                 return 1 ),
         }").bind_var("id", refno_aql).build();
-    let results: Vec<PdmsElement> = adb.aql_query(aql).await.unwrap();
+    let results: Vec<PdmsElement> = adb.aql_query(aql).await?;
     Ok(results)
 }
 
@@ -166,7 +166,7 @@ pub async fn query_ancestor_with_name_till_type_aql(arango_database: &ArDatabase
 pub async fn query_ancestor_name_of_type_aql(arango_database: &ArDatabase, refno: RefU64, att_type: &str) -> anyhow::Result<Option<String>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::builder().query("
-    for o in 1..10 outbound @id pdms_edges
+    for o in 0..10 outbound @id pdms_edges
         Filter o.noun == @noun
         return o.name")
         .bind_var("id", refno_aql)
@@ -531,7 +531,7 @@ pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, databa
             let value = value.replace("*", "%");
             format!("like '{}'", value)
         } else {
-            format!("= '{}'", value)
+            format!("== '{}'", value)
         };
         match condition {
             VagueSearchCondition::And => {
@@ -541,6 +541,7 @@ pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, databa
                 filter_condition.push_str(&format!("|| v.{} {} ", key, value_aql));
             }
             VagueSearchCondition::Not => {
+                let value_aql = if value_aql.starts_with("=") { value_aql[1..].to_string() } else { value_aql };
                 filter_condition.push_str(&format!("filter v.{} !{} ", key, value_aql));
             }
         }

@@ -3,7 +3,6 @@ use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors::{AqlQuery, Database};
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::virtual_hole_value::query_virtual_hole_value;
-// use crate::graph_db::pdms_arango::{ArDatabase, get_arangodb_conn_from_db_option};
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option;
 

@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::env;
 use std::fs::File;
 use std::hash::Hash;
 use std::io::{Read, Write};
 use std::mem::transmute;
 use std::sync::Arc;
+use aios_core::options::DbOption;
 use aios_core::pdms_types::{AttrVal, EleTreeNode, RefU64, RefU64Vec};
 use anyhow::anyhow;
 use bb8_arangodb::arangors::{AqlQuery, Database};
@@ -13,38 +15,45 @@ use futures::future::OkInto;
 use smol_str::SmolStr;
 use sqlx::{Acquire, Error, MySql, Pool, Row};
 use sqlx::Executor;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use sqlx::mysql::MySqlRow;
 use crate::api::children::*;
 use crate::api::element::*;
+use crate::api::project_mdb::query_db_nums_of_mdb;
 use crate::api::ssc_data::*;
 use crate::aql_api::children::{query_ancestor_till_type_aql, query_travel_children_aql};
-use crate::consts::PDMS_SSC_ELEMENTS_TABLE;
+use crate::consts::{AQL_PDMS_ELES_COLLECTION, AQL_SSC_EDGE_COLLECTION, AQL_SSC_ELES_COLLECTION, PDMS_SSC_ELEMENTS_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::structs::{PdmsEleGraphEdge, SSCEleGraphNode};
+use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, save_arangodb_with_database};
+use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode, SSCEleGraphNode};
+use crate::metadata::convert_str_to_hash;
 use crate::tables;
+use aios_core::aql_types::AqlEdge;
 
-
-/// site 和 zone 分类 excel 字段
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SiteExcelData {
-    pub code: String,
-    pub name: String,
-    pub att_type: String,
-}
-
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct SiteExcelDataTest {
     pub code: Option<String>,
     pub name: Option<String>,
     pub att_type: Option<String>,
-    pub children_code: Option<String>,
-    pub children_name: Option<String>,
-    pub children_att_type: Option<String>,
+    pub site_pdms_name: Option<String>,
+    pub zone_code: Option<String>,
+    pub zone_name: Option<String>,
+    pub zone_att_type: Option<String>,
+    pub zone_pdms_name: Option<String>,
 }
 
-impl SiteExcelDataTest {
+/// pdms site 和 zone name 对应的专业代码
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct PdmsSscMajorCode {
+    /// pdms site 的 name
+    pub site_name: String,
+    /// 专业代码
+    pub site_code: String,
+    /// site 下 zone name 对应的 专业代码
+    pub zone_map: HashMap<String, String>,
+}
+
+impl SiteExcelData {
     #[inline]
     pub fn is_valid(&self) -> bool {
         self.code.is_some() && self.name.is_some() && self.att_type.is_some()
@@ -60,7 +69,7 @@ pub struct RoomExcelData {
     pub room_code: Option<String>,
     /// 所属机组
     #[serde(rename="所属机组")]
-    pub aff_unit: Option<u32>,
+    pub aff_unit: Option<String>,
     ///安装厂房
     #[serde(rename="安装厂房")]
     pub install_plant: Option<String>,
@@ -123,6 +132,15 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
     Ok(())
 }
 
+pub async fn async_total_ssc_data_refactor(mgr: &AiosDBManager) -> anyhow::Result<()> {
+    let database = mgr.get_arangodb().await?;
+    // 创建图数据库连接
+    create_arangodb_conn(&database, AQL_SSC_EDGE_COLLECTION, Edge).await?;
+    create_arangodb_conn(&database, AQL_SSC_ELES_COLLECTION, Document).await?;
+
+    Ok(())
+}
+
 /// 将ssc房间对应的参考号修改为pdms房间的参考号
 pub async fn replace_ssc_room_refno(room_info: HashMap<String, RefU64>, pool: &Pool<MySql>) -> anyhow::Result<()> {
     // 找到 ssc 当前所有房间的参考号
@@ -148,6 +166,9 @@ pub async fn replace_ssc_room_refno(room_info: HashMap<String, RefU64>, pool: &P
 fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, DashMap<String, String>)> {
     let mut level: Vec<(String, Vec<String>)> = vec![];
     let mut name_map = DashMap::new();
+    let mut pdms_zone_name_map = HashMap::new();
+    let mut pdms_ssc_major_codes = Vec::new();
+
     let mut workbook: Xlsx<_> = open_workbook("resource/专业分类.xlsx")?;
     dbg!("加载专业分类.xlsx 成功");
     let range = workbook.worksheet_range("Sheet2")
@@ -160,61 +181,136 @@ fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, Da
     let mut b_first = true;
     let mut zones = vec![];
     while let Some(result) = iter.next() {
-        let v: SiteExcelDataTest = result?;
-        if v.is_valid() {
-            continue;
-        }
+        let v: SiteExcelData = result?;
         // site 的 name 、code 、att_type
-        // 当zone_code和当前读取的值不相等时，就代表不是同一个层级了 （第一次除外,所以加了个b_first 排除第一次的情况）
-        let read_site_code = v.code.clone().unwrap(); // 从 excel 文件中读取的 site name
-        if zone_code != read_site_code && !b_first {
-            level.push((zone_name.clone(), zones.clone()));
-            zones.clear();
-        }
+        if v.code.is_some() && v.name.is_some() && v.att_type.is_some() {
+            let read_site_code = v.code.clone().unwrap(); // 从 excel 文件中读取的 site name
+            // 当zone_code和当前读取的值不相等时，就代表不是同一个层级了 （第一次除外,所以加了个b_first 排除第一次的情况）
+            if zone_code != read_site_code && !b_first {
+                level.push((zone_name.clone(), zones.clone()));
+                zones.clear();
+            }
+            if zone_code != read_site_code {
+                if v.site_pdms_name.is_some() {
+                    pdms_ssc_major_codes.push(PdmsSscMajorCode {
+                        site_name: v.site_pdms_name.unwrap(),
+                        site_code: read_site_code.clone(),
+                        zone_map: pdms_zone_name_map.clone(),
+                    });
+                    pdms_zone_name_map.clear();
+                }
+            }
 
         let read_site_name = v.name.unwrap();
         zone_name = read_site_name.clone();
         zone_code = read_site_code.clone();
 
-        name_map.insert(read_site_code, read_site_name);
-        b_first = false;
+
+            name_map.insert(read_site_code, read_site_name);
+            b_first = false;
+        }
         // 存放 site 下的子节点
-
-        // v.children_name.as_ref().and_then(|x| {
-        //     zones.push(x.clone());
-        //     v.children_code.as_ref().and_then(|c| {
-        //         name_map.insert(c.clone(), x.clone());
-        //         None
-        //     });
-        //     None
-        // } );
-
-        if v.children_name.is_some() && v.children_code.is_some() {
-            let read_zone_name = v.children_name.unwrap();
-            let read_zone_code = v.children_code.clone().unwrap();
+        if v.zone_name.is_some() && v.zone_code.is_some() {
+            let read_zone_name = v.zone_name.unwrap();
+            let read_zone_code = v.zone_code.clone().unwrap();
 
             zones.push(read_zone_name.clone());
-            name_map.insert(read_zone_code, read_zone_name);
+            name_map.insert(read_zone_code.clone(), read_zone_name);
+            // 存放 pdms的site zone name 对应的 专业代码
+            if v.zone_pdms_name.is_some() {
+                pdms_zone_name_map.entry(read_zone_code).or_insert(v.zone_pdms_name.unwrap());
+            }
         }
     }
-    level.push((zone_name.clone(), zones.clone())); // 查询结束时 还需要剩最后一条数据没插入
+    // 查询结束时 还需要剩最后一条数据没插入
+    level.push((zone_name.clone(), zones.clone()));
     Ok((level, name_map))
+}
+
+/// ssc专业配置excel表 返回的对应数据
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct SscMajorCodeExcel {
+    /// key : site 的 name (中文名) value : site 下对应的zone 的 name
+    pub level: Vec<(String, Vec<String>)>,
+    /// 英文 code 对应的中文名
+    pub name_map: DashMap<String, String>,
+    /// pdms中 site 和 zone name 对应的专业代码
+    pub pdms_name_code_map: Vec<PdmsSscMajorCode>,
+}
+
+/// 读取 专业分类 excel表 ，返回需要的值
+pub fn get_room_level_from_excel_refactor() -> anyhow::Result<SscMajorCodeExcel> {
+    let mut level: Vec<(String, Vec<String>)> = Vec::new();
+    let mut name_map = DashMap::new();
+    let mut pdms_zone_name_map = HashMap::new();
+    let mut pdms_ssc_major_codes = Vec::new();
+
+    let mut workbook: Xlsx<_> = open_workbook("resource/专业分类.xlsx")?;
+    dbg!("加载专业分类.xlsx 成功");
+    let range = workbook.worksheet_range("Sheet2")
+        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+    dbg!("打开Sheet2成功");
+
+    let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
+    let mut b_first = true;
+    let mut site_code = "".to_string();
+    let mut site_chinese_name = "".to_string();
+    let mut pdms_site_name = "".to_string();
+    let mut zones = Vec::new();
+    while let Some(result) = iter.next() {
+        let v: SiteExcelData = result?;
+        // site 的 name 、code 、att_type
+        if v.code.is_some() && v.name.is_some() && v.att_type.is_some() && v.site_pdms_name.is_some() {
+            let read_site_code = v.code.unwrap();
+            let read_site_chinese_name = v.name.unwrap();
+            let read_pdms_site_name = v.site_pdms_name.unwrap();
+            // code != site_code 代表是下一个site的数据了 , b_first 防止第一个判断就是 != 会导致读取的数据错开，第一个site没值
+            if read_site_code != site_code && !b_first {
+                pdms_ssc_major_codes.push(PdmsSscMajorCode {
+                    site_name: pdms_site_name.clone(),
+                    site_code: site_code.clone(),
+                    zone_map: pdms_zone_name_map.clone(),
+                });
+                pdms_zone_name_map.clear();
+
+                level.push((site_chinese_name, zones.clone()));
+                zones.clear();
+            }
+            b_first = false;
+            site_code = read_site_code.clone();
+            site_chinese_name = read_site_chinese_name.clone();
+            pdms_site_name = read_pdms_site_name.clone();
+            // 存储专业编码对应的中文名称
+            name_map.insert(read_site_code, site_chinese_name.clone());
+
+            // 存放 site 下 zone 的专业代码
+            if v.zone_name.is_some() && v.zone_code.is_some() {
+                let read_zone_name = v.zone_name.unwrap();
+                let read_zone_code = v.zone_code.unwrap();
+                name_map.insert(read_zone_code.clone(), read_zone_name.clone());
+                // 存放 pdms的site下 zone name 对应的 专业代码
+                if v.zone_pdms_name.is_some() {
+                    pdms_zone_name_map.entry(v.zone_pdms_name.unwrap()).or_insert(read_zone_code);
+                }
+                zones.push(read_zone_name);
+            }
+        }
+    }
+    Ok(SscMajorCodeExcel {
+        level,
+        name_map,
+        pdms_name_code_map: pdms_ssc_major_codes,
+    })
 }
 
 /// 解析 excel 表单 ，找到每一层下面所有的房间号 返回所有的安装厂房下对应的层位，层位下对应的房间
 pub fn parse_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i32, Vec<String>>>> {
     let mut r = HashMap::new();
-    let mut workbook: Xlsx<_> = open_workbook("resource/test.xlsx")?;
+    let mut workbook: Xlsx<_> = open_workbook("resource/ssc_room.xlsx")?;
     let range = workbook.worksheet_range("Sheet1")
         .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
-
-    // while let Some(result) = iter.next() {
-    //     let v: RoomExcelData = result.and_then(|r| {
-    //
-    //     });
-    // }
 
     while let Some(result) = iter.next() {
         let v: RoomExcelData = result?;
@@ -233,9 +329,10 @@ pub fn parse_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i
     Ok(r)
 }
 
+
 pub fn get_rooms_from_excel() -> anyhow::Result<Vec<String>> {
     let mut r = vec![];
-    let mut workbook: Xlsx<_> = open_workbook("resource/test.xlsx")?;
+    let mut workbook: Xlsx<_> = open_workbook("../resource/ssc_room.xlsx")?;
     let range = workbook.worksheet_range("Sheet1")
         .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
 
@@ -539,12 +636,18 @@ pub fn set_ssc_node() -> anyhow::Result<(String, DashMap<String, RefU64>, DashMa
     Ok((sql, zone_level_map, zone_name_map, next_refno))
 }
 
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub(crate) struct SSCLevelExcelData {
+    pub name: Option<String>,
+    pub att_type: Option<String>,
+    pub owner: Option<String>,
+}
+
 /// ssc 假节点
 pub fn gen_insert_ssc_node_sql(refno: RefU64, type_name: &str, owner: RefU64, name: &str, real_pdms_refno: RefU64, order_num: usize) -> (RefU64, String) {
     let mut sql = String::new();
     let refno_str = refno.to_refno_str().to_string();
     sql.push_str(&format!("({},'{refno_str}','{type_name}',{},'{name}',{},{order_num}),", refno.0, owner.0, real_pdms_refno.0));
-
     (RefU64(refno.0 + 1), sql)
 }
 
@@ -599,7 +702,9 @@ fn set_ssc_level_node(node_map: HashMap<String, BTreeMap<i32, Vec<String>>>, uni
                       mut next_refno: RefU64, insert_sql: &mut String) -> anyhow::Result<(DashMap<String, RefU64>, DashMap<String, String>, RefU64)> {
     let mut zone_level_map = DashMap::new();
     let mut unit_refno = RefU64(0); // 不同机组对应的参考号
-    let (site_level_map, zone_name_map) = get_room_level_from_excel()?;
+    let excel_result = get_room_level_from_excel_refactor()?;
+    let site_level_map = excel_result.level;
+    let zone_name_map = excel_result.name_map;
     // 机组号 + 厂房号
     for (unit_name, v) in node_map {
         // 一号机组
@@ -677,7 +782,6 @@ pub fn deal_room_info(room_data: HashMap<RefU64, SscEleNode>) -> HashMap<String,
     map
 }
 
-
 /// 查询ssc对应的房间名，value ： 0: ssc 第一次创建的refno, 1: pdms 中房间的参考号
 pub async fn query_ssc_room_refnos(room_info: &HashMap<String, RefU64>, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, (RefU64, RefU64)>> {
     let mut map = HashMap::new();
@@ -702,6 +806,117 @@ pub async fn query_ssc_room_refnos(room_info: &HashMap<String, RefU64>, pool: &P
     Ok(map)
 }
 
+/// 通过 专业分类.xlsx 表中 pdms name 包含的关键字，将pdms_eles保存上对应的专业代码
+///
+/// name_map: 从 get_room_level_from_excel() 直接读出来的 , pdms site 和 其下面 zone 的 name 对应的专业代码
+pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>, db_option: &DbOption, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<()> {
+    let numbs = query_db_nums_of_mdb(&db_option.mdb_name, &db_option.module, pool).await?;
+    // 先查找到 mdb下的所有 site
+    let sites = query_types_refnos_names(&vec!["SITE"], pool, Some(&numbs)).await?;
+    // let sites = vec![(RefU64::from_refno_str("24383/66456").unwrap(), "/1WCC-PIPEBJ".to_string())];
+    let mut update_aqls = Vec::new();
+    // 将mdb所有的site查找到后，用 name_map 进行分组和过滤，一个site下面的zone为一组
+    for (site_refno, site_name) in sites {
+        let mut contains_key = Vec::new();
+        let mut filter_aql = String::new();
+        // 匹配 site 的 名字包含哪个专业代码
+        for name in name_map {
+            if site_name.contains(&name.site_name) {
+                contains_key.push(name.clone());
+            }
+        }
+        if contains_key.is_empty() { continue; }
+        // 如果site 名字 同时包含两个专业代码，取长度最长的那个
+        if contains_key.len() > 1 {
+            let Some(max_site_code) = contains_key.clone().into_iter().max_by(|a, b| a.site_name.len().cmp(&b.site_name.len())) else { continue; };
+            filter_aql.push_str(&format!("filter v.name like {}\r\n", max_site_code.site_name));
+            // 如果一个site name 同时满足多个条件，filter 字符长度最长的那个 ， 其他的 取否
+            for key in contains_key {
+                if &key.site_name == &max_site_code.site_name { continue; }
+                filter_aql.push_str(&format!("filter v.name !like {}\r\n", max_site_code.site_name));
+            }
+            // 写好过滤条件之后 就不需要其他数据了，只保留最符合的那个条件就可以了
+            contains_key = vec![max_site_code.clone()];
+        } else {
+            filter_aql.push_str(&format!("filter v.name like {}\r\n", contains_key[0].site_name));
+        }
+        // 每一个 site 和下面的 zone 的更新 pdms_eles 语句
+        let update_site_aql = format!("update {{'_key':'{}' , 'major': '{}'}} in {}", site_refno.to_url_refno(), contains_key[0].site_code, AQL_PDMS_ELES_COLLECTION);
+        update_aqls.push(update_site_aql);
+        for (zone_name, zone_code) in &contains_key[0].zone_map {
+            let mut update_zone_aql = format!("let zones = ( for v in 1 inbound '{}/{}' pdms_edges return v ) ",
+                                              AQL_PDMS_ELES_COLLECTION, site_refno.to_url_refno());
+            update_zone_aql.push_str(&format!("for zone in zones "));
+            update_zone_aql.push_str(&format!("filter zone.name like '%{}%' ", zone_name));
+            update_zone_aql.push_str(&format!("update {{'_key':zone._key , 'major': '{}'}} in {}", zone_code, AQL_PDMS_ELES_COLLECTION));
+            update_aqls.push(update_zone_aql);
+        }
+    }
+    // todo 不能同时update多次 后期将这些aql优化到一次执行
+    for update_aql in update_aqls {
+        let _r = database.aql_query::<()>(AqlQuery::new(update_aql.as_str())).await;
+    }
+    Ok(())
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub(crate) struct SscLevelExcel {
+    pub name: Option<String>,
+    pub att_type: Option<String>,
+    pub owner: Option<String>,
+}
+
+impl SscLevelExcel {
+    pub fn is_valid(&self) -> bool {
+        if self.name.is_none() || self.att_type.is_none() {
+            return false;
+        }
+        true
+    }
+}
+
+/// 将 ssc_level.xlsx  ssc 固定节点保存到图数据库中
+async fn save_ssc_level_excel(database: &Database) -> anyhow::Result<()> {
+    let mut eles_results = Vec::new();
+    let mut edge_results = Vec::new();
+
+    let mut workbook: Xlsx<_> = open_workbook("resource/ssc_level.xlsx")?;
+    let range = workbook.worksheet_range("Sheet1")
+        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+
+    let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
+
+    while let Some(result) = iter.next() {
+        let v: SscLevelExcel = result?;
+        if v.is_valid() {
+            let name = v.name.unwrap();
+            let name_hash = convert_str_to_hash(&name);
+            let owner = if v.owner.is_some() { convert_str_to_hash(&v.owner.unwrap()) } else { 0 };
+            let refno = RefU64(name_hash);
+            let owner = RefU64(owner);
+            eles_results.push(PdmsEleGraphNode {
+                _key: refno.to_url_refno(),
+                noun: v.att_type.unwrap(),
+                version: 0,
+                name,
+                owner: owner.to_url_refno(),
+                dbnum: 0,
+            });
+
+            edge_results.push(AqlEdge{
+                _key: refno.hash_with_another_refno(owner).to_string(),
+                _from: format!("{}/{}",AQL_SSC_ELES_COLLECTION,refno.to_url_refno()),
+                _to: format!("{}/{}",AQL_SSC_ELES_COLLECTION,owner.to_url_refno()),
+            })
+        }
+    }
+    let eles_value = serde_json::to_value(&eles_results)?;
+    save_arangodb_with_database(eles_value, AQL_SSC_ELES_COLLECTION, database, false).await?;
+    let edge_value = serde_json::to_value(&edge_results)?;
+    save_arangodb_with_database(edge_value, AQL_SSC_EDGE_COLLECTION, database, false).await?;
+    Ok(())
+}
+
 fn gen_query_ssc_room_refnos_sql(room_info: &HashMap<String, RefU64>) -> String {
     let mut sql = String::new();
     let mut rooms = String::new();
@@ -720,22 +935,40 @@ fn gen_replace_room_refno_sql(room_name: &str, refno: RefU64, old_refno: RefU64)
     sql
 }
 
+#[tokio::test]
+async fn test_set_pdms_major_from_excel() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let excel_result = get_room_level_from_excel_refactor()?;
+    set_pdms_major_from_excel(&excel_result.pdms_name_code_map, &db_option, &database, &pool).await?;
+    Ok(())
+}
 
-#[test]
-fn test_read_excel() {
-    let result = parse_room_info_from_excel().unwrap();
-    // let (level, name_map) = get_room_level_from_excel().unwrap();
-    if let Some(map) = result.get("1RX") {
-        if let Some(val) = map.get(&1) {
-            println!("val={:?}", val);
-        }
-    }
-    // dbg!(&name_map);
+#[tokio::test]
+async fn test_save_ssc_level_excel() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
+    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let _ = save_ssc_level_excel(&database).await?;
+    Ok(())
 }
 
 #[test]
-fn test_split_name() {
-    let room_name = "R101";
-    let room_split_name = room_name.split("-").collect::<Vec<_>>();
-    println!("name={:?}", room_split_name.last());
+fn test_parse_room_info_from_excel() -> anyhow::Result<()> {
+    let result = parse_room_info_from_excel()?;
+    dbg!(&result);
+    Ok(())
 }

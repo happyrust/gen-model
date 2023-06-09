@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Write;
-use aios_core::data_center::{DataCenterAttr, DataCenterInstance, DataCenterProject};
+use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors::Database;
@@ -34,6 +34,70 @@ pub async fn get_inst_data(refnos: Vec<RefU64>, database: &ArDatabase,pool:&Pool
     Ok(DataCenterProject {
         package_code: DataCenterProject::convert_package_code(),
         project_code: "1516".to_string(),
+        owner: "KY1801".to_string(),
+        instances: instance,
+    })
+}
+
+/// 获取仪控设备的信息
+pub async fn get_inst_equi_data(refnos: Vec<RefU64>, aios_mgr:&AiosDBManager) -> anyhow::Result<DataCenterProject> {
+    let mut instance = Vec::new();
+    let database  = aios_mgr.get_arangodb().await?;
+    if let Ok(equis) = query_refnos_travel_children_with_type_aql(database, refnos, vec!["EQUI"]).await {
+        for equi in equis {
+            let name = if equi.name.starts_with("/") { equi.name[1..].to_string() } else { equi.name };
+            if name.len() < 9 { continue };
+            let mut attr = Vec::new();
+            let replace_name = name.replace("-","");
+            attr.push(DataCenterAttr {
+                attribute_model_code: "COMP1".to_string(),
+                value: AttrValue::AttrString(replace_name[..1].to_string()).into(),
+            });
+            attr.push(DataCenterAttr {
+                attribute_model_code: "COMP2".to_string(),
+                value: AttrValue::AttrString(replace_name[1..4].to_string()).into(),
+            });
+            attr.push(DataCenterAttr {
+                attribute_model_code: "COMP3".to_string(),
+                value: AttrValue::AttrString(replace_name[4..7].to_string()).into(),
+            });
+            attr.push(DataCenterAttr {
+                attribute_model_code: "COMP4".to_string(),
+                value: AttrValue::AttrString(replace_name[7..9].to_string()).into(),
+            });
+            attr.push(DataCenterAttr {
+                attribute_model_code: "COMP6".to_string(),
+                value: AttrValue::AttrString(name.to_string()).into(),
+            });
+            let room_name = query_room_name_from_refno_aql(equi.refno, database).await?.unwrap_or("".to_string());
+            let position = aios_mgr.get_world_transform(equi.refno).await?;
+            attr.push(DataCenterAttr {
+                attribute_model_code: "COMP8".to_string(),
+                value: AttrValue::AttrString(room_name).into(),
+            });
+            if let Some(position) = position {
+                attr.push(DataCenterAttr {
+                    attribute_model_code: "COMPAD34".to_string(),
+                    value: AttrValue::AttrFloat(position.translation.z).into(),
+                });
+            } else {
+                attr.push(DataCenterAttr {
+                    attribute_model_code: "COMPAD34".to_string(),
+                    value: AttrValue::AttrFloat(0.0).into(),
+                });
+            }
+            instance.push(DataCenterInstance{
+                object_model_code: "COMPAD".to_string(),
+                project_code: "1516".to_string(),
+                instance_code: name,
+                version: "A版".to_string(),
+                attributes: attr,
+            });
+        }
+    }
+    Ok(DataCenterProject {
+        package_code: DataCenterProject::convert_package_code(),
+        project_code: aios_mgr.db_option.project_code.to_string(),
         owner: "KY1801".to_string(),
         instances: instance,
     })

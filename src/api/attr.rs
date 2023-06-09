@@ -215,7 +215,7 @@ pub async fn query_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: O
         let att_type = attr.get_type().to_string();
         let explicit_attr = query_explicit_attr(refno, &pool).await?;
         let ele = query_ele_node(refno, &pool).await?;
-        let b_bran = query_ancestor_of_type_from_cache(ele.refno, "PIPE").is_some();
+        // let b_bran = query_ancestor_of_type_from_cache(ele.refno, "PIPE").is_some();
 
         for (k, v) in explicit_attr.map {
             attr.entry(k).or_insert(v);
@@ -475,10 +475,11 @@ fn gen_query_uda_name_sql() -> String {
 
 #[tokio::test]
 async fn test_query_foreign_refno() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;
-    let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
-    let refno: RefU64 = RefI32Tuple((23584, 121)).into();
-    let v = query_foreign_refno(refno, "catr", &pool).await?;
+    let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
+    let refno: RefU64 = RefI32Tuple((24575,2178)).into();
+    let v = query_explicit_attr(refno,  &pool).await?;
     println!("v={:?}", v);
     Ok(())
 }

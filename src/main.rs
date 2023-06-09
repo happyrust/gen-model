@@ -74,7 +74,6 @@ use log::{error, LevelFilter};
 use tokio::sync::RwLock;
 use aios_database::consts::*;
 
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
@@ -125,13 +124,6 @@ async fn main() -> anyhow::Result<()> {
             set_arangodb_all_ssc_nodes(project_db.value(), &mgr.get_arango_db().await?).await?;
         }
         info!("SSC同步完成");
-    }
-
-    if db_option.gen_model_mesh {
-        println!("正在生成模型");
-        let mut time = Instant::now();
-        AiosDBManager::cache_geos_data(mgr.clone(), db_option.clone()).await?;
-        info!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
     if db_option.only_sync_sys {
@@ -228,32 +220,32 @@ fn test_inst_mgr() {
         dbg!(&value.value());
     };
 }
-
-#[test]
-fn test_compare_attr_info_file() {
-    let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
-    let old_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
-    let old_map = old_info.noun_attr_info_map;
-    for (noun, new_attr) in new_info.noun_attr_info_map {
-        if let Some(old_attr) = old_map.get(&noun) {
-            for (new_key, new_value) in new_attr {
-                let old_value = old_attr.get(&new_key);
-                if old_value.is_none() { continue; }
-                let old_value = old_value.unwrap();
-
-                if new_value.att_type != old_value.att_type || new_value.name != old_value.name {
-                    dbg!(&noun);
-                    dbg!(&new_value);
-                    dbg!("");
-                }
-            }
-        } else {
-            dbg!(&noun);
-            dbg!(&db1_dehash(noun as u32));
-            dbg!("");
-        }
-    }
-}
+//
+// #[test]
+// fn test_compare_attr_info_file() {
+//     let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
+//     let old_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
+//     let old_map = old_info.noun_attr_info_map;
+//     for (noun, new_attr) in new_info.noun_attr_info_map {
+//         if let Some(old_attr) = old_map.get(&noun) {
+//             for (new_key, new_value) in new_attr {
+//                 let old_value = old_attr.get(&new_key);
+//                 if old_value.is_none() { continue; }
+//                 let old_value = old_value.unwrap();
+//
+//                 if new_value.att_type != old_value.att_type || new_value.name != old_value.name {
+//                     dbg!(&noun);
+//                     dbg!(&new_value);
+//                     dbg!("");
+//                 }
+//             }
+//         } else {
+//             dbg!(&noun);
+//             dbg!(&db1_dehash(noun as u32));
+//             dbg!("");
+//         }
+//     }
+// }
 
 #[test]
 fn test_log() {

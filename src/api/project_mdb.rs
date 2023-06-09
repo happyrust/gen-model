@@ -23,7 +23,6 @@ lazy_static! {
     };
 }
 
-
 //(ID, DB_NUM, MDB_NAME, REFNO, PROJECT, WORLD_REFNO, DB_TYPE)
 pub async fn query_db_quick_info(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<DbQuickInfo>> {
     let mut sql = String::new();

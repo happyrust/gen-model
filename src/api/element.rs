@@ -439,9 +439,9 @@ pub async fn query_id_from_dbno_type(dbno: u32, pool: &Pool<MySql>) -> anyhow::R
 }
 
 /// 指定type查询所有type符合该值的节点
-pub async fn query_types_refnos_names(types: &[&str], pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
+pub async fn query_types_refnos_names(types: &[&str], pool: &Pool<MySql>, numbdbs: Option<&Vec<i32>>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut r = vec![];
-    let sql = gen_query_types_refnos_names(types);
+    let sql = gen_query_types_refnos_names(types, numbdbs);
     let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match result {
         Ok(vals) => {
@@ -517,7 +517,6 @@ pub async fn check_exist_refno(refno: RefU64, pool: &Pool<MySql>, mdb_dbnums: &B
     } else {
         format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND NUMBDB IN {} )", refno.0, in_sql)
     };
-    // dbg!(&sql);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(result.get::<bool, _>(0))
 }
@@ -528,7 +527,7 @@ fn gen_query_dbno_info_by_project(project_name: &str) -> String {
     sql
 }
 
-fn gen_query_types_refnos_names(types: &[&str]) -> String {
+fn gen_query_types_refnos_names(types: &[&str], dbnos: Option<&Vec<i32>>) -> String {
     let mut sql = String::new();
     let mut types_sql = String::new();
     for att_type in types {
@@ -536,7 +535,15 @@ fn gen_query_types_refnos_names(types: &[&str]) -> String {
     }
     types_sql.remove(types_sql.len() - 1);
 
-    sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE IN ({})", types_sql));
+    let mut dbnos_filter_sql = "".to_string();
+    if let Some(dbnos) = dbnos {
+        if dbnos.len() > 0 {
+            let sql_str = dbnos.iter().map(|x| x.to_string()).join(",");
+            dbnos_filter_sql.push_str(&format!(" AND NUMBDB IN ({sql_str}) "));
+        }
+    }
+
+    sql.push_str(&format!("SELECT ID,NAME FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE IN ({}) {}", types_sql, dbnos_filter_sql));
     sql
 }
 

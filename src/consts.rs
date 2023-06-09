@@ -23,6 +23,10 @@ pub const HOLES_TABLE: &'static str = "HOLEDATATABLE";
 pub const EMBED_TABLE: &'static str = "EMBEDDATATABLE";
 pub const SCTN_STANDARD: &'static str = "SCTN_STANDARD";
 pub const CHANNEL_STEEL_STANDARD: &'static str = "CHANNEL_STEEL_STANDARD";
+pub const GLOBAL_DATABASE: &'static str = "PROJECT_INFO";
+pub const PUHUA_MATERIAL_DATABASE: &'static str = "hdey_powerpmdb";
+pub const PUHUA_MATERIAL_TABLE: &'static str = "pdms_mat_gy";
+pub const PUHUA_DQ_MATERIAL_TABLE: &'static str = "pdms_traymotlist";
 // project_mdb
 // 专业表单
 pub const PROFESSION_TX_XT: &'static str = "TX_XT";
@@ -42,3 +46,9 @@ pub const AQL_PDMS_INST_INFO_COLLECTION: &'static str = "pdms_inst_infos";
 pub const AQL_PDMS_INST_GEO_COLLECTION: &'static str = "pdms_inst_geos";
 pub const AQL_PDMS_INST_TUBI_COLLECTION: &'static str = "pdms_inst_tubis";
 pub const AQL_PDMS_INST_EDGE_COLLECTION: &'static str = "pdms_inst_edges";
+
+pub const AQL_PDMS_ELES_COLLECTION: &'static str = "pdms_eles";
+pub const AQL_SSC_ELES_COLLECTION: &'static str = "ssc_eles";
+pub const AQL_SSC_EDGE_COLLECTION: &'static str = "ssc_edges";
+pub const AQL_THREED_REVIEW_COLLECTION: &'static str = "threed_review";
+pub const AQL_VIRTUAL_HOLE_COLLECTION: &'static str = "virtual_hole";

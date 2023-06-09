@@ -20,6 +20,19 @@ pub async fn save_three_dimensional_review_data_to_arango(
     Ok(())
 }
 
+//保存来自普华的数据
+pub async fn save_threed_review_data_to_arango(
+    database: &Database,
+    review_data: ThreeDimensionalModelDataCrate,
+) -> anyhow::Result<()>
+{
+    let data = insert_three_dimensional_review_data(review_data);
+    for i in data.chunks(ARANGODB_SAVE_AMOUNT) {
+        let json = serde_json::to_value(i)?;
+        save_arangodb_with_database(json, "threed_review", &database, false).await?;
+    }
+    Ok(())
+}
 
 fn insert_three_dimensional_review_data(review_data: ThreeDimensionalModelDataCrate) -> Vec<ThreeDimensionalModelDataToArango> {
     let mut review_data_vec = Vec::new();
@@ -45,3 +58,21 @@ pub async fn query_three_dimensional_review_data(database: &ArDatabase, key_valu
 }
 
 
+pub async fn query_threed_review_data(database: &Database, key_value: &str) -> anyhow::Result<Option<Vec<ThreeDimensionalModelDataToArango>>> {
+    let aql = AqlQuery::new("let v = document('threed_review',@_key)\
+        return unset(v , '_id','_rev') ")
+        .bind_var("_key", key_value);
+    let data_vec: Vec<ThreeDimensionalModelDataToArango> = database.aql_query(aql).await?;
+    return Ok(Some((data_vec)));
+}
+
+
+pub async fn query_threed_review_data_by_name(database: &Database, name: &str) -> anyhow::Result<Option<Vec<ThreeDimensionalModelDataToArango>>> {
+    let aql = AqlQuery::new("FOR u IN @@collection
+                                                FILTER u.UserCode==@name
+                                                return unset(u , '_id','_rev')")
+        .bind_var("@collection", "threed_review")
+        .bind_var("name", name);
+    let data_vec: Vec<ThreeDimensionalModelDataToArango> = database.aql_query(aql).await?;
+    return Ok(Some((data_vec)));
+}

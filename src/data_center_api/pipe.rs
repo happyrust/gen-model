@@ -15,7 +15,8 @@ use crate::api::children::travel_children_with_type;
 use crate::api::element::{query_children, query_children_eles, query_children_eles_without_children_count, query_name, query_refno_type};
 use crate::api::metadata_manage::{query_metadata_table_code_sql, query_metadata_table_sql};
 use crate::aql_api::children::{query_children_aql, query_children_refnos_aql, query_travel_children_with_type_aql};
-use crate::aql_api::tubi::{query_bran_info, query_tubi_from_bran};
+use crate::aql_api::tubi::{query_bran_info, query_tubi_from_bran, query_tubi_from_bran_filter_atta};
+use crate::data_center_api::auto_get_attr::{auto_get_datacenter_attr, DataCenterMetadata};
 use crate::data_center_api::bran::get_data_center_bran_attr;
 use crate::data_center_api::elbo::get_data_center_elbo_attr;
 use crate::data_center_api::flan::get_data_center_flan_attr;
@@ -423,6 +424,26 @@ fn get_instance_data_element(metadata_map: &HashMap<String, Vec<String>>, refno:
         version: "A版".to_string(),
         attributes: result,
     })
+}
+
+/// 提供给数据中台接口，部分自动获取数据
+///
+/// datacenter_excel_map 读取处理后的元数据表格,参考 resource/附录I-工艺布置管件类元数据.xlsx
+pub async fn get_datacenter_bran_data(aios_mgr:&AiosDBManager,bran_refno:RefU64,
+                                      datacenter_excel_map:&HashMap<String, Vec<DataCenterMetadata>>) -> anyhow::Result<()>{
+    let database = aios_mgr.get_arangodb().await?;
+    // 拿到 tubi 信息,并去除 atta(不包含bran下的元件，只有tubi)
+    let tubi_infos = query_tubi_from_bran_filter_atta(bran_refno,database).await?;
+    let bran_children = query_children_aql(database,bran_refno).await?;
+    // 处理 bran 下的元件属性 (不含tubi)
+    for child in bran_children {
+        let attr = aios_mgr.get_attr(child.refno).await?;
+        // 自动生成部分属性
+        auto_get_datacenter_attr(child.refno,aios_mgr,&attr,datacenter_excel_map).await?;
+        // 手动处理剩余的属性
+
+    }
+    Ok(())
 }
 
 #[tokio::test]

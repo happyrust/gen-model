@@ -21,7 +21,7 @@ pub async fn query_ssc_children_aql(refno: RefU64, database: &ArDatabase) -> any
     let result: Vec<PdmsElement> = database.aql_query(aql).await?;
     for v in result {
             r.push(EleTreeNode {
-                refno,
+                refno: v.refno,
                 owner: v.owner,
                 name: v.name,
                 noun: v.noun,

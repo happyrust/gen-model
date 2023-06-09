@@ -47,6 +47,7 @@ pub mod data_center_api;
 pub mod spatial_tree;
 pub mod ansys;
 pub mod test;
+pub mod other_plat;
 
 pub mod viewer;
 
