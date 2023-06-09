@@ -382,12 +382,15 @@ pub async fn save_arangodb_with_db_option(database: &ArDatabase, json: Value, co
 }
 
 pub async fn save_arangodb_doc(json: Value, collection: &str, database: &ArDatabase, replace: bool) -> anyhow::Result<()> {
-    let mut aql_str = r#"LET data = @elements
+    let mut aql_str = if replace {
+        r#"LET data = @elements
                     FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#;
-    // if replace {
-    //     aql_string = aql_string.replace("INSERT", "REPLACE");
-    // }
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#
+    } else{
+        r#"LET data = @elements
+                    FOR d IN data
+                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true}"#
+    };
     let aql = AqlQuery::builder().query(aql_str)
         .bind_var("@collection", collection)
         .bind_var("elements", json)

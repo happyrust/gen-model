@@ -12,14 +12,14 @@ use crate::test::common::get_arangodb_conn_from_db_option;
 
 /// 查询 catr refno引用的 dtse下 data 的 ppro和 dpro数据
 pub async fn query_dtse_ppro_from_catr_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<DashMap<String, DataDocument>>> {
-    let dtre_refno = query_foreign_refno_aql(refno,  &["DTRE", "DTRE"], database).await?;
+    let dtre_refno = query_foreign_refno_aql(refno,  &["DTRE", "DTRE"], &database).await?;
     if dtre_refno.is_none() { return Ok(None); }
-    let data_refnos = query_children_aql(database, dtre_refno.unwrap()).await?;
+    let data_refnos = query_children_aql(&database,dtre_refno.unwrap()).await?;
     let mut children = vec![];
     for data_refno in data_refnos.into_iter() {
         children.push(data_refno.refno);
     }
-    let result = query_data_attr_from_refnos(children, database).await?;
+    let result = query_data_attr_from_refnos(children, &database).await?;
     Ok(Some(result))
 }
 

@@ -157,8 +157,8 @@ async fn auto_get_attr_from_metadata_excel_single_function(aios_mgr: &AiosDBMana
             Some(serde_json::to_string(&position.rotation).unwrap_or("[0.0,0.0,0.0]".to_string()))
         }
         "room_code()" => {
-            let Ok(database) = aios_mgr.get_arangodb().await else { return None; };
-            let Ok(room_code) = query_room_name_from_refno_aql(refno, database).await else { return None; };
+            let Ok(database) = aios_mgr.get_arango_db().await else { return None; };
+            let Ok(room_code) = query_room_name_from_refno_aql(refno, &database).await else { return None; };
             room_code
         }
         _ => {

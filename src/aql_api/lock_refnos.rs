@@ -21,6 +21,6 @@ pub async fn set_lock_refnos(refnos: &Vec<RefU64>, database: &ArDatabase) -> any
 
 /// 解锁模型的参考号
 pub async fn unset_lock_refnos(refnos: &Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<bool> {
-    remove_arangodb_with_refno_key(refnos, AQL_LOCK_REFNOS_COLLECTION, database).await
+    remove_arangodb_with_refno_key(refnos, AQL_LOCK_REFNOS_COLLECTION, &database).await
 }
 

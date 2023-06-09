@@ -81,7 +81,7 @@ pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option
         refnos.push(pcla_refno.refno);
     }
     // 查找 pcla 的 数据
-    let pcla_data = get_pcla_data(pcla_refnos, database).await?;
+    let pcla_data = get_pcla_data(pcla_refnos, &database).await?;
 
     // 查找 stru下的所有参考号
     let stru_children = query_travel_children_aql(database, *stru_refno.value()).await?;
@@ -91,7 +91,7 @@ pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option
     // 统计 sctn的数据
     let sctn_datas = get_sctn_data(&stru_children, database, pool.value()).await?;
     // 统计 pfit 的 数据
-    let pfit_datas = get_pfit_data(&stru_children, database).await?;
+    let pfit_datas = get_pfit_data(&stru_children, &database).await?;
     // 统计 pave 的数据
     let pave_datas = get_pane_data(&stru_children, database, pool.value()).await?;
     let hangers_data = HangerData {
@@ -136,7 +136,7 @@ async fn get_pcla_data(pcla_refnos: Vec<PdmsElement>, database: &ArDatabase) -> 
     for pcla_refno in pcla_refnos {
         if pcla_refno.noun != "PCLA" { continue; }
         let refno = pcla_refno.refno;
-        let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], database).await?;
+        let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], &database).await?;
         if spre_name.is_none() { continue; }
         let spre_name = spre_name.unwrap();
         let spre_collections = spre_name.split('/').map(|x| x.to_string()).collect::<Vec<_>>();
@@ -163,7 +163,7 @@ async fn get_sctn_data(stru_children: &Vec<PdmsElement>, database: &ArDatabase, 
     for child in stru_children {
         if child.noun != "SCTN" { continue; }
         let refno = child.refno;
-        let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], database).await?;
+        let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], &database).await?;
         if spre_name.is_none() { continue; }
         let spre_name = spre_name.unwrap();
         let mut spre_name = spre_name.split('/').map(|x| x.to_string()).collect::<Vec<_>>();
@@ -204,7 +204,7 @@ async fn get_pfit_data(stru_children: &Vec<PdmsElement>, database: &ArDatabase) 
     for stru_child in stru_children {
         if stru_child.noun != "PFIT" { continue; }
         let refno = stru_child.refno;
-        let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], database).await?;
+        let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], &database).await?;
         if spre_name.is_none() { continue; }
         let spre_name = spre_name.unwrap();
         // 只要 spre_name 按 “/”分割的最后一段数据

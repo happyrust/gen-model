@@ -64,7 +64,7 @@ pub async fn query_single_sctn_ansys_data_test(refno: RefU64, pool: &Pool<MySql>
             // 将 mm 转为 m
             let poss = Vec3::from_array(poss) * Vec3::from_array([0.001; 3]);
             let pose = Vec3::from_array(pose) * Vec3::from_array([0.001; 3]);
-            let transform = query_refno_transform(refno, database).await?.unwrap_or_default();
+            let transform = query_refno_transform(refno, &database).await?.unwrap_or_default();
             let quat = Mat3::from_quat(transform.rotation);
             let dir = quat.y_axis + poss;
             let spre = RefU64(v.get::<i64, _>("SPRE") as u64);

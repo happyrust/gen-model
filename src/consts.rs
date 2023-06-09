@@ -46,8 +46,6 @@ pub const AQL_PDMS_INST_INFO_COLLECTION: &'static str = "pdms_inst_infos";
 pub const AQL_PDMS_INST_GEO_COLLECTION: &'static str = "pdms_inst_geos";
 pub const AQL_PDMS_INST_TUBI_COLLECTION: &'static str = "pdms_inst_tubis";
 pub const AQL_PDMS_INST_EDGE_COLLECTION: &'static str = "pdms_inst_edges";
-
-pub const AQL_PDMS_ELES_COLLECTION: &'static str = "pdms_eles";
 pub const AQL_SSC_ELES_COLLECTION: &'static str = "ssc_eles";
 pub const AQL_SSC_EDGE_COLLECTION: &'static str = "ssc_edges";
 pub const AQL_THREED_REVIEW_COLLECTION: &'static str = "threed_review";

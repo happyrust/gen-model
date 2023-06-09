@@ -8,14 +8,17 @@ use sqlx::{MySql, Pool};
 use crate::api::refno_info::query_refno_height_position;
 use crate::api::room_code::query_room_code;
 use crate::aql_api::children::{query_refnos_travel_children_with_type_aql};
+use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
+use crate::data_interface::interface::PdmsDataInterface;
+use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 
-pub async fn get_inst_data(refnos: Vec<RefU64>, database: &ArDatabase,pool:&Pool<MySql>) -> anyhow::Result<DataCenterProject> {
+pub async fn get_inst_data(refnos: Vec<RefU64>, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<DataCenterProject> {
     let mut instance = Vec::new();
-    if let Ok(valves) = query_refnos_travel_children_with_type_aql(database, refnos, vec!["INST","EQUI"]).await {
+    if let Ok(valves) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["INST", "EQUI"]).await {
         for valv in valves {
-            let room_name = query_room_code(valv.refno,pool).await?.unwrap_or("".to_string());
-            let position = query_refno_height_position(valv.refno,pool).await?;
+            let room_name = query_room_code(valv.refno, pool).await?.unwrap_or("".to_string());
+            let position = query_refno_height_position(valv.refno, pool).await?;
             instance.push(DataCenterInstance {
                 object_model_code: "COMPADD".to_string(),
                 project_code: "1516".to_string(),
@@ -24,7 +27,7 @@ pub async fn get_inst_data(refnos: Vec<RefU64>, database: &ArDatabase,pool:&Pool
                 attributes: vec![DataCenterAttr {
                     attribute_model_code: "COMP8".to_string(),
                     value: room_name,
-                },DataCenterAttr{
+                }, DataCenterAttr {
                     attribute_model_code: "COMPADD47".to_string(),
                     value: position.to_string(),
                 }],
@@ -39,16 +42,17 @@ pub async fn get_inst_data(refnos: Vec<RefU64>, database: &ArDatabase,pool:&Pool
     })
 }
 
+
 /// 获取仪控设备的信息
-pub async fn get_inst_equi_data(refnos: Vec<RefU64>, aios_mgr:&AiosDBManager) -> anyhow::Result<DataCenterProject> {
+pub async fn get_inst_equi_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut instance = Vec::new();
-    let database  = aios_mgr.get_arangodb().await?;
-    if let Ok(equis) = query_refnos_travel_children_with_type_aql(database, refnos, vec!["EQUI"]).await {
+    let database = aios_mgr.get_arango_db().await?;
+    if let Ok(equis) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["EQUI"]).await {
         for equi in equis {
             let name = if equi.name.starts_with("/") { equi.name[1..].to_string() } else { equi.name };
-            if name.len() < 9 { continue };
+            if name.len() < 9 { continue; };
             let mut attr = Vec::new();
-            let replace_name = name.replace("-","");
+            let replace_name = name.replace("-", "");
             attr.push(DataCenterAttr {
                 attribute_model_code: "COMP1".to_string(),
                 value: AttrValue::AttrString(replace_name[..1].to_string()).into(),
@@ -69,7 +73,7 @@ pub async fn get_inst_equi_data(refnos: Vec<RefU64>, aios_mgr:&AiosDBManager) ->
                 attribute_model_code: "COMP6".to_string(),
                 value: AttrValue::AttrString(name.to_string()).into(),
             });
-            let room_name = query_room_name_from_refno_aql(equi.refno, database).await?.unwrap_or("".to_string());
+            let room_name = query_room_name_from_refno_aql(equi.refno, &database).await?.unwrap_or("".to_string());
             let position = aios_mgr.get_world_transform(equi.refno).await?;
             attr.push(DataCenterAttr {
                 attribute_model_code: "COMP8".to_string(),
@@ -86,7 +90,7 @@ pub async fn get_inst_equi_data(refnos: Vec<RefU64>, aios_mgr:&AiosDBManager) ->
                     value: AttrValue::AttrFloat(0.0).into(),
                 });
             }
-            instance.push(DataCenterInstance{
+            instance.push(DataCenterInstance {
                 object_model_code: "COMPAD".to_string(),
                 project_code: "1516".to_string(),
                 instance_code: name,

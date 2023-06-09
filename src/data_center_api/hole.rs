@@ -67,9 +67,9 @@ async fn query_hole_data_tidb(id: u32, pool: &Pool<MySql>) -> Option<DataCenterI
     None
 }
 
-pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>,project_code:&str, database: &Database) -> Option<Vec<DataCenterInstance>> {
+pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>,project_code:&str, database: &ArDatabase) -> Option<Vec<DataCenterInstance>> {
     let mut instances_result = Vec::new();
-    let Ok(instances) = query_hole_data_by_keys_aql(keys, database).await else { return Some(instances_result); };
+    let Ok(instances) = query_hole_data_by_keys_aql(keys, &database).await else { return Some(instances_result); };
     for (idx, instance) in instances.into_iter().enumerate() {
         if let Ok(hole_type) = query_hole_type_aql(&instance).await {
             let result = match hole_type {
@@ -777,7 +777,7 @@ pub async fn save_hole_data_to_arangodb(data: Vec<VirtualHoleGraphNode>, databas
     if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
     let json = json.unwrap();
     let r = save_arangodb_doc(json, AQL_HOLE_DATA_COLLECTION, database, false).await;
-    let edge_r = create_hole_data_edge(&data, database).await?;
+    let edge_r = create_hole_data_edge(&data, &database).await?;
     if let Err(r) = r {
         Ok(r.to_string())
     } else {
@@ -786,17 +786,17 @@ pub async fn save_hole_data_to_arangodb(data: Vec<VirtualHoleGraphNode>, databas
 }
 
 /// 替换孔洞数据
-pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, database: &Database) -> anyhow::Result<String> {
+pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, database: &ArDatabase) -> anyhow::Result<String> {
     // 删除边
     let keys = datas.iter().map(|x| x._key.clone()).collect::<Vec<_>>();
-    let edge_aql = AqlQuery::new("\
+    let edge_aql = AqlQuery::builder().query("\
     for key in @keys
         for c,e in 1 inbound CONCAT('hole_data/',key) hole_edge
             REMOVE e._key IN hole_edge
-    ").bind_var("keys", keys);
+    ").bind_var("keys", keys).build();
     let result = database.aql_query::<Vec<()>>(edge_aql).await?;
     // 重新插入新的边
-    match replace_hole_data_edge(&datas,database).await{
+    match replace_hole_data_edge(&datas, &database).await{
         Ok(_) => {}
         Err(e) => {
             return Ok(e.to_string())
@@ -806,7 +806,7 @@ pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, dat
     let json = serde_json::to_value(&datas);
     if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
     let json = json.unwrap();
-    match replace_arangodb_with_database(json, AQL_HOLE_DATA_COLLECTION, database).await {
+    match save_arangodb_doc(json, AQL_HOLE_DATA_COLLECTION, &database, true).await {
         Ok(_) => {}
         Err(e) => {
             return Ok(e.to_string())
@@ -815,7 +815,7 @@ pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, dat
     Ok(format!("替换 {} 条数据 成功",datas.len()))
 }
 
-async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Database) -> anyhow::Result<()> {
+async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArDatabase) -> anyhow::Result<()> {
     let mut edges = Vec::new();
     for d in data {
         let refno = RefU64::from_refno_str(&d.rely_item_ref);
@@ -837,7 +837,7 @@ async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Data
     Ok(())
 }
 
-async fn replace_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Database) -> anyhow::Result<()> {
+async fn replace_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArDatabase) -> anyhow::Result<()> {
     let mut edges = Vec::new();
     for d in data {
         let refno = RefU64::from_refno_str(&d.rely_item_ref);
@@ -854,7 +854,7 @@ async fn replace_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Dat
     }
     if !edges.is_empty() {
         let json = serde_json::to_value(&edges)?;
-        replace_arangodb_with_database(json, AQL_HOLE_EDGE_COLLECTION, database).await?;
+        save_arangodb_doc(json, AQL_HOLE_EDGE_COLLECTION, &database, true).await?;
     }
     Ok(())
 }
@@ -915,8 +915,8 @@ pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase)
     Ok(result)
 }
 
-pub async fn query_hole_data_by_keys_aql(keys: Vec<String>, database: &Database) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
-    let aql = AqlQuery::new("
+pub async fn query_hole_data_by_keys_aql(keys: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
+    let aql = AqlQuery::builder().query("
     for key in @keys
         let c = document(@@hole_collection,key)
         filter c != null
@@ -965,7 +965,7 @@ pub async fn query_hole_data_by_keys_aql(keys: Vec<String>, database: &Database)
             'MainItemRefs': c.MainItemRefs
         }")
         .bind_var("keys", keys)
-        .bind_var("@hole_collection", AQL_HOLE_DATA_COLLECTION);
+        .bind_var("@hole_collection", AQL_HOLE_DATA_COLLECTION).build();
     let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
     Ok(result)
 }

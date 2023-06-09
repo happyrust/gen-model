@@ -78,7 +78,7 @@ pub async fn query_brother_node_front(refno: RefU64, database: &ArDatabase) -> a
     // let aql = AqlQuery::builder().query("\
     //     for v in 1 outbound @key sibl_edges
     //         return { '_key' : v._key, 'noun': v.noun }
-    // ").bind_var("key", key);
+    // ").bind_var("key", key).build();
     // let mut result: Vec<PdmsRefnoTypeAql> = database.aql_query(aql).await?;
     // if result.is_empty() { return Ok(None); }
     // let result = result.remove(0);
@@ -349,7 +349,7 @@ pub async fn query_travel_children_with_type_aql(arango_database: &ArDatabase, r
     Ok(r)
 }
 
-pub async fn query_refnos_travel_children_with_type_aql(arango_database: &ArDatabase, refnos: Vec<RefU64>, att_type: Vec<&str>) -> anyhow::Result<Vec<EleTreeNode>> {
+pub async fn query_refnos_travel_children_with_type_aql(arango_database: &ArDatabase, refnos: &[RefU64], att_type: Vec<&str>) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = refnos.into_iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::builder().query("\

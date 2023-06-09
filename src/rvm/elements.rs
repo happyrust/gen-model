@@ -88,7 +88,7 @@ async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager, mut data: 
     let children = query_children_eles(refno, &pool).await?;
     for child in children {
         let refno = child.refno;
-        let instance = query_rvm_instance_data_from_refno_aql(refno, database).await?;
+        let instance = query_rvm_instance_data_from_refno_aql(refno, &database).await?;
         if instance.is_none() { continue; }
         let instance = instance.unwrap();
         // 如果模型中所有得类型 visible 都为 false 就跳过
@@ -107,7 +107,7 @@ async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager, mut data: 
             data.append(&mut gen_name_position_data(&child.name, pos));
             data.append(&mut gen_prim_data(instance, shape_data, ShapeModule::Desi));
         } else {
-            // let mut cata_element_data = create_cata_element_data(refno, instance, database).await?;
+            // let mut cata_element_data = create_cata_element_data(refno, instance, &database).await?;
             // if !cata_element_data.is_empty() {
             //     data.append(&mut gen_cntb_data());
             //     let pos = query_position_from_id(refno, aios_mgr).await?.unwrap_or(Vec3::ZERO) + position;
@@ -145,7 +145,7 @@ async fn create_element_data_tree(cur_refno: RefU64, aios_mgr: &AiosDBManager, m
         let refno = child.refno;
         let children = query_children_eles(refno, &pool).await?;
         pending_children.extend(children.into_iter());
-        let instance = query_rvm_instance_data_from_refno_aql(refno, database).await?;
+        let instance = query_rvm_instance_data_from_refno_aql(refno, &database).await?;
         let pos = query_position_from_id(refno, aios_mgr).await?.unwrap_or(Vec3::ZERO) + position;
         if refno == cur_refno {
             position = pos;
@@ -166,7 +166,7 @@ async fn create_element_data_tree(cur_refno: RefU64, aios_mgr: &AiosDBManager, m
             if let Some(shape_data) = shape_data {
                 // data.append(&mut gen_prim_data(instance, shape_data,ShapeModule::DESI));
             } else {
-                // let mut cata_element_data = create_cata_element_data(refno, instance, database).await?;
+                // let mut cata_element_data = create_cata_element_data(refno, instance, &database).await?;
                 // if !cata_element_data.is_empty() {
                 //     data.append(&mut cata_element_data);
                 // }
@@ -220,7 +220,7 @@ async fn create_element_data_rvm_tree(cur_refno: RefU64, database: &ArDatabase, 
     //         pending_children.push_back(cur_child);
     //     }
     // }
-    // let instance = query_instance_with_refno_in_arangodb(cur_refno, database).await?;
+    // let instance = query_instance_with_refno_in_arangodb(cur_refno, &database).await?;
     // if instance.is_none() { return Ok(tree); }
     // let instances = instance.unwrap();
     //

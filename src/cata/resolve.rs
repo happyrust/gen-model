@@ -112,12 +112,12 @@ pub struct CataExprContext {
 
 impl CataExprContext {
     pub async fn create(des_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Self>> {
-        let catr_refno = query_foreign_refno_aql(des_refno, &["SPRE", "CATR"], database).await?;
+        let catr_refno = query_foreign_refno_aql(des_refno, &["SPRE", "CATR"], &database).await?;
         if catr_refno.is_none() { return Ok(None); }
         let catr_refno = catr_refno.unwrap();
-        let params = query_para_value(catr_refno, database).await?;
+        let params = query_para_value(catr_refno, &database).await?;
         if params.is_none() { return Ok(None); }
-        let dtse_map = query_dtse_ppro_from_catr_refno(catr_refno, database).await?;
+        let dtse_map = query_dtse_ppro_from_catr_refno(catr_refno, &database).await?;
         if dtse_map.is_none() { return Ok(None); }
         let mut dtse_expr_map = HashMap::new();
         let mut dtse_default_map = HashMap::new();

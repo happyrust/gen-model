@@ -49,7 +49,7 @@ pub async fn query_axis_from_sbfr_aql(sbfr_refno: RefU64, database: &ArDatabase)
 /// 通过 sbfr 参考号 获取下面轴网需要的数据
 pub async fn query_axis_from_sbfr(sbfr_refno: RefU64, database: &ArDatabase, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<AxisData>> {
     let mut result = vec![];
-    let sctns = query_children_aql(database, sbfr_refno).await?;
+    let sctns = query_children_aql(&database,sbfr_refno).await?;
     for sctn in sctns {
         let refno = sctn.refno;
         let attr = query_attr(refno, &aios_mgr, Some(vec!["GTYP", "POSS", "POSE"])).await?;

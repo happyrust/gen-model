@@ -32,9 +32,9 @@ pub async fn create_embed_data(pool: &Pool<MySql>) -> anyhow::Result<Option<Data
     Ok(Some(project))
 }
 
-pub async fn create_embed_data_aql(keys: Vec<String>,project_code:&str, database: &Database) -> anyhow::Result<Option<Vec<DataCenterInstance>>> {
+pub async fn create_embed_data_aql(keys: Vec<String>,project_code:&str, database: &ArDatabase) -> anyhow::Result<Option<Vec<DataCenterInstance>>> {
     let mut instances = Vec::new();
-    let embed_datas = query_embed_data_by_keys_aql(keys, database).await?;
+    let embed_datas = query_embed_data_by_keys_aql(keys, &database).await?;
     for (idx, embed_data) in embed_datas.into_iter().enumerate() {
         let Some(instance) = get_embed_data_aql(idx,embed_data, project_code).await? else { continue; };
         instances.push(instance);
@@ -428,7 +428,7 @@ pub async fn save_embed_data_to_arangodb(data: Vec<VirtualEmbedGraphNode>, datab
     if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
     let json = json.unwrap();
     let r = save_arangodb_doc(json, AQL_EMBED_DATA_COLLECTION, database, false).await;
-    let _edge_r = create_embed_data_edge(&data, database).await?;
+    let _edge_r = create_embed_data_edge(&data, &database).await?;
     if let Err(r) = r {
         Ok(r.to_string())
     } else {
@@ -437,17 +437,17 @@ pub async fn save_embed_data_to_arangodb(data: Vec<VirtualEmbedGraphNode>, datab
 }
 
 /// 替换埋件数据
-pub async fn replace_embed_data_to_arangodb(datas: Vec<VirtualEmbedGraphNode>, database: &Database) -> anyhow::Result<String> {
+pub async fn replace_embed_data_to_arangodb(datas: Vec<VirtualEmbedGraphNode>, database: &ArDatabase) -> anyhow::Result<String> {
     // 删除原来的边
     let keys = datas.iter().map(|x| x._key.clone()).collect::<Vec<_>>();
-    let edge_aql = AqlQuery::new("\
+    let edge_aql = AqlQuery::builder().query("\
     for key in @keys
         for c,e in 1 inbound CONCAT('embed_data/',key) embed_edge
             REMOVE e._key IN embed_edge
-    ").bind_var("keys", keys.clone());
+    ").bind_var("keys", keys.clone()).build();
     let result = database.aql_query::<Vec<()>>(edge_aql).await?;
     // 重新插入新的边
-    match replace_embed_data_edge(&datas,database).await{
+    match replace_embed_data_edge(&datas, &database).await{
         Ok(_) => {}
         Err(e) => {
             return Ok(e.to_string())
@@ -457,7 +457,7 @@ pub async fn replace_embed_data_to_arangodb(datas: Vec<VirtualEmbedGraphNode>, d
     let json = serde_json::to_value(&datas);
     if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
     let json = json.unwrap();
-    match replace_arangodb_with_database(json, AQL_EMBED_DATA_COLLECTION, database).await {
+    match save_arangodb_doc(json, AQL_EMBED_DATA_COLLECTION, &database, true).await {
         Ok(_) => {}
         Err(e) => {
             return Ok(e.to_string())
@@ -488,7 +488,7 @@ async fn create_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &Ar
     Ok(())
 }
 
-async fn replace_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &Database) -> anyhow::Result<()> {
+async fn replace_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &ArDatabase) -> anyhow::Result<()> {
     let mut edges = Vec::new();
     for d in data {
         let refno = RefU64::from_refno_str(&d.rely_item_ref);
@@ -505,7 +505,7 @@ async fn replace_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &D
     }
     if !edges.is_empty() {
         let json = serde_json::to_value(&edges)?;
-        replace_arangodb_with_database(json, AQL_EMBED_EDGE_COLLECTION, database).await?;
+        save_arangodb_doc(json, AQL_EMBED_EDGE_COLLECTION, &database, true).await?;
     }
     Ok(())
 }
@@ -589,8 +589,8 @@ pub async fn get_embed_data_total_aql(database: &ArDatabase) -> anyhow::Result<V
 }
 
 /// 通过key来查询埋件数据
-pub async fn query_embed_data_by_keys_aql(keys: Vec<String>, database: &Database) -> anyhow::Result<Vec<VirtualEmbedGraphNode>> {
-    let aql = AqlQuery::new("\
+pub async fn query_embed_data_by_keys_aql(keys: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualEmbedGraphNode>> {
+    let aql = AqlQuery::builder().query("\
     for key in @keys
         let c = document(@@embed_collection,key)
         filter c != null
@@ -625,7 +625,7 @@ pub async fn query_embed_data_by_keys_aql(keys: Vec<String>, database: &Database
             'Form': c.Form
         }")
         .bind_var("keys", keys)
-        .bind_var("@embed_collection", AQL_EMBED_DATA_COLLECTION);
+        .bind_var("@embed_collection", AQL_EMBED_DATA_COLLECTION).build();
     let result = database.aql_query::<VirtualEmbedGraphNode>(aql).await?;
     Ok(result)
 }

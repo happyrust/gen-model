@@ -128,7 +128,7 @@ pub async fn query_all_room_data_aql(database: &ArDatabase, pool: &Pool<MySql>, 
                         room_code: room_name,
                     });
                     // let panes = travel_children_with_type(*room_refno,"PANE".to_string(),pool).await?;
-                    // let target_refnos = get_room_refnos_from_spa_tree_aql(*room_refno, database).await?;
+                    // let target_refnos = get_room_refnos_from_spa_tree_aql(*room_refno, &database).await?;
                     // if let Ok(elenodes) = query_elenodes_without_children_count(target_refnos, &pool).await {
                     //     for ele in elenodes {
                     //         result.entry(ele.refno).or_insert(SscEleNode {

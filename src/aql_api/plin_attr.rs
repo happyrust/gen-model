@@ -24,14 +24,14 @@ pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &ArDataba
         let owner = owner.unwrap().0;
         owner_map.insert(*refno, owner);
         if wall_map.contains_key(&owner) { continue; }
-        let pstr = query_foreign_refno_aql(owner, &["SPRE", "PSTR"], database).await?;
+        let pstr = query_foreign_refno_aql(owner, &["SPRE", "PSTR"], &database).await?;
         if pstr.is_none() { continue; }
-        let pstr_children = query_children_aql(database, pstr.unwrap()).await?;
+        let pstr_children = query_children_aql(&database,pstr.unwrap()).await?;
         let mut children = vec![];
         pstr_children.into_iter().for_each(|ele| {
             children.push(ele.refno);
         });
-        let plin_attrs = query_plin_attrs_with_refnos(children, database).await?;
+        let plin_attrs = query_plin_attrs_with_refnos(children, &database).await?;
         for plin_attr in plin_attrs {
             let plin_refno = RefU64::from_url_refno(&plin_attr._key);
             if plin_refno.is_none() { continue; }
@@ -56,16 +56,16 @@ pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &ArDataba
 }
 
 pub async fn query_pline_value(refno: RefU64, jusl: &str, database: &ArDatabase) -> anyhow::Result<Option<[String; 3]>> {
-    let pstr = query_foreign_refno_aql(refno,  &["SPRE", "PSTR"], database).await?;
+    let pstr = query_foreign_refno_aql(refno,  &["SPRE", "PSTR"], &database).await?;
     // dbg!(pstr);
     if pstr.is_none() { return Ok(None); }
-    let pstr_children = query_children_aql(database, pstr.unwrap()).await?;
+    let pstr_children = query_children_aql(&database,pstr.unwrap()).await?;
     let mut children = vec![];
     pstr_children.into_iter().for_each(|ele| {
         children.push(ele.refno);
     });
     // dbg!(&children);
-    let plin_attrs = query_plin_attrs_with_refnos(children, database).await?;
+    let plin_attrs = query_plin_attrs_with_refnos(children, &database).await?;
     for plin_attr in plin_attrs {
         let plin_refno = RefU64::from_url_refno(&plin_attr._key);
         // dbg!(&plin_refno);

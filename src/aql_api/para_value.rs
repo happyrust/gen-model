@@ -2,14 +2,13 @@ use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors::{AqlQuery, Database};
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
-use crate::aql_api::virtual_hole_value::query_virtual_hole_value;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option;
 
 pub async fn query_para_from_desi_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Vec<f64>>> {
-    let catr_refno = query_foreign_refno_aql(refno,  &["SPRE", "CATR"], database).await?;
+    let catr_refno = query_foreign_refno_aql(refno,  &["SPRE", "CATR"], &database).await?;
     if catr_refno.is_none() { return Ok(None); }
-    query_para_value(catr_refno.unwrap(), database).await
+    query_para_value(catr_refno.unwrap(), &database).await
 }
 
 pub async fn query_para_value(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Vec<f64>>> {

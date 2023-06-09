@@ -27,7 +27,7 @@ use crate::data_interface::db_model::TUBI_TOL;
 pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<(RefU64, String), f32>>, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let brans = query_travel_children_with_type_aql(database, refno, "BRAN").await?;
     for bran in brans {
-        let tubis = query_tubi_from_bran(bran.refno, database).await?;
+        let tubis = query_tubi_from_bran(bran.refno, &database).await?;
         for tubi in tubis {
             let distance = tubi.start_pt.distance(tubi.end_pt);
             // 符合 tubi 条件
@@ -39,10 +39,10 @@ pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<
                 let from_refno = from_refno.unwrap();
                 // 如果是 tubi 在 bran 的第一个，取 bran 的 hstu
                 let spre = if from_refno == bran.refno {
-                    query_foreign_refno_aql(from_refno, &["HSTU", "HSTU"], database).await?.unwrap_or_default()
+                    query_foreign_refno_aql(from_refno, &["HSTU", "HSTU"], &database).await?.unwrap_or_default()
                 } else {
                     // 如果 tubi 在 bran 的中间或者最后一个，则取上一个节点的 lstu
-                    query_foreign_refno_aql(from_refno, &["LSTU", "LSTU"], database).await?.unwrap_or_default()
+                    query_foreign_refno_aql(from_refno, &["LSTU", "LSTU"], &database).await?.unwrap_or_default()
                 };
                 let spre_name = if spre == RefU64(0) {
                     "0/0".to_string()
@@ -282,16 +282,16 @@ pub async fn insert_tubi_value(tubi_map: DashMap<(RefU64, String), f32>, pool: &
 /// 找到bran里面所有的tubi，并过滤掉 atta ，找到tubi对应的长度和lstu（第一个元素为hstu）
 pub async fn query_tubi_lstu(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<TubiData>> {
     let mut result = Vec::new();
-    let tubis = query_tubi_from_bran_filter_atta(bran_refno, database).await?;
+    let tubis = query_tubi_from_bran_filter_atta(bran_refno, &database).await?;
     for tubi in tubis {
         let from_refno = RefU64::from_arangodb_refno_str(&tubi._from);
         if from_refno.is_none() { continue; }
         let from_refno = from_refno.unwrap();
         // bran下面的 tubi应该取hstu
         let lstu = if bran_refno == from_refno {
-            query_foreign_name_aql(from_refno, vec!["HSTU", "HSTU"], database).await?
+            query_foreign_name_aql(from_refno, vec!["HSTU", "HSTU"], &database).await?
         } else {
-            query_foreign_name_aql(from_refno, vec!["LSTU", "LSTU"], database).await?
+            query_foreign_name_aql(from_refno, vec!["LSTU", "LSTU"], &database).await?
         };
         if let Some(lstu) = lstu {
             result.push(TubiData {

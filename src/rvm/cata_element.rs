@@ -12,7 +12,7 @@ use crate::options::DbOption;
 
 pub async fn create_cata_element_data(refno: RefU64, desi_instance: RvmGeoInfo, database: &ArDatabase) -> anyhow::Result<Vec<u8>> {
     let mut data = Vec::new();
-    let geo_infos = query_rvm_geo_infos_aql(refno, database).await?;
+    let geo_infos = query_rvm_geo_infos_aql(refno, &database).await?;
     if geo_infos.is_none() { return Ok(data); }
     let geo_infos = geo_infos.unwrap();
     for (_idx, geo_info) in geo_infos.geo_params.into_iter().enumerate() {
@@ -150,7 +150,7 @@ pub async fn create_cata_element_data(refno: RefU64, desi_instance: RvmGeoInfo, 
 //         "\
 //         return document('geo_infos',@key)
 //         "
-//     ).bind_var("key", key);
+//     ).bind_var("key", key).build();
 //     let result = database.aql_query::<GeomsInfoAql>(aql).await;
 //     if result.is_err() { return Ok(None); }
 //     let mut result = result.unwrap();

@@ -118,7 +118,7 @@ pub async fn query_all_need_compute_room_refno(dbno: &Vec<i32>,
 }
 
 /// 传入参考号 返回该参考号所在的房间
-pub async fn query_room_name_from_refno_aql(refno: RefU64, database: &Database) -> anyhow::Result<Option<String>> {
+pub async fn query_room_name_from_refno_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<String>> {
     let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::builder().query("
     for v,e in 1 inbound @id room_edges

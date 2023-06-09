@@ -48,7 +48,7 @@ use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
 use crate::cata::resolve_helper::eval_str_to_f32;
 use crate::cata::sctn::geo::create_profile_geos;
-use crate::consts::PDMS_INFO_DB;
+use crate::consts::{GLOBAL_DATABASE, PDMS_INFO_DB, PUHUA_MATERIAL_DATABASE};
 use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::{AIOSAxisMap, CateBrepShapeMap};
@@ -287,6 +287,18 @@ impl AiosDBManager {
         format!("mysql://{user}:{pwd}@{ip}:{port}")
     }
 
+    #[inline]
+    pub async fn get_global_pool(&self) -> anyhow::Result<Pool<MySql>> {
+        let connection_str = self.default_conn_str();
+        let url = &format!("{connection_str}/{}", GLOBAL_DATABASE);
+        PoolOptions::new()
+            .max_connections(500)
+            .acquire_timeout(Duration::from_secs(10 * 60))
+            .connect(url)
+            .await
+            .map_err({ |x| anyhow!(x.to_string()) })
+    }
+
     ///获得默认的连接字符串
     #[inline]
     pub fn default_conn_str(&self) -> String {
@@ -309,6 +321,29 @@ impl AiosDBManager {
             .map_err({ |x| anyhow!(x.to_string()) })
     }
 
+    #[inline]
+    pub fn puhua_conn_str(&self) -> String {
+        let d = &self.db_option;
+        let user = d.puhua_database_user.as_str();
+        let pwd = d.puhua_database_password.as_str();
+        let ip = d.puhua_database_ip.as_str();
+        format!("mysql://{user}:{pwd}@{ip}")
+    }
+
+    ///获取普华mysql数据库的连接pool
+    #[inline]
+    pub async fn get_puhua_pool(&self) -> anyhow::Result<Pool<MySql>> {
+        let conn = self.puhua_conn_str();
+        let url = &format!("{conn}/{}", PUHUA_MATERIAL_DATABASE);
+        PoolOptions::new()
+            .max_connections(500)
+            .acquire_timeout(Duration::from_secs(10 * 60))
+            .connect(url)
+            .await
+            .map_err({ |x| anyhow!(x.to_string()) })
+    }
+
+    ///获取图数据库的连接pool
     #[inline]
     pub async fn get_arango_db(&self) -> anyhow::Result<ArDatabase> {
         Ok(self.arango_pool.get().await?.db(&self.db_option.arangodb_database).await?)
