@@ -362,7 +362,7 @@ impl AiosDBManager {
     /// 初始化mdb
     pub async fn init_mdb(&mut self, project: &str, mdb: &str, module: &str) -> anyhow::Result<()> {
         let project_pool = self.get_project_pool(project).ok_or(anyhow!("Unknown project pool"))?;
-        info!("正在初始化mdb: {mdb}");
+        println!("正在初始化mdb: {mdb}");
         let mut conn = project_pool.acquire().await?;
         let time = Instant::now();
         let need_sync_refno_basic = self.db_option.need_sync_refno_basic;
