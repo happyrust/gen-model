@@ -12,6 +12,7 @@ use log::{error, info};
 use sled::pin;
 use smol_str::SmolStr;
 use std::collections::{BTreeMap, HashMap};
+use glam::Vec3;
 use tokio::sync::RwLock;
 use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
 
@@ -24,6 +25,13 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
 ) -> anyhow::Result<CateGeomsInfo> {
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
+
+    // let gm_refno = RefU64::from_two_nums(17496, 170705);
+    // let att = interface.get_attr(gm_refno).await;
+    // let transform = interface.get_world_transform(gm_refno).await?.unwrap();
+    // dbg!(transform.transform_point(Vec3::new(0.0, 38.1, 0.0)));
+    // dbg!(att);
+
     let desi_att = interface.get_attr(refno).await?;
     //todo 改到使用图数据库去查找
     if scom_ref.is_none() {
@@ -241,6 +249,8 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     cur_context
         .entry(DDANGLE_STR.into())
         .or_insert("0.0".into());
+
+    let cat_ref = scom_info.attr_map.get_refno().unwrap_or_default();
     //获取DTSE的expression
     process_dtse_params(&scom_info.attr_map, interface, &mut cur_context).await;
 
@@ -331,6 +341,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     let geometries = resolve_gms(des_refno, &scom_info.gm_params, &jusl_param, &cur_context, &axis_map, interface);
     // dbg!(&geometries);
     Ok(CateGeomsInfo {
+        refno: cat_ref,
         geometries,
         axis_map,
     })

@@ -641,7 +641,7 @@ impl PdmsDataInterface for AiosDBManager {
 
                 let p_axis = ref_axis.cross(extru_dir).normalize();
                 let y_axis = extru_dir.cross(p_axis).normalize();
-                quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(&[
+                quat = Quat::from_mat3(&Mat3::from_cols_array_2d(&[
                     p_axis.to_array(),
                     y_axis.to_array(),
                     extru_dir.to_array(),
@@ -682,7 +682,7 @@ impl PdmsDataInterface for AiosDBManager {
                 let y_axis = Vec3::Z;
                 let z_axis = pline_plax;
                 let x_axis = y_axis.cross(z_axis).normalize();
-                let quat = Quat::from_mat3(&glam::f32::Mat3::from_cols_array_2d(&[
+                let quat = Quat::from_mat3(&Mat3::from_cols_array_2d(&[
                     x_axis.to_array(),
                     y_axis.to_array(),
                     z_axis.to_array(),
@@ -712,7 +712,7 @@ impl PdmsDataInterface for AiosDBManager {
         if self.db_option.debug_print_world_transform {
             let rot_mat = Mat3::from_quat(rotation);
             let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
-            println!("{} : {:?}", refno.to_refno_str(), (translation, ori_str));
+            println!("{} : {} {:?}", refno.to_refno_str(), rot_mat, (translation, ori_str));
         }
         if rotation.is_nan() || translation.is_nan() { return Ok(None); }
         Ok(Some(Transform {

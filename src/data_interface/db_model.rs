@@ -764,7 +764,6 @@ impl AiosDBManager {
                 aabb: Some(unit_cyli_aabb),
                 type_name: "TUBI".to_string(),
                 ptset_map: Default::default(),
-                flow_pt_indexs: vec![],
             });
             let instance_mgr = Arc::new(RwLock::new(shape_insts_data));
 
@@ -1053,6 +1052,7 @@ impl AiosDBManager {
                             aabb: w_aabb,
                             world_transform: w_trans,
                             cata_hash: None,
+                            flow_pt_indexs: vec![],
                         };
                         // dbg!(&geos_info);
                         inst_info_result_map_clone.insert(comp_refno, geos_info);
@@ -1064,7 +1064,6 @@ impl AiosDBManager {
                             aabb: None,
                             type_name: comp_type,
                             ptset_map: Default::default(),
-                            flow_pt_indexs: vec![],
                         });
                     });
 
@@ -1204,6 +1203,7 @@ impl AiosDBManager {
                 aabb: w_aabb,
                 world_transform: w_trans,
                 cata_hash: None,
+                flow_pt_indexs: vec![],
             };
             // dbg!(&geos_info);
             // inst_data.insert_info(comp_refno, geos_info);

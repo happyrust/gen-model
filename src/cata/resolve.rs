@@ -264,7 +264,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
         .map(|exp| eval_str_to_f32(&exp, context, interface))
         .collect::<anyhow::Result<_>>()?;
 
-    let mut paxises: Vec<CateAxisParam> = Vec::new();
+    let mut paxises: Vec<Option<CateAxisParam>> = Vec::new();
     for axis_str in gm.paxises.iter() {
         let mut axis = axis_str.trim();
         if axis.is_empty() { continue; }
@@ -276,18 +276,15 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
                 axis = &axis[1..];
             }
             if let Ok(index) = axis[1..].parse::<i32>() {
-                if index == 0 {
-                    paxises.push(CateAxisParam::zero());
-                } else {
-                    if axis_param_map.contains_key(&index) {
-                        paxises.push(if p_axis_neg {
-                            axis_param_map[&index].clone().neg()
-                        } else {
-                            axis_param_map[&index].clone()
-                        });
+                if axis_param_map.contains_key(&index) {
+                    paxises.push(Some(if p_axis_neg {
+                        axis_param_map[&index].clone().neg()
                     } else {
-                        return Err(anyhow!(format!("Axis: '{axis_str}' index not exist")));
-                    }
+                        axis_param_map[&index].clone()
+                    }));
+                } else {
+                    paxises.push(None);
+                    println!("Axis: '{axis_str}' index not exist");
                 }
             }
         } else {
@@ -300,7 +297,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
                 pconnect: "".to_string(),
                 pbore: 0.0,
             };
-            paxises.push(axis);
+            paxises.push(Some(axis));
         }
     }
     let mut plin_verts = Vec2::ZERO;
