@@ -108,7 +108,7 @@ impl AiosDBManager {
     }
 
 
-    pub async fn get_gen_model_target_refnos_by_cata_hash(&self, geo_type: GeoEnum, db_nos: &[i32], is_parent: bool, skip_exist: bool) -> anyhow::Result<DashMap<u64, CataHashRefnoKV>> {
+    pub async fn get_gen_model_map_by_cata_hash(&self, geo_type: GeoEnum, db_nos: &[i32], is_parent: bool, skip_exist: bool) -> anyhow::Result<DashMap<u64, CataHashRefnoKV>> {
         let db_option = &self.db_option;
         let database = self.get_arango_db().await?;
         let mut target_refnos_map = DashMap::new();
@@ -141,22 +141,30 @@ impl AiosDBManager {
                 continue;
             };
             let is_leaf = self.get_children_refs(root_refno).await?.len() == 0;
-            let mut is_parent = is_parent;
+            let mut check_parent = is_parent;
             if is_leaf {
-                is_parent = false;
+                if let Some(k) = self.query_element(root_refno).await?{
+                    target_refnos_map.insert(k.cata_hash.unwrap_or_default(), CataHashRefnoKV{
+                        cata_hash: k.cata_hash,
+                        exist_geo: None,
+                        group_refnos: vec![root_refno],
+                    });
+                }
+            }else{
+                let s = query_travel_children_with_types_and_cata_hash(
+                    &database,
+                    root_refno,
+                    types,
+                    check_parent,
+                    skip_exist,
+                )
+                    .await?;
+                // dbg!(s.len());
+                for k in s {
+                    target_refnos_map.insert(k.cata_hash.unwrap_or_default(), k);
+                }
             }
-            let s = query_travel_children_with_types_and_cata_hash(
-                &database,
-                root_refno,
-                types,
-                is_parent,
-                skip_exist,
-            )
-                .await?;
-            // dbg!(s.len());
-            for k in s {
-                target_refnos_map.insert(k.cata_hash, k);
-            }
+
         }
 
         Ok(target_refnos_map)

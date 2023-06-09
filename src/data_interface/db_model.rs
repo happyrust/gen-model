@@ -61,6 +61,7 @@ use crate::tables::gen_create_project_mdb_sql;
 use crate::consts::PDMS_DBNO_INFOS_TABLE;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::data_interface::gen_model::{cache_cata_geos, cache_loop_geos, cache_prim_geos};
+use crate::graph_db::structs::PdmsEleGraphNode;
 
 pub const TUBI_TOL: f32 = 10.0f32;
 
@@ -821,8 +822,8 @@ impl AiosDBManager {
                 }
             }
             // dbg!(&lstube_bores_map);
-            let target_bran_cata_map = mgr.get_gen_model_target_refnos_by_cata_hash(GeoEnum::CATA_ONLY_TUBI, &target_dbnos, true, false).await?;
-            let target_single_cata_map = mgr.get_gen_model_target_refnos_by_cata_hash(GeoEnum::CATA, &target_dbnos, false, false).await?;
+            let target_bran_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA_ONLY_TUBI, &target_dbnos, true, false).await?;
+            let target_single_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA, &target_dbnos, false, false).await?;
             // dbg!(&target_bran_cata_map);
             if run_cache_cata {
                 let mut handles = vec![];
@@ -1087,7 +1088,7 @@ impl AiosDBManager {
                         mesh_mgr.insert(k, v);
                     }
                 }
-            }else{
+            } else {
                 println!("当前节点下面没有需要参与负实体计算的几何体");
             }
 
@@ -1362,6 +1363,19 @@ impl AiosDBManager {
         // }
         //
         return Ok(true);
+    }
+
+    pub async fn query_element(
+        &self,
+        refno: RefU64,
+    ) -> anyhow::Result<Option<PdmsEleGraphNode>> {
+        let arango_db = self.get_arango_db().await?;
+        let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let aql = AqlQuery::builder().query("\
+            return document(pdms_eles, @id)
+        ").bind_var("id", refno_aql).build();
+        let mut r = arango_db.aql_query::<PdmsEleGraphNode>(aql).await?;
+        Ok(r.pop())
     }
 
     /// 获取缓存好的site

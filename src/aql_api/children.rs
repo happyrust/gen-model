@@ -232,10 +232,10 @@ pub async fn query_travel_children_with_out_leaf_aql(arango_database: &ArDatabas
 
 /// 遍历refno只获取指定类型数组的refnos
 pub async fn query_travel_children_with_types_and_cata_hash(arango_database: &ArDatabase, refno: RefU64,
-                                                            att_types: &[&str], is_parent: bool, skip_exist: bool) -> anyhow::Result<Vec<CataHashRefnoKV>> {
+                                                            att_types: &[&str], check_parent: bool, skip_exist: bool) -> anyhow::Result<Vec<CataHashRefnoKV>> {
     // let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = if is_parent {
+    let aql = if check_parent {
         AqlQuery::builder().query("\
 FOR v,e,p in 0..10 INBOUND @id pdms_edges
     let parent = p.vertices[-2]

@@ -714,6 +714,7 @@ impl PdmsDataInterface for AiosDBManager {
             let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
             println!("{} : {:?}", refno.to_refno_str(), (translation, ori_str));
         }
+        if rotation.is_nan() || translation.is_nan() { return Ok(None); }
         Ok(Some(Transform {
             rotation,
             translation,

@@ -75,11 +75,11 @@ pub async fn cache_prim_geos(
                     refno.to_refno_string(),
                     processed_cnt.lock().await.to_owned()
                 );
-                let trans_origin = mgr
+                let Ok(Some(trans_origin)) = mgr
                     .get_world_transform(refno)
-                    .await
-                    .unwrap_or_default()
-                    .unwrap_or_default();
+                    .await else {
+                    continue;
+                };
                 let mut geos_info = EleGeosInfo {
                     refno,
                     visible: true,
@@ -107,6 +107,7 @@ pub async fn cache_prim_geos(
                 if let Some(brep_obj) = attr.create_brep_shape(limit_size) {
                     if brep_obj.check_valid() {
                         item_trans = brep_obj.get_trans();
+                        if item_trans.is_nan() { continue; }
                         geo_param = brep_obj
                             .convert_to_geo_param()
                             .unwrap_or(PdmsGeoParam::Unknown);
@@ -212,11 +213,11 @@ pub async fn cache_loop_geos(
                     refno.to_refno_string(),
                     processed_cnt.lock().await.to_owned()
                 );
-                let trans_origin = mgr
+                let Ok(Some(trans_origin)) = mgr
                     .get_world_transform(refno)
-                    .await
-                    .unwrap_or_default()
-                    .unwrap_or_default();
+                    .await else {
+                    continue;
+                };
                 *processed_cnt.lock().await -= 1;
                 let Some(refno_basic) = mgr.get_refno_basic(refno) else {
                     continue;
@@ -332,6 +333,7 @@ pub async fn cache_loop_geos(
                 if let Some(geo_hash) = geo_hash {
                     let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
                     geos_info.visible = visible;
+                    if item_trans.is_nan() { continue; }
                     let tr: Transform = item_trans;
                     if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
                         let ele_aabb = aabb_apply_transform(&aabb, &tr);
@@ -486,7 +488,10 @@ pub async fn cache_cata_geos(
             }
             println!("当前范围: {start_idx} ~ {end_idx}");
             for j in start_idx..end_idx {
-                let cata_hash = all_unique_keys[j];
+                let Some(cata_hash) = all_unique_keys[j] else {
+                    continue;
+                };
+                if cata_hash == 0 { continue; }
                 let target_cata = target_cata_map.get(&cata_hash).unwrap();
                 let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
                 let mut shape_insts_data = instance_mgr.write().await;
@@ -517,11 +522,11 @@ pub async fn cache_cata_geos(
                         .unwrap_or_default();
                     ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
                     for (ele_refno, shapes) in brep_shapes_map {
-                        let o = mgr
+                        let Ok(Some(o)) = mgr
                             .get_world_transform(ele_refno)
-                            .await
-                            .unwrap_or_default()
-                            .unwrap_or_default();
+                            .await else {
+                            continue;
+                        };
                         let Ok(ele_att) = mgr.get_attr(ele_refno).await else {
                             continue;
                         };
@@ -607,6 +612,7 @@ pub async fn cache_cata_geos(
                                 rotation: rot,
                                 scale,
                             };
+                            if transform.is_nan() { continue; }
                             let geom_inst = EleInstGeo {
                                 geo_hash,
                                 refno,
@@ -679,11 +685,12 @@ pub async fn cache_cata_geos(
                         "正在处理同类元件库的模型当前参考号：{}",
                         ele_refno.to_refno_string(),
                     );
-                    let o = mgr
+                    let Ok(Some(o)) = mgr
                         .get_world_transform(ele_refno)
-                        .await
-                        .unwrap_or_default()
-                        .unwrap_or_default();
+                        .await else {
+                        continue;
+                    };
+
                     let mut geos_info = EleGeosInfo {
                         refno: ele_refno,
                         cata_hash: Some(cata_hash),
@@ -732,10 +739,11 @@ pub async fn cache_cata_geos(
         let children = b.value();
         let group_att = mgr.get_attr(branch_refno).await?;
         //可能只有branch 元素需要做一遍求解
-        let group_transform = mgr
+        let Ok(Some(group_transform)) = mgr
             .get_world_transform(branch_refno)
-            .await?
-            .unwrap_or_default();
+            .await else {
+            continue;
+        };
         let htube_pt = group_transform.transform_point(
             group_att
                 .get_vec3("HPOS")
