@@ -11,7 +11,7 @@ pub async fn save_three_dimensional_review_data_to_arango(
     database: &ArDatabase,
     review_data: ThreeDimensionalModelDataCrate,
 ) -> anyhow::Result<()> {
-    let json = serde_json::to_value(review_data)?;
+    let json = serde_json::to_value(review_data.to_arango_struct())?;
     save_arangodb_doc(json, "review_data", database, false).await?;
     Ok(())
 }
@@ -21,7 +21,7 @@ pub async fn save_threed_review_data_to_arango(
     database: &ArDatabase,
     review_data: ThreeDimensionalModelDataCrate,
 ) -> anyhow::Result<()> {
-    let json = serde_json::to_value(review_data)?;
+    let json = serde_json::to_value(review_data.to_arango_struct())?;
     save_arangodb_doc(json, "review_data", database, false).await?;
     Ok(())
 }
