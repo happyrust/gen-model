@@ -748,7 +748,9 @@ impl AiosDBManager {
             &db_option.mdb_name,
             &db_option.module,
         ).await?;
+        dbg!("init mdb 完毕");
         mgr.init_rtree().await?;
+        dbg!("init rtee 完毕");
         Ok(mgr)
     }
 
@@ -1198,12 +1200,15 @@ impl AiosDBManager {
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
+                    dbg!(&db_refno);
                     if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {
                         let db_num = att.get_i32("NUMBDB").unwrap_or_default();
+                        dbg!(&db_num);
                         if let Ok(Some(mut quick_info)) = self.query_quick_info_by_dbno(*db_refno, db_num, info_pool).await {
                             quick_info.order_number = i as _;
                             map.entry(quick_info.db_type.clone())
                                 .or_insert_with(Vec::new).push(quick_info);
+                            dbg!("insert ok");
                         }
                     }
                 }

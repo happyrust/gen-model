@@ -10,7 +10,7 @@ use crate::api::attr::query_explicit_attr;
 use crate::api::children::travel_children_with_type;
 use crate::api::element::{query_id_from_name, query_name, query_refno_type, query_types_refnos};
 use crate::aql_api::children::query_travel_children_with_type_aql;
-use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
+use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
 use crate::aql_api::pdms_room::{get_room_name_split, query_room_info_from_refno, query_room_name_from_refno_aql};
 use crate::consts::PUHUA_DQ_MATERIAL_TABLE;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -241,6 +241,23 @@ pub(crate) async fn get_refno_world_poss_pose(refno: RefU64, aios_mgr: &AiosDBMa
     let world_poss = world_transform.transform_point(poss);
     let world_pose = world_transform.transform_point(pose);
     Ok(Some((world_poss, world_pose)))
+}
+
+/// 返回pspec属性对应的中文名
+pub(crate) async fn get_pspec_code(refno: RefU64, database: &Database) -> anyhow::Result<String> {
+    let pspe_name = query_foreign_name_aql(refno, vec!["PSPE", "PSPE"], database).await?;
+    let mut kind = "".to_string();
+    if let Some(pspe_name) = pspe_name {
+        match pspe_name {
+            s if s.contains("Ladder") => { kind = "梯架".to_string() }
+            s if s.contains("Ventilated") => { kind = "带孔托盘".to_string() }
+            s if s.contains("Trough") => { kind = "实底托盘".to_string() }
+            s if s.contains("Riser") => { kind = "竖梯".to_string() }
+            s if s.contains("Divider") => { kind = "分隔板".to_string() }
+            _ => {}
+        }
+    }
+    Ok(kind)
 }
 
 fn gen_dq_material_code_sql(spre_name_split: &str, stander_num: &str, fileds: &Vec<String>) -> String {

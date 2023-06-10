@@ -165,6 +165,45 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
             }
             let desc = get_refno_desc(bran.refno,aios_mgr).await?;
             let b_partition = if desc.is_empty() { false } else { true };
+
+            let mut erecb_attr = Vec::new();
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB1".to_string(),
+                value: AttrValue::AttrString(bran.name.clone()).into(),
+            });
+
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB3".to_string(),
+                value: AttrValue::AttrString(room_name.clone()).into(),
+            });
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB31".to_string(),
+                value: AttrValue::AttrString(kind.clone()).into(),
+            });
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB32".to_string(),
+                value: AttrValue::AttrString(color.to_string()).into(),
+            });
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB33".to_string(),
+                value: AttrValue::AttrBool(b_paint).into(),
+            });
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB34".to_string(),
+                value: AttrValue::AttrBool(b_partition).into(),
+            });
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB35".to_string(),
+                value: AttrValue::AttrString(bridge_dir.to_string()).into(),
+            });
+            result.push(DataCenterInstance {
+                object_model_code: "ERECB".to_string(),
+                project_code: aios_mgr.db_option.project_code.to_string(),
+                instance_code: bran.name,
+                version: "A版".to_string(),
+                attributes: erecb_attr,
+            });
+
             for child in bran_children {
                 let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], database).await?.unwrap_or_default();
                 let mut object_code = None;
@@ -178,15 +217,6 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
                 if object_code.is_none() { continue };
 
                 let mut attr = Vec::new();
-                // attr.push(DataCenterAttr {
-                //     attribute_model_code: "ERECB1".to_string(),
-                //     value: AttrValue::AttrString(bran.name.clone()).into(),
-                // });
-                //
-                // attr.push(DataCenterAttr {
-                //     attribute_model_code: "ERECB3".to_string(),
-                //     value: AttrValue::AttrString(room_name.clone()).into(),
-                // });
 
                 let world_transform = aios_mgr.get_world_transform(child.refno).await?.unwrap_or_default();
                 attr.push(DataCenterAttr {
@@ -224,30 +254,11 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
                 //     attribute_model_code: "PARTEF29".to_string(),
                 //     value: AttrValue::AttrBool(b_cover).into(),
                 // });
-                // attr.push(DataCenterAttr {
-                //     attribute_model_code: "ERECB31".to_string(),
-                //     value: AttrValue::AttrString(kind.clone()).into(),
-                // });
-                // attr.push(DataCenterAttr {
-                //     attribute_model_code: "ERECB32".to_string(),
-                //     value: AttrValue::AttrString(color.to_string()).into(),
-                // });
-                // attr.push(DataCenterAttr {
-                //     attribute_model_code: "ERECB33".to_string(),
-                //     value: AttrValue::AttrBool(b_paint).into(),
-                // });
-                // attr.push(DataCenterAttr {
-                //     attribute_model_code: "ERECB34".to_string(),
-                //     value: AttrValue::AttrBool(b_partition).into(),
-                // });
-                // attr.push(DataCenterAttr {
-                //     attribute_model_code: "ERECB35".to_string(),
-                //     value: AttrValue::AttrString(bridge_dir.to_string()).into(),
-                // });
+
                 result.push(DataCenterInstance {
                     object_model_code: object_code.unwrap().to_string(),
                     project_code: aios_mgr.db_option.project_code.to_string(),
-                    instance_code: child.name,
+                    instance_code: child.name.to_string(),
                     version: "A版".to_string(),
                     attributes: attr,
                 });

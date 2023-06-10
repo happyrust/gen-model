@@ -167,7 +167,7 @@ async fn create_arangodb_conns(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "SPCO";
+    let noun = "SCTO";
     let hash = db1_hash(noun);
     dbg!(hash);
     let hashes = [798355,644698,640493,907462,631900,855442,926170,239044746,566245];
@@ -206,14 +206,6 @@ fn test_turn_bin_into_json() {
     new_file.write_all(&json.into_bytes()).unwrap();
 }
 
-#[test]
-fn test_inst_mgr() {
-    let map = CachedInstanceMgr::deserialize_from_bin_file(&"assets/instance/7999.inst").unwrap();
-    let refno = RefU64::from_refno_str("24381/34919").unwrap();
-    if let Some(value) = map.inst_mgr.inst_map.get(&refno) {
-        dbg!(&value.value());
-    };
-}
 //
 // #[test]
 // fn test_compare_attr_info_file() {

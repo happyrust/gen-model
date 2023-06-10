@@ -65,16 +65,16 @@ async fn get_dq_support_sctn_gtype_box_data(refno: RefU64, aios_mgr: &AiosDBMana
     });
     let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], database).await?.unwrap_or("".to_string());
     let spre_name_split = spre_name.split("-").collect::<Vec<_>>();
-    attr.push(DataCenterAttr {
-        attribute_model_code: "PARTDA27".to_string(),
-        value: AttrValue::AttrString(spre_name_split.last().unwrap_or(&"").to_string()).into(),
-    });
     if let Some(spre_name_split_last) = spre_name_split.last() {
         let spre_name_split_last_split = spre_name_split_last.split("X").collect::<Vec<_>>();
         if spre_name_split_last_split.len() >= 3 {
             attr.push(DataCenterAttr {
                 attribute_model_code: "PARTDA26".to_string(),
                 value: AttrValue::AttrString(format!("{}X{}", spre_name_split_last_split[0], spre_name_split_last_split[1])).into(),
+            });
+            attr.push(DataCenterAttr {
+                attribute_model_code: "PARTDA27".to_string(),
+                value: AttrValue::AttrString(spre_name_split[2].to_string()).into(),
             });
         }
     }
@@ -95,7 +95,7 @@ async fn get_dq_support_sctn_gtype_box_data(refno: RefU64, aios_mgr: &AiosDBMana
     }
     attr.push(DataCenterAttr {
         attribute_model_code: "PARTDA34".to_string(),
-        value: AttrValue::AttrString("100mm".to_string()).into(),
+        value: AttrValue::AttrString("100".to_string()).into(),
     });
     Ok(attr)
 }
@@ -130,7 +130,7 @@ async fn get_dq_support_sctn_gtype_beam_data(refno: RefU64, aios_mgr: &AiosDBMan
         Some(s) if s.contains("Z2") => {
             attr.push(DataCenterAttr {
                 attribute_model_code: "PART3".to_string(),
-                value: AttrValue::AttrString("异形钢".to_string()).into(),
+                value: AttrValue::AttrString("异型钢".to_string()).into(),
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "PARTDB29".to_string(),
@@ -138,7 +138,7 @@ async fn get_dq_support_sctn_gtype_beam_data(refno: RefU64, aios_mgr: &AiosDBMan
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "PARTDB30".to_string(),
-                value: AttrValue::AttrString("异形钢".to_string()).into(),
+                value: AttrValue::AttrString("异型钢".to_string()).into(),
             });
         }
         Some(s) if s.contains("Z3") => {
@@ -201,7 +201,7 @@ async fn get_dq_support_sctn_gtype_beam_data(refno: RefU64, aios_mgr: &AiosDBMan
     });
     attr.push(DataCenterAttr {
         attribute_model_code: "PARTDB35".to_string(),
-        value: AttrValue::AttrString("角焊".to_string()).into(),
+        value: AttrValue::AttrString("连续角焊".to_string()).into(),
     });
     Ok(attr)
 }
