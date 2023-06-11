@@ -26,11 +26,11 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
 ) -> anyhow::Result<CateGeomsInfo> {
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
 
-    // let gm_refno = RefU64::from_two_nums(17496, 170705);
+    // let gm_refno = RefU64::from_two_nums(13246, 198158);
     // let att = interface.get_attr(gm_refno).await;
+    // dbg!(att);
     // let transform = interface.get_world_transform(gm_refno).await?.unwrap();
     // dbg!(transform.transform_point(Vec3::new(0.0, 38.1, 0.0)));
-    // dbg!(att);
 
     let desi_att = interface.get_attr(refno).await?;
     //todo 改到使用图数据库去查找

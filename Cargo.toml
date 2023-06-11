@@ -58,7 +58,7 @@ serde = { version = "1.0.137", features = ["derive"] }
 id_tree = { version = "1.8.0", features = ["serde_support"] }
 glam = { version = "0.23.0", features = ["rkyv"] }
 cached = "0.43.0"
-rkyv = "0.7.41"
+rkyv = "0.7.42"
 #memcache = "0.16.0"
 #openssl = { version = "0.10", features = ["vendored"] }
 #[target.'cfg(target_os = "macos")'.dependencies]

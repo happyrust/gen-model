@@ -823,7 +823,8 @@ impl AiosDBManager {
             // dbg!(&lstube_bores_map);
             let target_bran_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA_ONLY_TUBI, &target_dbnos, true, false).await?;
             let target_single_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA, &target_dbnos, false, false).await?;
-            // dbg!(&target_bran_cata_map);
+            dbg!(&target_bran_cata_map.len());
+            dbg!(&target_single_cata_map.len());
             if run_cache_cata {
                 let mut handles = vec![];
                 if !target_bran_cata_map.is_empty() {

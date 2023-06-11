@@ -120,8 +120,8 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                     let bangle = att.get_f32("BANG").unwrap_or_default();
                     let solid = SweepSolid {
                         profile: profile.clone(),
-                        drns,
-                        drne,
+                        drns: drns.normalize_or_zero(),
+                        drne: drne.normalize_or_zero(),
                         bangle,
                         plane_normal,
                         extrude_dir,
@@ -161,8 +161,8 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                     for path in paths {
                         let loft = SweepSolid {
                             profile: profile.clone(),
-                            drns,
-                            drne,
+                            drns: drns.normalize_or_zero(),
+                            drne: drne.normalize_or_zero(),
                             bangle,
                             plane_normal,
                             extrude_dir,

@@ -148,6 +148,9 @@ puhua_database_password = ""
 
 #debug_root_refnos = ["17496/169983"]
 
+#WALL 的调试
+debug_root_refnos = ["24381/42520"]
+
 #24381/34109,
 #24381/42520,
 #24381/44873,

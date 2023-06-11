@@ -554,10 +554,10 @@ pub async fn cache_cata_geos(
                             generic_type: mgr.get_generic_type(ele_refno),
                             aabb: None,
                             world_transform: o,
-                            flow_pt_indexs: vec![
+                            flow_pt_indexs: if !ele_att.contains_attr_name("ARRI") { vec![] } else{ vec![
                                 ele_att.get_i32("ARRI").unwrap_or(-1),
                                 ele_att.get_i32("LEAV").unwrap_or(-1),
-                            ],
+                            ]},
                         };
 
                         let mut geo_insts = vec![];
