@@ -355,8 +355,8 @@ pub async fn cache_loop_geos(
                     // geo_insts.push(geom_inst);
                     geos_info.aabb = Some(aabb_apply_transform(&ele_aabb, &trans_origin));
 
-                    dbg!(parent_refno);
-                    dbg!(loop_refno);
+                    // dbg!(parent_refno);
+                    // dbg!(loop_refno);
                     shape_insts_data.insert_info(parent_refno, geos_info);
                     // shape_insts_data.insert_info(refno, geos_info);
                     shape_insts_data.insert_geos_data(*parent_refno, EleInstGeosData {

@@ -972,7 +972,7 @@ impl AiosDBManager {
             //todo 优化负实体的计算
             dbg!(&root_refnos);
             let has_pos_neg_map = mgr.query_refnos_has_pos_neg_map(&root_refnos).await.unwrap_or_default();
-            dbg!(&has_pos_neg_map);
+            // dbg!(&has_pos_neg_map);
             dbg!(has_pos_neg_map.len());
 
             // Spawn a separate task to send messages
