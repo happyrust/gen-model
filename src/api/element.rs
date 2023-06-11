@@ -227,6 +227,7 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>, m
     let mdb = format!("/{}", mdb);
     //需要在这里判断是哪个 project pool
     let quicks = query_db_quick_info(&mdb, module, &pool).await?;
+    if quicks.is_empty() { return Ok(None); }
     let quick = &quicks[0];
     let sql = gen_query_node_id_from_refno_sql(quick.world_refno);
     let world_pool = mgr.get_project_pool(&quick.project).ok_or(anyhow!("project not found"))?;

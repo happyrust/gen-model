@@ -825,7 +825,8 @@ impl AiosDBManager {
             let target_single_reuse_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA_SINGLE_REUSE, &target_dbnos, false, false).await?;
             let target_single_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA_WITHOUT_REUSE, &target_dbnos, false, false).await?;
             dbg!(&target_bran_reuse_cata_map.len());
-            dbg!(target_single_reuse_cata_map.iter().map(|x| x.value().group_refnos.clone()).collect::<Vec<_>>());
+            // dbg!(target_single_reuse_cata_map.iter().map(|x| x.value().group_refnos.clone()).collect::<Vec<_>>());
+            dbg!(target_single_reuse_cata_map.len());
             dbg!(&target_single_cata_map.len());
             if run_cache_cata {
                 let mut handles = vec![];

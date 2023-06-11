@@ -151,11 +151,23 @@ impl AiosDBManager {
             let mut check_parent = is_parent;
             if is_leaf {
                 if let Some(k) = self.query_element(root_refno).await?{
-                    target_refnos_map.insert(k.cata_hash.unwrap_or_default(), CataHashRefnoKV{
-                        cata_hash: k.cata_hash,
-                        exist_geo: None,
-                        group_refnos: vec![root_refno]
-                    });
+                    let mut add = k.cata_hash.is_some();
+
+                    if let Some(owner_ele) = self.query_element(RefU64::from_url_refno(&k.owner).unwrap()).await?{
+                        if owner_ele.noun.as_str() == "BRAN" || owner_ele.noun.as_str() == "HANG" {
+                            add = geo_type == GeoEnum::CATA_BRAN_AND_HANGER_REUSE;
+                        }else if CATA_SINGLE_REUSE_GEO_NAMES.contains(&k.noun.as_str()) {
+                            add = true;
+                        }
+                    }
+                    dbg!(add);
+                    if add {
+                        target_refnos_map.insert(k.cata_hash.unwrap_or_default(), CataHashRefnoKV{
+                            cata_hash: k.cata_hash,
+                            exist_geo: None,
+                            group_refnos: vec![root_refno]
+                        });
+                    }
                 }
             }else{
                 let s = query_travel_children_with_types_and_cata_hash(
