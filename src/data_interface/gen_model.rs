@@ -114,8 +114,7 @@ pub async fn cache_prim_geos(
                         geo_param = brep_obj
                             .convert_to_geo_param()
                             .unwrap_or(PdmsGeoParam::Unknown);
-                        let r = cached_mesh_mgr.gen_pdms_mesh(brep_obj, replace_mesh);
-                        geo_hash = Some(r);
+                        geo_hash = cached_mesh_mgr.gen_pdms_mesh(brep_obj, replace_mesh);
                     }
                 }
                 let Some(geo_hash) = geo_hash else {
@@ -197,7 +196,7 @@ pub async fn cache_loop_geos(
     for i in 0..batch_chunks_cnt as usize {
         let mgr = mgr.clone();
         let instance_mgr = instance_mgr.clone();
-        let all_refnos = all_refnos.clone();
+        let all_loop_refnos = all_refnos.clone();
         let processed_cnt = processed_cnt.clone();
         let handle = tokio::spawn(async move {
             let start_idx = i * batch_size;
@@ -208,27 +207,27 @@ pub async fn cache_loop_geos(
             for j in start_idx..end_idx {
                 let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
                 let mut shape_insts_data = instance_mgr.write().await;
-                let refno = all_refnos[j];
-                println!(
-                    "正在处理loops的模型，索引：{}, 当前参考号：{}, 剩余: {}",
-                    j,
-                    refno.to_refno_string(),
-                    processed_cnt.lock().await.to_owned()
-                );
+                let loop_refno = all_loop_refnos[j];
                 let Ok(Some(trans_origin)) = mgr
-                    .get_world_transform(refno)
+                    .get_world_transform(loop_refno)
                     .await else {
                     continue;
                 };
                 *processed_cnt.lock().await -= 1;
-                let Some(refno_basic) = mgr.get_refno_basic(refno) else {
+                let Some(refno_basic) = mgr.get_refno_basic(loop_refno) else {
                     continue;
                 };
-                let parent_basic = mgr.get_owner_ref_basic(refno).unwrap();
+                let parent_basic = mgr.get_owner_ref_basic(loop_refno).unwrap();
                 let target_type = parent_basic.get_type();
                 let parent_refno = refno_basic.get_owner();
+                println!(
+                    "正在处理loops类型的模型，索引：{}, 当前参考号：{}, 剩余: {}",
+                    j,
+                    parent_refno.to_refno_string(),
+                    processed_cnt.lock().await.to_owned()
+                );
                 let mut geos_info = EleGeosInfo {
-                    refno,
+                    refno: parent_refno,
                     cata_hash: None,
                     visible: true,
                     world_transform: trans_origin,
@@ -236,11 +235,10 @@ pub async fn cache_loop_geos(
                     aabb: None,
                     flow_pt_indexs: vec![],
                 };
-                let mut target_refno = parent_refno;
                 let mut loop_verts: Vec<Vec3> = vec![];
                 let mut fradius_vec: Vec<f32> = vec![];
 
-                if let Ok(children_refs) = mgr.get_children_refs(refno).await {
+                if let Ok(children_refs) = mgr.get_children_refs(loop_refno).await {
                     for x in children_refs {
                         if let Ok(a) = mgr.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
                             let pt = a.get_position().unwrap_or_default();
@@ -278,25 +276,27 @@ pub async fn cache_loop_geos(
                                 geo_param = revo
                                     .convert_to_geo_param()
                                     .unwrap_or(PdmsGeoParam::Unknown);
-                                geo_hash =
-                                    Some(cached_mesh_mgr.gen_pdms_mesh(revo, replace_mesh));
+                                geo_hash = cached_mesh_mgr.gen_pdms_mesh(revo, replace_mesh);
                             }
                         }
                     }
                     //todo 关于justline，可能需要jusline的信息才能判断中心点
                     "AEXTR" | "NXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
-                        let attr = mgr.get_attr(refno).await.unwrap_or_default();
-                        target_refno = parent_refno;
-                        let mut height = attr
+                        let loop_attr = mgr.get_attr(loop_refno).await.unwrap_or_default();
+                        let mut height = loop_attr
                             .get_f32("HEIG")
                             .unwrap_or(parent_att.get_f32("HEIG").unwrap_or_default());
+                        if height < f32::EPSILON {
+                            println!("{}： 的height太小为: {}", parent_refno, height);
+                            continue;
+                        }
                         let i: usize = 0;
                         //fix 1516 的情况  =24381/36952，当为DBOT的时候，会变成DISH
-                        let sjus = attr.get_str("SJUS").unwrap_or_default();
+                        let sjus = loop_attr.get_str("SJUS").unwrap_or_default();
                         //开始处理有偏移的情况
                         {
-                            if attr.get_type() == "NXTR" {
-                                if let Some(parent_inst) = shape_insts_data.get_inst_info(attr.get_owner().unwrap_or_default()) {
+                            if loop_attr.get_type() == "NXTR" {
+                                if let Some(parent_inst) = shape_insts_data.get_inst_info(loop_attr.get_owner().unwrap_or_default()) {
                                     if let Some(h) = parent_inst.aabb.map(|x| x.bounding_sphere().radius * 2.0) {
                                         height = height.min(h);
                                         // dbg!(height);
@@ -316,9 +316,8 @@ pub async fn cache_loop_geos(
                                 .convert_to_geo_param()
                                 .unwrap_or(PdmsGeoParam::Unknown);
                             item_trans = extrusion.get_trans();
-                            let r = cached_mesh_mgr.gen_pdms_mesh(extrusion, replace_mesh);
-                            geo_hash = Some(r);
-                            // }
+
+                            geo_hash = cached_mesh_mgr.gen_pdms_mesh(extrusion, replace_mesh);
                         };
                         let off_z = if sjus == "UTOP" || sjus == "DTOP" {
                             -height
@@ -332,41 +331,44 @@ pub async fn cache_loop_geos(
                     }
                     _ => {}
                 }
+                let Some(geo_hash) = geo_hash else {
+                    continue;
+                };
 
-                if let Some(geo_hash) = geo_hash {
-                    let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
-                    geos_info.visible = visible;
-                    if item_trans.is_nan() { continue; }
-                    let tr: Transform = item_trans;
-                    if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
-                        let ele_aabb = aabb_apply_transform(&aabb, &tr);
-                        let geom_inst = EleInstGeo {
-                            geo_hash,
-                            refno,
-                            pts: Default::default(),
-                            aabb: Some(aabb),
-                            transform: tr,
-                            visible,
-                            is_tubi: false,
-                            geo_param,
-                            geo_type: if parent_att.is_neg() { GeoBasicType::Neg } else { GeoBasicType::Pos },
-                        };
-                        // geo_insts.push(geom_inst);
-                        geos_info.aabb = Some(aabb_apply_transform(&ele_aabb, &trans_origin));
+                let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
+                geos_info.visible = visible;
+                if item_trans.is_nan() { continue; }
+                let tr: Transform = item_trans;
+                if let Some(mut aabb) = cached_mesh_mgr.get_bbox(&geo_hash) {
+                    let ele_aabb = aabb_apply_transform(&aabb, &tr);
+                    let geom_inst = EleInstGeo {
+                        geo_hash,
+                        refno: parent_refno,
+                        pts: Default::default(),
+                        aabb: Some(aabb),
+                        transform: tr,
+                        visible,
+                        is_tubi: false,
+                        geo_param,
+                        geo_type: if parent_att.is_neg() { GeoBasicType::Neg } else { GeoBasicType::Pos },
+                    };
+                    // geo_insts.push(geom_inst);
+                    geos_info.aabb = Some(aabb_apply_transform(&ele_aabb, &trans_origin));
 
-                        shape_insts_data.insert_info(target_refno, geos_info.clone());
-                        shape_insts_data.insert_info(refno, geos_info);
-                        shape_insts_data.insert_geos_data(*refno, EleInstGeosData {
-                            inst_key: *refno,
-                            refno,
-                            insts: vec![geom_inst],
-                            aabb: Some(ele_aabb),
-                            type_name: parent_att.get_type().to_string(),
-                            ptset_map: Default::default(),
-                        });
-                    } else {
-                        error!("LOOP 有问题：{} ", refno.to_refno_string());
-                    }
+                    dbg!(parent_refno);
+                    dbg!(loop_refno);
+                    shape_insts_data.insert_info(parent_refno, geos_info);
+                    // shape_insts_data.insert_info(refno, geos_info);
+                    shape_insts_data.insert_geos_data(*parent_refno, EleInstGeosData {
+                        inst_key: *parent_refno,
+                        refno: parent_refno,
+                        insts: vec![geom_inst],
+                        aabb: Some(ele_aabb),
+                        type_name: parent_att.get_type().to_string(),
+                        ptset_map: Default::default(),
+                    });
+                } else {
+                    error!("LOOP 有问题：{} ", loop_refno.to_refno_string());
                 }
             }
         });
@@ -522,7 +524,7 @@ pub async fn cache_cata_geos(
                         &brep_shapes_map,
                         &refno_ptset_map,
                         &scom_info_map,
-                    ).await else{
+                    ).await else {
                         continue;
                     };
                     ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
@@ -555,10 +557,12 @@ pub async fn cache_cata_geos(
                             generic_type: mgr.get_generic_type(ele_refno),
                             aabb: None,
                             world_transform: o,
-                            flow_pt_indexs: if !ele_att.contains_attr_name("ARRI") { vec![] } else{ vec![
-                                ele_att.get_i32("ARRI").unwrap_or(-1),
-                                ele_att.get_i32("LEAV").unwrap_or(-1),
-                            ]},
+                            flow_pt_indexs: if !ele_att.contains_attr_name("ARRI") { vec![] } else {
+                                vec![
+                                    ele_att.get_i32("ARRI").unwrap_or(-1),
+                                    ele_att.get_i32("LEAV").unwrap_or(-1),
+                                ]
+                            },
                         };
 
                         let mut geo_insts = vec![];
@@ -580,17 +584,14 @@ pub async fn cache_cata_geos(
                             }
                             let trans = brep_shape.get_trans();
                             // dbg!(&brep_shape);
-                            let geo_hash =
-                                cached_mesh_mgr.gen_pdms_mesh(brep_shape.clone(), replace_mesh);
-                            // dbg!(geo_hash);
-                            let mut bbox = cached_mesh_mgr.get_bbox(&geo_hash);
-                            // dbg!(&bbox);
-                            if bbox.is_none() {
+                            let Some(geo_hash) =
+                                cached_mesh_mgr.gen_pdms_mesh(brep_shape.clone(), replace_mesh) else{
                                 continue;
-                            }
-                            let mut geo_aabb = bbox.unwrap();
-
-                            // dbg!(&transform);
+                            };
+                            // dbg!(geo_hash);
+                            let Some(mut geo_aabb) = cached_mesh_mgr.get_bbox(&geo_hash) else{
+                                continue;
+                            };
                             let rot = transform.rotation;
                             let translation =
                                 transform.translation + transform.rotation * trans.translation;
@@ -704,10 +705,12 @@ pub async fn cache_cata_geos(
                         generic_type: mgr.get_generic_type(ele_refno),
                         aabb: Some(aabb_apply_transform(target_geo_data.aabb.as_ref().unwrap(), &o)),
                         world_transform: o,
-                        flow_pt_indexs: if !flow.contains_attr_name("ARRI") { vec![] } else{ vec![
-                            flow.get_i32("ARRI").unwrap_or(-1),
-                            flow.get_i32("LEAV").unwrap_or(-1),
-                        ]},
+                        flow_pt_indexs: if !flow.contains_attr_name("ARRI") { vec![] } else {
+                            vec![
+                                flow.get_i32("ARRI").unwrap_or(-1),
+                                flow.get_i32("LEAV").unwrap_or(-1),
+                            ]
+                        },
                     };
                     //需要变换成世界坐标系下的aabb
                     // if let Some(a) = target_geo_data.aabb {

@@ -965,13 +965,14 @@ impl AiosDBManager {
             }
 
             println!("开始处理负实体计算");
-            let (tx, rx) =
-                mpsc::unbounded_channel::<(RefU64, Arc<AiosDBManager>, Arc<RwLock<ShapeInstancesData>>)>();
-            let rx_stream = UnboundedReceiverStream::new(rx);
+            // let (tx, rx) =
+            //     mpsc::unbounded_channel::<(RefU64, Arc<AiosDBManager>, Arc<RwLock<ShapeInstancesData>>)>();
+            // let rx_stream = UnboundedReceiverStream::new(rx);
 
             //todo 优化负实体的计算
             dbg!(&root_refnos);
             let has_pos_neg_map = mgr.query_refnos_has_pos_neg_map(&root_refnos).await.unwrap_or_default();
+            dbg!(&has_pos_neg_map);
             dbg!(has_pos_neg_map.len());
 
             // Spawn a separate task to send messages
@@ -996,7 +997,7 @@ impl AiosDBManager {
                         let trans = mgr.get_world_transform(comp_refno).await.unwrap_or_default().unwrap_or_default();
                         trans_map.insert(comp_refno, trans);
                     }
-                    has_pos_neg_map.into_par_iter().for_each(|(comp_refno, (pos_refnos, neg_refnos))| {
+                    has_pos_neg_map.into_par_iter().for_each(|(comp_refno, (mut pos_refnos, neg_refnos))| {
                         println!("正在处理: {} 下的负实体", comp_refno);
                         let inst_data_clone = inst_data.clone();
                         let mut mesh_mgr_clone = mesh_mgr.clone();
@@ -1007,9 +1008,10 @@ impl AiosDBManager {
 
                         let mut pos_meshes = vec![];
                         let mut neg_meshes = vec![];
-                        let mut w_aabb: Option<Aabb> = None;
+                        // let mut w_aabb: Option<Aabb> = None;
                         //没有正实体的情况，直接跳过
                         if pos_refnos.is_empty() { return; }
+                        // pos_refnos.push(comp_refno);
                         let Some(w_trans) = trans_map.get(&comp_refno).map(|x| x.value().clone()) else {
                             return;
                         };
@@ -1018,28 +1020,32 @@ impl AiosDBManager {
                         total_refnos.extend_from_slice(&neg_refnos);
                         let inverse_mat = w_trans.compute_matrix().inverse();
 
+                        let Some(origin_comp_geos_info) = inst_data.get_info(&comp_refno) else {
+                            return;
+                        };
+
+                        let mut neg_refnos = vec![];
                         for t_refno in total_refnos {
                             let Some(geos_info) = inst_data.get_info(&t_refno) else {
                                 continue;
                             };
                             // dbg!(geos_info);
-                            if let Some(mut w_aabb) = w_aabb {
-                                w_aabb.merge(&geos_info.aabb.unwrap());
-                            } else {
-                                w_aabb = geos_info.aabb;
-                            }
+                            // if let Some(mut w_aabb) = w_aabb {
+                            //     w_aabb.merge(&geos_info.aabb.unwrap());
+                            // } else {
+                            //     w_aabb = geos_info.aabb;
+                            // }
+                            // dbg!(t_refno);
                             let Some(inst_geos) = inst_data.get_inst_geos_data(geos_info) else {
                                 continue;
                             };
+                            // dbg!(t_refno);
                             for geo_inst in &inst_geos.insts {
                                 let geo_refno = geo_inst.refno;
                                 // dbg!(geo_refno);
                                 let Some(mesh) = mesh_mgr_clone.get_mesh(geo_inst.geo_hash) else {
                                     continue;
                                 };
-                                // let Ok(Some(geo_mat)) = mgr.get_world_transform(geo_refno).await else {
-                                //     continue;
-                                // };
                                 let geo_mat = geos_info.world_transform;
                                 let ele_mat = inverse_mat * geo_mat.compute_matrix();
                                 let local_mat = ele_mat * geo_inst.transform.compute_matrix();
@@ -1048,6 +1054,7 @@ impl AiosDBManager {
                                     pos_meshes.push(csg_mesh)
                                 } else {
                                     neg_meshes.push(csg_mesh);
+                                    neg_refnos.push(t_refno);
                                 }
                             }
                         }
@@ -1057,10 +1064,15 @@ impl AiosDBManager {
                         for pos_mesh in pos_meshes {
                             final_mesh = final_mesh + pos_mesh;
                         }
-                        for neg_mesh in neg_meshes {
-                            final_mesh = final_mesh - neg_mesh;
+                        for (i, neg_mesh) in neg_meshes.into_iter().enumerate() {
+                            let tmp_mesh = final_mesh.clone() - neg_mesh;
+                            if tmp_mesh.triangles.is_empty() {
+                                println!("需要执行的负实体: {} 建模有问题", neg_refnos[i]);
+                                break;
+                            }
+                            final_mesh = tmp_mesh;
                         }
-                        mesh_result_map_clone.insert(geo_hash, final_mesh.into());
+                        mesh_result_map_clone.insert(geo_hash, PlantMesh::from(final_mesh));
                         let geom_inst = EleInstGeo {
                             geo_hash,
                             refno: comp_refno,
@@ -1074,23 +1086,23 @@ impl AiosDBManager {
                         };
 
 
-                        let mut geos_info = EleGeosInfo {
+                        let mut comp_geos_info = EleGeosInfo {
                             refno: comp_refno,
                             visible: true,
                             generic_type: mgr.get_generic_type(comp_refno),
-                            aabb: w_aabb,
+                            aabb: origin_comp_geos_info.aabb.clone(),
                             world_transform: w_trans,
                             cata_hash: None,
                             flow_pt_indexs: vec![],
                         };
-                        // dbg!(&geos_info);
-                        inst_info_result_map_clone.insert(comp_refno, geos_info);
+                        // dbg!(&comp_geos_info);
+                        inst_info_result_map_clone.insert(comp_refno, comp_geos_info);
                         let comp_type = mgr.get_refno_basic(comp_refno).unwrap().get_type().to_string();
                         inst_geos_result_map_clone.insert(*comp_refno, EleInstGeosData {
                             inst_key: *comp_refno,
                             refno: comp_refno,
                             insts: vec![geom_inst],
-                            aabb: None,
+                            aabb: origin_comp_geos_info.aabb.clone(),
                             type_name: comp_type,
                             ptset_map: Default::default(),
                         });
