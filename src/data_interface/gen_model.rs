@@ -500,6 +500,7 @@ pub async fn cache_cata_geos(
                 let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
                 let mut shape_insts_data = instance_mgr.write().await;
                 let mut target_geo_data_option = None;
+                //reuse代表是否重用，如果
                 if replace_mesh || target_cata.exist_geo.is_none() {
                     //如果没有已有的，需要生成
                     let refno = target_cata.group_refnos[0];

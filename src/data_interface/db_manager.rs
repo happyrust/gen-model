@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use aios_core::options::DbOption;
-use aios_core::pdms_types::{CATA_GEO_NAMES, CATA_HAS_TUBI_GEO_NAMES, CataHashRefnoKV, GNERAL_LOOP_NOUN_NAMES, GNERAL_PRIM_NOUN_NAMES, PdmsElement, RefU64, TOTAL_GEO_NOUN_NAMES};
+use aios_core::pdms_types::*;
 // use bevy::utils::HashMap;
 use bitflags::bitflags;
 use dashmap::DashMap;
@@ -21,7 +21,10 @@ bitflags! {
         const PRIM = 0x1 << 1;
         const LOOP = 0x1 << 2;
         const CATA = 0x1 << 3;
-        const CATA_ONLY_TUBI = 0x1 << 4;
+        const CATA_BRAN_AND_HANGER_REUSE = 0x1 << 4;  //branch
+        const CATA_SINGLE_REUSE = 0x1 << 5;   //sctn, fit, fixing, pfit
+        const CATA_WITHOUT_REUSE = 0x1 << 6;   //sctn, fit, fixing, pfit
+        // const CATA_ONLY_TUBI_REUSE = 0x1 << 4;
         const ALL = Self::PRIM.bits() | Self::LOOP.bits() | Self::CATA.bits() ;
     }
 }
@@ -64,7 +67,9 @@ impl AiosDBManager {
             GeoEnum::PRIM => GNERAL_PRIM_NOUN_NAMES.as_slice(),
             GeoEnum::LOOP => GNERAL_LOOP_NOUN_NAMES.as_slice(),
             GeoEnum::CATA => CATA_GEO_NAMES.as_slice(),
-            GeoEnum::CATA_ONLY_TUBI => CATA_HAS_TUBI_GEO_NAMES.as_slice(),
+            GeoEnum::CATA_BRAN_AND_HANGER_REUSE => CATA_HAS_TUBI_GEO_NAMES.as_slice(),
+            GeoEnum::CATA_SINGLE_REUSE => CATA_SINGLE_REUSE_GEO_NAMES.as_slice(),
+            GeoEnum::CATA_WITHOUT_REUSE => CATA_WITHOUT_REUSE_GEO_NAMES.as_slice(),
             GeoEnum::ALL => TOTAL_GEO_NOUN_NAMES.as_slice(),
             _ => &[],
         };
@@ -117,7 +122,9 @@ impl AiosDBManager {
             GeoEnum::PRIM => GNERAL_PRIM_NOUN_NAMES.as_slice(),
             GeoEnum::LOOP => GNERAL_LOOP_NOUN_NAMES.as_slice(),
             GeoEnum::CATA => CATA_GEO_NAMES.as_slice(),
-            GeoEnum::CATA_ONLY_TUBI => CATA_HAS_TUBI_GEO_NAMES.as_slice(),
+            GeoEnum::CATA_BRAN_AND_HANGER_REUSE => CATA_HAS_TUBI_GEO_NAMES.as_slice(),
+            GeoEnum::CATA_SINGLE_REUSE => CATA_SINGLE_REUSE_GEO_NAMES.as_slice(),
+            GeoEnum::CATA_WITHOUT_REUSE => CATA_WITHOUT_REUSE_GEO_NAMES.as_slice(),
             GeoEnum::ALL => TOTAL_GEO_NOUN_NAMES.as_slice(),
             _ => &[],
         };
@@ -147,7 +154,7 @@ impl AiosDBManager {
                     target_refnos_map.insert(k.cata_hash.unwrap_or_default(), CataHashRefnoKV{
                         cata_hash: k.cata_hash,
                         exist_geo: None,
-                        group_refnos: vec![root_refno],
+                        group_refnos: vec![root_refno]
                     });
                 }
             }else{

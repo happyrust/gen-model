@@ -783,8 +783,8 @@ impl AiosDBManager {
 
             //元件库的模型计算
             //求出有多少个是一样的模型
-            let target_cata_refnos = mgr.get_gen_model_target_refnos(GeoEnum::CATA_ONLY_TUBI, &target_dbnos, false).await?;
-            println!("使用管道元件库数量: {}", target_cata_refnos.len());
+            let target_cata_refnos = mgr.get_gen_model_target_refnos(GeoEnum::CATA_BRAN_AND_HANGER_REUSE, &target_dbnos, false).await?;
+            println!("使用管道或者支吊架元件库数量: {}", target_cata_refnos.len());
             //查询出branch 和 branch 下的子节点
             let mut branch_refnos_map = DashMap::new();
             let mut refno_lstube_map = DashMap::new();
@@ -821,13 +821,16 @@ impl AiosDBManager {
                 }
             }
             // dbg!(&lstube_bores_map);
-            let target_bran_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA_ONLY_TUBI, &target_dbnos, true, false).await?;
-            let target_single_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA, &target_dbnos, false, false).await?;
-            dbg!(&target_bran_cata_map.len());
+            let target_bran_reuse_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA_BRAN_AND_HANGER_REUSE, &target_dbnos, true, false).await?;
+            let target_single_reuse_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA_SINGLE_REUSE, &target_dbnos, false, false).await?;
+            let target_single_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA_WITHOUT_REUSE, &target_dbnos, false, false).await?;
+            dbg!(&target_bran_reuse_cata_map.len());
+            dbg!(target_single_reuse_cata_map.iter().map(|x| x.value().group_refnos.clone()).collect::<Vec<_>>());
             dbg!(&target_single_cata_map.len());
             if run_cache_cata {
                 let mut handles = vec![];
-                if !target_bran_cata_map.is_empty() {
+                //bran，hanger下需要重用的模型
+                if !target_bran_reuse_cata_map.is_empty() {
                     let scom_info_map_clone = scom_info_map.clone();
                     let mgr_clone = mgr.clone();
                     let instance_mgr_clone = instance_mgr.clone();
@@ -838,7 +841,7 @@ impl AiosDBManager {
                             instance_mgr_clone,
                             scom_info_map_clone,
                             &db_option_clone,
-                            Arc::new(target_bran_cata_map),
+                            Arc::new(target_bran_reuse_cata_map),
                             Arc::new(branch_refnos_map),
                             Arc::new(refno_lstube_map),
                             Arc::new(lstube_bores_map),
@@ -849,6 +852,30 @@ impl AiosDBManager {
                     handles.push(handle);
                 }
 
+                ///需要重用的类型
+                if !target_single_reuse_cata_map.is_empty() {
+                    let scom_info_map_clone = scom_info_map.clone();
+                    let mgr_clone = mgr.clone();
+                    let instance_mgr_clone = instance_mgr.clone();
+                    let db_option_clone = db_option.clone();
+                    let handle = tokio::spawn(async move {
+                        cache_cata_geos(
+                            mgr_clone,
+                            instance_mgr_clone,
+                            scom_info_map_clone,
+                            &db_option_clone,
+                            Arc::new(target_single_reuse_cata_map),
+                            Arc::new(Default::default()),
+                            Arc::new(Default::default()),
+                            Arc::new(Default::default()),
+                        )
+                            .await
+                            .unwrap();
+                    });
+                    handles.push(handle);
+                }
+
+                //不能重用的类型
                 if !target_single_cata_map.is_empty() {
                     let mgr_clone = mgr.clone();
                     let scom_info_map_clone = scom_info_map.clone();
