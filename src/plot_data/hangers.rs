@@ -178,8 +178,6 @@ async fn get_sctn_data(stru_children: &Vec<PdmsElement>, database: &ArDatabase, 
         if pose.is_none() || poss.is_none() { continue; }
         let poss = poss.unwrap();
         let pose = pose.unwrap();
-        let poss = Vec3::new(poss.x, poss.y, poss.z);
-        let pose = Vec3::new(pose.x, pose.y, pose.z);
         let distance = pose.distance(poss) as i32;
         // 统计个数
         let mut count = sctn_map.entry((across_section, distance)).or_insert(0);

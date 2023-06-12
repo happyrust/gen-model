@@ -114,14 +114,15 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
 pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) -> anyhow::Result<ShapeInstancesData> {
     let refnos = refnos.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
     // dbg!(&refnos);
+    //过滤掉负实体计算后的多余几何体
     let aql = AqlQuery::builder().query(r#"
             FOR refno in @refnos
-                FOR c,e,p IN 0..10 inbound CONCAT('pdms_eles/',refno) pdms_edges
+                FOR c,e,p IN 0..20 inbound CONCAT('pdms_eles/',refno) pdms_edges
                     PRUNE c.noun in @neg_nouns
                     OPTIONS { order: "bfs"  }
                     let parent = p.vertices[-2]
                     let f = document('pdms_inst_infos', c._key)
-                    filter f != null and (parent == null or document('pdms_inst_infos', parent._key) == null)
+                    filter f != null and (parent == null or document('pdms_inst_infos', parent._key).geo_type != "Compound")
                     return f
             "#)
         .bind_var("refnos", refnos)

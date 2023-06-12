@@ -2,7 +2,7 @@
 total_sync = false
 enable_log = false
 sync_graph_db = true
-sync_tidb = true
+sync_tidb = false
 incr_sync = false
 replace_dbs = true
 
@@ -46,7 +46,7 @@ server_release_ip = "127.0.0.1:9099"
 
 
 #调试选项
-replace_mesh = false
+replace_mesh = true
 save_model_mesh_to_graph_db = true
 need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
 reset_mdb_project = false      #是否重新生成 mdb 缓存
@@ -57,9 +57,9 @@ only_rebuild_pdms_element = false
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
 #included_db_files = ["ams7997_0001"]
-#included_db_files = ["ams7997_0001"]
+included_db_files = ["ams7997_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
-manual_db_nums = [1112]  #, 8000
+manual_db_nums = [7997]  #, 8000
 plat_url = ""
 
 #puhua
@@ -153,9 +153,14 @@ puhua_database_password = ""
 
 
 #debug_root_refnos = ["17496/169982"]
-#debug_root_refnos = ["24381/46775"]
 #debug_root_refnos = ["9304/2"]
-debug_root_refnos = ["17496/169984"]
+#debug_root_refnos = ["17496/169984"]
+
+#风管的测试
+debug_root_refnos = ["24381/46775"]
+
+#测试风管bend的问题
+#debug_root_refnos = ["24381/47158"]
 
 #24381/34109,
 #24381/42520,

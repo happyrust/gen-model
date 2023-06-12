@@ -73,6 +73,7 @@ use env_logger::{Builder, fmt::Target};
 use log::{error, LevelFilter};
 use tokio::sync::RwLock;
 use aios_database::consts::*;
+use aios_database::data_interface::gen_model::cache_geos_data;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -118,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
     if db_option.gen_model_mesh {
         println!("正在生成模型");
         let mut time = Instant::now();
-        AiosDBManager::cache_geos_data(mgr.clone(), db_option.clone()).await?;
+        cache_geos_data(mgr.clone(), db_option.clone()).await?;
         info!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
