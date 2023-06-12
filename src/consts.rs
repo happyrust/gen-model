@@ -37,7 +37,15 @@ pub const AQL_HOLE_DATA_COLLECTION: &'static str = "hole_data";
 pub const AQL_EMBED_DATA_COLLECTION: &'static str = "embed_data";
 pub const AQL_HOLE_EDGE_COLLECTION: &'static str = "hole_edge";
 pub const AQL_EMBED_EDGE_COLLECTION: &'static str = "embed_edge";
+
+
+pub const BATCH_CHUNKS_CNT: usize = 50;
 pub const AQL_PDMS_ELES_COLLECTION: &'static str = "pdms_eles";
+pub const AQL_PDMS_EDGES_COLLECTION: &'static str = "pdms_edges";
+pub const AQL_PDMS_INST_INFO_COLLECTION: &'static str = "pdms_inst_infos";
+pub const AQL_PDMS_INST_GEO_COLLECTION: &'static str = "pdms_inst_geos";
+pub const AQL_PDMS_INST_TUBI_COLLECTION: &'static str = "pdms_inst_tubis";
+pub const AQL_PDMS_INST_EDGE_COLLECTION: &'static str = "pdms_inst_edges";
 pub const AQL_SSC_ELES_COLLECTION: &'static str = "ssc_eles";
 pub const AQL_SSC_EDGE_COLLECTION: &'static str = "ssc_edges";
 pub const AQL_THREED_REVIEW_COLLECTION: &'static str = "threed_review";

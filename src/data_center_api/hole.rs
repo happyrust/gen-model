@@ -6,7 +6,7 @@ use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, Data
 use aios_core::negative_mesh_type::NegativeEdges;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use arangors_lite::{AqlQuery, Database};
+use bb8_arangodb::arangors::{AqlQuery, Database};
 use bevy::prelude::dbg;
 use chrono::DateTime;
 use chrono::{Datelike, NaiveDateTime, Timelike};
@@ -17,7 +17,7 @@ use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, remove_arangodb_with_refno_key, replace_arangodb_with_database, save_arangodb_with_database};
+use crate::graph_db::pdms_arango::{ArDatabase, remove_arangodb_with_refno_key, save_arangodb_doc};
 
 /// 正则匹配字符串中的数字
 pub fn get_num_from_str(input: &str) -> Option<i32> {
@@ -67,9 +67,9 @@ async fn query_hole_data_tidb(id: u32, pool: &Pool<MySql>) -> Option<DataCenterI
     None
 }
 
-pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>,project_code:&str, database: &Database) -> Option<Vec<DataCenterInstance>> {
+pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>,project_code:&str, database: &ArDatabase) -> Option<Vec<DataCenterInstance>> {
     let mut instances_result = Vec::new();
-    let Ok(instances) = query_hole_data_by_keys_aql(keys, database).await else { return Some(instances_result); };
+    let Ok(instances) = query_hole_data_by_keys_aql(keys, &database).await else { return Some(instances_result); };
     for (idx, instance) in instances.into_iter().enumerate() {
         if let Ok(hole_type) = query_hole_type_aql(&instance).await {
             let result = match hole_type {
@@ -772,12 +772,12 @@ pub fn convert_time_to_vec(time: &str) -> Vec<String> {
     r
 }
 
-pub async fn save_hole_data_to_arangodb(data: Vec<VirtualHoleGraphNode>, database: &Database) -> anyhow::Result<String> {
+pub async fn save_hole_data_to_arangodb(data: Vec<VirtualHoleGraphNode>, database: &ArDatabase) -> anyhow::Result<String> {
     let json = serde_json::to_value(&data);
     if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
     let json = json.unwrap();
-    let r = save_arangodb_with_database(json, AQL_HOLE_DATA_COLLECTION, database, false).await;
-    let edge_r = create_hole_data_edge(&data, database).await?;
+    let r = save_arangodb_doc(json, AQL_HOLE_DATA_COLLECTION, database, false).await;
+    let edge_r = create_hole_data_edge(&data, &database).await?;
     if let Err(r) = r {
         Ok(r.to_string())
     } else {
@@ -786,17 +786,17 @@ pub async fn save_hole_data_to_arangodb(data: Vec<VirtualHoleGraphNode>, databas
 }
 
 /// 替换孔洞数据
-pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, database: &Database) -> anyhow::Result<String> {
+pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, database: &ArDatabase) -> anyhow::Result<String> {
     // 删除边
     let keys = datas.iter().map(|x| x._key.clone()).collect::<Vec<_>>();
-    let edge_aql = AqlQuery::new("\
+    let edge_aql = AqlQuery::builder().query("\
     for key in @keys
         for c,e in 1 inbound CONCAT('hole_data/',key) hole_edge
             REMOVE e._key IN hole_edge
-    ").bind_var("keys", keys);
+    ").bind_var("keys", keys).build();
     let result = database.aql_query::<Vec<()>>(edge_aql).await?;
     // 重新插入新的边
-    match replace_hole_data_edge(&datas,database).await{
+    match replace_hole_data_edge(&datas, &database).await{
         Ok(_) => {}
         Err(e) => {
             return Ok(e.to_string())
@@ -806,7 +806,7 @@ pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, dat
     let json = serde_json::to_value(&datas);
     if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
     let json = json.unwrap();
-    match replace_arangodb_with_database(json, AQL_HOLE_DATA_COLLECTION, database).await {
+    match save_arangodb_doc(json, AQL_HOLE_DATA_COLLECTION, &database, true).await {
         Ok(_) => {}
         Err(e) => {
             return Ok(e.to_string())
@@ -815,7 +815,7 @@ pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, dat
     Ok(format!("替换 {} 条数据 成功",datas.len()))
 }
 
-async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Database) -> anyhow::Result<()> {
+async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArDatabase) -> anyhow::Result<()> {
     let mut edges = Vec::new();
     for d in data {
         let refno = RefU64::from_refno_str(&d.rely_item_ref);
@@ -832,12 +832,12 @@ async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Data
     }
     if !edges.is_empty() {
         let json = serde_json::to_value(&edges)?;
-        save_arangodb_with_database(json, AQL_HOLE_EDGE_COLLECTION, database, false).await?;
+        save_arangodb_doc(json, AQL_HOLE_EDGE_COLLECTION, database, false).await?;
     }
     Ok(())
 }
 
-async fn replace_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Database) -> anyhow::Result<()> {
+async fn replace_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArDatabase) -> anyhow::Result<()> {
     let mut edges = Vec::new();
     for d in data {
         let refno = RefU64::from_refno_str(&d.rely_item_ref);
@@ -854,16 +854,16 @@ async fn replace_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &Dat
     }
     if !edges.is_empty() {
         let json = serde_json::to_value(&edges)?;
-        replace_arangodb_with_database(json, AQL_HOLE_EDGE_COLLECTION, database).await?;
+        save_arangodb_doc(json, AQL_HOLE_EDGE_COLLECTION, &database, true).await?;
     }
     Ok(())
 }
 
 
 /// 通过孔洞依附的墙或板来查询这个墙上所有的孔洞数据
-pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &Database) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
+pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
     let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
-    let aql = AqlQuery::new("
+    let aql = AqlQuery::builder().query("
     for key in @keys
     for c in 1 outbound key hole_edge
         filter c != null
@@ -910,13 +910,13 @@ pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &Database) -
             'hType': c.hType,
             'MainItems': c.MainItems,
             'MainItemRefs': c.MainItemRefs
-        }").bind_var("keys", keys);
+        }").bind_var("keys", keys).build();
     let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
     Ok(result)
 }
 
-pub async fn query_hole_data_by_keys_aql(keys: Vec<String>, database: &Database) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
-    let aql = AqlQuery::new("
+pub async fn query_hole_data_by_keys_aql(keys: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
+    let aql = AqlQuery::builder().query("
     for key in @keys
         let c = document(@@hole_collection,key)
         filter c != null
@@ -965,14 +965,14 @@ pub async fn query_hole_data_by_keys_aql(keys: Vec<String>, database: &Database)
             'MainItemRefs': c.MainItemRefs
         }")
         .bind_var("keys", keys)
-        .bind_var("@hole_collection", AQL_HOLE_DATA_COLLECTION);
+        .bind_var("@hole_collection", AQL_HOLE_DATA_COLLECTION).build();
     let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
     Ok(result)
 }
 
 /// 查询所有的孔洞信息
-pub async fn query_hole_data_total_aql(database: &Database) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
-    let aql = AqlQuery::new("
+pub async fn query_hole_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
+    let aql = AqlQuery::builder().query("
     for c in @@collection
         return {
             '_key': c._key,
@@ -1017,23 +1017,23 @@ pub async fn query_hole_data_total_aql(database: &Database) -> anyhow::Result<Ve
             'hType': c.hType,
             'MainItems': c.MainItems,
             'MainItemRefs': c.MainItemRefs
-        }").bind_var("@collection", AQL_HOLE_DATA_COLLECTION);
+        }").bind_var("@collection", AQL_HOLE_DATA_COLLECTION).build();
     let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
     Ok(result)
 }
 
 /// 删除孔洞的信息，并删除边
-pub async fn delete_hole_data_aql(keys: Vec<String>, database: &Database) -> anyhow::Result<bool> {
-    let edge_aql = AqlQuery::new("\
+pub async fn delete_hole_data_aql(keys:Vec<String>,database:&ArDatabase) -> anyhow::Result<bool> {
+    let edge_aql = AqlQuery::builder().query("\
     for key in @keys
         for c,e in 1 inbound CONCAT('hole_data/',key) hole_edge
             REMOVE e._key IN hole_edge
-    ").bind_var("keys", keys.clone());
+    ").bind_var("keys",keys.clone()).build();
     let result = database.aql_query::<Vec<()>>(edge_aql).await;
-    let data_aql = AqlQuery::new("\
+    let data_aql = AqlQuery::builder().query("\
     for key in @keys
        REMOVE key IN hole_data
-    ").bind_var("keys", keys);
+    ").bind_var("keys",keys).build();
     let result = database.aql_query::<Vec<()>>(data_aql).await;
     Ok(!result.is_err())
 }

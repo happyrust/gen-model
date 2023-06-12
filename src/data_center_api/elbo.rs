@@ -71,8 +71,8 @@ pub async fn get_data_center_attr_handle(attr: &AttrMap, aios_mgr: &AiosDBManage
 /// 获取 elbo 的弯曲半径 都默认为 para 2
 async fn get_elbo_radius(attr: &AttrMap, aios_mgr: &AiosDBManager) -> anyhow::Result<String> {
     let Some(refno) = attr.get_refno() else { return Ok("".to_string()); };
-    let database = aios_mgr.get_arangodb().await?;
-    let catr = query_foreign_refno_aql(refno, &vec!["SPRE", "CATR"], database).await?;
+    let database = aios_mgr.get_arango_db().await?;
+    let catr = query_foreign_refno_aql(refno, &vec!["SPRE", "CATR"], &database).await?;
     if let Some(catr) = catr {
         let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok("".to_string()); };
         let catr_explicit = query_explicit_attr(catr, &pool).await?;

@@ -1,30 +1,30 @@
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use arangors_lite::{AqlQuery, Connection, Database};
+use bb8_arangodb::arangors::{AqlQuery, Database};
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
-// use crate::aql_api::virtual_hole_value::query_virtual_hole_value;
-use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::graph_db::pdms_arango::ArDatabase;
+use crate::test::common::get_arangodb_conn_from_db_option;
 
-pub async fn query_para_from_desi_refno(refno: RefU64, database: &Database) -> anyhow::Result<Option<Vec<f64>>> {
-    let catr_refno = query_foreign_refno_aql(refno,  &["SPRE", "CATR"], database).await?;
+pub async fn query_para_from_desi_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Vec<f64>>> {
+    let catr_refno = query_foreign_refno_aql(refno,  &["SPRE", "CATR"], &database).await?;
     if catr_refno.is_none() { return Ok(None); }
-    query_para_value(catr_refno.unwrap(), database).await
+    query_para_value(catr_refno.unwrap(), &database).await
 }
 
-pub async fn query_para_value(refno: RefU64, database: &Database) -> anyhow::Result<Option<Vec<f64>>> {
-    let aql = AqlQuery::new("
+pub async fn query_para_value(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Vec<f64>>> {
+    let aql = AqlQuery::builder().query("
     return document(@collection,@refno).para")
         .bind_var("collection", "para_eles")
-        .bind_var("refno", refno.to_url_refno());
+        .bind_var("refno", refno.to_url_refno()).build();
     let mut result: Vec<Vec<f64>> = database.aql_query(aql).await?;
     return if result.len() == 0 { Ok(None) } else { Ok(Some(result.remove(0))) };
 }
 
-pub async fn query_des_para_value(refno: RefU64, database: &Database) -> anyhow::Result<Option<Vec<f64>>> {
-    let aql = AqlQuery::new("
+pub async fn query_des_para_value(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Vec<f64>>> {
+    let aql = AqlQuery::builder().query("
     return document(@collection,@refno).para")
         .bind_var("collection", "despara_eles")
-        .bind_var("refno", refno.to_url_refno());
+        .bind_var("refno", refno.to_url_refno()).build();
     let mut result: Vec<Vec<f64>> = database.aql_query(aql).await?;
     return if result.len() == 0 { Ok(None) } else { Ok(Some(result.remove(0))) };
 }

@@ -4,7 +4,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use aios_core::parsed_data::CateGeomsInfo;
 use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::AttrVal::IntArrayType;
-use aios_core::pdms_types::{AttrMap, RefU64, TOTAL_GEO_NOUN_NAMES};
+use aios_core::pdms_types::{AttrMap, RefU64, TOTAL_CATA_GEO_NOUN_NAMES, TOTAL_GEO_NOUN_NAMES};
 use anyhow::anyhow;
 use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
@@ -12,22 +12,31 @@ use log::{error, info};
 use sled::pin;
 use smol_str::SmolStr;
 use std::collections::{BTreeMap, HashMap};
+use glam::Vec3;
 use tokio::sync::RwLock;
 use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
 
 
 ///求解design component
 pub async fn resolve_desi_comp<T: PdmsDataInterface>(
+    interface: Option<&T>,
     refno: RefU64,
     mut scom_ref: Option<RefU64>,
-    interface: Option<&T>,
     scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
 ) -> anyhow::Result<CateGeomsInfo> {
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
+
+    // let gm_refno = RefU64::from_two_nums(13246, 198158);
+    // let att = interface.get_attr(gm_refno).await;
+    // dbg!(att);
+    // let transform = interface.get_world_transform(gm_refno).await?.unwrap();
+    // dbg!(transform.transform_point(Vec3::new(0.0, 38.1, 0.0)));
+
     let desi_att = interface.get_attr(refno).await?;
     //todo 改到使用图数据库去查找
     if scom_ref.is_none() {
         if let Some(spre_ref) = desi_att.get_foreign_refno("SPRE") {
+            // dbg!(spre_ref);
             let spre = interface.get_attr(spre_ref).await?;
             if spre.contains_attr_name("CATR") {
                 scom_ref = spre.get_foreign_refno("CATR");
@@ -48,12 +57,13 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             }
         }
     }
+    // dbg!(scom_ref);
     let scom_ref = scom_ref.ok_or(anyhow!(format!(
         "SCOM not exist in element: {}",
         refno.to_refno_str()
     )))?;
     if !scom_ref.is_valid() {
-        error!("{} 的CAT引用不存在，为 {}", refno.to_refno_str(), scom_ref.to_refno_str());
+        println!("{} 的CAT引用不存在，为 {}", refno.to_refno_str(), scom_ref.to_refno_str());
         return Ok(Default::default());
     }
     //缓存备用
@@ -203,7 +213,8 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_travel_children_attrs(refno, &TOTAL_GEO_NOUN_NAMES).await.unwrap();
+    let children = interface.get_travel_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
+    // dbg!(children.len());
     //todo 获得所有的几何数据，需要用几何type去过滤
     // let children = interface.get_children_attrs(refno).await.unwrap();
     for geo_am in children {
@@ -238,6 +249,8 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     cur_context
         .entry(DDANGLE_STR.into())
         .or_insert("0.0".into());
+
+    let cat_ref = scom_info.attr_map.get_refno().unwrap_or_default();
     //获取DTSE的expression
     process_dtse_params(&scom_info.attr_map, interface, &mut cur_context).await;
 
@@ -287,24 +300,26 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         }
     }
 
-    if let Some(link_cat_ref) = int
-        .query_foreign_refno(des_refno, &[&["CREF"], &["SPRE", "CATR"]], &["SPRE", "CATR"],&[])
-        .await?{
-        dbg!(link_cat_ref);
-        let link_cat_am = interface.as_ref().unwrap().get_attr(link_cat_ref).await?;
-        let params = link_cat_am.get_f64_vec("PARA").unwrap_or_default();
-        for i in 0..params.len() {
-            cur_context.insert(
-                format!("APAR{}", i + 1).into(),
-                params[i].to_string().into(),
-            );
-        }
-        let desp = link_cat_am.get_f64_vec("DESP").unwrap_or_default();
-        for i in 0..desp.len() {
-            cur_context.insert(
-                format!("ADES{}", i + 1).into(),
-                desp[i].to_string().into(),
-            );
+    if let Ok(link_cat_refs) = int
+        .query_foreign_refnos(&[des_refno], &[&["CREF"], &["SPRE", "CATR"]], &["SPRE", "CATR"],&[], 4)
+        .await{
+        if !link_cat_refs.is_empty() {
+            let link_cat_ref = link_cat_refs[0];
+            let link_cat_am = interface.as_ref().unwrap().get_attr(link_cat_ref).await?;
+            let params = link_cat_am.get_f64_vec("PARA").unwrap_or_default();
+            for i in 0..params.len() {
+                cur_context.insert(
+                    format!("APAR{}", i + 1).into(),
+                    params[i].to_string().into(),
+                );
+            }
+            let desp = link_cat_am.get_f64_vec("DESP").unwrap_or_default();
+            for i in 0..desp.len() {
+                cur_context.insert(
+                    format!("ADES{}", i + 1).into(),
+                    desp[i].to_string().into(),
+                );
+            }
         }
     }
 
@@ -326,6 +341,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     let geometries = resolve_gms(des_refno, &scom_info.gm_params, &jusl_param, &cur_context, &axis_map, interface);
     // dbg!(&geometries);
     Ok(CateGeomsInfo {
+        refno: cat_ref,
         geometries,
         axis_map,
     })

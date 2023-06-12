@@ -2,7 +2,7 @@ use std::env;
 use std::io::Write;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use arangors_lite::Database;
+use bb8_arangodb::arangors::Database;
 use bevy::prelude::Transform;
 use glam::{Mat3, Quat, Vec3};
 use sqlx::{MySql, Pool, Row};
@@ -13,10 +13,11 @@ use crate::aql_api::pdms_mesh::query_refno_transform;
 use crate::aql_api::query_transform::query_cylinder_transform;
 use crate::consts::SCTN_STANDARD;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::graph_db::pdms_arango::ArDatabase;
 use crate::consts::CHANNEL_STEEL_STANDARD;
+use crate::test::common::get_arangodb_conn_from_db_option;
 
-pub async fn query_single_sctn_ansys_data(refno: RefU64, aios_mgr: &AiosDBManager,database:&Database) -> anyhow::Result<Option<SctnAnsysData>> {
+pub async fn query_single_sctn_ansys_data(refno: RefU64, aios_mgr: &AiosDBManager,database:&ArDatabase) -> anyhow::Result<Option<SctnAnsysData>> {
     // 查找pdms中 sctn 对应的属性
     if let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
         let sql = gen_query_sctn_pdms_data_sql(refno);
@@ -52,7 +53,7 @@ pub async fn query_single_sctn_ansys_data(refno: RefU64, aios_mgr: &AiosDBManage
     Ok(None)
 }
 
-pub async fn query_single_sctn_ansys_data_test(refno: RefU64, pool: &Pool<MySql>, cata_pool: &Pool<MySql>, database: &Database) -> anyhow::Result<Option<SctnAnsysData>> {
+pub async fn query_single_sctn_ansys_data_test(refno: RefU64, pool: &Pool<MySql>, cata_pool: &Pool<MySql>, database: &ArDatabase) -> anyhow::Result<Option<SctnAnsysData>> {
     // 查找pdms中 sctn 对应的属性
     let sql = gen_query_sctn_pdms_data_sql(refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
@@ -63,7 +64,7 @@ pub async fn query_single_sctn_ansys_data_test(refno: RefU64, pool: &Pool<MySql>
             // 将 mm 转为 m
             let poss = Vec3::from_array(poss) * Vec3::from_array([0.001; 3]);
             let pose = Vec3::from_array(pose) * Vec3::from_array([0.001; 3]);
-            let transform = query_refno_transform(refno, database).await?.unwrap_or_default();
+            let transform = query_refno_transform(refno, &database).await?.unwrap_or_default();
             let quat = Mat3::from_quat(transform.rotation);
             let dir = quat.y_axis + poss;
             let spre = RefU64(v.get::<i64, _>("SPRE") as u64);

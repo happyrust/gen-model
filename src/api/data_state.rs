@@ -1,6 +1,6 @@
 use std::env;
 use aios_core::pdms_types::{DataScope, DataScopeVec, DataState, DataStateVec, RefI32Tuple, RefU64};
-use arangors_lite::Database;
+use bb8_arangodb::arangors::Database;
 use sqlx::{Error, Executor, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
 use crate::api::children::{travel_children_eles, travel_children_without_leaf};
@@ -8,9 +8,10 @@ use crate::aql_api::children::query_travel_children_with_out_leaf_aql;
 use crate::consts::PDMS_DATA_STATE;
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_arango::ArDatabase;
 
 /// 查找该节点下的所有子节点的data_state数据
-pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>, arango_database: &Database) -> anyhow::Result<DataStateVec> {
+pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>, arango_database: &ArDatabase) -> anyhow::Result<DataStateVec> {
     let refnos = query_travel_children_with_out_leaf_aql(arango_database, refno).await?;
     if refnos.len() == 0 { return Ok(DataStateVec::default()); }
     let mut r = vec![];

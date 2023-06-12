@@ -14,7 +14,7 @@ use std::time::Instant;
 use aios_core::consts::*;
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::pdms_types::{
-    AttrMap, AttrVal, CachedMeshesMgr, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec,
+    AttrMap, AttrVal, MeshesData, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec,
 };
 use aios_core::tool::db_tool::{convert_to_hash, db1_dehash, db1_hash};
 use aios_core::tool::float_tool::f64_round_3;
@@ -135,7 +135,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name),
     )
         .await?;
-    let mut pdms_info_conn = pdms_info_pool.clone().acquire().await?;
     let mut create_tables_elapse = 0;
     dbg!("执行多线程解析");
     for project in &db_option.included_projects {
@@ -207,8 +206,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         create_tables_elapse += table_time.elapsed().as_millis();
 
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
-
+        let arrango_pool = connect_arangodb(db_option).await?;
         sync_total_async_threaded(
+            arrango_pool.clone(),
             &db_option,
             project,
             project_pool.clone(),
@@ -491,6 +491,7 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
 
 ///多线程同步数据
 pub async fn sync_total_async_threaded(
+    arango_pool: ArPool,
     db_option: &DbOption,
     project: &str,
     pool: Pool<MySql>,
@@ -570,9 +571,9 @@ pub async fn sync_total_async_threaded(
             {
                 //save dbno info first
                 let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(
-                    db_no.0,
+                    db_no,
                     &file_name_clone.clone(),
-                    version.0,
+                    version,
                     project_clone.clone().as_str(),
                     db_type.clone(),
                 );
@@ -632,24 +633,25 @@ pub async fn sync_total_async_threaded(
                 // 将部分数据保存到图数据库
                 if db_option.sync_graph_db.unwrap_or(true) {
                     if db_type == "CATA" || db_type == "DESI" {
+                        let database = arango_pool.get().await?.db(&db_option.arangodb_database).await?;
                         // 将 pdms_element 部分数据保存到图数据库中
-                        save_pdms_element_in_sync(
-                            &db_option,
+                        save_pdms_element_to_arango(
+                            &database,
                             &total_attr_map_arc,
                             &children_map_arc,
-                            db_no.0 as i32,
+                            db_no as i32,
                         ).await?;
                         // 将兄弟关系保存到图数据库中
-                        save_pdms_level_edges_in_sync(&db_option, &children_map_arc).await?;
+                        save_pdms_level_edges_in_sync(&database, &children_map_arc).await?;
 
-                        save_foreign_refno_edges_in_sync(&db_option, foreign_refnos_map).await?;
+                        save_foreign_refno_edges_in_sync(&database, foreign_refnos_map).await?;
                         // 单独保存plin
-                        save_plin_attr_arangodb(&db_option, &type_ele_map, &total_attr_map_arc)
+                        save_plin_attr_arangodb(&database, &type_ele_map, &total_attr_map_arc)
                             .await?;
                         // 将 para 和 des_para保存的图数据库中
-                        save_paras_into_arangodb(&db_option, &total_attr_map_arc).await?;
+                        save_paras_into_arangodb(&database, &total_attr_map_arc).await?;
                         // 将 dtse下的data部分数据保存到图数据库
-                        save_dtse_value_to_arangodb(&db_option, &type_ele_map, &total_attr_map_arc)
+                        save_dtse_value_to_arangodb(&database, &type_ele_map, &total_attr_map_arc)
                             .await?;
                     }
                     println!("图数据库保存完成");
@@ -675,6 +677,7 @@ pub async fn sync_total_async_threaded(
                     let total_attr_map_arc = total_attr_map_arc.clone();
                     let children_map_arc = children_map_arc.clone();
                     let pool_clone = pool.clone();
+                    let arango_pool_clone = arango_pool.clone();
                     let error_sql_clone = error_sql.clone();
                     // println!("类型: {} 数量: {}", db1_dehash(type_hash), type_refnos.len());
 
@@ -692,6 +695,7 @@ pub async fn sync_total_async_threaded(
                             let children_map_arc_clone = children_map_arc.clone();
                             let all_refnos = all_refnos.clone();
                             let pool_clone = pool_clone.clone();
+                            let arango_pool_clone = arango_pool_clone.clone();
                             let error_sql_clone = error_sql_clone.clone();
                             let mut implicit_values_sql = String::new();
                             let mut explicit_values_sql = String::new();
@@ -743,7 +747,7 @@ pub async fn sync_total_async_threaded(
                                         pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(
                                             att.value(),
                                             &name,
-                                            db_no.0,
+                                            db_no,
                                             order,
                                             children_count,
                                         ));
@@ -870,7 +874,7 @@ pub async fn sync_total_async_threaded(
         let mut version_sql =
             format!("INSERT IGNORE INTO {PDMS_FILE_VERSION_TABLE} (FILENAME,VERSION) VALUES");
         for (file_name, version) in version_map.into_iter() {
-            version_sql.push_str(&format!("('{}',{}),", file_name, version.0))
+            version_sql.push_str(&format!("('{}',{}),", file_name, version))
         }
         let mut project_conn = pool.acquire().await.unwrap();
         version_sql.remove(version_sql.len() - 1);
@@ -948,7 +952,7 @@ fn set_uda_attr(
     Ok(())
 }
 
-pub async fn save_pdms_mesh_tidb(mgr: CachedMeshesMgr, pool: &Pool<MySql>) -> anyhow::Result<()> {
+pub async fn save_pdms_mesh_tidb(mgr: MeshesData, pool: &Pool<MySql>) -> anyhow::Result<()> {
     for chunks in &mgr.meshes.iter().chunks(1000) {
         let mut sql = format!("INSERT IGNORE INTO {PDMS_MESH} (HASH,MESH) VALUES ");
         for (key, map)  in chunks.into_iter() {
@@ -973,7 +977,7 @@ pub async fn save_pdms_mesh_tidb(mgr: CachedMeshesMgr, pool: &Pool<MySql>) -> an
 
 /// 将部分type的数据单独保存到图数据库中
 async fn save_plin_attr_arangodb(
-    db_option: &DbOption,
+    database: &ArDatabase,
     type_ele_map: &DashMap<u32, HashSet<RefU64>>,
     total_attr_map: &DashMap<RefU64, WholeAttMap>,
 ) -> anyhow::Result<()> {
@@ -989,20 +993,19 @@ async fn save_plin_attr_arangodb(
                 _key: refno.to_url_refno(),
                 attr: whole_attr
                     .unwrap()
-                    .clone()
-                    .change_implicit_explicit_into_attr(),
+                    .merge_implicit_explicit_into_attr(),
             })
         }
         if refno_attrs.len() > 0 {
             let json = serde_json::to_value(&take(&mut refno_attrs))?;
-            save_arangodb_with_db_option(json, &db_option, "plin_eles").await?;
+            save_arangodb_with_db_option(database, json, "plin_eles").await?;
         }
     }
     Ok(())
 }
 
 async fn save_paras_into_arangodb(
-    db_option: &DbOption,
+    database: &ArDatabase,
     total_attr_map: &DashMap<RefU64, WholeAttMap>,
 ) -> anyhow::Result<()> {
     let mut para_map = Vec::new();
@@ -1032,12 +1035,11 @@ async fn save_paras_into_arangodb(
     }
     for para in para_map.chunks(ARANGODB_SAVE_AMOUNT) {
         let para_json = serde_json::to_value(para)?;
-
-        save_arangodb_with_db_option(para_json, db_option, "para_eles").await?;
+        save_arangodb_with_db_option(database, para_json,  "para_eles").await?;
     }
     for des_para in des_para_map.chunks(ARANGODB_SAVE_AMOUNT) {
         let des_para_json = serde_json::to_value(des_para)?;
-        save_arangodb_with_db_option(des_para_json, db_option, "despara_eles").await?;
+        save_arangodb_with_db_option(database, des_para_json,  "despara_eles").await?;
     }
     Ok(())
 }

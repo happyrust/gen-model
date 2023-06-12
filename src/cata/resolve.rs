@@ -9,7 +9,7 @@ use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
-use arangors_lite::Database;
+use bb8_arangodb::arangors::Database;
 use bevy::prelude::error;
 use glam::{Vec2, Vec3};
 // use sea_orm::sea_query::IndexType::Hash;
@@ -21,7 +21,7 @@ use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
 use crate::cata::resolve_helper::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-
+use crate::graph_db::pdms_arango::ArDatabase;
 
 
 /// 求解axis的数值, 得到 {num:  }
@@ -89,11 +89,11 @@ pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
 ) -> anyhow::Result<CateGeoParam> {
     match resolve_gmse_params(gm_param, jusl_param, context, axis_params, interface) {
         Ok(gm_data) => {
-            // panic::catch_unwind(|| {
+            panic::catch_unwind(|| {
                 resolve_to_cate_geo_params(&gm_data)
-                    //.expect("resolve geom failed")
-            // })
-        // .map_err(|e| anyhow!("元件库求解失败."))
+                    .expect("resolve geom failed")
+            })
+                .map_err(|e| anyhow!("元件库求解失败."))
         }
         Err(e) => {
             Err(anyhow!(format!("几何数据解析失败: {:?}, 原因：{}", des_refno.to_refno_string(), &e)))
@@ -111,13 +111,13 @@ pub struct CataExprContext {
 }
 
 impl CataExprContext {
-    pub async fn create(des_refno: RefU64, database: &Database) -> anyhow::Result<Option<Self>> {
-        let catr_refno = query_foreign_refno_aql(des_refno, &["SPRE", "CATR"], database).await?;
+    pub async fn create(des_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Self>> {
+        let catr_refno = query_foreign_refno_aql(des_refno, &["SPRE", "CATR"], &database).await?;
         if catr_refno.is_none() { return Ok(None); }
         let catr_refno = catr_refno.unwrap();
-        let params = query_para_value(catr_refno, database).await?;
+        let params = query_para_value(catr_refno, &database).await?;
         if params.is_none() { return Ok(None); }
-        let dtse_map = query_dtse_ppro_from_catr_refno(catr_refno, database).await?;
+        let dtse_map = query_dtse_ppro_from_catr_refno(catr_refno, &database).await?;
         if dtse_map.is_none() { return Ok(None); }
         let mut dtse_expr_map = HashMap::new();
         let mut dtse_default_map = HashMap::new();
@@ -264,7 +264,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
         .map(|exp| eval_str_to_f32(&exp, context, interface))
         .collect::<anyhow::Result<_>>()?;
 
-    let mut paxises: Vec<CateAxisParam> = Vec::new();
+    let mut paxises: Vec<Option<CateAxisParam>> = Vec::new();
     for axis_str in gm.paxises.iter() {
         let mut axis = axis_str.trim();
         if axis.is_empty() { continue; }
@@ -276,18 +276,15 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
                 axis = &axis[1..];
             }
             if let Ok(index) = axis[1..].parse::<i32>() {
-                if index == 0 {
-                    paxises.push(CateAxisParam::zero());
-                } else {
-                    if axis_param_map.contains_key(&index) {
-                        paxises.push(if p_axis_neg {
-                            axis_param_map[&index].clone().neg()
-                        } else {
-                            axis_param_map[&index].clone()
-                        });
+                if axis_param_map.contains_key(&index) {
+                    paxises.push(Some(if p_axis_neg {
+                        axis_param_map[&index].clone().neg()
                     } else {
-                        return Err(anyhow!("Axis index not exist".to_string()));
-                    }
+                        axis_param_map[&index].clone()
+                    }));
+                } else {
+                    paxises.push(None);
+                    println!("Axis: '{axis_str}' index not exist");
                 }
             }
         } else {
@@ -300,7 +297,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
                 pconnect: "".to_string(),
                 pbore: 0.0,
             };
-            paxises.push(axis);
+            paxises.push(Some(axis));
         }
     }
     let mut plin_verts = Vec2::ZERO;

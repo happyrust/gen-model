@@ -96,8 +96,8 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         paths
     } else { vec![] };
     let mut height = 0.0;
-    let parent_rot = interface.get_world_transform(parent_refno).await.unwrap().unwrap().rotation;
-    let current_rot = interface.get_world_transform(refno).await.unwrap().unwrap().rotation;
+    let parent_rot = interface.get_world_transform(parent_refno).await.unwrap_or_default().unwrap_or_default().rotation;
+    let current_rot = interface.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default().rotation;
     let new_rot =  current_rot.inverse() * parent_rot;
     let drns = new_rot * drns;
     let drne = new_rot * drne;
@@ -120,8 +120,8 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                     let bangle = att.get_f32("BANG").unwrap_or_default();
                     let solid = SweepSolid {
                         profile: profile.clone(),
-                        drns,
-                        drne,
+                        drns: drns.normalize_or_zero(),
+                        drne: drne.normalize_or_zero(),
                         bangle,
                         plane_normal,
                         extrude_dir,
@@ -161,8 +161,8 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                     for path in paths {
                         let loft = SweepSolid {
                             profile: profile.clone(),
-                            drns,
-                            drne,
+                            drns: drns.normalize_or_zero(),
+                            drne: drne.normalize_or_zero(),
                             bangle,
                             plane_normal,
                             extrude_dir,

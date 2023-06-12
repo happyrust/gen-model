@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use aios_core::data_center::AttrValue::{AttrIntArray, AttrMap, AttrString};
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::RefU64;
-use arangors_lite::Database;
 use bevy::reflect::List;
 use parry3d::utils::Array1;
 use regex::Regex;
@@ -13,6 +12,7 @@ use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_paras};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_arango::ArDatabase;
 
 /// 获取 管段元数据
 pub fn get_data_center_bran_attr(refno: RefU64) -> Vec<DataCenterAttr> {
@@ -74,11 +74,11 @@ pub fn get_data_center_bran_attr(refno: RefU64) -> Vec<DataCenterAttr> {
 }
 
 /// 给排水专业 获取 bran和pipe的name
-pub async fn get_sg_pipe_bran_name(refnos: Vec<RefU64>, database: &Database) -> anyhow::Result<DataCenterProject> {
+pub async fn get_sg_pipe_bran_name(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(database, refnos, vec!["PIPE"]).await {
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["PIPE"]).await {
         for pipe in children {
-            let brans = query_children_aql(database, pipe.refno).await?;
+            let brans = query_children_aql(&database, pipe.refno).await?;
             for bran in brans {
                 if bran.noun != "BRAN" { continue; };
                 let mut attr = Vec::new();
@@ -109,15 +109,15 @@ pub async fn get_sg_pipe_bran_name(refnos: Vec<RefU64>, database: &Database) -> 
 }
 
 /// 获取电气专业的 bran 下面的元件信息
-pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
+pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
-    let database = aios_mgr.get_arangodb().await?;
+    let database = aios_mgr.get_arango_db().await?;
     let regex = Regex::new(r"\d.*:\d")?; // 判断字符串是否包含有多个数字加一个:
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(database, refnos, vec!["BRAN"]).await {
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["BRAN"]).await {
         for bran in children {
-            let bran_children = query_children_aql(database, bran.refno).await?;
-            let room_name = query_room_name_from_refno_aql(bran.refno, database).await?.unwrap_or("".to_string());
-            let pspe_name = query_foreign_name_aql(bran.refno, vec!["PSPE", "PSPE"], database).await?;
+            let bran_children = query_children_aql(&database, bran.refno).await?;
+            let room_name = query_room_name_from_refno_aql(bran.refno, &database).await?.unwrap_or("".to_string());
+            let pspe_name = query_foreign_name_aql(bran.refno, vec!["PSPE", "PSPE"], &database).await?;
             let mut kind = "".to_string();
             if let Some(pspe_name) = pspe_name {
                 match pspe_name {
@@ -138,9 +138,9 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
             for child in &bran_children {
                 if child.noun == "ATTA" { continue; }
                 if !bridge_dir.is_empty() {
-                    let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], database).await?;
+                    let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], &database).await?;
                     if let Some(spre_name) = spre_name {
-                        if spre_name.contains("Riser") || spre_name.contains("RDivider"){
+                        if spre_name.contains("Riser") || spre_name.contains("RDivider") {
                             bridge_dir = "竖向".to_string();
                         } else {
                             bridge_dir = "水平".to_string();
@@ -149,7 +149,7 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
                 }
 
                 if child.noun == "FTUB" {
-                    let mut paras = get_refno_paras(child.refno,aios_mgr).await?;
+                    let mut paras = get_refno_paras(child.refno, aios_mgr).await?;
                     tray_width = paras.pop().unwrap_or(0.0).to_string();
                     tray_height = paras.pop().unwrap_or(0.0).to_string();
                     break;
@@ -163,7 +163,7 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
                 color = bran_name_split[1].to_string();
                 if color == "CO" { b_paint = true }
             }
-            let desc = get_refno_desc(bran.refno,aios_mgr).await?;
+            let desc = get_refno_desc(bran.refno, aios_mgr).await?;
             let b_partition = if desc.is_empty() { false } else { true };
 
             let mut erecb_attr = Vec::new();
@@ -205,16 +205,16 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
             });
 
             for child in bran_children {
-                let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], database).await?.unwrap_or_default();
+                let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], &database).await?.unwrap_or_default();
                 let mut object_code = None;
                 match child.noun.as_str() {
-                    "FTUB" => { if spre_name.contains("RISER") { object_code = Some("PARTEH") } else { object_code = Some("PARTEF") } },
+                    "FTUB" => { if spre_name.contains("RISER") { object_code = Some("PARTEH") } else { object_code = Some("PARTEF") } }
                     "TEE" => { object_code = Some("PARTEA") }
                     "CROS" => { object_code = Some("PARTEJ") }
                     "BEND" => { if regex.is_match(&spre_name) { object_code = Some("PARTEB") } }
                     _ => {}
                 }
-                if object_code.is_none() { continue };
+                if object_code.is_none() { continue; };
 
                 let mut attr = Vec::new();
 
@@ -230,7 +230,7 @@ pub async fn get_dq_bran_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
                     value: AttrValue::AttrString(stander_num.to_string()).into(),
                 });
                 let material_map = get_dq_material_code(&spre_name,
-                                                        &stander_num,&vec!["ItemCode".to_string(),"Unit".to_string()],aios_mgr).await.unwrap_or_default();
+                                                        &stander_num, &vec!["ItemCode".to_string(), "Unit".to_string()], aios_mgr).await.unwrap_or_default();
                 attr.push(DataCenterAttr {
                     attribute_model_code: "PARTE5".to_string(),
                     value: AttrValue::AttrString(material_map.get("ItemCode").unwrap_or(&"".to_string()).to_string()).into(),

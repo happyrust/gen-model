@@ -1,7 +1,7 @@
 use std::ops::Neg;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
-use arangors_lite::{AqlQuery, Connection, Database};
+use bb8_arangodb::arangors::{AqlQuery, Database};
 use dashmap::{DashMap, DashSet};
 use glam::Vec3;
 use smol_str::SmolStr;
@@ -9,10 +9,11 @@ use crate::aql_api::children::{query_children_aql, query_owner_with_type_aql};
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::PdmsPLINAttrAql;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::graph_db::pdms_arango::ArDatabase;
+use crate::test::common::get_arangodb_conn_from_db_option;
 
 /// 传入desi的参考号，返回该参考号对应的plin attr_map 和 wall 引用的 NA 等对应的数值
-pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &Database) -> anyhow::Result<DashMap<RefU64, String>> {
+pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &ArDatabase) -> anyhow::Result<DashMap<RefU64, String>> {
     let mut result = DashMap::new();
     // 存 wall下的所有p_key以及对应的值
     let mut wall_map: DashMap<RefU64, DashMap<String, String>> = DashMap::new();
@@ -23,14 +24,14 @@ pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &Database
         let owner = owner.unwrap().0;
         owner_map.insert(*refno, owner);
         if wall_map.contains_key(&owner) { continue; }
-        let pstr = query_foreign_refno_aql(owner, &["SPRE", "PSTR"], database).await?;
+        let pstr = query_foreign_refno_aql(owner, &["SPRE", "PSTR"], &database).await?;
         if pstr.is_none() { continue; }
-        let pstr_children = query_children_aql(database, pstr.unwrap()).await?;
+        let pstr_children = query_children_aql(&database,pstr.unwrap()).await?;
         let mut children = vec![];
         pstr_children.into_iter().for_each(|ele| {
             children.push(ele.refno);
         });
-        let plin_attrs = query_plin_attrs_with_refnos(children, database).await?;
+        let plin_attrs = query_plin_attrs_with_refnos(children, &database).await?;
         for plin_attr in plin_attrs {
             let plin_refno = RefU64::from_url_refno(&plin_attr._key);
             if plin_refno.is_none() { continue; }
@@ -54,17 +55,17 @@ pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &Database
     Ok(result)
 }
 
-pub async fn query_pline_value(refno: RefU64, jusl: &str, database: &Database) -> anyhow::Result<Option<[String; 3]>> {
-    let pstr = query_foreign_refno_aql(refno,  &["SPRE", "PSTR"], database).await?;
+pub async fn query_pline_value(refno: RefU64, jusl: &str, database: &ArDatabase) -> anyhow::Result<Option<[String; 3]>> {
+    let pstr = query_foreign_refno_aql(refno,  &["SPRE", "PSTR"], &database).await?;
     // dbg!(pstr);
     if pstr.is_none() { return Ok(None); }
-    let pstr_children = query_children_aql(database, pstr.unwrap()).await?;
+    let pstr_children = query_children_aql(&database,pstr.unwrap()).await?;
     let mut children = vec![];
     pstr_children.into_iter().for_each(|ele| {
         children.push(ele.refno);
     });
     // dbg!(&children);
-    let plin_attrs = query_plin_attrs_with_refnos(children, database).await?;
+    let plin_attrs = query_plin_attrs_with_refnos(children, &database).await?;
     for plin_attr in plin_attrs {
         let plin_refno = RefU64::from_url_refno(&plin_attr._key);
         // dbg!(&plin_refno);
@@ -87,12 +88,12 @@ pub async fn query_pline_value(refno: RefU64, jusl: &str, database: &Database) -
 }
 
 /// 传入plin参考号集合，返回集合中的所有plin的attr_map
-async fn query_plin_attrs_with_refnos(refnos: Vec<RefU64>, database: &Database) -> anyhow::Result<Vec<PdmsPLINAttrAql>> {
+async fn query_plin_attrs_with_refnos(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsPLINAttrAql>> {
     let mut children = vec![];
     refnos.into_iter().for_each(|refno| {
         children.push(RefU64::to_url_refno(&refno))
     });
-    let aql = AqlQuery::new("
+    let aql = AqlQuery::builder().query("
     let data = @element
     for v in data
     let e = document('plin_eles',v)
@@ -100,19 +101,20 @@ async fn query_plin_attrs_with_refnos(refnos: Vec<RefU64>, database: &Database) 
             '_key':e._key,
             'attr':e.attr
         } "
-    ).bind_var("element", children);
+    ).bind_var("element", children)
+        .build();
     let result: Vec<PdmsPLINAttrAql> = database.aql_query(aql).await?;
     Ok(result)
 }
 
-async fn query_plin_attrs_with_refno(refno: RefU64, database: &Database) -> anyhow::Result<Vec<PdmsPLINAttrAql>> {
-    let aql = AqlQuery::new("
+async fn query_plin_attrs_with_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<PdmsPLINAttrAql>> {
+    let aql = AqlQuery::builder().query("
     let e = document('plin_eles',@refno)
         return {
             '_key':e._key,
             'attr':e.attr
         } "
-    ).bind_var("refno", refno.to_url_refno());
+    ).bind_var("refno", refno.to_url_refno()).build();
     let result: Vec<PdmsPLINAttrAql> = database.aql_query(aql).await?;
     Ok(result)
 }

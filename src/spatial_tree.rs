@@ -1,5 +1,5 @@
 use crate::aql_api::pdms_room::*;
-use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::graph_db::pdms_arango::ArDatabase;
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::db_number::DbNumMgr;
 use aios_core::pdms_types::UdaMajorType::{E, T, V};
@@ -11,17 +11,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use aios_core::options::DbOption;
-use arangors_lite::Database;
-
-
-
-
+use bb8_arangodb::arangors::Database;
+use crate::test::common::get_arangodb_conn_from_db_option;
 
 
 ///投影到平面上的房间，去计算是否二维有相交
 pub async fn compute_rooms_by_projection(
     room_refno: Vec<RefU64>,
-    all_insts_mgr: HashMap<u32, ShapeInstancesMgr>,
+    all_insts_mgr: HashMap<u32, ShapeInstancesData>,
     collider_shape_mgr: ColliderShapeMgr,
     db_option: &DbOption,
 ) -> anyhow::Result<HashMap<RefU64, (Aabb, Vec<RefU64>)>> {
@@ -29,7 +26,7 @@ pub async fn compute_rooms_by_projection(
     // let mut file = fs::File::open("assets/mesh/mesh.bin")?;
     // let mut data = vec![];
     // file.read_to_end(&mut data)?;
-    // let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
+    // let mesh_mgr = bincode::deserialize::<MeshesData>(&data)?;
     //
     // let instance_dir_path = "assets/instance";
     // let mut file = fs::File::open("accel.spa")?;
@@ -43,17 +40,17 @@ pub async fn compute_rooms_by_projection(
     //     DbNumMgr::load_file(&format!("{instance_dir_path}/dbno_mgr.num")).unwrap_or_default();
     // for target_refno in room_refno {
     //     if let Some(dbno) = dbno_mgr.get_dbno(target_refno) {
-    //         if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
+    //         if let Some(inst_data) = all_insts_mgr.get(&dbno) {
     //             {
-    //                 let all_refnos = inst_mgr.level_shape_mgr.get(&target_refno).unwrap();
+    //                 let all_refnos = inst_data.level_shape_mgr.get(&target_refno).unwrap();
     //                 for room_refno in all_refnos.value().clone().into_iter() {
     //                     if room_info_map.contains_key(&room_refno) {
     //                         continue;
     //                     }
-    //                     let ele_geos_info = inst_mgr.get_inst_data(room_refno);
+    //                     let ele_geos_info = inst_data.get_inst_data(room_refno);
     //                     let ele_refno = *ele_geos_info.key();
     //                     let room_colliders =
-    //                         collider_shape_mgr.get_collider(ele_refno, inst_mgr, &mesh_mgr);
+    //                         collider_shape_mgr.get_collider(ele_refno, inst_data, &mesh_mgr);
     //                     if let Some(target_abb) = ele_geos_info.aabb {
     //                         let mut withing_room_refnos =
     //                             vec![RefU64::from_refno_str("24381/109830").unwrap()];
@@ -61,8 +58,8 @@ pub async fn compute_rooms_by_projection(
     //                         withing_room_refnos.retain(|x| {
     //                             //直接判断点集，可以快速过滤一些构件
     //                             if let Some(dbno) = dbno_mgr.get_dbno(*x) {
-    //                                 if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
-    //                                     let ele_geos_info = inst_mgr.get_inst_data(*x);
+    //                                 if let Some(inst_data) = all_insts_mgr.get(&dbno) {
+    //                                     let ele_geos_info = inst_data.get_inst_data(*x);
     //                                     let mut has_checked = false;
     //                                     let tr = ele_geos_info.get_transform();
     //                                     for pt_kv in &ele_geos_info.ptset_map {
@@ -77,7 +74,7 @@ pub async fn compute_rooms_by_projection(
     //                                         }
     //                                         has_checked = true;
     //                                         let checking_colliders = collider_shape_mgr
-    //                                             .get_collider(*x, inst_mgr, &mesh_mgr);
+    //                                             .get_collider(*x, inst_data, &mesh_mgr);
     //                                         for rc in &room_colliders {
     //                                             for cc in &checking_colliders {
     //                                                 let target_pt = if let Some(tri_mesh) =
@@ -134,7 +131,7 @@ pub async fn compute_rooms_by_projection(
 /// （1）调用投影算法，投影到2d，进行计算
 pub async fn recompute_spatial_tree(
     room_refno: Vec<RefU64>,
-    all_insts_mgr: HashMap<u32, ShapeInstancesMgr>,
+    all_insts_mgr: HashMap<u32, ShapeInstancesData>,
     collider_shape_mgr: ColliderShapeMgr,
     db_option: &DbOption,
 ) -> anyhow::Result<HashMap<RefU64, (Aabb, Vec<RefU64>)>> {
@@ -142,7 +139,7 @@ pub async fn recompute_spatial_tree(
     // let mut file = fs::File::open("assets/mesh/mesh.bin")?;
     // let mut data = vec![];
     // file.read_to_end(&mut data)?;
-    // let mesh_mgr = bincode::deserialize::<CachedMeshesMgr>(&data)?;
+    // let mesh_mgr = bincode::deserialize::<MeshesData>(&data)?;
     //
     // let instance_dir_path = "assets/instance";
     // let mut file = fs::File::open("assets/accel.spa")?;
@@ -156,19 +153,19 @@ pub async fn recompute_spatial_tree(
     //     DbNumMgr::load_file(&format!("{instance_dir_path}/dbno_mgr.num")).unwrap_or_default();
     // for target_refno in room_refno {
     //     if let Some(dbno) = dbno_mgr.get_dbno(target_refno) {
-    //         if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
-    //             if inst_mgr.level_shape_mgr.contains_key(&target_refno) {
-    //                 let all_refnos = inst_mgr.level_shape_mgr.get(&target_refno).unwrap();
+    //         if let Some(inst_data) = all_insts_mgr.get(&dbno) {
+    //             if inst_data.level_shape_mgr.contains_key(&target_refno) {
+    //                 let all_refnos = inst_data.level_shape_mgr.get(&target_refno).unwrap();
     //                 for room_refno in all_refnos.value().clone().into_iter() {
     //                     if room_info_map.contains_key(&room_refno) {
     //                         continue;
     //                     }
-    //                     let ele_geos_info = inst_mgr.get_inst_data(room_refno);
+    //                     let ele_geos_info = inst_data.get_inst_data(room_refno);
     //                     {
     //                         //filter None aabb
     //                         let ele_refno = *ele_geos_info.key();
     //                         let room_colliders =
-    //                             collider_shape_mgr.get_collider(ele_refno, inst_mgr, &mesh_mgr);
+    //                             collider_shape_mgr.get_collider(ele_refno, inst_data, &mesh_mgr);
     //                         if let Some(target_abb) = ele_geos_info.aabb {
     //                             let mut withing_room_refnos = rtree
     //                                 .locate_intersecting_bounds(&target_abb)
@@ -179,8 +176,8 @@ pub async fn recompute_spatial_tree(
     //                             // withing_room_refnos.retain(|x| {
     //                             //     //直接判断点集，可以快速过滤一些构件
     //                             //     if let Some(dbno) = dbno_mgr.get_dbno(*x) {
-    //                             //         if let Some(inst_mgr) = all_insts_mgr.get(&dbno) {
-    //                             //             let ele_geos_info = inst_mgr.get_inst_data(*x);
+    //                             //         if let Some(inst_data) = all_insts_mgr.get(&dbno) {
+    //                             //             let ele_geos_info = inst_data.get_inst_data(*x);
     //                             //             let mut has_checked = false;
     //                             //             {
     //                             //                 let tr = ele_geos_info.get_transform();
@@ -192,7 +189,7 @@ pub async fn recompute_spatial_tree(
     //                             //                         };
     //                             //                     }
     //                             //                     has_checked = true;
-    //                             //                     let checking_colliders = collider_shape_mgr.get_collider(*x, inst_mgr, &mesh_mgr);
+    //                             //                     let checking_colliders = collider_shape_mgr.get_collider(*x, inst_data, &mesh_mgr);
     //                             //                     for rc in &room_colliders {
     //                             //                         for cc in &checking_colliders {
     //                             //                             let target_pt = if let Some(tri_mesh) = cc.as_ref().as_trimesh() {

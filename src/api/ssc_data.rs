@@ -15,7 +15,7 @@ use std::fs::File;
 use std::io::Read;
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::options::DbOption;
-use arangors_lite::{AqlQuery, Database};
+use bb8_arangodb::arangors::{AqlQuery, Database};
 use parry3d::math::Point;
 use crate::api::children::{travel_children_with_refno, travel_children_with_type};
 use crate::api::element::{query_ele_node, query_elenode_without_children_count, query_elenodes_without_children_count};
@@ -23,6 +23,7 @@ use crate::aql_api::{change_vec_refnos_into_vec_string, convert_refno_vec_from_v
 use crate::aql_api::children::query_travel_children_aql;
 use crate::aql_api::pdms_room::{get_room_name_split, query_all_need_compute_room_refno};
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_arango::ArDatabase;
 use crate::ssc::parse_room_info_from_excel;
 
 // 缓存该参考号的 owner 和 owner 的 type
@@ -43,16 +44,17 @@ pub struct SscEleNode {
 }
 
 /// 通过指定包围盒计算包围盒中的房间的所有节点
-pub async fn get_room_refnos_from_spa_tree_aql(room_refno: RefU64, database: &Database) -> anyhow::Result<Vec<RefU64>> {
+pub async fn get_room_refnos_from_spa_tree_aql(room_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
     let mut room_map = vec![];
     let refno = format!("room_eles/{}", room_refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::builder().query("\
     for v in 1 outbound @id room_edges
         filter v != null
         return {
             'refno':v._key,
         }").bind_var("id", refno)
-        .bind_var("id", room_refno.to_url_refno());
+        .bind_var("id", room_refno.to_url_refno())
+        .build();
     let results: Vec<String> = database.aql_query(aql).await?;
     let results = convert_refno_vec_from_vec_string(results);
     // let mut b_insert_self = true; // 需要将自己也加到 target_refnos 里面 方便显示 pane
@@ -104,7 +106,7 @@ pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<HashMap<R
     Ok(HashMap::default())
 }
 
-pub async fn query_all_room_data_aql(database: &Database, pool: &Pool<MySql>, db_option: &DbOption) -> anyhow::Result<HashMap<RefU64, SscEleNode>> {
+pub async fn query_all_room_data_aql(database: &ArDatabase, pool: &Pool<MySql>, db_option: &DbOption) -> anyhow::Result<HashMap<RefU64, SscEleNode>> {
     let mut result = HashMap::new();
     let all_room = parse_room_info_from_excel()?;
     let room_map = query_all_need_compute_room_refno(&db_option.clone().arch_db_nums.unwrap_or_default(), "FRMW", Some("-RM"), pool).await?;
@@ -126,7 +128,7 @@ pub async fn query_all_room_data_aql(database: &Database, pool: &Pool<MySql>, db
                         room_code: room_name,
                     });
                     // let panes = travel_children_with_type(*room_refno,"PANE".to_string(),pool).await?;
-                    // let target_refnos = get_room_refnos_from_spa_tree_aql(*room_refno, database).await?;
+                    // let target_refnos = get_room_refnos_from_spa_tree_aql(*room_refno, &database).await?;
                     // if let Ok(elenodes) = query_elenodes_without_children_count(target_refnos, &pool).await {
                     //     for ele in elenodes {
                     //         result.entry(ele.refno).or_insert(SscEleNode {
@@ -339,9 +341,9 @@ pub async fn update_ssc_type(names: Vec<String>, pool: &Pool<MySql>) -> anyhow::
 }
 
 /// 获取某个房间下的所有参考号
-pub async fn query_room_refnos_aql(room_name: &str, database: &Database) -> anyhow::Result<Vec<RefU64>> {
-    let aql = AqlQuery::new("return document('room_eles',@room_name)")
-        .bind_var("room_name", room_name);
+pub async fn query_room_refnos_aql(room_name: &str, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
+    let aql = AqlQuery::builder().query("return document('room_eles',@room_name)")
+        .bind_var("room_name", room_name).build();
     let result: Vec<String> = database.aql_query(aql).await?;
     Ok(convert_refno_vec_from_vec_string(result))
 }

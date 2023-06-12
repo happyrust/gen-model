@@ -2,17 +2,17 @@ use aios_core::geom_types::RvmGeoInfo;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::{EleGeoInstanceJson, RefU64};
 use aios_core::prim_geo::helper::RotateInfo;
-use arangors_lite::{AqlQuery, Database};
+use bb8_arangodb::arangors::{AqlQuery, Database};
 use bevy::prelude::Transform;
 use bitvec::macros::internal::funty::Floating;
 use glam::{Quat, Vec3};
 use nom::number::streaming::f32;
-use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+use crate::graph_db::pdms_arango::ArDatabase;
 use crate::options::DbOption;
 
-pub async fn create_cata_element_data(refno: RefU64, desi_instance: RvmGeoInfo, database: &Database) -> anyhow::Result<Vec<u8>> {
+pub async fn create_cata_element_data(refno: RefU64, desi_instance: RvmGeoInfo, database: &ArDatabase) -> anyhow::Result<Vec<u8>> {
     let mut data = Vec::new();
-    let geo_infos = query_rvm_geo_infos_aql(refno, database).await?;
+    let geo_infos = query_rvm_geo_infos_aql(refno, &database).await?;
     if geo_infos.is_none() { return Ok(data); }
     let geo_infos = geo_infos.unwrap();
     for (_idx, geo_info) in geo_infos.geo_params.into_iter().enumerate() {
@@ -144,13 +144,13 @@ pub async fn create_cata_element_data(refno: RefU64, desi_instance: RvmGeoInfo, 
 //     result
 // }
 //
-// async fn query_rvm_geo_infos_aql(refno: RefU64, database: &Database) -> anyhow::Result<Option<GeomsInfoAql>> {
+// async fn query_rvm_geo_infos_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<GeomsInfoAql>> {
 //     let key = refno.to_url_refno();
-//     let aql = AqlQuery::new(
+//     let aql = AqlQuery::builder().query(
 //         "\
 //         return document('geo_infos',@key)
 //         "
-//     ).bind_var("key", key);
+//     ).bind_var("key", key).build();
 //     let result = database.aql_query::<GeomsInfoAql>(aql).await;
 //     if result.is_err() { return Ok(None); }
 //     let mut result = result.unwrap();

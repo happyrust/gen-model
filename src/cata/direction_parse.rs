@@ -71,7 +71,7 @@ fn parse_rotation_struct(input: &str) -> IResult<&str, RotationStruct> {
 }
 
 ///解析expression到direction
-pub fn parse_expr_to_dir(expr: &str) -> Vec3 {
+pub fn parse_expr_to_dir(expr: &str) -> Option<Vec3> {
     if let Ok((_, res)) = parse_rotation_struct(expr) {
         let mut axis = res.origin_axis;
         if res.rot1.is_some() {
@@ -86,30 +86,8 @@ pub fn parse_expr_to_dir(expr: &str) -> Vec3 {
                 axis = quat2 * axis;
             }
         }
-        return vec3_round_2(axis);
+        return Some(vec3_round_2(axis));
     }
-    Vec3::ZERO
+    None
 }
 
-#[test]
-fn test_parse_vector() {
-    let test_str = "X30Y";
-    let dir = parse_expr_to_dir(test_str);
-    dbg!(dir);
-    let dir = parse_rotation_struct(test_str).unwrap();
-    dbg!(&dir);
-    dbg!(AXISES_MAP.get("-X"));
-    let test_str = "-X(59)Y";
-    let res= parse_expr_to_dir(test_str);
-    println!("{:?}",res);
-    let test_str = "Z(90.0)Y";
-    let res= parse_expr_to_dir(test_str);
-    println!("{:?}",res);
-    let test_str = "-Y45Z";
-    let res= parse_expr_to_dir(test_str);
-    println!("test_str: {:?}",res);
-    let test_str = "Y45-Z";
-    let res= parse_expr_to_dir(test_str);
-    println!("test_str: {:?}",res);
-    //Z DESIGN PARAM 14Y
-}

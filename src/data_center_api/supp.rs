@@ -8,8 +8,8 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 /// 获取电气支吊架信息
 pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
-    let database = aios_mgr.get_arangodb().await?;
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(database, refnos, vec!["STRU"]).await{
+    let database = aios_mgr.get_arango_db().await?;
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["STRU"]).await{
         for stru in children {
             let mut attr = Vec::new();
             attr.push(DataCenterAttr {
@@ -20,7 +20,7 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
                 attribute_model_code: "ERECAB48".to_string(),
                 value: AttrValue::AttrString("施工图阶段".to_string()).into(),
             });
-            let room_name = query_room_name_from_refno_aql(stru.refno, database).await?.unwrap_or("".to_string());
+            let room_name = query_room_name_from_refno_aql(stru.refno, &database).await?.unwrap_or("".to_string());
             attr.push(DataCenterAttr {
                 attribute_model_code: "ROOM2".to_string(),
                 value: AttrValue::AttrString(room_name).into(),

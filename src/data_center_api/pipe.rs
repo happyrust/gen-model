@@ -7,7 +7,7 @@ use std::sync::Arc;
 use aios_core::data_center::{DataCenterAttr, DataCenterInstance, DataCenterProject, DataCenterProjectWithRelations, DataCenterRelations};
 use aios_core::data_center::AttrValue::AttrString;
 use aios_core::pdms_types::{PdmsElement, RefU64};
-use arangors_lite::Database;
+use bb8_arangodb::arangors::Database;
 use bevy::render::render_resource::encase::private::RuntimeSizedArray;
 use sqlx::{MySql, Pool};
 use crate::api::attr::query_implicit_attr;
@@ -23,8 +23,10 @@ use crate::data_center_api::flan::get_data_center_flan_attr;
 use crate::data_center_api::redu::get_data_center_redu_attr;
 use crate::data_center_api::tee::get_data_center_tee_attr;
 use crate::data_center_api::tubi::get_data_center_tubi_attr;
+use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::{AiosDBManager, TUBI_TOL};
+use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_arango::ArDatabase;
 use crate::metadata::{convert_str_to_hash, get_characters_in_str};
 
 macro_rules! query_metadata {
@@ -57,9 +59,9 @@ pub async fn get_data_center_from_pipe(aios_mgr: &AiosDBManager, pipe_refno: Ref
     let pool = aios_mgr.get_project_pool_by_refno(pipe_refno).await;
     if pool.is_none() { return Ok(None); }
     let (_, pool) = pool.unwrap();
-    let database = aios_mgr.get_arangodb().await?;
+    let database = aios_mgr.get_arango_db().await?;
     // 找到所有需要统计的 bran
-    let bran_refnos = query_travel_children_with_type_aql(&database,pipe_refno ,"BRAN").await?;
+    let bran_refnos = query_travel_children_with_type_aql(&database, pipe_refno, "BRAN").await?;
     let bran_refnos = bran_refnos.into_iter().map(|x| x.into()).collect::<Vec<_>>();
     dbg!(&bran_refnos.len());
     // 获得 bran的信息
@@ -118,7 +120,7 @@ async fn get_bran_data(bran_refnos: &Vec<PdmsElement>, aios_mgr: &AiosDBManager)
 
 /// ref_map: 每个 bran 对应的 href 和 tref
 async fn get_instances_data(compute_refnos: HashMap<String, HashSet<RefU64>>, metadata_map: HashMap<String, Vec<String>>,
-                            pool: &Pool<MySql>, database: &Database) -> anyhow::Result<(HashMap<RefU64, DataCenterInstance>, HashMap<RefU64, Vec<RefU64>>, HashMap<RefU64, Vec<RefU64>>)> {
+                            pool: &Pool<MySql>, database: &ArDatabase) -> anyhow::Result<(HashMap<RefU64, DataCenterInstance>, HashMap<RefU64, Vec<RefU64>>, HashMap<RefU64, Vec<RefU64>>)> {
     // let mut bran_instances_map = HashMap::new(); // 将 bran 及其 href tref 的 instance 存在 map 中
     let mut instances = HashMap::new();
     let mut bran_children_map = HashMap::new();
@@ -136,7 +138,7 @@ async fn get_instances_data(compute_refnos: HashMap<String, HashSet<RefU64>>, me
             instances.insert(refno, instance);
             // 将 bran 下得元件放进去
             if b_bran {
-                let bran_elements = query_bran_info(refno, database).await?;
+                let bran_elements = query_bran_info(refno, &database).await?;
                 let bran_children = query_children_refnos_aql(database, refno).await?;
                 for idx in 0..bran_elements.len() {
                     // 放入元件数据
@@ -427,19 +429,18 @@ fn get_instance_data_element(metadata_map: &HashMap<String, Vec<String>>, refno:
 /// 提供给数据中台接口，部分自动获取数据
 ///
 /// datacenter_excel_map 读取处理后的元数据表格,参考 resource/附录I-工艺布置管件类元数据.xlsx
-pub async fn get_datacenter_bran_data(aios_mgr:&AiosDBManager,bran_refno:RefU64,
-                                      datacenter_excel_map:&HashMap<String, Vec<DataCenterMetadata>>) -> anyhow::Result<()>{
-    let database = aios_mgr.get_arangodb().await?;
+pub async fn get_datacenter_bran_data(aios_mgr: &AiosDBManager, bran_refno: RefU64,
+                                      datacenter_excel_map: &HashMap<String, Vec<DataCenterMetadata>>) -> anyhow::Result<()> {
+    let database = aios_mgr.get_arango_db().await?;
     // 拿到 tubi 信息,并去除 atta(不包含bran下的元件，只有tubi)
-    let tubi_infos = query_tubi_from_bran_filter_atta(bran_refno,database).await?;
-    let bran_children = query_children_aql(database,bran_refno).await?;
+    let tubi_infos = query_tubi_from_bran_filter_atta(bran_refno, &database).await?;
+    let bran_children = query_children_aql(&database, bran_refno).await?;
     // 处理 bran 下的元件属性 (不含tubi)
     for child in bran_children {
         let attr = aios_mgr.get_attr(child.refno).await?;
         // 自动生成部分属性
-        auto_get_datacenter_attr(child.refno,aios_mgr,&attr,datacenter_excel_map).await?;
+        auto_get_datacenter_attr(child.refno, aios_mgr, &attr, datacenter_excel_map).await?;
         // 手动处理剩余的属性
-
     }
     Ok(())
 }

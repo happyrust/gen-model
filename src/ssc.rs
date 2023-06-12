@@ -8,8 +8,7 @@ use std::sync::Arc;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{AttrVal, EleTreeNode, RefU64, RefU64Vec};
 use anyhow::anyhow;
-use arangors_lite::{AqlQuery, Database};
-use arangors_lite::collection::CollectionType::{Document, Edge};
+use bb8_arangodb::arangors::{AqlQuery, Database};
 use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::{DashMap, DashSet};
 use futures::future::OkInto;
@@ -23,13 +22,15 @@ use crate::api::element::*;
 use crate::api::project_mdb::query_db_nums_of_mdb;
 use crate::api::ssc_data::*;
 use crate::aql_api::children::{query_ancestor_till_type_aql, query_travel_children_aql};
-use crate::consts::{AQL_PDMS_ELES_COLLECTION, AQL_SSC_EDGE_COLLECTION, AQL_SSC_ELES_COLLECTION, PDMS_SSC_ELEMENTS_TABLE};
+use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{create_arangodb_conn, get_arangodb_conn_from_db_option, save_arangodb_with_database};
+use crate::graph_db::pdms_arango::*;
 use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode, SSCEleGraphNode};
 use crate::metadata::convert_str_to_hash;
 use crate::tables;
 use aios_core::aql_types::AqlEdge;
+use arangors::collection::CollectionType::*;
+use arangors::collection::CollectionType::Document;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SiteExcelData {
@@ -105,7 +106,7 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
         }
     }
     dbg!("创建SSC表完成");
-    let room_data = query_all_room_data_aql(mgr.get_arangodb().await?, project_pool, &mgr.db_option).await?;
+    let room_data = query_all_room_data_aql(&mgr.get_arango_db().await?, project_pool, &mgr.db_option).await?;
     let room_info = deal_room_info(room_data.clone());
     let (zone_level_map, zone_name_map, next_refno) = insert_set_ssc_node_sql(room_info.clone(), project_pool).await?;
     dbg!("SSC固定节点生成");
@@ -134,10 +135,10 @@ pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBMan
 }
 
 pub async fn async_total_ssc_data_refactor(mgr: &AiosDBManager) -> anyhow::Result<()> {
-    let database = mgr.get_arangodb().await?;
+    let database = mgr.get_arango_db().await?;
     // 创建图数据库连接
-    create_arangodb_conn(&database, AQL_SSC_EDGE_COLLECTION, Edge).await?;
-    create_arangodb_conn(&database, AQL_SSC_ELES_COLLECTION, Document).await?;
+    create_arango_document(&database, AQL_SSC_EDGE_COLLECTION, Edge).await?;
+    create_arango_document(&database, AQL_SSC_ELES_COLLECTION, Document).await?;
 
     Ok(())
 }
@@ -504,8 +505,8 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
                     }
                 } else {
                     // 如果发现该zone下 :CNPE_divco 没有值，直接把整个zone下的refno全部移除
-                    let database = mgr.get_arangodb().await?;
-                    if let Ok(children) = query_travel_children_aql(database, zone_refno).await {
+                    let database = mgr.get_arango_db().await?;
+                    if let Ok(children) = query_travel_children_aql(&database, zone_refno).await {
                         let children_len = children.len();
                         println!("删除不符合条件的 zone {:?} 下的所有参考号,共有{}条", zone_refno, children_len);
                         for child in children.into_iter() {
@@ -810,7 +811,7 @@ pub async fn query_ssc_room_refnos(room_info: &HashMap<String, RefU64>, pool: &P
 /// 通过 专业分类.xlsx 表中 pdms name 包含的关键字，将pdms_eles保存上对应的专业代码
 ///
 /// name_map: 从 get_room_level_from_excel() 直接读出来的 , pdms site 和 其下面 zone 的 name 对应的专业代码
-pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>, db_option: &DbOption, database: &Database, pool: &Pool<MySql>) -> anyhow::Result<()> {
+pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>, db_option: &DbOption, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let numbs = query_db_nums_of_mdb(&db_option.mdb_name, &db_option.module, pool).await?;
     // 先查找到 mdb下的所有 site
     let sites = query_types_refnos_names(&vec!["SITE"], pool, Some(&numbs)).await?;
@@ -855,7 +856,7 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>, db_opti
     }
     // todo 不能同时update多次 后期将这些aql优化到一次执行
     for update_aql in update_aqls {
-        let _r = database.aql_query::<()>(AqlQuery::new(update_aql.as_str())).await;
+        let _r = database.aql_query::<()>(AqlQuery::builder().query(update_aql.as_str()).build() ).await;
     }
     Ok(())
 }
@@ -877,7 +878,7 @@ impl SscLevelExcel {
 }
 
 /// 将 ssc_level.xlsx  ssc 固定节点保存到图数据库中
-async fn save_ssc_level_excel(database: &Database) -> anyhow::Result<()> {
+async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
     let mut eles_results = Vec::new();
     let mut edge_results = Vec::new();
 
@@ -902,6 +903,7 @@ async fn save_ssc_level_excel(database: &Database) -> anyhow::Result<()> {
                 name,
                 owner: owner.to_url_refno(),
                 dbnum: 0,
+                cata_hash: None,
             });
 
             edge_results.push(AqlEdge{
@@ -912,9 +914,9 @@ async fn save_ssc_level_excel(database: &Database) -> anyhow::Result<()> {
         }
     }
     let eles_value = serde_json::to_value(&eles_results)?;
-    save_arangodb_with_database(eles_value, AQL_SSC_ELES_COLLECTION, database, false).await?;
+    save_arangodb_doc(eles_value, AQL_SSC_ELES_COLLECTION, database, false).await?;
     let edge_value = serde_json::to_value(&edge_results)?;
-    save_arangodb_with_database(edge_value, AQL_SSC_EDGE_COLLECTION, database, false).await?;
+    save_arangodb_doc(edge_value, AQL_SSC_EDGE_COLLECTION, database, false).await?;
     Ok(())
 }
 

@@ -1,5 +1,5 @@
 use aios_core::pdms_types::{PdmsElement, RefU64};
-use arangors_lite::{AqlQuery, Database};
+use bb8_arangodb::arangors::{AqlQuery, Database};
 use sqlx::{MySql, Pool, Row};
 use crate::api::element::query_ele_nodes_by_refnos;
 use crate::aql_api::convert_refno_vec_from_vec_string;

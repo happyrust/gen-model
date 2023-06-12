@@ -1,11 +1,12 @@
 use aios_core::pdms_types::{EleGeosInfo, RefU64};
-use arangors_lite::{AqlQuery, Database};
+use bb8_arangodb::arangors::{AqlQuery, Database};
 use sqlx::{MySql, Pool, Row};
-use crate::AQL_PDMS_INST_COLLECTION;
+use crate::consts::AQL_PDMS_INST_INFO_COLLECTION;
+use crate::graph_db::pdms_arango::ArDatabase;
 use crate::graph_db::structs::{PdmsEleGraphEdge, SSCEleGraphNode};
 
 /// 将 ssc固定节点保存到图数据库（zone下面的层级除外）
-pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &Database) -> anyhow::Result<()> {
+pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &ArDatabase) -> anyhow::Result<()> {
     let sql = gen_query_all_ssc_fixed_nodes_sql();
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
     let collection = "ssc_eles";
@@ -36,19 +37,21 @@ pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &Database)
             ssc_ele_edges.push(edge);
         }
         let json = serde_json::to_value(&ssc_eles).unwrap();
-        let aql = AqlQuery::new("LET data = @elements
+        let aql = AqlQuery::builder().query("LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
             .bind_var("@collection", collection)
-            .bind_var("elements", json);
+            .bind_var("elements", json)
+            .build();
         let _result: Vec<()> = database.aql_query(aql).await?;
 
         let json = serde_json::to_value(&ssc_ele_edges).unwrap();
-        let aql = AqlQuery::new("LET data = @edges
+        let aql = AqlQuery::builder().query("LET data = @edges
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
             .bind_var("@collection", ssc_edge_collection)
-            .bind_var("edges", json);
+            .bind_var("edges", json)
+            .build();
         let _result: Vec<()> = database.aql_query(aql).await?;
     }
 
@@ -56,10 +59,10 @@ pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &Database)
 }
 
 /// 传入ssc参考号，返回该参考号下面的模型数据
-pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: &Database) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
+pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
     let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
-    let pdms_instances = AQL_PDMS_INST_COLLECTION;
-    let aql = AqlQuery::new("
+    let pdms_inst_infos = AQL_PDMS_INST_INFO_COLLECTION;
+    let aql = AqlQuery::builder().query("
     FOR c IN 0..10 inbound @refno ssc_edges
         let f = document(@collection,c._key)
         Filter f != null
@@ -74,7 +77,8 @@ pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: 
             'flow_pt_indexs':f.flow_pt_indexs
         }")
         .bind_var("refno", refno_aql)
-        .bind_var("collection", pdms_instances);
+        .bind_var("collection", pdms_inst_infos)
+        .build();
     let result: Vec<EleGeosInfo> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }
     // let r  = result.into_iter().map(|x| { EleGeosInfo::from_json_type(x)}).collect::<Vec<_>>();

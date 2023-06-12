@@ -33,7 +33,7 @@ pub trait PdmsDataInterface : Send + Sync{
     fn get_owner(&self, refno: RefU64) -> RefU64;
 
     ///获得根据refno出去的外键路径, 只设置一个终点，返回最后的结果
-    async fn query_foreign_refno(&self, refno: RefU64, start_types: &[&[&str]], end_types: &[&str], t_types: &[&str]) -> anyhow::Result<Option<RefU64>>;
+    async fn query_foreign_refnos(&self, refnos: &[RefU64], start_types: &[&[&str]], end_types: &[&str], t_types: &[&str], depth: u32) -> anyhow::Result<Vec<RefU64>>;
 
     ///沿着owner path找到需要找的第一个foreign目标节点，可以找到父节点，也可以找到子节点
     async fn query_first_foreign_along_path(&self, refno: RefU64, start_types: &[&str], end_types: &[&str], t_types: &[&str]) -> anyhow::Result<Option<RefU64>>;
@@ -80,7 +80,10 @@ pub trait PdmsDataInterface : Send + Sync{
     async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>>;
 
     ///查询指定参考号下负实体和正实体的集合
-    async fn query_refnos_has_pos_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)>>;
+    async fn query_refnos_has_pos_neg_map(&self, refnos: &[RefU64]) -> anyhow::Result<HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)>>;
+
+    ///查询哪些节点下面有负实体
+    async fn query_parent_refnos_has_neg_geos(&self, refnos: &[RefU64]) -> anyhow::Result<Vec<RefU64>>;
 
     ///查询有几何体的父节点 refno
     async fn query_refnos_has_geos(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>>;

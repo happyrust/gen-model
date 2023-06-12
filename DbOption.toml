@@ -1,20 +1,25 @@
 #同步文件配置
-total_sync = true
-sync_graph_db = false
+total_sync = false
+enable_log = false
+sync_graph_db = true
 sync_tidb = true
 incr_sync = false
-replace_dbs = false
+replace_dbs = true
 
 #项目设置
-project_path = "D:/AVEVA/Projects/E3D2.1"  #TestCatalogue
-included_projects = ["AvevaMarineSample"]
-#, "AvevaCatalogue", "SCB", "ZDJ"
-#included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]  #"AvevaPlantSample",
+project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
+included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
+#included_projects = ["AvevaCatalogue"]  #"AvevaPlantSample",
+#included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
+
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
+project_code = 1516
 module = "DESI"
 gen_model_mesh = true
-gen_spatial_tree = true
+apply_boolean_operation = true
+#是否生成房间树
+gen_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 100
 
@@ -24,42 +29,152 @@ multi_threads = true
 only_sync_sys = false
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
+arangodb_user = "root"
+arangodb_password = ""
 
 #tidb 配置
 ip = "127.0.0.1"
 user = "root"
-password = "root"
-port = "3306"
-#port = "4000"
+password = ""
+#port = "3306"
+port = "4000"
 sql_threads_number = 50
-batch_insert_sql_cnt = 500   #mysql 批量插入的数量
+batch_insert_sql_cnt = 100   #mysql 批量插入的数量
+
+#服务器启动配置
 server_release_ip = "127.0.0.1:9099"
-arangodb_user = "root"
-arangodb_password = ""
-# 普华数据库连接
-puhua_database_ip = "pms.powerpms.net:23306"
-puhua_database_user = "ZY_User"
-puhua_database_password = "ZYuser@123"
+
 
 #调试选项
 replace_mesh = false
 save_model_mesh_to_graph_db = true
-need_sync_refno_basic = true  #是否重新生成 refno_basic 缓存
+need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
 reset_mdb_project = false      #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
-debug_root_refnos = ["24383/66456"]
-#debug_branch_refno = "24383/100842"
-#debug_desi_refno = "24381/56685"
-debug_refno_types = ["CATA", "LOOP", "PRIM"]  # "CATA", "LOOP", "PRIM"
-#debug_refno_types = ["CATA", "LOOP", "PRIM"]
-#debug_db_num = 7997
-#included_db_files = ["acp7002_0001"]
-#replace_types = ["MDB"]
-manual_db_nums = [7999]
+
+debug_refno_types = ["CATA", "LOOP", "PRIM"]
+#debug_refno_types = ["CATA"]
+#included_db_files = ["ams7997_0001"]
+#included_db_files = ["ams7997_0001"]
+#manual_db_nums = [7999, 7997, 1112, 8000]
+manual_db_nums = [1112]  #, 8000
 plat_url = ""
-enable_log = false
-room_root_refnos = ["24381/34919"]
+
+#puhua
+puhua_database_ip = ""
+puhua_database_user = ""
+puhua_database_password = ""
+
+#joint还有问题，方位对齐的问题
+#debug_root_refnos = ["23708/26027"]
+
+
+#管道不出来的情况，需要查一下原因, *以解决
+#debug_root_refnos = ["24381/57428"]
+
+#debug_root_refnos = ["9304/2"]
+#拉伸体的wire共线的问题, 开门洞还是有问题需要调试
+#debug_root_refnos = ["17496/106258"]
+
+#生成会崩溃, 已解决
+#debug_root_refnos = ["24383/73928"]
+
+#房间计算用
+#debug_root_refnos = ["24381/34848"]
+
+#风管还有问题
+#debug_root_refnos = ["24381/57479"]
+
+#风管有问题  还剩下OF的计算没有解决
+#debug_root_refnos = ["24381/57478"]
+#风管的rtorus 生成有问题
+#debug_root_refnos = ["24381/57524"]
+
+#桥架有问题 *已解决
+#debug_root_refnos = ["24384/22404"]
+
+#楼板生成有问题, 需要offset，这里判断如果是extrusion，就需要offset
+#debug_root_refnos = ["24381/40192"]
+#debug_root_refnos = ["24381/40451"]
+
+#debug_root_refnos = ["24384/24932"]
+
+#生成的负实体，没有将圆柱体削成半球
+#debug_root_refnos = ["24381/36945"]
+
+#debug_root_refnos = ["24383/73985"]
+
+#Cut 崩溃, 需要一个个切
+#debug_root_refnos = ["24381/57864"]
+
+#Cut 崩溃, 被offset影响
+#debug_root_refnos = ["24383/78369"]
+
+#debug_root_refnos = ["24383/76668"]
+
+
+#transform 有不合适的值，NAN
+#debug_root_refnos = ["24381/105513"]
+
+#stwall的元件库生成模型有错误
+#debug_root_refnos = ["17496/106397"]
+
+#24381_105593
+
+#debug_root_refnos = ["17496/169982"]
+#debug_root_refnos = ["25688/4135"]
+#debug_root_refnos = ["25688/4160"]
+#debug_root_refnos = ["9304/2"]
+
+#rtor显示问题
+#debug_root_refnos = ["24381/159849"]
+
+#管道测试
+#debug_root_refnos = ["24381/159849"]
+
+#大量负实体测试
+#debug_root_refnos = ["24381/101405"]
+#debug_root_refnos = ["17496/169987"]
+
+#SCTN测试
+#debug_root_refnos = ["25688/4377"]
+
+#WALL测试，SPLINE的问题
+#debug_root_refnos = ["24381/44638"]
+
+#debug_root_refnos = ["13246/101405"]
+
+#debug_root_refnos = ["17496/169983"]
+
+#WALL 的调试
+#debug_root_refnos = ["24381/46775"]
+
+
+#debug_root_refnos = ["17496/169982"]
+#debug_root_refnos = ["24381/46775"]
+#debug_root_refnos = ["9304/2"]
+debug_root_refnos = ["17496/169984"]
+
+#24381/34109,
+#24381/42520,
+#24381/44873,
+#24381/46775,
+#24381/48631,
+#24381/57476,
+#24381/76564,
+#24381/79977,
+#24381/100675,
+#24381/101405,
+#24381/177373,
+
+#指定哪些根节点下面是房间，以FRMW为一个整体
+room_root_refnos = ["24381/35538", "24381/35622"]
+
+#room_root_refnos = ["24381/35622"]
+#24381_105593\
+
+
 
 
