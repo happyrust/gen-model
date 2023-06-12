@@ -10,7 +10,7 @@ use crate::api::attr::query_explicit_attr;
 use crate::api::children::travel_children_with_type;
 use crate::api::element::*;
 use crate::aql_api::children::query_travel_children_with_type_aql;
-use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
+use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
 use crate::aql_api::pdms_room::*;
 use crate::consts::PUHUA_DQ_MATERIAL_TABLE;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -245,7 +245,7 @@ pub(crate) async fn get_refno_world_poss_pose(refno: RefU64, aios_mgr: &AiosDBMa
 }
 
 /// 返回pspec属性对应的中文名
-pub(crate) async fn get_pspec_code(refno: RefU64, database: &Database) -> anyhow::Result<String> {
+pub(crate) async fn get_pspec_code(refno: RefU64, database: &ArDatabase) -> anyhow::Result<String> {
     let pspe_name = query_foreign_name_aql(refno, vec!["PSPE", "PSPE"], database).await?;
     let mut kind = "".to_string();
     if let Some(pspe_name) = pspe_name {
