@@ -79,11 +79,7 @@ use crate::graph_db::pdms_arango::{ArDatabase, ArPool, connect_arangodb, save_ar
 use crate::graph_db::pdms_inst_arango::*;
 use crate::mdb::get_project_mdb;
 use crate::tables::{gen_create_project_mdb_json_sql, gen_create_project_mdb_sql};
-// use bb8_arangodb::bb8::Pool as ArangoPool;
 use bb8_arangodb::{ArangoConnectionManager, AuthenticationMethod};
-
-#[cfg(feature = "opencascade")]
-use opencascade::{DsShape, Edge, OCCShape, Wire};
 use parry3d::query::{Ray, RayCast};
 use crate::data_interface::db_manager::GeoEnum;
 use crate::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;

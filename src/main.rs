@@ -115,12 +115,6 @@ async fn main() -> anyhow::Result<()> {
         info!("read cached mesh ok.");
     }
 
-    if db_option.gen_model_mesh {
-        println!("正在生成模型");
-        let mut time = Instant::now();
-        AiosDBManager::cache_geos_data(mgr.clone(), db_option.clone()).await?;
-        info!("生成模型花费时间: {} ms", time.elapsed().as_millis());
-    }
 
     ///生成ssc 树
     if db_option.rebuild_ssc_tree {
