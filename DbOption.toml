@@ -1,8 +1,8 @@
 #同步文件配置
-total_sync = false
+total_sync = true
 enable_log = false
-sync_graph_db = true
-sync_tidb = true
+sync_graph_db = false
+sync_tidb = false
 #保存到本地数据库redb
 sync_redb = true
 incr_sync = false
@@ -62,7 +62,7 @@ only_rebuild_pdms_element = false
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
 #included_db_files = ["ams7997_0001"]
-included_db_files = ["ams1112_0001"]
+included_db_files = ["ams7351_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 manual_db_nums = [7997]  #, 8000
 plat_url = ""

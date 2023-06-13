@@ -135,7 +135,7 @@ pub(crate) async fn auto_get_attr_from_metadata_excel(refno: RefU64, attr: &Attr
             });
         } else {
             let attr_val = auto_get_attr_from_metadata_excel_attr_function(&function, attr, &material_map)
-                .unwrap_or(AttrVal::StringType(SmolStr::default()));
+                .unwrap_or(AttrVal::StringType(String::new()));
             datacenter_attrs.push(DataCenterAttr {
                 attribute_model_code: auto_data.attr_code.to_string(),
                 value: attr_val.get_val_as_string(),
@@ -179,14 +179,14 @@ fn auto_get_attr_from_metadata_excel_attr_function(function: &Vec<&str>, attr: &
         "material()" => {
             let material_value = function[1];
             if let Some(value) = material_map.get(material_value) {
-                Some(AttrVal::StringType(SmolStr::new(value.value())))
+                Some(AttrVal::StringType(value.value().to_string()))
             } else {
                 None
             }
         }
         "String" => {
             match function[1] {
-                "default()" => { Some(AttrVal::StringType(SmolStr::default())) }
+                "default()" => { Some(AttrVal::StringType(String::default())) }
                 _ => { None }
             }
         }

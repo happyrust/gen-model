@@ -72,6 +72,7 @@ opencascade = { path = "../dslcad/crates/opencascade", optional = true }
 serde_with = "3.0.0"
 tokio-stream = "0.1.14"
 rayon = "1.7.0"
+redb = "0.22.0"
 #geo = "0.24.1"
 
 

@@ -29,7 +29,7 @@ pub fn gen_implicit_attr_data(attr: AttrMap) -> Vec<u8> {
                 values.push(val.to_be_bytes()[..4].to_vec());
             }
             AttrVal::StringType(val) => {
-                if !EXPR_ATT_SET.contains(&(*hash as i32)) {
+                if !EXPR_ATT_SET.contains(&(hash as i32)) {
                     let v = val.as_str().as_bytes().to_vec();
                     let len = v.len() as f32;
                     let l = (((len / 4.0).ceil() + 1.0) as u16).to_be_bytes().to_vec();

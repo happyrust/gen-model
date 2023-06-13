@@ -13,7 +13,6 @@ use glam::{Mat3, Quat, Vec2, Vec3};
 use itertools::any;
 use nom::Parser;
 use regex::{Captures, NoExpand, Regex};
-use smol_str::SmolStr;
 use tokio::runtime::Runtime;
 use crate::cata::direction_parse::parse_expr_to_dir;
 use crate::cata::polish_notation::Stack;
@@ -72,7 +71,7 @@ fn test_expression_regex() {
     }
 }
 
-pub fn eval_str_to_f32<T: PdmsDataInterface>(input_expr: impl AsRef<str>, context: &BTreeMap<SmolStr, SmolStr>, interface: Option<&T>) -> anyhow::Result<f32> {
+pub fn eval_str_to_f32<T: PdmsDataInterface>(input_expr: impl AsRef<str>, context: &BTreeMap<String, String>, interface: Option<&T>) -> anyhow::Result<f32> {
     let input_expr = input_expr.as_ref().trim().to_uppercase();
     eval_str_to_f64(&input_expr, context, interface).map(|x| x as f32)
 }
@@ -103,7 +102,7 @@ pub const INTERNAL_PDMS_EXPRESS: [&'static str; 20] = [
 
 ///评估表达式的值
 pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
-                                             context: &BTreeMap<SmolStr, SmolStr>,
+                                             context: &BTreeMap<String, String>,
                                              interface: Option<&T>) -> anyhow::Result<f64> {
     if input_expr.is_empty() || input_expr == "UNSET" {
         return Ok(0.0);
@@ -166,8 +165,8 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     if new_exp.contains("RPRO") {
         // dbg!(&new_exp);
         new_exp = rpro_re.replace_all(&new_exp, |caps: &Captures| {
-            let key: SmolStr = format!("{}_{}", &caps[1], &caps[2]).into();
-            let default_key: SmolStr = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
+            let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
+            let default_key: String = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
             let v = context.get(&key).map(|x| x.to_string()).unwrap_or("0".to_string());
             if let Ok(t) = eval_str_to_f64(&v, &context, interface) {
                 t.to_string()
@@ -190,7 +189,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             let c2 = caps.get(2).map_or("", |m| m.as_str());
             let c3 = caps.get(3).map_or("", |m| m.as_str());
             // 小数向下取整
-            let k: SmolStr = format!("{}{}", c1, c3.parse::<f32>().map(|x| x.floor().to_string()).unwrap_or_default()).into();
+            let k: String = format!("{}{}", c1, c3.parse::<f32>().map(|x| x.floor().to_string()).unwrap_or_default()).into();
             // dbg!(&k);
             if context.contains_key(&k) {
                 result_exp = result_exp.replace(s, &context[&k]);
@@ -201,8 +200,8 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         result_exp = result_exp.replace("ATTRIB", "");
         if result_exp.contains("RPRO") {
             result_exp = rpro_re.replace_all(&result_exp, |caps: &Captures| {
-                let key: SmolStr = format!("{}_{}", &caps[1], &caps[2]).into();
-                let default_key: SmolStr = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
+                let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
+                let default_key: String = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
 
                 context.get(&key).map(|x| x.to_string()).unwrap_or(
                     context.get(&default_key).map(|x| x.to_string()).unwrap_or("0".to_string())
@@ -225,7 +224,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         let c1 = caps.get(1).map_or("", |m| m.as_str());
         let c2 = caps.get(2).map_or("", |m| m.as_str());
         let c3 = caps.get(3).map_or("", |m| m.as_str());
-        let mut k = SmolStr::new("");
+        let mut k = String::new();
         if c1.starts_with("DESIGN") {
             k = format!("DESI{}", c3).into();  //design's params
         } else {
@@ -248,7 +247,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             new_exp = re.replace_all(&new_exp, format!(" {rs} ").as_str()).to_string();
         }
     }
-    let seg_strs: Vec<SmolStr> = new_exp.split_whitespace().map(|x| x.trim().into()).collect::<Vec<_>>();
+    let seg_strs: Vec<String> = new_exp.split_whitespace().map(|x| x.trim().into()).collect::<Vec<_>>();
     if seg_strs.len() == 0 {
         return Ok(0.0);
     }
@@ -634,7 +633,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
 
 pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
                                                  scom: &ScomInfo,
-                                                 context: &BTreeMap<SmolStr, SmolStr>,
+                                                 context: &BTreeMap<String, String>,
                                                  interface: Option<&T>) -> anyhow::Result<(Vec3, Vec3)> {
     let mut dir_str = axis.direction.trim();
     let mut dir = Vec3::ZERO;
@@ -655,7 +654,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
 }
 
 //Y is N and Z is U
-pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(ori_str: &str, context: &BTreeMap<SmolStr, SmolStr>, interface: Option<&T>) -> anyhow::Result<Quat> {
+pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(ori_str: &str, context: &BTreeMap<String, String>, interface: Option<&T>) -> anyhow::Result<Quat> {
     let dir_strs = ori_str.split(" and ").collect::<Vec<_>>();
     // dbg!(&dir_strs);
     if dir_strs.len() < 2 {
@@ -706,7 +705,7 @@ pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(ori_str: &str, context: &BTre
     Ok(Quat::from_mat3(&mat))
 }
 
-pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeMap<SmolStr, SmolStr>, interface: Option<&T>) -> anyhow::Result<Vec3> {
+pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeMap<String, String>, interface: Option<&T>) -> anyhow::Result<Vec3> {
     let dir_str = pdir.to_uppercase().replace("AXIS", "");
     let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();
     let mut new_dir_str = dir_str.clone();

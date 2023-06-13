@@ -12,8 +12,6 @@ use anyhow::anyhow;
 use bb8_arangodb::arangors::Database;
 use bevy::prelude::error;
 use glam::{Vec2, Vec3};
-// use sea_orm::sea_query::IndexType::Hash;
-use smol_str::SmolStr;
 use crate::aql_api::dtse_attr::query_dtse_ppro_from_catr_refno;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::para_value::query_para_value;
@@ -27,7 +25,7 @@ use crate::graph_db::pdms_arango::ArDatabase;
 /// 求解axis的数值, 得到 {num:  }
 pub fn resolve_axis_params<T: PdmsDataInterface>(
     scom: &ScomInfo,
-    context: &BTreeMap<SmolStr, SmolStr>,
+    context: &BTreeMap<String, String>,
     interface: Option<&T>,
 ) -> BTreeMap<i32, CateAxisParam> {
     let mut map = BTreeMap::new();
@@ -49,7 +47,7 @@ pub fn resolve_gms<T: PdmsDataInterface>(
     des_refno: RefU64,
     gmse_raw_paras: &[GmParam],
     jusl_param: &Option<PlinParam>,
-    context: &BTreeMap<SmolStr, SmolStr>,
+    context: &BTreeMap<String, String>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
     interface: Option<&T>,
 ) -> Vec<CateGeoParam> {
@@ -83,7 +81,7 @@ pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
     des_refno: RefU64,
     gm_param: &GmParam,
     jusl_param: &Option<PlinParam>,
-    context: &BTreeMap<SmolStr, SmolStr>,
+    context: &BTreeMap<String, String>,
     axis_params: &BTreeMap<i32, CateAxisParam>,
     interface: Option<&T>,
 ) -> anyhow::Result<CateGeoParam> {
@@ -107,7 +105,7 @@ pub struct CataExprContext {
     pub params: Vec<f64>,
     pub dtse_expr_map: HashMap<String, String>,
     pub dtse_default_map: HashMap<String, String>,
-    // pub context: HashMap<SmolStr, SmolStr>,
+    // pub context: HashMap<String, String>,
 }
 
 impl CataExprContext {
@@ -132,8 +130,8 @@ impl CataExprContext {
         }))
     }
     //需要获取design的数据
-    pub async fn build(&self, mgr: &AiosDBManager, des_refno: RefU64) -> BTreeMap<SmolStr, SmolStr> {
-        let mut context: BTreeMap<SmolStr, SmolStr> = Default::default();
+    pub async fn build(&self, mgr: &AiosDBManager, des_refno: RefU64) -> BTreeMap<String, String> {
+        let mut context: BTreeMap<String, String> = Default::default();
         if let Ok(attr_map) = mgr.get_attr(des_refno).await {
             let mut desp = attr_map.get_f64_vec("DESP").unwrap_or_default();
             for i in 0..desp.len() {
@@ -150,13 +148,13 @@ impl CataExprContext {
                     desp[i].to_string().into(),
                 );
             }
-            let height: SmolStr = attr_map.get_as_string("HEIG").unwrap_or("0.0".into()).into();
+            let height: String = attr_map.get_as_string("HEIG").unwrap_or("0.0".into()).into();
             context.insert(DDHEIGHT_STR.into(), height.clone());
             context.insert("HEIG".into(), height);
-            let angle: SmolStr = attr_map.get_as_string("ANGL").unwrap_or("0.0".into()).into();
+            let angle: String = attr_map.get_as_string("ANGL").unwrap_or("0.0".into()).into();
             context.insert(DDANGLE_STR.into(), angle.clone());
             context.insert("ANGL".into(), angle);
-            let radi: SmolStr = attr_map.get_as_string("RADI").unwrap_or("0.0".into()).into();
+            let radi: String = attr_map.get_as_string("RADI").unwrap_or("0.0".into()).into();
             context.insert(DDRADIUS_STR.into(), radi.clone());
             context.insert("RADI".into(), radi);
         } else {
@@ -198,7 +196,7 @@ impl CataExprContext {
 pub fn resolve_gmse_params<T: PdmsDataInterface>(
     gm: &GmParam,
     jusl_param: &Option<PlinParam>,
-    context: &BTreeMap<SmolStr, SmolStr>,
+    context: &BTreeMap<String, String>,
     axis_param_map: &BTreeMap<i32, CateAxisParam>,
     interface: Option<&T>,
 ) -> anyhow::Result<GmseParamData> {
@@ -344,10 +342,10 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
 pub fn resolve_axis_param<T: PdmsDataInterface>(
     axis_param: &AxisParam,
     scom: &ScomInfo,
-    context: &BTreeMap<SmolStr, SmolStr>,
+    context: &BTreeMap<String, String>,
     interface: Option<&T>,
 ) -> anyhow::Result<CateAxisParam> {
-    let key: SmolStr = axis_param.pconnect.replace("\n", "").replace(" ", "").into();
+    let key: String = axis_param.pconnect.replace("\n", "").replace(" ", "").into();
     let pconnect = if context.contains_key(&key) {
         let tmp = context[&key].parse::<u32>().unwrap_or(0u32);
         db1_dehash(tmp)
@@ -439,7 +437,7 @@ pub fn parse_to_f64(input: &[u8]) -> f64 {
 
 
 #[inline]
-pub fn convert_u32_to_noun(input: &[u8]) -> SmolStr {
+pub fn convert_u32_to_noun(input: &[u8]) -> String {
     db1_dehash(parse_to_u32(input.try_into().unwrap())).into()
 }
 

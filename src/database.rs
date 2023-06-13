@@ -162,7 +162,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                     } else {
                         continue;
                     }
-                    if kk == *TYPE_HASH as i32 {
+                    if kk == TYPE_HASH as i32 {
                         attr_map.insert(
                             vv.offset,
                             (att_name, StringType(db1_dehash(k as u32).into())),
@@ -274,7 +274,7 @@ pub fn gen_implicit_attr_insert_sql(hash: u32) -> (String, Vec<NounHash>) {
     let implicit_names = ATTR_INFO_MAP.get_type_implicit_att_names(type_name.as_str());
     let column_hashs = implicit_names
         .iter()
-        .filter_map(|x| (x != "unset").then(|| NounHash(db1_hash(x.as_str()))))
+        .filter_map(|x| (x != "unset").then(|| (db1_hash(x.as_str()))))
         .collect();
     let v_sql = implicit_names
         .iter()
@@ -347,7 +347,7 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
     if let Some(info_map) = ATTR_INFO_MAP.get(&(db1_hash(type_name) as i32)) {
         for noun_hash in column_hashes {
             //如果没有这个属性，需要用unset顶上
-            //if noun_hash != &NounHash(UNSET_NOUN)
+            //if noun_hash != &(UNSET_NOUN)
             if let Some(v) = i_att.get(noun_hash) {
                 match v {
                     AttrVal::InvalidType => {}
@@ -412,7 +412,7 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                     AttrVal::StringHashType(_) => {}
                 }
             } else {
-                if let Some(info) = info_map.get(&(**noun_hash as i32)) {
+                if let Some(info) = info_map.get(&(*noun_hash as i32)) {
                     // todo 和上面的 math 合并为一个
 
                     match &info.default_val {
@@ -655,6 +655,24 @@ pub async fn sync_total_async_threaded(
                             .await?;
                     }
                     println!("图数据库保存完成");
+                }
+
+                if db_option.sync_redb.unwrap_or(true) {
+                    use redb::{Database, Error, ReadableTable, TableDefinition};
+                    let db = Database::create(format!("{}.redb", &project_clone))?;
+                    let table_name = format!("{db_no}");
+                    let table: TableDefinition<u64, &[u8]> = TableDefinition::new(&table_name);
+                    let write_txn = db.begin_write()?;
+                    {
+                        let mut table = write_txn.open_table(table)?;
+                        for kv in total_attr_map_arc.as_ref() {
+                            let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                            table.insert(**kv.key(), &*vec)?;
+                        }
+                        // table.insert("my_key", &123)?;
+                    }
+                    write_txn.commit()?;
+                    println!("保存到本地db完成");
                 }
 
                 //如果不需要同步tidb，continue
@@ -944,7 +962,7 @@ fn set_uda_attr(
                 uda_map
                     .entry(noun)
                     .or_insert_with(AttrMap::default)
-                    .entry(NounHash(ukey as u32))
+                    .entry((ukey as u32))
                     .or_insert(default.clone());
             }
         }
