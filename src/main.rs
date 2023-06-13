@@ -111,12 +111,12 @@ async fn main() -> anyhow::Result<()> {
     }
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    if let Ok(cache_mesh) = MeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
+    if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
         info!("read cached mesh ok.");
     }
 
-    if db_option.gen_model_mesh {
+    if db_option.gen_model {
         println!("正在生成模型");
         let mut time = Instant::now();
         cache_geos_data(mgr.clone(), db_option.clone()).await?;
@@ -160,6 +160,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, "para_eles", Document).await?;
     create_arango_document(&database, AQL_PDMS_EDGES_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
+    create_arango_document(&database, AQL_PDMS_MESH_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_INFO_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_GEO_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_TUBI_COLLECTION, Document).await?;

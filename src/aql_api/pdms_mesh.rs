@@ -35,19 +35,19 @@ struct PdmsMeshQueryData {
     pub data: String,
 }
 
-pub async fn query_pdms_mesh_data(hash: Vec<u64>, pool: &Pool<MySql>) -> anyhow::Result<MeshesData> {
-    let mut cache_mgr = MeshesData::default();
+pub async fn query_pdms_mesh_data(hash: Vec<u64>, pool: &Pool<MySql>) -> anyhow::Result<PlantMeshesData> {
+    let mut cache_mgr = PlantMeshesData::default();
     let query_sql = gen_query_pdms_mesh_from_refno_sql(hash);
     let results = sqlx::query(&query_sql).fetch_all(&mut pool.acquire().await?).await;
     if let Ok(results) = results {
-        for result in results {
-            let hash = result.get::<u64, _>("HASH");
-            let mesh = result.get::<Vec<u8>, _>("MESH");
-            let mesh = PlantMesh::from_compress_bytes(&mesh);
-            if mesh.is_none() { continue; }
-            let mesh = mesh.unwrap();
-            cache_mgr.meshes.entry(hash).or_insert(mesh);
-        }
+        // for result in results {
+        //     let hash = result.get::<u64, _>("HASH");
+        //     let mesh = result.get::<Vec<u8>, _>("MESH");
+        //     let mesh = PlantGeoData::from_compress_bytes(&mesh);
+        //     if mesh.is_none() { continue; }
+        //     let mesh = mesh.unwrap();
+        //     cache_mgr.meshes.entry(hash).or_insert(mesh);
+        // }
     }
     Ok(cache_mgr)
 }
@@ -115,55 +115,53 @@ pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &ArDatabase) 
 }
 
 ///查询相应的mesh数据
-pub async fn query_pdms_mesh_aql(database: &ArDatabase, hashes: &[u64]) -> anyhow::Result<MeshesData> {
-    let mut cache_mgr = MeshesData::default();
+pub async fn query_pdms_mesh_aql(database: &ArDatabase, hashes: &[u64]) -> anyhow::Result<PlantMeshesData> {
+    let mut cache_mgr = PlantMeshesData::default();
     let hash_strs = hashes.into_iter().map(|x| x.to_string()).collect::<Vec<_>>();
     // dbg!(&hash_strs);
     let aql = AqlQuery::builder().query("\
     for hash in @hashes
         let d = document('pdms_mesh',hash)
         filter d != null
-        return {
-            'hash':hash,
-            'data' : d.data
-        }
+        return d
     ").bind_var("hashes", hash_strs).build();
-    let results: Vec<PdmsMeshQueryData> = database.aql_query(aql).await?;
+    let results: Vec<PlantGeoData> = database.aql_query(aql).await?;
     for result in results {
-        let hash: u64 = result.hash.parse()?;
-        let data = hex::decode(&result.data)?;
-        let mesh = PlantMesh::from_compress_bytes(&data);
-        if mesh.is_none() { continue; }
-        let mesh = mesh.unwrap();
-        cache_mgr.meshes.entry(hash).or_insert(mesh);
+        // let hash: u64 = result.hash.parse()?;
+        // let data = hex::decode(&result.data)?;
+        // let mesh = PlantMesh::from_compress_bytes(&data);
+        // if mesh.is_none() { continue; }
+        // let mesh = mesh.unwrap();
+        //todo fix this
+        cache_mgr.meshes.entry(result.geo_hash).or_insert(result);
     }
     Ok(cache_mgr)
 }
 
-
-pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<MeshesData> {
-    let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::builder().query("
-    for v in 0..5 inbound @id pdms_edges
-        let r = document('negative_eles',v._key)
-        filter r!= null
-        return {
-            '_key': r._key,
-            'mesh': r.mesh
-        }").bind_var("id", id).build();
-    let results: Vec<NegativeEles> = database.aql_query(aql).await?;
-    let mut cache_mgr = MeshesData::default();
-    for r in results {
-        let refno = RefU64::from_url_refno(&r._key);
-        if refno.is_none() { continue; }
-        let refno = refno.unwrap();
-        let mesh = PlantMesh::from_compress_bytes(&hex::decode(r.mesh)?);
-        if mesh.is_none() { continue; }
-        let mesh = mesh.unwrap();
-        cache_mgr.meshes.entry(refno.0).or_insert(mesh);
-    }
-    Ok(cache_mgr)
-}
+//
+// pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<PlantMeshesData> {
+//     let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+//     let aql = AqlQuery::builder().query("
+//     for v in 0..5 inbound @id pdms_edges
+//         let r = document('negative_eles',v._key)
+//         filter r!= null
+//         return {
+//             '_key': r._key,
+//             'mesh': r.mesh
+//         }").bind_var("id", id).build();
+//     let results: Vec<NegativeEles> = database.aql_query(aql).await?;
+//     let mut cache_mgr = PlantMeshesData::default();
+//     for r in results {
+//         let refno = RefU64::from_url_refno(&r._key);
+//         if refno.is_none() { continue; }
+//         let refno = refno.unwrap();
+//         let mesh = PlantMesh::from_compress_bytes(&hex::decode(r.mesh)?);
+//         if mesh.is_none() { continue; }
+//         let mesh = mesh.unwrap();
+//         cache_mgr.meshes.entry(refno.0).or_insert(mesh);
+//     }
+//     Ok(cache_mgr)
+// }
 
 
 pub async fn query_refno_transform(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Transform>> {

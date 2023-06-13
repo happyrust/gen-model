@@ -26,7 +26,7 @@ pub async fn compute_rooms_by_projection(
     // let mut file = fs::File::open("assets/mesh/mesh.bin")?;
     // let mut data = vec![];
     // file.read_to_end(&mut data)?;
-    // let mesh_mgr = bincode::deserialize::<MeshesData>(&data)?;
+    // let mesh_mgr = bincode::deserialize::<PlantMeshesData>(&data)?;
     //
     // let instance_dir_path = "assets/instance";
     // let mut file = fs::File::open("accel.spa")?;
@@ -139,7 +139,7 @@ pub async fn recompute_spatial_tree(
     // let mut file = fs::File::open("assets/mesh/mesh.bin")?;
     // let mut data = vec![];
     // file.read_to_end(&mut data)?;
-    // let mesh_mgr = bincode::deserialize::<MeshesData>(&data)?;
+    // let mesh_mgr = bincode::deserialize::<PlantMeshesData>(&data)?;
     //
     // let instance_dir_path = "assets/instance";
     // let mut file = fs::File::open("assets/accel.spa")?;

@@ -116,7 +116,7 @@ pub struct AiosDBManager {
 
     pub db_option: DbOption,
 
-    pub cached_mesh_mgr: Arc<RwLock<MeshesData>>,
+    pub cached_mesh_mgr: Arc<RwLock<PlantMeshesData>>,
 
     pub arango_pool: ArPool,
 

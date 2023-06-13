@@ -3,6 +3,8 @@ total_sync = false
 enable_log = false
 sync_graph_db = true
 sync_tidb = true
+#保存到本地数据库redb
+sync_redb = true
 incr_sync = false
 replace_dbs = true
 
@@ -16,7 +18,10 @@ mdb_name = "ALL"
 project_name = "AvevaMarineSample"
 project_code = 1516
 module = "DESI"
-gen_model_mesh = true
+#是否生成模型数据
+gen_model = true
+#是否生成模型的mesh数据
+gen_mesh = false
 apply_boolean_operation = false
 #是否生成房间树
 gen_spatial_tree = false
@@ -168,7 +173,7 @@ puhua_database_password = ""
 #FIXING 的调试
 #debug_root_refnos = ["17496/106824"]  #墙
 
-debug_root_refnos = ["25688/4138"]
+debug_root_refnos = ["17496/106640"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]

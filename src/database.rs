@@ -14,7 +14,7 @@ use std::time::Instant;
 use aios_core::consts::*;
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::pdms_types::{
-    AttrMap, AttrVal, MeshesData, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec,
+    AttrMap, AttrVal, PlantMeshesData, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec,
 };
 use aios_core::tool::db_tool::{convert_to_hash, db1_dehash, db1_hash};
 use aios_core::tool::float_tool::f64_round_3;
@@ -946,29 +946,6 @@ fn set_uda_attr(
                     .or_insert_with(AttrMap::default)
                     .entry(NounHash(ukey as u32))
                     .or_insert(default.clone());
-            }
-        }
-    }
-    Ok(())
-}
-
-pub async fn save_pdms_mesh_tidb(mgr: MeshesData, pool: &Pool<MySql>) -> anyhow::Result<()> {
-    for chunks in &mgr.meshes.iter().chunks(1000) {
-        let mut sql = format!("INSERT IGNORE INTO {PDMS_MESH} (HASH,MESH) VALUES ");
-        for (key, map)  in chunks.into_iter() {
-            sql.push_str(&format!(
-                "( {}, 0x{}) ,",
-                key,
-                hex::encode(&map.into_compress_bytes())
-            ));
-        }
-        sql.remove(sql.len() - 1);
-        let result = pool.execute(sql.as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(e);
-                dbg!(sql.as_str());
             }
         }
     }

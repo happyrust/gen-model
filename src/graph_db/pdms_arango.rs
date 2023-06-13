@@ -395,7 +395,7 @@ pub async fn save_arangodb_doc(json: Value, collection: &str, database: &ArDatab
         .bind_var("@collection", collection)
         .bind_var("elements", json)
         .build();
-    let _result: Vec<()> = database.aql_query(aql).await?;
+    let _result: Vec<()> = database.aql_query(aql).await.unwrap();
     Ok(())
 }
 
