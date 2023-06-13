@@ -2,7 +2,7 @@
 total_sync = false
 enable_log = false
 sync_graph_db = true
-sync_tidb = false
+sync_tidb = true
 incr_sync = false
 replace_dbs = true
 
@@ -17,7 +17,7 @@ project_name = "AvevaMarineSample"
 project_code = 1516
 module = "DESI"
 gen_model_mesh = true
-apply_boolean_operation = true
+apply_boolean_operation = false
 #是否生成房间树
 gen_spatial_tree = false
 save_spatial_tree_to_db = false
@@ -57,7 +57,7 @@ only_rebuild_pdms_element = false
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
 #included_db_files = ["ams7997_0001"]
-included_db_files = ["ams7997_0001"]
+included_db_files = ["ams1112_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 manual_db_nums = [7997]  #, 8000
 plat_url = ""
@@ -154,25 +154,21 @@ puhua_database_password = ""
 
 #debug_root_refnos = ["17496/169982"]
 #debug_root_refnos = ["9304/2"]
-#debug_root_refnos = ["17496/169984"]
+#debug_root_refnos = ["17496/106409"]
 
 #风管的测试
-debug_root_refnos = ["24381/46775"]
+#debug_root_refnos = ["24381/46775"]
 
 #测试风管bend的问题
 #debug_root_refnos = ["24381/47158"]
 
-#24381/34109,
-#24381/42520,
-#24381/44873,
-#24381/46775,
-#24381/48631,
-#24381/57476,
-#24381/76564,
-#24381/79977,
-#24381/100675,
-#24381/101405,
-#24381/177373,
+#错误的pyramid
+#debug_root_refnos = ["17496/171101"]
+
+#FIXING 的调试
+#debug_root_refnos = ["17496/106824"]  #墙
+
+debug_root_refnos = ["25688/4138"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]

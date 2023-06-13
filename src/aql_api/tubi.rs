@@ -39,10 +39,10 @@ pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<
                 let from_refno = from_refno.unwrap();
                 // 如果是 tubi 在 bran 的第一个，取 bran 的 hstu
                 let spre = if from_refno == bran.refno {
-                    query_foreign_refno_aql(from_refno, &["HSTU", "HSTU"], &database).await?.unwrap_or_default()
+                    query_foreign_refno_aql(&database, from_refno, &["HSTU", "HSTU"]).await?.unwrap_or_default()
                 } else {
                     // 如果 tubi 在 bran 的中间或者最后一个，则取上一个节点的 lstu
-                    query_foreign_refno_aql(from_refno, &["LSTU", "LSTU"], &database).await?.unwrap_or_default()
+                    query_foreign_refno_aql(&database, from_refno, &["LSTU", "LSTU"]).await?.unwrap_or_default()
                 };
                 let spre_name = if spre == RefU64(0) {
                     "0/0".to_string()
@@ -311,7 +311,7 @@ async fn test_query_tubi_from_bran_filter_atta() -> anyhow::Result<()> {
     //     .add_source(File::with_name("DbOption"))
     //     .build()?;
     // let db_option: DbOption = s.try_deserialize().unwrap();
-    // let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    // let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     // let refno = RefU64::from_refno_str("23584/5443").unwrap();
     // let results = query_tubi_lstu(refno, &database).await?;
     // dbg!(&results);

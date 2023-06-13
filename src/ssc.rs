@@ -31,6 +31,7 @@ use crate::tables;
 use aios_core::aql_types::AqlEdge;
 use arangors::collection::CollectionType::*;
 use arangors::collection::CollectionType::Document;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SiteExcelData {
@@ -948,7 +949,7 @@ async fn test_set_pdms_major_from_excel() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let excel_result = get_room_level_from_excel_refactor()?;
     set_pdms_major_from_excel(&excel_result.pdms_name_code_map, &db_option, &database, &pool).await?;
     Ok(())
@@ -964,7 +965,7 @@ async fn test_save_ssc_level_excel() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let _ = save_ssc_level_excel(&database).await?;
     Ok(())
 }

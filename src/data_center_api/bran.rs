@@ -6,7 +6,7 @@ use bevy::reflect::List;
 use parry3d::utils::Array1;
 use regex::Regex;
 use crate::api::attr::query_explicit_attr;
-use crate::aql_api::children::{query_children_aql, query_refnos_travel_children_with_type_aql};
+use crate::aql_api::children::{query_children_eles, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_paras};
@@ -78,7 +78,7 @@ pub async fn get_sg_pipe_bran_name(refnos: Vec<RefU64>, database: &ArDatabase) -
     let mut result = Vec::new();
     if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["PIPE"]).await {
         for pipe in children {
-            let brans = query_children_aql(&database, pipe.refno).await?;
+            let brans = query_children_eles(&database, pipe.refno).await?;
             for bran in brans {
                 if bran.noun != "BRAN" { continue; };
                 let mut attr = Vec::new();
@@ -115,7 +115,7 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
     let regex = Regex::new(r"\d.*:\d")?; // 判断字符串是否包含有多个数字加一个:
     if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["BRAN"]).await {
         for bran in children {
-            let bran_children = query_children_aql(&database, bran.refno).await?;
+            let bran_children = query_children_eles(&database, bran.refno).await?;
             let room_name = query_room_name_from_refno_aql(bran.refno, &database).await?.unwrap_or("".to_string());
             let pspe_name = query_foreign_name_aql(bran.refno, vec!["PSPE", "PSPE"], &database).await?;
             let mut kind = "".to_string();

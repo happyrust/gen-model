@@ -13,7 +13,7 @@ use crate::consts::PDMS_MESH;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::graph_db::pdms_inst_arango::*;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
-use crate::test::common::get_arangodb_conn_from_db_option;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 struct PdmsMeshAql {
@@ -198,7 +198,7 @@ async fn test_query_pdms_mesh_aql() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let hashes = vec![546828117367565544, 1418680084324994534];
     let meshes = query_pdms_mesh_aql(&database, &hashes).await?;
     dbg!(&meshes.meshes.len());
@@ -212,7 +212,7 @@ async fn test_query_pdms_instance_mesh_from_refno() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let refno = RefU64::from_refno_str("24383/69713").unwrap();
     let result = query_refno_transform(refno, &database).await?;
     Ok(())

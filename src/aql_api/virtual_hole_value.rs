@@ -3,7 +3,7 @@
 // use arangors_lite::AqlQuery;
 // use config::{Config, ConfigError, Environment, File};
 //
-// use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option;
+// use crate::graph_db::pdms_arango::get_arangodb_conn_from_db_option_for_test;
 //
 //
 // pub async fn query_virtual_hole_value(database: &ArDatabase, refnos: Vec<RefU64>) -> anyhow::Result<Option<(Vec<VirtualHoleGraphNode>, Vec<VirtualEmbedGraphNode>)>> {

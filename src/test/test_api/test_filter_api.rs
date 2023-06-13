@@ -4,7 +4,7 @@ use crate::aql_api::children::query_travel_children_filter_negative_sibl_nodes;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
-use crate::test::common::get_arangodb_conn_from_db_option;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::test::test_helper::{get_test_ams_db_manager, get_test_ams_db_manager_async};
 
 ///  测试获取包含负实体的集合 （也包含了正实体）
@@ -15,7 +15,7 @@ async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Resu
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let refno = RefU64::from_refno_str("31896/10042").unwrap();
     let result = query_travel_children_filter_negative_sibl_nodes(refno, &database).await?;
     dbg!(&result);

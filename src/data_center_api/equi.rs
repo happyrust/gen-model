@@ -12,7 +12,7 @@ use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
-use crate::test::common::get_arangodb_conn_from_db_option;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 /// 获得工艺设备的数据
 pub async fn get_gy_equi_data(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<DataCenterProject> {
@@ -241,7 +241,7 @@ async fn test_get_machine_equi_data() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let refno = RefU64::from_refno_str("23584/107").unwrap();
     let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
     let project = get_gy_equi_data(vec![refno], &database).await.unwrap();

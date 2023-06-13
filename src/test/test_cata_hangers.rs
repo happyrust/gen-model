@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::plot_data::hangers;
-use crate::test::common::get_arangodb_conn_from_db_option;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::test::test_helper;
 use crate::test::test_helper::get_test_ams_db_manager;
 
@@ -17,7 +17,7 @@ async fn test_save_hangers_data() -> anyhow::Result<()> {
     // let pool = AiosDBManager::get_db_pool(&url, "sample").await?;
     //
     //
-    // let database = get_arangodb_conn_from_db_option().await?;
+    // let database = get_arangodb_conn_from_db_option_for_test().await?;
     // create_arango_document(&database, "hanger_data", Document).await?;
     // create_arango_document(&database, "hanger_edges", Edge).await?;
     //

@@ -41,7 +41,7 @@ pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], sta
 
 /// 查询某参考号的引用参考号  例如：refno -> spre -> catr -> ptre  可直接查到 ptre
 // 加入可选的出发，以及可选的结束
-pub async fn query_foreign_refno_aql(refno: RefU64, foreign_types: &[&str], arango_database: &ArDatabase) -> anyhow::Result<Option<RefU64>> {
+pub async fn query_foreign_refno_aql(arango_database: &ArDatabase, refno: RefU64, foreign_types: &[&str]) -> anyhow::Result<Option<RefU64>> {
     let id = format!("{}/{}", "pdms_eles", refno.to_url_refno());
     if foreign_types.len() < 2 { return Ok(None); }
     let aql = AqlQuery::builder().query("\

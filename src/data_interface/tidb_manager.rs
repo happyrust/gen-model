@@ -63,7 +63,7 @@ use crate::api::refno_info::{cache_plin_plax, get_ref0_projects, sync_refno_basi
 use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::{query_foreign_refno_aql, query_foreign_refnos_fuzzy};
 use crate::aql_api::para_value::{query_des_para_value, query_para_from_desi_refno};
-use crate::aql_api::plin_attr::{match_jusline_attr, query_plin_attrs, query_pline_value};
+use crate::aql_api::plin_attr::*;
 use crate::cata::consts::{BANG_WIT_EXTRU_TYPES, JUSLINE_TYPES};
 use crate::cata::direction_parse::parse_expr_to_dir;
 use crate::cata::query_cata::resolve_desi_comp;
@@ -577,16 +577,16 @@ impl PdmsDataInterface for AiosDBManager {
             let mut quat = Quat::IDENTITY;
             let type_name = att.get_type();
             if let Some(jusl) = att.get_str("JUSL") {
-                if let Some(exps) = query_pline_value(refno, jusl, &database).await? {
-                    let x = self.resolve_expression_to_f32(&exps[0], refno).await?;
-                    let y = self.resolve_expression_to_f32(&exps[1], refno).await?;
-                    jusl_vec = Vec3::new(x, y, 0.0);
+                if let Some(param) = self.query_pline(refno, jusl).await? {
+                    jusl_vec = param.pt;
                 }
             }
             //先获得下面的PLOO
             let owner = ref_basic.owner;
+            //假定为当前的owner 就是形集的所有者（墙，柱子）等
+            let mut splin_owner = ref_basic.owner;
             if let Some(owner_basic) = self.get_refno_basic(owner) {
-                //特殊情况的一些处理
+                //土建特殊情况的一些处理
                 match owner_basic.get_type() {
                     "FLOOR" => {
                         let sjus = att.get_str("JUSL").unwrap_or("unset");
@@ -604,7 +604,12 @@ impl PdmsDataInterface for AiosDBManager {
                         };
                         pos.z += off_z;
                     }
+                    "JLDATU"  => {
+                        let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
+                        let pkdi = att.get_f32("PKDI").unwrap_or_default();
+                    }
                     "PLDATU" => {
+                        //需要获得PLIN 的值
                         let grand = owner_basic.owner;
                         let grand_att = self.get_attr(grand).await?;
                         let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
@@ -649,12 +654,14 @@ impl PdmsDataInterface for AiosDBManager {
             }
 
             if let Some(bangle) = att.get_f32("BANG") {
+                //是否需要考虑beta angle
                 need_bangle |= type_name == "PFIT";
                 if need_bangle {
                     quat = quat * Quat::from_rotation_z(bangle.to_radians());
                 }
             }
             //弧墙下方没有fitt
+            //处理有POSL的情况
             if let Some(pos_line) = att.get_str("POSL") {
                 // dbg!(pos_line);
                 //plin里的位置偏移
@@ -664,20 +671,26 @@ impl PdmsDataInterface for AiosDBManager {
                 let delta_vec = att.get_vec3("DELP").unwrap_or_default() /*+ plin_pos*/;
                 let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
                 let bangle = att.get_f32("BANG").unwrap_or_default();
-                let pos_line =
-                    query_pline_value(att.get_owner().unwrap(), pos_line, &database)
-                        .await?;
-                if let Some(pos_line) = pos_line {
-                    // dbg!(&pos_line);
-                    let owner = ref_basic.owner;
-                    //对于fitting这种，需要取parent的值
-                    let x = self.resolve_expression_to_f32(&pos_line[0], owner).await?;
-                    let y = self.resolve_expression_to_f32(&pos_line[1], owner).await?;
-                    plin_pos = Vec3::new(x, y, 0.0);
+                let owner = att.get_owner().unwrap_or_default();
+                // POSL 的处理, 获得父节点的形集
+                if let Some(param) = self.query_pline(owner, pos_line).await? {
+                    plin_pos = param.pt;
+                    pline_plax = param.plax;
                 }
-                if let Some(v) = CACHED_PLIN_MAP.get(&refno) {
-                    pline_plax = parse_expr_to_dir(&v.value()).unwrap_or(Vec3::Z);
-                }
+                // let pos_line =
+                //     query_pline_value(&database, att.get_owner().unwrap(), pos_line)
+                //         .await?;
+                // if let Some(pos_line) = pos_line {
+                //     // dbg!(&pos_line);
+                //     let owner = ref_basic.owner;
+                //     //对于fitting这种，需要取parent的值
+                //     let x = self.resolve_expression_to_f32(&pos_line[0], owner).await?;
+                //     let y = self.resolve_expression_to_f32(&pos_line[1], owner).await?;
+                //     plin_pos = Vec3::new(x, y, 0.0);
+                // }
+                // if let Some(v) = CACHED_PLIN_MAP.get(&refno) {
+                //     pline_plax = parse_expr_to_dir(&v.value()).unwrap_or(Vec3::Z);
+                // }
                 let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
                 let y_axis = Vec3::Z;
                 let z_axis = pline_plax;
@@ -695,18 +708,16 @@ impl PdmsDataInterface for AiosDBManager {
                 translation = translation + rotation * pos;
                 rotation = rotation * quat;
             }
-            if rotation.is_nan() {
-                // dbg!(&rotation);
-                return Ok(None);
-            }
 
+            let trans = Transform {
+                rotation,
+                translation,
+                scale: Vec3::ONE,
+            };
+            if trans.is_nan() { return Ok(None); }
             self.cached_world_transforms_map
                 .entry(refno)
-                .or_insert(Transform {
-                    rotation,
-                    translation,
-                    scale: Vec3::ONE,
-                });
+                .or_insert(trans);
         }
         //将rotation 还原为角度
         if self.db_option.debug_print_world_transform {

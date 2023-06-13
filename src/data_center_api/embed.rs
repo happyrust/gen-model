@@ -14,6 +14,7 @@ use crate::data_center_api::hole::{convert_time_to_vec, get_pos_from_str, hash_t
 use crate::consts::{AQL_EMBED_DATA_COLLECTION, AQL_EMBED_EDGE_COLLECTION, EMBED_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{ArDatabase, save_arangodb_doc};
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 pub async fn create_embed_data(pool: &Pool<MySql>) -> anyhow::Result<Option<DataCenterProject>> {
     let mut instances = Vec::new();
@@ -686,7 +687,7 @@ async fn test_query_embed_data_by_keys() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let keys = vec!["7f80f3a5-66a4-481f-afd1-22242966de80".to_string()];
     let r = create_embed_data_aql(keys, &db_option.project_code,&database).await?;
     // if let Some(r) = r {

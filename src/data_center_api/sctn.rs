@@ -1,7 +1,7 @@
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::RefU64;
 use crate::api::element::query_children;
-use crate::aql_api::children::{query_children_aql, query_refnos_travel_children_with_type_aql};
+use crate::aql_api::children::{query_children_eles, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::query_foreign_name_aql;
 use crate::data_center_api::data_api::{get_refno_desc, get_refno_world_poss_pose};
 use crate::data_interface::interface::PdmsDataInterface;
@@ -113,7 +113,7 @@ async fn get_dq_support_sctn_gtype_beam_data(refno: RefU64, aios_mgr: &AiosDBMan
         attribute_model_code: "PARTD11".to_string(),
         value: AttrValue::AttrString("Q355B".to_string()).into(),
     });
-    let children = query_children_aql(&database,refno).await?;
+    let children = query_children_eles(&database, refno).await?;
     let mut fitt = None;
     for child in children {
         if child.noun == "FITT" {

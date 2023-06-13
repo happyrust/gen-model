@@ -18,6 +18,7 @@ use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{ArDatabase, remove_arangodb_with_refno_key, save_arangodb_doc};
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 /// 正则匹配字符串中的数字
 pub fn get_num_from_str(input: &str) -> Option<i32> {
@@ -1111,7 +1112,7 @@ async fn test_gen_stucj_data_aql() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let keys = vec!["8DB55F00DF18E30-B32E-19".to_string()];
     let instances = gen_hole_datacenter_instance_aql(keys, &db_option.project_code,&database).await.unwrap_or_default();
     let mut file = fs::File::create("孔洞_aql.json")?;

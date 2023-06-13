@@ -3,18 +3,18 @@ use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors::{AqlQuery, Database};
 use dashmap::DashMap;
 use crate::aql_api::change_vec_refnos_into_vec_string;
-use crate::aql_api::children::query_children_aql;
+use crate::aql_api::children::query_children_eles;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::para_value::query_des_para_value;
 use crate::graph_db::DataDocument;
 use crate::graph_db::pdms_arango::ArDatabase;
-use crate::test::common::get_arangodb_conn_from_db_option;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 /// 查询 catr refno引用的 dtse下 data 的 ppro和 dpro数据
 pub async fn query_dtse_ppro_from_catr_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<DashMap<String, DataDocument>>> {
-    let dtre_refno = query_foreign_refno_aql(refno,  &["DTRE", "DTRE"], &database).await?;
+    let dtre_refno = query_foreign_refno_aql(&database, refno, &["DTRE", "DTRE"]).await?;
     if dtre_refno.is_none() { return Ok(None); }
-    let data_refnos = query_children_aql(&database,dtre_refno.unwrap()).await?;
+    let data_refnos = query_children_eles(&database, dtre_refno.unwrap()).await?;
     let mut children = vec![];
     for data_refno in data_refnos.into_iter() {
         children.push(data_refno.refno);
@@ -52,7 +52,7 @@ async fn test_query_dtse_ppro_from_catr_refno() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let refno = RefU64::from_refno_str("15193/14606").unwrap();
     let result = query_dtse_ppro_from_catr_refno(refno, &database).await?;
     dbg!(&result);

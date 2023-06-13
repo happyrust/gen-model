@@ -122,6 +122,7 @@ pub async fn cache_prim_geos(
                         geo_param = brep_obj
                             .convert_to_geo_param()
                             .unwrap_or(PdmsGeoParam::Unknown);
+                        //todo 将geo_param 放在mesh的数据结构里
                         geo_hash = cached_mesh_mgr.gen_pdms_mesh(brep_obj, replace_mesh);
                     }
                 }
@@ -162,6 +163,7 @@ pub async fn cache_prim_geos(
                         aabb: Some(geo_aabb),
                         type_name: attr.get_type().to_string(),
                         ptset_map: Default::default(),
+                        reuse_unit: true,
                     });
                 }
                 *processed_cnt.lock().await -= 1;
@@ -375,6 +377,7 @@ pub async fn cache_loop_geos(
                         aabb: Some(ele_aabb),
                         type_name: parent_att.get_type().to_string(),
                         ptset_map: Default::default(),
+                        reuse_unit: false,
                     });
                 } else {
                     error!("LOOP 有问题：{} ", loop_refno.to_refno_string());
@@ -536,6 +539,7 @@ pub async fn cache_cata_geos(
                     ).await else {
                         continue;
                     };
+                    let mut is_reuse_unit = false;
                     ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
                     for (ele_refno, shapes) in brep_shapes_map {
                         let Ok(Some(mut o)) = mgr
@@ -546,14 +550,8 @@ pub async fn cache_cata_geos(
                         let Ok(ele_att) = mgr.get_attr(ele_refno).await else {
                             continue;
                         };
-                        let is_sctn = ele_att.get_type() == "SCTN";
-                        if is_sctn {
-                            let attr = mgr.get_attr(ele_refno).await.unwrap_or_default();
-                            let poss = attr.get_vec3("POSS").unwrap_or_default();
-                            let pose = attr.get_vec3("POSE").unwrap_or_default();
-                            let v = (pose - poss).length();
-                            o.scale = Vec3::new(1.0, 1.0, v);
-                        }
+
+                        let is_scaled_reuse = SCALED_REUSE_GEO_NAMES.contains(&ele_att.get_type());
                         // let Ok(Some(gmse_refno)) = mgr.query_foreign_refno(ele_refno,
                         //                                                    &[&["SPRE", "CATR"]], &["GMRE", "GSTR"],
                         //                                                    &[]).await else {
@@ -601,16 +599,27 @@ pub async fn cache_cata_geos(
                                 continue;
                             }
                             let mut trans = brep_shape.get_trans();
-                            if is_sctn {
-                                trans.scale = Vec3::ONE;
+                            if is_scaled_reuse {
+                                if brep_shape.is_reuse_unit() {
+                                    let attr = mgr.get_attr(ele_refno).await.unwrap_or_default();
+                                    let poss = attr.get_vec3("POSS").unwrap_or_default();
+                                    let pose = attr.get_vec3("POSE").unwrap_or_default();
+                                    let v = (pose - poss).length();
+                                    if v < f32::EPSILON {
+                                        continue;
+                                    }
+                                    geos_info.world_transform.scale = Vec3::new(1.0, 1.0, v);
+                                    trans.scale = Vec3::ONE;
+                                    is_reuse_unit = true;
+                                }
                             }
                             // dbg!(&brep_shape);
                             let Some(geo_hash) =
-                                cached_mesh_mgr.gen_pdms_mesh(brep_shape.clone(), replace_mesh) else{
+                                cached_mesh_mgr.gen_pdms_mesh(brep_shape.clone(), replace_mesh) else {
                                 continue;
                             };
                             // dbg!(geo_hash);
-                            let Some(mut geo_aabb) = cached_mesh_mgr.get_bbox(&geo_hash) else{
+                            let Some(mut geo_aabb) = cached_mesh_mgr.get_bbox(&geo_hash) else {
                                 continue;
                             };
                             let rot = transform.rotation;
@@ -666,7 +675,7 @@ pub async fn cache_cata_geos(
                             //         translation: o.translation.into(),
                             //     }),
                             // );
-                            geos_info.aabb = Some(aabb_apply_transform(&a, &o));
+                            geos_info.aabb = Some(aabb_apply_transform(&a, &geos_info.world_transform));
                         }
 
                         if let Some(mut aabb) = &mut geos_info.aabb {
@@ -689,6 +698,7 @@ pub async fn cache_cata_geos(
                                     .remove(&ele_refno)
                                     .map(|x| x.1)
                                     .unwrap_or_default(),
+                                reuse_unit: is_reuse_unit,
                             };
                             target_geo_data_option = Some(d.clone());
                             shape_insts_data.insert_geos_data(inst_key, d);
@@ -721,8 +731,9 @@ pub async fn cache_cata_geos(
                     let Some(ref_basic) = mgr.get_refno_basic(ele_refno) else {
                         continue;
                     };
-                    let is_sctn = ref_basic.get_type() == "SCTN";
-                    if is_sctn {
+                    // let is_sctn = ref_basic.get_type() == "SCTN";
+                    let is_scaled_reuse = SCALED_REUSE_GEO_NAMES.contains(&ref_basic.get_type());
+                    if is_scaled_reuse && target_geo_data.reuse_unit {
                         let attr = mgr.get_attr(ele_refno).await.unwrap_or_default();
                         let poss = attr.get_vec3("POSS").unwrap_or_default();
                         let pose = attr.get_vec3("POSE").unwrap_or_default();
@@ -1071,6 +1082,25 @@ pub async fn cache_geos_data(
     let mdb = &db_option.mdb_name;
     let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
 
+
+    let s_refno = RefU64::from_two_nums(17496, 106824);
+    // let att = mgr.get_attr(s_refno).await;
+    // dbg!(att);
+    // let plin_param = mgr.query_pline(s_refno, "OBOW").await?;
+    // dbg!(plin_param);
+    // let transform = mgr.get_world_transform(s_refno).await?.unwrap();
+    // dbg!(transform);
+
+    // let s_refno = RefU64::from_two_nums(17496, 161309);
+    // let att = mgr.get_attr(s_refno).await;
+    // dbg!(att);
+    // // let plin_param = mgr.query_pline(s_refno, "OBOW").await?;
+    // // dbg!(plin_param);
+    // let transform = mgr.get_world_transform(s_refno).await?.unwrap();
+    // dbg!(transform);
+
+    // return Ok(true);
+
     if db_nos.is_empty() {
         let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
         let pool = AiosDBManager::get_db_pool(&url, project).await?;
@@ -1113,6 +1143,7 @@ pub async fn cache_geos_data(
             aabb: Some(unit_cyli_aabb),
             type_name: "TUBI".to_string(),
             ptset_map: Default::default(),
+            reuse_unit: true,
         });
         let instance_mgr = Arc::new(RwLock::new(shape_insts_data));
 
@@ -1130,6 +1161,7 @@ pub async fn cache_geos_data(
             continue;
         }
 
+
         //元件库的模型计算
         //求出有多少个是一样的模型
         let target_cata_refnos = mgr.get_gen_model_target_refnos(GeoEnum::CATA_BRAN_AND_HANGER_REUSE, &target_dbnos, false).await?;
@@ -1139,12 +1171,12 @@ pub async fn cache_geos_data(
         let mut refno_lstube_map = DashMap::new();
         let mut lstube_bores_map = DashMap::new();
         let mut bran_comp_eles = vec![];
-        for refno in target_cata_refnos {
-            let children = query_children_order_aql(&adb, refno).await?;
+        for refno in &target_cata_refnos {
+            let children = query_children_order_aql(&adb, *refno).await?;
             if children.is_empty() { continue; }
             bran_comp_eles.extend(children.iter().map(|x| x.refno));
             //求出元件对应的outside bore
-            branch_refnos_map.insert(refno, children);
+            branch_refnos_map.insert(*refno, children);
         }
 
         let lstube_refnos = mgr.query_foreign_refnos(&bran_comp_eles,
@@ -1174,6 +1206,7 @@ pub async fn cache_geos_data(
         let target_single_reuse_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA_SINGLE_REUSE, &target_dbnos, false, false).await?;
         let target_single_cata_map = mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA_WITHOUT_REUSE, &target_dbnos, false, false).await?;
         dbg!(&target_bran_reuse_cata_map.len());
+        dbg!(&target_bran_reuse_cata_map);
         // dbg!(target_single_reuse_cata_map.iter().map(|x| x.value().group_refnos.clone()).collect::<Vec<_>>());
         dbg!(target_single_reuse_cata_map.len());
         dbg!(&target_single_cata_map.len());
@@ -1249,7 +1282,7 @@ pub async fn cache_geos_data(
             }
 
             futures::future::join_all(handles).await;
-            {
+            if !target_cata_refnos.is_empty(){
                 let mesh_mgr = mgr.cached_mesh_mgr.read().await;
                 let inst_data = instance_mgr.read().await;
                 println!("当前db下的元件库生成统计：");
@@ -1455,6 +1488,7 @@ pub async fn cache_geos_data(
                         aabb: origin_comp_geos_info.aabb.clone(),
                         type_name: comp_type,
                         ptset_map: Default::default(),
+                        reuse_unit: false,
                     });
                 });
 

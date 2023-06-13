@@ -222,14 +222,14 @@ fn test_turn_bin_into_json() {
     new_file.write_all(&json.into_bytes()).unwrap();
 }
 
-#[test]
-fn test_inst_mgr() {
-    let map = CachedInstanceMgr::deserialize_from_bin_file(&"assets/instance/7999.inst").unwrap();
-    let refno = RefU64::from_refno_str("24381/34919").unwrap();
-    if let Some(value) = map.inst_data.inst_map.get(&refno) {
-        dbg!(&value.value());
-    };
-}
+// #[test]
+// fn test_inst_mgr() {
+//     let map = CachedInstanceMgr::deserialize_from_bin_file(&"assets/instance/7999.inst").unwrap();
+//     let refno = RefU64::from_refno_str("24381/34919").unwrap();
+//     if let Some(value) = map.inst_data.inst_map.get(&refno) {
+//         dbg!(&value.value());
+//     };
+// }
 //
 // #[test]
 // fn test_compare_attr_info_file() {

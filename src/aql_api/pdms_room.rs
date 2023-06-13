@@ -19,7 +19,7 @@ use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::graph_db::pdms_arango::*;
 use aios_core::pdms_types::*;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::test::common::get_arangodb_conn_from_db_option;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RoomData {
@@ -295,7 +295,7 @@ async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let refno = RefU64::from_url_refno("24383_68084").unwrap();
     let name = query_refno_belong_rooms(refno, &database).await?;
     dbg!(&name);
@@ -309,7 +309,7 @@ async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let refno = RefU64::from_url_refno("24381_178638").unwrap();
     let name = query_room_info_from_refno(refno, "FRMW", &database).await?.unwrap();
     let room_name = get_room_name_split(&name).unwrap();

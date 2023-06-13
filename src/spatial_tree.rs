@@ -12,7 +12,7 @@ use std::fs;
 use std::io::{Read, Write};
 use aios_core::options::DbOption;
 use bb8_arangodb::arangors::Database;
-use crate::test::common::get_arangodb_conn_from_db_option;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 
 ///投影到平面上的房间，去计算是否二维有相交
@@ -244,7 +244,7 @@ async fn test_save_spatial_tree_to_db() -> anyhow::Result<()> {
     // pane 的 refno
     let test_room_refno = RefU64::from_two_nums(24381, 35033);
 
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let room_contains_refno = vec![
         RefU64::from_two_nums(24384, 3088),
         RefU64::from_two_nums(24384, 3090),

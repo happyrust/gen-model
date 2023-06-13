@@ -13,7 +13,7 @@ use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::data_interface::tidb_manager::{AiosDBManager};
 use crate::graph_db::pdms_arango::ArDatabase;
 
-pub async fn query_children_aql(arango_db: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
+pub async fn query_children_eles(arango_db: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::builder().query("\
     for z in 1 inbound @id pdms_edges
@@ -29,6 +29,8 @@ pub async fn query_children_aql(arango_db: &ArDatabase, refno: RefU64) -> anyhow
     let results: Vec<PdmsElement> = arango_db.aql_query(aql).await.unwrap();
     Ok(results)
 }
+
+
 
 pub async fn query_children_order_aql(adb: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
@@ -63,7 +65,8 @@ pub async fn query_children_order_aql(adb: &ArDatabase, refno: RefU64) -> anyhow
     Ok(results)
 }
 
-pub async fn query_children_refnos_aql(arango_database: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
+///查询子节点refno集合
+pub async fn query_children_refnos(arango_database: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::builder().query("\
     for z in 1 inbound @id pdms_edges
@@ -71,6 +74,15 @@ pub async fn query_children_refnos_aql(arango_database: &ArDatabase, refno: RefU
     let result: Vec<String> = arango_database.aql_query(aql).await?;
     Ok(convert_refno_vec_from_vec_string(result))
 }
+
+// pub async fn query_children_refnos_aql(arango_database: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
+//     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+//     let aql = AqlQuery::builder().query("\
+//     for z in 1 inbound @id pdms_edges
+//         return  z._key ").bind_var("id", refno_aql).build();
+//     let result: Vec<String> = arango_database.aql_query(aql).await?;
+//     Ok(convert_refno_vec_from_vec_string(result))
+// }
 
 /// 找到该节点同级的上一个节点
 pub async fn query_brother_node_front(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<(RefU64, String)>> {
@@ -254,7 +266,7 @@ FOR v,e,p in 0..10 INBOUND @id pdms_edges
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
             .build()
-    }else{
+    } else {
         AqlQuery::builder().query("\
 FOR v,e,p in 0..10 INBOUND @id pdms_edges
     filter v.noun in @nouns
@@ -291,7 +303,7 @@ pub async fn query_travel_children_with_types_aql(arango_database: &ArDatabase, 
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
             .build()
-    }else{
+    } else {
         AqlQuery::builder().query("\
     FOR v in 0..10 INBOUND @id pdms_edges
     Filter v.noun in @nouns
@@ -566,7 +578,7 @@ async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Resu
     //     .add_source(File::with_name("DbOption"))
     //     .build()?;
     // let db_option: DbOption = s.try_deserialize().unwrap();
-    // let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    // let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     // let refno = RefU64::from_refno_str("17496/79566").unwrap();
     // let result = query_travel_children_filter_negative_sibl_nodes(refno, &database).await?;
     // dbg!(&result);

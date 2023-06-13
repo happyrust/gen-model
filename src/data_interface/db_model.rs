@@ -385,28 +385,28 @@ impl AiosDBManager {
         cache_mdb_site_map(mdb, module, &project_pool).await;
         self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
         let database = self.get_arango_db().await?;
-        if need_sync_refno_basic {
-            for project in &self.db_option.included_projects {
-                if let Some(kv) = self.project_map.get(project) {
-                    let dbnums = self.mdb_dbnums.iter().cloned().collect::<Vec<_>>();
-                    if let Ok(m) = cache_plin_plax(
-                        kv.value(),
-                        &dbnums,
-                        &database,
-                    ).await {
-                        for (k, v) in m {
-                            CACHED_PLIN_MAP.insert(k, &v.into());
-                        }
-                    }
-                }
-            }
-        }
+        // if need_sync_refno_basic {
+        //     for project in &self.db_option.included_projects {
+        //         if let Some(kv) = self.project_map.get(project) {
+        //             let dbnums = self.mdb_dbnums.iter().cloned().collect::<Vec<_>>();
+        //             if let Ok(m) = cache_plin_plax(
+        //                 kv.value(),
+        //                 &dbnums,
+        //                 &database,
+        //             ).await {
+        //                 for (k, v) in m {
+        //                     CACHED_PLIN_MAP.insert(k, &v.into());
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
         if need_sync_refno_basic {
             CACHED_REFNO_BASIC_MAP.save_to_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
-            CACHED_PLIN_MAP.save_to_file(stringify!(CACHED_PLIN_MAP))?;
+            // CACHED_PLIN_MAP.save_to_file(stringify!(CACHED_PLIN_MAP))?;
         } else {
             CACHED_REFNO_BASIC_MAP.load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
-            CACHED_PLIN_MAP.load_map_from_file(stringify!(CACHED_PLIN_MAP))?;
+            // CACHED_PLIN_MAP.load_map_from_file(stringify!(CACHED_PLIN_MAP))?;
         }
 
         // 将 mdb对应的 module 下的所有 numbdb保存下来
