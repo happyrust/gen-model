@@ -85,12 +85,15 @@ use bb8_arangodb::{ArangoConnectionManager, AuthenticationMethod};
 #[cfg(feature = "opencascade")]
 use opencascade::{DsShape, Edge, OCCShape, Wire};
 use parry3d::query::{Ray, RayCast};
+use redb::{ReadableTable, TableDefinition};
 use crate::data_interface::db_manager::GeoEnum;
 use crate::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 use crate::consts::{AQL_PDMS_ELES_COLLECTION};
+// use heed::types::*;
+// use heed::byteorder::BE;
 
 lazy_static! {
     pub static ref CATAEXPRCONTEXT_MAP: DashMap<RefU64, CataExprContext> = {
@@ -103,6 +106,14 @@ lazy_static! {
 pub struct AiosDBManager {
     //不同project的连接池子
     pub project_map: DashMap<String, Pool<MySql>>,
+
+    // pub local_db_map: DashMap<String, Arc<redb::Database>>,
+
+    // heed
+    // pub local_db_map: DashMap<String, (Arc<heed::Env>, Arc<heed::Database<U64<BE>, ByteSlice>>) >,
+
+    //seld
+    pub local_db_map: DashMap<String, (Arc<sled::Db>) >,
 
     pub ref0_projects: DashMap<u32, Vec<String>>,
 
@@ -127,6 +138,7 @@ pub struct AiosDBManager {
     pub mdb_dbnums: BTreeSet<i32>,
 
     pub rtree: Option<AccelerationTree>,
+
 }
 
 impl Debug for AiosDBManager {
@@ -134,6 +146,8 @@ impl Debug for AiosDBManager {
         write!(f, "db manager project is {}", &self.project_path)
     }
 }
+
+const ATTR_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("kv");
 
 #[async_trait]
 impl PdmsDataInterface for AiosDBManager {
@@ -149,6 +163,33 @@ impl PdmsDataInterface for AiosDBManager {
                 .expect("PDMS_ATT_MAP_CACHE save error.");
             Ok(attr)
         };
+    }
+
+    fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
+        for project in &self.db_option.included_projects {
+            if let Ok(a) = self.get_attr_within_project(refno, project.as_str()) {
+                return Ok(a);
+            }
+        }
+        // dbg!(refno);
+        Err(anyhow!("Not found att"))
+    }
+
+
+    /// 从本地数据库获得最全的数据
+    fn get_attr_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<AttrMap> {
+        if let Some(db) = self.local_db_map.get(project) {
+            // let mut rtxn = db.value().0.read_txn()?;
+            // let bytes = db.value().1.get(&rtxn, &*refno).unwrap();
+            // if let Some(bytes) = bytes{
+            //     return AttrMap::from_bytes(bytes);
+            // }
+            let k = refno.0.to_be_bytes();
+            if let Ok(Some(bytes)) = db.get(k.as_slice()) {
+                return AttrMap::from_bytes(bytes.as_ref());
+            }
+        }
+        Err(anyhow!("not exist project"))
     }
 
     /// 获得最全的数据
@@ -321,12 +362,14 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///获得children的属性集合
+    //todo use local db to get children refnos
     async fn get_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
         if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
             let children = query_children(refno, &project_pool).await?;
             for child in children {
-                let attr = self.get_attr(child.0).await?;
+                // let attr = self.get_attr(child.0).await?;
+                let attr = self.get_attr_from_localdb(child.0).unwrap_or_default();
                 r.push(attr);
             }
         }
@@ -604,7 +647,7 @@ impl PdmsDataInterface for AiosDBManager {
                         };
                         pos.z += off_z;
                     }
-                    "JLDATU"  => {
+                    "JLDATU" => {
                         let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
                         let pkdi = att.get_f32("PKDI").unwrap_or_default();
                     }
@@ -738,7 +781,7 @@ impl PdmsDataInterface for AiosDBManager {
         let mut r = vec![];
         let children = query_deep_children_refnos_fuzzy(&self.get_arango_db().await?, refno, nouns).await?;
         for child in children {
-            let attr = self.get_attr(child).await?;
+            let attr = self.get_attr_from_localdb(child).unwrap_or_default();
             r.push(attr);
         }
         Ok(r)

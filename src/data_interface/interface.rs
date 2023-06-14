@@ -26,6 +26,11 @@ pub trait PdmsDataInterface : Send + Sync{
     ///获得属性
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
 
+    fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
+
+
+    fn get_attr_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<AttrMap>;
+
     ///获得包含UDA的属性
     async fn get_attr_with_uda(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
 

@@ -1,18 +1,17 @@
 #同步文件配置
-total_sync = true
+total_sync = false
 enable_log = false
 sync_graph_db = false
 sync_tidb = false
-#保存到本地数据库redb
-sync_redb = true
+sync_localdb = true
 incr_sync = false
 replace_dbs = true
 
 #项目设置
 project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
 included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
+#included_projects = ["SCB", "ZDJ"]  #"AvevaPlantSample",
 #included_projects = ["AvevaCatalogue"]  #"AvevaPlantSample",
-#included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
 
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
@@ -62,9 +61,9 @@ only_rebuild_pdms_element = false
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
 #included_db_files = ["ams7997_0001"]
-included_db_files = ["ams7351_0001"]
+#included_db_files = ["ams7351_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
-manual_db_nums = [7997]  #, 8000
+manual_db_nums = [1112]  #, 8000
 plat_url = ""
 
 #puhua
@@ -173,7 +172,8 @@ puhua_database_password = ""
 #FIXING 的调试
 #debug_root_refnos = ["17496/106824"]  #墙
 
-debug_root_refnos = ["17496/106640"]
+#debug_root_refnos = ["17496/106640"]
+#debug_root_refnos = ["24381/159769"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]

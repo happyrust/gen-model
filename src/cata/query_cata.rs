@@ -26,12 +26,12 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
 
 
-    let desi_att = interface.get_attr(refno).await?;
+    let desi_att = interface.get_attr_from_localdb(refno)?;
     //todo 改到使用图数据库去查找
     if scom_ref.is_none() {
         if let Some(spre_ref) = desi_att.get_foreign_refno("SPRE") {
             // dbg!(spre_ref);
-            let spre = interface.get_attr(spre_ref).await?;
+            let spre = interface.get_attr_from_localdb(spre_ref).unwrap_or_default();
             if spre.contains_attr_name("CATR") {
                 scom_ref = spre.get_foreign_refno("CATR");
             } else {
@@ -40,10 +40,10 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
             }
         } else {
             if let Some(catref) = desi_att.get_foreign_refno("CATR") {
-                let c_att = interface.get_attr(catref).await?;
+                let c_att = interface.get_attr_from_localdb(catref).unwrap_or_default();
                 if c_att.get_type() == "TABITE" {
                     let tmp_ref = c_att.get_foreign_refno("PRTREF").unwrap_or_default();
-                    let t_att = interface.get_attr(tmp_ref).await?;
+                    let t_att = interface.get_attr_from_localdb(tmp_ref)?;
                     scom_ref = t_att.get_foreign_refno("CATR");
                 } else {
                     scom_ref = Some(catref);
@@ -112,7 +112,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     interface: Option<&T>,
 ) -> anyhow::Result<ScomInfo> {
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
-    let attr_map = interface.get_attr(refno).await.unwrap();
+    let attr_map = interface.get_attr_from_localdb(refno)?;
     let type_noun = attr_map
         .get_type_cloned()
         .ok_or(anyhow!(format!("{} 元件库属性不正确: {:?}", refno.to_refno_string(), &attr_map)))?;
@@ -123,7 +123,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     let mut axis_params = vec![];
     let mut axis_param_numbers = vec![];
     if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
-        if let Ok(ptre_am) = interface.get_attr(ptre_refno).await {
+        if let Ok(ptre_am) = interface.get_attr_from_localdb(ptre_refno) {
             if let Ok(axis_param_map) = query_axis_params(&ptre_am, Some(interface)).await {
                 axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
                 axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
@@ -136,7 +136,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     };
     let mut gm_params = vec![];
     if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
-        if let Ok(gmse_am) = interface.get_attr(gmse_refno).await {
+        if let Ok(gmse_am) = interface.get_attr_from_localdb(gmse_refno) {
             gm_params = query_gm_params(&gmse_am, Some(interface)).await?;
         }
     }
@@ -278,21 +278,23 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         .query_first_foreign_along_path(des_refno, &["SPRE", "CATR"], &["SPRE", "CATR"], &[])
         .await?{
         // dbg!(parent_cat_ref);
-        let parent_cat_am = interface.as_ref().unwrap().get_attr(parent_cat_ref).await?;
-        let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
-        for i in 0..params.len() {
-            cur_context.insert(
-                format!("OPAR{}", i + 1).into(),
-                params[i].to_string().into(),
-            );
+        if let Ok(parent_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(parent_cat_ref){
+            let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
+            for i in 0..params.len() {
+                cur_context.insert(
+                    format!("OPAR{}", i + 1).into(),
+                    params[i].to_string().into(),
+                );
+            }
+            let desp = parent_cat_am.get_f64_vec("DESP").unwrap_or_default();
+            for i in 0..desp.len() {
+                cur_context.insert(
+                    format!("ODES{}", i + 1).into(),
+                    desp[i].to_string().into(),
+                );
+            }
         }
-        let desp = parent_cat_am.get_f64_vec("DESP").unwrap_or_default();
-        for i in 0..desp.len() {
-            cur_context.insert(
-                format!("ODES{}", i + 1).into(),
-                desp[i].to_string().into(),
-            );
-        }
+
     }
 
     if let Ok(link_cat_refs) = int
@@ -300,20 +302,21 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         .await{
         if !link_cat_refs.is_empty() {
             let link_cat_ref = link_cat_refs[0];
-            let link_cat_am = interface.as_ref().unwrap().get_attr(link_cat_ref).await?;
-            let params = link_cat_am.get_f64_vec("PARA").unwrap_or_default();
-            for i in 0..params.len() {
-                cur_context.insert(
-                    format!("APAR{}", i + 1).into(),
-                    params[i].to_string().into(),
-                );
-            }
-            let desp = link_cat_am.get_f64_vec("DESP").unwrap_or_default();
-            for i in 0..desp.len() {
-                cur_context.insert(
-                    format!("ADES{}", i + 1).into(),
-                    desp[i].to_string().into(),
-                );
+            if let Ok(link_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(link_cat_ref) {
+                let params = link_cat_am.get_f64_vec("PARA").unwrap_or_default();
+                for i in 0..params.len() {
+                    cur_context.insert(
+                        format!("APAR{}", i + 1).into(),
+                        params[i].to_string().into(),
+                    );
+                }
+                let desp = link_cat_am.get_f64_vec("DESP").unwrap_or_default();
+                for i in 0..desp.len() {
+                    cur_context.insert(
+                        format!("ADES{}", i + 1).into(),
+                        desp[i].to_string().into(),
+                    );
+                }
             }
         }
     }

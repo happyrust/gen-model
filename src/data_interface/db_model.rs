@@ -34,6 +34,8 @@ use approx::abs_diff_eq;
 use opencascade::{DsShape, OCCShape};
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use futures::StreamExt;
+// use heed::byteorder::BE;
+// use heed::EnvOpenOptions;
 use nalgebra::Point3;
 use rayon::prelude::*;
 use crate::api::attr::{query_attr, query_uda_ukey_udna_all};
@@ -421,9 +423,39 @@ impl AiosDBManager {
     pub async fn init(db_option: &DbOption) -> anyhow::Result<Self> {
         let dir = db_option.project_path.to_string();
         let mut project_map = DashMap::new();
+        let mut local_db_map = DashMap::new();
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
+        // use heed::types::*;
+        // use heed::{Database, EnvOpenOptions};
+
         for project in &db_option.included_projects {
+
+
+            //redb 的实现
+            // if let Ok(db) = redb::Database::builder()
+            //     .set_cache_size(500 * 1024 * 1024)
+            //     .open(format!("{}.redb", project)) {
+            //     redb_map.entry(project.clone()).or_insert(Arc::new(db));
+            // }
+
+            // local_db_map
+            let db_path = format!("{}.db", project);
+            if let Ok(db) = sled::open(&db_path){
+                local_db_map.entry(project.clone()).or_insert(Arc::new(db));
+            }
+            // let env = EnvOpenOptions::new()
+            //     .map_size(10 * 1024 * 1024 * 1024) // 10G 的映射大小
+            //     .max_dbs(3000)
+            //     .open(db_path)?;
+            // let mut rtxn = env.read_txn()?;
+            // if let Some(db) = env.open_database::<U64<BE>, ByteSlice>(&rtxn, Some("att"))?{
+            //     println!("加载本地db={}", project);
+            //     local_db_map.entry(project.clone()).or_insert((Arc::new(env.clone()), Arc::new(db)));
+            // }
+
+            // heed 的实现
+
             let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
             match project_pool {
                 Ok(pool) => {
@@ -452,6 +484,7 @@ impl AiosDBManager {
         let arango_pool = connect_arangodb(&db_option).await?;
         Ok(Self {
             project_map,
+            local_db_map,
             ref0_projects,
             info_pool: info_conn,
             projects,

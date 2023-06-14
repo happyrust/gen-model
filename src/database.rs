@@ -525,6 +525,14 @@ pub async fn sync_total_async_threaded(
         })
         .collect::<Vec<PathBuf>>();
 
+    let local_db = if db_option.sync_localdb.unwrap_or(true) {
+        let path = format!("{}.db", &project);
+        let tree = sled::open(&path)?;
+        Some(tree)
+    }else{
+        None
+    };
+
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
     let mut error_sql = Arc::new(DashSet::new());
@@ -657,23 +665,60 @@ pub async fn sync_total_async_threaded(
                     println!("图数据库保存完成");
                 }
 
-                if db_option.sync_redb.unwrap_or(true) {
-                    use redb::{Database, Error, ReadableTable, TableDefinition};
-                    let db = Database::create(format!("{}.redb", &project_clone))?;
-                    let table_name = format!("{db_no}");
-                    let table: TableDefinition<u64, &[u8]> = TableDefinition::new(&table_name);
-                    let write_txn = db.begin_write()?;
-                    {
-                        let mut table = write_txn.open_table(table)?;
-                        for kv in total_attr_map_arc.as_ref() {
-                            let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
-                            table.insert(**kv.key(), &*vec)?;
-                        }
-                        // table.insert("my_key", &123)?;
+                if let Some(tree) = local_db.clone() {
+                    for kv in total_attr_map_arc.as_ref() {
+                        let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                        tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
                     }
-                    write_txn.commit()?;
-                    println!("保存到本地db完成");
                 }
+
+                //heed lmdb 的实现
+                // if db_option.sync_localdb.unwrap_or(true) {
+                //     use heed::bytemuck::{Pod, Zeroable};
+                //     use heed::byteorder::BE;
+                //     use heed::types::*;
+                //     use heed::{Database, EnvOpenOptions};
+                //     let path = Path::new(".").join(format!("{}.mdb", &project_clone));
+                //
+                //     fs::create_dir_all(&path)?;
+                //
+                //     let env = EnvOpenOptions::new()
+                //         .map_size(10 * 1024 * 1024 * 1024) // 10MB
+                //         .max_dbs(3000)
+                //         .open(path)?;
+                //
+                //     // you can specify that a database will support some typed key/data
+                //     //
+                //     // like here we specify that the key will be an array of two i32
+                //     // and the data will be an str
+                //     let mut wtxn = env.write_txn()?;
+                //     let db: Database<U64<BE>, heed::types::ByteSlice> = env.create_database(&mut wtxn, Some("att"))?;
+                //     for kv in total_attr_map_arc.as_ref() {
+                //         let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                //         db.put(&mut wtxn, &**kv.key(), &*vec)?;
+                //     }
+                //     wtxn.commit()?;
+                //     println!("保存到本地db完成");
+                // }
+
+                //redb 的实现
+                // if db_option.sync_localdb.unwrap_or(true) {
+                //     use redb::{Database, Error, ReadableTable, TableDefinition};
+                //     let db = Database::create(format!("{}.redb", &project_clone))?;
+                //     // let table_name = format!("{db_no}");
+                //     let table_name = format!("kv");
+                //     let table: TableDefinition<u64, &[u8]> = TableDefinition::new(&table_name);
+                //     let write_txn = db.begin_write()?;
+                //     {
+                //         let mut table = write_txn.open_table(table)?;
+                //         for kv in total_attr_map_arc.as_ref() {
+                //             let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                //             table.insert(**kv.key(), &*vec)?;
+                //         }
+                //     }
+                //     write_txn.commit()?;
+                //     println!("保存到本地db完成");
+                // }
 
                 //如果不需要同步tidb，continue
                 if !db_option.sync_tidb.unwrap_or(true) {
@@ -1030,11 +1075,11 @@ async fn save_paras_into_arangodb(
     }
     for para in para_map.chunks(ARANGODB_SAVE_AMOUNT) {
         let para_json = serde_json::to_value(para)?;
-        save_arangodb_with_db_option(database, para_json,  "para_eles").await?;
+        save_arangodb_with_db_option(database, para_json, "para_eles").await?;
     }
     for des_para in des_para_map.chunks(ARANGODB_SAVE_AMOUNT) {
         let des_para_json = serde_json::to_value(des_para)?;
-        save_arangodb_with_db_option(database, des_para_json,  "despara_eles").await?;
+        save_arangodb_with_db_option(database, des_para_json, "despara_eles").await?;
     }
     Ok(())
 }

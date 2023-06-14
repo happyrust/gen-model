@@ -103,7 +103,7 @@ pub async fn cache_prim_geos(
                 let mut geo_hash = None;
                 let mut item_trans = Transform::IDENTITY;
 
-                let attr = mgr.get_attr(refno).await.unwrap_or_default();
+                let attr = mgr.get_attr_from_localdb(refno).unwrap_or_default();
                 let mut geo_param = PdmsGeoParam::Unknown;
                 //需要限制负实体的大小，太大，导致负运算失败
                 let limit_size: Option<f32> = if GENRAL_NEG_NOUN_NAMES.contains(&attr.get_type()) {
@@ -266,7 +266,7 @@ pub async fn cache_loop_geos(
                     }
                 }
                 if loop_verts.is_empty() { continue; }
-                let mut parent_att = mgr.get_attr(parent_refno).await.unwrap_or_default();
+                let mut parent_att = mgr.get_attr_from_localdb(parent_refno).unwrap_or_default();
                 let mut geo_hash = None;
                 let mut item_trans = Transform::IDENTITY;
                 let mut geo_param = PdmsGeoParam::Unknown;
@@ -293,7 +293,7 @@ pub async fn cache_loop_geos(
                     }
                     //todo 关于justline，可能需要jusline的信息才能判断中心点
                     "AEXTR" | "NXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
-                        let loop_attr = mgr.get_attr(loop_refno).await.unwrap_or_default();
+                        let loop_attr = mgr.get_attr_from_localdb(loop_refno).unwrap_or_default();
                         let mut height = loop_attr
                             .get_f32("HEIG")
                             .unwrap_or(parent_att.get_f32("HEIG").unwrap_or_default());
@@ -414,7 +414,7 @@ pub async fn gen_cata_single_geoms(
     if owner.is_none() {
         return Ok(RefU64::default());
     }
-    let desi_att = mgr.get_attr(design_refno).await?;
+    let desi_att = mgr.get_attr_from_localdb(design_refno)?;
     let geoms_info = resolve_desi_comp(Some(mgr.as_ref()), design_refno, None, scom_info_map)
         .await
         .unwrap_or_default();
@@ -528,7 +528,7 @@ pub async fn cache_cata_geos(
                     );
                     //在这里直接处理完所有需要处理的transform
                     let brep_shapes_map = CateBrepShapeMap::new();
-                    let current_att = mgr.get_attr(refno).await.unwrap_or_default();
+                    let current_att = mgr.get_attr_from_localdb(refno).unwrap_or_default();
                     let mut refno_ptset_map = DashMap::new();
                     let cur_type = current_att.get_type();
 
@@ -549,7 +549,7 @@ pub async fn cache_cata_geos(
                             .await else {
                             continue;
                         };
-                        let Ok(ele_att) = mgr.get_attr(ele_refno).await else {
+                        let Ok(ele_att) = mgr.get_attr_from_localdb(ele_refno) else {
                             continue;
                         };
 
@@ -603,7 +603,7 @@ pub async fn cache_cata_geos(
                             let mut trans = brep_shape.get_trans();
                             if is_scaled_reuse {
                                 if brep_shape.is_reuse_unit() {
-                                    let attr = mgr.get_attr(ele_refno).await.unwrap_or_default();
+                                    let attr = mgr.get_attr_from_localdb(ele_refno).unwrap_or_default();
                                     let poss = attr.get_vec3("POSS").unwrap_or_default();
                                     let pose = attr.get_vec3("POSE").unwrap_or_default();
                                     let v = (pose - poss).length();
@@ -730,7 +730,7 @@ pub async fn cache_cata_geos(
                     };
                     let is_scaled_reuse = SCALED_REUSE_GEO_NAMES.contains(&ref_basic.get_type());
                     if is_scaled_reuse && target_geo_data.reuse_unit {
-                        let attr = mgr.get_attr(ele_refno).await.unwrap_or_default();
+                        let attr = mgr.get_attr_from_localdb(ele_refno).unwrap_or_default();
                         let poss = attr.get_vec3("POSS").unwrap_or_default();
                         let pose = attr.get_vec3("POSE").unwrap_or_default();
                         let v = (pose - poss).length();
@@ -743,7 +743,7 @@ pub async fn cache_cata_geos(
                     };
 
                     if CATA_HAS_TUBI_GEO_NAMES.contains(&own_ref_basic.get_type()) {
-                        let attr = mgr.get_attr(ele_refno).await.unwrap_or_default();
+                        let attr = mgr.get_attr_from_localdb(ele_refno).unwrap_or_default();
                         flow_pt_indexs = vec![
                             attr.get_i32("ARRI").unwrap_or(-1),
                             attr.get_i32("LEAV").unwrap_or(-1),
@@ -789,7 +789,9 @@ pub async fn cache_cata_geos(
         let shape_insts_data = main_instance_mgr.read().await;
         let branch_refno = *b.key();
         let children = b.value();
-        let group_att = mgr.get_attr(branch_refno).await?;
+        let Ok(group_att) = mgr.get_attr_from_localdb(branch_refno) else{
+            continue;
+        };
         //可能只有branch 元素需要做一遍求解
         let Ok(Some(group_transform)) = mgr
             .get_world_transform(branch_refno)
@@ -824,7 +826,7 @@ pub async fn cache_cata_geos(
         let mut bore = 0.0f32;
         let mut href_type = "".to_string();
         //todo 头节点的处理
-        if let Ok(h_att) = mgr.get_attr(h_ref).await {
+        if let Ok(h_att) = mgr.get_attr_from_localdb(h_ref) {
             href_type = h_att.get_type().to_string();
             let h_cat_ref = h_att.get_foreign_refno("CATR").unwrap_or_default();
             //只是为了获得外径而已
@@ -842,11 +844,12 @@ pub async fn cache_cata_geos(
             }
 
             if !has_tube_geom {
-                let h_cat_att = mgr.get_attr(h_cat_ref).await?;
-                let params = h_cat_att.get_f64_vec("PARA").unwrap_or_default();
-                if params.len() >= 2 {
-                    bore = params[if is_hang { 0 } else { 1 }] as f32;
-                }
+                if let Ok(h_cat_att) = mgr.get_attr_from_localdb(h_cat_ref) {
+                    let params = h_cat_att.get_f64_vec("PARA").unwrap_or_default();
+                    if params.len() >= 2 {
+                        bore = params[if is_hang { 0 } else { 1 }] as f32;
+                    }
+                };
             }
             // dbg!(bore);
         }
@@ -1063,16 +1066,16 @@ pub async fn cache_geos_data(
     let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
 
 
-    let s_refno = RefU64::from_two_nums(17496, 106683);
-    let att = mgr.get_attr(s_refno).await;
-    dbg!(att);
+    // let s_refno = RefU64::from_two_nums(17496, 143557);
+    // let att = mgr.get_attr_from_localdb(s_refno);
+    // dbg!(att);
     // let plin_param = mgr.query_pline(s_refno, "OBOW").await?;
     // dbg!(plin_param);
-    let transform = mgr.get_world_transform(s_refno).await?.unwrap();
-    dbg!(transform);
+    // let transform = mgr.get_world_transform(s_refno).await?.unwrap();
+    // dbg!(transform);
 
     // let s_refno = RefU64::from_two_nums(17496, 161309);
-    // let att = mgr.get_attr(s_refno).await;
+    // let att = mgr.get_attr_from_localdb(s_refno);
     // dbg!(att);
     // // let plin_param = mgr.query_pline(s_refno, "OBOW").await?;
     // // dbg!(plin_param);
@@ -1171,7 +1174,9 @@ pub async fn cache_geos_data(
             .collect::<HashSet<_>>()
             .into_iter();
         for l in lstube_set {
-            let att = mgr.get_attr(l).await?;
+            let Ok(att) = mgr.get_attr_from_localdb(l) else {
+                continue;
+            };
             let params = att.get_f64_vec("PARA").unwrap_or_default();
             let gtype = att.get_as_string("GTYP").unwrap_or_default();
             if params.len() >= 2 {
