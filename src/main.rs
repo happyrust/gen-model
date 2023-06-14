@@ -115,7 +115,6 @@ async fn main() -> anyhow::Result<()> {
         info!("read cached mesh ok.");
     }
 
-
     ///生成ssc 树
     if db_option.rebuild_ssc_tree {
         info!("正在同步SSC");
@@ -126,8 +125,6 @@ async fn main() -> anyhow::Result<()> {
         }
         info!("SSC同步完成");
     }
-
-
 
     if db_option.only_sync_sys {
         sync_system_db(&mgr).await?;

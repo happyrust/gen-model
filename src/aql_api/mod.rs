@@ -11,7 +11,7 @@ pub mod dtse_attr;
 pub mod pdms_mesh;
 pub mod pdms_room;
 pub mod tubi;
-pub mod virtual_hole_value;
+pub mod virtual_hole;
 pub mod atta_pos;
 pub mod lock_refnos;
 
