@@ -50,6 +50,7 @@ pub mod test;
 pub mod other_plat;
 
 pub mod viewer;
+pub mod plug_in;
 
 #[macro_use]
 extern crate derive_more;
