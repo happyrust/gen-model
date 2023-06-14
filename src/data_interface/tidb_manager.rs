@@ -157,7 +157,8 @@ impl PdmsDataInterface for AiosDBManager {
             let k = PDMS_ATT_MAP_CACHE.get(&refno).unwrap();
             Ok(k.value().clone())
         } else {
-            let attr = query_attr(refno, self, None).await?;
+            // let attr = query_attr(refno, self, None).await?;
+            let attr = self.get_attr_from_localdb(refno)?;
             PDMS_ATT_MAP_CACHE
                 .insert(refno, &attr)
                 .expect("PDMS_ATT_MAP_CACHE save error.");
@@ -615,7 +616,7 @@ impl PdmsDataInterface for AiosDBManager {
         //需要判断owner 下是不是有spine，如wall，顺时针逆时针会影响plin的方向
         for (refno, ref_basic) in ancestors {
             let mut jusl_vec = Vec3::new(0.0, 0.0, 0.0);
-            let att = self.get_attr(refno).await?;
+            let att = self.get_attr_from_localdb(refno)?;
             let mut pos = att.get_position().unwrap_or_default();
             let mut quat = Quat::IDENTITY;
             let type_name = att.get_type();
