@@ -5,8 +5,8 @@ use aios_core::cache::refno::CachedRefBasic;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
 use aios_core::plot_struct::hanger::*;
-use bb8_arangodb::arangors::{AqlQuery, Database};
-use bb8_arangodb::arangors::collection::CollectionType::{Document, Edge};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
 use calamine::{Error, open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::DashMap;
 use glam::{Vec2, Vec3};
@@ -294,9 +294,9 @@ fn gen_query_stru_and_rest_with_atta_name_sql(atta_name: &str) -> String {
 
 /// 从图数据库获取单个hanger需要的数据
 pub async fn query_hangers_element(atta_name: &str, database: &ArDatabase) -> anyhow::Result<Vec<HangerData>> {
-    let aql = AqlQuery::builder().query("\
+    let aql = AqlQuery::new("\
         return document('hanger_data',@name)
-    ").bind_var("name", atta_name).build();
+    ").bind_var("name", atta_name);
     let result: Vec<HangerData> = database.aql_query(aql).await?;
     Ok(result)
 }

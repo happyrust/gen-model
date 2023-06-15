@@ -1,6 +1,6 @@
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use dashmap::DashMap;
 use crate::aql_api::change_vec_refnos_into_vec_string;
 use crate::aql_api::children::query_children_eles;
@@ -26,7 +26,7 @@ pub async fn query_dtse_ppro_from_catr_refno(refno: RefU64, database: &ArDatabas
 /// 返回data下对应的ppro数据 -> k: dkey
 async fn query_data_attr_from_refnos(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<DashMap<String, DataDocument>> {
     let children = change_vec_refnos_into_vec_string(refnos);
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     let data = @element
     for v in data
     let e = document('data_eles',v)
@@ -36,7 +36,7 @@ async fn query_data_attr_from_refnos(refnos: Vec<RefU64>, database: &ArDatabase)
             'ppro':e.ppro,
             'dpro':e.dpro,
         } "
-    ).bind_var("element", children).build();
+    ).bind_var("element", children);
     let result: Vec<DataDocument> = database.aql_query(aql).await?;
     let mut data_map = DashMap::new();
     for r in result {

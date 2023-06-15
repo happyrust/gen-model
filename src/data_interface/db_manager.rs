@@ -175,7 +175,7 @@ impl AiosDBManager {
                             add = geo_type == GeoEnum::CATA_BRAN_AND_HANGER_REUSE;
                         } else if CATA_SINGLE_REUSE_GEO_NAMES.contains(&k.noun.as_str()) {
                             add = geo_type == GeoEnum::CATA_SINGLE_REUSE;
-                        } else {
+                        } else if CATA_WITHOUT_REUSE_GEO_NAMES.contains(&k.noun.as_str()) {
                             add = geo_type == GeoEnum::CATA_WITHOUT_REUSE;
                         }
                     }

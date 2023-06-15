@@ -8,7 +8,7 @@ use std::sync::Arc;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{AttrVal, EleTreeNode, RefU64, RefU64Vec};
 use anyhow::anyhow;
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::{DashMap, DashSet};
 use futures::future::OkInto;
@@ -29,8 +29,8 @@ use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode, SSCEleGraphNo
 use crate::metadata::convert_str_to_hash;
 use crate::tables;
 use aios_core::aql_types::AqlEdge;
-use arangors::collection::CollectionType::*;
-use arangors::collection::CollectionType::Document;
+use arangors_lite::collection::CollectionType::*;
+use arangors_lite::collection::CollectionType::Document;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -857,7 +857,7 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>, db_opti
     }
     // todo 不能同时update多次 后期将这些aql优化到一次执行
     for update_aql in update_aqls {
-        let _r = database.aql_query::<()>(AqlQuery::builder().query(update_aql.as_str()).build() ).await;
+        let _r = database.aql_query::<()>(AqlQuery::new(update_aql.as_str()) ).await;
     }
     Ok(())
 }

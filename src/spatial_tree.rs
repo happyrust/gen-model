@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use aios_core::options::DbOption;
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 

@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::io::Write;
 use std::mem::take;
 use aios_core::pdms_types::PlantMeshesData;
-use arangors::AqlQuery;
-use bb8_arangodb::arangors::collection::CollectionType::Document;
+use arangors_lite::AqlQuery;
+use bb8_arangodb::arangors_lite::collection::CollectionType::Document;
 use itertools::Itertools;
 use log::{error, info};
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -21,12 +21,12 @@ pub async fn save_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &PlantMeshesD
             let json = serde_json::to_value(k.1).unwrap();
             data.push(json);
         }
-        let aql = AqlQuery::builder().query(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
             .bind_var("elements", take(&mut data))
-            .build();
+            ;
         database.aql_query::<Vec<()>>(aql).await.unwrap();
     }
 

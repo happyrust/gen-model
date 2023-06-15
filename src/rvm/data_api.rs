@@ -2,7 +2,7 @@ use std::ops::Mul;
 use aios_core::pdms_types::{EleInstGeo, EleGeosInfo, RefU64};
 use aios_core::geom_types::RvmGeoInfo;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 use bevy::prelude::Transform;
 use glam::{Mat3, Mat3A, Quat, Vec3};
 use id_tree::{NodeId, Tree};

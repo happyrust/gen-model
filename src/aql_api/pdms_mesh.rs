@@ -3,7 +3,7 @@ use aios_core::negative_mesh_type::NegativeEles;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::shape::pdms_shape::{PlantMesh};
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use bevy::prelude::Transform;
 use dashmap::DashMap;
 use glam::{Quat, Vec3};
@@ -55,7 +55,7 @@ pub async fn query_pdms_mesh_data(hash: Vec<u64>, pool: &Pool<MySql>) -> anyhow:
 pub async fn query_refno_meshes_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<DashMap<RefU64, PlantMesh>> {
     let mut map = DashMap::new();
     let key = format!("{}/{}", "pdms_eles", refno.to_url_refno());
-    let aql = AqlQuery::builder().query("\
+    let aql = AqlQuery::new("\
     let refnos = (for v,e,p in 0..10 inbound @id pdms_edges
                 return v._key)
     let results = ( for refno in refnos
@@ -67,7 +67,7 @@ pub async fn query_refno_meshes_aql(refno: RefU64, database: &ArDatabase) -> any
         for d in result.data
             let r = document('pdms_mesh',d.geo_hash)
             return { refno:refno,hash: r._key, data: r.data }
-    ").bind_var("id", key).build();
+    ").bind_var("id", key);
     if let Ok(results) = database.aql_query::<PdmsMeshAql>(aql).await {
         if !results.is_empty() {
             for result in results {
@@ -87,7 +87,7 @@ pub async fn query_refno_meshes_aql(refno: RefU64, database: &ArDatabase) -> any
 pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<DashMap<RefU64, PlantMesh>> {
     let mut map = DashMap::new();
     let key = format!("{}/{}", "pdms_eles", refno.to_url_refno());
-    let aql = AqlQuery::builder().query("\
+    let aql = AqlQuery::new("\
     let refnos = (for v,e,p in 0..10 inbound @id pdms_edges
                 return v._key)
     let results = ( for refno in refnos
@@ -99,7 +99,7 @@ pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &ArDatabase) 
         for d in result.data
             let r = document('pdms_mesh',d.geo_hash)
             return { refno:d.refno,hash: r._key, data: r.data }
-    ").bind_var("id", key).build();
+    ").bind_var("id", key);
     if let Ok(results) = database.aql_query::<PdmsCatrMeshAql>(aql).await {
         if !results.is_empty() {
             for result in results {
@@ -119,12 +119,12 @@ pub async fn query_pdms_mesh_aql(database: &ArDatabase, hashes: &[u64]) -> anyho
     let mut cache_mgr = PlantMeshesData::default();
     let hash_strs = hashes.into_iter().map(|x| x.to_string()).collect::<Vec<_>>();
     // dbg!(&hash_strs);
-    let aql = AqlQuery::builder().query("\
+    let aql = AqlQuery::new("\
     for hash in @hashes
         let d = document('pdms_mesh',hash)
         filter d != null
         return d
-    ").bind_var("hashes", hash_strs).build();
+    ").bind_var("hashes", hash_strs);
     let results: Vec<PlantGeoData> = database.aql_query(aql).await?;
     for result in results {
         // let hash: u64 = result.hash.parse()?;
@@ -141,14 +141,14 @@ pub async fn query_pdms_mesh_aql(database: &ArDatabase, hashes: &[u64]) -> anyho
 //
 // pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<PlantMeshesData> {
 //     let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-//     let aql = AqlQuery::builder().query("
+//     let aql = AqlQuery::new("
 //     for v in 0..5 inbound @id pdms_edges
 //         let r = document('negative_eles',v._key)
 //         filter r!= null
 //         return {
 //             '_key': r._key,
 //             'mesh': r.mesh
-//         }").bind_var("id", id).build();
+//         }").bind_var("id", id);
 //     let results: Vec<NegativeEles> = database.aql_query(aql).await?;
 //     let mut cache_mgr = PlantMeshesData::default();
 //     for r in results {
@@ -165,9 +165,9 @@ pub async fn query_pdms_mesh_aql(database: &ArDatabase, hashes: &[u64]) -> anyho
 
 
 pub async fn query_refno_transform(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Transform>> {
-    let aql = AqlQuery::builder().query("return document('pdms_inst_infos',@key).world_transform")
+    let aql = AqlQuery::new("return document('pdms_inst_infos',@key).world_transform")
         .bind_var("key", refno.to_url_refno())
-        .build();
+        ;
     let result: Vec<(Quat, Vec3, Vec3)> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }
     let result = result.first().unwrap();

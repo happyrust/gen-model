@@ -3,7 +3,7 @@ use std::io::Write;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 use sqlx::{MySql, Pool};
 use crate::api::refno_info::query_refno_height_position;
 use crate::api::room_code::query_room_code;

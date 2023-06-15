@@ -1,7 +1,7 @@
 use glam::Vec3;
 use once_cell::sync::Lazy;
 use smol_str::SmolStr;
-use arangors::AqlQuery;
+use arangors_lite::AqlQuery;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use aios_core::pdms_types::*;
 use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
@@ -31,7 +31,6 @@ use aios_core::prim_geo::cylinder::SCylinder;
 use aios_core::prim_geo::TUBI_GEO_HASH;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use approx::abs_diff_eq;
-use opencascade::{DsShape, OCCShape};
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use futures::StreamExt;
 // use heed::byteorder::BE;
@@ -117,7 +116,7 @@ impl AiosDBManager {
         let database = self.get_arango_db().await?;
         loop {
             //需要排除负实体
-            let aql = AqlQuery::builder().query(r#"
+            let aql = AqlQuery::new(r#"
             FOR doc IN pdms_inst_infos
                 SORT doc._key
                 LIMIT @offset, @batch_size
@@ -130,7 +129,7 @@ impl AiosDBManager {
         "#)
                 .bind_var("offset", offset)
                 .bind_var("batch_size", 5000)
-                .build();
+                ;
             offset += 5000;
             if let Ok(refno_aabbs) = database.aql_query::<(String, Aabb)>(aql).await {
                 if refno_aabbs.is_empty() {
@@ -423,7 +422,7 @@ impl AiosDBManager {
     pub async fn init(db_option: &DbOption) -> anyhow::Result<Self> {
         let dir = db_option.project_path.to_string();
         let mut project_map = DashMap::new();
-        let mut local_db_map = DashMap::new();
+        let mut local_attr_db_map = DashMap::new();
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         // use heed::types::*;
@@ -441,8 +440,13 @@ impl AiosDBManager {
 
             // local_db_map
             let db_path = format!("{}.db", project);
-            if let Ok(db) = sled::open(&db_path){
-                local_db_map.entry(project.clone()).or_insert(Arc::new(db));
+            let config = sled::Config::default()
+                .path(db_path)
+                .mode(sled::Mode::HighThroughput)
+                .cache_capacity(10_000_000_000)
+                .flush_every_ms(Some(1000));
+            if let Ok(db) = config.open(){
+                local_attr_db_map.entry(project.clone()).or_insert(db.open_tree("attr_map")?);
             }
             // let env = EnvOpenOptions::new()
             //     .map_size(10 * 1024 * 1024 * 1024) // 10G 的映射大小
@@ -484,7 +488,7 @@ impl AiosDBManager {
         let arango_pool = connect_arangodb(&db_option).await?;
         Ok(Self {
             project_map,
-            local_db_map,
+            local_attr_db_map,
             ref0_projects,
             info_pool: info_conn,
             projects,
@@ -751,9 +755,9 @@ impl AiosDBManager {
     ) -> anyhow::Result<Option<PdmsEleGraphNode>> {
         let arango_db = self.get_arango_db().await?;
         let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-        let aql = AqlQuery::builder().query("\
+        let aql = AqlQuery::new("\
             return document(pdms_eles, @id)
-        ").bind_var("id", refno_aql).build();
+        ").bind_var("id", refno_aql);
         let mut r = arango_db.aql_query::<PdmsEleGraphNode>(aql).await?;
         Ok(r.pop())
     }

@@ -26,7 +26,6 @@ use dashmap::{DashMap, DashSet};
 use futures::future::ok;
 use glam::{Mat3, Vec3};
 use nalgebra::Point3;
-use opencascade::{DsShape, Shape};
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Vector};
 use rayon::iter::IntoParallelIterator;

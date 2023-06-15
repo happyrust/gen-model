@@ -6,7 +6,7 @@ use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, Data
 use aios_core::negative_mesh_type::NegativeEdges;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{RefU64, UdaMajorType};
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
@@ -441,11 +441,11 @@ pub async fn save_embed_data_to_arangodb(data: Vec<VirtualEmbedGraphNode>, datab
 pub async fn replace_embed_data_to_arangodb(datas: Vec<VirtualEmbedGraphNode>, database: &ArDatabase) -> anyhow::Result<String> {
     // 删除原来的边
     let keys = datas.iter().map(|x| x._key.clone()).collect::<Vec<_>>();
-    let edge_aql = AqlQuery::builder().query("\
+    let edge_aql = AqlQuery::new("\
     for key in @keys
         for c,e in 1 inbound CONCAT('embed_data/',key) embed_edge
             REMOVE e._key IN embed_edge
-    ").bind_var("keys", keys.clone()).build();
+    ").bind_var("keys", keys.clone());
     let result = database.aql_query::<Vec<()>>(edge_aql).await?;
     // 重新插入新的边
     match replace_embed_data_edge(&datas, &database).await{
@@ -514,7 +514,7 @@ async fn replace_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &A
 /// 通过埋件依附的墙或板来查询这个墙上所有的埋件数据
 pub async fn query_embed_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualEmbedGraphNode>> {
     let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
-    let aql = AqlQuery::builder().query("\
+    let aql = AqlQuery::new("\
     for key in @keys
         for c in 1 outbound key embed_edge
             filter c != null
@@ -547,13 +547,13 @@ pub async fn query_embed_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase
                 'RelyItemBPID': c.RelyItemBPID,
                 'RelyItemBPVER': c.RelyItemBPVER,
                 'Form': c.Form
-        }").bind_var("keys", keys).build();
+        }").bind_var("keys", keys);
     let result = database.aql_query::<VirtualEmbedGraphNode>(aql).await?;
     Ok(result)
 }
 
 pub async fn get_embed_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<VirtualEmbedGraphNode>> {
-    let aql = AqlQuery::builder().query("\
+    let aql = AqlQuery::new("\
     for c in @@collection
         return {
             '_key': c._key,
@@ -584,14 +584,14 @@ pub async fn get_embed_data_total_aql(database: &ArDatabase) -> anyhow::Result<V
             'RelyItemBPID': c.RelyItemBPID,
             'RelyItemBPVER': c.RelyItemBPVER,
             'Form': c.Form
-        }").bind_var("@collection", AQL_EMBED_DATA_COLLECTION).build();
+        }").bind_var("@collection", AQL_EMBED_DATA_COLLECTION);
     let result = database.aql_query::<VirtualEmbedGraphNode>(aql).await?;
     Ok(result)
 }
 
 /// 通过key来查询埋件数据
 pub async fn query_embed_data_by_keys_aql(keys: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualEmbedGraphNode>> {
-    let aql = AqlQuery::builder().query("\
+    let aql = AqlQuery::new("\
     for key in @keys
         let c = document(@@embed_collection,key)
         filter c != null
@@ -626,23 +626,23 @@ pub async fn query_embed_data_by_keys_aql(keys: Vec<String>, database: &ArDataba
             'Form': c.Form
         }")
         .bind_var("keys", keys)
-        .bind_var("@embed_collection", AQL_EMBED_DATA_COLLECTION).build();
+        .bind_var("@embed_collection", AQL_EMBED_DATA_COLLECTION);
     let result = database.aql_query::<VirtualEmbedGraphNode>(aql).await?;
     Ok(result)
 }
 
 /// 删除埋件的信息，并删除边
 pub async fn delete_embed_data_aql(keys:Vec<String>,database:&ArDatabase) -> anyhow::Result<bool> {
-    let edge_aql = AqlQuery::builder().query("\
+    let edge_aql = AqlQuery::new("\
     for key in @keys
         for c,e in 1 inbound CONCAT('embed_data/',key) embed_edge
             REMOVE e._key IN embed_edge
-    ").bind_var("keys",keys.clone()).build();
+    ").bind_var("keys",keys.clone());
     let result = database.aql_query::<Vec<()>>(edge_aql).await;
-    let data_aql = AqlQuery::builder().query("\
+    let data_aql = AqlQuery::new("\
     for key in @keys
        REMOVE key IN embed_data
-    ").bind_var("keys",keys).build();
+    ").bind_var("keys",keys);
     let result = database.aql_query::<Vec<()>>(data_aql).await;
     Ok(!result.is_err())
 }

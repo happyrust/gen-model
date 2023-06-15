@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["opencascade"]
+default = []
 truck = []
-opencascade = ["dep:opencascade"]  #"dep:opencascade"
+#opencascade = ["dep:opencascade"]  #"dep:opencascade"
 viewer = []  #是否开启视图
 
 [dependencies]
@@ -42,13 +42,12 @@ nalgebra = { version = "0.32.2", features = ["serde", "rkyv", "glam023"] }
 parry3d = { version = "0.13.3", features = ["serde-serialize", "rkyv"] }
 
 parse_pdms_db = { path = "../aios-parse-pdms" }
-aios_core = { path = "../crates/aios-core" , features = ["opencascade"] }
+aios_core = { path = "../crates/aios-core" , features = ["truck"] } #, features = ["opencascade"]
 bevy = { path = "../crates/bevy", default-features = false }
 csg = { path = "../crates/csgrs/csg" }
-#arangors_lite = { path = "../crates/arangors-lite"}
+arangors_lite = { path = "../crates/arangors-lite"}
 #heed = {path = "../crates/heed/heed"}
 bb8-arangodb = { path = "../crates/bb8-arangodb" }
-arangors = { path = "../crates/arangors"}
 bb8 = "0.8.1"
 
 clap = { version = "3.1.18", features = ["derive"] }
@@ -68,7 +67,7 @@ rkyv = "0.7.42"
 #simple-process-stats = "1.0.0"
 
 #造型功能，先在database测试
-opencascade = { path = "../dslcad/crates/opencascade", optional = true }
+#opencascade = { path = "../dslcad/crates/opencascade", optional = true }
 serde_with = "3.0.0"
 tokio-stream = "0.1.14"
 rayon = "1.7.0"

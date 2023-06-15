@@ -9,7 +9,7 @@ use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 use bevy::prelude::error;
 use glam::{Vec2, Vec3};
 use crate::aql_api::dtse_attr::query_dtse_ppro_from_catr_refno;

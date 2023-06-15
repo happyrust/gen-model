@@ -6,7 +6,7 @@ use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, Data
 use aios_core::negative_mesh_type::NegativeEdges;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use bevy::prelude::dbg;
 use chrono::DateTime;
 use chrono::{Datelike, NaiveDateTime, Timelike};
@@ -790,11 +790,11 @@ pub async fn save_hole_data_to_arangodb(data: Vec<VirtualHoleGraphNode>, databas
 pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, database: &ArDatabase) -> anyhow::Result<String> {
     // 删除边
     let keys = datas.iter().map(|x| x._key.clone()).collect::<Vec<_>>();
-    let edge_aql = AqlQuery::builder().query("\
+    let edge_aql = AqlQuery::new("\
     for key in @keys
         for c,e in 1 inbound CONCAT('hole_data/',key) hole_edge
             REMOVE e._key IN hole_edge
-    ").bind_var("keys", keys).build();
+    ").bind_var("keys", keys);
     let result = database.aql_query::<Vec<()>>(edge_aql).await?;
     // 重新插入新的边
     match replace_hole_data_edge(&datas, &database).await{
@@ -864,7 +864,7 @@ async fn replace_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArD
 /// 通过孔洞依附的墙或板来查询这个墙上所有的孔洞数据
 pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
     let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     for key in @keys
     for c in 1 outbound key hole_edge
         filter c != null
@@ -911,13 +911,13 @@ pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase)
             'hType': c.hType,
             'MainItems': c.MainItems,
             'MainItemRefs': c.MainItemRefs
-        }").bind_var("keys", keys).build();
+        }").bind_var("keys", keys);
     let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
     Ok(result)
 }
 
 pub async fn query_hole_data_by_keys_aql(keys: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     for key in @keys
         let c = document(@@hole_collection,key)
         filter c != null
@@ -966,14 +966,14 @@ pub async fn query_hole_data_by_keys_aql(keys: Vec<String>, database: &ArDatabas
             'MainItemRefs': c.MainItemRefs
         }")
         .bind_var("keys", keys)
-        .bind_var("@hole_collection", AQL_HOLE_DATA_COLLECTION).build();
+        .bind_var("@hole_collection", AQL_HOLE_DATA_COLLECTION);
     let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
     Ok(result)
 }
 
 /// 查询所有的孔洞信息
 pub async fn query_hole_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     for c in @@collection
         return {
             '_key': c._key,
@@ -1018,23 +1018,23 @@ pub async fn query_hole_data_total_aql(database: &ArDatabase) -> anyhow::Result<
             'hType': c.hType,
             'MainItems': c.MainItems,
             'MainItemRefs': c.MainItemRefs
-        }").bind_var("@collection", AQL_HOLE_DATA_COLLECTION).build();
+        }").bind_var("@collection", AQL_HOLE_DATA_COLLECTION);
     let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
     Ok(result)
 }
 
 /// 删除孔洞的信息，并删除边
 pub async fn delete_hole_data_aql(keys:Vec<String>,database:&ArDatabase) -> anyhow::Result<bool> {
-    let edge_aql = AqlQuery::builder().query("\
+    let edge_aql = AqlQuery::new("\
     for key in @keys
         for c,e in 1 inbound CONCAT('hole_data/',key) hole_edge
             REMOVE e._key IN hole_edge
-    ").bind_var("keys",keys.clone()).build();
+    ").bind_var("keys",keys.clone());
     let result = database.aql_query::<Vec<()>>(edge_aql).await;
-    let data_aql = AqlQuery::builder().query("\
+    let data_aql = AqlQuery::new("\
     for key in @keys
        REMOVE key IN hole_data
-    ").bind_var("keys",keys).build();
+    ").bind_var("keys",keys);
     let result = database.aql_query::<Vec<()>>(data_aql).await;
     Ok(!result.is_err())
 }

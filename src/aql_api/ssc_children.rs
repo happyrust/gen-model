@@ -1,12 +1,12 @@
 use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use crate::graph_db::pdms_arango::ArDatabase;
 
 /// 通过图数据库查询 children
 pub async fn query_ssc_children_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
-    let aql = AqlQuery::builder().query("\
+    let aql = AqlQuery::new("\
     FOR z in 1 INBOUND @id ssc_edges
     return {
         'refno':z._key,
@@ -17,7 +17,7 @@ pub async fn query_ssc_children_aql(refno: RefU64, database: &ArDatabase) -> any
         'children_count':length(for c in 1 inbound z._id ssc_edges
                             return 1 ),
     }
-    ").bind_var("id", refno_aql).build();
+    ").bind_var("id", refno_aql);
     let result: Vec<PdmsElement> = database.aql_query(aql).await?;
     for v in result {
             r.push(EleTreeNode {

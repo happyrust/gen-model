@@ -9,7 +9,7 @@
 // pub async fn query_virtual_hole_value(database: &ArDatabase, refnos: Vec<RefU64>) -> anyhow::Result<Option<(Vec<VirtualHoleGraphNode>, Vec<VirtualEmbedGraphNode>)>> {
 //     let mut hole: Vec<VirtualHoleGraphNode> = Vec::new();
 //     for refno in &refnos {
-//         let aql = AqlQuery::builder().query("
+//         let aql = AqlQuery::new("
 //         let a =  document(@collection,@refno)
 //         return {
 //             '_key':a._key,
@@ -48,12 +48,12 @@
 //         }
 //         ")
 //             .bind_var("collection", "hole_data")
-//             .bind_var("refno", refno.to_url_refno()).build();
+//             .bind_var("refno", refno.to_url_refno());
 //         hole.append(&mut database.aql_query(aql).await?);
 //     }
 //     let mut embed: Vec<VirtualEmbedGraphNode> = Vec::new();
 //     for refno in &refnos {
-//         let aql = AqlQuery::builder().query("
+//         let aql = AqlQuery::new("
 //         let a =  document(@collection,@refno)
 //         return {
 //             '_key':a._key,
@@ -85,7 +85,7 @@
 //         }
 //         ")
 //             .bind_var("collection", "embed_data")
-//             .bind_var("refno", refno.to_url_refno()).build();
+//             .bind_var("refno", refno.to_url_refno());
 //         embed.append(&mut database.aql_query(aql).await?);
 //     }
 //     return Ok(Some((hole, embed)));

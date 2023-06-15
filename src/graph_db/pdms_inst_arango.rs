@@ -7,7 +7,7 @@ use aios_core::geom_types::RvmGeoInfo;
 
 use aios_core::pdms_types::*;
 use anyhow::anyhow;
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use bevy::prelude::{dbg, Transform};
 use futures::future::ok;
 use glam::{Mat3, Quat, Vec3, Vec4};
@@ -38,12 +38,12 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             let json = serde_json::to_value(k.1).unwrap();
             instances.push(json);
         }
-        let aql = AqlQuery::builder().query(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
             .bind_var("elements", take(&mut instances))
-            .build();
+            ;
         database.aql_query::<Vec<()>>(aql).await?;
     }
 
@@ -54,12 +54,12 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             let json = serde_json::to_value(k).unwrap();
             instances.push(json);
         }
-        let aql = AqlQuery::builder().query(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
             .bind_var("elements", take(&mut instances))
-            .build();
+            ;
         database.aql_query::<Vec<()>>(aql).await?;
     }
 
@@ -69,12 +69,12 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
     //         let json = serde_json::to_value(k).unwrap();
     //         instances.push(json);
     //     }
-    //     let aql = AqlQuery::builder().query(r#"LET data = @elements
+    //     let aql = AqlQuery::new(r#"LET data = @elements
     //                 FOR d IN data
     //                     INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
     //         .bind_var("@collection", collection)
     //         .bind_var("elements", take(&mut instances))
-    //         .build();
+    //         ;
     //     database.aql_query::<Vec<()>>(aql).await?;
     // }
 
@@ -89,19 +89,19 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             };
             edges.push(serde_json::to_value(&edge).unwrap());
         }
-        let aql = AqlQuery::builder().query(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
             .bind_var("elements", take(&mut instances))
-            .build();
+            ;
         database.aql_query::<Vec<()>>(aql).await?;
-        let aql = AqlQuery::builder().query(r#"LET data = @edges
+        let aql = AqlQuery::new(r#"LET data = @edges
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
             .bind_var("@collection", edge_collection)
             .bind_var("edges", take(&mut edges))
-            .build()
+
             ;
         database.aql_query::<Vec<()>>(aql).await?;
     }
@@ -115,7 +115,7 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     let refnos = refnos.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
     // dbg!(&refnos);
     //过滤掉负实体计算后的多余几何体
-    let aql = AqlQuery::builder().query(r#"
+    let aql = AqlQuery::new(r#"
             FOR refno in @refnos
                 FOR c,e,p IN 0..20 inbound CONCAT('pdms_eles/',refno) pdms_edges
                     PRUNE c.noun in @neg_nouns
@@ -127,7 +127,7 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
             "#)
         .bind_var("refnos", refnos)
         .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
-        .build()
+
         ;
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     if geos_info.is_empty() { return Ok(ShapeInstancesData::default()); }
@@ -143,14 +143,14 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     // dbg!(&inst_keys);
     let mut inst_geos_map = HashMap::new();
     // let mut geo_hashes = BTreeSet::new();
-    let aql = AqlQuery::builder().query(r#"
+    let aql = AqlQuery::new(r#"
             FOR inst_key in @inst_keys
                 let f = document('pdms_inst_geos', inst_key)
                 filter f != null
                 return f
             "#)
         .bind_var("inst_keys", inst_keys)
-        .build()
+
         ;
     let inst_geos: Vec<EleInstGeosData> = database.aql_query(aql).await.unwrap();
     // dbg!(inst_geos.len());
@@ -160,14 +160,14 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
 
     let mut inst_tubi_map = HashMap::new();
     let all_refnos = inst_info_map.keys().map(|x| x.to_url_refno()).collect::<Vec<_>>();
-    let aql = AqlQuery::builder().query(r#"
+    let aql = AqlQuery::new(r#"
             FOR r in @refnos
                 let f = document('pdms_inst_tubis', r)
                 filter f != null
                 return f
             "#)
         .bind_var("refnos", all_refnos)
-        .build();
+        ;
     let inst_tubi: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     for g in inst_tubi {
         inst_tubi_map.insert(g.refno, g);
@@ -184,7 +184,7 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
 pub async fn query_instance_level_with_refno_in_arangodb(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let pdms_inst_infos = AQL_PDMS_INST_INFO_COLLECTION;
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     FOR c IN 1..15 inbound @refno pdms_edges
         PRUNE document(@collection,c._key) != null
         Filter document(@collection,c._key) != null
@@ -192,7 +192,7 @@ pub async fn query_instance_level_with_refno_in_arangodb(refno: RefU64, database
         return f._key")
         .bind_var("refno", refno_aql)
         .bind_var("collection", pdms_inst_infos)
-        .build();
+        ;
     let result: Vec<String> = database.aql_query(aql).await.unwrap();
     if result.is_empty() { return Ok(vec![]); }
     let result = convert_refno_vec_from_vec_string(result);
@@ -202,12 +202,12 @@ pub async fn query_instance_level_with_refno_in_arangodb(refno: RefU64, database
 pub async fn query_instance_level_with_ssc_refno_in_arangodb(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
     let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
     let pdms_inst_infos = AQL_PDMS_INST_INFO_COLLECTION;
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     FOR c IN 0..20 inbound @refno ssc_edges
         // Filter document(@collection,c._key) != null
         return c._key")
-        .bind_var("refno", refno_aql).build();
-        // .bind_var("collection", pdms_inst_infos).build();
+        .bind_var("refno", refno_aql);
+        // .bind_var("collection", pdms_inst_infos);
     let result: Vec<String> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(vec![]); }
     let result = convert_refno_vec_from_vec_string(result);
@@ -217,14 +217,14 @@ pub async fn query_instance_level_with_ssc_refno_in_arangodb(refno: RefU64, data
 /// 查找基本体得 instance
 pub async fn query_rvm_instance_data_from_refno_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<RvmGeoInfo>> {
     let refno_aql = refno.to_url_refno();
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     let r = document('pdms_inst_infos',@key)
     return {
         '_key':r._key,
         'aabb':r.aabb,
         'geo_insts':r.geo_insts,
         'world_transform':r.world_transform
-    }").bind_var("key", refno_aql).build();
+    }").bind_var("key", refno_aql);
     let result = database.aql_query::<RvmGeoInfo>(aql).await;
     if result.is_err() { return Ok(None); }
     let mut result = result.unwrap();

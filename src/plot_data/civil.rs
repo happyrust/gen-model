@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use bb8_arangodb::arangors::collection::CollectionType::{Document, Edge};
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool};
@@ -33,7 +33,7 @@ pub struct AxisEdge {
 /// 将提前存好的轴网数据从图数据库取出来
 pub async fn query_axis_from_sbfr_aql(sbfr_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<AxisData>> {
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", sbfr_refno.to_url_refno());
-    let aql = AqlQuery::builder().query("\
+    let aql = AqlQuery::new("\
     for v in 1 outbound @id axis_edge
         return {
         '_key':v._key,
@@ -41,7 +41,7 @@ pub async fn query_axis_from_sbfr_aql(sbfr_refno: RefU64, database: &ArDatabase)
         'gtype':v.gtype,
         'pose':v.pose,
         'poss':v.poss,
-    } ").bind_var("id", key).build();
+    } ").bind_var("id", key);
     let result: Vec<AxisData> = database.aql_query(aql).await?;
     Ok(result)
 }

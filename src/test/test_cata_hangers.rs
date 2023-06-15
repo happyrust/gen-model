@@ -1,7 +1,7 @@
 use crate::graph_db::pdms_arango::save_arangodb_with_db_option;
 use config::{Config, ConfigError, Environment, File};
 use std::env;
-use bb8_arangodb::arangors::collection::CollectionType::{Document, Edge};
+use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
 use std::sync::Arc;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;

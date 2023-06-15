@@ -41,10 +41,12 @@ use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_ro
 use crate::tables::*;
 use parry3d::utils::hashmap::FxHasher32;
 use std::hash::{Hash, Hasher};
+use aios_core::cache::mgr::BytesTrait;
 use aios_core::get_default_pdms_db_info;
 use aios_core::helper::table::{qualified_column_name, qualified_table_name};
 use aios_core::options::DbOption;
 use aios_core::pdms_data::ATTR_INFO_MAP;
+use sled::transaction::ConflictableTransactionError;
 use crate::tables;
 
 pub trait MySqlMethods {
@@ -525,12 +527,20 @@ pub async fn sync_total_async_threaded(
         })
         .collect::<Vec<PathBuf>>();
 
-    let local_db = if db_option.sync_localdb.unwrap_or(true) {
-        let path = format!("{}.db", &project);
-        let tree = sled::open(&path)?;
-        Some(tree)
+
+    let (local_tree, children_tree) = if db_option.sync_localdb.unwrap_or(true) {
+        let db_path = format!("{}.db", &project);
+        let config = sled::Config::default()
+            .path(db_path)
+            .mode(sled::Mode::HighThroughput)
+            .cache_capacity(10_000_000_000)
+            .flush_every_ms(Some(1000));
+        let db = config.open()?;
+        let tree = db.open_tree("attr_map").ok();
+        let children_tree = db.open_tree("children").ok();
+        (tree, children_tree)
     }else{
-        None
+        (None, None)
     };
 
     let project = Arc::new(project.to_string());
@@ -665,11 +675,36 @@ pub async fn sync_total_async_threaded(
                     println!("图数据库保存完成");
                 }
 
-                if let Some(tree) = local_db.clone() {
+                if let Some(tree) = local_tree.clone() && let Some(children_tree) = children_tree.clone() {
+                    // let mut batch = sled::Batch::default();
                     for kv in total_attr_map_arc.as_ref() {
-                        let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                        // if *kv.key() == RefU64::from_two_nums(24381, 47210) {
+                        //     dbg!(db1_hash("CYLI"));
+                        //     dbg!(kv.value());
+                        //     break;
+                        // }
+                        let mut vec = kv.value().merge_implicit_explicit_into_attr().into_rkyv_compress_bytes();
                         tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
                     }
+                    // tree.apply_batch(batch)?;
+
+                    // let mut batch = sled::Batch::default();
+                    for (k, v) in children_map_arc.as_ref() {
+                        let mut vec = v.to_bytes();
+                        children_tree.insert((**k).to_be_bytes().as_slice(), &*vec)?;
+                    }
+                    // children_tree.apply_batch(batch)?;
+
+                    // let c = total_attr_map_arc.clone();
+                    // let tree = db.open_tree("attr_map")?;
+                    // tree.transaction::<_, _, ()>(|tx_db| {
+                    //     for kv in c.as_ref() {
+                    //         let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                    //         tx_db.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
+                    //     }
+                    //     Ok(())
+                    //     // Ok::<(), ConflictableTransactionError<_>>(())
+                    // }).expect("Error inserting local db ");
                 }
 
                 //heed lmdb 的实现

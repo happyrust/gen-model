@@ -2,7 +2,7 @@ use std::ops::Neg;
 use aios_core::options::DbOption;
 use aios_core::pdms_data::{PlinParam, PlinParamData};
 use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use dashmap::{DashMap, DashSet};
 use glam::{Vec2, Vec3};
 use smol_str::SmolStr;
@@ -118,7 +118,7 @@ async fn query_plin_attrs_with_refnos(refnos: Vec<RefU64>, database: &ArDatabase
     refnos.into_iter().for_each(|refno| {
         children.push(RefU64::to_url_refno(&refno))
     });
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     let data = @element
     for v in data
     let e = document('plin_eles',v)
@@ -127,19 +127,19 @@ async fn query_plin_attrs_with_refnos(refnos: Vec<RefU64>, database: &ArDatabase
             'attr':e.attr
         } "
     ).bind_var("element", children)
-        .build();
+        ;
     let result: Vec<PdmsPLINAttrAql> = database.aql_query(aql).await?;
     Ok(result)
 }
 
 async fn query_plin_attrs_with_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<PdmsPLINAttrAql>> {
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     let e = document('plin_eles',@refno)
         return {
             '_key':e._key,
             'attr':e.attr
         } "
-    ).bind_var("refno", refno.to_url_refno()).build();
+    ).bind_var("refno", refno.to_url_refno());
     let result: Vec<PdmsPLINAttrAql> = database.aql_query(aql).await?;
     Ok(result)
 }

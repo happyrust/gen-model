@@ -1,5 +1,5 @@
 use aios_core::pdms_types::{EleGeosInfo, RefU64};
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::AQL_PDMS_INST_INFO_COLLECTION;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -37,21 +37,21 @@ pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &ArDatabas
             ssc_ele_edges.push(edge);
         }
         let json = serde_json::to_value(&ssc_eles).unwrap();
-        let aql = AqlQuery::builder().query("LET data = @elements
+        let aql = AqlQuery::new("LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
             .bind_var("@collection", collection)
             .bind_var("elements", json)
-            .build();
+            ;
         let _result: Vec<()> = database.aql_query(aql).await?;
 
         let json = serde_json::to_value(&ssc_ele_edges).unwrap();
-        let aql = AqlQuery::builder().query("LET data = @edges
+        let aql = AqlQuery::new("LET data = @edges
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
             .bind_var("@collection", ssc_edge_collection)
             .bind_var("edges", json)
-            .build();
+            ;
         let _result: Vec<()> = database.aql_query(aql).await?;
     }
 
@@ -62,7 +62,7 @@ pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &ArDatabas
 pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
     let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
     let pdms_inst_infos = AQL_PDMS_INST_INFO_COLLECTION;
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     FOR c IN 0..10 inbound @refno ssc_edges
         let f = document(@collection,c._key)
         Filter f != null
@@ -78,7 +78,7 @@ pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: 
         }")
         .bind_var("refno", refno_aql)
         .bind_var("collection", pdms_inst_infos)
-        .build();
+        ;
     let result: Vec<EleGeosInfo> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }
     // let r  = result.into_iter().map(|x| { EleGeosInfo::from_json_type(x)}).collect::<Vec<_>>();
