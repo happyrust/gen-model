@@ -222,7 +222,6 @@ pub async fn cache_loop_geos(
                     .await else {
                     continue;
                 };
-                *processed_cnt.lock().await -= 1;
                 let Some(refno_basic) = mgr.get_refno_basic(loop_refno) else {
                     continue;
                 };
