@@ -50,7 +50,7 @@ server_release_ip = "127.0.0.1:9099"
 
 
 #调试选项
-replace_mesh = true
+replace_mesh = false
 save_model_mesh_to_graph_db = true
 need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
 reset_mdb_project = false      #是否重新生成 mdb 缓存
@@ -173,7 +173,7 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/106824"]  #墙
 
 #debug_root_refnos = ["17496/106640"]
-debug_root_refnos = ["24381/47160"]
+#debug_root_refnos = ["24381/47160"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]

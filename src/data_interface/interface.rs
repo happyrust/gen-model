@@ -26,10 +26,15 @@ pub trait PdmsDataInterface : Send + Sync{
     ///获得属性
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
 
+    ///从本地获取属性数据
     fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
 
+    ///从本地获取children
+    fn get_children_from_localdb(&self, refno: RefU64) -> anyhow::Result<RefU64Vec>;
 
     fn get_attr_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<AttrMap>;
+
+    fn get_children_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<RefU64Vec>;
 
     ///获得包含UDA的属性
     async fn get_attr_with_uda(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
@@ -68,7 +73,7 @@ pub trait PdmsDataInterface : Send + Sync{
     ///获得子节点的refno集合
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec>;
 
-    async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr>;
+    async fn get_name(&self, refno: RefU64) -> anyhow::Result<String>;
 
     async fn get_refnos_by_types(&self, project: &str, att_types: &[&str], dbnos: &[i32]) -> anyhow::Result<RefU64Vec>;
 

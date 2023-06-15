@@ -32,13 +32,6 @@ impl AsRef<str> for RString {
 }
 
 impl BytesTrait for RString {
-    fn to_bytes(&self) -> Vec<u8> {
-        bincode::serialize(&self).unwrap().into()
-    }
-
-    fn from_bytes(bytes: &[u8]) -> Self {
-        bincode::deserialize(bytes).unwrap()
-    }
 }
 
 impl From<String> for RString {

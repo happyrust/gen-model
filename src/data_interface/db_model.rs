@@ -423,6 +423,7 @@ impl AiosDBManager {
         let dir = db_option.project_path.to_string();
         let mut project_map = DashMap::new();
         let mut local_attr_db_map = DashMap::new();
+        let mut local_children_db_map = DashMap::new();
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         // use heed::types::*;
@@ -447,6 +448,7 @@ impl AiosDBManager {
                 .flush_every_ms(Some(1000));
             if let Ok(db) = config.open(){
                 local_attr_db_map.entry(project.clone()).or_insert(db.open_tree("attr_map")?);
+                local_children_db_map.entry(project.clone()).or_insert(db.open_tree("children")?);
             }
             // let env = EnvOpenOptions::new()
             //     .map_size(10 * 1024 * 1024 * 1024) // 10G 的映射大小
@@ -489,6 +491,7 @@ impl AiosDBManager {
         Ok(Self {
             project_map,
             local_attr_db_map,
+            local_children_db_map,
             ref0_projects,
             info_pool: info_conn,
             projects,

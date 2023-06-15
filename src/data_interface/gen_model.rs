@@ -83,6 +83,7 @@ pub async fn cache_prim_geos(
                     refno.to_refno_string(),
                     processed_cnt.lock().await.to_owned()
                 );
+                *processed_cnt.lock().await -= 1;
                 let Ok(Some(trans_origin)) = mgr
                     .get_world_transform(refno)
                     .await else {
@@ -165,7 +166,6 @@ pub async fn cache_prim_geos(
                         reuse_unit: true,
                     });
                 }
-                *processed_cnt.lock().await -= 1;
             }
         });
         handles.push(handle);
@@ -235,6 +235,7 @@ pub async fn cache_loop_geos(
                     parent_refno.to_refno_string(),
                     processed_cnt.lock().await.to_owned()
                 );
+                *processed_cnt.lock().await -= 1;
                 let mut geos_info = EleGeosInfo {
                     refno: parent_refno,
                     cata_hash: None,
@@ -525,6 +526,7 @@ pub async fn cache_cata_geos(
                         refno.to_refno_string(),
                         processed_cnt.lock().await.to_owned()
                     );
+                    *processed_cnt.lock().await -= 1;
                     //在这里直接处理完所有需要处理的transform
                     let brep_shapes_map = CateBrepShapeMap::new();
                     let current_att = mgr.get_attr_from_localdb(refno).unwrap_or_default();
@@ -763,8 +765,6 @@ pub async fn cache_cata_geos(
                     shape_insts_data.insert_info(ele_refno, geos_info);
                     shape_insts_data.insert_geos_data(inst_key, target_geo_data.clone());
                 }
-
-                *processed_cnt.lock().await -= 1;
             }
         });
         handles.push(handle);
@@ -1064,12 +1064,15 @@ pub async fn cache_geos_data(
     let mdb = &db_option.mdb_name;
     let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
 
-
-    // let s_refno = RefU64::from_two_nums(17496, 143557);
-    // let att = mgr.get_attr_from_localdb(s_refno);
-    // dbg!(att);
-    // let plin_param = mgr.query_pline(s_refno, "OBOW").await?;
-    // dbg!(plin_param);
+    // let s_refno = RefU64::from_two_nums(24381, 100675);
+    // let children = mgr.get_children_from_localdb(s_refno);
+    // dbg!(children);
+    //
+    let s_refno = RefU64::from_two_nums(17496, 143555);
+    let att = mgr.get_attr_from_localdb(s_refno);
+    dbg!(att);
+    let plin_param = mgr.query_pline(s_refno, "OBOW").await?;
+    dbg!(plin_param);
     // let transform = mgr.get_world_transform(s_refno).await?.unwrap();
     // dbg!(transform);
 

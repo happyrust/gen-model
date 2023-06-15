@@ -690,7 +690,7 @@ pub async fn sync_total_async_threaded(
 
                     // let mut batch = sled::Batch::default();
                     for (k, v) in children_map_arc.as_ref() {
-                        let mut vec = v.to_bytes();
+                        let mut vec = v.to_bytes()?;
                         children_tree.insert((**k).to_be_bytes().as_slice(), &*vec)?;
                     }
                     // children_tree.apply_batch(batch)?;

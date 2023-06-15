@@ -39,7 +39,7 @@ impl AiosDBManager {
             for str in db_option.debug_root_refnos.as_ref().unwrap() {
                 is_debug = true;
                 if let Ok(root_refno) = RefU64::from_refno_str(str) {
-                    if let Ok(name) = self.get_name(root_refno).await {
+                    if self.get_attr_from_localdb(root_refno).is_ok() {
                         target_refnos.push(root_refno);
                     }
                 }

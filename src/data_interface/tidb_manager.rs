@@ -115,6 +115,8 @@ pub struct AiosDBManager {
     //seld
     pub local_attr_db_map: DashMap<String, sled::Tree>,
 
+    pub local_children_db_map: DashMap<String, sled::Tree>,
+
     pub ref0_projects: DashMap<u32, Vec<String>>,
 
     pub info_pool: Pool<MySql>,
@@ -172,10 +174,29 @@ impl PdmsDataInterface for AiosDBManager {
                 return Ok(a);
             }
         }
-        // dbg!(refno);
         Err(anyhow!("Not found att"))
     }
 
+    //get_children_from_localdb
+    fn get_children_from_localdb(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
+        for project in &self.db_option.included_projects {
+            if let Ok(a) = self.get_children_within_project(refno, project.as_str()) {
+                return Ok(a);
+            }
+        }
+        Err(anyhow!("Not found children"))
+    }
+
+
+    fn get_children_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<RefU64Vec> {
+        if let Some(db) = self.local_children_db_map.get(project) {
+            let k = refno.0.to_be_bytes();
+            if let Ok(Some(bytes)) = db.get(k.as_slice()) {
+                return RefU64Vec::from_bytes(bytes.as_ref());
+            }
+        }
+        Err(anyhow!("not exist project"))
+    }
 
     /// 从本地数据库获得最全的数据
     fn get_attr_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<AttrMap> {
@@ -361,11 +382,13 @@ impl PdmsDataInterface for AiosDBManager {
     //todo use local db to get children refnos
     async fn get_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
-        if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
-            let children = query_children(refno, &project_pool).await?;
+        // if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
+        //     let children = query_children(refno, &project_pool).await?;
+        //
+        // }
+        if let Ok(children) = self.get_children_from_localdb(refno){
             for child in children {
-                // let attr = self.get_attr(child.0).await?;
-                let attr = self.get_attr_from_localdb(child.0).unwrap_or_default();
+                let attr = self.get_attr_from_localdb(child).unwrap_or_default();
                 r.push(attr);
             }
         }
@@ -374,21 +397,23 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获得参考号下的子节点
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
-        let mut result = RefU64Vec::default();
-        if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
-            let children = query_children(refno, &project_pool).await?;
-            children.into_iter().for_each(|child| {
-                result.push(child.0);
-            });
-        }
-        Ok(result)
+
+        self.get_children_from_localdb(refno)
+        // let mut result = RefU64Vec::default();
+        // if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
+        //     let children = query_children(refno, &project_pool).await?;
+        //     children.into_iter().for_each(|child| {
+        //         result.push(child.0);
+        //     });
+        // }
+        // Ok(result)
     }
 
     ///获得参考号的name
-    async fn get_name(&self, refno: RefU64) -> anyhow::Result<SmolStr> {
+    async fn get_name(&self, refno: RefU64) -> anyhow::Result<String> {
         if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
             let name = query_name(refno, &project_pool).await?;
-            return Ok(SmolStr::new(name));
+            return Ok(name);
         }
         Err(anyhow!("Element不存在"))
     }

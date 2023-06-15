@@ -93,7 +93,7 @@ pub(crate) async fn auto_get_attr_from_metadata_excel(refno: RefU64, attr: &Attr
     // 找到大宗材料的编码
     let material = if let Some(spre) = spre {
         let spre_name = aios_mgr.get_name(spre).await
-            .unwrap_or(SmolStr::default()).split("/").map(|x| x.to_string()).collect::<Vec<String>>();
+            .unwrap_or(String::new()).split("/").map(|x| x.to_string()).collect::<Vec<String>>();
         if spre_name.len() < 3 { None } else {
             if spre_name[2].contains(":") {
                 let spre_name = spre_name[1].split(":").collect::<Vec<_>>();
