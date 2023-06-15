@@ -867,50 +867,7 @@ pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase)
     for key in @keys
     for c in 1 outbound key hole_edge
         filter c != null
-        return {
-            '_key': c._key,
-            'RelyItem': c.RelyItem,
-            'MainItem': c.MainItem,
-            'Speciality': c.Speciality,
-            'Position': c.Position,
-            'HoleWork': c.HoleWork,
-            'WorkBy': c.WorkBy,
-            'Time': c.Time,
-            'Shape': c.Shape,
-            'Ori': c.Ori,
-            'ItemREF': c.ItemREF,
-            'RelyItemREF': c.RelyItemREF,
-            'MainItemREF': c.MainItemREF,
-            'OpenItem': c.OpenItem,
-            'PlugType': c.PlugType,
-            'SizeHeight': c.SizeHeight,
-            'SizeWidth': c.SizeWidth,
-            'BankWidth': c.BankWidth,
-            'BankHeight': c.BankHeight,
-            'HotDis': c.HotDis,
-            'HeatThick': c.HeatThick,
-            'refNo': c.refNo,
-            'FittRefNo': c.FittRefNo,
-            'SubsMaterial': c.SubsMaterial,
-            'SubsThickness': c.SubsThickness,
-            'iCreate': c.iCreate,
-            'SubsType': c.SubsType,
-            'ExtentLength1': c.ExtentLength1,
-            'ExtentLength2': c.ExtentLength2,
-            'Second': c.Second,
-            'ReHole': c.ReHole,
-            'Note': c.Note,
-            'SizeThrowWall': c.SizeThrowWall,
-            'HoleBPID': c.HoleBPID,
-            'HoleBPVER': c.HoleBPVER,
-            'RelyItemBPID': c.RelyItemBPID,
-            'RelyItemBPVER': c.RelyItemBPVER,
-            'MainPipeline': c.MainPipeline,
-            'iFlowState': c.iFlowState,
-            'hType': c.hType,
-            'MainItems': c.MainItems,
-            'MainItemRefs': c.MainItemRefs
-        }").bind_var("keys", keys).build();
+        return unset(c , '_id','_rev')").bind_var("keys", keys).build();
     let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
     Ok(result)
 }

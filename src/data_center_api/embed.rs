@@ -517,36 +517,7 @@ pub async fn query_embed_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase
     for key in @keys
         for c in 1 outbound key embed_edge
             filter c != null
-            return {
-                '_key': c._key,
-                'RelyItem': c.RelyItem,
-                'RelyItemRef': c.RelyItemRef,
-                'MainItem': c.MainItem,
-                'Speciality': c.Speciality,
-                'Position': c.Position,
-                'Ori': c.Ori,
-                'Work': c.Work,
-                'WorkBy': c.WorkBy,
-                'Time': c.Time,
-                'StanderType': c.StanderType,
-                'OpenItem': c.OpenItem,
-                'SizeLength': c.SizeLength,
-                'SizeWidth': c.SizeWidth,
-                'SizeThickness': c.SizeThickness,
-                'MinThickness': c.MinThickness,
-                'Load': c.Load,
-                'MinDistance': c.MinDistance,
-                'SubsMaterial': c.SubsMaterial,
-                'FittID': c.FittID,
-                'REF': c.REF,
-                'Shape': c.Shape,
-                'Note': c.Note,
-                'EmbedBPID': c.EmbedBPID,
-                'EmbedBPVER': c.EmbedBPVER,
-                'RelyItemBPID': c.RelyItemBPID,
-                'RelyItemBPVER': c.RelyItemBPVER,
-                'Form': c.Form
-        }").bind_var("keys", keys).build();
+            return unset(c , '_id','_rev')").bind_var("keys", keys).build();
     let result = database.aql_query::<VirtualEmbedGraphNode>(aql).await?;
     Ok(result)
 }
@@ -554,36 +525,7 @@ pub async fn query_embed_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase
 pub async fn get_embed_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<VirtualEmbedGraphNode>> {
     let aql = AqlQuery::builder().query("\
     for c in @@collection
-        return {
-            '_key': c._key,
-            'RelyItem': c.RelyItem,
-            'RelyItemRef': c.RelyItemRef,
-            'MainItem': c.MainItem,
-            'Speciality': c.Speciality,
-            'Position': c.Position,
-            'Ori': c.Ori,
-            'Work': c.Work,
-            'WorkBy': c.WorkBy,
-            'Time': c.Time,
-            'StanderType': c.StanderType,
-            'OpenItem': c.OpenItem,
-            'SizeLength': c.SizeLength,
-            'SizeWidth': c.SizeWidth,
-            'SizeThickness': c.SizeThickness,
-            'MinThickness': c.MinThickness,
-            'Load': c.Load,
-            'MinDistance': c.MinDistance,
-            'SubsMaterial': c.SubsMaterial,
-            'FittID': c.FittID,
-            'REF': c.REF,
-            'Shape': c.Shape,
-            'Note': c.Note,
-            'EmbedBPID': c.EmbedBPID,
-            'EmbedBPVER': c.EmbedBPVER,
-            'RelyItemBPID': c.RelyItemBPID,
-            'RelyItemBPVER': c.RelyItemBPVER,
-            'Form': c.Form
-        }").bind_var("@collection", AQL_EMBED_DATA_COLLECTION).build();
+        return unset(c , '_id','_rev')").bind_var("@collection", AQL_EMBED_DATA_COLLECTION).build();
     let result = database.aql_query::<VirtualEmbedGraphNode>(aql).await?;
     Ok(result)
 }
