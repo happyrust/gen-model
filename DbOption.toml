@@ -52,7 +52,7 @@ server_release_ip = "127.0.0.1:9099"
 
 
 #调试选项
-replace_mesh = false
+replace_mesh = true
 save_model_mesh_to_graph_db = true
 need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
 reset_mdb_project = false      #是否重新生成 mdb 缓存
@@ -175,7 +175,7 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/106824"]  #墙
 
 #debug_root_refnos = ["17496/106407"]
-#debug_root_refnos = ["24381/36958"]
+#debug_root_refnos = ["24381/148471"]
 #debug_root_refnos = ["25688/4135"]
 #debug_root_refnos = ["25688/4361"]
 

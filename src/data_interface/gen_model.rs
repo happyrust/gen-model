@@ -120,7 +120,7 @@ pub async fn gen_prim_geos(
                 let Some(brep_shape) = attr.create_brep_shape(limit_size) else {
                     continue;
                 };
-                if brep_shape.check_valid() {
+                if !brep_shape.check_valid() {
                     continue;
                 }
 
@@ -138,7 +138,6 @@ pub async fn gen_prim_geos(
                     };
                     aabb
                 };
-
                 let visible = attr.is_visible_by_level(None).unwrap_or(true);
                 geos_info.visible = visible;
                 let tr = &item_trans;
@@ -1359,24 +1358,11 @@ pub async fn gen_geos_data(
             }
 
             println!("开始处理负实体计算");
-            // let (tx, rx) =
-            //     mpsc::unbounded_channel::<(RefU64, Arc<AiosDBManager>, Arc<RwLock<ShapeInstancesData>>)>();
-            // let rx_stream = UnboundedReceiverStream::new(rx);
-
-            //todo 优化负实体的计算
+            //todo 优化负实体的计算, use monifold 库
             // dbg!(&root_refnos);
             let has_pos_neg_map = mgr.query_refnos_has_pos_neg_map(&root_refnos).await.unwrap_or_default();
             // dbg!(&has_pos_neg_map);
             dbg!(has_pos_neg_map.len());
-
-            // Spawn a separate task to send messages
-
-            // tokio::spawn(async move {
-            //     for refno in has_neg_refnos {
-            //         tx.send((refno, mgr_clone_new.clone(), instance_mgr_new.clone())).unwrap();
-            //     }
-            // });
-
 
             if db_option.apply_boolean_operation && !has_pos_neg_map.is_empty() {
                 let now = Instant::now();
