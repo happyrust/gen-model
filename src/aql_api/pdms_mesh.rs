@@ -72,7 +72,7 @@ pub async fn query_refno_meshes_aql(refno: RefU64, database: &ArDatabase) -> any
         if !results.is_empty() {
             for result in results {
                 let r = hex::decode(result.data)?;
-                if let Some(mesh) = PlantMesh::from_compress_bytes(&r) {
+                if let Ok(mesh) = PlantMesh::from_compress_bytes(&r) {
                     let refno = RefU64::from_url_refno(&result.refno);
                     if refno.is_none() { continue; }
                     let refno = refno.unwrap();
@@ -104,7 +104,7 @@ pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &ArDatabase) 
         if !results.is_empty() {
             for result in results {
                 let r = hex::decode(result.data)?;
-                if let Some(mesh) = PlantMesh::from_compress_bytes(&r) {
+                if let Ok(mesh) = PlantMesh::from_compress_bytes(&r) {
                     let refno = RefU64(result.refno);
                     map.entry(refno).or_insert(mesh);
                 }
@@ -112,6 +112,23 @@ pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &ArDatabase) 
         }
     }
     Ok(map)
+}
+
+///查询相应的mesh数据
+pub async fn query_all_geo_hashs(database: &ArDatabase) -> anyhow::Result<HashSet<u64>> {
+    let aql = AqlQuery::new("\
+    for d in pdms_mesh
+        filter d != null
+        return d._key
+    ");
+    let mut hashs = HashSet::new();
+    let results: Vec<String> = database.aql_query(aql).await?;
+    for result in results {
+        if let Ok(s) = result.parse::<u64>() {
+            hashs.insert(s);
+        }
+    }
+    Ok(hashs)
 }
 
 ///查询相应的mesh数据
@@ -127,12 +144,6 @@ pub async fn query_pdms_mesh_aql(database: &ArDatabase, hashes: &[u64]) -> anyho
     ").bind_var("hashes", hash_strs);
     let results: Vec<PlantGeoData> = database.aql_query(aql).await?;
     for result in results {
-        // let hash: u64 = result.hash.parse()?;
-        // let data = hex::decode(&result.data)?;
-        // let mesh = PlantMesh::from_compress_bytes(&data);
-        // if mesh.is_none() { continue; }
-        // let mesh = mesh.unwrap();
-        //todo fix this
         cache_mgr.meshes.entry(result.geo_hash).or_insert(result);
     }
     Ok(cache_mgr)

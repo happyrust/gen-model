@@ -44,7 +44,7 @@ use crate::api::project_mdb::{gen_insert_project_mdb_sql, query_db_nums_of_mdb};
 use crate::api::refno_info::{cache_plin_plax, get_ref0_projects, sync_refno_basic_map};
 use crate::aql_api::children::{query_children_order_aql, query_deep_children_refnos_fuzzy};
 use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
-use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
+use crate::aql_api::pdms_mesh::{query_all_geo_hashs, query_pdms_mesh_aql};
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
 use crate::cata::resolve_helper::eval_str_to_f32;
@@ -61,7 +61,7 @@ use crate::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 use crate::tables::gen_create_project_mdb_sql;
 use crate::consts::PDMS_DBNO_INFOS_TABLE;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
-use crate::data_interface::gen_model::{cache_cata_geos, cache_loop_geos, cache_prim_geos};
+use crate::data_interface::gen_model::{gen_cata_geos, gen_loop_geos, gen_prim_geos};
 use crate::graph_db::structs::PdmsEleGraphNode;
 
 pub const TUBI_TOL: f32 = 10.0f32;
@@ -428,6 +428,15 @@ impl AiosDBManager {
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         // use heed::types::*;
         // use heed::{Database, EnvOpenOptions};
+        let db_path = format!("{}.db", "mesh");
+        let config = sled::Config::default()
+            .path(db_path)
+            .mode(sled::Mode::HighThroughput)
+            .cache_capacity(10_000_000_000)
+            .flush_every_ms(Some(1000));
+        let db = config.open()?;
+        let local_mesh_db = db.open_tree("mesh")?;
+        let local_mesh_aabb_db = db.open_tree("aabb")?;
 
         for project in &db_option.included_projects {
 
@@ -488,10 +497,14 @@ impl AiosDBManager {
         let projects = db_option.included_projects.clone();
         println!("正在创建图数据库连接");
         let arango_pool = connect_arangodb(&db_option).await?;
+        let db = arango_pool.get().await?.db(&db_option.arangodb_database).await?;
+
         Ok(Self {
             project_map,
             local_attr_db_map,
             local_children_db_map,
+            local_mesh_db,
+            local_mesh_aabb_db,
             ref0_projects,
             info_pool: info_conn,
             projects,

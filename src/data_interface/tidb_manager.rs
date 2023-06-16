@@ -112,10 +112,17 @@ pub struct AiosDBManager {
     // heed
     // pub local_db_map: DashMap<String, (Arc<heed::Env>, Arc<heed::Database<U64<BE>, ByteSlice>>) >,
 
-    //seld
+    //sled
+    ///本地缓存的atrr数据
     pub local_attr_db_map: DashMap<String, sled::Tree>,
 
+    ///本地缓存的children数据
     pub local_children_db_map: DashMap<String, sled::Tree>,
+
+    ///本地缓存的mesh数据
+    pub local_mesh_db: sled::Tree,
+
+    pub local_mesh_aabb_db: sled::Tree,
 
     pub ref0_projects: DashMap<u32, Vec<String>>,
 
@@ -195,7 +202,7 @@ impl PdmsDataInterface for AiosDBManager {
                 return RefU64Vec::from_bytes(bytes.as_ref());
             }
         }
-        Err(anyhow!("not exist project"))
+        Err(anyhow!(format!("{refno} att not exist in {project}")))
     }
 
     /// 从本地数据库获得最全的数据
@@ -206,7 +213,23 @@ impl PdmsDataInterface for AiosDBManager {
                 return AttrMap::from_rkvy_compress_bytes(bytes.as_ref());
             }
         }
-        Err(anyhow!("not exist project"))
+        Err(anyhow!(format!("{refno} att not exist")))
+    }
+
+    fn get_mesh_from_localdb(&self, geo_hash: u64) -> anyhow::Result<PlantMesh>{
+        let k = geo_hash.to_be_bytes();
+        if let Some(bytes) = self.local_mesh_db.get(&k)?{
+            return PlantMesh::from_compress_bytes(bytes.as_ref());
+        }
+        Err(anyhow!(format!("{geo_hash} mesh not exist")))
+    }
+
+    fn get_mesh_aabb_from_localdb(&self, geo_hash: u64) -> anyhow::Result<Aabb>{
+        let k = geo_hash.to_be_bytes();
+        if let Some(bytes) = self.local_mesh_aabb_db.get(&k)?{
+            return Aabb::from_bytes(bytes.as_ref());
+        }
+        Err(anyhow!(format!("{geo_hash} aabb not exist.")))
     }
 
     /// 获得最全的数据
