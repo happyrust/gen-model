@@ -45,6 +45,8 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
                     let tmp_ref = c_att.get_foreign_refno("PRTREF").unwrap_or_default();
                     let t_att = interface.get_attr_from_localdb(tmp_ref)?;
                     scom_ref = t_att.get_foreign_refno("CATR");
+                } else if c_att.get_type() == "SPCO"{
+                    scom_ref = c_att.get_foreign_refno("CATR");
                 } else {
                     scom_ref = Some(catref);
                 }
@@ -274,9 +276,9 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         cur_context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
     }
 
-    if let Some(parent_cat_ref) = int
+    if let Ok(Some(parent_cat_ref)) = int
         .query_first_foreign_along_path(des_refno, &["SPRE", "CATR"], &["SPRE", "CATR"], &[])
-        .await?{
+        .await{
         // dbg!(parent_cat_ref);
         if let Ok(parent_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(parent_cat_ref){
             let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();

@@ -209,15 +209,22 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
 
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
         let arrango_pool = connect_arangodb(db_option).await?;
-        sync_total_async_threaded(
+        match  sync_total_async_threaded(
             arrango_pool.clone(),
             &db_option,
             project,
             project_pool.clone(),
             pdms_info_pool.clone(),
         )
-            .await
-            .expect("同步数据失败");
+            .await {
+            Ok(_) => {
+                println!("同步数据成功。");
+            }
+            Err(e) => {
+                println!("{}", e.to_string());
+            }
+        }
+            // .expect("同步数据失败");
     }
     println!("创建表花费时间: {} ms", create_tables_elapse);
     println!(
@@ -507,6 +514,11 @@ pub async fn sync_total_async_threaded(
     if max_sql_threads_number * batch_insert_sql_cnt == 0 {
         return Err(anyhow!(
             "batch_insert_sql_cnt 或者  sql_threads_number 不能为0"
+        ));
+    }
+    if !Path::new(&project_dir).exists() {
+        return Err(anyhow!(
+            "项目文件夹指定不正确"
         ));
     }
     let mut target_dir = fs::read_dir(&project_dir)

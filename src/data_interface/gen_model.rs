@@ -498,17 +498,16 @@ pub async fn gen_cata_geos(
     let batch_size = mgr.db_option.gen_model_batch_size;
     let t = Instant::now();
     let unique_cata_cnt = target_cata_map.len();
-    // dbg!(has_cata_cnt);
     if unique_cata_cnt == 0 { return Ok(true); }
     let batch_chunks_cnt = unique_cata_cnt / batch_size + 1;
     println!("使用元件库的unique模型总数：{unique_cata_cnt}, 分块数量: {batch_chunks_cnt}");
     let mut handles = vec![];
-    // let all_refnos = Arc::new(cata_refnos.to_vec());
     let processed_cnt = Arc::new(Mutex::new(unique_cata_cnt));
     // let mut tubi_aqls = Arc::new(DashMap::new());
     let replace_mesh = db_option.replace_mesh;
     let tol_ratio = db_option.mesh_tol_ratio;
 
+    // dbg!(&target_cata_map);
     let all_unique_keys = Arc::new(target_cata_map.iter().map(|x| x.cata_hash).collect::<Vec<_>>());
     for i in 0..batch_chunks_cnt as usize {
         let mgr = mgr.clone();
@@ -809,7 +808,20 @@ pub async fn gen_cata_geos(
     for b in branch_map.iter() {
         let shape_insts_data = main_instance_mgr.read().await;
         let branch_refno = *b.key();
-        let children = b.value();
+        let Ok(children_refnos) = mgr.get_children_from_localdb(branch_refno) else{
+            continue;
+        };
+        // dbg!(&children_refnos);
+        let mut children = vec![];
+        children_refnos.into_iter().for_each(|x|{
+            for c in b.value() {
+                if c.refno == x {
+                    children.push(c);
+                }
+            }
+        });
+        // dbg!(&children);
+        // let children = b.value();
         let Ok(group_att) = mgr.get_attr_from_localdb(branch_refno) else {
             continue;
         };
@@ -977,7 +989,8 @@ pub async fn gen_cata_geos(
                     current_tubing.refno = refno;
                     current_tubing.end_pt = a_pos;
                     current_tubing.desire_arrive_dir = a_dir;
-                    if current_tubing.is_dir_ok() {
+                    // if current_tubing.is_dir_ok()
+                    {
                         if let Some(t) = current_tubing.get_transform() {
                             inst_tubi_map
                                 .insert(refno, EleGeosInfo {
@@ -991,7 +1004,10 @@ pub async fn gen_cata_geos(
                                     geo_type: Default::default(),
                                 });
                         }
-                    } else {
+                    }
+                    if current_tubing.is_dir_ok(){
+
+                    }  else {
                         // dbg!(&axis_map);
                         // dbg!(axis_map[&arrive].pt);
                         // let a_pos = world_trans.transform_point(axis_map[&arrive].pt);
@@ -1020,22 +1036,21 @@ pub async fn gen_cata_geos(
                     current_tubing.end_pt = bran_ttube_pt;
                     //todo 需要取得连接到的，tref的点对应的arrive方向
                     current_tubing.desire_arrive_dir = -current_tubing.desire_leave_dir;
-
+                    let last_component_refno = *bran_comp_vec.last().unwrap();
+                    if let Some(t) = current_tubing.get_transform() {
+                        inst_tubi_map
+                            .insert(last_component_refno, EleGeosInfo {
+                                refno: last_component_refno,
+                                cata_hash: Some(TUBI_GEO_HASH),
+                                visible: true,
+                                generic_type: mgr.get_generic_type(last_component_refno),
+                                aabb: Some(aabb_apply_transform(&unit_cyli_aabb, &t)),
+                                world_transform: t,
+                                flow_pt_indexs: vec![],
+                                geo_type: Default::default(),
+                            });
+                    }
                     if current_tubing.is_dir_ok() {
-                        let last_component_refno = *bran_comp_vec.last().unwrap();
-                        if let Some(t) = current_tubing.get_transform() {
-                            inst_tubi_map
-                                .insert(last_component_refno, EleGeosInfo {
-                                    refno: last_component_refno,
-                                    cata_hash: Some(TUBI_GEO_HASH),
-                                    visible: true,
-                                    generic_type: mgr.get_generic_type(last_component_refno),
-                                    aabb: Some(aabb_apply_transform(&unit_cyli_aabb, &t)),
-                                    world_transform: t,
-                                    flow_pt_indexs: vec![],
-                                    geo_type: Default::default(),
-                                });
-                        }
                     } else {
                         dbg!(current_tubing.desire_arrive_dir);
                         println!("{} 的直段方向有问题", refno.to_refno_string());
@@ -1089,11 +1104,11 @@ pub async fn gen_geos_data(
     // let children = mgr.get_children_from_localdb(s_refno);
     // dbg!(children);
     //
-    let s_refno = RefU64::from_two_nums(17496, 143555);
-    let att = mgr.get_attr_from_localdb(s_refno);
-    dbg!(att);
-    let plin_param = mgr.query_pline(s_refno, "OBOW").await?;
-    dbg!(plin_param);
+    // let s_refno = RefU64::from_two_nums(17496, 143555);
+    // let att = mgr.get_attr_from_localdb(s_refno);
+    // dbg!(att);
+    // let plin_param = mgr.query_pline(s_refno, "OBOW").await?;
+    // dbg!(plin_param);
     // let transform = mgr.get_world_transform(s_refno).await?.unwrap();
     // dbg!(transform);
 
