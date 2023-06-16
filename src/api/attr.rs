@@ -204,9 +204,19 @@ pub async fn query_uda_attr(att_type: Vec<i32>, pool: &Pool<MySql>) -> anyhow::R
     Ok(map)
 }
 
+/// 查询该参考号某个uda的值
+pub async fn query_refno_uda_value(refno: RefU64, uda_name: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<AttrVal>> {
+    let uda_name = if uda_name.starts_with(":") { uda_name[1..].to_string() } else { uda_name.to_string() };
+    // 查询 uda 对应的 ukey
+    let ukey = query_uda_ukey(&uda_name, pool).await?;
+    // 再找到显示属性中对应的值
+    let explicit_attr = query_explicit_attr(refno, pool).await?;
+    let uda_value = explicit_attr.get(&NounHash(ukey as u32));
+    Ok(uda_value.map(|x| x.clone()))
+}
+
 pub async fn query_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
     if let Some((project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
-        // dbg!(&project);
         let ref_basic = aios_mgr.get_refno_basic(refno);
         if ref_basic.is_none() { return Ok(AttrMap::default()); }
         let ref_basic = ref_basic.unwrap();
@@ -411,6 +421,14 @@ pub async fn query_uda_ukey_udna_all(pool: &Pool<MySql>) -> anyhow::Result<HashM
     Ok(result)
 }
 
+/// 查找某个uda对应的ukey
+pub async fn query_uda_ukey(uda: &str, pool: &Pool<MySql>) -> anyhow::Result<i32> {
+    let sql = gen_query_uda_ukey_sql(uda);
+    let query_result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let u_key = query_result.get::<i32, _>("UKEY");
+    Ok(u_key)
+}
+
 pub fn gen_query_explicit_attr_sql(refno: RefU64) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT DATA FROM {PDMS_EXPLICIT_TABLE} WHERE ID = {} ;", refno.0));
@@ -473,13 +491,19 @@ fn gen_query_uda_name_sql() -> String {
     sql
 }
 
+fn gen_query_uda_ukey_sql(uda: &str) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT UKEY,UDNA FROM {PDMS_UDA_TABLE} WHERE UDNA == '{}'", uda));
+    sql
+}
+
 #[tokio::test]
 async fn test_query_foreign_refno() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
-    let refno: RefU64 = RefI32Tuple((24575,2178)).into();
-    let v = query_explicit_attr(refno,  &pool).await?;
+    let refno: RefU64 = RefI32Tuple((24575, 2178)).into();
+    let v = query_explicit_attr(refno, &pool).await?;
     println!("v={:?}", v);
     Ok(())
 }

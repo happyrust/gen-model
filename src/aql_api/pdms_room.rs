@@ -18,6 +18,7 @@ use crate::graph_db::pdms_arango::*;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::graph_db::pdms_arango::*;
 use aios_core::pdms_types::*;
+use anyhow::anyhow;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::test::common::get_arangodb_conn_from_db_option;
 
@@ -135,6 +136,28 @@ pub async fn query_room_name_from_refno_aql(refno: RefU64, database: &ArDatabase
     }
 }
 
+/// 传入参考号集合 返回该参考号所在的房间
+pub async fn query_room_name_from_refnos_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsNodeBelongRoomName>> {
+    let refnos = refnos.into_iter().map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
+    let aql = AqlQuery::builder().query("
+    for id in @refnos
+    for v,e in 1 inbound id room_edges
+         return {
+            'refno': v._key,
+            'room_name': v.name
+         }
+    ").bind_var("refnos", refnos).build();
+    let result = database.aql_query::<PdmsNodeBelongRoomName>(aql).await;
+    match result {
+        Ok(data) => {
+            Ok(data)
+        }
+        Err(_) => {
+            Ok(vec![])
+        }
+    }
+}
+
 /// 获取该参考号属于哪个房间 room_name_type : 存放房间名的类型
 pub async fn query_room_info_from_refno(refno: RefU64, room_name_type: &str, database: &ArDatabase) -> anyhow::Result<Option<String>> {
     let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
@@ -208,6 +231,35 @@ pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<UdaMajorT
     };
     let result: Vec<String> = database.aql_query(aql).await?;
     Ok(convert_refno_vec_from_vec_string(result))
+}
+
+/// 查找房间集合下的所有元件的参考号
+pub async fn query_rooms_refnos_aql(rooms: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<RoomNodes>> {
+    let aql = AqlQuery::builder().query("
+    for room in room_eles
+    filter room.name in @rooms
+    for v,e in 1 outbound room._id room_edges
+         return {
+            'refno': v._key,
+            'room_name': room.name,
+         }
+    ").bind_var("rooms", rooms).build();
+    let result = database.aql_query::<PdmsNodeBelongRoomName>(aql).await;
+    match result {
+        Ok(datas) => {
+            let mut result_map = HashMap::new();
+            for data in datas {
+                result_map.entry(data.room_name).or_insert_with(Vec::new).push(data.refno.to_refno_string());
+            }
+            Ok(result_map.into_iter().map(|data| RoomNodes {
+                room_name: data.0,
+                nodes: data.1,
+            }).collect())
+        }
+        Err(e) => {
+            Ok(vec![])
+        }
+    }
 }
 
 /// 查找房间下的所有元件的 pdms_element
