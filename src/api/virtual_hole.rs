@@ -24,22 +24,36 @@ pub async fn query_virtual_hole_audit_data_by_name(database: &ArDatabase, name: 
     return Ok(Some((data_vec)));
 }
 
-pub async fn query_hole_detail_data_by_code(database: &ArDatabase, code: &str) -> anyhow::Result<Option<Vec<VirtualHoleGraphNode>>> {
-    let aql = AqlQuery::builder().query("FOR u IN @@collection
-                                                FILTER u.ItemREF==@code
-                                                return unset(u , '_id','_rev')")
-        .bind_var("@collection", "hole_data")
-        .bind_var("code", code).build();
+pub async fn query_hole_detail_data_by_code(database: &ArDatabase, key: &str) -> anyhow::Result<Option<Vec<VirtualHoleGraphNode>>> {
+    // let aql = AqlQuery::builder().query("FOR u IN @@collection
+    //                                             FILTER u.ItemREF==@code
+    //                                             return unset(u , '_id','_rev')")
+    //     .bind_var("@collection", "hole_data")
+    //     .bind_var("code", code).build();
+
+    let aql = AqlQuery::builder().query("let v = document('hole_data',@_key)\
+        return unset(v , '_id','_rev') ")
+        .bind_var("_key", key)
+        .build();
+
+
     let data_vec: Vec<VirtualHoleGraphNode> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }
 
-pub async fn query_embed_detail_data_by_code(database: &ArDatabase, code: &str) -> anyhow::Result<Option<Vec<VirtualEmbedGraphNode>>> {
-    let aql = AqlQuery::builder().query("FOR u IN @@collection
-                                                FILTER u.REF==@code
-                                                return unset(u , '_id','_rev')")
-        .bind_var("@collection", "embed_data")
-        .bind_var("code", code).build();
+pub async fn query_embed_detail_data_by_code(database: &ArDatabase, key: &str) -> anyhow::Result<Option<Vec<VirtualEmbedGraphNode>>> {
+    let aql = AqlQuery::builder().query("let v = document('embed_data',@_key)\
+        return unset(v , '_id','_rev') ")
+        .bind_var("_key", key)
+        .build();
+
+
+    //
+    // let aql = AqlQuery::builder().query("FOR u IN @@collection
+    //                                             FILTER u.REF==@code
+    //                                             return unset(u , '_id','_rev')")
+    //     .bind_var("@collection", "embed_data")
+    //     .bind_var("code", code).build();
     let data_vec: Vec<VirtualEmbedGraphNode> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }
