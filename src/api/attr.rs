@@ -211,7 +211,7 @@ pub async fn query_refno_uda_value(refno: RefU64, uda_name: &str, pool: &Pool<My
     let ukey = query_uda_ukey(&uda_name, pool).await?;
     // 再找到显示属性中对应的值
     let explicit_attr = query_explicit_attr(refno, pool).await?;
-    let uda_value = explicit_attr.get(&NounHash(ukey as u32));
+    let uda_value = explicit_attr.get(&(ukey as u32));
     Ok(uda_value.map(|x| x.clone()))
 }
 

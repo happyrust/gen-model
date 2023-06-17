@@ -12,7 +12,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 pub async fn get_virtual_hole_size(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<HoleSize>> {
     let database = aios_mgr.get_arango_db().await?;
     // 找到catr中的ngmr
-    let ngmr_refno = query_foreign_refno_aql(refno, &vec!["SPRE", "NGMR"], &database).await?;
+    let ngmr_refno = query_foreign_refno_aql( &database,refno, &vec!["SPRE", "NGMR"]).await?;
     if ngmr_refno.is_none() { return Ok(None); };
     // 找到ngmr下的所有负实体，只需要第一个，孔洞默认只有方形和圆形两种，代表只能有一个负实体
     let ngmr_children = query_children_order_aql(&database, ngmr_refno.unwrap()).await?;

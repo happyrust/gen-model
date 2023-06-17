@@ -868,7 +868,7 @@ pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase)
     for key in @keys
     for c in 1 outbound key hole_edge
         filter c != null
-        return unset(c , '_id','_rev')").bind_var("keys", keys).build();
+        return unset(c , '_id','_rev')").bind_var("keys", keys);
     let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
     Ok(result)
 }
@@ -889,7 +889,7 @@ pub async fn query_hole_data_by_keys_aql(keys: Vec<String>, database: &ArDatabas
 pub async fn query_hole_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
     let aql = AqlQuery::new("
     for c in @@collection
-        return unset(c , '_id','_rev')").bind_var("@collection", AQL_HOLE_DATA_COLLECTION).build();
+        return unset(c , '_id','_rev')").bind_var("@collection", AQL_HOLE_DATA_COLLECTION);
     let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
     Ok(result)
 }

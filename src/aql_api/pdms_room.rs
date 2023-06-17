@@ -139,14 +139,14 @@ pub async fn query_room_name_from_refno_aql(refno: RefU64, database: &ArDatabase
 /// 传入参考号集合 返回该参考号所在的房间
 pub async fn query_room_name_from_refnos_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsNodeBelongRoomName>> {
     let refnos = refnos.into_iter().map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     for id in @refnos
     for v,e in 1 inbound id room_edges
          return {
             'refno': v._key,
             'room_name': v.name
          }
-    ").bind_var("refnos", refnos).build();
+    ").bind_var("refnos", refnos);
     let result = database.aql_query::<PdmsNodeBelongRoomName>(aql).await;
     match result {
         Ok(data) => {
@@ -235,7 +235,7 @@ pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<UdaMajorT
 
 /// 查找房间集合下的所有元件的参考号
 pub async fn query_rooms_refnos_aql(rooms: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<RoomNodes>> {
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     for room in room_eles
     filter room.name in @rooms
     for v,e in 1 outbound room._id room_edges
@@ -243,7 +243,7 @@ pub async fn query_rooms_refnos_aql(rooms: Vec<String>, database: &ArDatabase) -
             'refno': v._key,
             'room_name': room.name,
          }
-    ").bind_var("rooms", rooms).build();
+    ").bind_var("rooms", rooms);
     let result = database.aql_query::<PdmsNodeBelongRoomName>(aql).await;
     match result {
         Ok(datas) => {
