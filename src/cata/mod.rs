@@ -1,5 +1,4 @@
 
-pub mod sctn;
 pub mod query_cata;
 pub mod resolve;
 pub mod resolve_helper;

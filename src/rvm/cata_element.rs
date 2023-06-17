@@ -2,7 +2,7 @@ use aios_core::geom_types::RvmGeoInfo;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::{EleGeoInstanceJson, RefU64};
 use aios_core::prim_geo::helper::RotateInfo;
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use bevy::prelude::Transform;
 use bitvec::macros::internal::funty::Floating;
 use glam::{Quat, Vec3};
@@ -146,11 +146,11 @@ pub async fn create_cata_element_data(refno: RefU64, desi_instance: RvmGeoInfo, 
 //
 // async fn query_rvm_geo_infos_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<GeomsInfoAql>> {
 //     let key = refno.to_url_refno();
-//     let aql = AqlQuery::builder().query(
+//     let aql = AqlQuery::new(
 //         "\
 //         return document('geo_infos',@key)
 //         "
-//     ).bind_var("key", key).build();
+//     ).bind_var("key", key);
 //     let result = database.aql_query::<GeomsInfoAql>(aql).await;
 //     if result.is_err() { return Ok(None); }
 //     let mut result = result.unwrap();
@@ -165,7 +165,7 @@ pub async fn create_cata_element_data(refno: RefU64, desi_instance: RvmGeoInfo, 
 //         .add_source(File::with_name("DbOption"))
 //         .build().unwrap();
 //     let db_option: DbOption = s.try_deserialize().unwrap();
-//     let database = get_arangodb_conn_from_db_option(&db_option).await.unwrap();
+//     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await.unwrap();
 //     let refno = RefU64::from_refno_str("23584/209").unwrap();
 //     let result = query_rvm_geo_infos_aql(refno, &database).await.unwrap().unwrap();
 //     dbg!(&result);

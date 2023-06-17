@@ -1,9 +1,9 @@
 use crate::data_interface::tidb_manager::AiosDBManager;
 use config::{Config, ConfigError, Environment, File};
 use std::env;
-use bb8_arangodb::arangors::collection::CollectionType::{Document, Edge};
+use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
 use std::sync::Arc;
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 use tokio::runtime::Runtime;
 use crate::graph_db::pdms_arango::*;
 use crate::plot_data::hangers;
@@ -35,6 +35,6 @@ pub async fn connect_test_ams_arrango_db() -> ArPool {
         .add_source(File::with_name("DbOption_ams"))
         .build().unwrap();
     let db_option: DbOption = s.try_deserialize().unwrap();
-    // get_arangodb_conn_from_db_option(&db_option).await.unwrap()
+    // get_arangodb_conn_from_db_option_for_test(&db_option).await.unwrap()
     connect_arangodb(&db_option).await.unwrap()
 }

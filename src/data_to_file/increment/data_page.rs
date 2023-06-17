@@ -23,8 +23,8 @@ lazy_static! {
     /// attr_map 中不需要转为 bytes的属性
     pub static ref ATT_BYTES_SET: DashSet<NounHash> = {
         let mut set = DashSet::new();
-        set.insert(NounHash(db1_hash("OWNER")));
-        set.insert(NounHash(db1_hash("TYPE")));
+        set.insert((db1_hash("OWNER")));
+        set.insert((db1_hash("TYPE")));
         set
     };
 }
@@ -222,7 +222,7 @@ pub fn convert_new_node_data_implicit(attr_map: BTreeMap<u32, (NounHash, AttrVal
                 values.push(val.to_be_bytes()[..4].to_vec());
             }
             AttrVal::StringType(val) => {
-                if !EXPR_ATT_SET.contains(&(noun.0 as i32)) {
+                if !EXPR_ATT_SET.contains(&(noun as i32)) {
                     let v = val.as_str().as_bytes().to_vec();
                     let len = v.len() as f32;
                     let l = (((len / 4.0).ceil() + 1.0) as u16).to_be_bytes().to_vec();
@@ -241,7 +241,7 @@ pub fn convert_new_node_data_implicit(attr_map: BTreeMap<u32, (NounHash, AttrVal
             // bool 压缩的值先不管
             AttrVal::BoolType(v) => {
                 // 这个noun是bool 但是默认值是 0C 不知道怎么搞的
-                if noun.0 == db1_hash("CLFL") {
+                if noun == db1_hash("CLFL") {
                     values.push(vec![0, 0, 0, 0xC]);
                 } else {
                     if *v {
@@ -333,7 +333,7 @@ fn convert_first_version_page_increment(input: &[u8], owner_refno: RefU64, refno
 //     let info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../../../all_attr_info.json")).unwrap();
 //     dbg!(&info.noun_attr_info_map.len());
 //     let mut attr = AttrMap::default();
-//     attr.insert(NounHash(db1_hash("TYPE")), AttrVal::StringType(SmolStr::new("ELBO")));
+//     attr.insert((db1_hash("TYPE")), AttrVal::StringType(SmolStr::new("ELBO")));
 //
 //     let increment_new_data = DataPageIncrement {
 //         old_file: input,

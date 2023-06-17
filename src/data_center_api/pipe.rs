@@ -7,14 +7,14 @@ use std::sync::Arc;
 use aios_core::data_center::{DataCenterAttr, DataCenterInstance, DataCenterProject, DataCenterProjectWithRelations, DataCenterRelations};
 use aios_core::data_center::AttrValue::AttrString;
 use aios_core::pdms_types::{PdmsElement, RefU64};
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 use bevy::render::render_resource::encase::private::RuntimeSizedArray;
 use sqlx::{MySql, Pool};
 use crate::api::attr::query_implicit_attr;
 use crate::api::children::travel_children_with_type;
-use crate::api::element::{query_children, query_children_eles, query_children_eles_without_children_count, query_name, query_refno_type};
+use crate::api::element::{query_children, query_children_eles_without_children_count, query_name, query_refno_type};
 use crate::api::metadata_manage::{query_metadata_table_code_sql, query_metadata_table_sql};
-use crate::aql_api::children::{query_children_aql, query_children_refnos_aql, query_travel_children_with_type_aql};
+use crate::aql_api::children::{query_children_eles, query_children_refnos, query_travel_children_with_type_aql};
 use crate::aql_api::tubi::{query_bran_info, query_tubi_from_bran, query_tubi_from_bran_filter_atta};
 use crate::data_center_api::auto_get_attr::{auto_get_datacenter_attr, DataCenterMetadata};
 use crate::data_center_api::bran::get_data_center_bran_attr;
@@ -139,7 +139,7 @@ async fn get_instances_data(compute_refnos: HashMap<String, HashSet<RefU64>>, me
             // 将 bran 下得元件放进去
             if b_bran {
                 let bran_elements = query_bran_info(refno, &database).await?;
-                let bran_children = query_children_refnos_aql(database, refno).await?;
+                let bran_children = query_children_refnos(database, refno).await?;
                 for idx in 0..bran_elements.len() {
                     // 放入元件数据
                     let bran_element = &bran_elements[idx];
@@ -434,7 +434,7 @@ pub async fn get_datacenter_bran_data(aios_mgr: &AiosDBManager, bran_refno: RefU
     let database = aios_mgr.get_arango_db().await?;
     // 拿到 tubi 信息,并去除 atta(不包含bran下的元件，只有tubi)
     let tubi_infos = query_tubi_from_bran_filter_atta(bran_refno, &database).await?;
-    let bran_children = query_children_aql(&database, bran_refno).await?;
+    let bran_children = query_children_eles(&database, bran_refno).await?;
     // 处理 bran 下的元件属性 (不含tubi)
     for child in bran_children {
         let attr = aios_mgr.get_attr(child.refno).await?;

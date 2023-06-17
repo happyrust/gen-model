@@ -1,9 +1,9 @@
 use aios_core::three_dimensional_review::{ThreeDimensionalModelDataCrate, ThreeDimensionalModelDataToArango};
 use crate::consts::ARANGODB_SAVE_AMOUNT;
 use crate::graph_db::pdms_arango::{ArDatabase, save_arangodb_doc};
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 // use crate::options::DbOption;
-use bb8_arangodb::arangors::AqlQuery;
+use bb8_arangodb::arangors_lite::AqlQuery;
 
 
 //编校审数据存入图数据库
@@ -43,28 +43,28 @@ fn insert_three_dimensional_review_data(review_data: ThreeDimensionalModelDataCr
 }
 
 pub async fn query_three_dimensional_review_data(database: &ArDatabase, key_value: &str) -> anyhow::Result<Option<Vec<ThreeDimensionalModelDataToArango>>> {
-    let aql = AqlQuery::builder().query("return document('review_data',@_key)")
-        .bind_var("_key", key_value).build();
+    let aql = AqlQuery::new("return document('review_data',@_key)")
+        .bind_var("_key", key_value);
     let data_vec: Vec<ThreeDimensionalModelDataToArango> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }
 
 
 pub async fn query_threed_review_data(database: &ArDatabase, key_value: &str) -> anyhow::Result<Option<Vec<ThreeDimensionalModelDataToArango>>> {
-    let aql = AqlQuery::builder().query("let v = document('threed_review',@_key)\
+    let aql = AqlQuery::new("let v = document('threed_review',@_key)\
         return unset(v , '_id','_rev') ")
-        .bind_var("_key", key_value).build();
+        .bind_var("_key", key_value);
     let data_vec: Vec<ThreeDimensionalModelDataToArango> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }
 
 
 pub async fn query_threed_review_data_by_name(database: &ArDatabase, name: &str) -> anyhow::Result<Option<Vec<ThreeDimensionalModelDataToArango>>> {
-    let aql = AqlQuery::builder().query("FOR u IN @@collection
+    let aql = AqlQuery::new("FOR u IN @@collection
                                                 FILTER u.UserCode==@name
                                                 return unset(u , '_id','_rev')")
         .bind_var("@collection", "threed_review")
-        .bind_var("name", name).build();
+        .bind_var("name", name);
     let data_vec: Vec<ThreeDimensionalModelDataToArango> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }

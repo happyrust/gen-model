@@ -3,7 +3,7 @@ use aios_core::data_center::TubiData;
 // use aios_core::data_center::TubiData;
 use aios_core::pdms_types::RefU64;
 use aios_core::prim_geo::tubing::TubiEdge;
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use bevy::prelude::{dbg, unwrap};
 use dashmap::DashMap;
 use glam::Vec3;
@@ -39,10 +39,10 @@ pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<
                 let from_refno = from_refno.unwrap();
                 // 如果是 tubi 在 bran 的第一个，取 bran 的 hstu
                 let spre = if from_refno == bran.refno {
-                    query_foreign_refno_aql(from_refno, &["HSTU", "HSTU"], &database).await?.unwrap_or_default()
+                    query_foreign_refno_aql(&database, from_refno, &["HSTU", "HSTU"]).await?.unwrap_or_default()
                 } else {
                     // 如果 tubi 在 bran 的中间或者最后一个，则取上一个节点的 lstu
-                    query_foreign_refno_aql(from_refno, &["LSTU", "LSTU"], &database).await?.unwrap_or_default()
+                    query_foreign_refno_aql(&database, from_refno, &["LSTU", "LSTU"]).await?.unwrap_or_default()
                 };
                 let spre_name = if spre == RefU64(0) {
                     "0/0".to_string()
@@ -60,7 +60,7 @@ pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<
 /// 找到 bran 下所有的 tubi
 pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<TubiEdge>> {
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     let bran_name = ( return document('pdms_eles',@bran_refno).name )
     for v,e in 0..1000 outbound @id tubi_edges
     filter bran_name[0] != null
@@ -79,7 +79,7 @@ pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &ArDatabase) -> 
     }")
         .bind_var("id", key)
         .bind_var("bran_refno", bran_refno.to_url_refno())
-        .build();
+        ;
     let mut results: Vec<TubiEdge> = database.aql_query(aql).await?;
     // 过滤不是 tubi 的数据
     results.retain(|r| {
@@ -93,7 +93,7 @@ pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &ArDatabase) -> 
 pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<TubiEdge>> {
     let mut tubi = Vec::new();
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     let bran_name = ( return document('pdms_eles',@bran_refno).name )
     for v,e in 0..1000 outbound @id tubi_edges
     filter bran_name[0] != null
@@ -112,7 +112,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArD
     }")
         .bind_var("id", key)
         .bind_var("bran_refno", bran_refno.to_url_refno())
-        .build();
+        ;
     let results: Vec<TubiEdge> = database.aql_query(aql).await?;
     // 过滤 atta
     let mut i = 0;
@@ -236,7 +236,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArD
 /// 获取 bran 所有的 tubi_edge 的信息
 pub async fn query_bran_info(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<TubiEdge>> {
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     let bran_name = ( return document('pdms_eles',@bran_refno).name )
     for v,e in 0..1000 outbound @id tubi_edges
     filter bran_name[0] != null
@@ -255,7 +255,7 @@ pub async fn query_bran_info(bran_refno: RefU64, database: &ArDatabase) -> anyho
     }")
         .bind_var("id", key)
         .bind_var("bran_refno", bran_refno.to_url_refno())
-        .build();
+        ;
     let results: Vec<TubiEdge> = database.aql_query(aql).await?;
     Ok(results)
 }
@@ -311,7 +311,7 @@ async fn test_query_tubi_from_bran_filter_atta() -> anyhow::Result<()> {
     //     .add_source(File::with_name("DbOption"))
     //     .build()?;
     // let db_option: DbOption = s.try_deserialize().unwrap();
-    // let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    // let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     // let refno = RefU64::from_refno_str("23584/5443").unwrap();
     // let results = query_tubi_lstu(refno, &database).await?;
     // dbg!(&results);

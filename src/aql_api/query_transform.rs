@@ -4,7 +4,7 @@ use aios_core::pdms_types::RefU64;
 use bevy::prelude::Vec3;
 use crate::api::attr::query_implicit_attr;
 use crate::api::element::query_refno_type;
-use crate::aql_api::children::{query_children_aql, query_travel_children_aql};
+use crate::aql_api::children::{query_children_eles, query_travel_children_aql};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};

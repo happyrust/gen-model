@@ -484,7 +484,7 @@ pub async fn query_all_type_name_refnos(att_type: &str, pool: &Pool<MySql>) -> a
 /// 获取zone属于哪个专业
 pub async fn get_zone_divco(refno: RefU64, pool: &Pool<MySql>) -> String {
     if let Ok(attr) = query_explicit_attr(refno, pool).await {
-        if let Some(val) = attr.map.get(&NounHash(ATT_DIVCO as u32)) {
+        if let Some(val) = attr.map.get(&(ATT_DIVCO as u32)) {
             return val.string_value();
         }
     }
@@ -634,7 +634,7 @@ pub fn gen_dbinfo_value_insert_sql(dbno: u32, filename: &str, version: u32, proj
 pub fn get_name(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashMap<RefU64, RefU64Vec>, refno: RefU64) -> String {
     let attr = whole_attr.get(&refno).unwrap();
     let type_name = attr.implicit_attmap.get_type();
-    return if let Some(name) = attr.explicit_attmap.get(&NounHash(db1_hash("NAME"))) {
+    return if let Some(name) = attr.explicit_attmap.get(&(db1_hash("NAME"))) {
         name.string_value()
     } else {
         let owner = attr.implicit_attmap.get_owner().unwrap();

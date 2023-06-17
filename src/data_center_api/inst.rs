@@ -3,7 +3,7 @@ use std::io::Write;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 use sqlx::{MySql, Pool};
 use crate::api::refno_info::query_refno_height_position;
 use crate::api::room_code::query_room_code;
@@ -114,7 +114,7 @@ pub async fn get_inst_equi_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -
 //         .add_source(File::with_name("DbOption"))
 //         .build()?;
 //     let db_option: DbOption = s.try_deserialize().unwrap();
-//     let database = get_arangodb_conn_from_db_option(&db_option).await?;
+//     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
 //     let refno = RefU64::from_refno_str("24381/104050").unwrap();
 //     let data = get_inst_data(refno, &database).await;
 //     let mut file = fs::File::create("仪控.json")?;

@@ -15,7 +15,7 @@ use std::fs::File;
 use std::io::Read;
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::options::DbOption;
-use bb8_arangodb::arangors::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use parry3d::math::Point;
 use crate::api::children::{travel_children_with_refno, travel_children_with_type};
 use crate::api::element::{query_ele_node, query_elenode_without_children_count, query_elenodes_without_children_count};
@@ -47,14 +47,14 @@ pub struct SscEleNode {
 pub async fn get_room_refnos_from_spa_tree_aql(room_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
     let mut room_map = vec![];
     let refno = format!("room_eles/{}", room_refno.to_url_refno());
-    let aql = AqlQuery::builder().query("\
+    let aql = AqlQuery::new("\
     for v in 1 outbound @id room_edges
         filter v != null
         return {
             'refno':v._key,
         }").bind_var("id", refno)
         .bind_var("id", room_refno.to_url_refno())
-        .build();
+        ;
     let results: Vec<String> = database.aql_query(aql).await?;
     let results = convert_refno_vec_from_vec_string(results);
     // let mut b_insert_self = true; // 需要将自己也加到 target_refnos 里面 方便显示 pane
@@ -342,8 +342,8 @@ pub async fn update_ssc_type(names: Vec<String>, pool: &Pool<MySql>) -> anyhow::
 
 /// 获取某个房间下的所有参考号
 pub async fn query_room_refnos_aql(room_name: &str, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
-    let aql = AqlQuery::builder().query("return document('room_eles',@room_name)")
-        .bind_var("room_name", room_name).build();
+    let aql = AqlQuery::new("return document('room_eles',@room_name)")
+        .bind_var("room_name", room_name);
     let result: Vec<String> = database.aql_query(aql).await?;
     Ok(convert_refno_vec_from_vec_string(result))
 }

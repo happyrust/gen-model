@@ -38,7 +38,7 @@ pub struct PdmsRefnoTypeAql {
 
 
 
-/// todo 需要放到 RefU64的 成员方法中
+#[inline]
 pub fn convert_refno_vec_from_vec_string(string_vec: Vec<String>) -> Vec<RefU64> {
     let mut result = vec![];
     for v in string_vec {

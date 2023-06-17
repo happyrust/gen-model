@@ -143,7 +143,7 @@ pub async fn get_ispec_from_attr(attr: &AttrMap, aios_mgr: &AiosDBManager) -> an
 pub async fn get_rtext_from_attr(attr: &AttrMap, aios_mgr: &AiosDBManager) -> anyhow::Result<String> {
     let Some(refno) = attr.get_refno() else { return Ok("".to_string()); };
     let database = aios_mgr.get_arango_db().await?;
-    let Some(detr) = query_foreign_refno_aql(refno, &vec!["SPRE", "DETR"], &database).await?
+    let Some(detr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "DETR"]).await?
         else { return Ok("".to_string()); };
     let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(detr).await else { return Ok("".to_string()); };
     let detr_map = query_explicit_attr(detr, &pool).await?;
@@ -176,7 +176,7 @@ pub(crate) async fn get_quarantine_room_name(refno: RefU64, database: &ArDatabas
 /// 获取元件的desc （ catr.desc）
 pub(crate) async fn get_refno_desc(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<String> {
     let database = aios_mgr.get_arango_db().await?;
-    let Some(catr) = query_foreign_refno_aql(refno, &vec!["SPRE", "CATR"], &database).await?
+    let Some(catr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "CATR"]).await?
         else { return Ok("".to_string()); };
     let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok("".to_string()); };
     let attr = aios_mgr.get_attr(refno).await?;
@@ -192,7 +192,7 @@ pub(crate) async fn get_refno_desp(refno: RefU64, aios_mgr: &AiosDBManager) -> a
 /// 获取元件的 para
 pub(crate) async fn get_refno_paras(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<f64>> {
     let database = aios_mgr.get_arango_db().await?;
-    let Some(catr) = query_foreign_refno_aql(refno, &vec!["SPRE", "CATR"], &database).await?
+    let Some(catr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "CATR"]).await?
         else { return Ok(vec![]); };
     let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok(vec![]); };
     let attr = aios_mgr.get_attr(refno).await?;

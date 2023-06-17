@@ -3,7 +3,7 @@ use sqlx::Row;
 use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
 use crate::consts::*;
-use bb8_arangodb::arangors::{AqlQuery, ClientError, Collection, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, ClientError, Collection, Database};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::take;
 use std::sync::{Arc, Mutex};
@@ -14,7 +14,7 @@ use aios_core::pdms_types::{PdmsElement, RefU64, RefU64Vec};
 use aios_core::tool::db_tool::db1_hash;
 use anyhow::anyhow;
 use bb8_arangodb::{ArangoConnectionManager, AuthenticationMethod};
-use bb8_arangodb::arangors::collection::CollectionType;
+use bb8_arangodb::arangors_lite::collection::CollectionType;
 use bb8_arangodb::bb8::Pool;
 use bevy::prelude::dbg;
 use dashmap::{DashMap, DashSet};
@@ -32,14 +32,13 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{DataDocument, ForeignEdges};
 use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphEdgeWithKey, PdmsEleGraphNode};
-use arangors::uclient::reqwest::ReqwestClient;
 
-pub type ArDatabase = Database<ReqwestClient>;
-pub type ArPool = Pool<ArangoConnectionManager<ReqwestClient>>;
+pub type ArDatabase = arangors_lite::Database;
+pub type ArPool = Pool<ArangoConnectionManager>;
 
 
 pub async fn connect_arangodb(db_option: &DbOption) -> anyhow::Result<ArPool> {
-    let manager = ArangoConnectionManager::<ReqwestClient>::new(
+    let manager = ArangoConnectionManager::new(
         db_option.arangodb_url.to_string(),
         AuthenticationMethod::JWTAuth(db_option.arangodb_user.to_string(), db_option.arangodb_password.to_string()),
     );
@@ -358,12 +357,12 @@ pub async fn save_dtse_value_to_arangodb(database: &ArDatabase, type_ele_map: &D
 
 pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &str) -> anyhow::Result<()> {
     let database = mgr.get_arango_db().await?;
-    let aql = AqlQuery::builder().query(r#"LET data = @elements
+    let aql = AqlQuery::new(r#"LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
         .bind_var("@collection", collection)
         .bind_var("elements", json)
-        .build();
+        ;
     let _result: Vec<()> = database.aql_query(aql).await?;
     Ok(())
 }
@@ -372,11 +371,11 @@ pub async fn save_arangodb_with_db_option(database: &ArDatabase, json: Value, co
     let mut aql_string = r#"LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#.to_string();
-    let aql = //AqlQuery::builder().query(&aql_string)
-        AqlQuery::builder().query(&aql_string)
+    let aql = //AqlQuery::new(&aql_string)
+        AqlQuery::new(&aql_string)
             .bind_var("@collection", collection)
             .bind_var("elements", json)
-            .build();
+            ;
     let _result: Vec<()> = database.aql_query(aql).await?;
     Ok(())
 }
@@ -391,22 +390,22 @@ pub async fn save_arangodb_doc(json: Value, collection: &str, database: &ArDatab
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true}"#
     };
-    let aql = AqlQuery::builder().query(aql_str)
+    let aql = AqlQuery::new(aql_str)
         .bind_var("@collection", collection)
         .bind_var("elements", json)
-        .build();
-    let _result: Vec<()> = database.aql_query(aql).await?;
+        ;
+    let _result: Vec<()> = database.aql_query(aql).await.unwrap();
     Ok(())
 }
 
 pub async fn remove_arangodb_with_refno_key(refnos: &Vec<RefU64>, collection: &str, database: &ArDatabase) -> anyhow::Result<bool> {
     let keys = refnos.into_iter().map(|refno| refno.to_url_refno()).collect::<Vec<_>>();
-    let aql = AqlQuery::builder().query(
+    let aql = AqlQuery::new(
         "FOR D IN @DATA
                     REMOVE D IN @COLLECTION")
         .bind_var("data", keys)
         .bind_var("collection", collection)
-        .build();
+        ;
     let result = database.aql_query::<Vec<()>>(aql).await;
     Ok(!result.is_err())
 }
@@ -426,10 +425,10 @@ pub async fn save_arangodb_with_db_option_create_collection(database: &ArDatabas
     // if db_option.replace_dbs {
     //     aql_string = aql_string.replace("INSERT", "REPLACE");
     // }
-    let aql = AqlQuery::builder().query(&aql_string)
+    let aql = AqlQuery::new(&aql_string)
         .bind_var("@collection", collection)
         .bind_var("elements", json)
-        .build();
+        ;
     let _result: Vec<()> = database.aql_query(aql).await?;
     Ok(())
 }

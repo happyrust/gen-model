@@ -1,6 +1,6 @@
 use std::env;
 use aios_core::pdms_types::{DataScope, DataScopeVec, DataState, DataStateVec, RefI32Tuple, RefU64};
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 use sqlx::{Error, Executor, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
 use crate::api::children::{travel_children_eles, travel_children_without_leaf};

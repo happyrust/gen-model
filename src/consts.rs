@@ -41,6 +41,7 @@ pub const AQL_EMBED_EDGE_COLLECTION: &'static str = "embed_edge";
 
 pub const BATCH_CHUNKS_CNT: usize = 50;
 pub const AQL_PDMS_ELES_COLLECTION: &'static str = "pdms_eles";
+pub const AQL_PDMS_MESH_COLLECTION: &'static str = "pdms_mesh";
 pub const AQL_PDMS_EDGES_COLLECTION: &'static str = "pdms_edges";
 pub const AQL_PDMS_INST_INFO_COLLECTION: &'static str = "pdms_inst_infos";
 pub const AQL_PDMS_INST_GEO_COLLECTION: &'static str = "pdms_inst_geos";

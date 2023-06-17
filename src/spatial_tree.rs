@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use aios_core::options::DbOption;
-use bb8_arangodb::arangors::Database;
-use crate::test::common::get_arangodb_conn_from_db_option;
+use bb8_arangodb::arangors_lite::Database;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 
 ///投影到平面上的房间，去计算是否二维有相交
@@ -26,7 +26,7 @@ pub async fn compute_rooms_by_projection(
     // let mut file = fs::File::open("assets/mesh/mesh.bin")?;
     // let mut data = vec![];
     // file.read_to_end(&mut data)?;
-    // let mesh_mgr = bincode::deserialize::<MeshesData>(&data)?;
+    // let mesh_mgr = bincode::deserialize::<PlantMeshesData>(&data)?;
     //
     // let instance_dir_path = "assets/instance";
     // let mut file = fs::File::open("accel.spa")?;
@@ -139,7 +139,7 @@ pub async fn recompute_spatial_tree(
     // let mut file = fs::File::open("assets/mesh/mesh.bin")?;
     // let mut data = vec![];
     // file.read_to_end(&mut data)?;
-    // let mesh_mgr = bincode::deserialize::<MeshesData>(&data)?;
+    // let mesh_mgr = bincode::deserialize::<PlantMeshesData>(&data)?;
     //
     // let instance_dir_path = "assets/instance";
     // let mut file = fs::File::open("assets/accel.spa")?;
@@ -244,7 +244,7 @@ async fn test_save_spatial_tree_to_db() -> anyhow::Result<()> {
     // pane 的 refno
     let test_room_refno = RefU64::from_two_nums(24381, 35033);
 
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let room_contains_refno = vec![
         RefU64::from_two_nums(24384, 3088),
         RefU64::from_two_nums(24384, 3090),

@@ -3,7 +3,7 @@ use std::env;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{NounHash, PdmsElement, RefU64, UdaMajorType};
 use aios_core::pdms_types::UdaMajorType::T;
-use bb8_arangodb::arangors::{AqlQuery, ClientError, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, ClientError, Database};
 use parry3d::bounding_volume::Aabb;
 use regex::Regex;
 use serde::{Serialize, Deserialize};
@@ -20,7 +20,7 @@ use crate::graph_db::pdms_arango::*;
 use aios_core::pdms_types::*;
 use anyhow::anyhow;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::test::common::get_arangodb_conn_from_db_option;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RoomData {
@@ -121,10 +121,10 @@ pub async fn query_all_need_compute_room_refno(dbno: &Vec<i32>,
 /// 传入参考号 返回该参考号所在的房间
 pub async fn query_room_name_from_refno_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<String>> {
     let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     for v,e in 1 inbound @id room_edges
          return v.name )
-    ").bind_var("id", refno).build();
+    ").bind_var("id", refno);
     let result = database.aql_query::<String>(aql).await;
     match result {
         Ok(data) => {
@@ -161,10 +161,10 @@ pub async fn query_room_name_from_refnos_aql(refnos: Vec<RefU64>, database: &ArD
 /// 获取该参考号属于哪个房间 room_name_type : 存放房间名的类型
 pub async fn query_room_info_from_refno(refno: RefU64, room_name_type: &str, database: &ArDatabase) -> anyhow::Result<Option<String>> {
     let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     let refno = (for v,e in 1 inbound @id room_edges
                 return v._key )[0]
-    return refno").bind_var("id", refno).build();
+    return refno").bind_var("id", refno);
     let result = database.aql_query::<String>(aql).await;
     return match result {
         Ok(r) => {
@@ -211,23 +211,23 @@ fn gen_query_all_need_compute_room_refno_sql(dbnos: &Vec<i32>, room_type: &str, 
 pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<UdaMajorType>, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = if filter_major.is_none() {
-        AqlQuery::builder().query("
+        AqlQuery::new("
         for e in 0..10 inbound @key pdms_edges
             // filter e.noun == 'PANE'
             for v in 1 outbound CONCAT('room_eles/',e._key) room_edges
                 filter v != null
                 return v._key
         ").bind_var("key", key)
-            .build()
+
     } else {
         let filter_data = filter_major.unwrap().to_major_str();
-        AqlQuery::builder().query("
+        AqlQuery::new("
         for v,e in 1 outbound @key room_edges
             filter v != null
             filter filter_major == e.major
             return v._key
         ").bind_var("key", key).bind_var("filter_major", filter_data)
-            .build()
+
     };
     let result: Vec<String> = database.aql_query(aql).await?;
     Ok(convert_refno_vec_from_vec_string(result))
@@ -266,23 +266,23 @@ pub async fn query_rooms_refnos_aql(rooms: Vec<String>, database: &ArDatabase) -
 pub async fn query_room_pdms_elements_aql(refno: RefU64, filter_major: Option<UdaMajorType>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = if filter_major.is_none() {
-        AqlQuery::builder().query("
+        AqlQuery::new("
         for e in 0..10 inbound @key pdms_edges
             filter e.noun == 'PANE'
             for v in 1 outbound CONCAT('room_eles/',e._key) room_edges
                 filter v != null
                 return { refno:v._key , owner:v.owner , name:v.name,noun:v.noun,version:0,children_count:0 }
-        ").bind_var("key", key).build()
+        ").bind_var("key", key)
     } else {
         let filter_data = filter_major.unwrap().to_major_str();
-        AqlQuery::builder().query("
+        AqlQuery::new("
         for p in 0..10 inbound @key pdms_edges
             filter p.noun == 'PANE'
             for v,e in 1 outbound CONCAT('room_eles/',p._key) room_edges
                 filter v != null
                 filter @filter_major == e.major
                 return { refno:v._key , owner:v.owner , name:v.name,noun:v.noun,version:0,children_count:0 }
-        ").bind_var("key", key).bind_var("filter_major", filter_data).build()
+        ").bind_var("key", key).bind_var("filter_major", filter_data)
     };
     let results: Vec<PdmsElement> = database.aql_query(aql).await.unwrap();
     Ok(results)
@@ -306,7 +306,7 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &ArDatabase) -> a
     let mut set = HashSet::new();
     let mut r = Vec::new();
     let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::builder().query("
+    let aql = AqlQuery::new("
     let elements = ( for v in 0..100 inbound @id pdms_edges
                     filter v!= null
                     return v._id )
@@ -321,7 +321,7 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &ArDatabase) -> a
             filter v.noun == 'FRMW'
             return { refno:v._key , owner:0 , name:v.name,noun:v.noun,version:0,children_count:1 }")
         .bind_var("id", id)
-        .build();
+        ;
     let results: Vec<PdmsElement> = database.aql_query(aql).await?;
     for result in results {
         let refno = result.refno;
@@ -347,7 +347,7 @@ async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let refno = RefU64::from_url_refno("24383_68084").unwrap();
     let name = query_refno_belong_rooms(refno, &database).await?;
     dbg!(&name);
@@ -361,7 +361,7 @@ async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let refno = RefU64::from_url_refno("24381_178638").unwrap();
     let name = query_room_info_from_refno(refno, "FRMW", &database).await?.unwrap();
     let room_name = get_room_name_split(&name).unwrap();

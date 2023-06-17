@@ -1,5 +1,5 @@
 use aios_core::pdms_types::RefU64;
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 use crate::graph_db::pdms_arango::{ArDatabase, remove_arangodb_with_refno_key, save_arangodb_doc};
 use serde::{Serialize, Deserialize};
 use crate::consts::AQL_LOCK_REFNOS_COLLECTION;

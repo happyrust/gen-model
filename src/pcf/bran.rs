@@ -2,7 +2,7 @@ use std::io::Write;
 use std::sync::Arc;
 use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
 use aios_core::prim_geo::tubing::TubiEdge;
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 use bevy::prelude::dbg;
 use dashmap::DashMap;
 use glam::Vec3;

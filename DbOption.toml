@@ -2,26 +2,32 @@
 total_sync = false
 enable_log = false
 sync_graph_db = true
-sync_tidb = true
+sync_tidb = false
+sync_localdb = false
 incr_sync = false
-replace_dbs = true
+replace_dbs = false
 
 #项目设置
 project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
 included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
-#included_projects = ["AvevaCatalogue"]  #"AvevaPlantSample",
+#included_projects = ["SCB", "ZDJ"]  #"AvevaPlantSample",
 #included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
 
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
 project_code = 1516
 module = "DESI"
-gen_model_mesh = true
-apply_boolean_operation = true
+#是否生成模型数据
+gen_model = true
+mesh_tol_ratio = 5.0
+#是否生成模型的mesh数据
+gen_mesh = false
+apply_boolean_operation = false
 #是否生成房间树
 gen_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 100
+
 
 #arangodb 配置
 arangodb_database = "ams"
@@ -46,20 +52,20 @@ server_release_ip = "127.0.0.1:9099"
 
 
 #调试选项
-replace_mesh = false
+replace_mesh = true
 save_model_mesh_to_graph_db = true
 need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
-reset_mdb_project = false      #是否重新生成 mdb 缓存
+reset_mdb_project = true      #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
-#included_db_files = ["ams7997_0001"]
-#included_db_files = ["ams7997_0001"]
+included_db_files = ["ams7997_0001"]
+#included_db_files = ["ams7351_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
-manual_db_nums = [1112]  #, 8000
+manual_db_nums = [7997]  #, 8000
 plat_url = ""
 
 #puhua
@@ -153,21 +159,26 @@ puhua_database_password = ""
 
 
 #debug_root_refnos = ["17496/169982"]
-#debug_root_refnos = ["24381/46775"]
 #debug_root_refnos = ["9304/2"]
-debug_root_refnos = ["17496/169984"]
+#debug_root_refnos = ["17496/106409"]
 
-#24381/34109,
-#24381/42520,
-#24381/44873,
-#24381/46775,
-#24381/48631,
-#24381/57476,
-#24381/76564,
-#24381/79977,
-#24381/100675,
-#24381/101405,
-#24381/177373,
+#风管的测试
+#debug_root_refnos = ["24381/46775"]
+
+#测试风管bend的问题
+#debug_root_refnos = ["24381/47158"]
+
+#错误的pyramid
+#debug_root_refnos = ["17496/171101"]
+
+#FIXING 的调试
+#debug_root_refnos = ["17496/106824"]  #墙
+
+#debug_root_refnos = ["17496/106407"]
+#debug_root_refnos = ["24381/148471"]
+debug_root_refnos = ["25688/4160"]
+#debug_root_refnos = ["25688/4361"]
+#debug_root_refnos = ["24381/159290"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]

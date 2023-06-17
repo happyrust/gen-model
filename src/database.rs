@@ -14,7 +14,7 @@ use std::time::Instant;
 use aios_core::consts::*;
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::pdms_types::{
-    AttrMap, AttrVal, MeshesData, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec,
+    AttrMap, AttrVal, PlantMeshesData, NounHash, PdmsDatabaseInfo, RefU64, RefU64Vec,
 };
 use aios_core::tool::db_tool::{convert_to_hash, db1_dehash, db1_hash};
 use aios_core::tool::float_tool::f64_round_3;
@@ -41,10 +41,12 @@ use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_ro
 use crate::tables::*;
 use parry3d::utils::hashmap::FxHasher32;
 use std::hash::{Hash, Hasher};
+use aios_core::cache::mgr::BytesTrait;
 use aios_core::get_default_pdms_db_info;
 use aios_core::helper::table::{qualified_column_name, qualified_table_name};
 use aios_core::options::DbOption;
 use aios_core::pdms_data::ATTR_INFO_MAP;
+use sled::transaction::ConflictableTransactionError;
 use crate::tables;
 
 pub trait MySqlMethods {
@@ -162,7 +164,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                     } else {
                         continue;
                     }
-                    if kk == *TYPE_HASH as i32 {
+                    if kk == TYPE_HASH as i32 {
                         attr_map.insert(
                             vv.offset,
                             (att_name, StringType(db1_dehash(k as u32).into())),
@@ -207,15 +209,22 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
 
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
         let arrango_pool = connect_arangodb(db_option).await?;
-        sync_total_async_threaded(
+        match  sync_total_async_threaded(
             arrango_pool.clone(),
             &db_option,
             project,
             project_pool.clone(),
             pdms_info_pool.clone(),
         )
-            .await
-            .expect("同步数据失败");
+            .await {
+            Ok(_) => {
+                println!("同步数据成功。");
+            }
+            Err(e) => {
+                println!("{}", e.to_string());
+            }
+        }
+            // .expect("同步数据失败");
     }
     println!("创建表花费时间: {} ms", create_tables_elapse);
     println!(
@@ -274,7 +283,7 @@ pub fn gen_implicit_attr_insert_sql(hash: u32) -> (String, Vec<NounHash>) {
     let implicit_names = ATTR_INFO_MAP.get_type_implicit_att_names(type_name.as_str());
     let column_hashs = implicit_names
         .iter()
-        .filter_map(|x| (x != "unset").then(|| NounHash(db1_hash(x.as_str()))))
+        .filter_map(|x| (x != "unset").then(|| (db1_hash(x.as_str()))))
         .collect();
     let v_sql = implicit_names
         .iter()
@@ -347,7 +356,7 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
     if let Some(info_map) = ATTR_INFO_MAP.get(&(db1_hash(type_name) as i32)) {
         for noun_hash in column_hashes {
             //如果没有这个属性，需要用unset顶上
-            //if noun_hash != &NounHash(UNSET_NOUN)
+            //if noun_hash != &(UNSET_NOUN)
             if let Some(v) = i_att.get(noun_hash) {
                 match v {
                     AttrVal::InvalidType => {}
@@ -412,7 +421,7 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                     AttrVal::StringHashType(_) => {}
                 }
             } else {
-                if let Some(info) = info_map.get(&(**noun_hash as i32)) {
+                if let Some(info) = info_map.get(&(*noun_hash as i32)) {
                     // todo 和上面的 math 合并为一个
 
                     match &info.default_val {
@@ -507,6 +516,11 @@ pub async fn sync_total_async_threaded(
             "batch_insert_sql_cnt 或者  sql_threads_number 不能为0"
         ));
     }
+    if !Path::new(&project_dir).exists() {
+        return Err(anyhow!(
+            "项目文件夹指定不正确"
+        ));
+    }
     let mut target_dir = fs::read_dir(&project_dir)
         .unwrap()
         .into_iter()
@@ -524,6 +538,22 @@ pub async fn sync_total_async_threaded(
             entry.path()
         })
         .collect::<Vec<PathBuf>>();
+
+
+    let (local_tree, children_tree) = if db_option.sync_localdb.unwrap_or(true) {
+        let db_path = format!("{}.db", &project);
+        let config = sled::Config::default()
+            .path(db_path)
+            .mode(sled::Mode::HighThroughput)
+            .cache_capacity(10_000_000_000)
+            .flush_every_ms(Some(1000));
+        let db = config.open()?;
+        let tree = db.open_tree("attr_map").ok();
+        let children_tree = db.open_tree("children").ok();
+        (tree, children_tree)
+    }else{
+        (None, None)
+    };
 
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
@@ -656,6 +686,86 @@ pub async fn sync_total_async_threaded(
                     }
                     println!("图数据库保存完成");
                 }
+
+                if let Some(tree) = local_tree.clone() && let Some(children_tree) = children_tree.clone() {
+                    // let mut batch = sled::Batch::default();
+                    for kv in total_attr_map_arc.as_ref() {
+                        // if *kv.key() == RefU64::from_two_nums(24381, 47210) {
+                        //     dbg!(db1_hash("CYLI"));
+                        //     dbg!(kv.value());
+                        //     break;
+                        // }
+                        let mut vec = kv.value().merge_implicit_explicit_into_attr().into_rkyv_compress_bytes();
+                        tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
+                    }
+                    // tree.apply_batch(batch)?;
+
+                    // let mut batch = sled::Batch::default();
+                    for (k, v) in children_map_arc.as_ref() {
+                        let mut vec = v.to_bytes()?;
+                        children_tree.insert((**k).to_be_bytes().as_slice(), &*vec)?;
+                    }
+                    // children_tree.apply_batch(batch)?;
+
+                    // let c = total_attr_map_arc.clone();
+                    // let tree = db.open_tree("attr_map")?;
+                    // tree.transaction::<_, _, ()>(|tx_db| {
+                    //     for kv in c.as_ref() {
+                    //         let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                    //         tx_db.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
+                    //     }
+                    //     Ok(())
+                    //     // Ok::<(), ConflictableTransactionError<_>>(())
+                    // }).expect("Error inserting local db ");
+                }
+
+                //heed lmdb 的实现
+                // if db_option.sync_localdb.unwrap_or(true) {
+                //     use heed::bytemuck::{Pod, Zeroable};
+                //     use heed::byteorder::BE;
+                //     use heed::types::*;
+                //     use heed::{Database, EnvOpenOptions};
+                //     let path = Path::new(".").join(format!("{}.mdb", &project_clone));
+                //
+                //     fs::create_dir_all(&path)?;
+                //
+                //     let env = EnvOpenOptions::new()
+                //         .map_size(10 * 1024 * 1024 * 1024) // 10MB
+                //         .max_dbs(3000)
+                //         .open(path)?;
+                //
+                //     // you can specify that a database will support some typed key/data
+                //     //
+                //     // like here we specify that the key will be an array of two i32
+                //     // and the data will be an str
+                //     let mut wtxn = env.write_txn()?;
+                //     let db: Database<U64<BE>, heed::types::ByteSlice> = env.create_database(&mut wtxn, Some("att"))?;
+                //     for kv in total_attr_map_arc.as_ref() {
+                //         let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                //         db.put(&mut wtxn, &**kv.key(), &*vec)?;
+                //     }
+                //     wtxn.commit()?;
+                //     println!("保存到本地db完成");
+                // }
+
+                //redb 的实现
+                // if db_option.sync_localdb.unwrap_or(true) {
+                //     use redb::{Database, Error, ReadableTable, TableDefinition};
+                //     let db = Database::create(format!("{}.redb", &project_clone))?;
+                //     // let table_name = format!("{db_no}");
+                //     let table_name = format!("kv");
+                //     let table: TableDefinition<u64, &[u8]> = TableDefinition::new(&table_name);
+                //     let write_txn = db.begin_write()?;
+                //     {
+                //         let mut table = write_txn.open_table(table)?;
+                //         for kv in total_attr_map_arc.as_ref() {
+                //             let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                //             table.insert(**kv.key(), &*vec)?;
+                //         }
+                //     }
+                //     write_txn.commit()?;
+                //     println!("保存到本地db完成");
+                // }
 
                 //如果不需要同步tidb，continue
                 if !db_option.sync_tidb.unwrap_or(true) {
@@ -944,31 +1054,8 @@ fn set_uda_attr(
                 uda_map
                     .entry(noun)
                     .or_insert_with(AttrMap::default)
-                    .entry(NounHash(ukey as u32))
+                    .entry((ukey as u32))
                     .or_insert(default.clone());
-            }
-        }
-    }
-    Ok(())
-}
-
-pub async fn save_pdms_mesh_tidb(mgr: MeshesData, pool: &Pool<MySql>) -> anyhow::Result<()> {
-    for chunks in &mgr.meshes.iter().chunks(1000) {
-        let mut sql = format!("INSERT IGNORE INTO {PDMS_MESH} (HASH,MESH) VALUES ");
-        for (key, map)  in chunks.into_iter() {
-            sql.push_str(&format!(
-                "( {}, 0x{}) ,",
-                key,
-                hex::encode(&map.into_compress_bytes())
-            ));
-        }
-        sql.remove(sql.len() - 1);
-        let result = pool.execute(sql.as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(e);
-                dbg!(sql.as_str());
             }
         }
     }
@@ -1035,11 +1122,11 @@ async fn save_paras_into_arangodb(
     }
     for para in para_map.chunks(ARANGODB_SAVE_AMOUNT) {
         let para_json = serde_json::to_value(para)?;
-        save_arangodb_with_db_option(database, para_json,  "para_eles").await?;
+        save_arangodb_with_db_option(database, para_json, "para_eles").await?;
     }
     for des_para in des_para_map.chunks(ARANGODB_SAVE_AMOUNT) {
         let des_para_json = serde_json::to_value(des_para)?;
-        save_arangodb_with_db_option(database, des_para_json,  "despara_eles").await?;
+        save_arangodb_with_db_option(database, des_para_json, "despara_eles").await?;
     }
     Ok(())
 }

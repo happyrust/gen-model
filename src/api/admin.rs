@@ -120,7 +120,7 @@ pub async fn get_pdms_tree_user(elements: Vec<PdmsElement>, aios_mgr: &AiosDBMan
                 continue;
             };
             if let Ok(explicit_attr) = query_explicit_attr(refno, &pool).await {
-                if let Some(user) = explicit_attr.map.get(&NounHash(642952117)) {
+                if let Some(user) = explicit_attr.map.get(&642952117) {
                     if let AttrVal::StringType(u) = user {
                         final_user = u.to_string();
                     }

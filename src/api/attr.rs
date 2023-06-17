@@ -47,7 +47,7 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &[&st
                 continue;
             }
             //type 需要获取
-            if info.offset != 0 || info.hash as u32 == *TYPE_HASH {
+            if info.offset != 0 || info.hash as u32 == TYPE_HASH {
                 let t = info.name.as_str();
                 //todo 需要进一步查找原因
                 if t == "DETR" {
@@ -82,7 +82,7 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &[&st
                     }
                     DbAttributeType::WORD => {
                         row.try_get::<String, _>(t).map(|v| {
-                            r.entry(hash).or_insert(AttrVal::StringType(SmolStr::new(v)))
+                            r.entry(hash).or_insert(AttrVal::StringType(v.to_string()))
                         })?;
                     }
                     DbAttributeType::DOUBLEVEC => {
@@ -130,7 +130,7 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &[&st
 pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic,
                                  pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
     let type_name = ref_basic.get_type();
-    let type_hash = *ref_basic.get_noun_hash() as i32;
+    let type_hash = ref_basic.get_noun_hash() as i32;
     let mut exclude_columns = vec![];
     //需要过滤一遍
     let column_names = if column_names.is_some() {
@@ -245,7 +245,7 @@ pub async fn query_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: O
         // 赋默认值
         if let Some(map) = ATTR_INFO_MAP.map.get(&(db1_hash(&ele.noun) as i32)) {
             for values in map.value() {
-                attr.entry(NounHash(*values.key() as u32)).or_insert(values.default_val.clone());
+                attr.entry((*values.key() as u32)).or_insert(values.default_val.clone());
             }
         }
         attr.insert(REFNO_HASH, AttrVal::RefU64Type(ele.refno));
@@ -277,7 +277,7 @@ pub async fn query_full_attr_with_pool(refno: RefU64, aios_mgr: &AiosDBManager, 
     // 赋默认值
     if let Some(map) = ATTR_INFO_MAP.map.get(&(db1_hash(&ele.noun) as i32)) {
         for values in map.value() {
-            attr.entry(NounHash(*values.key() as u32)).or_insert(values.default_val.clone());
+            attr.entry((*values.key() as u32)).or_insert(values.default_val.clone());
         }
     }
     attr.insert(REFNO_HASH, AttrVal::RefU64Type(ele.refno));
@@ -400,7 +400,7 @@ pub fn gen_query_implicit_attr_sql_by_owner(owner: RefU64, type_name: &str, colu
 /// 获取site属于哪个专业
 pub async fn get_site_major_from_uda(site_refno: RefU64, pool: &Pool<MySql>) -> Option<UdaMajorType> {
     if let Ok(explicit_attr) = query_explicit_attr(site_refno, &pool).await {
-        if let Some(major) = explicit_attr.map.get(&NounHash(688051936)) {
+        if let Some(major) = explicit_attr.map.get(&(688051936)) {
             let major_str = major.string_value();
             return Some(UdaMajorType::from_str(major_str.as_str()));
         }

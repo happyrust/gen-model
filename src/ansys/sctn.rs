@@ -2,7 +2,7 @@ use std::env;
 use std::io::Write;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 use bevy::prelude::Transform;
 use glam::{Mat3, Quat, Vec3};
 use sqlx::{MySql, Pool, Row};
@@ -15,7 +15,7 @@ use crate::consts::SCTN_STANDARD;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::consts::CHANNEL_STEEL_STANDARD;
-use crate::test::common::get_arangodb_conn_from_db_option;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 pub async fn query_single_sctn_ansys_data(refno: RefU64, aios_mgr: &AiosDBManager,database:&ArDatabase) -> anyhow::Result<Option<SctnAnsysData>> {
     // 查找pdms中 sctn 对应的属性
@@ -198,7 +198,7 @@ async fn test_query_single_sctn_ansys_data() -> anyhow::Result<()> {
     let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
     let cata_pool = AiosDBManager::get_db_pool(&url, "zdj").await?;
     let refno = RefU64::from_refno_str("24383/69687").unwrap();
-    let database = get_arangodb_conn_from_db_option(&db_option).await?;
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let children = query_children_order_aql(&database, refno).await?;
     let mut sctns = Vec::new();
     for child in children {

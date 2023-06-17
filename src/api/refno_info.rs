@@ -6,7 +6,7 @@ use aios_core::db_number::DbNumMgr;
 use aios_core::helper::table::qualified_table_name;
 use aios_core::pdms_types::{AttrVal, NounHash, RefU64, RefU64Vec};
 use anyhow::anyhow;
-use bb8_arangodb::arangors::Database;
+use bb8_arangodb::arangors_lite::Database;
 use crate::consts::*;
 use dashmap::DashMap;
 use sqlx::{Error, MySql, Pool, Row};
@@ -89,7 +89,7 @@ pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: &[i32], arango_db: &ArDa
 /// 通过uda，获取设备的底标高
 pub async fn query_refno_height_position(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<String> {
     let explicit_attr = query_explicit_attr(refno, pool).await?;
-    let position = explicit_attr.get(&NounHash(WDJZ as u32));
+    let position = explicit_attr.get(&(WDJZ as u32));
     if let Some(AttrVal::StringType(position)) = position {
         let position = position.replace("mm","").trim().to_string();
         Ok(position.to_string())

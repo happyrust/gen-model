@@ -37,7 +37,7 @@ use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
-use bb8_arangodb::arangors::collection::CollectionType::{Document, Edge};
+use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
 use bevy::prelude::*;
 use bevy::transform::components::Transform;
 use chrono::{Datelike, Timelike};
@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     }
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    if let Ok(cache_mesh) = MeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
+    if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
         info!("read cached mesh ok.");
     }
@@ -150,6 +150,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, "para_eles", Document).await?;
     create_arango_document(&database, AQL_PDMS_EDGES_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
+    create_arango_document(&database, AQL_PDMS_MESH_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_INFO_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_GEO_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_TUBI_COLLECTION, Document).await?;
@@ -212,14 +213,14 @@ fn test_turn_bin_into_json() {
     new_file.write_all(&json.into_bytes()).unwrap();
 }
 
-#[test]
-fn test_inst_mgr() {
-    let map = CachedInstanceMgr::deserialize_from_bin_file(&"assets/instance/7999.inst").unwrap();
-    let refno = RefU64::from_refno_str("24381/34919").unwrap();
-    if let Some(value) = map.inst_data.inst_map.get(&refno) {
-        dbg!(&value.value());
-    };
-}
+// #[test]
+// fn test_inst_mgr() {
+//     let map = CachedInstanceMgr::deserialize_from_bin_file(&"assets/instance/7999.inst").unwrap();
+//     let refno = RefU64::from_refno_str("24381/34919").unwrap();
+//     if let Some(value) = map.inst_data.inst_map.get(&refno) {
+//         dbg!(&value.value());
+//     };
+// }
 //
 // #[test]
 // fn test_compare_attr_info_file() {

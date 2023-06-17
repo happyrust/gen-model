@@ -1,7 +1,7 @@
 use glam::Vec3;
 use once_cell::sync::Lazy;
 use smol_str::SmolStr;
-use arangors::AqlQuery;
+use arangors_lite::AqlQuery;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use aios_core::pdms_types::*;
 use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
@@ -20,7 +20,6 @@ use aios_core::tool::db_tool::{db1_dehash, db1_hash, GLOBAL_UDA_NAME_MAP};
 use tokio::sync::{mpsc, RwLock};
 use aios_core::pdms_data::ScomInfo;
 use aios_core::parsed_data::CateGeomsInfo;
-use aios_core::prim_geo::category::convert_to_brep_shapes;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
 use aios_core::parsed_data::geo_params_data::CateGeoParam::TubeImplied;
 use std::default::default;
@@ -31,8 +30,10 @@ use aios_core::prim_geo::cylinder::SCylinder;
 use aios_core::prim_geo::TUBI_GEO_HASH;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use approx::abs_diff_eq;
-use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
+use aios_core::shape::pdms_shape::{PlantMesh, VerifiedShape};
 use futures::StreamExt;
+// use heed::byteorder::BE;
+// use heed::EnvOpenOptions;
 use nalgebra::Point3;
 use rayon::prelude::*;
 use crate::api::attr::{query_attr, query_uda_ukey_udna_all};
@@ -42,15 +43,14 @@ use crate::api::project_mdb::{gen_insert_project_mdb_sql, query_db_nums_of_mdb};
 use crate::api::refno_info::{cache_plin_plax, get_ref0_projects, sync_refno_basic_map};
 use crate::aql_api::children::{query_children_order_aql, query_deep_children_refnos_fuzzy};
 use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
-use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
+use crate::aql_api::pdms_mesh::{query_all_geo_hashs, query_pdms_mesh_aql};
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
 use crate::cata::resolve_helper::eval_str_to_f32;
-use crate::cata::sctn::geo::create_profile_geos;
-use crate::consts::*;
+use crate::consts::{GLOBAL_DATABASE, PDMS_INFO_DB, PUHUA_MATERIAL_DATABASE};
 use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::structs::{AIOSAxisMap, CateBrepShapeMap};
+use crate::data_interface::structs::{AIOSAxisMap, };
 use crate::data_interface::tidb_manager::{AiosDBManager, CATAEXPRCONTEXT_MAP};
 use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_PLIN_MAP, CACHED_REFNO_BASIC_MAP};
 use crate::graph_db::pdms_arango::{ArDatabase, connect_arangodb};
@@ -114,7 +114,7 @@ impl AiosDBManager {
         let database = self.get_arango_db().await?;
         loop {
             //需要排除负实体
-            let aql = AqlQuery::builder().query(r#"
+            let aql = AqlQuery::new(r#"
             FOR doc IN pdms_inst_infos
                 SORT doc._key
                 LIMIT @offset, @batch_size
@@ -127,7 +127,7 @@ impl AiosDBManager {
         "#)
                 .bind_var("offset", offset)
                 .bind_var("batch_size", 5000)
-                .build();
+                ;
             offset += 5000;
             if let Ok(refno_aabbs) = database.aql_query::<(String, Aabb)>(aql).await {
                 if refno_aabbs.is_empty() {
@@ -384,28 +384,28 @@ impl AiosDBManager {
         cache_mdb_site_map(mdb, module, &project_pool).await;
         self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
         let database = self.get_arango_db().await?;
-        if need_sync_refno_basic {
-            for project in &self.db_option.included_projects {
-                if let Some(kv) = self.project_map.get(project) {
-                    let dbnums = self.mdb_dbnums.iter().cloned().collect::<Vec<_>>();
-                    if let Ok(m) = cache_plin_plax(
-                        kv.value(),
-                        &dbnums,
-                        &database,
-                    ).await {
-                        for (k, v) in m {
-                            CACHED_PLIN_MAP.insert(k, &v.into());
-                        }
-                    }
-                }
-            }
-        }
+        // if need_sync_refno_basic {
+        //     for project in &self.db_option.included_projects {
+        //         if let Some(kv) = self.project_map.get(project) {
+        //             let dbnums = self.mdb_dbnums.iter().cloned().collect::<Vec<_>>();
+        //             if let Ok(m) = cache_plin_plax(
+        //                 kv.value(),
+        //                 &dbnums,
+        //                 &database,
+        //             ).await {
+        //                 for (k, v) in m {
+        //                     CACHED_PLIN_MAP.insert(k, &v.into());
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
         if need_sync_refno_basic {
             CACHED_REFNO_BASIC_MAP.save_to_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
-            CACHED_PLIN_MAP.save_to_file(stringify!(CACHED_PLIN_MAP))?;
+            // CACHED_PLIN_MAP.save_to_file(stringify!(CACHED_PLIN_MAP))?;
         } else {
             CACHED_REFNO_BASIC_MAP.load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
-            CACHED_PLIN_MAP.load_map_from_file(stringify!(CACHED_PLIN_MAP))?;
+            // CACHED_PLIN_MAP.load_map_from_file(stringify!(CACHED_PLIN_MAP))?;
         }
 
         // 将 mdb对应的 module 下的所有 numbdb保存下来
@@ -420,9 +420,55 @@ impl AiosDBManager {
     pub async fn init(db_option: &DbOption) -> anyhow::Result<Self> {
         let dir = db_option.project_path.to_string();
         let mut project_map = DashMap::new();
+        let mut local_attr_db_map = DashMap::new();
+        let mut local_children_db_map = DashMap::new();
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
+        // use heed::types::*;
+        // use heed::{Database, EnvOpenOptions};
+        let db_path = format!("{}.db", "mesh");
+        let config = sled::Config::default()
+            .path(db_path)
+            .mode(sled::Mode::HighThroughput)
+            .cache_capacity(10_000_000_000)
+            .flush_every_ms(Some(1000));
+        let db = config.open()?;
+        let local_mesh_db = db.open_tree("mesh")?;
+        let local_mesh_aabb_db = db.open_tree("aabb")?;
+
         for project in &db_option.included_projects {
+
+
+            //redb 的实现
+            // if let Ok(db) = redb::Database::builder()
+            //     .set_cache_size(500 * 1024 * 1024)
+            //     .open(format!("{}.redb", project)) {
+            //     redb_map.entry(project.clone()).or_insert(Arc::new(db));
+            // }
+
+            // local_db_map
+            let db_path = format!("{}.db", project);
+            let config = sled::Config::default()
+                .path(db_path)
+                .mode(sled::Mode::HighThroughput)
+                .cache_capacity(10_000_000_000)
+                .flush_every_ms(Some(1000));
+            if let Ok(db) = config.open(){
+                local_attr_db_map.entry(project.clone()).or_insert(db.open_tree("attr_map")?);
+                local_children_db_map.entry(project.clone()).or_insert(db.open_tree("children")?);
+            }
+            // let env = EnvOpenOptions::new()
+            //     .map_size(10 * 1024 * 1024 * 1024) // 10G 的映射大小
+            //     .max_dbs(3000)
+            //     .open(db_path)?;
+            // let mut rtxn = env.read_txn()?;
+            // if let Some(db) = env.open_database::<U64<BE>, ByteSlice>(&rtxn, Some("att"))?{
+            //     println!("加载本地db={}", project);
+            //     local_db_map.entry(project.clone()).or_insert((Arc::new(env.clone()), Arc::new(db)));
+            // }
+
+            // heed 的实现
+
             let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
             match project_pool {
                 Ok(pool) => {
@@ -449,8 +495,14 @@ impl AiosDBManager {
         let projects = db_option.included_projects.clone();
         println!("正在创建图数据库连接");
         let arango_pool = connect_arangodb(&db_option).await?;
+        let db = arango_pool.get().await?.db(&db_option.arangodb_database).await?;
+
         Ok(Self {
             project_map,
+            local_attr_db_map,
+            local_children_db_map,
+            local_mesh_db,
+            local_mesh_aabb_db,
             ref0_projects,
             info_pool: info_conn,
             projects,
@@ -541,17 +593,32 @@ impl AiosDBManager {
     ) -> anyhow::Result<MdbQuickInfoMap> {
         let mut mdb_map = HashMap::new();
         let mdbs = query_types_refnos(&vec!["MDB"], project_pool, &[]).await?;
+        dbg!(&mdbs);
         for mdb_refno in mdbs {
+            // let Ok(mdb_attr) = query_attr(mdb_refno, self, None).await else {
+            //     continue;
+            // };
+            dbg!(&mdb_refno);
             let Ok(mdb_attr) = self.get_attr(mdb_refno).await else {
                 continue;
             };
             let mdb_name = mdb_attr.get_name().to_string();
+            // let Ok(mdb_name) = query_name(mdb_refno, &project_pool).await else {
+            //     continue;
+            // };
+            dbg!(&mdb_name);
+            dbg!(&mdb_attr);
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
+                dbg!(&dbs);
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
                     if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {
-                        let db_num = att.get_i32("NUMBDB").unwrap_or_default();
+                        let Some(db_num) = att.get_i32("NUMBDB") else{
+                            continue;
+                        };
+                        dbg!(&db_num);
                         if let Ok(Some(mut quick_info)) = self.query_quick_info_by_dbno(*db_refno, db_num, info_pool).await {
+                            dbg!(&quick_info.db_type);
                             quick_info.order_number = i as _;
                             map.entry(quick_info.db_type.clone())
                                 .or_insert_with(Vec::new).push(quick_info);
@@ -629,9 +696,9 @@ impl AiosDBManager {
     ) -> anyhow::Result<Option<PdmsEleGraphNode>> {
         let arango_db = self.get_arango_db().await?;
         let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-        let aql = AqlQuery::builder().query("\
+        let aql = AqlQuery::new("\
             return document(pdms_eles, @id)
-        ").bind_var("id", refno_aql).build();
+        ").bind_var("id", refno_aql);
         let mut r = arango_db.aql_query::<PdmsEleGraphNode>(aql).await?;
         Ok(r.pop())
     }

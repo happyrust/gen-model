@@ -39,7 +39,7 @@ impl AiosDBManager {
             for str in db_option.debug_root_refnos.as_ref().unwrap() {
                 is_debug = true;
                 if let Ok(root_refno) = RefU64::from_refno_str(str) {
-                    if let Ok(name) = self.get_name(root_refno).await {
+                    if self.get_attr_from_localdb(root_refno).is_ok() {
                         target_refnos.push(root_refno);
                     }
                 }
@@ -83,7 +83,24 @@ impl AiosDBManager {
                     };
                     let is_leaf = self.get_children_refs(root_refno).await?.len() == 0;
                     if is_leaf {
-                        target_refnos.push(root_refno);
+                        if let Some(k) = self.query_element(root_refno).await? {
+                            let mut add = false;
+
+                            if let Some(owner_ele) = self.query_element(RefU64::from_url_refno(&k.owner).unwrap()).await? {
+                                if CATA_HAS_TUBI_GEO_NAMES.contains(&owner_ele.noun.as_str()) {
+                                    add = geo_type == GeoEnum::CATA_BRAN_AND_HANGER_REUSE;
+                                } else if CATA_SINGLE_REUSE_GEO_NAMES.contains(&k.noun.as_str()) {
+                                    add = geo_type == GeoEnum::CATA_SINGLE_REUSE;
+                                } else if GNERAL_LOOP_NOUN_NAMES.contains(&k.noun.as_str()) {
+                                    add = geo_type == GeoEnum::LOOP;
+                                } else if GNERAL_PRIM_NOUN_NAMES.contains(&k.noun.as_str()) {
+                                    add = geo_type == GeoEnum::PRIM;
+                                }
+                            }
+                            if add {
+                                target_refnos.push(root_refno);
+                            }
+                        }
                     } else {
                         query_travel_children_with_types_aql(
                             &database,
@@ -150,26 +167,27 @@ impl AiosDBManager {
             let is_leaf = self.get_children_refs(root_refno).await?.len() == 0;
             let mut check_parent = is_parent;
             if is_leaf {
-                if let Some(k) = self.query_element(root_refno).await?{
-                    let mut add = k.cata_hash.is_some();
+                if let Some(k) = self.query_element(root_refno).await? {
+                    let mut add = false;
 
-                    if let Some(owner_ele) = self.query_element(RefU64::from_url_refno(&k.owner).unwrap()).await?{
+                    if let Some(owner_ele) = self.query_element(RefU64::from_url_refno(&k.owner).unwrap()).await? {
                         if owner_ele.noun.as_str() == "BRAN" || owner_ele.noun.as_str() == "HANG" {
                             add = geo_type == GeoEnum::CATA_BRAN_AND_HANGER_REUSE;
-                        }else if CATA_SINGLE_REUSE_GEO_NAMES.contains(&k.noun.as_str()) {
-                            add = true;
+                        } else if CATA_SINGLE_REUSE_GEO_NAMES.contains(&k.noun.as_str()) {
+                            add = geo_type == GeoEnum::CATA_SINGLE_REUSE;
+                        } else if CATA_WITHOUT_REUSE_GEO_NAMES.contains(&k.noun.as_str()) {
+                            add = geo_type == GeoEnum::CATA_WITHOUT_REUSE;
                         }
                     }
-                    dbg!(add);
                     if add {
-                        target_refnos_map.insert(k.cata_hash.unwrap_or_default(), CataHashRefnoKV{
+                        target_refnos_map.insert(k.cata_hash.unwrap_or_default(), CataHashRefnoKV {
                             cata_hash: k.cata_hash,
                             exist_geo: None,
-                            group_refnos: vec![root_refno]
+                            group_refnos: vec![root_refno],
                         });
                     }
                 }
-            }else{
+            } else {
                 let s = query_travel_children_with_types_and_cata_hash(
                     &database,
                     root_refno,
@@ -183,7 +201,6 @@ impl AiosDBManager {
                     target_refnos_map.insert(k.cata_hash.unwrap_or_default(), k);
                 }
             }
-
         }
 
         Ok(target_refnos_map)

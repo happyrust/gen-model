@@ -84,7 +84,7 @@ impl OldDataPage {
         if noun_info_map.is_none() { return None; }
         let noun_info_map = noun_info_map.unwrap();
         for (noun_hash, info) in noun_info_map.clone().into_iter() {
-            let noun_hash = NounHash(noun_hash as u32);
+            let noun_hash = (noun_hash as u32);
             if ATT_BYTES_SET.contains(&noun_hash) { continue; }
             if let Some(val) = attr_map.map.get(&noun_hash) {
                 if info.offset == 0 {
