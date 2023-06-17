@@ -73,6 +73,7 @@ use env_logger::{Builder, fmt::Target};
 use log::{error, LevelFilter};
 use tokio::sync::RwLock;
 use aios_database::consts::*;
+use aios_database::data_interface::gen_model::gen_geos_data;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -113,6 +114,13 @@ async fn main() -> anyhow::Result<()> {
     if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
         info!("read cached mesh ok.");
+    }
+
+    if db_option.gen_model {
+        println!("正在生成模型");
+        let mut time = Instant::now();
+        gen_geos_data(mgr.clone(), db_option.clone()).await?;
+        info!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
     ///生成ssc 树
