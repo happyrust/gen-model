@@ -407,12 +407,14 @@ impl AiosDBManager {
             CACHED_REFNO_BASIC_MAP.load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
             // CACHED_PLIN_MAP.load_map_from_file(stringify!(CACHED_PLIN_MAP))?;
         }
+        println!("加载 CACHED_REFNO_BASIC_MAP 成功");
 
         // 将 mdb对应的 module 下的所有 numbdb保存下来
         let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
         for r in results {
             self.cache_module_numbdbs.insert(r);
         }
+        dbg!(&self.cache_module_numbdbs);
         Ok(())
     }
 
