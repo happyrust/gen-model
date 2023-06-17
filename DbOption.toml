@@ -1,9 +1,9 @@
 #同步文件配置
-total_sync = false
+total_sync = true
 enable_log = false
 sync_graph_db = true
 sync_tidb = false
-sync_localdb = false
+sync_localdb = true
 incr_sync = false
 replace_dbs = false
 
@@ -20,8 +20,6 @@ module = "DESI"
 #是否生成模型数据
 gen_model = true
 mesh_tol_ratio = 5.0
-#是否生成模型的mesh数据
-gen_mesh = false
 apply_boolean_operation = false
 #是否生成房间树
 gen_spatial_tree = false
