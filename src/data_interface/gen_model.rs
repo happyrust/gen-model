@@ -1539,15 +1539,18 @@ pub async fn gen_geos_data(
             dbg!(inst_data.inst_geos_map.len());
             save_instance_to_graph_db(&mgr, &inst_data).await?;
         }
+
+        {
+            let mesh_mgr = mgr.cached_mesh_mgr.read().await;
+            dbg!(mesh_mgr.len());
+            save_mesh_to_arango_db(&mgr, &mesh_mgr, replace_mesh).await?;
+            save_mesh_to_local_db(&mgr, &mesh_mgr, replace_mesh).expect("Save mesh to local db failed.");
+        }
+
         println!("{db_no} 生成完毕。");
     }
 
-    {
-        let mesh_mgr = mgr.cached_mesh_mgr.read().await;
-        dbg!(mesh_mgr.len());
-        save_mesh_to_arango_db(&mgr, &mesh_mgr, replace_mesh).await?;
-        save_mesh_to_local_db(&mgr, &mesh_mgr, replace_mesh).expect("Save mesh to local db failed.");
-    }
+
 
     println!("生成所有模型时间: {}ms", time.elapsed().as_millis());
     Ok(true)

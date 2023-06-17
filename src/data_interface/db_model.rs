@@ -595,10 +595,12 @@ impl AiosDBManager {
     ) -> anyhow::Result<MdbQuickInfoMap> {
         let mut mdb_map = HashMap::new();
         let mdbs = query_types_refnos(&vec!["MDB"], project_pool, &[]).await?;
+        dbg!(&mdbs);
         for mdb_refno in mdbs {
             // let Ok(mdb_attr) = query_attr(mdb_refno, self, None).await else {
             //     continue;
             // };
+            dbg!(&mdb_refno);
             let Ok(mdb_attr) = self.get_attr(mdb_refno).await else {
                 continue;
             };
@@ -606,16 +608,19 @@ impl AiosDBManager {
             // let Ok(mdb_name) = query_name(mdb_refno, &project_pool).await else {
             //     continue;
             // };
-            // dbg!(&mdb_name);
-            // dbg!(&mdb_attr);
+            dbg!(&mdb_name);
+            dbg!(&mdb_attr);
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
+                dbg!(&dbs);
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
                     if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {
-                        let db_num = att.get_i32("NUMBDB").unwrap_or_default();
-                        // dbg!(&db_num);
+                        let Some(db_num) = att.get_i32("NUMBDB") else{
+                            continue;
+                        };
+                        dbg!(&db_num);
                         if let Ok(Some(mut quick_info)) = self.query_quick_info_by_dbno(*db_refno, db_num, info_pool).await {
-                            // dbg!(&quick_info.db_type);
+                            dbg!(&quick_info.db_type);
                             quick_info.order_number = i as _;
                             map.entry(quick_info.db_type.clone())
                                 .or_insert_with(Vec::new).push(quick_info);

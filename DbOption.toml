@@ -5,7 +5,7 @@ sync_graph_db = true
 sync_tidb = false
 sync_localdb = false
 incr_sync = false
-replace_dbs = true
+replace_dbs = false
 
 #项目设置
 project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
@@ -55,7 +55,7 @@ server_release_ip = "127.0.0.1:9099"
 replace_mesh = true
 save_model_mesh_to_graph_db = true
 need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
-reset_mdb_project = false      #是否重新生成 mdb 缓存
+reset_mdb_project = true      #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
