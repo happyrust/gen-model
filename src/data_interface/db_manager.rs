@@ -87,7 +87,8 @@ impl AiosDBManager {
                             let mut add = false;
 
                             if let Some(owner_ele) = self.query_element(RefU64::from_url_refno(&k.owner).unwrap()).await? {
-                                if CATA_HAS_TUBI_GEO_NAMES.contains(&owner_ele.noun.as_str()) {
+                                if CATA_HAS_TUBI_GEO_NAMES.contains(&owner_ele.noun.as_str()) ||
+                                    CATA_HAS_TUBI_GEO_NAMES.contains(&k.noun.as_str()){
                                     add = geo_type == GeoEnum::CATA_BRAN_AND_HANGER_REUSE;
                                 } else if CATA_SINGLE_REUSE_GEO_NAMES.contains(&k.noun.as_str()) {
                                     add = geo_type == GeoEnum::CATA_SINGLE_REUSE;
