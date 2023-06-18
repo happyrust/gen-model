@@ -173,7 +173,6 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     for g in inst_tubi {
         inst_tubi_map.insert(g.refno, g);
     }
-    // dbg!(&inst_tubi_map);
 
     return Ok(ShapeInstancesData{
         inst_info_map,

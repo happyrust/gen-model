@@ -387,9 +387,9 @@ impl AiosDBManager {
         self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
         let database = self.get_arango_db().await?;
         if need_sync_refno_basic {
-            CACHED_REFNO_BASIC_MAP.save_to_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
+            CACHED_REFNO_BASIC_MAP.save_to_file(stringify!(CACHED_REFNO_BASIC_MAP)).expect("CACHED_REFNO_BASIC_MAP 保存文件失败。");
         } else {
-            CACHED_REFNO_BASIC_MAP.load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
+            CACHED_REFNO_BASIC_MAP.load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP)).expect("CACHED_REFNO_BASIC_MAP 文件不存在。");
         }
         // 将 mdb对应的 module 下的所有 numbdb保存下来
         let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
