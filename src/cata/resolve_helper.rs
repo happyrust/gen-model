@@ -504,9 +504,6 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             }
             "SCTO" | "NSCT" => {
                 // 弯管
-                if gmse.refno == RefU64::from_two_nums(13246, 198158) {
-                    dbg!(&gmse);
-                }
                 CateGeoParam::Torus(CateTorusParam {
                     refno: gmse.refno,
                     pa: (gmse.paxises[0].clone()),

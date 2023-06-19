@@ -95,9 +95,9 @@ impl AiosDBManager {
     pub async fn init_form_config() -> anyhow::Result<Self> {
         let db_option = Self::get_db_option()?;
         let mut mgr = Self::init(&db_option).await?;
-        dbg!("正在初始化uda");
+        println!("正在初始化uda");
         mgr.init_uda_map().await?;
-        dbg!("uda初始化完成");
+        println!("uda初始化完成");
         mgr.init_mdb(
             &db_option.project_name,
             &db_option.mdb_name,
@@ -232,7 +232,7 @@ impl AiosDBManager {
             let Ok(room_root_refno) = RefU64::from_refno_str(r) else {
                 continue;
             };
-            let panes = query_deep_children_refnos_fuzzy(&database, room_root_refno, &["PANE"]).await?;
+            let panes = query_deep_children_refnos_fuzzy(&database, &[room_root_refno], &["PANE"]).await?;
             // dbg!(&panes);
             println!("房间下的panel数量为: {}", panes.len());
             let inst_data = query_insts_shape_data(&database, &panes).await?;

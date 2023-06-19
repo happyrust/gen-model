@@ -819,7 +819,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///获得子节点集合的属性
     async fn get_travel_children_attrs(&self, refno: RefU64, nouns: &[&str]) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
-        let children = query_deep_children_refnos_fuzzy(&self.get_arango_db().await?, refno, nouns).await?;
+        let children = query_deep_children_refnos_fuzzy(&self.get_arango_db().await?, &[refno], nouns).await?;
         for child in children {
             let attr = self.get_attr_from_localdb(child).unwrap_or_default();
             r.push(attr);

@@ -23,6 +23,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{ArDatabase, connect_arangodb};
 use crate::graph_db::structs::*;
 use aios_core::helper::*;
+use crate::aql_api::children::{query_deep_children_refnos_fuzzy, query_travel_children_with_types_aql};
 use crate::consts::{AQL_PDMS_ELES_COLLECTION};
 
 ///保存instance 数据到数据库
@@ -160,7 +161,17 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
 
     let mut inst_tubi_map = HashMap::new();
     let mut all_refnos = inst_info_map.keys().map(|x| x.to_url_refno()).collect::<Vec<_>>();
-    all_refnos.extend_from_slice(&refno_strs);
+    //这里需要直接通过这个查询下面的所有的branch那些
+    let branch_refnos = query_deep_children_refnos_fuzzy(&database, refnos, &CATA_HAS_TUBI_GEO_NAMES).await?;
+    // dbg!(branch_refnos);
+    // let branch_refnos = query_travel_children_with_types_aql(
+    //     &database,
+    //     refnos,
+    //     &CATA_HAS_TUBI_GEO_NAMES,
+    //     false,
+    // )
+    //     .await?.into_iter().map(|x| x.refno.to_url_refno()).collect::<Vec<_>>();
+    all_refnos.extend(branch_refnos.iter().map(|x| x.to_url_refno()));
     let aql = AqlQuery::new(r#"
             FOR r in @refnos
                 let f = document('pdms_inst_tubis', r)
