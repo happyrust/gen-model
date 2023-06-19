@@ -392,7 +392,7 @@ pub async fn query_refnos_travel_children_with_type_aql(arango_database: &ArData
     FOR z in 0..100 INBOUND refno pdms_edges
         filter POSITION(@noun,z.noun)
         return {
-            'refno':z._key,
+            '_key':z._key,
             'owner':z.owner,
             'name':z.name,
             'noun':z.noun,
@@ -401,8 +401,7 @@ pub async fn query_refnos_travel_children_with_type_aql(arango_database: &ArData
         })
     return UNIQUE(eles)")
         .bind_var("id", refno_aql)
-        .bind_var("noun", att_type)
-        ;
+        .bind_var("noun", att_type);
     let result: Vec<Vec<PdmsElement>> = arango_database.aql_query(aql).await?;
     let result = result.into_iter().flatten().collect::<Vec<_>>();
     for v in result {
