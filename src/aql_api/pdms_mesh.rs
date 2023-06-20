@@ -177,8 +177,7 @@ pub async fn query_pdms_mesh_aql(database: &ArDatabase, hashes: &[u64]) -> anyho
 
 pub async fn query_refno_transform(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Transform>> {
     let aql = AqlQuery::new("return document('pdms_inst_infos',@key).world_transform")
-        .bind_var("key", refno.to_url_refno())
-        ;
+        .bind_var("key", refno.to_url_refno());
     let result: Vec<(Quat, Vec3, Vec3)> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }
     let result = result.first().unwrap();

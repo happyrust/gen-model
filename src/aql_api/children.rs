@@ -2,9 +2,11 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{CataHashRefnoKV, EleTreeNode, GENRAL_NEG_NOUN_NAMES, PdmsElement, RefU64, RefU64Vec};
+use aios_core::pdms_user::{PdmsElementWithMajor, RefnoMajor};
 use aios_core::three_dimensional_review::{VagueSearchCondition, VagueSearchRequest};
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use bitvec::ptr::replace;
+use itertools::Itertools;
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool};
 use crate::api::attr::query_attr;
@@ -29,7 +31,6 @@ pub async fn query_children_eles(arango_db: &ArDatabase, refno: RefU64) -> anyho
     let results: Vec<PdmsElement> = arango_db.aql_query(aql).await.unwrap();
     Ok(results)
 }
-
 
 
 pub async fn query_children_order_aql(adb: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
@@ -176,8 +177,7 @@ pub async fn query_ancestor_till_types_aql(arango_database: &ArDatabase, refno: 
             'children_count':0 ),
         }")
         .bind_var("id", refno_aql)
-        .bind_var("nouns", att_types)
-        ;
+        .bind_var("nouns", att_types);
     let result = arango_database.aql_query::<PdmsElement>(aql).await?;
     if result.is_empty() { return Ok(None); }
     Ok(Some(result[0].clone()))
@@ -235,7 +235,7 @@ pub async fn query_travel_children_aql(arango_database: &ArDatabase, refno: RefU
     FOR z in 1..2 INBOUND @id pdms_edges
     filter z._key != null
     return {
-        'refno':z._key,
+        '_key':z._key,
         'owner':z.owner,
         'name':z.name,
         'noun':z.noun,
@@ -288,7 +288,6 @@ FOR v,e,p in 0..10 INBOUND @id pdms_edges
             .bind_var("skip_exist", skip_exist)
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
-
     } else {
         AqlQuery::new("\
 FOR v,e,p in 0..10 INBOUND @id pdms_edges
@@ -306,7 +305,6 @@ FOR v,e,p in 0..10 INBOUND @id pdms_edges
             .bind_var("skip_exist", skip_exist)
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
-
     };
     // dbg!(&aql);
     let r: Vec<CataHashRefnoKV> = arango_database.aql_query(aql).await?;
@@ -325,7 +323,6 @@ pub async fn query_travel_children_with_types_aql(arango_database: &ArDatabase, 
     return v")
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
-
     } else {
         AqlQuery::new("\
     FOR v in 0..10 INBOUND @id pdms_edges
@@ -333,7 +330,6 @@ pub async fn query_travel_children_with_types_aql(arango_database: &ArDatabase, 
     return v")
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
-
     };
     // dbg!(&aql);
     let result: Vec<PdmsElement> = arango_database.aql_query(aql).await?;
@@ -361,7 +357,7 @@ pub async fn query_travel_children_with_type_aql(arango_database: &ArDatabase, r
     FOR z in 0..10 INBOUND @id pdms_edges
     Filter z.noun == @noun
     return {
-        'refno':z._key,
+        '_key':z._key,
         'owner':z.owner,
         'name':z.name,
         'noun':z.noun,
@@ -484,7 +480,6 @@ pub async fn query_pre_or_next_node(refno: RefU64, b_pre: bool, database: &ArDat
         for v in 1 inbound @key sibl_edges
             return v._key
     ").bind_var("key", refno_url)
-
     };
     let aql_result = database.aql_query::<String>(aql).await;
     // 如果为该层第一个或者最后一个 则返回 None
@@ -508,7 +503,7 @@ pub async fn query_travel_children_filter_negative_sibl_nodes(refno: RefU64, dat
         let sibls = ( for negative in negatives
                 for v in 0..1000 ANY negative sibl_edges
                 return {
-                    'refno':v._key,
+                    '_key':v._key,
                     'owner':v.owner,
                     'name':v.name,
                     'noun':v.noun,
@@ -591,6 +586,52 @@ pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, databa
         }
     }
     Ok(r)
+}
+
+/// 查询节点属于哪个专业和专业下的具体分类
+pub async fn query_refnos_belong_major(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<RefnoMajor>> {
+    let ids = refnos.into_iter()
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
+    let aql = AqlQuery::new("
+    for id in @ids
+    for v,e,p in 0..10 outbound id pdms_edges
+    filter v != null
+    filter v.major != null
+    return {
+        'refno':p.vertices[0]._key,
+        'owner':v.owner,
+        'name':v.name,
+        'noun':v.noun,
+        'major':v.major,
+    }").bind_var("ids", ids);
+    let result = database.aql_query::<PdmsElementWithMajor>(aql).await?;
+    let mut majors = HashMap::new();
+    // 查询到该参考号分别在zone和site下属于哪个专业，并将这两个专业代码合并到一个结构体下
+    for r in result {
+        if majors.contains_key(&r.refno) {
+            let mut major: &mut RefnoMajor = majors.get_mut(&r.refno).unwrap();
+            if &r.noun == "SITE" {
+                major.major = r.major;
+            } else {
+                major.major_classify = r.major;
+            }
+        } else {
+            if &r.noun == "SITE" {
+                majors.entry(r.refno).or_insert(RefnoMajor {
+                    refno: r.refno.to_refno_str(),
+                    major: r.major,
+                    major_classify: "".to_string(),
+                });
+            } else {
+                majors.entry(r.refno).or_insert(RefnoMajor {
+                    refno: r.refno.to_refno_str(),
+                    major: "".to_string(),
+                    major_classify: r.major,
+                });
+            }
+        }
+    }
+    Ok(majors.into_iter().map(|major| major.1).collect::<Vec<_>>())
 }
 
 #[tokio::test]
