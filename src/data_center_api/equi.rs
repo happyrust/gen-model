@@ -17,7 +17,7 @@ use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 /// 获得工艺设备的数据
 pub async fn get_gy_equi_data(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(database, &refnos, vec!["EQUI"]).await {
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(database, &refnos, vec!["EQUI".to_string()]).await {
         for child in children {
             let mut attr = Vec::new();
             if !split_equi_name(&child.name, &mut attr) { continue; }
@@ -53,7 +53,7 @@ pub async fn get_gy_equi_data(refnos: Vec<RefU64>, database: &ArDatabase) -> any
 pub async fn get_sg_fire_hydrant_equi_data(refnos: Vec<RefU64>, aios_mgr:&AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["EQUI"]).await {
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["EQUI".to_string()]).await {
         for child in children {
             if !child.name.ends_with("RJ") { continue; };
             let name = if child.name.starts_with("/") { child.name[1..].to_string() } else { child.name };
@@ -90,7 +90,7 @@ pub async fn get_sg_fire_hydrant_equi_data(refnos: Vec<RefU64>, aios_mgr:&AiosDB
 pub async fn get_dq_cross_element_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["EQUI"]).await {
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["EQUI".to_string()]).await {
         for child in children {
             if !child.name.contains("ZZZ") && child.name.len() < 4 { continue; };
             let mut attr = Vec::new();
@@ -154,7 +154,7 @@ async fn get_site_name_first_char(refno: RefU64, database: &ArDatabase) -> anyho
 /// 获取电气设备信息
 pub async fn get_dq_equi_data(refnos: Vec<RefU64>, database: &ArDatabase, project_code: &str) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(database, &refnos, vec!["EQUI"]).await {
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(database, &refnos, vec!["EQUI".to_string()]).await {
         for child in children {
             let mut attr = Vec::new();
             if !split_equi_name(&child.name, &mut attr) { continue; }

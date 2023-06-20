@@ -17,7 +17,8 @@ use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 pub async fn get_valv_data(refnos: Vec<RefU64>, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<DataCenterProject> {
     let mut instance = Vec::new();
-    if let Ok(valves) = query_refnos_travel_children_with_type_aql(database, &refnos, vec!["VALV"]).await {
+    if let Ok(valves) = query_refnos_travel_children_with_type_aql(database,
+                                                                   &refnos, vec!["VALV".to_string()]).await {
         for valv in valves {
             let room_name = query_room_code(valv.refno, pool).await?.unwrap_or("".to_string());
             instance.push(DataCenterInstance {
@@ -44,7 +45,8 @@ pub async fn get_valv_data(refnos: Vec<RefU64>, database: &ArDatabase, pool: &Po
 pub async fn get_tf_fireproof_valv_data(refnos: Vec<RefU64>, aios_mgr:&AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut instance = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
-    if let Ok(valves) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["DAMP"]).await {
+    if let Ok(valves) = query_refnos_travel_children_with_type_aql(&database, &refnos,
+                                                                   vec!["DAMP".to_string()]).await {
         for valv in valves {
             let name = if valv.name.starts_with("/") { valv.name[1..].to_string() } else { valv.name };
             if name.len() < 10 { continue; }

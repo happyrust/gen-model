@@ -8,12 +8,12 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 获取电气支吊架 型钢数据
-pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
+pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager,sctn_types:Vec<String>) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
     // 1516为 sctn 1907为 gensec,sctn
-    let mut select_type = if aios_mgr.db_option.project_code == "1516" { vec!["SCTN"] } else { vec!["GENSEC","SCTN"] };
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, select_type).await {
+    // let mut select_type = if aios_mgr.db_option.project_code == "1516" { vec!["SCTN"] } else { vec!["GENSEC","SCTN"] };
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, sctn_types).await {
         for child in children {
             let Ok(implicit_attr) = aios_mgr.get_implicit_attr(child.refno, Some(vec!["GTYP"])).await else { continue; };
             let Some(gtype) = implicit_attr.get_str("GTYP") else { continue; };
