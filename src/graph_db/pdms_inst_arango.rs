@@ -112,7 +112,7 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
 
 ///获取element inst的几何数据
 pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) -> anyhow::Result<ShapeInstancesData> {
-    let refnos = refnos.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
+    let refno_strs = refnos.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
     // dbg!(&refnos);
     //过滤掉负实体计算后的多余几何体
     let aql = AqlQuery::new(r#"
@@ -125,12 +125,12 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
                     filter f != null and (parent == null or document('pdms_inst_infos', parent._key).geo_type != "Compound")
                     return f
             "#)
-        .bind_var("refnos", refnos)
+        .bind_var("refnos", refno_strs.clone())
         .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
 
         ;
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
-    if geos_info.is_empty() { return Ok(ShapeInstancesData::default()); }
+    // if geos_info.is_empty() { return Ok(ShapeInstancesData::default()); }
     let mut inst_info_map = HashMap::new();
     let mut inst_keys = geos_info.iter().map(|x| x.get_inst_key().to_string()).collect::<Vec<_>>();
     for g in geos_info {
@@ -159,7 +159,8 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     }
 
     let mut inst_tubi_map = HashMap::new();
-    let all_refnos = inst_info_map.keys().map(|x| x.to_url_refno()).collect::<Vec<_>>();
+    let mut all_refnos = inst_info_map.keys().map(|x| x.to_url_refno()).collect::<Vec<_>>();
+    all_refnos.extend_from_slice(&refno_strs);
     let aql = AqlQuery::new(r#"
             FOR r in @refnos
                 let f = document('pdms_inst_tubis', r)
@@ -172,7 +173,7 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     for g in inst_tubi {
         inst_tubi_map.insert(g.refno, g);
     }
-    // dbg!(inst_tubi_map.len());
+    // dbg!(&inst_tubi_map);
 
     return Ok(ShapeInstancesData{
         inst_info_map,

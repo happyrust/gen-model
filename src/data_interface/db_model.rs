@@ -414,7 +414,6 @@ impl AiosDBManager {
         for r in results {
             self.cache_module_numbdbs.insert(r);
         }
-        dbg!(&self.cache_module_numbdbs);
         Ok(())
     }
 

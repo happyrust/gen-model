@@ -176,9 +176,11 @@ puhua_database_password = ""
 
 #debug_root_refnos = ["17496/106407"]
 #debug_root_refnos = ["24381/148471"]
-debug_root_refnos = ["25688/4160"]
+#debug_root_refnos = ["25688/4160"]
 #debug_root_refnos = ["25688/4361"]
 #debug_root_refnos = ["24381/159290"]
+
+
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]
