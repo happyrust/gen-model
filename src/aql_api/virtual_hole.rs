@@ -1,18 +1,32 @@
 use aios_core::pdms_types::RefU64;
-use aios_core::virtual_hole::{CircleHoleSize, HoleBlockageMethod, HoleSize, RectHoleSize};
+use aios_core::virtual_hole::{CircleHoleSize, HoleBlockageMethod, HoleSize, PluggingHoleData, RectHoleSize};
 use crate::api::attr::{query_explicit_attr, query_refno_uda_value};
+use crate::api::element::query_name;
 use crate::api::ssc_data::get_ancestor_till_type;
 use crate::aql_api::children::{query_ancestor_till_types_aql, query_children_order_aql};
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::data_center_api::data_api::get_refno_desp;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
+pub async fn get_plugging_hole_data(refnos: Vec<RefU64>,aios_mgr:&AiosDBManager) -> anyhow::Result<Vec<PluggingHoleData>> {
+    let mut data = Vec::new();
+    for refno in refnos {
+        let Some((_,pool)) = aios_mgr.get_project_pool_by_refno(refno).await else { continue };
+        let hole_name = query_name(refno,&pool).await else { continue };
+        let Some(hole_size) = get_virtual_hole_size(refno,aios_mgr).await? else { continue };
+        let Some(hole_volume) = get_virtual_hole_volume(refno,&hole_size,aios_mgr).await? else { continue };
+        let Some(hole_)
+    }
+    Ok(data)
+}
+
 /// 计算fitt这种元件库为负实体的孔洞的尺寸
+///
 /// refno ： fitt等的参考号
 pub async fn get_virtual_hole_size(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<HoleSize>> {
     let database = aios_mgr.get_arango_db().await?;
     // 找到catr中的ngmr
-    let ngmr_refno = query_foreign_refno_aql( &database,refno, &vec!["SPRE", "NGMR"]).await?;
+    let ngmr_refno = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "NGMR"]).await?;
     if ngmr_refno.is_none() { return Ok(None); };
     // 找到ngmr下的所有负实体，只需要第一个，孔洞默认只有方形和圆形两种，代表只能有一个负实体
     let ngmr_children = query_children_order_aql(&database, ngmr_refno.unwrap()).await?;
@@ -44,14 +58,18 @@ pub async fn get_virtual_hole_size(refno: RefU64, aios_mgr: &AiosDBManager) -> a
 }
 
 /// 计算fitt这种元件库为负实体的孔洞的体积
+///
 /// refno ： fitt等的参考号
+///
 /// hole_size: get_virtual_hole_size() 通过desp获取对应形状孔洞的尺寸
+///
 /// 该方法只需要计算所依赖的墙或者板的宽度即可
 pub async fn get_virtual_hole_volume(refno: RefU64, hole_site: &HoleSize, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<f32>> {
     Ok(None)
 }
 
 /// 根据封堵方式和水淹高度获取封堵材料
+///
 /// flooded_height:水淹高度，通过水淹高度插件计算
 pub async fn get_hole_blockage_method(refno: RefU64, flooded_height: f32, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<HoleBlockageMethod>> {
     let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(refno).await else { return Ok(None); };
@@ -97,7 +115,15 @@ pub async fn get_hole_blockage_method(refno: RefU64, flooded_height: f32, aios_m
 }
 
 /// 返回墙的厚度
+///
 /// 部分孔洞高度需要依赖墙的厚度
 pub async fn get_wall_thickness(wall_refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<f32> {
     Ok(0.0)
+}
+
+/// 返回孔洞中电缆的占用面积
+///
+/// 从图为节点获取，目前不知道接口是什么
+pub async fn get_cable_area(refno: RefU64) -> anyhow::Result<Option<f32>> {
+    Ok(Some(0.0))
 }
