@@ -83,6 +83,7 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
     for chunk in &inst_mgr.inst_info_map.iter().chunks(1000) {
         for k in chunk {
             let json = serde_json::to_value(k.1).unwrap();
+            // dbg!(&json);
             instances.push(json);
             let edge = PdmsInstanceGraphEdge {
                 _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.0.to_refno_normal_string()),
@@ -141,16 +142,13 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     inst_keys.push("2".to_string());
     // dbg!(&inst_keys);
     let mut inst_geos_map = HashMap::new();
-    // let mut geo_hashes = BTreeSet::new();
     let aql = AqlQuery::new(r#"
             FOR inst_key in @inst_keys
                 let f = document('pdms_inst_geos', inst_key)
                 filter f != null
                 return f
             "#)
-        .bind_var("inst_keys", inst_keys)
-
-        ;
+        .bind_var("inst_keys", inst_keys);
     let inst_geos: Vec<EleInstGeosData> = database.aql_query(aql).await.unwrap();
     // dbg!(inst_geos.len());
     for g in inst_geos {

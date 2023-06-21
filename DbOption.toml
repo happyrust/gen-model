@@ -5,7 +5,7 @@ sync_graph_db = true
 sync_tidb = false
 sync_localdb = true
 incr_sync = false
-replace_dbs = false
+replace_dbs = true
 
 #项目设置
 project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
@@ -60,8 +60,8 @@ only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
-included_db_files = ["ams7997_0001"]
-#included_db_files = ["ams7351_0001"]
+#included_db_files = ["ams7997_0001"]
+included_db_files = ["ams1112_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 manual_db_nums = [1112]  #, 8000
 plat_url = ""
@@ -187,18 +187,25 @@ puhua_database_password = ""
 #DISH  显示有问题
 #debug_root_refnos = ["17496/170884"]
 
-#debug_root_refnos = ["24381/44372"]
-#debug_root_refnos = ["17496/79566"]
+#debug_root_refnos = ["24381/42520"]
+#debug_root_refnos = ["24381/44462"]
+debug_root_refnos = ["17496/169987"]
 
 #负实体的计算问题
 #debug_root_refnos = ["17496/169986"]
 #debug_root_refnos = ["9304/2"]
 #debug_root_refnos = ["17496/98576"]
 
-#重点测试
-debug_root_refnos = ["17496/99813"]
+#重点测试负实体
+#debug_root_refnos = ["17496/99813"]
+#debug_root_refnos = ["17496/170391"]
 
 #debug_root_refnos = ["17496/79888"]
+
+#重点测试管道
+#debug_root_refnos = ["17496/169983"]
+#debug_root_refnos = ["17496/171009"]
+#debug_root_refnos = ["17496/170902"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]

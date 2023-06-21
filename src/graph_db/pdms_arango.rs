@@ -106,7 +106,7 @@ pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: 
             noun: noun.to_string(),
             version: 0,
             dbnum,
-            cata_hash: whole_attr.merge_implicit_explicit_into_attr().cal_cata_hash(),
+            cata_hash: whole_attr.merge_implicit_explicit_into_attr().cal_cata_hash().map(|x| x.to_string()),
         };
         let key = refno.hash_with_another_refno(owner);
         let pdms_edges = PdmsEleGraphEdgeWithKey {

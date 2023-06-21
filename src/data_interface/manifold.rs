@@ -83,6 +83,43 @@ impl ManifoldRust {
         }
     }
 
+    pub(crate) fn direct_to_plant_mesh(&self) -> PlantMesh {
+        unsafe {
+            let mesh = ManifoldMeshRust::new();
+            manifold_get_meshgl(mesh.ptr as _, self.ptr);
+            let len = manifold_meshgl_tri_length(mesh.ptr as _);
+            if len == 0 {
+                return PlantMesh::default();
+            }
+            let prop_num = manifold_meshgl_num_prop(mesh.ptr) as usize;
+            // dbg!(prop_num);
+            let vert_num = manifold_meshgl_num_vert(mesh.ptr) as usize;
+            // dbg!(vert_num);
+            let tri_num = manifold_meshgl_num_tri(mesh.ptr) as usize;
+            // dbg!(tri_num);
+
+            let mut p: Vec<f32> = Vec::with_capacity(vert_num * prop_num);
+            p.resize(vert_num * prop_num, 0.0);
+            let mut indices: Vec<u32> = Vec::with_capacity(tri_num * 3);
+            indices.resize(tri_num * 3, 0);
+
+            let mut vertices = Vec::with_capacity(vert_num);
+            manifold_meshgl_vert_properties(p.as_mut_ptr() as _, mesh.ptr);
+            manifold_meshgl_tri_verts(indices.as_mut_ptr() as _, mesh.ptr);
+
+            for i in 0..vert_num {
+                vertices.push(Vec3::new(p[prop_num * i + 0], p[prop_num * i + 1], p[prop_num * i + 2]));
+            }
+
+
+            PlantMesh {
+                indices,
+                vertices,
+                normals: vec![],
+                wire_vertices: vec![],
+            }
+        }
+    }
 
 
     pub fn destroy(&self) {
@@ -141,14 +178,14 @@ impl From<ManifoldRust> for PlantMesh {
             if len == 0 {
                 return Self::default();
             }
-            dbg!(len);
+            // dbg!(len);
 
             let prop_num = manifold_meshgl_num_prop(mesh.ptr) as usize;
-            dbg!(prop_num);
+            // dbg!(prop_num);
             let vert_num = manifold_meshgl_num_vert(mesh.ptr) as usize;
-            dbg!(vert_num);
+            // dbg!(vert_num);
             let tri_num = manifold_meshgl_num_tri(mesh.ptr) as usize;
-            dbg!(tri_num);
+            // dbg!(tri_num);
 
             let mut p: Vec<f32> = Vec::with_capacity(vert_num * prop_num);
             p.resize(vert_num * prop_num, 0.0);
@@ -173,7 +210,7 @@ impl From<ManifoldRust> for PlantMesh {
                 let b: Vec3 = Vec3::from(vert[c[1] as usize].clone());
                 let c: Vec3 = Vec3::from(vert[c[2] as usize].clone());
 
-                let normal: [f32; 3] = ((b - a).cross(c - a)).into();
+                let normal = ((b - a).cross(c - a)).normalize();
 
                 vertices.push(a.into());
                 vertices.push(b.into());
@@ -188,9 +225,6 @@ impl From<ManifoldRust> for PlantMesh {
                 indices.push(i* 3 + 2);
             }
 
-
-
-
             Self {
                 indices,
                 vertices,
@@ -199,4 +233,5 @@ impl From<ManifoldRust> for PlantMesh {
             }
         }
     }
+
 }

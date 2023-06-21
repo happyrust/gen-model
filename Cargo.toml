@@ -67,6 +67,7 @@ rayon = "1.7.0"
 redb = "0.22.0"
 #geo = "0.24.1"
 
+mcut-sys = { path = "../crates/mcut-sys"}
 manifold-sys = { path = "../crates/manifold-sys"}
 
 
