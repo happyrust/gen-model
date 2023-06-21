@@ -278,7 +278,7 @@ FOR v,e,p in 0..10 INBOUND @id pdms_edges
     filter parent.noun in @nouns
     let s = document(pdms_inst_geos, to_string(v.cata_hash))
     filter !@skip_exist or s == null
-    COLLECT exist = s, cata_group=v.cata_hash into g
+    COLLECT exist = s, cata_group=to_string(v.cata_hash) into g
     return {
         cata_hash: cata_group,
         exist_geo: exist,
@@ -295,7 +295,7 @@ FOR v,e,p in 0..10 INBOUND @id pdms_edges
     filter v.cata_hash != null
     let s = document(pdms_inst_geos, to_string(v.cata_hash))
     filter !@skip_exist or s == null
-    COLLECT exist = s, cata_group=v.cata_hash into g
+    COLLECT exist = s, cata_group=to_string(v.cata_hash) into g
     return {
         cata_hash: cata_group,
         exist_geo: exist,

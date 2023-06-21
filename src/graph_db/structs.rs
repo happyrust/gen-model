@@ -1,7 +1,10 @@
 use aios_core::pdms_types::RefU64;
 use serde::{Serialize, Deserialize};
+use serde_with::serde_as;
+use serde_with::DisplayFromStr;
 
 ///图数据库里存储的索引值
+#[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct PdmsEleGraphNode {
     pub _key: String,
@@ -10,7 +13,8 @@ pub struct PdmsEleGraphNode {
     pub noun: String,
     pub version: u32,
     pub dbnum: i32,
-    pub cata_hash: Option<u64>,
+    #[serde(default)]
+    pub cata_hash: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
