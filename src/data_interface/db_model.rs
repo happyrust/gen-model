@@ -72,6 +72,10 @@ static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> 
     m.insert("ROOM", PdmsGenericType::ROOM);
     m.insert("STRU", PdmsGenericType::STRU);
     m.insert("PANE", PdmsGenericType::PANE);
+    m.insert("WALL", PdmsGenericType::WALL);
+    m.insert("GWALL", PdmsGenericType::WALL);
+    m.insert("CWALL", PdmsGenericType::WALL);
+    m.insert("STWALL", PdmsGenericType::WALL);
     m.insert("CFLOOR", PdmsGenericType::CFLOOR);
     m.insert("FLOOR", PdmsGenericType::FLOOR);
     m.insert("EXTR", PdmsGenericType::EXTR);
@@ -79,16 +83,6 @@ static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> 
     m
 });
 
-static GENRIC_NOUN_NAMES: Lazy<Vec<SmolStr>> = Lazy::new(|| {
-    vec![
-        "EQUI".into(),
-        "PIPE".into(),
-        "STRU".into(),
-        "ROOM".into(),
-        "STWALL".into(),
-        "FLOOR".into(),
-    ]
-});
 
 impl AiosDBManager {
     /// 从默认配置文件初始化

@@ -128,10 +128,8 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
             "#)
         .bind_var("refnos", refno_strs.clone())
         .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
-
         ;
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
-    // if geos_info.is_empty() { return Ok(ShapeInstancesData::default()); }
     let mut inst_info_map = HashMap::new();
     let mut inst_keys = geos_info.iter().map(|x| x.get_inst_key().to_string()).collect::<Vec<_>>();
     for g in geos_info {
@@ -163,14 +161,6 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     let mut all_refnos = inst_info_map.keys().map(|x| x.to_url_refno()).collect::<Vec<_>>();
     //这里需要直接通过这个查询下面的所有的branch那些
     let branch_refnos = query_deep_children_refnos_fuzzy(&database, refnos, &CATA_HAS_TUBI_GEO_NAMES).await?;
-    // dbg!(branch_refnos);
-    // let branch_refnos = query_travel_children_with_types_aql(
-    //     &database,
-    //     refnos,
-    //     &CATA_HAS_TUBI_GEO_NAMES,
-    //     false,
-    // )
-    //     .await?.into_iter().map(|x| x.refno.to_url_refno()).collect::<Vec<_>>();
     all_refnos.extend(branch_refnos.iter().map(|x| x.to_url_refno()));
     let aql = AqlQuery::new(r#"
             FOR r in @refnos

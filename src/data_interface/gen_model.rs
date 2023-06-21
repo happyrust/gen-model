@@ -26,6 +26,7 @@ use bevy::prelude::Transform;
 use dashmap::{DashMap, DashSet};
 use futures::future::ok;
 use glam::{Mat3, Vec3};
+use manifold_sys::bindings::ManifoldOpType_MANIFOLD_ADD;
 use nalgebra::Point3;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Vector};
@@ -45,6 +46,7 @@ use crate::data_interface::db_manager::GeoEnum;
 use crate::graph_db::pdms_inst_arango::save_instance_to_graph_db;
 use crate::graph_db::pdms_mesh_arango::{save_mesh_to_arango_db, save_mesh_to_local_db};
 use rayon::iter::ParallelIterator;
+use crate::data_interface::manifold::ManifoldRust;
 
 /// 生成基本体的几何数据
 pub async fn gen_prim_geos(
@@ -388,20 +390,38 @@ pub async fn gen_loop_geos(
                     transform: tr,
                     visible,
                     is_tubi: false,
-                    geo_param,
+                    geo_param: geo_param.clone(),
                     geo_type: if parent_att.is_neg() { GeoBasicType::Neg } else { GeoBasicType::Pos },
                 };
                 geos_info.aabb = Some(aabb_apply_transform(&ele_aabb, &trans_origin));
-                shape_insts_data.insert_info(parent_refno, geos_info);
+                shape_insts_data.insert_info(parent_refno, geos_info.clone());
                 shape_insts_data.insert_geos_data(*parent_refno, EleInstGeosData {
                     inst_key: *parent_refno,
                     refno: parent_refno,
+                    insts: vec![geom_inst.clone()],
+                    aabb: Some(ele_aabb),
+                    type_name: parent_att.get_type().to_string(),
+                    ptset_map: Default::default(),
+                    reuse_unit: false,
+                });
+
+                //说明 loops是可以服用模型的
+                let mut loop_geos_info = &mut geos_info;
+                loop_geos_info.cata_hash = Some(geo_hash);
+                loop_geos_info.refno = loop_refno;
+
+                dbg!(loop_refno);
+                shape_insts_data.insert_info(loop_refno, geos_info);
+                shape_insts_data.insert_geos_data(geo_hash, EleInstGeosData {
+                    inst_key: geo_hash,
+                    refno: loop_refno,
                     insts: vec![geom_inst],
                     aabb: Some(ele_aabb),
                     type_name: parent_att.get_type().to_string(),
                     ptset_map: Default::default(),
                     reuse_unit: false,
                 });
+
             }
         });
         handles.push(handle);
@@ -1123,8 +1143,6 @@ pub async fn gen_geos_data(
     // let s_refno = RefU64::from_two_nums(17496, 143555);
     // let att = mgr.get_attr_from_localdb(s_refno);
     // dbg!(att);
-    // let plin_param = mgr.query_pline(s_refno, "OBOW").await?;
-    // dbg!(plin_param);
     // let transform = mgr.get_world_transform(s_refno).await?.unwrap();
     // dbg!(transform);
 
@@ -1414,18 +1432,28 @@ pub async fn gen_geos_data(
                         let trans = mgr.get_world_transform(comp_refno).await.unwrap_or_default().unwrap_or_default();
                         trans_map.insert(comp_refno, trans);
                     }
-                    has_pos_neg_map.into_par_iter().for_each(|(comp_refno, (mut pos_refnos, neg_refnos))| {
+                    //has_pos_neg_map.into_par_iter()
+                    has_pos_neg_map.into_iter().for_each(|(comp_refno, (mut pos_refnos, origin_neg_refnos))| {
                         println!("正在处理: {} 下的负实体", comp_refno);
-                        let inst_data_clone = inst_data.clone();
+
+                        let Ok(children_refnos) = mgr.get_children_from_localdb(comp_refno) else{
+                            return;
+                        };
+                        let mut neg_refnos = vec![];
+                        children_refnos.iter().for_each(|x|{
+                            for c in &origin_neg_refnos {
+                                if c == x {
+                                    neg_refnos.push(*c);
+                                }
+                            }
+                        });
+
                         let mut mesh_mgr_clone = mesh_mgr.clone();
-                        let trans_map_clone = trans_map.clone();
                         let mut mesh_result_map_clone = mesh_result_map.clone();
                         let mut inst_info_result_map_clone = inst_info_result_map.clone();
                         let mut inst_geos_result_map_clone = inst_geos_result_map.clone();
 
-                        let mut pos_meshes = vec![];
-                        let mut neg_meshes = vec![];
-                        // let mut w_aabb: Option<Aabb> = None;
+                        let mut batch_meshes = vec![];
                         //没有正实体的情况，直接跳过
                         if neg_refnos.is_empty() { return; }
                         pos_refnos.push(comp_refno);
@@ -1433,7 +1461,8 @@ pub async fn gen_geos_data(
                             return;
                         };
                         // dbg!(w_trans);
-                        let mut total_refnos = pos_refnos.clone();
+                        // let mut total_refnos = pos_refnos.clone();
+                        let mut total_refnos = vec![comp_refno];
                         total_refnos.extend_from_slice(&neg_refnos);
                         let inverse_mat = w_trans.compute_matrix().inverse();
 
@@ -1446,50 +1475,70 @@ pub async fn gen_geos_data(
                             let Some(geos_info) = inst_data.get_info(&t_refno) else {
                                 continue;
                             };
-                            // dbg!(geos_info);
-                            // if let Some(mut w_aabb) = w_aabb {
-                            //     w_aabb.merge(&geos_info.aabb.unwrap());
-                            // } else {
-                            //     w_aabb = geos_info.aabb;
-                            // }
-                            // dbg!(t_refno);
                             let Some(inst_geos) = inst_data.get_inst_geos_data(geos_info) else {
                                 continue;
                             };
-                            // dbg!(t_refno);
                             for geo_inst in &inst_geos.insts {
                                 let geo_refno = geo_inst.refno;
-                                // dbg!(geo_refno);
                                 let Some(mesh) = mesh_mgr_clone.get_mesh(geo_inst.geo_hash) else {
                                     continue;
                                 };
                                 let geo_mat = geos_info.world_transform;
                                 let ele_mat = inverse_mat * geo_mat.compute_matrix();
                                 let local_mat = ele_mat * geo_inst.transform.compute_matrix();
-                                let csg_mesh = mesh.into_csg_mesh(&local_mat);
-                                if pos_refnos.contains(&t_refno) {
-                                    pos_meshes.push(csg_mesh)
-                                } else {
-                                    neg_meshes.push(csg_mesh);
-                                    neg_refnos.push(t_refno);
+
+                                //如果是第一个正实体，需要生成模型计算
+                                //如果是负实体，需要生成模型计算
+                                if t_refno == comp_refno || !pos_refnos.contains(&t_refno) {
+                                    if !pos_refnos.contains(&t_refno) {
+                                        neg_refnos.push(t_refno);
+                                    }
+                                    let manifold: ManifoldRust = (mesh, &local_mat).into();
+                                    // dbg!(manifold.manifold_num_tri());
+                                    batch_meshes.push(manifold);
                                 }
                             }
+                            if batch_meshes.len() >= 15 {
+                                break;
+                            }
                         }
+                        // dbg!(&neg_refnos);
                         let geo_hash = *comp_refno;
-                        if pos_meshes.is_empty() { return; }
-                        let mut final_mesh = pos_meshes.pop().unwrap();
+                        // if pos_meshes.is_empty() { return; }
+                        // let mut final_mesh = pos_meshes.pop().unwrap();
                         // for pos_mesh in pos_meshes {
                         //     final_mesh = final_mesh + pos_mesh;
                         // }
-                        for (i, neg_mesh) in neg_meshes.into_iter().enumerate() {
-                            // let tmp_mesh = final_mesh.clone() - neg_mesh;
-                            // if tmp_mesh.triangles.is_empty() {
-                            //     println!("需要执行的负实体: {} 建模有问题", neg_refnos[i]);
-                            //     break;
-                            // }
-                            final_mesh = final_mesh - neg_mesh;
+                        // dbg!(neg_meshes.len());
+                        // for (i, neg_mesh) in neg_meshes.into_iter().enumerate() {
+                        //     // let tmp_mesh = final_mesh.clone() - neg_mesh;
+                        //     // if tmp_mesh.triangles.is_empty() {
+                        //     //     println!("需要执行的负实体: {} 建模有问题", neg_refnos[i]);
+                        //     //     break;
+                        //     // }
+                        //     if i==7 {
+                        //         break;
+                        //     }
+                        //     dbg!(neg_refnos[i]);
+                        //     final_mesh = final_mesh - neg_mesh;
+                        // }
+
+                        let final_manifold = ManifoldRust::batch_boolean_subtract(&batch_meshes);
+                        // let final_manifold = ManifoldRust::batch_boolean(&batch_meshes[3..], ManifoldOpType_MANIFOLD_ADD);
+                        dbg!(final_manifold.manifold_num_tri());
+                        dbg!(final_manifold.manifold_get_properties());
+                        let mut plant_geo_data = PlantGeoData{
+                            geo_hash,
+                            mesh: Some(final_manifold.clone().into()),
+                            aabb: origin_comp_geos_info.aabb.clone(),
+                        };
+
+                        //销毁中间数据
+                        final_manifold.destroy();
+                        for m in batch_meshes {
+                            m.destroy();
                         }
-                        let mut plant_geo_data = PlantGeoData::from(final_mesh);
+
                         plant_geo_data.geo_hash = geo_hash;
                         mesh_result_map_clone.insert(geo_hash, plant_geo_data);
                         let geom_inst = EleInstGeo {
@@ -1691,6 +1740,12 @@ async fn process_csg_boolean_operations(has_geom_refno: RefU64, mgr: Arc<AiosDBM
 
     return Ok(true);
 }
+
+
+
+// pub fn convert_to_manifold(m: &csg::Mesh) -> {
+//
+// }
 
 async fn process_occ_boolean_operations(has_geom_refno: RefU64, mgr: Arc<AiosDBManager>, instance_mgr: Arc<RwLock<ShapeInstancesData>>) -> anyhow::Result<bool> {
     // let pos_neg_map = mgr.query_refnos_has_pos_neg_map(has_geom_refno).await.unwrap_or_default();
