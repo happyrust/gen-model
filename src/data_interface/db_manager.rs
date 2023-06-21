@@ -130,7 +130,7 @@ impl AiosDBManager {
     }
 
 
-    pub async fn get_gen_model_map_by_cata_hash(&self, geo_type: GeoEnum, db_nos: &[i32], is_parent: bool, skip_exist: bool) -> anyhow::Result<DashMap<u64, CataHashRefnoKV>> {
+    pub async fn get_gen_model_map_by_cata_hash(&self, geo_type: GeoEnum, db_nos: &[i32], is_parent: bool, skip_exist: bool) -> anyhow::Result<DashMap<String, CataHashRefnoKV>> {
         let db_option = &self.db_option;
         let database = self.get_arango_db().await?;
         let mut target_refnos_map = DashMap::new();
@@ -180,11 +180,13 @@ impl AiosDBManager {
                         }
                     }
                     if add {
-                        target_refnos_map.insert(k.cata_hash.unwrap_or_default(), CataHashRefnoKV {
-                            cata_hash: k.cata_hash,
-                            exist_geo: None,
-                            group_refnos: vec![root_refno],
-                        });
+                        if let Some(r) = k.cata_hash.clone() {
+                            target_refnos_map.insert(r.clone(), CataHashRefnoKV {
+                                cata_hash: Some(r),
+                                exist_geo: None,
+                                group_refnos: vec![root_refno],
+                            });
+                        }
                     }
                 }
             } else {
@@ -198,7 +200,8 @@ impl AiosDBManager {
                     .await?;
                 // dbg!(s.len());
                 for k in s {
-                    target_refnos_map.insert(k.cata_hash.unwrap_or_default(), k);
+                    if k.cata_hash.is_none() { continue; }
+                    target_refnos_map.insert(k.cata_hash.clone().unwrap_or_default(), k);
                 }
             }
         }
