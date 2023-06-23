@@ -3,7 +3,7 @@ use crate::aql_api::children::query_children_order_aql;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn::geo::create_profile_geos;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
-use crate::data_interface::cgal_boolean;
+// use crate::data_interface::cgal_boolean;
 use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -1604,15 +1604,17 @@ pub async fn gen_geos_data(
                                     if !pos_refnos.contains(&t_refno) {
                                         neg_refnos.push(t_refno);
                                     }
-                                    // let csg_mesh = new_mesh.into_csg_mesh(None);
+                                    let merged = mesh.merge_without_normal(true).unwrap();
+                                    let new_mesh = merged.transform_by(&local_mat);
+                                    let csg_mesh = new_mesh.into_csg_mesh(None);
                                     // csg_mesh.export_obj(false, &format!("{}.obj", index)).unwrap();
                                     // let simpled = csg_mesh.simplified(0.9);
                                     // simpled.export_obj(false, &format!("{}_simpled.obj", index)).unwrap();
-                                    let merged = mesh.merge_without_normal(true).unwrap();
-                                    dbg!(mesh.indices.len());
-                                    dbg!(merged.indices.len());
-                                    let new_mesh = merged.transform_by(&local_mat);
-                                    batch_meshes.push(new_mesh);
+
+                                    // dbg!(mesh.indices.len());
+                                    // dbg!(merged.indices.len());
+
+                                    batch_meshes.push(csg_mesh);
                                     // batch_meshes.push(new_mesh);
                                 }
                             }
@@ -1622,14 +1624,32 @@ pub async fn gen_geos_data(
                         if batch_meshes.is_empty() { return; }
                         dbg!(batch_meshes.len());
 
-                        let mut final_mesh = cgal_boolean::batch_boolean_subtract(&batch_meshes);
-                        final_mesh.export_obj(false, "final.obj").unwrap();
+                        // let mut final_mesh = cgal_boolean::batch_boolean_subtract(&batch_meshes);
+                        // final_mesh.export_obj(false, "final.obj").unwrap();
+                        let mut final_mesh = batch_meshes.remove(0);
+                        let mut neg_mesh = batch_meshes.remove(0);
+                        for neg in batch_meshes {
+                            neg_mesh = neg_mesh + neg;
+                            dbg!(neg_mesh.triangles.len());
+                            if neg_mesh.triangles.len() > 30000 {
+                                break;
+                            }
 
-                        let mut plant_geo_data = PlantGeoData{
-                            geo_hash,
-                            mesh: Some(final_mesh),
-                            aabb: origin_comp_geos_info.aabb.clone(),
-                        };
+                            // final_mesh = m.into_csg_mesh(None);
+                        }
+                        let mut d: PlantGeoData = (&neg_mesh).into();
+                        let merged_neg = d.mesh.as_ref().unwrap().merge_without_normal(false).unwrap();
+                        dbg!(merged_neg.indices.len());
+
+                        final_mesh = final_mesh - merged_neg.into_csg_mesh(None);
+                        final_mesh.export_obj(false, "final.obj").unwrap();
+                        let mut plant_geo_data: PlantGeoData = (&final_mesh).into();
+                        plant_geo_data.geo_hash = geo_hash;
+                        // let mut plant_geo_data = PlantGeoData{
+                        //     geo_hash,
+                        //     mesh: Some(final_mesh),
+                        //     aabb: origin_comp_geos_info.aabb.clone(),
+                        // };
                         mesh_result_map_clone.insert(geo_hash, plant_geo_data);
                         let geom_inst = EleInstGeo {
                             geo_hash,

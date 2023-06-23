@@ -42,10 +42,9 @@ parry3d = { path="../crates/parry/crates/parry3d", features = ["serde-serialize"
 
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path = "../crates/aios-core" }
-#bevy = { path = "../crates/bevy", default-features = false }
 bevy_transform = { path = "../crates/bevy/crates/bevy_transform"}
 
-#csg = { path = "../crates/csgrs/csg" }
+csg = { path = "../crates/csgrs/csg" }
 arangors_lite = { path = "../crates/arangors-lite"}
 #heed = {path = "../crates/heed/heed"}
 bb8-arangodb = { path = "../crates/bb8-arangodb" }
@@ -73,7 +72,7 @@ redb = "0.22.0"
 
 #mcut-sys = { path = "../crates/mcut-sys"}
 # manifold-sys = { path = "../crates/manifold-sys"}
-kigumi-sys= { path = "../crates/kigumi-sys"}
+#kigumi-sys= { path = "../crates/kigumi-sys"}
 
 
 [build-dependencies]

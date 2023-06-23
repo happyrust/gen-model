@@ -192,7 +192,7 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/169987"]
 
 #负实体的计算问题
-debug_root_refnos = ["17496/169986"]
+#debug_root_refnos = ["17496/169983"]
 #debug_root_refnos = ["9304/2"]
 #debug_root_refnos = ["17496/98576"]
 
@@ -206,7 +206,7 @@ debug_root_refnos = ["17496/169986"]
 #debug_root_refnos = ["24381/44462"]
 
 #重点测试管道
-#debug_root_refnos = ["17496/169983"]
+debug_root_refnos = ["17496/169986"]
 #debug_root_refnos = ["17496/171009"]
 #debug_root_refnos = ["17496/170902"]
 

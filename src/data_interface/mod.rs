@@ -8,4 +8,4 @@ pub mod gen_model;
 // pub mod manifold;
 // pub mod mcut;
 
-pub mod cgal_boolean;
+// pub mod cgal_boolean;
