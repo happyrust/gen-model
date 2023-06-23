@@ -24,7 +24,7 @@ use aios_core::prim_geo::category::convert_to_brep_shapes;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
 use aios_core::parsed_data::geo_params_data::CateGeoParam::TubeImplied;
 use std::default::default;
-use bevy::prelude::Transform;
+use bevy_transform::prelude::Transform;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use std::mem::take;
 use aios_core::prim_geo::cylinder::SCylinder;

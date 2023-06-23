@@ -7,7 +7,7 @@ use smol_str::SmolStr;
 use async_trait::async_trait;
 use dashmap::mapref::one::Ref;
 use id_tree::NodeId;
-use bevy::prelude::*;
+use bevy_transform::prelude::*;
 use parry3d::bounding_volume::Aabb;
 use crate::data_interface::tidb_manager::AiosDBManager;
 

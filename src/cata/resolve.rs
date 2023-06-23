@@ -10,7 +10,6 @@ use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
 use bb8_arangodb::arangors_lite::Database;
-use bevy::prelude::error;
 use glam::{Vec2, Vec3};
 use crate::aql_api::dtse_attr::query_dtse_ppro_from_catr_refno;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
@@ -35,7 +34,7 @@ pub fn resolve_axis_params<T: PdmsDataInterface>(
                 map.insert(scom.axis_param_numbers[i], axis);
             }
             Err(e) => {
-                error!("resolve_axis_params 出错： {:?}", &e);
+                println!("resolve_axis_params 出错： {:?}", &e);
             }
         }
     }

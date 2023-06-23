@@ -8,7 +8,6 @@ use aios_core::pdms_types::RefU64;
 use aios_core::tiny_expr::expr_eval::interp;
 use aios_core::tool::float_tool::*;
 use anyhow::anyhow;
-use bevy::log::error;
 use glam::{Mat3, Quat, Vec2, Vec3};
 use itertools::any;
 use nom::Parser;

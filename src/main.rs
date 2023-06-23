@@ -38,8 +38,7 @@ use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
 use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
-use bevy::prelude::*;
-use bevy::transform::components::Transform;
+use bevy_transform::prelude::Transform;
 use chrono::{Datelike, Timelike};
 use dashmap::DashMap;
 use futures::StreamExt;
@@ -67,7 +66,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use aios_core::options::DbOption;
-use bevy::prelude::system_adapter::new;
 use tokio::spawn;
 use env_logger::{Builder, fmt::Target};
 use log::{error, LevelFilter};
@@ -114,7 +112,6 @@ async fn main() -> anyhow::Result<()> {
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
-        info!("read cached mesh ok.");
     }
 
     if db_option.gen_model {
@@ -125,18 +122,18 @@ async fn main() -> anyhow::Result<()> {
         // let branch_refnos = query_deep_children_refnos_fuzzy(&database, &[refno], &CATA_HAS_TUBI_GEO_NAMES).await?;
         // dbg!(branch_refnos);
         gen_geos_data(mgr.clone(), db_option.clone()).await?;
-        info!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
     ///生成ssc 树
     if db_option.rebuild_ssc_tree {
-        info!("正在同步SSC");
+        println!("正在同步SSC");
         if let Some(project_db) = mgr.project_map.get(&mgr.db_option.project_name) {
             // 保存ssc
             async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
             set_arangodb_all_ssc_nodes(project_db.value(), &mgr.get_arango_db().await?).await?;
         }
-        info!("SSC同步完成");
+        println!("SSC同步完成");
     }
 
     if db_option.only_sync_sys {

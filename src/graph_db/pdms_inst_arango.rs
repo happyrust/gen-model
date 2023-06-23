@@ -8,7 +8,7 @@ use aios_core::geom_types::RvmGeoInfo;
 use aios_core::pdms_types::*;
 use anyhow::anyhow;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
-use bevy::prelude::{dbg, Transform};
+use bevy_transform::prelude::Transform;
 use futures::future::ok;
 use glam::{Mat3, Quat, Vec3, Vec4};
 use itertools::Itertools;

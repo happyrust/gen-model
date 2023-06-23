@@ -20,7 +20,7 @@ use anyhow::anyhow;
 use approx::{abs_diff_eq, abs_diff_ne};
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use async_trait::async_trait;
-use bevy::prelude::{dbg, Transform};
+use bevy_transform::prelude::Transform;
 use config::{Config, ConfigError, Environment, File};
 use dashmap::mapref::one::Ref;
 use dashmap::{DashMap, DashSet};
@@ -136,7 +136,7 @@ pub struct AiosDBManager {
 
     pub arango_pool: ArPool,
 
-    pub cached_world_transforms_map: Arc<DashMap<RefU64, bevy::prelude::Transform>>,
+    pub cached_world_transforms_map: Arc<DashMap<RefU64, bevy_transform::prelude::Transform>>,
 
     pub cache_module_numbdbs: BTreeSet<i32>,
 

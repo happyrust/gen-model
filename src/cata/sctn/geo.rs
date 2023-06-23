@@ -10,10 +10,10 @@ use aios_core::prim_geo::spine::{Line3D, Spine3D, SpineCurveType, SweepPath3D};
 use aios_core::shape::pdms_shape::BrepShapeTrait;
 use aios_core::tool::math_tool::to_pdms_vec_str;
 use anyhow::anyhow;
+use bevy_transform::prelude::Transform;
 use dashmap::{DashMap, DashSet};
 use glam::{Quat, Vec3};
 use regex::internal::Input;
-use bevy::prelude::*;
 use parry3d::bounding_volume::Aabb;
 
 use crate::data_interface::interface::PdmsDataInterface;
@@ -101,7 +101,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
     let new_rot =  current_rot.inverse() * parent_rot;
     let drns = new_rot * drns;
     let drne = new_rot * drne;
-    info!("refno, drns: {:?}, drne: {:?}", to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
+    println!("refno, drns: {:?}, drne: {:?}", to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
     if spine_paths.len() == 0 {
         // dbg!(spine_paths.len());
         if let Some(poss) = att.get_poss() &&
