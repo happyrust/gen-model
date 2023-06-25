@@ -158,6 +158,11 @@ pub async fn query_room_name_from_refnos_aql(refnos: Vec<RefU64>, database: &ArD
     }
 }
 
+/// 获取节点连接的两边的房间
+pub async fn query_node_connect_rooms(refno:RefU64,database:&ArDatabase) -> anyhow::Result<Option<(String,String)>> {
+    todo!()
+}
+
 /// 获取该参考号属于哪个房间 room_name_type : 存放房间名的类型
 pub async fn query_room_info_from_refno(refno: RefU64, room_name_type: &str, database: &ArDatabase) -> anyhow::Result<Option<String>> {
     let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
