@@ -635,13 +635,19 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
     let mut dir = Vec3::ZERO;
     let mut pos = Vec3::ZERO;
 
-    let re = Regex::new(r"^P\d+$").unwrap();
+    let re = Regex::new(r"^(-?)P(\d+)$").unwrap();
     if re.is_match(dir_str) {
-        let pnt_indx = dir_str[1..].parse::<i32>().unwrap_or(i32::MAX);
-        if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
-            let mut axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
-            dir = mem::take(&mut axis.dir);
-            pos = mem::take(&mut axis.pt);
+        if let Some(cap) = re.captures(dir_str) {
+            let is_neg = cap.get(1).map_or("", |m| m.as_str()) == "-";
+            let pnt_indx = cap.get(2).map_or("", |m| m.as_str()).parse::<i32>().unwrap_or(-1);
+            if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
+                let mut axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
+                let flag = if is_neg { -1.0 } else { 1.0 };
+                dir = flag * mem::take(&mut axis.dir);
+                pos = flag *  mem::take(&mut axis.pt);
+            }else{
+                return Err(anyhow!("未找到点索引: {}", pnt_indx));
+            }
         }
     } else {
         dir = parse_str_axis_to_vec3(dir_str, context, interface)?.into();
@@ -738,8 +744,9 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeM
             }
         }
     }
-    let v = parse_expr_to_dir(&new_dir_str.replace(" ", "")).ok_or(anyhow!("方向字符串不正确。"))?;
-    Ok(Vec3::new(f32_round_2(v[0]), f32_round_2(v[1]), f32_round_2(v[2])))
+    let dir_str = new_dir_str.replace(" ", "");
+    let v = parse_expr_to_dir(&dir_str).ok_or(anyhow!(format!("方向字符串: {} 不正确。", &dir_str)))?;
+    Ok(v)
 }
 
 

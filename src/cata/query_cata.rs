@@ -11,6 +11,7 @@ use dashmap::DashMap;
 use log::{error, info};
 use sled::pin;
 use std::collections::{BTreeMap, HashMap};
+use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use glam::Vec3;
 use tokio::sync::RwLock;
 use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
@@ -325,7 +326,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
 
 
     let axis_map = resolve_axis_params(scom_info, &cur_context, interface);
-    // dbg!(&axis_map);
+    // dbg!(&scom_info.axis_params);
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
         if scom_info.plin_map.contains_key(plin.as_str()) {
             Some(scom_info.plin_map.get(plin.as_str()).unwrap().clone())
@@ -338,8 +339,15 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         None
     };
     //说明: 需要传递 interface, 因为可能需要取属性值
+    // dbg!(&scom_info.gm_params);
+    // dbg!(&scom_info.axis_params);
     let geometries = resolve_gms(des_refno, &scom_info.gm_params, &jusl_param, &cur_context, &axis_map, interface);
-    // dbg!(&geometries);
+    for geometry in &geometries {
+        if let CateGeoParam::Pyramid(l) = geometry {
+            dbg!(&l);
+        }
+    }
+    dbg!(&geometries.len());
     Ok(CateGeomsInfo {
         refno: cat_ref,
         geometries,

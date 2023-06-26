@@ -1,4 +1,3 @@
-#![feature(drain_filter)]
 #![feature(let_chains)]
 #![feature(default_free_fn)]
 // 暂时屏蔽warnings
@@ -117,10 +116,10 @@ async fn main() -> anyhow::Result<()> {
     if db_option.gen_model {
         println!("正在生成模型");
         let mut time = Instant::now();
-        // let database = mgr.get_arango_db().await?;
-        // let refno = RefU64::from_two_nums(17496, 171026);
-        // let branch_refnos = query_deep_children_refnos_fuzzy(&database, &[refno], &CATA_HAS_TUBI_GEO_NAMES).await?;
-        // dbg!(branch_refnos);
+        let database = mgr.get_arango_db().await?;
+        let refno = RefU64::from_two_nums(17496, 171026);
+        let branch_refnos = query_deep_children_refnos_fuzzy(&database, &[refno], &CATA_HAS_TUBI_GEO_NAMES).await?;
+        dbg!(branch_refnos);
         gen_geos_data(mgr.clone(), db_option.clone()).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }

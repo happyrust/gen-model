@@ -1,8 +1,8 @@
 #同步文件配置
-total_sync = false
+total_sync = true
 enable_log = false
 sync_graph_db = true
-sync_tidb = false
+sync_tidb = true
 sync_localdb = true
 incr_sync = false
 replace_dbs = true
@@ -52,8 +52,8 @@ server_release_ip = "127.0.0.1:9099"
 #调试选项
 replace_mesh = true
 save_model_mesh_to_graph_db = true
-need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
-reset_mdb_project = false      #是否重新生成 mdb 缓存
+need_sync_refno_basic = true  #是否重新生成 refno_basic 缓存
+reset_mdb_project = true      #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
@@ -195,6 +195,11 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/169983"]
 #debug_root_refnos = ["9304/2"]
 #debug_root_refnos = ["17496/98576"]
+#生成多个分段了的负实体，会崩溃，需要跳过
+#debug_root_refnos = ["17496/99813"]
+
+#拉伸体有一些异性，需要处理掉不必要的边
+#debug_root_refnos = ["17496/99969"]
 
 #重点测试负实体
 #debug_root_refnos = ["17496/99813"]
@@ -204,11 +209,35 @@ puhua_database_password = ""
 
 #有问题的负实体
 #debug_root_refnos = ["24381/44462"]
+#debug_root_refnos = ["24381/44372"]
+#debug_root_refnos = ["24381/44372"]
+
+#cut a sphere cap
+#debug_root_refnos = ["24381/36945"]
+
+#debug_root_refnos = ["17496/161421"]
+#debug_root_refnos = ["17496/171102"]
+#debug_root_refnos = ["17496/171102"]
+#debug_root_refnos = ["24381/57302"]
+
+
+#直墙的显示问题
+#debug_root_refnos = ["17496/172197"]
+debug_root_refnos = ["17496/172195"]
+#debug_root_refnos = ["17496/172361"]
+
+#debug_root_refnos = ["24381/34109"]
+#debug_root_refnos = ["17496/72861"]
+#debug_root_refnos = ["17496/168790"]
+
+#debug_root_refnos = ["17496/171134"]
 
 #重点测试管道
-debug_root_refnos = ["17496/169986"]
+#debug_root_refnos = ["17496/169986"]
 #debug_root_refnos = ["17496/171009"]
 #debug_root_refnos = ["17496/170902"]
+
+#debug_root_refnos = ["17496/168790"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]

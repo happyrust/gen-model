@@ -37,7 +37,7 @@ use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::{Isometry, Vector};
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::default::default;
 use std::io::Read;
 use std::mem::take;
@@ -46,6 +46,7 @@ use std::ptr::replace;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
+use aios_core::csg::manifold::ManifoldRust;
 // use crate::data_interface::manifold::{ManifoldMeshRust, ManifoldRust};
 // use crate::data_interface::mcut;
 
@@ -205,6 +206,7 @@ pub async fn gen_prim_geos(
     Ok(true)
 }
 
+///处理带有loop的元件
 pub async fn gen_loop_geos(
     mgr: Arc<AiosDBManager>,
     instance_mgr: Arc<RwLock<ShapeInstancesData>>,
@@ -299,7 +301,7 @@ pub async fn gen_loop_geos(
                 match target_type {
                     "NREV" | "REVO" => {
                         let angle = parent_att.get_f32("ANGL").unwrap_or_default();
-                        if angle >= f32::EPSILON {
+                        if angle.abs() >= f32::EPSILON {
                             let revo = Box::new(Revolution {
                                 verts: loop_verts,
                                 fradius_vec,
@@ -307,7 +309,7 @@ pub async fn gen_loop_geos(
                                 ..Default::default()
                             });
                             if revo.check_valid() {
-                                // dbg!(&revo);
+                                dbg!(&revo);
                                 item_trans = revo.get_trans();
                                 geo_param =
                                     revo.convert_to_geo_param().unwrap_or(PdmsGeoParam::Unknown);
@@ -487,8 +489,7 @@ pub async fn gen_cata_single_geoms(
         .await
         .unwrap_or_default();
     // dbg!(geoms.geometries.len());
-    if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL"
-    {
+    if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" {
         create_profile_geos(
             design_refno,
             &desi_att,
@@ -496,7 +497,7 @@ pub async fn gen_cata_single_geoms(
             &brep_shape_map,
             mgr.as_ref(),
         )
-        .await?;
+            .await?;
         return Ok(geoms_info.refno);
     } else {
         let CateGeomsInfo {
@@ -559,7 +560,6 @@ pub async fn gen_cata_geos(
             .map(|x| x.cata_hash.clone())
             .collect::<Vec<_>>(),
     );
-    dbg!(&all_unique_keys);
     if !all_unique_keys.is_empty() {
         for i in 0..batch_chunks_cnt as usize {
             let mgr = mgr.clone();
@@ -878,7 +878,7 @@ pub async fn gen_cata_geos(
         let shape_insts_data = main_instance_mgr.read().await;
         let branch_refno = *b.key();
         dbg!(branch_refno);
-        let Ok(children_refnos) = mgr.get_children_from_localdb(branch_refno) else{
+        let Ok(children_refnos) = mgr.get_children_from_localdb(branch_refno) else {
             continue;
         };
         // dbg!(&children_refnos);
@@ -928,8 +928,8 @@ pub async fn gen_cata_geos(
                 Some(h_cat_ref),
                 &scom_info_map,
             )
-            .await
-            .unwrap_or_default();
+                .await
+                .unwrap_or_default();
             let mut has_tube_geom = false;
             for tubi_geom in &tubi_geoms_info.geometries {
                 if let TubeImplied(d) = tubi_geom {
@@ -1386,8 +1386,8 @@ pub async fn gen_geos_data(
                         Arc::new(refno_lstube_map),
                         Arc::new(lstube_bores_map),
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 has_run_cata = true;
                 handles.push(handle);
@@ -1410,8 +1410,8 @@ pub async fn gen_geos_data(
                         Arc::new(Default::default()),
                         Arc::new(Default::default()),
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 has_run_cata = true;
                 handles.push(handle);
@@ -1434,8 +1434,8 @@ pub async fn gen_geos_data(
                         Arc::new(Default::default()),
                         Arc::new(Default::default()),
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 has_run_cata = true;
                 handles.push(handle);
@@ -1443,7 +1443,7 @@ pub async fn gen_geos_data(
 
             futures::future::join_all(handles).await;
             if has_run_cata {
-                let mesh_mgr = mgr.cached_mesh_mgr.read().await;
+                let mut  mesh_mgr = mgr.cached_mesh_mgr.write().await;
                 let inst_data = instance_mgr.read().await;
                 println!("当前db下的元件库生成统计：");
                 dbg!(mesh_mgr.len());
@@ -1453,7 +1453,7 @@ pub async fn gen_geos_data(
                 save_instance_to_graph_db(&mgr, &inst_data).await?;
                 save_mesh_to_local_db(&mgr, &mesh_mgr, replace_mesh)
                     .expect("Save mesh to local db failed.");
-                save_mesh_to_arango_db(&mgr, &mesh_mgr, replace_mesh).await?;
+                save_mesh_to_arango_db(&mgr, &mut mesh_mgr, replace_mesh).await?;
             }
             // mgr.cached_mesh_mgr.write().await.clear();
             // instance_mgr.write().await.clear();
@@ -1481,8 +1481,8 @@ pub async fn gen_geos_data(
                         &db_option_clone,
                         &target_loop_refnos,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
             }
@@ -1502,8 +1502,8 @@ pub async fn gen_geos_data(
                         &db_option_clone,
                         target_prim_refnos.as_slice(),
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
             }
@@ -1546,11 +1546,11 @@ pub async fn gen_geos_data(
                     has_pos_neg_map.into_iter().for_each(|(comp_refno, (mut pos_refnos, origin_neg_refnos))| {
                         println!("正在处理: {} 下的负实体", comp_refno);
 
-                        let Ok(children_refnos) = mgr.get_children_from_localdb(comp_refno) else{
+                        let Ok(children_refnos) = mgr.get_children_from_localdb(comp_refno) else {
                             return;
                         };
                         let mut neg_refnos = vec![];
-                        children_refnos.iter().for_each(|x|{
+                        children_refnos.iter().for_each(|x| {
                             for c in &origin_neg_refnos {
                                 if c == x {
                                     neg_refnos.push(*c);
@@ -1563,8 +1563,8 @@ pub async fn gen_geos_data(
                         let mut inst_info_result_map_clone = inst_info_result_map.clone();
                         let mut inst_geos_result_map_clone = inst_geos_result_map.clone();
 
+                        let mut batch_manifolds = vec![];
                         let mut batch_meshes = vec![];
-                        // let mut batch_meshes = vec![];
                         //没有正实体的情况，直接跳过
                         if neg_refnos.is_empty() { return; }
                         pos_refnos.push(comp_refno);
@@ -1582,7 +1582,14 @@ pub async fn gen_geos_data(
                         };
 
                         let mut neg_refnos = vec![];
+                        let mut found_non_manifold = false;
+                        //如果数量比较少，直接用慢的csg方法
+                        let mut use_csg = total_refnos.len() < 20;;
+                        // use_csg = false;
                         for (index, t_refno) in total_refnos.into_iter().enumerate() {
+                            // if t_refno != RefU64::from_two_nums(17496, 168894) {
+                            //     continue;
+                            // }
                             let Some(geos_info) = inst_data.get_info(&t_refno) else {
                                 continue;
                             };
@@ -1604,52 +1611,80 @@ pub async fn gen_geos_data(
                                     if !pos_refnos.contains(&t_refno) {
                                         neg_refnos.push(t_refno);
                                     }
-                                    let merged = mesh.merge_without_normal(true).unwrap();
-                                    let new_mesh = merged.transform_by(&local_mat);
-                                    let csg_mesh = new_mesh.into_csg_mesh(None);
-                                    // csg_mesh.export_obj(false, &format!("{}.obj", index)).unwrap();
-                                    // let simpled = csg_mesh.simplified(0.9);
-                                    // simpled.export_obj(false, &format!("{}_simpled.obj", index)).unwrap();
-
-                                    // dbg!(mesh.indices.len());
-                                    // dbg!(merged.indices.len());
-
-                                    batch_meshes.push(csg_mesh);
-                                    // batch_meshes.push(new_mesh);
+                                    // let merged = mesh.merge_without_normal(true).unwrap();
+                                    let new_mesh = if t_refno == comp_refno  {
+                                        mesh.transform_by(&local_mat)
+                                    }else{
+                                        //根据类型来考虑是否需要扩大负实体
+                                        mesh.transform_by(&(local_mat * Mat4::from_scale(Vec3::splat(1.008))))
+                                        // mesh.transform_by(&local_mat)
+                                    };
+                                    #[cfg(debug_assertions)]
+                                    {
+                                        dbg!(t_refno);
+                                        dbg!(new_mesh.vertices.len());
+                                        // new_mesh.export_obj(false, &format!("{}.obj", t_refno.to_url_refno())).unwrap();
+                                    }
+                                    if !use_csg /*&& !found_non_manifold*/ {
+                                        let manifold: ManifoldRust = (&new_mesh).into();
+                                        if manifold.num_tri() == 0 {
+                                            println!("Found non manifold {}", t_refno);
+                                            found_non_manifold = true;
+                                            #[cfg(debug_assertions)]
+                                            new_mesh.export_obj(false, &format!("{}_not_manifold.obj", t_refno.to_url_refno())).unwrap();
+                                        }else{
+                                            batch_manifolds.push(manifold);
+                                        }
+                                    }
+                                    batch_meshes.push(new_mesh);
                                 }
                             }
                         }
+                        #[cfg(debug_assertions)]
                         dbg!(&neg_refnos);
                         let geo_hash = *comp_refno;
-                        if batch_meshes.is_empty() { return; }
-                        dbg!(batch_meshes.len());
+                        if batch_meshes.len() < 2 { return; }
+                        #[cfg(debug_assertions)]
+                        dbg!(batch_manifolds.len());
 
-                        // let mut final_mesh = cgal_boolean::batch_boolean_subtract(&batch_meshes);
-                        // final_mesh.export_obj(false, "final.obj").unwrap();
-                        let mut final_mesh = batch_meshes.remove(0);
-                        let mut neg_mesh = batch_meshes.remove(0);
-                        for neg in batch_meshes {
-                            neg_mesh = neg_mesh + neg;
-                            dbg!(neg_mesh.triangles.len());
-                            if neg_mesh.triangles.len() > 30000 {
-                                break;
+                        //如果数量太多，还是要用manifold, 太少的情况下用csg
+                        use_csg = batch_manifolds.len() < 20;;
+                        // use_csg = false;
+                        //执行负实体计算
+                        let mut plant_geo_data = if use_csg {
+                            dbg!(use_csg);
+                            //如果发现有非流体，更改到使用csg的算法
+                            let mut final_mesh = (batch_meshes.remove(0)).into_csg_mesh(None);
+                            batch_meshes.sort_by(|x, y| x.indices.len().cmp(&y.indices.len()));
+                            for m in batch_meshes {
+                                let csg = m.into_csg_mesh(None);
+                                final_mesh = final_mesh - csg;
                             }
+                            #[cfg(debug_assertions)]
+                            final_mesh.export_obj(false, "final.obj").unwrap();
+                            let mut d: PlantGeoData = final_mesh.into();;
+                            d.geo_hash = geo_hash;
+                            d
+                        }else{
+                            if batch_manifolds.len() < 2 {
+                                return;
+                            }
+                            let mut src_manifold = batch_manifolds.remove(0);
+                            batch_manifolds.sort_by(|x, y| x.num_tri().cmp(&y.num_tri()));
+                            let final_manifold = ManifoldRust::batch_boolean_subtract(&src_manifold, &batch_manifolds);
+                            let final_mesh: PlantMesh = final_manifold.into();
+                            for m in batch_manifolds {
+                                m.destroy();
+                            }
+                            #[cfg(debug_assertions)]
+                            final_mesh.export_obj(false, "final.obj").unwrap();
+                            PlantGeoData {
+                                geo_hash,
+                                mesh: Some(final_mesh),
+                                aabb: origin_comp_geos_info.aabb.clone(),
+                            }
+                        };
 
-                            // final_mesh = m.into_csg_mesh(None);
-                        }
-                        let mut d: PlantGeoData = (&neg_mesh).into();
-                        let merged_neg = d.mesh.as_ref().unwrap().merge_without_normal(false).unwrap();
-                        dbg!(merged_neg.indices.len());
-
-                        final_mesh = final_mesh - merged_neg.into_csg_mesh(None);
-                        final_mesh.export_obj(false, "final.obj").unwrap();
-                        let mut plant_geo_data: PlantGeoData = (&final_mesh).into();
-                        plant_geo_data.geo_hash = geo_hash;
-                        // let mut plant_geo_data = PlantGeoData{
-                        //     geo_hash,
-                        //     mesh: Some(final_mesh),
-                        //     aabb: origin_comp_geos_info.aabb.clone(),
-                        // };
                         mesh_result_map_clone.insert(geo_hash, plant_geo_data);
                         let geom_inst = EleInstGeo {
                             geo_hash,
@@ -1723,9 +1758,9 @@ pub async fn gen_geos_data(
         }
 
         {
-            let mesh_mgr = mgr.cached_mesh_mgr.read().await;
+            let mut mesh_mgr = mgr.cached_mesh_mgr.write().await;
             dbg!(mesh_mgr.len());
-            save_mesh_to_arango_db(&mgr, &mesh_mgr, replace_mesh).await?;
+            save_mesh_to_arango_db(&mgr, &mut mesh_mgr, replace_mesh).await?;
         }
 
         println!("{db_no} 生成完毕。");

@@ -349,7 +349,7 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
         let tmp = context[&key].parse::<u32>().unwrap_or(0u32);
         db1_dehash(tmp)
     } else {
-        "".to_string()
+        key.clone()
     };
     let number = axis_param.number;
     let pbore = eval_str_to_f32(&axis_param.pbore, &context, interface)?;
