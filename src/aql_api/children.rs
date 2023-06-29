@@ -3,7 +3,7 @@ use std::str::FromStr;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{CataHashRefnoKV, EleTreeNode, GENRAL_NEG_NOUN_NAMES, PdmsElement, RefU64, RefU64Vec};
 use aios_core::pdms_user::{PdmsElementWithMajor, RefnoMajor};
-use aios_core::three_dimensional_review::{VagueSearchCondition, VagueSearchRequest};
+use aios_core::three_dimensional_review::{VagueSearchCondition, VagueSearchExportAqlData, VagueSearchRequest};
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use bitvec::ptr::replace;
 use itertools::Itertools;
@@ -190,8 +190,7 @@ pub async fn query_ancestor_with_name_till_type_aql(arango_database: &ArDatabase
         PRUNE o.noun == @noun
         return { refno:o._key, name:o.name }")
         .bind_var("id", refno_aql)
-        .bind_var("noun", att_type)
-        ;
+        .bind_var("noun", att_type);
     let mut result: Vec<PdmsRefnoNameAql> = arango_database.aql_query(aql).await?;
     if result.len() == 0 { return Ok(vec![]); };
     Ok(result)
@@ -632,6 +631,29 @@ pub async fn query_refnos_belong_major(refnos: Vec<RefU64>, database: &ArDatabas
         }
     }
     Ok(majors.into_iter().map(|major| major.1).collect::<Vec<_>>())
+}
+
+/// 查询参考号集合分别属于哪个层级
+///
+/// 层级：从owner一直到某个类型的name
+pub async fn query_refnos_belong_level_aql(refno: Vec<RefU64>, att_type: &str, database: &ArDatabase) -> anyhow::Result<Vec<VagueSearchExportAqlData>> {
+    let refnos = refno.into_iter()
+        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<String>>();
+    let aql = AqlQuery::new("
+    for refno in @refnos
+        let level = ( for o in 1..10 outbound refno pdms_edges
+                PRUNE o.noun == @noun
+                return o.name  )
+        let element = document(refno)
+        return {
+            'refno':element._key,
+            'name': element.name,
+            'level':level,
+            'att_type':element.noun
+        }").bind_var("refnos", refnos)
+        .bind_var("noun", att_type);
+    let result = database.aql_query::<VagueSearchExportAqlData>(aql).await?;
+    Ok(result)
 }
 
 #[tokio::test]

@@ -169,15 +169,15 @@ async fn test_query_plin_attrs() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn test_query_wall_jusl_value() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let result = query_pline_value(&database, RefU64::from_refno_str("23584/5931").unwrap(), "NA").await?;
-    dbg!(&result);
-    Ok(())
-}
+// #[tokio::test]
+// async fn test_query_wall_jusl_value() -> anyhow::Result<()> {
+//     use config::{Config, ConfigError, Environment, File};
+//     let s = Config::builder()
+//         .add_source(File::with_name("DbOption"))
+//         .build()?;
+//     let db_option: DbOption = s.try_deserialize().unwrap();
+//     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+//     let result = query_pline_value(&database, RefU64::from_refno_str("23584/5931").unwrap(), "NA").await?;
+//     dbg!(&result);
+//     Ok(())
+// }

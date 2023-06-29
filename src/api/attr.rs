@@ -137,9 +137,14 @@ pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic,
         let mut column_names = column_names.unwrap();
         if column_names.len() == 0 { return Ok(AttrMap::default()); }
         if let Some(names_map) = ATTR_INFO_MAP.get_names_of_type(type_name) {
-            exclude_columns = column_names.drain_filter(|x| {
-                !names_map.value().contains(*x)
-            }).collect();
+            // exclude_columns = column_names.drain_filter(|x| {
+            //     !names_map.value().contains(*x)
+            // }).collect();
+            column_names.iter().for_each(|x| {
+                if names_map.value().contains(*x) {
+                    exclude_columns.push(*x);
+                }
+            })
         }
         column_names
     } else {
