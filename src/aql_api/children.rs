@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{CataHashRefnoKV, EleTreeNode, GENRAL_NEG_NOUN_NAMES, PdmsElement, RefU64, RefU64Vec};
@@ -7,6 +7,7 @@ use aios_core::three_dimensional_review::{VagueSearchCondition, VagueSearchExpor
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use bitvec::ptr::replace;
 use itertools::Itertools;
+use parry3d::partitioning::QbvhDataGenerator;
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool};
 use crate::api::attr::query_attr;
@@ -541,6 +542,11 @@ pub async fn filter_negative_sibl_from_refnos(refnos: &Vec<RefU64>, database: &A
 pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, database: &ArDatabase) -> anyhow::Result<Vec<(RefU64, String)>> {
     let keys = request.filter_refnos.into_iter()
         .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
+    let mut condition_map = HashSet::new();
+    request.filter_condition.iter().for_each(|x| if x.0 == ":CNPEdivco" {
+        condition_map.insert(x.0.to_string());
+    });
+
     // 生成aql模板
     let aql = format!("\
     for refno in {}
