@@ -1,5 +1,5 @@
-#同步文件配置
-total_sync = true
+#同步文件配置false
+total_sync = false
 enable_log = false
 sync_graph_db = true
 sync_tidb = true
@@ -52,16 +52,16 @@ server_release_ip = "127.0.0.1:9099"
 #调试选项
 replace_mesh = true
 save_model_mesh_to_graph_db = true
-need_sync_refno_basic = true  #是否重新生成 refno_basic 缓存
-reset_mdb_project = true      #是否重新生成 mdb 缓存
+need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
+reset_mdb_project =  false     #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
-#included_db_files = ["ams7997_0001"]
-included_db_files = ["ams1112_0001"]
+#included_db_files = ["zdj7600_0001"]
+included_db_files = ["ams5052_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 manual_db_nums = [1112]  #, 8000
 plat_url = ""
@@ -223,10 +223,24 @@ puhua_database_password = ""
 
 #直墙的显示问题
 #debug_root_refnos = ["17496/172197"]
-debug_root_refnos = ["17496/172195"]
-#debug_root_refnos = ["17496/172361"]
+#debug_root_refnos = ["17496/171750"]
+#debug_root_refnos = ["24381/48631"]
 
-#debug_root_refnos = ["24381/34109"]
+#debug_root_refnos = ["17496/172361"]
+#debug_root_refnos = ["17496/171256"]
+#debug_root_refnos = ["17496/171254"]
+#debug_root_refnos = ["17496/172817"]
+#debug_root_refnos = ["17496/172816"]
+#debug_root_refnos = ["17496/172852"]
+
+#debug_root_refnos = ["24381/44495", "17496/171256", "17496/171302"]
+#debug_root_refnos = ["24381/42520"]
+#debug_root_refnos = ["9304/2"]
+#debug_root_refnos = ["17496/161703"]
+debug_root_refnos = ["17496/116749"]
+
+#17496/116750
+
 #debug_root_refnos = ["17496/72861"]
 #debug_root_refnos = ["17496/168790"]
 

@@ -46,7 +46,9 @@ use std::ptr::replace;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
+#[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
+use aios_core::tool::math_tool::{quat_to_pdms_ori_str, to_pdms_ori_str};
 // use crate::data_interface::manifold::{ManifoldMeshRust, ManifoldRust};
 // use crate::data_interface::mcut;
 
@@ -309,7 +311,7 @@ pub async fn gen_loop_geos(
                                 ..Default::default()
                             });
                             if revo.check_valid() {
-                                dbg!(&revo);
+                                // dbg!(&revo);
                                 item_trans = revo.get_trans();
                                 geo_param =
                                     revo.convert_to_geo_param().unwrap_or(PdmsGeoParam::Unknown);
@@ -488,7 +490,7 @@ pub async fn gen_cata_single_geoms(
     let geoms_info = resolve_desi_comp(Some(mgr.as_ref()), design_refno, None, scom_info_map)
         .await
         .unwrap_or_default();
-    // dbg!(geoms.geometries.len());
+    // dbg!(geoms_info.geometries.len());
     if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" {
         create_profile_geos(
             design_refno,
@@ -623,6 +625,8 @@ pub async fn gen_cata_geos(
                                 .await else {
                                 continue;
                             };
+                            // let ori_str = quat_to_pdms_ori_str(&o.rotation);
+                            // dbg!(o.translation);
                             let Ok(ele_att) = mgr.get_attr_from_localdb(ele_refno) else {
                                 continue;
                             };
@@ -703,7 +707,7 @@ pub async fn gen_cata_geos(
                                     };
                                     aabb
                                 };
-                                // dbg!(geo_hash);
+                                // dbg!(geo_aabb);
                                 let rot = transform.rotation;
                                 let translation =
                                     transform.translation + transform.rotation * trans.translation;
@@ -749,6 +753,7 @@ pub async fn gen_cata_geos(
                                 };
                                 geo_insts.push(geom_inst);
                             }
+                            dbg!(&geo_insts.len());
                             //需要变换成世界坐标系下的aabb
                             if let Some(a) = merged_cata_aabb {
                                 geos_info.aabb =
@@ -1179,7 +1184,7 @@ pub async fn gen_cata_geos(
         .into_iter()
         .map(|x| x.1)
         .collect::<Vec<_>>();
-    dbg!(&tubi_result.len());
+    // dbg!(&tubi_result.len());
     if !tubi_result.is_empty() {
         let conn = mgr.get_arango_db().await?;
         let json = serde_json::to_value(tubi_result).unwrap_or_default();
@@ -1358,13 +1363,17 @@ pub async fn gen_geos_data(
                 false,
             )
             .await?;
-        dbg!(&target_bran_reuse_cata_map.len());
-        dbg!(target_bran_reuse_cata_map
-            .iter()
-            .map(|x| (x.key().clone(), x.value().group_refnos.clone()))
-            .collect::<Vec<_>>());
-        dbg!(target_single_reuse_cata_map.len());
-        dbg!(&target_single_cata_map.len());
+        #[cfg(debug_assertions)]
+        {
+            dbg!(&target_bran_reuse_cata_map.len());
+            dbg!(target_bran_reuse_cata_map
+                .iter()
+                .map(|x| (x.key().clone(), x.value().group_refnos.clone()))
+                .collect::<Vec<_>>());
+            dbg!(target_single_reuse_cata_map.len());
+            dbg!(&target_single_cata_map.len());
+        }
+
 
         let mut has_run_cata = false;
         if run_cache_cata {

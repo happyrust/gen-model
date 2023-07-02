@@ -140,7 +140,6 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     //还有的直段会放在branch上，需要特殊处理
 
     inst_keys.push("2".to_string());
-    // dbg!(&inst_keys);
     let mut inst_geos_map = HashMap::new();
     let aql = AqlQuery::new(r#"
             FOR inst_key in @inst_keys
@@ -150,7 +149,6 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
             "#)
         .bind_var("inst_keys", inst_keys);
     let inst_geos: Vec<EleInstGeosData> = database.aql_query(aql).await.unwrap();
-    // dbg!(inst_geos.len());
     for g in inst_geos {
         inst_geos_map.insert(g.inst_key, g);
     }

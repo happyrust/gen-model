@@ -72,6 +72,7 @@ static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> 
     m.insert("ROOM", PdmsGenericType::ROOM);
     m.insert("STRU", PdmsGenericType::STRU);
     m.insert("PANE", PdmsGenericType::PANE);
+    m.insert("HANG", PdmsGenericType::HANG);
     m.insert("WALL", PdmsGenericType::WALL);
     m.insert("GWALL", PdmsGenericType::WALL);
     m.insert("CWALL", PdmsGenericType::WALL);

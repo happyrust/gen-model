@@ -70,9 +70,10 @@ fn test_expression_regex() {
     }
 }
 
-pub fn eval_str_to_f32<T: PdmsDataInterface>(input_expr: impl AsRef<str>, context: &BTreeMap<String, String>, interface: Option<&T>) -> anyhow::Result<f32> {
+pub fn eval_str_to_f32<T: PdmsDataInterface>(input_expr: impl AsRef<str>,
+                                             context: &BTreeMap<String, String>, interface: Option<&T>) -> anyhow::Result<f32> {
     let input_expr = input_expr.as_ref().trim().to_uppercase();
-    eval_str_to_f64(&input_expr, context, interface).map(|x| x as f32)
+    eval_str_to_f64(&input_expr, context, interface, true).map(|x| x as f32)
 }
 
 //  SIN  00 00 03 85
@@ -94,15 +95,18 @@ pub fn eval_str_to_f32<T: PdmsDataInterface>(input_expr: impl AsRef<str>, contex
 //  MIN  00 00 03 F1
 
 
-pub const INTERNAL_PDMS_EXPRESS: [&'static str; 20] = [
+pub const INTERNAL_PDMS_EXPRESS: [&'static str; 22] = [
     "MAX", "MIN", "COS", "SIN", "LOG", "ABS", "POW", "SQR", "NOT", "AND", "OR",
-    "ATAN", "ACOS", "ATAN2", "ASIN", "INT", "OF", "MOD", "MINT", "NEGATE",
+    "ATAN", "ACOS", "ATAN2", "ASIN", "INT", "OF", "MOD", "NEGATE", "SUM", "TANF", "TAN",
 ];
+
+
 
 ///评估表达式的值
 pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                                              context: &BTreeMap<String, String>,
-                                             interface: Option<&T>) -> anyhow::Result<f64> {
+                                             interface: Option<&T>,
+                                             replace_err_by_zero: bool) -> anyhow::Result<f64> {
     if input_expr.is_empty() || input_expr == "UNSET" {
         return Ok(0.0);
     }
@@ -156,7 +160,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     }
 
     //说明：匹配带小数的情况 PARA[1.1]
-    let re = Regex::new(r"([A-Z_]+[0-9]*)(\s*\[\s*(([1-9]\d*\.?\d*)|(0\.\d*[1-9]))\s*\])?").unwrap();
+    let re = Regex::new(r"([A-Z_]+[0-9]*)(\s*\[?\s*(([1-9]\d*\.?\d*)|(0\.\d*[1-9]))\s*\]?)?").unwrap();
     // 将NEXT PREV 的值统一换成参考号，然后 context_params 要存储 参考号对应的 attr，要是它这个值没有求解，
     // 相当于要递归去求值
 
@@ -167,7 +171,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
             let default_key: String = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
             let v = context.get(&key).map(|x| x.to_string()).unwrap_or("0".to_string());
-            if let Ok(t) = eval_str_to_f64(&v, &context, interface) {
+            if let Ok(t) = eval_str_to_f64(&v, &context, interface, false) {
                 t.to_string()
             } else {
                 context.get(&default_key).map(|x| x.to_string()).unwrap_or("0".to_string())
@@ -175,23 +179,40 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         }).trim().to_string();
         // dbg!(&new_exp);
     }
+    let mut new_exp = new_exp.replace("DESIGN PARAM", "DESP").replace("DESIGN PARA", "DESP");;
     let mut result_exp = new_exp.clone();
     //默认两次
     let mut found_replaced = false;
-    for _ in 0..5 {
+    let para_name_re = Regex::new(r"(DESI(GN)?\s+)?([I|C|O|A)]?PARA?M?)|DESP|(O|A|W|D)DES").unwrap();
+    for _ in 0..100 {
         for caps in re.captures_iter(&new_exp) {
-            let s = &caps[0];
+            let s = caps[0].trim();
             if INTERNAL_PDMS_EXPRESS.contains(&s) {
                 continue;
             }
-            let c1 = caps.get(1).map_or("", |m| m.as_str());
+            let mut para_name = caps.get(1).map_or("", |m| m.as_str());
             let c2 = caps.get(2).map_or("", |m| m.as_str());
             let c3 = caps.get(3).map_or("", |m| m.as_str());
+
+            //处理掉PARA 和 PARAM的区别
+            let is_some_param = para_name_re.is_match(para_name);
+            if is_some_param {
+                if para_name.ends_with("M") {
+                    para_name = &para_name[0..para_name.len() - 1];
+                }
+            }
             // 小数向下取整
-            let k: String = format!("{}{}", c1, c3.parse::<f32>().map(|x| x.floor().to_string()).unwrap_or_default()).into();
-            // dbg!(&k);
+            let mut k: String = format!("{}{}", para_name, c3.parse::<f32>().map(|x| x.floor().to_string()).unwrap_or_default()).into();
+
             if context.contains_key(&k) {
                 result_exp = result_exp.replace(s, &context[&k]);
+                found_replaced = true;
+            } else if is_some_param {
+                if !replace_err_by_zero {
+                    return Err(anyhow!(format!("{input_expr}： {} not found.", &k)));
+                }
+                println!("{input_expr}： {} not found, use 0.", &k);
+                result_exp = result_exp.replace(s, " 0");
                 found_replaced = true;
             }
         }
@@ -208,45 +229,15 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             }).trim().to_string();
             found_replaced = true;
         }
+        // dbg!(&result_exp);
         new_exp = result_exp.clone();
         if !found_replaced {
             break;
         }
         found_replaced = false;
     }
-    //说明：因为 attrib 的原因，这里还需要再执行一遍处理，以防止有可能出现
-    //处理出现 DESIGN IPARA 1 这种没有 “[]”的情况
-    let re = Regex::new(r"(DESIGN?\s+)?([I|C|O|A)]?PARAM?)\s*(\d+)").unwrap();
-    let mut new_exp = result_exp.clone();
-    for caps in re.captures_iter(&result_exp) {
-        let s = &caps[0];
-        let c1 = caps.get(1).map_or("", |m| m.as_str());
-        let c2 = caps.get(2).map_or("", |m| m.as_str());
-        let c3 = caps.get(3).map_or("", |m| m.as_str());
-        let mut k = String::new();
-        if c1.starts_with("DESIGN") {
-            k = format!("DESI{}", c3).into();  //design's params
-        } else {
-            // if c2.ends_with("M") {
-            //     dbg!(c2);
-            //     k = c2[..c2.len()-1].into(); //忽略结尾的M
-            //     dbg!(&k);
-            // }
-            let four = &c2[0..4];
-            match four {
-                "DESP" | "DDES" | "WDES" => k = format!("DESI{}", c3).into(),
-                "ODES" | "ADES" | "OPAR" | "CPAR" | "APAR" | "PARA" | "IPAR" => k = format!("{four}{}", c3).into(),
-                _ => {}
-            }
-            // dbg!(&k);
-        }
-        if context.contains_key(&k) {
-            let re = Regex::new(format!(r"^{s}|\s{s}").as_str()).unwrap();
-            let rs = if context.contains_key(&k) { &*context[&k] } else { return Err(anyhow!("{k} 不存在")) };
-            new_exp = re.replace_all(&new_exp, format!(" {rs} ").as_str()).to_string();
-        }
-    }
-    let seg_strs: Vec<String> = new_exp.split_whitespace().map(|x| x.trim().into()).collect::<Vec<_>>();
+    // dbg!(&result_exp);
+    let seg_strs: Vec<String> = result_exp.split_whitespace().map(|x| x.trim().into()).collect::<Vec<_>>();
     if seg_strs.len() == 0 {
         return Ok(0.0);
     }
@@ -720,11 +711,11 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeM
         for cap in re.captures_iter(&dir_str) {
             if cap.len() == 6 {
                 let val_str = cap[2].to_string();
-                let val_result = eval_str_to_f64(&val_str, context, interface)?.to_string();
+                let val_result = eval_str_to_f64(&val_str, context, interface, true)?.to_string();
                 new_dir_str = dir_str.replace(&val_str, &val_result);
 
                 let val_str = cap[4].to_string();
-                let val_result = eval_str_to_f64(&val_str, context, interface)?.to_string();
+                let val_result = eval_str_to_f64(&val_str, context, interface, true)?.to_string();
                 new_dir_str = new_dir_str.replace(&val_str, &val_result);
                 is_three = true;
             }
@@ -737,7 +728,7 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeM
                 if cap.len() == 4 {
                     let val_str = cap[2].to_string();
                     // dbg!(&val_str);
-                    let val_result = eval_str_to_f64(&val_str, context, interface).unwrap_or_default().to_string();
+                    let val_result = eval_str_to_f64(&val_str, context, interface, true).unwrap_or_default().to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                     // dbg!(&new_dir_str);
                 }
