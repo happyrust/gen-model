@@ -540,13 +540,41 @@ pub async fn filter_negative_sibl_from_refnos(refnos: &Vec<RefU64>, database: &A
 
 /// 用户自定义条件模糊查询 aql
 pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, database: &ArDatabase) -> anyhow::Result<Vec<(RefU64, String)>> {
-    let keys = request.filter_refnos.into_iter()
+    let mut keys = request.filter_refnos.into_iter()
         .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
     let mut condition_map = HashSet::new();
-    request.filter_condition.iter().for_each(|x| if x.0 == ":CNPEdivco" {
-        condition_map.insert(x.0.to_string());
+    request.filter_condition.iter().for_each(|x| if x.0 == "MAJOR" {
+        condition_map.insert(x.1.clone());
     });
-
+    // 对专业进行过滤
+    // 先进行专业过滤查询
+    if !condition_map.is_empty() {
+        let aql = format!("
+            let refnos = ( for refno in {}
+                let v = document(refno)
+                @@major_filter_condition
+                return v._id )", serde_json::to_string(&keys).unwrap_or("[]".to_string()));
+        let mut filter_conditions = String::new();
+        for condition in &condition_map {
+            match condition.0 {
+                VagueSearchCondition::And => {
+                    filter_conditions.push_str(&format!("filter v.major == '{}' OR v.noun != 'SITE' ", condition.1));
+                }
+                VagueSearchCondition::Or => {
+                    if condition_map.len() > 1 {
+                        filter_conditions.push_str(&format!("|| v.major == '{}' OR v.noun != 'SITE' ", condition.1));
+                    }
+                }
+                VagueSearchCondition::Not => {
+                    filter_conditions.push_str(&format!("filter v.major != '{}' OR v.noun != 'SITE' ", condition.1));
+                }
+            }
+        }
+        let aql = aql.replace("@@major_filter_condition", &filter_conditions);
+        let aql = AqlQuery::new(&aql);
+        let result: Vec<String> = database.aql_query(aql).await?;
+        keys = result;
+    }
     // 生成aql模板
     let aql = format!("\
     for refno in {}
