@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use bevy::prelude::Vec3;
+use glam::Vec3;
 use crate::api::attr::query_implicit_attr;
 use crate::api::element::query_refno_type;
 use crate::aql_api::children::{query_children_eles, query_travel_children_aql};

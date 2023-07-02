@@ -8,7 +8,7 @@ use aios_core::geom_types::RvmGeoInfo;
 use aios_core::pdms_types::*;
 use anyhow::anyhow;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
-use bevy::prelude::{dbg, Transform};
+use bevy_transform::prelude::Transform;
 use futures::future::ok;
 use glam::{Mat3, Quat, Vec3, Vec4};
 use itertools::Itertools;
@@ -23,6 +23,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{ArDatabase, connect_arangodb};
 use crate::graph_db::structs::*;
 use aios_core::helper::*;
+use crate::aql_api::children::{query_deep_children_refnos_fuzzy, query_travel_children_with_types_aql};
 use crate::consts::{AQL_PDMS_ELES_COLLECTION};
 
 ///保存instance 数据到数据库
@@ -128,10 +129,8 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
             "#)
         .bind_var("refnos", refno_strs.clone())
         .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
-
         ;
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
-    // if geos_info.is_empty() { return Ok(ShapeInstancesData::default()); }
     let mut inst_info_map = HashMap::new();
     let mut inst_keys = geos_info.iter().map(|x| x.get_inst_key().to_string()).collect::<Vec<_>>();
     for g in geos_info {
@@ -141,7 +140,6 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     //还有的直段会放在branch上，需要特殊处理
 
     inst_keys.push("2".to_string());
-    // dbg!(&inst_keys);
     let mut inst_geos_map = HashMap::new();
     let aql = AqlQuery::new(r#"
             FOR inst_key in @inst_keys
@@ -151,14 +149,15 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
             "#)
         .bind_var("inst_keys", inst_keys);
     let inst_geos: Vec<EleInstGeosData> = database.aql_query(aql).await.unwrap();
-    // dbg!(inst_geos.len());
     for g in inst_geos {
         inst_geos_map.insert(g.inst_key, g);
     }
 
     let mut inst_tubi_map = HashMap::new();
     let mut all_refnos = inst_info_map.keys().map(|x| x.to_url_refno()).collect::<Vec<_>>();
-    all_refnos.extend_from_slice(&refno_strs);
+    //这里需要直接通过这个查询下面的所有的branch那些
+    let branch_refnos = query_deep_children_refnos_fuzzy(&database, refnos, &CATA_HAS_TUBI_GEO_NAMES).await?;
+    all_refnos.extend(branch_refnos.iter().map(|x| x.to_url_refno()));
     let aql = AqlQuery::new(r#"
             FOR r in @refnos
                 let f = document('pdms_inst_tubis', r)
@@ -171,7 +170,6 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     for g in inst_tubi {
         inst_tubi_map.insert(g.refno, g);
     }
-    // dbg!(&inst_tubi_map);
 
     return Ok(ShapeInstancesData{
         inst_info_map,

@@ -5,7 +5,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use std::sync::Arc;
 use aios_core::create_attas_structs::{ATTAPos, ATTAPosVec};
 use glam::Vec3;
-use bevy::prelude::dbg;
+
 
 
 pub async fn get_atta_pos(brans: Vec<(RefU64, f32)>, mgr: Arc<AiosDBManager>) -> anyhow::Result<ATTAPosVec> {

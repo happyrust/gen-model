@@ -212,18 +212,21 @@ pub async fn query_ancestor_name_of_type_aql(arango_database: &ArDatabase, refno
     Ok(Some(result.remove(0)))
 }
 
-/// 遍历refno获取所有子节点的PdmsElement
-pub async fn query_deep_children_refnos_fuzzy(arango_database: &ArDatabase, refno: RefU64, nouns: &[&str]) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+/// 遍历refno获取所有子节点的RefU64
+pub async fn query_deep_children_refnos_fuzzy(database: &ArDatabase, refno: &[RefU64], nouns: &[&str]) -> anyhow::Result<Vec<RefU64>> {
+    let refno_aqls =
+        refno.iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("\
-    FOR z in 1..2 INBOUND @id pdms_edges
-    filter z._key != null
-    filter z.noun in @nouns
-    return z._key
-    ").bind_var("id", refno_aql)
-        .bind_var("nouns", nouns)
-        ;
-    let results: Vec<RefU64> = arango_database.aql_query::<String>(aql).await?.iter()
+    for id in @ids
+        FOR z in 0..10 INBOUND id pdms_edges
+        prune z.noun in @nouns
+        filter z._key != null
+        filter z.noun in @nouns
+        return z._key
+    ")
+        .bind_var("ids", refno_aqls)
+        .bind_var("nouns", nouns);
+    let results: Vec<RefU64> = database.aql_query::<String>(aql).await?.iter()
         .map(|x| RefU64::from_str(x).unwrap_or_default()).collect();
     Ok(results)
 }

@@ -2,12 +2,14 @@ use std::collections::{HashMap, VecDeque};
 use std::dbg;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::pdms_types::{AiosStr, AttrMap, EleTreeNode, PdmsTree, RefU64, RefU64Vec};
+use aios_core::prim_geo::spine::Spine3D;
 use aios_core::shape::pdms_shape::PlantMesh;
 use smol_str::SmolStr;
 use async_trait::async_trait;
 use dashmap::mapref::one::Ref;
 use id_tree::NodeId;
-use bevy::prelude::*;
+use bevy_transform::prelude::*;
+use glam::Vec3;
 use parry3d::bounding_volume::Aabb;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
@@ -27,6 +29,9 @@ pub trait PdmsDataInterface : Send + Sync{
 
     ///获得属性
     async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
+
+    ///获得参考号类型
+    fn get_type_name(&self, refno: RefU64) -> anyhow::Result<String>;
 
     ///从本地获取属性数据
     fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
@@ -76,7 +81,7 @@ pub trait PdmsDataInterface : Send + Sync{
     async fn get_children_nodes(&self, refno: RefU64) -> anyhow::Result<Vec<EleTreeNode>>;
 
     ///获得子节点的属性集合
-    async fn get_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>>;
+    fn get_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>>;
 
     ///获得子节点的refno集合
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec>;
@@ -123,6 +128,13 @@ pub trait PdmsDataInterface : Send + Sync{
     ///获取当前节点深度遍历后的所有子节点, 是否指定目标节点
     async fn get_travel_children_attrs(&self, refno:RefU64, nouns: &[&str]) -> anyhow::Result<Vec<AttrMap>>;
 
+
+    /*******  几何相关算法    ********/
+
     ///获得在一定范围的构件参考号列表
     async fn get_refnos_within_bound_radius(&self, refno: RefU64, distance: f32) -> anyhow::Result<Vec<RefU64>>;
+
+    ///获得spline的路径，包括直线路径，圆弧路径
+    fn get_spline_path(&self, refno: RefU64) -> anyhow::Result<Vec<Spine3D>>;
+
 }

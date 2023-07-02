@@ -1,12 +1,14 @@
-use std::collections::HashMap;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
+use std::collections::HashMap;
 // use bevy::utils::HashMap;
-use bitflags::bitflags;
-use dashmap::DashMap;
-use crate::aql_api::children::{query_travel_children_with_types_and_cata_hash, query_travel_children_with_types_aql};
+use crate::aql_api::children::{
+    query_travel_children_with_types_and_cata_hash, query_travel_children_with_types_aql,
+};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use bitflags::bitflags;
+use dashmap::DashMap;
 
 // pub enum GeoEnum {
 //     ALL,
@@ -48,7 +50,9 @@ impl AiosDBManager {
 
         if !is_debug {
             for &db_no in db_nos {
-                let refnos = self.get_refnos_by_types(db_option.project_name.as_str(), &["SITE"], &[db_no]).await?;
+                let refnos = self
+                    .get_refnos_by_types(db_option.project_name.as_str(), &["SITE"], &[db_no])
+                    .await?;
                 target_refnos.extend_from_slice(&refnos);
             }
         }
@@ -56,9 +60,13 @@ impl AiosDBManager {
         Ok(target_refnos)
     }
 
-
     ///获取待调试或者整个db的参考号集合
-    pub async fn get_gen_model_target_refnos(&self, geo_type: GeoEnum, db_nos: &[i32], is_parent: bool) -> anyhow::Result<Vec<RefU64>> {
+    pub async fn get_gen_model_target_refnos(
+        &self,
+        geo_type: GeoEnum,
+        db_nos: &[i32],
+        is_parent: bool,
+    ) -> anyhow::Result<Vec<RefU64>> {
         let db_option = &self.db_option;
         let database = self.get_arango_db().await?;
         let mut target_refnos = vec![];
@@ -86,8 +94,13 @@ impl AiosDBManager {
                         if let Some(k) = self.query_element(root_refno).await? {
                             let mut add = false;
 
-                            if let Some(owner_ele) = self.query_element(RefU64::from_url_refno(&k.owner).unwrap()).await? {
-                                if CATA_HAS_TUBI_GEO_NAMES.contains(&owner_ele.noun.as_str()) {
+                            if let Some(owner_ele) = self
+                                .query_element(RefU64::from_url_refno(&k.owner).unwrap())
+                                .await?
+                            {
+                                if CATA_HAS_TUBI_GEO_NAMES.contains(&owner_ele.noun.as_str())
+                                    || CATA_HAS_TUBI_GEO_NAMES.contains(&k.noun.as_str())
+                                {
                                     add = geo_type == GeoEnum::CATA_BRAN_AND_HANGER_REUSE;
                                 } else if CATA_SINGLE_REUSE_GEO_NAMES.contains(&k.noun.as_str()) {
                                     add = geo_type == GeoEnum::CATA_SINGLE_REUSE;
@@ -103,34 +116,34 @@ impl AiosDBManager {
                         }
                     } else {
                         query_travel_children_with_types_aql(
-                            &database,
-                            root_refno,
-                            types,
-                            is_parent,
+                            &database, root_refno, types, is_parent,
                         )
-                            .await?
-                            .iter()
-                            .for_each(|x| target_refnos.push(x.refno));
+                        .await?
+                        .iter()
+                        .for_each(|x| target_refnos.push(x.refno));
                     }
                 }
             }
         }
 
         if !is_debug {
-            target_refnos.extend_from_slice(&self
-                .get_refnos_by_types(
-                    db_option.project_name.as_str(),
-                    types,
-                    db_nos,
-                )
-                .await?);
+            target_refnos.extend_from_slice(
+                &self
+                    .get_refnos_by_types(db_option.project_name.as_str(), types, db_nos)
+                    .await?,
+            );
         }
 
         Ok(target_refnos)
     }
 
-
-    pub async fn get_gen_model_map_by_cata_hash(&self, geo_type: GeoEnum, db_nos: &[i32], is_parent: bool, skip_exist: bool) -> anyhow::Result<DashMap<String, CataHashRefnoKV>> {
+    pub async fn get_gen_model_map_by_cata_hash(
+        &self,
+        geo_type: GeoEnum,
+        db_nos: &[i32],
+        is_parent: bool,
+        skip_exist: bool,
+    ) -> anyhow::Result<DashMap<String, CataHashRefnoKV>> {
         let db_option = &self.db_option;
         let database = self.get_arango_db().await?;
         let mut target_refnos_map = DashMap::new();
@@ -146,17 +159,15 @@ impl AiosDBManager {
             _ => &[],
         };
 
-        let mut root_refnos =
-            if let Some(d) = &db_option.debug_root_refnos {
-                d.iter().map(|x| RefU64::from_refno_str(x).unwrap_or_default()).collect::<Vec<_>>()
-            } else {
-                self
-                    .get_refnos_by_types(
-                        db_option.project_name.as_str(),
-                        &["SITE"],
-                        db_nos,
-                    ).await?.0
-            };
+        let mut root_refnos = if let Some(d) = &db_option.debug_root_refnos {
+            d.iter()
+                .map(|x| RefU64::from_refno_str(x).unwrap_or_default())
+                .collect::<Vec<_>>()
+        } else {
+            self.get_refnos_by_types(db_option.project_name.as_str(), &["SITE"], db_nos)
+                .await?
+                .0
+        };
 
         //是否是叶子节点
         for root_refno in root_refnos {
@@ -170,7 +181,10 @@ impl AiosDBManager {
                 if let Some(k) = self.query_element(root_refno).await? {
                     let mut add = false;
 
-                    if let Some(owner_ele) = self.query_element(RefU64::from_url_refno(&k.owner).unwrap()).await? {
+                    if let Some(owner_ele) = self
+                        .query_element(RefU64::from_url_refno(&k.owner).unwrap())
+                        .await?
+                    {
                         if owner_ele.noun.as_str() == "BRAN" || owner_ele.noun.as_str() == "HANG" {
                             add = geo_type == GeoEnum::CATA_BRAN_AND_HANGER_REUSE;
                         } else if CATA_SINGLE_REUSE_GEO_NAMES.contains(&k.noun.as_str()) {
@@ -181,11 +195,14 @@ impl AiosDBManager {
                     }
                     if add {
                         if let Some(r) = k.cata_hash.clone() {
-                            target_refnos_map.insert(r.clone(), CataHashRefnoKV {
-                                cata_hash: Some(r),
-                                exist_geo: None,
-                                group_refnos: vec![root_refno],
-                            });
+                            target_refnos_map.insert(
+                                r.clone(),
+                                CataHashRefnoKV {
+                                    cata_hash: Some(r),
+                                    exist_geo: None,
+                                    group_refnos: vec![root_refno],
+                                },
+                            );
                         }
                     }
                 }
@@ -197,11 +214,10 @@ impl AiosDBManager {
                     check_parent,
                     skip_exist,
                 )
-                    .await?;
+                .await?;
                 // dbg!(s.len());
                 for k in s {
-                    if k.cata_hash.is_none() { continue; }
-                    target_refnos_map.insert(k.cata_hash.clone().unwrap_or_default(), k);
+                    target_refnos_map.insert(k.cata_hash.unwrap_or_default(), k);
                 }
             }
         }

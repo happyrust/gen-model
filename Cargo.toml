@@ -6,7 +6,6 @@ edition = "2021"
 [features]
 default = []
 truck = []
-#opencascade = ["dep:opencascade"]  #"dep:opencascade"
 viewer = []  #是否开启视图
 
 [dependencies]
@@ -38,26 +37,30 @@ bitflags = "1.3.2"
 bitvec = "1.0.0"
 chrono = "0.4.22"
 #geo = { path = "../crates/geo/geo" }
-nalgebra = { version = "0.32.2", features = ["serde", "rkyv", "glam023"] }
-parry3d = { version = "0.13.3", features = ["serde-serialize", "rkyv"] }
+nalgebra = { path="../crates/nalgebra", features = ["serde", "rkyv", "glam023"] }
+parry3d = { path="../crates/parry/crates/parry3d", features = ["serde-serialize", "rkyv"] }
 
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path = "../crates/aios-core" }
-bevy = { path = "../crates/bevy", default-features = false }
+bevy_transform = { path = "../crates/bevy/crates/bevy_transform"}
+
 csg = { path = "../crates/csgrs/csg" }
 arangors_lite = { path = "../crates/arangors-lite"}
 #heed = {path = "../crates/heed/heed"}
 bb8-arangodb = { path = "../crates/bb8-arangodb" }
 bb8 = "0.8.1"
 
-clap = { version = "3.1.18", features = ["derive"] }
+tobj = { path = "../crates/tobj", features = ["merging"]}
+
+clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "5.4.0", features = ["serde"] }
 tokio = { vertion = "1.18.2", features = ["full"] }
 serde = { version = "1.0.137", features = ["derive"] }
 id_tree = { version = "1.8.0", features = ["serde_support"] }
-glam = { version = "0.23.0", features = ["rkyv"] }
+glam = { version = "0.24.0", features = ["rkyv"] }
 cached = "0.43.0"
 rkyv = "0.7.42"
+debug_print = "1.0.0"
 
 
 #造型功能，先在database测试
@@ -69,6 +72,7 @@ redb = "0.22.0"
 #geo = "0.24.1"
 
 
+
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
 
@@ -77,6 +81,7 @@ version = "0.6.3"
 default-features = false
 features = [
     "runtime-async-std-rustls",
+#    "runtime-async-std-native-tls",
     "macros",
     "mysql",
     "tls",

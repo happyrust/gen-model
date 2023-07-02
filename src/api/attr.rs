@@ -140,11 +140,15 @@ pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic,
             // exclude_columns = column_names.drain_filter(|x| {
             //     !names_map.value().contains(*x)
             // }).collect();
-            column_names.iter().for_each(|x| {
-                if names_map.value().contains(*x) {
-                    exclude_columns.push(*x);
+            let mut i = 0;
+            while i < column_names.len() {
+                if !names_map.value().contains(column_names[i]) {
+                    exclude_columns.push(column_names[i]);
+                    column_names.swap_remove(i);
+                } else {
+                    i += 1;
                 }
-            })
+            }
         }
         column_names
     } else {
@@ -213,10 +217,10 @@ pub async fn query_uda_attr(att_type: Vec<i32>, pool: &Pool<MySql>) -> anyhow::R
 pub async fn query_refno_uda_value(refno: RefU64, uda_name: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<AttrVal>> {
     let uda_name = if uda_name.starts_with(":") { uda_name[1..].to_string() } else { uda_name.to_string() };
     // 查询 uda 对应的 ukey
-    let ukey = query_uda_ukey(&uda_name, pool).await?;
+    let ukey = query_uda_ukey(&uda_name, pool).await? as u32;
     // 再找到显示属性中对应的值
     let explicit_attr = query_explicit_attr(refno, pool).await?;
-    let uda_value = explicit_attr.get(&(ukey as u32));
+    let uda_value = explicit_attr.get(&ukey);
     Ok(uda_value.map(|x| x.clone()))
 }
 

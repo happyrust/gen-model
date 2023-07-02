@@ -136,7 +136,7 @@ pub async fn query_room_name_from_refno_aql(refno: RefU64, database: &ArDatabase
     }
 }
 
-/// 传入参考号集合 返回该参考号所在的房间
+// 传入参考号集合 返回该参考号所在的房间
 pub async fn query_room_name_from_refnos_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsNodeBelongRoomName>> {
     let refnos = refnos.into_iter().map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("

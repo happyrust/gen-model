@@ -20,17 +20,18 @@ use aios_core::tool::db_tool::{db1_dehash, db1_hash, GLOBAL_UDA_NAME_MAP};
 use tokio::sync::{mpsc, RwLock};
 use aios_core::pdms_data::ScomInfo;
 use aios_core::parsed_data::CateGeomsInfo;
+use aios_core::prim_geo::category::convert_to_brep_shapes;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
 use aios_core::parsed_data::geo_params_data::CateGeoParam::TubeImplied;
 use std::default::default;
-use bevy::prelude::Transform;
+use bevy_transform::prelude::Transform;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use std::mem::take;
 use aios_core::prim_geo::cylinder::SCylinder;
 use aios_core::prim_geo::TUBI_GEO_HASH;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use approx::abs_diff_eq;
-use aios_core::shape::pdms_shape::{PlantMesh, VerifiedShape};
+use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use futures::StreamExt;
 // use heed::byteorder::BE;
 // use heed::EnvOpenOptions;
@@ -47,10 +48,11 @@ use crate::aql_api::pdms_mesh::{query_all_geo_hashs, query_pdms_mesh_aql};
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
 use crate::cata::resolve_helper::eval_str_to_f32;
+use crate::cata::sctn::geo::create_profile_geos;
 use crate::consts::{GLOBAL_DATABASE, PDMS_INFO_DB, PUHUA_MATERIAL_DATABASE};
 use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::structs::{AIOSAxisMap, };
+use crate::data_interface::structs::{AIOSAxisMap, CateBrepShapeMap};
 use crate::data_interface::tidb_manager::{AiosDBManager, CATAEXPRCONTEXT_MAP};
 use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_PLIN_MAP, CACHED_REFNO_BASIC_MAP};
 use crate::graph_db::pdms_arango::{ArDatabase, connect_arangodb};
@@ -70,6 +72,11 @@ static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> 
     m.insert("ROOM", PdmsGenericType::ROOM);
     m.insert("STRU", PdmsGenericType::STRU);
     m.insert("PANE", PdmsGenericType::PANE);
+    m.insert("HANG", PdmsGenericType::HANG);
+    m.insert("WALL", PdmsGenericType::WALL);
+    m.insert("GWALL", PdmsGenericType::WALL);
+    m.insert("CWALL", PdmsGenericType::WALL);
+    m.insert("STWALL", PdmsGenericType::WALL);
     m.insert("CFLOOR", PdmsGenericType::CFLOOR);
     m.insert("FLOOR", PdmsGenericType::FLOOR);
     m.insert("EXTR", PdmsGenericType::EXTR);
@@ -77,25 +84,15 @@ static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> 
     m
 });
 
-static GENRIC_NOUN_NAMES: Lazy<Vec<SmolStr>> = Lazy::new(|| {
-    vec![
-        "EQUI".into(),
-        "PIPE".into(),
-        "STRU".into(),
-        "ROOM".into(),
-        "STWALL".into(),
-        "FLOOR".into(),
-    ]
-});
 
 impl AiosDBManager {
     /// 从默认配置文件初始化
     pub async fn init_form_config() -> anyhow::Result<Self> {
         let db_option = Self::get_db_option()?;
         let mut mgr = Self::init(&db_option).await?;
-        dbg!("正在初始化uda");
+        println!("正在初始化uda");
         mgr.init_uda_map().await?;
-        dbg!("uda初始化完成");
+        println!("uda初始化完成");
         mgr.init_mdb(
             &db_option.project_name,
             &db_option.mdb_name,
@@ -230,7 +227,7 @@ impl AiosDBManager {
             let Ok(room_root_refno) = RefU64::from_refno_str(r) else {
                 continue;
             };
-            let panes = query_deep_children_refnos_fuzzy(&database, room_root_refno, &["PANE"]).await?;
+            let panes = query_deep_children_refnos_fuzzy(&database, &[room_root_refno], &["PANE"]).await?;
             // dbg!(&panes);
             println!("房间下的panel数量为: {}", panes.len());
             let inst_data = query_insts_shape_data(&database, &panes).await?;
@@ -384,28 +381,11 @@ impl AiosDBManager {
         cache_mdb_site_map(mdb, module, &project_pool).await;
         self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
         let database = self.get_arango_db().await?;
-        // if need_sync_refno_basic {
-        //     for project in &self.db_option.included_projects {
-        //         if let Some(kv) = self.project_map.get(project) {
-        //             let dbnums = self.mdb_dbnums.iter().cloned().collect::<Vec<_>>();
-        //             if let Ok(m) = cache_plin_plax(
-        //                 kv.value(),
-        //                 &dbnums,
-        //                 &database,
-        //             ).await {
-        //                 for (k, v) in m {
-        //                     CACHED_PLIN_MAP.insert(k, &v.into());
-        //                 }
-        //             }
-        //         }
-        //     }
-        // }
         if need_sync_refno_basic {
-            CACHED_REFNO_BASIC_MAP.save_to_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
-            // CACHED_PLIN_MAP.save_to_file(stringify!(CACHED_PLIN_MAP))?;
+            CACHED_REFNO_BASIC_MAP.save_to_file(stringify!(CACHED_REFNO_BASIC_MAP)).expect("CACHED_REFNO_BASIC_MAP 保存文件失败。");
         } else {
-            CACHED_REFNO_BASIC_MAP.load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP))?;
-            // CACHED_PLIN_MAP.load_map_from_file(stringify!(CACHED_PLIN_MAP))?;
+            println!("正在加载 CACHED_REFNO_BASIC_MAP");
+            CACHED_REFNO_BASIC_MAP.load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP)).expect("CACHED_REFNO_BASIC_MAP 文件不存在。");
         }
         println!("加载 CACHED_REFNO_BASIC_MAP 成功");
 
@@ -600,7 +580,7 @@ impl AiosDBManager {
             //     continue;
             // };
             dbg!(&mdb_refno);
-            let Ok(mdb_attr) = self.get_attr(mdb_refno).await else {
+            let Ok(mdb_attr) = self.get_attr_from_localdb(mdb_refno) else {
                 continue;
             };
             let mdb_name = mdb_attr.get_name().to_string();

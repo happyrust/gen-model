@@ -4,7 +4,6 @@ use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::db_number::DbNumMgr;
 use aios_core::pdms_types::UdaMajorType::{E, T, V};
 use aios_core::pdms_types::*;
-use bevy::utils::default;
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::{Isometry, Point};
 use std::collections::HashMap;

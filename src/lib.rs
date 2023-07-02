@@ -1,4 +1,3 @@
-// #![feature(drain_filter)]
 #![feature(let_chains)]
 #![feature(default_free_fn)]
 #![feature(async_closure)]

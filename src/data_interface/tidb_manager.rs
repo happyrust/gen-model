@@ -7,19 +7,20 @@ use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_types::*;
+use aios_core::prim_geo::category::{CateBrepShape, convert_to_brep_shapes};
 use aios_core::prim_geo::extrusion::Extrusion;
 use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
 use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
 use aios_core::prim_geo::wire::CurveType;
-use aios_core::shape::pdms_shape::{PlantMesh, VerifiedShape};
+use aios_core::shape::pdms_shape::{BrepShapeTrait, LEN_TOL, PlantMesh, TRI_TOL, VerifiedShape};
 use aios_core::tool::db_tool::{db1_hash, GLOBAL_UDA_NAME_MAP};
 use aios_core::tool::math_tool;
 use anyhow::anyhow;
 use approx::{abs_diff_eq, abs_diff_ne};
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use async_trait::async_trait;
-use bevy::prelude::{dbg, Transform};
+use bevy_transform::prelude::Transform;
 use config::{Config, ConfigError, Environment, File};
 use dashmap::mapref::one::Ref;
 use dashmap::{DashMap, DashSet};
@@ -48,6 +49,8 @@ use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBo
 use aios_core::options::DbOption;
 use aios_core::pdms_data::ScomInfo;
 use aios_core::prim_geo;
+use aios_core::prim_geo::spine::{Spine3D, SpineCurveType, SweepPath3D};
+use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use log::{error, info};
@@ -68,6 +71,8 @@ use crate::cata::direction_parse::parse_expr_to_dir;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
 use crate::cata::resolve_helper::{eval_str_to_f32, parse_str_axis_to_vec3};
+use crate::cata::sctn;
+use crate::cata::sctn::geo::create_profile_geos;
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
@@ -133,7 +138,7 @@ pub struct AiosDBManager {
 
     pub arango_pool: ArPool,
 
-    pub cached_world_transforms_map: Arc<DashMap<RefU64, bevy::prelude::Transform>>,
+    pub cached_world_transforms_map: Arc<DashMap<RefU64, bevy_transform::prelude::Transform>>,
 
     pub cache_module_numbdbs: BTreeSet<i32>,
 
@@ -177,6 +182,12 @@ impl PdmsDataInterface for AiosDBManager {
         Err(anyhow!("Not found att"))
     }
 
+    fn get_type_name(&self, refno: RefU64) -> anyhow::Result<String> {
+        self.get_refno_basic(refno).map(|x|
+            Ok(x.get_type().to_string())
+        ).unwrap_or(Ok("unset".to_string()))
+    }
+
     //get_children_from_localdb
     fn get_children_from_localdb(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
         for project in &self.db_option.included_projects {
@@ -209,17 +220,17 @@ impl PdmsDataInterface for AiosDBManager {
         Err(anyhow!(format!("{refno} att not exist")))
     }
 
-    fn get_mesh_from_localdb(&self, geo_hash: u64) -> anyhow::Result<PlantMesh>{
+    fn get_mesh_from_localdb(&self, geo_hash: u64) -> anyhow::Result<PlantMesh> {
         let k = geo_hash.to_be_bytes();
-        if let Some(bytes) = self.local_mesh_db.get(&k)?{
+        if let Some(bytes) = self.local_mesh_db.get(&k)? {
             return PlantMesh::from_compress_bytes(bytes.as_ref());
         }
         Err(anyhow!(format!("{geo_hash} mesh not exist")))
     }
 
-    fn get_mesh_aabb_from_localdb(&self, geo_hash: u64) -> anyhow::Result<Aabb>{
+    fn get_mesh_aabb_from_localdb(&self, geo_hash: u64) -> anyhow::Result<Aabb> {
         let k = geo_hash.to_be_bytes();
-        if let Some(bytes) = self.local_mesh_aabb_db.get(&k)?{
+        if let Some(bytes) = self.local_mesh_aabb_db.get(&k)? {
             return Aabb::from_bytes(bytes.as_ref());
         }
         Err(anyhow!(format!("{geo_hash} aabb not exist.")))
@@ -328,7 +339,7 @@ impl PdmsDataInterface for AiosDBManager {
         todo!()
     }
 
-    /// 获得缓存的refno基本信息, todo 改成使用sql的intersect
+    /// 获得缓存的refno基本信息
     #[inline]
     fn get_refno_basic(&self, refno: RefU64) -> Option<Ref<RefU64, CachedRefBasic>> {
         if !refno.is_valid() {
@@ -396,13 +407,13 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获得children的属性集合
     //todo use local db to get children refnos
-    async fn get_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
+    fn get_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
         // if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
         //     let children = query_children(refno, &project_pool).await?;
         //
         // }
-        if let Ok(children) = self.get_children_from_localdb(refno){
+        if let Ok(children) = self.get_children_from_localdb(refno) {
             for child in children {
                 let attr = self.get_attr_from_localdb(child).unwrap_or_default();
                 r.push(attr);
@@ -413,7 +424,6 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获得参考号下的子节点
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
-
         self.get_children_from_localdb(refno)
         // let mut result = RefU64Vec::default();
         // if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
@@ -629,6 +639,7 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(ancestors)
     }
 
+
     ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
     async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
         let mut ancestors = VecDeque::new();
@@ -661,44 +672,69 @@ impl PdmsDataInterface for AiosDBManager {
                     jusl_vec = param.pt;
                 }
             }
-            //先获得下面的PLOO
-            let owner = ref_basic.owner;
-            //假定为当前的owner 就是形集的所有者（墙，柱子）等
-            let mut splin_owner = ref_basic.owner;
-            if let Some(owner_basic) = self.get_refno_basic(owner) {
-                //土建特殊情况的一些处理
-                match owner_basic.get_type() {
-                    "FLOOR" => {
-                        let sjus = att.get_str("JUSL").unwrap_or("unset");
-                        let height = self
-                            .get_attr(refno)
-                            .await?
-                            .get_f32("HEIG")
-                            .unwrap_or_default();
-                        let mut off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                            -height
-                        } else if sjus == "UCEN" || sjus == "DCEN" {
-                            -height / 2.0
-                        } else {
-                            0.0
-                        };
-                        pos.z += off_z;
-                    }
-                    "JLDATU" => {
-                        let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
-                        let pkdi = att.get_f32("PKDI").unwrap_or_default();
-                    }
-                    "PLDATU" => {
-                        //需要获得PLIN 的值
-                        let grand = owner_basic.owner;
-                        let grand_att = self.get_attr(grand).await?;
-                        let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
-                        let pkdi = att.get_f32("PKDI").unwrap_or_default();
-                        //获取比例的位置
-                        pos = pos + zdis;
-                    }
-                    _ => {}
+
+            let check_type = if type_name == "PLOO" || type_name == "LOOP" {
+                self.get_refno_basic(ref_basic.owner).unwrap().get_type().to_string()
+            } else {
+                type_name.to_string()
+            };
+            //土建特殊情况的一些处理
+            match check_type.as_str() {
+                "FLOOR" => {
+                    let sjus = att.get_str("JUSL").unwrap_or("unset");
+                    let height = self
+                        .get_attr(refno)
+                        .await?
+                        .get_f32("HEIG")
+                        .unwrap_or_default();
+                    let mut off_z = if sjus == "UTOP" || sjus == "DTOP" {
+                        -height
+                    } else if sjus == "UCEN" || sjus == "DCEN" {
+                        -height / 2.0
+                    } else {
+                        0.0
+                    };
+                    pos.z += off_z;
                 }
+                "SBFI" => {
+                    let axis_dir = att.get_vec3("ZDIR").unwrap_or_default().normalize();
+                    // let axis_dir = Vec3::X;
+                    if axis_dir.is_normalized() {
+                        quat = Quat::from_rotation_arc(-Vec3::Z, axis_dir);
+                        // let d = axis_dir.dot(Vec3::Z).abs();
+                        // let mut ref_axis = if abs_diff_eq!(1.0, d) {
+                        //     Vec3::Y
+                        // } else {
+                        //     Vec3::Z
+                        // };
+                        // let p_axis = ref_axis.cross(axis_dir).normalize();
+                        // let y_axis = p_axis.cross(axis_dir).normalize();
+                        // quat = Quat::from_mat3(&Mat3::from_cols(
+                        //     p_axis,
+                        //     axis_dir,
+                        //     y_axis,
+                        // ));
+                        dbg!(quat_to_pdms_ori_str(&quat));
+                    }
+                }
+                "CMPF" => {
+                    quat = Quat::from_mat3(&Mat3::from_cols(
+                        Vec3::X,
+                        Vec3::NEG_Y,
+                        Vec3::NEG_Z,
+                    ));
+                }
+                //Justification Line Datum
+                "JLDATU" => {
+                    let zdist = att.get_f32("ZDIS").unwrap_or_default();
+                    let pkdi = att.get_f32("PKDI").unwrap_or_default();
+                    let result = self.cal_zdis_pkdi_in_section(ref_basic.owner, pkdi, zdist);
+                    pos += result.1;
+                    quat *= result.0;
+                }
+                //Positioning Line Datum
+                "PLDATU" => {}
+                _ => {}
             }
 
             let mut quat_v = att.get_rotation();
@@ -706,31 +742,28 @@ impl PdmsDataInterface for AiosDBManager {
             if quat_v.is_some() {
                 quat = quat_v.unwrap();
             } else {
-                let extru_dir: Vec3 = if let Some(poss) = att.get_poss() &&
-                    let Some(pose) = att.get_pose()
-                {
+                if let Some(poss) = att.get_poss() &&
+                    let Some(pose) = att.get_pose() {
                     need_bangle = true;
-                    (pose - poss).normalize()
-                } else {
-                    Vec3::Z
-                };
-                if extru_dir.is_nan() {
-                    return Ok(None);
-                }
-                let d = extru_dir.dot(Vec3::Z).abs();
-                let mut ref_axis = if abs_diff_eq!(1.0, d) {
-                    Vec3::Y
-                } else {
-                    Vec3::Z
-                };
+                    let extru_dir = (pose - poss).normalize();
+                    if !extru_dir.is_normalized() {
+                        return Ok(None);
+                    }
+                    let d = extru_dir.dot(Vec3::Z).abs();
+                    let mut ref_axis = if abs_diff_eq!(1.0, d) {
+                        Vec3::Y
+                    } else {
+                        Vec3::Z
+                    };
 
-                let p_axis = ref_axis.cross(extru_dir).normalize();
-                let y_axis = extru_dir.cross(p_axis).normalize();
-                quat = Quat::from_mat3(&Mat3::from_cols_array_2d(&[
-                    p_axis.to_array(),
-                    y_axis.to_array(),
-                    extru_dir.to_array(),
-                ]));
+                    let p_axis = ref_axis.cross(extru_dir).normalize();
+                    let y_axis = extru_dir.cross(p_axis).normalize();
+                    quat = Quat::from_mat3(&Mat3::from_cols(
+                        p_axis,
+                        y_axis,
+                        extru_dir,
+                    ));
+                }
             }
 
             if let Some(bangle) = att.get_f32("BANG") {
@@ -748,38 +781,40 @@ impl PdmsDataInterface for AiosDBManager {
                 let mut plin_pos = Vec3::new(0.0, 0.0, 0.0);
                 let mut pline_plax = -Vec3::X;
 
-                let delta_vec = att.get_vec3("DELP").unwrap_or_default() /*+ plin_pos*/;
+                let delta_vec = att.get_vec3("DELP").unwrap_or_default();
+                //todo 这里不一定正确
                 let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
                 let bangle = att.get_f32("BANG").unwrap_or_default();
-                let owner = att.get_owner().unwrap_or_default();
+
+                let mut tmp_owner = ref_basic.get_owner();
                 // POSL 的处理, 获得父节点的形集
-                if let Some(param) = self.query_pline(owner, pos_line).await? {
+                let mut plin_param = None;
+                while plin_param.is_none() {
+                    plin_param = self.query_pline(tmp_owner, pos_line).await?;
+                    if plin_param.is_some() {
+                        break;
+                    }
+                    if let Some(t) = self.get_refno_basic(ref_basic.owner) {
+                        tmp_owner = t.get_owner();
+                    } else {
+                        break;
+                    }
+                }
+                if let Some(param) = plin_param {
+                    // dbg!(&param);
                     plin_pos = param.pt;
                     pline_plax = param.plax;
                 }
-                // let pos_line =
-                //     query_pline_value(&database, att.get_owner().unwrap(), pos_line)
-                //         .await?;
-                // if let Some(pos_line) = pos_line {
-                //     // dbg!(&pos_line);
-                //     let owner = ref_basic.owner;
-                //     //对于fitting这种，需要取parent的值
-                //     let x = self.resolve_expression_to_f32(&pos_line[0], owner).await?;
-                //     let y = self.resolve_expression_to_f32(&pos_line[1], owner).await?;
-                //     plin_pos = Vec3::new(x, y, 0.0);
-                // }
-                // if let Some(v) = CACHED_PLIN_MAP.get(&refno) {
-                //     pline_plax = parse_expr_to_dir(&v.value()).unwrap_or(Vec3::Z);
-                // }
                 let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
                 let y_axis = Vec3::Z;
-                let z_axis = pline_plax;
+                let z_axis = -pline_plax;
                 let x_axis = y_axis.cross(z_axis).normalize();
-                let quat = Quat::from_mat3(&Mat3::from_cols_array_2d(&[
-                    x_axis.to_array(),
-                    y_axis.to_array(),
-                    z_axis.to_array(),
-                ]));
+                let quat = Quat::from_mat3(&Mat3::from_cols(
+                    x_axis,
+                    y_axis,
+                    z_axis,
+                ));
+                // dbg!(quat_to_pdms_ori_str(&quat));
                 translation = translation
                     + rotation * (pos + zdis + plin_pos - jusl_vec)
                     + rotation * quat * bangle_rot * delta_vec;
@@ -816,7 +851,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///获得子节点集合的属性
     async fn get_travel_children_attrs(&self, refno: RefU64, nouns: &[&str]) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
-        let children = query_deep_children_refnos_fuzzy(&self.get_arango_db().await?, refno, nouns).await?;
+        let children = query_deep_children_refnos_fuzzy(&self.get_arango_db().await?, &[refno], nouns).await?;
         for child in children {
             let attr = self.get_attr_from_localdb(child).unwrap_or_default();
             r.push(attr);
@@ -835,8 +870,81 @@ impl PdmsDataInterface for AiosDBManager {
         let pos = instances.inst_info_map.iter().next().unwrap().1.world_transform.translation;
         let target_refnos = rtree.query_within_distance(pos, distance)
             .collect();
-        ;
 
         Ok(target_refnos)
+    }
+
+
+    ///获取对应的截面sweep 线，包含了sctn的处理情况
+    fn get_spline_path(&self, refno: RefU64) -> anyhow::Result<Vec<Spine3D>> {
+        let children_refs = self.get_children_from_localdb(refno)?;
+        let mut paths = vec![];
+        for x in children_refs {
+            let type_name = self.get_type_name(x)?;
+            if type_name != "SPINE" {
+                continue;
+            }
+            let spine_att = self.get_attr_from_localdb(x)?;
+            // drns = spine_att.get_vec3("DRNS").unwrap_or_default();
+            // drne = spine_att.get_vec3("DRNE").unwrap_or_default();
+            let children_atts = self.get_children_attrs(x)?;
+            if (children_atts.len() - 1) % 2 == 0 {
+                for i in 0..(children_atts.len() - 1) / 2 {
+                    let att1 = &(children_atts[2 * i]);
+                    let att2 = &(children_atts[2 * i + 1]);
+                    let att3 = &(children_atts[2 * i + 2]);
+                    let pt0 = att1.get_position().unwrap_or_default();
+                    let pt1 = att3.get_position().unwrap_or_default();
+                    let mid_pt = att2.get_position().unwrap_or_default();
+                    let cur_type_str = att2.get_str("CURTYP").unwrap_or("unset");
+                    let curve_type = match cur_type_str {
+                        "CENT" => { SpineCurveType::CENT }
+                        "THRU" => { SpineCurveType::THRU }
+                        _ => { SpineCurveType::UNKNOWN }
+                    };
+                    paths.push(Spine3D {
+                        pt0,
+                        pt1,
+                        thru_pt: mid_pt,
+                        center_pt: mid_pt,
+                        cond_pos: att2.get_vec3("CPOS").unwrap_or_default(),
+                        curve_type,
+                        preferred_dir: spine_att.get_vec3("YDIR").unwrap_or(Vec3::Z),
+                        radius: att2.get_f32("RADI").unwrap_or_default(),
+                    });
+                }
+            } else if children_atts.len() == 2 {
+                let att1 = &children_atts[0];
+                let att2 = &children_atts[1];
+                let pt0 = att1.get_position().unwrap_or_default();
+                let pt1 = att2.get_position().unwrap_or_default();
+                if att1.get_type() == "POINSP" && att2.get_type() == "POINSP" {
+                    paths.push(Spine3D {
+                        pt0,
+                        pt1,
+                        curve_type: SpineCurveType::LINE,
+                        preferred_dir: spine_att.get_vec3("YDIR").unwrap_or(Vec3::Z),
+                        ..default()
+                    });
+                }
+            }
+        }
+
+        //考虑sctn这种直接拉升出来的情况
+        if paths.is_empty() {
+            let att = self.get_attr_from_localdb(refno)?;
+            if let Some(poss) = att.get_poss() &&
+                let Some(pose) = att.get_pose() {
+                paths.push(Spine3D {
+                    pt0: poss,
+                    pt1: pose,
+                    curve_type: SpineCurveType::LINE,
+                    preferred_dir: Vec3::Z,
+                    ..default()
+                });
+            }
+        }
+
+        Ok(paths)
     }
 }
