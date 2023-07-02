@@ -7,7 +7,6 @@ use serde::{de, Deserialize, Deserializer, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
 use derive_more::{Deref, DerefMut};
 use dashmap::DashMap;
-use aios_core::prim_geo::category::CateBrepShape;
 
 pub type AIOSAxisMap = BTreeMap<i32, CateAxisParam>;
 
@@ -26,13 +25,7 @@ pub struct RefnoHasNegPosInfoTuple(
     pub Vec<RefU64>,
 );
 
-// #[derive(Debug, Serialize, Deserialize, Default)]
-// pub struct RefnoHasNegPosInfo {
-//     #[serde(deserialize_with = "de_refno_from_vec_str")]
-//     pub children: Vec<RefU64>,
-//     pub nouns: Vec<String>,
-//     pub cur_noun: String,
-// }
+
 
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -57,12 +50,4 @@ fn de_refno_from_vec_str<'de, D>(deserializer: D) -> Result<Vec<RefU64>, D::Erro
     Ok(s.iter().map(|x| RefU64::from_url_refno(x).unwrap()).collect())
 }
 
-// #[derive(Debug, Serialize, Deserialize, Default)]
-pub struct CateBrepShapeData{
-    // pub scom_refno: RefU64,
-    pub gmse_refno: RefU64,
-    pub shapes: Vec<CateBrepShape>,
-}
 
-///元件库的几何Map，键值为 ele refno, 值为 (scom_refno, shapes)
-pub type CateBrepShapeMap = DashMap<RefU64, Vec<CateBrepShape>>;

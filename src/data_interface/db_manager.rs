@@ -217,7 +217,7 @@ impl AiosDBManager {
                 .await?;
                 // dbg!(s.len());
                 for k in s {
-                    target_refnos_map.insert(k.cata_hash.unwrap_or_default(), k);
+                    target_refnos_map.insert(k.cata_hash.clone().unwrap_or_default(), k);
                 }
             }
         }
