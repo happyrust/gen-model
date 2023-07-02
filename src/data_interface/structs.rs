@@ -25,13 +25,7 @@ pub struct RefnoHasNegPosInfoTuple(
     pub Vec<RefU64>,
 );
 
-// #[derive(Debug, Serialize, Deserialize, Default)]
-// pub struct RefnoHasNegPosInfo {
-//     #[serde(deserialize_with = "de_refno_from_vec_str")]
-//     pub children: Vec<RefU64>,
-//     pub nouns: Vec<String>,
-//     pub cur_noun: String,
-// }
+
 
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -55,4 +49,5 @@ fn de_refno_from_vec_str<'de, D>(deserializer: D) -> Result<Vec<RefU64>, D::Erro
     let s = Vec::<String>::deserialize(deserializer)?;
     Ok(s.iter().map(|x| RefU64::from_url_refno(x).unwrap()).collect())
 }
+
 

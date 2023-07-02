@@ -4,7 +4,7 @@ use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::shape::pdms_shape::{PlantMesh};
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
-use bevy::prelude::Transform;
+use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use glam::{Quat, Vec3};
 use serde::{Serialize, Deserialize};

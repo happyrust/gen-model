@@ -11,6 +11,7 @@ use dashmap::DashMap;
 use log::{error, info};
 use sled::pin;
 use std::collections::{BTreeMap, HashMap};
+use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use glam::Vec3;
 use tokio::sync::RwLock;
 use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
@@ -144,7 +145,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     }
     let mut plin_map = HashMap::new();
     if let Some(pstr_refno) = attr_map.get_foreign_refno("PSTR") {
-        let pstr_am = interface.get_children_attrs(pstr_refno).await?;
+        let pstr_am = interface.get_children_attrs(pstr_refno)?;
         for a in pstr_am {
             if let Some(k) = a.get_as_string("PKEY") {
                 plin_map.insert(
@@ -191,7 +192,7 @@ pub async fn query_axis_params<T: PdmsDataInterface>(
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let mut map = BTreeMap::new();
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_children_attrs(refno).await.unwrap();
+    let children = interface.get_children_attrs(refno)?;
 
     for child in children {
         let number = child.get_i32("NUMB").unwrap_or(-1);
@@ -325,7 +326,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
 
 
     let axis_map = resolve_axis_params(scom_info, &cur_context, interface);
-    // dbg!(&axis_map);
+    // dbg!(&scom_info.axis_params);
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
         if scom_info.plin_map.contains_key(plin.as_str()) {
             Some(scom_info.plin_map.get(plin.as_str()).unwrap().clone())
@@ -338,7 +339,14 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         None
     };
     //说明: 需要传递 interface, 因为可能需要取属性值
+    // dbg!(&scom_info.gm_params);
+    // dbg!(&scom_info.axis_params);
     let geometries = resolve_gms(des_refno, &scom_info.gm_params, &jusl_param, &cur_context, &axis_map, interface);
+    for geometry in &geometries {
+        if let CateGeoParam::Pyramid(l) = geometry {
+            dbg!(&l);
+        }
+    }
     // dbg!(&geometries);
     Ok(CateGeomsInfo {
         refno: cat_ref,
@@ -456,10 +464,10 @@ pub async fn query_gm_param(
     let type_name = a.get_type();
     if type_name == "SEXT" || type_name == "SREV" {
         //先暂时不考虑负实体
-        let children = interface.get_children_attrs(refno).await.ok()?;
+        let children = interface.get_children_attrs(refno).ok()?;
         for child in children {
             if let Some(r) = child.get_refno() && child.get_type() == "SLOO" {
-                for a in interface.get_children_attrs(r).await.unwrap_or_default() {
+                for a in interface.get_children_attrs(r).unwrap_or_default() {
                     verts.push([(a.get_as_string("PX").unwrap_or_default()),
                         (a.get_as_string("PY").unwrap_or_default()),
                         (a.get_as_string("PZ").unwrap_or_default())
@@ -470,7 +478,7 @@ pub async fn query_gm_param(
         }
     } else {
         if has_children {
-            for a in interface.get_children_attrs(refno).await.ok()? {
+            for a in interface.get_children_attrs(refno).ok()? {
                 verts.push([
                     (a.get_as_string("PX").unwrap_or_default()),
                     (a.get_as_string("PY").unwrap_or_default()),
@@ -532,8 +540,7 @@ pub async fn process_dtse_params<T: PdmsDataInterface>(
     let dtre_refno = attr_map.get_foreign_refno("DTRE")?;
     let children = interface
         .get_children_attrs(dtre_refno)
-        .await
-        .unwrap_or_default();
+        .ok()?;
     for child in children {
         let key = (format!("RPRO_{}", child.get_as_string("DKEY")?));
         let exp = (child.get_as_string("PPRO")?);

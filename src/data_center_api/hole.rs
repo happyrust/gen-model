@@ -7,7 +7,7 @@ use aios_core::negative_mesh_type::NegativeEdges;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
-use bevy::prelude::dbg;
+
 use chrono::DateTime;
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use glam::Vec3;

@@ -1,4 +1,3 @@
-// #![feature(drain_filter)]
 #![feature(let_chains)]
 #![feature(default_free_fn)]
 // 暂时屏蔽warnings
@@ -38,8 +37,7 @@ use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
 use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
-use bevy::prelude::*;
-use bevy::transform::components::Transform;
+use bevy_transform::prelude::Transform;
 use chrono::{Datelike, Timelike};
 use dashmap::DashMap;
 use futures::StreamExt;
@@ -67,16 +65,49 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use aios_core::options::DbOption;
-use bevy::prelude::system_adapter::new;
+use aios_core::tool::direction_parse::parse_expr_to_dir;
+use aios_core::tool::math_tool::{quat_to_pdms_ori_str, to_pdms_ori_str, to_pdms_vec_str};
+use approx::abs_diff_eq;
 use tokio::spawn;
 use env_logger::{Builder, fmt::Target};
+use glam::{Mat3, Quat, Vec3};
 use log::{error, LevelFilter};
 use tokio::sync::RwLock;
+use aios_database::aql_api::children::query_deep_children_refnos_fuzzy;
+use aios_database::cata::resolve_helper::parse_str_axis_to_vec3;
 use aios_database::consts::*;
+#[cfg(feature = "gen_model")]
+use aios_database::data_interface::gen_model::gen_geos_data;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
+    //
+    //
+    // let axis_str = "X45-Y";
+    // let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    // dbg!(to_pdms_vec_str(&addition_axis));
+    // let mut extru_dir = if addition_axis.dot(Vec3::Z) < 0.0 {
+    //     -addition_axis
+    // }else{
+    //     addition_axis
+    // };
+    // let d = extru_dir.dot(Vec3::Z).abs();
+    // let mut ref_axis = if abs_diff_eq!(1.0, d) {
+    //     Vec3::Y
+    // } else {
+    //     Vec3::Z
+    // };
+    // let y_axis = extru_dir.cross(ref_axis).normalize();
+    // let x_axis = y_axis.cross(extru_dir).normalize();
+    // let quat = Quat::from_mat3(&Mat3::from_cols(
+    //     x_axis,
+    //     y_axis,
+    //     extru_dir,
+    // ));
+    // dbg!(quat_to_pdms_ori_str(&quat));
+    // return Ok(());
+
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
         .build()?;
@@ -112,18 +143,17 @@ async fn main() -> anyhow::Result<()> {
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
-        info!("read cached mesh ok.");
     }
 
     ///生成ssc 树
     if db_option.rebuild_ssc_tree {
-        info!("正在同步SSC");
+        println!("正在同步SSC");
         if let Some(project_db) = mgr.project_map.get(&mgr.db_option.project_name) {
             // 保存ssc
             async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
             set_arangodb_all_ssc_nodes(project_db.value(), &mgr.get_arango_db().await?).await?;
         }
-        info!("SSC同步完成");
+        println!("SSC同步完成");
     }
 
     if db_option.only_sync_sys {
