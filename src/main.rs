@@ -145,33 +145,6 @@ async fn main() -> anyhow::Result<()> {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
     }
 
-    #[cfg(feature = "gen_model")]
-    if db_option.gen_model {
-        println!("正在生成模型");
-        let mut time = Instant::now();
-
-        // let refno = RefU64::from_two_nums(17496, 137937);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(17496, 137938);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(17496, 171259);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-
-        // let branch_refnos = query_deep_children_refnos_fuzzy(&database, &[refno], &CATA_HAS_TUBI_GEO_NAMES).await?;
-        // dbg!(branch_refnos);
-
-        gen_geos_data(mgr.clone(), db_option.clone()).await?;
-        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
-    }
-
     ///生成ssc 树
     if db_option.rebuild_ssc_tree {
         println!("正在同步SSC");
