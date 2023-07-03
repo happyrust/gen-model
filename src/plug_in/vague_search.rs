@@ -41,3 +41,9 @@ fn create_vague_search_aql() -> String {
     );")
 }
 
+///查询数据库中所有记录
+pub fn gen_query_all_vague_search_info_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT user,name,major,note,conditions FROM search_condition"));
+    sql
+}
