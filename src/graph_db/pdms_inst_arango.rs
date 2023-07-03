@@ -231,28 +231,28 @@ pub async fn query_rvm_instance_data_from_refno_aql(refno: RefU64, database: &Ar
 
 #[test]
 fn test_get_matrix() {
-    let world_transform = bevy::prelude::Transform {
-        translation: Vec3::from([12490., 12280., 2835.0]),
-        rotation: Quat::from_array([0., 0.7071067690849304, 0., 0.7071067690849304]),
-        scale: Vec3::from([210.0, 210.0, 29.0]),
-    };
-    let inverse = world_transform.compute_matrix().inverse();
-    let min = Vec3::from([-105.0, -105.0, 0.0]);
-    let max = Vec3::from([105.0, 105.0, 29.0]);
-    let min_bbox = inverse.transform_point3(min);
-    let max_bbox = inverse.transform_point3(max);
-    let rotation = Mat3::from_quat(world_transform.rotation);
-
-    let x_axis = rotation.x_axis * world_transform.scale.x;
-    let y_axis = rotation.y_axis * world_transform.scale.y;
-    let z_axis = rotation.z_axis * world_transform.scale.z;
-
-    dbg!(&x_axis.normalize());
-    dbg!(&y_axis.normalize());
-    dbg!(&z_axis.normalize());
-
-    dbg!(&min_bbox);
-    dbg!(&max_bbox);
+    // let world_transform = bevy::prelude::Transform {
+    //     translation: Vec3::from([12490., 12280., 2835.0]),
+    //     rotation: Quat::from_array([0., 0.7071067690849304, 0., 0.7071067690849304]),
+    //     scale: Vec3::from([210.0, 210.0, 29.0]),
+    // };
+    // let inverse = world_transform.compute_matrix().inverse();
+    // let min = Vec3::from([-105.0, -105.0, 0.0]);
+    // let max = Vec3::from([105.0, 105.0, 29.0]);
+    // let min_bbox = inverse.transform_point3(min);
+    // let max_bbox = inverse.transform_point3(max);
+    // let rotation = Mat3::from_quat(world_transform.rotation);
+    //
+    // let x_axis = rotation.x_axis * world_transform.scale.x;
+    // let y_axis = rotation.y_axis * world_transform.scale.y;
+    // let z_axis = rotation.z_axis * world_transform.scale.z;
+    //
+    // dbg!(&x_axis.normalize());
+    // dbg!(&y_axis.normalize());
+    // dbg!(&z_axis.normalize());
+    //
+    // dbg!(&min_bbox);
+    // dbg!(&max_bbox);
 }
 
 #[test]

@@ -4,6 +4,7 @@ use aios_core::options::DbOption;
 use aios_core::pdms_types::{CataHashRefnoKV, EleTreeNode, GENRAL_NEG_NOUN_NAMES, PdmsElement, RefU64, RefU64Vec};
 use aios_core::pdms_user::*;
 use aios_core::three_dimensional_review::*;
+use aios_core::three_dimensional_review::VagueSearchCondition::And;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use bitvec::ptr::replace;
 use itertools::Itertools;
@@ -15,6 +16,7 @@ use crate::aql_api::*;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::data_interface::tidb_manager::{AiosDBManager};
 use crate::graph_db::pdms_arango::ArDatabase;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 pub async fn query_children_eles(arango_db: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
@@ -553,10 +555,10 @@ pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, databa
     // 先进行专业过滤查询
     if !condition_map.is_empty() {
         let aql = format!("
-            let refnos = ( for refno in {}
+            for refno in {}
                 let v = document(refno)
                 @@major_filter_condition
-                return v._id )", serde_json::to_string(&keys).unwrap_or("[]".to_string()));
+                return v._id", serde_json::to_string(&keys).unwrap_or("[]".to_string()));
         let mut filter_conditions = String::new();
         for condition in &condition_map {
             match condition.0 {
@@ -590,6 +592,7 @@ pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, databa
     // 拼接过滤条件
     let mut filter_condition = String::new();
     for (key, (condition, value)) in request.filter_condition {
+        if &key == "MAJOR" { continue };
         let key = key.to_lowercase().replace("type", "noun");
         let value_aql = if value.contains("*") {
             // 替换通配符
@@ -704,5 +707,22 @@ async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Resu
     // let refno = RefU64::from_refno_str("17496/79566").unwrap();
     // let result = query_travel_children_filter_negative_sibl_nodes(refno, &database).await?;
     // dbg!(&result);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_vague_query_refnos_user_set_aql() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+    let request = VagueSearchRequest {
+        filter_refnos: vec![RefU64::from_refno_str("24383/66456").unwrap(), RefU64::from_refno_str("24381/100675").unwrap()],
+        filter_condition: vec![("MAJOR".to_string(), (And, "T".to_string())),("NAME".to_string(),(And,"*WCC*".to_string())),("TYPE".to_string(),(And,"PIPE".to_string()))],
+    };
+    let result = vague_query_refnos_user_set_aql(request,&database).await?;
+    dbg!(&result);
     Ok(())
 }
