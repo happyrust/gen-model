@@ -144,6 +144,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                             end: pose - poss,
                             is_spine: false,
                         }),
+                        lmirror: att.get_bool("LMIRR").unwrap_or_default(),
                     };
                     // dbg!(&solid);
                     brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
@@ -180,6 +181,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                             extrude_dir,
                             height: 0.0,
                             path,
+                            lmirror: att.get_bool("LMIRR").unwrap_or_default(),
                         };
                         let transform = loft.get_trans() * transform;
                         brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
