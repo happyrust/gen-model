@@ -6,12 +6,12 @@ use sqlx::Row;
 
 /// 初始化时保存所有SITE
 pub async fn save_all_site(sites: SiteVec, pool: &Pool<MySql>) -> anyhow::Result<()> {
-    let create_table_sql = create_ssc_aql();
+    let create_table_sql = create_ssc_sql();
     let mut conn = pool.clone().acquire().await?;
     let create_table_result = conn.execute(create_table_sql.as_str()).await;
     let Ok(_) = create_table_result else { return Ok(()); };
 
-    let clear_table_sql = clear_ssc_aql();
+    let clear_table_sql = clear_ssc_sql();
     let clear_table_result = conn.execute(clear_table_sql.as_str()).await;
     let Ok(_) = clear_table_result else { return Ok(()); };
 
@@ -22,14 +22,13 @@ pub async fn save_all_site(sites: SiteVec, pool: &Pool<MySql>) -> anyhow::Result
 }
 
 pub async fn save_selected_site(sites: SelectedSiteVec, pool: &Pool<MySql>) -> anyhow::Result<()> {
-    let create_table_sql = create_selected_ssc_aql();
-
+    let create_table_sql = create_selected_ssc_sql();
     let mut conn = pool.clone().acquire().await?;
     let create_table_result = conn.execute(create_table_sql.as_str()).await;
     let Ok(_) = create_table_result else { return Ok(()); };
 
 
-    let clear_table_sql = clear_selected_ssc_aql();
+    let clear_table_sql = clear_selected_ssc_sql();
     let clear_table_result = conn.execute(clear_table_sql.as_str()).await;
     let Ok(_) = clear_table_result else { return Ok(()); };
 
@@ -97,9 +96,16 @@ fn gen_query_selected_ssc_sql() -> String {
     sql
 }
 
+///查询数据库中是否具有all_ssc_data表
+fn gen_query_table_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SHOW TABLES LIKE 'allsscdata'"));
+    sql
+}
+
 
 /// 创建ssc sql
-fn create_ssc_aql() -> String {
+fn create_ssc_sql() -> String {
     format!("CREATE TABLE IF NOT EXISTS AllSscData (
         refno VARCHAR(255) NOT NULL,
         name VARCHAR(255) NOT NULL
@@ -107,17 +113,17 @@ fn create_ssc_aql() -> String {
 }
 
 /// 创建selected ssc sql
-fn create_selected_ssc_aql() -> String {
+fn create_selected_ssc_sql() -> String {
     format!("CREATE TABLE IF NOT EXISTS SelectedSscData (
         refno VARCHAR(255) NOT NULL,
         name VARCHAR(255) NOT NULL
     );")
 }
 
-fn clear_ssc_aql() -> String {
+fn clear_ssc_sql() -> String {
     format!("truncate table AllSscData;")
 }
 
-fn clear_selected_ssc_aql() -> String {
+fn clear_selected_ssc_sql() -> String {
     format!("truncate table SelectedSscData;")
 }
