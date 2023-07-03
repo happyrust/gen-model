@@ -2,8 +2,6 @@ use std::collections::HashMap;
 use aios_core::data_center::AttrValue::{AttrIntArray, AttrMap, AttrString};
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::RefU64;
-use bevy::reflect::List;
-use parry3d::utils::Array1;
 use regex::Regex;
 use crate::api::attr::query_explicit_attr;
 use crate::aql_api::children::{query_children_eles, query_refnos_travel_children_with_type_aql};

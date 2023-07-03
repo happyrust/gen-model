@@ -16,7 +16,6 @@ use anyhow::anyhow;
 use bb8_arangodb::{ArangoConnectionManager, AuthenticationMethod};
 use bb8_arangodb::arangors_lite::collection::CollectionType;
 use bb8_arangodb::bb8::Pool;
-use bevy::prelude::dbg;
 use dashmap::{DashMap, DashSet};
 use futures::future::ok;
 use itertools::Itertools;

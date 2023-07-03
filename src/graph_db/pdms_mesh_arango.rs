@@ -37,49 +37,56 @@ pub fn save_mesh_to_local_db(mgr: &AiosDBManager, mesh_mgr: &PlantMeshesData, re
 }
 
 ///保存mesh数据到图数据库
-pub async fn save_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &PlantMeshesData, replace: bool) -> anyhow::Result<()> {
+pub async fn save_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &mut PlantMeshesData, replace: bool) -> anyhow::Result<()> {
     let collection = AQL_PDMS_MESH_COLLECTION;
     let database = mgr.get_arango_db().await?;
     let mut data = vec![];
     println!("开始保存mesh数据");
-    let exist_geo_hashs = query_all_geo_hashs(&database).await?;
-    // dbg!(&exist_geo_hashs);
 
-    //保存local mesh db 里的数据
-    let aabb_tree = mgr.local_mesh_aabb_db.clone();
-    dbg!(aabb_tree.len());
+    //不是replace，需要考虑缓存
+    let mut meshes = &mut mesh_mgr.meshes;
+    println!("当前mesh数量：{}", meshes.len());
+    if !replace {
+        let exist_geo_hashs = query_all_geo_hashs(&database).await?;
+        // dbg!(&exist_geo_hashs);
+        println!("数据库已经存在的mesh数量：{}", exist_geo_hashs.len());
 
-    let mut meshes = mesh_mgr.meshes.clone();
-    println!("当前mesh 数量{}", meshes.len());
-    //遍历一遍local db，检查是否有遗漏
-    let mut iter = aabb_tree.iter();
-    while let Some(Ok((k, v))) = iter.next() {
-        let geo_hash = u64::from_be_bytes(k.as_bytes().try_into().unwrap());
-        if !replace {
+        //保存local mesh db 里的数据
+        let aabb_tree = mgr.local_mesh_aabb_db.clone();
+        // dbg!(aabb_tree.len());
+        println!("当前local mesh 数量：{}", aabb_tree.len());
+
+        println!("当前mesh 数量：{}", meshes.len());
+        //遍历一遍local db，检查是否有遗漏
+        let mut iter = aabb_tree.iter();
+        while let Some(Ok((k, v))) = iter.next() {
+            let geo_hash = u64::from_be_bytes(k.as_bytes().try_into().unwrap());
             //如果已经存在，不需要替换
             if exist_geo_hashs.contains(&geo_hash) {
                 continue;
             }
+            if !meshes.contains_key(&geo_hash) {
+                let aabb = Aabb::from_bytes(v.as_bytes())?;
+                let mesh = mgr.get_mesh_from_localdb(geo_hash).expect("read mesh from local db error.");
+                meshes.insert(geo_hash, PlantGeoData {
+                    geo_hash,
+                    mesh: Some(mesh),
+                    aabb: Some(aabb),
+                });
+            }
         }
-        if !meshes.contains_key(&geo_hash) {
-            let aabb = Aabb::from_bytes(v.as_bytes())?;
-            let mesh = mgr.get_mesh_from_localdb(geo_hash).expect("read mesh from local db error.");
-            meshes.insert(geo_hash, PlantGeoData{
-                geo_hash,
-                mesh: Some(mesh),
-                aabb: Some(aabb),
-            });
-        }
+        println!("合并缓存后mesh数量：{}", meshes.len());
     }
-    println!("合并本地mesh缓存后，当前mesh 数量{}", meshes.len());
+
+
     for chunk in &meshes.iter().chunks(1000) {
         for k in chunk {
-            if !replace {
-                //如果已经存在，不需要替换
-                if exist_geo_hashs.contains(k.0) {
-                    continue;
-                }
-            }
+            // if !replace {
+            //     //如果已经存在，不需要替换
+            //     if exist_geo_hashs.contains(k.0) {
+            //         continue;
+            //     }
+            // }
             let json = serde_json::to_value(k.1).unwrap();
             data.push(json);
         }
@@ -89,14 +96,12 @@ pub async fn save_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &PlantMeshesD
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
                 .bind_var("@collection", collection)
                 .bind_var("elements", take(&mut data))
-
-        }else{
+        } else {
             AqlQuery::new(r#"LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "ignore" }"#)
                 .bind_var("@collection", collection)
                 .bind_var("elements", take(&mut data))
-
         };
         database.aql_query::<Vec<()>>(aql).await.unwrap();
     }

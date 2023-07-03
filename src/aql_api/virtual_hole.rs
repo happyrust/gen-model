@@ -1,5 +1,5 @@
 use aios_core::pdms_types::RefU64;
-use aios_core::virtual_hole::{CircleHoleSize, HoleBlockageMethod, HoleSize, PluggingHoleData, RectHoleSize};
+use aios_core::virtual_hole::*;
 use anyhow::anyhow;
 use crate::api::attr::{query_explicit_attr, query_refno_uda_value};
 use crate::api::element::{get_order, query_name};
