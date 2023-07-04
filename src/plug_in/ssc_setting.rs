@@ -83,6 +83,19 @@ pub async fn query_selected_ssc(pool: &Pool<MySql>) -> anyhow::Result<Vec<(Strin
     Ok(result)
 }
 
+pub async fn query_table_ssc(pool: &Pool<MySql>) -> anyhow::Result<&'static str> {
+    let sql = gen_query_table_sql();
+    let mut conn = pool.acquire().await?;
+    if let Ok(query_results) = conn.fetch_all(sql.as_str()).await {
+        if query_results.len() > 0 {
+            return Ok("true");
+        } else {
+           return Ok("false");
+        }
+    }
+    Ok("error")
+}
+
 
 fn gen_query_ssc_sql() -> String {
     let mut sql = String::new();
