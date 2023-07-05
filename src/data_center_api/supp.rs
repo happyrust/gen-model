@@ -64,6 +64,10 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
                 attribute_model_code: "STUCC14".to_string(),
                 value: AttrValue::AttrString("Q355B".to_string()).into(),
             });
+            attr.push(DataCenterAttr {
+                attribute_model_code: "ERECAB49".to_string(),
+                value: AttrValue::AttrFloatArray(vec![0.0,0.0]).into(),
+            });
             result.push(DataCenterInstance {
                 object_model_code: "ERECAB".to_string(),
                 project_code: aios_mgr.db_option.project_code.to_string(),
