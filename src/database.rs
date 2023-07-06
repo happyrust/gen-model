@@ -208,9 +208,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         create_tables_elapse += table_time.elapsed().as_millis();
 
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
-        let arrango_pool = connect_arangodb(db_option).await?;
+        let arango_pool = connect_arangodb(db_option).await?;
         match  sync_total_async_threaded(
-            arrango_pool.clone(),
+            arango_pool.clone(),
             &db_option,
             project,
             project_pool.clone(),
