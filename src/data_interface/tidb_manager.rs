@@ -48,7 +48,7 @@ use aios_core::options::DbOption;
 use aios_core::pdms_data::ScomInfo;
 use aios_core::prim_geo;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType, SweepPath3D};
-use aios_core::tool::math_tool::quat_to_pdms_ori_str;
+use aios_core::tool::math_tool::{quat_to_pdms_ori_str, to_pdms_vec_str};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use log::{error, info};
@@ -78,6 +78,7 @@ use crate::graph_db::pdms_inst_arango::*;
 use crate::mdb::get_project_mdb;
 use crate::tables::{gen_create_project_mdb_json_sql, gen_create_project_mdb_sql};
 use bb8_arangodb::{ArangoConnectionManager, AuthenticationMethod};
+use futures::future::ok;
 use parry3d::query::{Ray, RayCast};
 use redb::{ReadableTable, TableDefinition};
 use crate::data_interface::db_manager::GeoEnum;
@@ -668,58 +669,24 @@ impl PdmsDataInterface for AiosDBManager {
                     jusl_vec = param.pt;
                 }
             }
-
-            let check_type = if type_name == "PLOO" || type_name == "LOOP" {
-                self.get_refno_basic(ref_basic.owner).unwrap().get_type().to_string()
-            } else {
-                type_name.to_string()
-            };
             //土建特殊情况的一些处理
-            match check_type.as_str() {
-                "FLOOR" => {
-                    let sjus = att.get_str("JUSL").unwrap_or("unset");
-                    let height = self
-                        .get_attr(refno)
-                        .await?
-                        .get_f32("HEIG")
-                        .unwrap_or_default();
-                    let mut off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                        -height
-                    } else if sjus == "UCEN" || sjus == "DCEN" {
-                        -height / 2.0
-                    } else {
-                        0.0
-                    };
-                    pos.z += off_z;
-                }
-                "SBFI" => {
-                    let axis_dir = att.get_vec3("ZDIR").unwrap_or_default().normalize();
-                    // let axis_dir = Vec3::X;
-                    if axis_dir.is_normalized() {
-                        quat = Quat::from_rotation_arc(-Vec3::Z, axis_dir);
-                        // let d = axis_dir.dot(Vec3::Z).abs();
-                        // let mut ref_axis = if abs_diff_eq!(1.0, d) {
-                        //     Vec3::Y
-                        // } else {
-                        //     Vec3::Z
-                        // };
-                        // let p_axis = ref_axis.cross(axis_dir).normalize();
-                        // let y_axis = p_axis.cross(axis_dir).normalize();
-                        // quat = Quat::from_mat3(&Mat3::from_cols(
-                        //     p_axis,
-                        //     axis_dir,
-                        //     y_axis,
-                        // ));
-                        dbg!(quat_to_pdms_ori_str(&quat));
-                    }
-                }
-                "CMPF" => {
-                    quat = Quat::from_mat3(&Mat3::from_cols(
-                        Vec3::X,
-                        Vec3::NEG_Y,
-                        Vec3::NEG_Z,
-                    ));
-                }
+            match type_name {
+                // "FLOOR" => {
+                //     let sjus = att.get_str("JUSL").unwrap_or("unset");
+                //     let height = self
+                //         .get_attr(refno)
+                //         .await?
+                //         .get_f32("HEIG")
+                //         .unwrap_or_default();
+                //     let mut off_z = if sjus == "UTOP" || sjus == "DTOP" {
+                //         -height
+                //     } else if sjus == "UCEN" || sjus == "DCEN" {
+                //         -height / 2.0
+                //     } else {
+                //         0.0
+                //     };
+                //     pos.z += off_z;
+                // }
                 //Justification Line Datum
                 "JLDATU" => {
                     let zdist = att.get_f32("ZDIS").unwrap_or_default();
@@ -730,7 +697,33 @@ impl PdmsDataInterface for AiosDBManager {
                 }
                 //Positioning Line Datum
                 "PLDATU" => {}
-                _ => {}
+                "SBFI" => {
+                    //need to check out owner's SJUS
+                    if let Ok(owner_att) = self.get_attr_from_localdb(ref_basic.owner) {
+                        if let Some(owner_sjus) = owner_att.get_str("SJUS") {
+                            //如果发现了SJUS，需要找到同一层集的PLOO，得到height
+                            let children = self.get_children_from_localdb(owner_att.get_owner().unwrap())?;
+                            for c in children {
+                                let c_att = self.get_attr_from_localdb(c)?;
+                                // dbg!(c_att.get_type());
+                                if c_att.get_type() == "PLOO" {
+                                    let height = c_att.get_f32("HEIG").unwrap_or_default();
+                                    let mut off_z = if owner_sjus == "UTOP" || owner_sjus == "DTOP" {
+                                        height
+                                    } else if owner_sjus == "UCEN" || owner_sjus == "DCEN" {
+                                        height / 2.0
+                                    } else {
+                                        0.0
+                                    };
+                                    pos.z += off_z;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                _ =>{}
             }
 
             let mut quat_v = att.get_rotation();

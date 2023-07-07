@@ -43,6 +43,7 @@ pub struct SSCEleGraphNode {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct PdmsInstanceGraphEdge {
+    pub _key: String,
     pub _from: String,
     pub _to: String,
 }

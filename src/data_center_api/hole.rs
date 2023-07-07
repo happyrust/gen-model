@@ -6,6 +6,7 @@ use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, Data
 use aios_core::negative_mesh_type::NegativeEdges;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
+use aios_core::tool::hash_tool::hash_two_str;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 
 use chrono::DateTime;
@@ -929,12 +930,6 @@ fn match_plug_type_str(input: &str) -> String {
     }
 }
 
-pub(crate) fn hash_two_str(from: &str, to: &str) -> u64 {
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    std::hash::Hash::hash(from, &mut hash);
-    std::hash::Hash::hash(to, &mut hash);
-    std::hash::Hasher::finish(&hash)
-}
 
 #[test]
 fn test_convert_time_to_vec() {

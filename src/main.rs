@@ -66,7 +66,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use aios_core::options::DbOption;
 use aios_core::tool::direction_parse::parse_expr_to_dir;
-use aios_core::tool::math_tool::{quat_to_pdms_ori_str, to_pdms_ori_str, to_pdms_vec_str};
+use aios_core::tool::math_tool::{cal_mat3_by_zdir, quat_to_pdms_ori_str, to_pdms_ori_str, to_pdms_vec_str};
 use approx::abs_diff_eq;
 use tokio::spawn;
 use env_logger::{Builder, fmt::Target};
@@ -79,34 +79,82 @@ use aios_database::consts::*;
 #[cfg(feature = "gen_model")]
 use aios_database::data_interface::gen_model::gen_geos_data;
 
+fn test_sbfi() -> anyhow::Result<()> {
+
+
+    let owner_mat3 =  Mat3::from_cols(
+        Vec3::X,
+        Vec3::NEG_Y,
+        Vec3::NEG_Z,
+    );
+
+    let axis_str = "Y27.041-X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+    let final_mat3 = owner_mat3 * mat3;
+    dbg!(to_pdms_ori_str(&final_mat3));
+    let quat = Quat::from_mat3(&final_mat3);
+    let m = Mat3::from_quat(quat);
+    dbg!(to_pdms_ori_str(&m));
+
+    return Ok(());
+
+
+    let axis_str = "-X45-Y";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    // dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
+
+    let axis_str = "-X30-Y";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    // dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
+
+    let axis_str = "-Y";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
+
+    let axis_str = "X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
+
+    let axis_str = "-X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
+
+    let axis_str = "-Y30X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
+
+
+    // let refno = RefU64::from_two_nums(17496, 116749);
+    // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+    // dbg!(transform);
+    //
+    // let refno = RefU64::from_two_nums(17496, 137937);
+    // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+    // dbg!(transform);
+    //
+    // let refno = RefU64::from_two_nums(17496, 137938);
+    // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+    // dbg!(transform);
+    //
+    // let refno = RefU64::from_two_nums(17496, 137936);
+    // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+    // dbg!(transform);
+
+
+    return Ok(());
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
-    //
-    //
-    // let axis_str = "X45-Y";
-    // let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    // dbg!(to_pdms_vec_str(&addition_axis));
-    // let mut extru_dir = if addition_axis.dot(Vec3::Z) < 0.0 {
-    //     -addition_axis
-    // }else{
-    //     addition_axis
-    // };
-    // let d = extru_dir.dot(Vec3::Z).abs();
-    // let mut ref_axis = if abs_diff_eq!(1.0, d) {
-    //     Vec3::Y
-    // } else {
-    //     Vec3::Z
-    // };
-    // let y_axis = extru_dir.cross(ref_axis).normalize();
-    // let x_axis = y_axis.cross(extru_dir).normalize();
-    // let quat = Quat::from_mat3(&Mat3::from_cols(
-    //     x_axis,
-    //     y_axis,
-    //     extru_dir,
-    // ));
-    // dbg!(quat_to_pdms_ori_str(&quat));
-    // return Ok(());
+
+    // return test_sbfi();
 
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
@@ -181,6 +229,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, AQL_PDMS_EDGES_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_MESH_COLLECTION, Document).await?;
+    create_arango_document(&database, AQL_PDMS_COMPOUND_INST_INFO_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_INFO_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_GEO_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_TUBI_COLLECTION, Document).await?;
