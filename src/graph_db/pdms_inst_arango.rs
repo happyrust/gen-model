@@ -155,7 +155,8 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
                     return distinct d
             "#)
         .bind_var("refnos", refno_strs.clone())
-        .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        // .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
+        ;
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     let mut inst_info_map = HashMap::new();
     let mut inst_keys = geos_info.iter().map(|x| x.get_inst_key().to_string()).collect::<Vec<_>>();
