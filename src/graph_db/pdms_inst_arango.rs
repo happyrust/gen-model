@@ -23,8 +23,46 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{ArDatabase, connect_arangodb};
 use crate::graph_db::structs::*;
 use aios_core::helper::*;
+use dashmap::DashMap;
 use crate::aql_api::children::{query_deep_children_refnos_fuzzy, query_travel_children_with_types_aql};
 use crate::consts::{AQL_PDMS_ELES_COLLECTION};
+
+
+///保存instance 数据到数据库
+pub async fn save_compound_inst_info_to_graph_db(mgr: &AiosDBManager, inst_info_map: &DashMap<RefU64, EleGeosInfo>) -> anyhow::Result<()> {
+    //将compound数据分开保存
+    let edge_collection = "instance_edges";
+    let database = mgr.get_arango_db().await?;
+    let mut instances = vec![];
+    // let mut edges = vec![];
+    let collection = AQL_PDMS_COMPOUND_INST_INFO_COLLECTION;
+    println!("开始保存负实体instance数据");
+    for chunk in &inst_info_map.iter().filter(|v| v.is_compound()).chunks(1000) {
+        for k in chunk {
+            let json = serde_json::to_value(k.value()).unwrap();
+            instances.push(json);
+            // let edge = PdmsInstanceGraphEdge {
+            //     _key: "".to_string(),
+            //     _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.0.to_url_refno()),
+            //     _to: format!("{}/{}", collection, k.0.to_url_refno()),
+            // };
+            // edges.push(serde_json::to_value(&edge).unwrap());
+        }
+        let aql = AqlQuery::new(r#"LET data = @elements
+                    FOR d IN data
+                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
+            .bind_var("@collection", collection)
+            .bind_var("elements", take(&mut instances));
+        database.aql_query::<Vec<()>>(aql).await?;
+        // let aql = AqlQuery::new(r#"LET data = @edges
+        //             FOR d IN data
+        //                 INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
+        //     .bind_var("@collection", edge_collection)
+        //     .bind_var("edges", take(&mut edges));
+        // database.aql_query::<Vec<()>>(aql).await?;
+    }
+    Ok(())
+}
 
 ///保存instance 数据到数据库
 pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInstancesData) -> anyhow::Result<()> {
@@ -43,8 +81,7 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
-            .bind_var("elements", take(&mut instances))
-            ;
+            .bind_var("elements", take(&mut instances));
         database.aql_query::<Vec<()>>(aql).await?;
     }
 
@@ -64,30 +101,15 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
         database.aql_query::<Vec<()>>(aql).await?;
     }
 
-    // let collection = AQL_PDMS_INST_EDGE_COLLECTION;
-    // for chunk in &inst_mgr.geo_edges.iter().chunks(1000) {
-    //     for k in chunk {
-    //         let json = serde_json::to_value(k).unwrap();
-    //         instances.push(json);
-    //     }
-    //     let aql = AqlQuery::new(r#"LET data = @elements
-    //                 FOR d IN data
-    //                     INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
-    //         .bind_var("@collection", collection)
-    //         .bind_var("elements", take(&mut instances))
-    //         ;
-    //     database.aql_query::<Vec<()>>(aql).await?;
-    // }
-
     let collection = AQL_PDMS_INST_INFO_COLLECTION;
-    for chunk in &inst_mgr.inst_info_map.iter().chunks(1000) {
+    for chunk in &inst_mgr.inst_info_map.iter().filter(|(_, v)| !v.is_compound()).chunks(1000) {
         for k in chunk {
             let json = serde_json::to_value(k.1).unwrap();
-            // dbg!(&json);
             instances.push(json);
             let edge = PdmsInstanceGraphEdge {
-                _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.0.to_refno_normal_string()),
-                _to: format!("{}/{}", collection, k.0.to_refno_normal_string()),
+                _key: "".to_string(),
+                _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.0.to_url_refno()),
+                _to: format!("{}/{}", collection, k.0.to_url_refno()),
             };
             edges.push(serde_json::to_value(&edge).unwrap());
         }
@@ -95,41 +117,45 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
-            .bind_var("elements", take(&mut instances))
-            ;
+            .bind_var("elements", take(&mut instances));
         database.aql_query::<Vec<()>>(aql).await?;
         let aql = AqlQuery::new(r#"LET data = @edges
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
             .bind_var("@collection", edge_collection)
-            .bind_var("edges", take(&mut edges))
-
-            ;
+            .bind_var("edges", take(&mut edges));
         database.aql_query::<Vec<()>>(aql).await?;
     }
+
+
     Ok(())
 }
 
 
 
 ///获取element inst的几何数据
+/// 默认直接优先取负实体的数据
 pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) -> anyhow::Result<ShapeInstancesData> {
     let refno_strs = refnos.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
     // dbg!(&refnos);
     //过滤掉负实体计算后的多余几何体
+    //pdms_compound_inst_infos
+    // let parent = p.vertices[-2]
+    // PRUNE c.noun in @neg_nouns
+    // OPTIONS { order: "bfs"  }
+    //filter f != null and (parent == null or document('pdms_inst_infos', parent._key).geo_type != "Compound")
+    //如果单独拖入负实体，允许把负实体显示出来
     let aql = AqlQuery::new(r#"
             FOR refno in @refnos
                 FOR c,e,p IN 0..20 inbound CONCAT('pdms_eles/',refno) pdms_edges
-                    PRUNE c.noun in @neg_nouns
-                    OPTIONS { order: "bfs"  }
-                    let parent = p.vertices[-2]
+                    let comp_f = document('pdms_compound_inst_infos', c._key)
                     let f = document('pdms_inst_infos', c._key)
-                    filter f != null and (parent == null or document('pdms_inst_infos', parent._key).geo_type != "Compound")
-                    return f
+                    let d = comp_f == null ? f : comp_f
+                    filter d != null and (d.geo_type != "Neg" or e == null)
+                    return distinct d
             "#)
         .bind_var("refnos", refno_strs.clone())
-        .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
-        ;
+        .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     let mut inst_info_map = HashMap::new();
     let mut inst_keys = geos_info.iter().map(|x| x.get_inst_key().to_string()).collect::<Vec<_>>();

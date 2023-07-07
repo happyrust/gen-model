@@ -39,11 +39,18 @@ pub const AQL_HOLE_EDGE_COLLECTION: &'static str = "hole_edge";
 pub const AQL_EMBED_EDGE_COLLECTION: &'static str = "embed_edge";
 
 
+/// 批量块数量
 pub const BATCH_CHUNKS_CNT: usize = 50;
+/// pdms 的基本 element数据
 pub const AQL_PDMS_ELES_COLLECTION: &'static str = "pdms_eles";
+/// pdms 的 mesh数据
 pub const AQL_PDMS_MESH_COLLECTION: &'static str = "pdms_mesh";
 pub const AQL_PDMS_EDGES_COLLECTION: &'static str = "pdms_edges";
+/// 负实体运算后的inst infos数据
+pub const AQL_PDMS_COMPOUND_INST_INFO_COLLECTION: &'static str = "pdms_compound_inst_infos";
 pub const AQL_PDMS_INST_INFO_COLLECTION: &'static str = "pdms_inst_infos";
+/// 负实体运算后的inst geos数据
+pub const AQL_PDMS_COMPOUND_INST_GEO_COLLECTION: &'static str = "pdms_compound_inst_geos";
 pub const AQL_PDMS_INST_GEO_COLLECTION: &'static str = "pdms_inst_geos";
 pub const AQL_PDMS_INST_TUBI_COLLECTION: &'static str = "pdms_inst_tubis";
 pub const AQL_PDMS_INST_EDGE_COLLECTION: &'static str = "pdms_inst_edges";
