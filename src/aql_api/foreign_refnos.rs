@@ -32,8 +32,7 @@ pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], sta
         .bind_var("ids", ids)
         .bind_var("depth", depth)
         .bind_var("end_types", end_types)
-        .bind_var("t_types", t_types)
-        ;
+        .bind_var("t_types", t_types);
     let results: Vec<String> = adb.aql_query(aql).await?;
     let refnos = results.iter().map(|x| RefU64::from_url_refno_default(x)).collect::<Vec<_>>();
     Ok(refnos)

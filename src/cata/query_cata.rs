@@ -25,8 +25,6 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
 ) -> anyhow::Result<CateGeomsInfo> {
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
-
-
     let desi_att = interface.get_attr_from_localdb(refno)?;
     //todo 改到使用图数据库去查找
     if scom_ref.is_none() {
@@ -79,7 +77,8 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     let scom_read = scom_info_map.read().await;
     let scom_info = scom_read.get(&scom_ref).unwrap();
-    // dbg!(scom_info);
+    // dbg!(&scom_info.gm_params);
+    // dbg!(&scom_info.axis_params);
     let mut context: BTreeMap<String, String> = BTreeMap::new();
     if let Some(v) = desi_att.get_as_string("JUSL") {
         context.insert("JUSL".into(), v.into());
@@ -212,9 +211,6 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
     let children = interface.get_travel_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
-    // dbg!(children.len());
-    //todo 获得所有的几何数据，需要用几何type去过滤
-    // let children = interface.get_children_attrs(refno).await.unwrap();
     for geo_am in children {
         if !geo_am.is_visible_by_level(None).unwrap_or(true) {
             continue;
@@ -280,7 +276,6 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     if let Ok(Some(parent_cat_ref)) = int
         .query_first_foreign_along_path(des_refno, &["SPRE", "CATR"], &["SPRE", "CATR"], &[])
         .await{
-        // dbg!(parent_cat_ref);
         if let Ok(parent_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(parent_cat_ref){
             let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
             for i in 0..params.len() {
@@ -462,7 +457,7 @@ pub async fn query_gm_param(
     let mut dxy = vec![];
     let refno = a.get_refno().unwrap_or_default();
     let type_name = a.get_type();
-    if type_name == "SEXT" || type_name == "SREV" {
+    if type_name == "SEXT" || type_name == "NSEX" || type_name == "SREV" || type_name == "NSRE" {
         //先暂时不考虑负实体
         let children = interface.get_children_attrs(refno).ok()?;
         for child in children {

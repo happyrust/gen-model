@@ -29,7 +29,7 @@ gen_model_batch_size = 100
 
 #arangodb 配置
 arangodb_database = "ams"
-multi_threads = true
+multi_threads = false
 only_sync_sys = false
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
@@ -242,9 +242,14 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/105760"]
 
 #SBFI
-#debug_root_refnos = ["17496/137938"]
+#debug_root_refnos = ["17496/105760"]
 #GWALL
-debug_root_refnos = ["17496/171380"]
+#debug_root_refnos = ["17496/171346"]
+#电气负实体测试
+debug_root_refnos = ["24383/84480"]
+#debug_root_refnos = ["24383/84515"]
+#debug_root_refnos = ["24383/84531"]
+#debug_root_refnos = ["24383/84532"]
 
 
 #17496/116750

@@ -541,10 +541,8 @@ impl PdmsDataInterface for AiosDBManager {
                     (for c in children filter c.noun in @neg_nouns  return c._key)
                 ]
         "#).bind_var("keys", refno_urls)
-            .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
-            .bind_var("pos_nouns", GENRAL_POS_NOUN_NAMES.to_vec())
-
-            ;
+            .bind_var("neg_nouns", TOTAL_NEG_NOUN_NAMES.to_vec())
+            .bind_var("pos_nouns", GENRAL_POS_NOUN_NAMES.to_vec());
         let result: HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)> = self.get_arango_db().await?
             .aql_query::<RefnoHasNegPosInfoTuple>(aql).await?.into_iter().map(|x| (x.0, (x.1, x.2))).collect();
 
