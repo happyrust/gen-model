@@ -157,7 +157,6 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
     Ok(())
 }
 
-
 ///获取element inst的几何数据
 /// 默认直接优先取负实体的数据
 pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) -> anyhow::Result<ShapeInstancesData> {

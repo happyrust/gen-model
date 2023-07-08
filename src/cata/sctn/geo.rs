@@ -109,9 +109,13 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         ///处理随意设置方向的情况，保证一致性
         if (Vec3::Z).angle_between(tmp_drns).abs() > PI/2.0 {
             drns = -tmp_drns;
+        }else{
+            drns = tmp_drns;
         }
         if (Vec3::Z).angle_between(-tmp_drne).abs() > PI/2.0 {
             drne = -tmp_drne;
+        }else{
+            drne = tmp_drne;
         }
         println!("refno: {}, 变换后drns: {:?}, drne: {:?}", refno, to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
     }

@@ -727,7 +727,7 @@ pub async fn gen_cata_geos(
                                         scale,
                                     };
                                     let new_mesh = mesh.transform_by(&local_trans.compute_matrix());
-                                    dbg!(new_mesh.indices.len());
+                                    // dbg!(new_mesh.indices.len());
                                     csg_map.insert(refno, new_mesh.into_csg_mesh(None));
                                 };
 
@@ -763,7 +763,11 @@ pub async fn gen_cata_geos(
                                         .unwrap_or(PdmsGeoParam::Unknown),
                                     visible,
                                     is_tubi,
-                                    geo_type: GeoBasicType::Pos,
+                                    geo_type: if is_neg {
+                                        GeoBasicType::Neg
+                                    } else {
+                                        GeoBasicType::Pos
+                                    },
                                 };
                                 geo_insts.push(geom_inst);
                             }
@@ -840,7 +844,6 @@ pub async fn gen_cata_geos(
                                     // }
                                     inst_key = geo_hash;
                                     d.geo_hash = geo_hash;
-
                                     cached_mesh_mgr.insert(d.geo_hash, d);
 
                                     let compound_geom_inst = EleInstGeo {
@@ -854,7 +857,6 @@ pub async fn gen_cata_geos(
                                         is_tubi: false,
                                         geo_type: GeoBasicType::Compound,
                                     };
-
                                     shape_insts_data.insert_geos_data(inst_key, EleInstGeosData {
                                         inst_key,
                                         refno: cat_refno,
@@ -864,8 +866,6 @@ pub async fn gen_cata_geos(
                                         ptset_map: origin.ptset_map.clone(),
                                         reuse_unit: origin.reuse_unit,
                                     });
-
-
                                     compound_geos_info.geo_type = GeoBasicType::Compound;
 
                                     // if is_debug {
@@ -875,7 +875,6 @@ pub async fn gen_cata_geos(
                                     // }else{
                                     //     dbg!(compound_geos_info.get_inst_key());
                                     // }
-
                                     shape_insts_data.insert_compound_info(
                                         ele_refno,
                                         compound_geos_info,
@@ -951,15 +950,19 @@ pub async fn gen_cata_geos(
                             flow_pt_indexs,
                             geo_type: Default::default(),
                         };
-                        let mut compound_geos_info = geos_info.clone();
-                        compound_geos_info.geo_type = GeoBasicType::Compound;
-                        compound_geos_info.update_to_compound_hash();
-                        shape_insts_data.insert_info(ele_refno, geos_info);
-                        //为了不覆盖，这里需要动一下
-                        shape_insts_data.insert_compound_info(
-                            ele_refno,
-                            compound_geos_info,
-                        );
+                        shape_insts_data.insert_info(ele_refno, geos_info.clone());
+                        //如果有负实体，需要特殊处理
+                        if target_geo_data.has_neg(){
+                            let mut compound_geos_info = geos_info;
+                            compound_geos_info.geo_type = GeoBasicType::Compound;
+                            compound_geos_info.update_to_compound_hash();
+                            //为了不覆盖，这里需要动一下
+                            shape_insts_data.insert_compound_info(
+                                ele_refno,
+                                compound_geos_info,
+                            );
+                        }
+
                     }
                 }
             });
@@ -1736,7 +1739,7 @@ pub async fn gen_geos_data(
                             }
                             #[cfg(debug_assertions)]
                             final_mesh.export_obj(false, "final.obj").unwrap();
-                            let mut d: PlantGeoData = final_mesh.into();;
+                            let mut d: PlantGeoData = final_mesh.into();
                             d.geo_hash = geo_hash;
                             d
                         }else{
