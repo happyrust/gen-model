@@ -171,6 +171,7 @@ puhua_database_password = ""
 
 #FIXING 的调试
 debug_root_refnos = ["17496/106824"]  #墙
+#debug_root_refnos = ["17496/145250"]  #FIXING
 #debug_root_refnos = ["17496/106409"]  #墙
 
 #debug_root_refnos = ["17496/169983"]

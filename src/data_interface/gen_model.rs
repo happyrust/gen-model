@@ -673,7 +673,7 @@ pub async fn gen_cata_geos(
                                 geo_type: Default::default(),
                             };
 
-                            let mut csg_map: HashMap<RefU64, csg::Mesh> = HashMap::new();
+                            let mut manifold_map: HashMap<RefU64, ManifoldRust> = HashMap::new();
                             let mut geo_insts = vec![];
                             let mut ngmr_geo_insts = vec![];
                             let mut cata_aabb: Option<Aabb> = None;
@@ -751,9 +751,16 @@ pub async fn gen_cata_geos(
                                         rotation: rot,
                                         scale,
                                     };
-                                    let new_mesh = mesh.transform_by(&local_trans.compute_matrix());
+                                    //稍微扩张一点
+                                    // dbg!(refno);
+                                    // let s = if is_ngmr || is_neg {
+                                    //     Mat4::from_scale(Vec3::new(1.0, 1.0, 1.1))
+                                    // }else{
+                                    //     Mat4::IDENTITY
+                                    // };
+                                    let new_mesh = mesh.transform_by(&(local_trans.compute_matrix()));
                                     // dbg!(new_mesh.indices.len());
-                                    csg_map.insert(refno, new_mesh.into_csg_mesh(None));
+                                    manifold_map.insert(refno, new_mesh.into());
                                 };
 
                                 if let Some(mut cata_aabb) = cata_aabb {
@@ -863,36 +870,46 @@ pub async fn gen_cata_geos(
                                 //在这里执行负实体的运算
                                 let mut finals = vec![];
                                 for (k, (_, neg_vec)) in pos_neg_map {
-                                    if let Some(mut src_mesh) = csg_map.remove(&k) {
+                                    if let Some(mut src_manifold) = manifold_map.remove(&k) {
+                                        let mut neg_ms = vec![];
                                         for neg in neg_vec {
-                                            if let Some(m) = csg_map.remove(&neg) {
-                                                src_mesh -= m;
+                                            if let Some(m) = manifold_map.remove(&neg) {
+                                                // src_manifold -= m;
+                                                neg_ms.push(m);
                                             } else {
                                                 break;
                                             }
                                         }
                                         // dbg!(src_mesh.triangles.len());
-                                        finals.push(src_mesh);
+                                        let final_manifold = src_manifold.batch_boolean_subtract(&neg_ms);
+                                        finals.push(final_manifold);
                                     } else {
                                         continue;
                                     }
                                 }
 
                                 if !finals.is_empty() {
-                                    let mut final_mesh = finals.pop().unwrap();
-                                    for f in finals {
-                                        final_mesh += f;
-                                    }
-                                    dbg!(final_mesh.triangles.len());
-                                    let mut d: PlantGeoData = final_mesh.into();
+                                    let result_manifold = ManifoldRust::batch_boolean(&finals, 0);
+
+                                    // let result_manifold = finals.pop().unwrap();
 
                                     //组合成新的hash
                                     let mut compound_geos_info = geos_info;
                                     compound_geos_info.update_to_compound();
                                     let geo_hash = compound_geos_info.cata_hash.as_ref().unwrap().parse::<u64>().unwrap();
                                     inst_key = geo_hash;
-                                    d.geo_hash = geo_hash;
-                                    cached_mesh_mgr.insert(d.geo_hash, d);
+                                    // d.geo_hash = geo_hash;
+                                    cached_mesh_mgr.insert(geo_hash, PlantGeoData{
+                                        geo_hash,
+                                        mesh: Some((result_manifold.clone()).into()),
+                                        aabb: origin.aabb.clone(),
+                                    });
+
+                                    for f in finals {
+                                        f.destroy();
+                                    }
+                                    // result_manifold.destroy();
+
 
                                     let compound_geom_inst = EleInstGeo {
                                         geo_hash,
@@ -1803,11 +1820,12 @@ pub async fn gen_geos_data(
                             }
                             let mut src_manifold = batch_manifolds.remove(0);
                             batch_manifolds.sort_by(|x, y| x.num_tri().cmp(&y.num_tri()));
-                            let final_manifold = ManifoldRust::batch_boolean_subtract(&src_manifold, &batch_manifolds);
-                            let final_mesh: PlantMesh = final_manifold.into();
+                            let final_manifold = src_manifold.batch_boolean_subtract( &batch_manifolds);
+                            let final_mesh: PlantMesh = final_manifold.clone().into();
                             for m in batch_manifolds {
                                 m.destroy();
                             }
+                            final_manifold.destroy();
                             #[cfg(debug_assertions)]
                             final_mesh.export_obj(false, "final.obj").unwrap();
                             PlantGeoData {
@@ -1928,7 +1946,11 @@ pub async fn gen_geos_data(
                         continue;
                     };
                     let parent_matrix_inverse =  parent_geos_info.world_transform.compute_matrix().inverse();
-                    let mut parent_csg = parent_mesh.into_csg_mesh(Some(&p_inst.transform.compute_matrix()));
+                    let mat4 = p_inst.transform.compute_matrix();
+                    // let mut parent_csg = parent_mesh.into_csg_mesh(Some(&mat4));
+                    let mut parent_manifold: ManifoldRust = (parent_mesh, &mat4).into();
+                    dbg!(parent_manifold.num_tri());
+                    let mut neg_ms = vec![];
                     for refno in refnos {
                         let Some(geos_info) = shape_insts_data.get_ngmr_info(&refno) else {
                             continue;
@@ -1942,24 +1964,38 @@ pub async fn gen_geos_data(
                             let Some(mesh) = mesh_mgr.get_mesh(g.geo_hash) else {
                                 continue;
                             };
-                            let mut csg_mesh = mesh.into_csg_mesh(Some(&final_mat));
-                            parent_csg -= csg_mesh;
+                            // let mut csg_mesh = mesh.into_csg_mesh(Some(&final_mat));
+                            let mut neg_manifold: ManifoldRust = (mesh, &final_mat).into();
+                            dbg!(neg_manifold.num_tri());
+                            neg_ms.push(neg_manifold);
+                            // parent_csg -= csg_mesh;
                         }
                     }
+                    let mut final_manifold = parent_manifold.batch_boolean_subtract( &neg_ms);
+                    dbg!(final_manifold.num_tri());
                     let mut new_geos_info = parent_geos_info.clone();
                     new_geos_info.update_to_compound();
                     let geo_hash = new_geos_info.get_inst_key();
                     p_inst.geo_hash = geo_hash;
                     p_inst.transform = Transform::IDENTITY;
-                    let mut d: PlantGeoData = parent_csg.into();
-                    d.geo_hash = geo_hash;
-
+                    // let mut d: PlantGeoData = parent_csg.into();
+                    // d.geo_hash = geo_hash;
+                    let mut mesh: PlantMesh = (final_manifold.clone()).into();
+                    for f in neg_ms {
+                        f.destroy();
+                    }
+                    final_manifold.destroy();
                     let mut new_geos_data = parent_geos_data.clone();
                     new_geos_data.insts = vec![p_inst];
                     new_geos_data.inst_key = geo_hash;
-                    new_geos_data.aabb = d.aabb;
+                    // new_geos_data.aabb = d.aabb;
+
+                    mesh_mgr.insert(geo_hash, PlantGeoData{
+                        geo_hash,
+                        mesh: Some(mesh),
+                        aabb: new_geos_data.aabb,
+                    });
                     shape_insts_data.insert_geos_data(geo_hash, new_geos_data);
-                    mesh_mgr.insert(geo_hash, d);
                     shape_insts_data.insert_compound_info(parent, new_geos_info);
 
                 }
