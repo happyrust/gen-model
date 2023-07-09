@@ -133,27 +133,29 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
         for k in chunk {
             let json = serde_json::to_value(k.1).unwrap();
             instances.push(json);
-            // let edge = PdmsInstanceGraphEdge {
-            //     _key: "".to_string(),
-            //     _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.0.to_url_refno()),
-            //     _to: format!("{}/{}", collection, k.0.to_url_refno()),
-            // };
-            // edges.push(serde_json::to_value(&edge).unwrap());
         }
-        dbg!(instances.len());
         let aql = AqlQuery::new(r#"LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
             .bind_var("elements", take(&mut instances));
         database.aql_query::<Vec<()>>(aql).await?;
-        // let aql = AqlQuery::new(r#"LET data = @edges
-        //             FOR d IN data
-        //                 INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
-        //     .bind_var("@collection", edge_collection)
-        //     .bind_var("edges", take(&mut edges));
-        // database.aql_query::<Vec<()>>(aql).await?;
     }
+
+    let collection = AQL_PDMS_NGMS_INST_INFO_COLLECTION;
+    for chunk in &inst_mgr.ngmr_inst_info_map.iter().chunks(1000) {
+        for k in chunk {
+            let json = serde_json::to_value(k.1).unwrap();
+            instances.push(json);
+        }
+        let aql = AqlQuery::new(r#"LET data = @elements
+                    FOR d IN data
+                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
+            .bind_var("@collection", collection)
+            .bind_var("elements", take(&mut instances));
+        database.aql_query::<Vec<()>>(aql).await?;
+    }
+
     Ok(())
 }
 
@@ -227,6 +229,7 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
         inst_tubi_map,
         inst_geos_map,
         compound_inst_info_map: Default::default(),
+        ngmr_inst_info_map: Default::default(),
     });
 }
 

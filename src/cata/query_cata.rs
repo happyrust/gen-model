@@ -142,6 +142,16 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
             gm_params = query_gm_params(&gmse_am, Some(interface)).await?;
         }
     }
+
+    let mut ngm_params = vec![];
+    //-ve， 和design发生左右的负实体
+    if let Some(gmse_refno) = attr_map.get_foreign_refno("NGMR") {
+        if let Ok(gmse_am) = interface.get_attr_from_localdb(gmse_refno) {
+            ngm_params = query_gm_params(&gmse_am, Some(interface)).await?;
+        }
+    }
+
+
     let mut plin_map = HashMap::new();
     if let Some(pstr_refno) = attr_map.get_foreign_refno("PSTR") {
         let pstr_am = interface.get_children_attrs(pstr_refno)?;
@@ -169,6 +179,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
         gtype: attr_map.get_as_string("GTYP").unwrap_or("unset".into()),
         dtse_params: vec![],
         gm_params,
+        ngm_params,
         axis_params,
         params: attr_map
             .get_as_string("PARA")
@@ -337,15 +348,17 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     // dbg!(&scom_info.gm_params);
     // dbg!(&scom_info.axis_params);
     let geometries = resolve_gms(des_refno, &scom_info.gm_params, &jusl_param, &cur_context, &axis_map, interface);
-    for geometry in &geometries {
-        if let CateGeoParam::Pyramid(l) = geometry {
-            dbg!(&l);
-        }
-    }
+    let n_geometries = resolve_gms(des_refno, &scom_info.ngm_params, &jusl_param, &cur_context, &axis_map, interface);
+    // for geometry in &geometries {
+    //     if let CateGeoParam::Pyramid(l) = geometry {
+    //         dbg!(&l);
+    //     }
+    // }
     // dbg!(&geometries);
     Ok(CateGeomsInfo {
         refno: cat_ref,
         geometries,
+        n_geometries,
         axis_map,
     })
 }

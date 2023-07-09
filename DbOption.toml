@@ -170,7 +170,8 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/171101"]
 
 #FIXING 的调试
-#debug_root_refnos = ["17496/106824"]  #墙
+debug_root_refnos = ["17496/106824"]  #墙
+#debug_root_refnos = ["17496/106409"]  #墙
 
 #debug_root_refnos = ["17496/169983"]
 #debug_root_refnos = ["24381/148471"]
@@ -237,18 +238,19 @@ puhua_database_password = ""
 #debug_root_refnos = ["24381/42520"]
 #debug_root_refnos = ["9304/2"]
 #debug_root_refnos = ["17496/161703"]
-#debug_root_refnos = ["17496/116749"]
+
 #debug_root_refnos = ["17496/105760"]
 #debug_root_refnos = ["17496/105760"]
 
-debug_root_refnos = ["17496/171102"]
+#debug_root_refnos = ["17496/171102"]
 #debug_root_refnos = ["17496/171138"]
 #debug_root_refnos = ["17496/172824"]
 #debug_root_refnos = ["17496/171158"]
 
 #SBFI
-#debug_root_refnos = ["17496/105760"]
+#debug_root_refnos = ["17496/137938"]
 #GWALL
+#debug_root_refnos = ["17496/116749"]
 #debug_root_refnos = ["17496/171346"]
 #电气负实体测试
 #debug_root_refnos = ["24383/84480"]

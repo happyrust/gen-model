@@ -528,7 +528,7 @@ impl PdmsDataInterface for AiosDBManager {
                 FOR v,e,p in 0..15 INBOUND key pdms_edges
                 PRUNE v.noun in @neg_nouns
                 OPTIONS { "order": "bfs"}
-                filter v.noun in @neg_nouns
+                filter (v.noun in @neg_nouns)
                 let parent = p.vertices[-2]
                 let children = ( for cc in 1 INBOUND parent._id pdms_edges return cc )
                 return [
@@ -538,7 +538,7 @@ impl PdmsDataInterface for AiosDBManager {
                         let parent_is_pos = parent.noun in @pos_nouns
                         return parent_is_pos ? PUSH(pos_vec, parent._key) : pos_vec
                      )[0],
-                    (for c in children filter c.noun in @neg_nouns  return c._key)
+                    (for c in children filter (c.noun in @neg_nouns) return c._key)
                 ]
         "#).bind_var("keys", refno_urls)
             .bind_var("neg_nouns", TOTAL_NEG_NOUN_NAMES.to_vec())
@@ -661,14 +661,13 @@ impl PdmsDataInterface for AiosDBManager {
         }
         //需要判断owner 下是不是有spine，如wall，顺时针逆时针会影响plin的方向
         for (refno, ref_basic) in ancestors {
-            let mut jusl_vec = Vec3::new(0.0, 0.0, 0.0);
             let att = self.get_attr_from_localdb(refno)?;
             let mut pos = att.get_position().unwrap_or_default();
             let mut quat = Quat::IDENTITY;
             let type_name = att.get_type();
             if let Some(jusl) = att.get_str("JUSL") {
                 if let Some(param) = self.query_pline(refno, jusl).await? {
-                    jusl_vec = param.pt;
+                    pos -= param.pt;
                 }
             }
             //土建特殊情况的一些处理
@@ -697,8 +696,6 @@ impl PdmsDataInterface for AiosDBManager {
                     pos += result.1;
                     quat *= result.0;
                 }
-                //Positioning Line Datum
-                "PLDATU" => {}
                 "SBFI" => {
                     //need to check out owner's SJUS
                     if let Ok(owner_att) = self.get_attr_from_localdb(ref_basic.owner) {
@@ -764,29 +761,34 @@ impl PdmsDataInterface for AiosDBManager {
                     quat = quat * Quat::from_rotation_z(bangle.to_radians());
                 }
             }
-            //弧墙下方没有fitt
-            //处理有POSL的情况
+            //如果有posl
             if let Some(pos_line) = att.get_str("POSL") {
                 // dbg!(pos_line);
                 //plin里的位置偏移
-                let mut plin_pos = Vec3::new(0.0, 0.0, 0.0);
-                let mut pline_plax = -Vec3::X;
+                let mut plin_pos = Vec3::ZERO;
+                let mut pline_plax = Vec3::NEG_X;
 
                 let delta_vec = att.get_vec3("DELP").unwrap_or_default();
                 //todo 这里不一定正确
                 let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
                 let bangle = att.get_f32("BANG").unwrap_or_default();
 
-                let mut tmp_owner = ref_basic.get_owner();
+                let mut plin_owner = att.get_owner().unwrap();
+                // let mut tmp_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
+                // while !tmp_att.contains_attr_name("JUSL") {
+                //     tmp_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
+                //     plin_owner = tmp_att.get_owner().unwrap();
+                // }
+
                 // POSL 的处理, 获得父节点的形集
                 let mut plin_param = None;
                 while plin_param.is_none() {
-                    plin_param = self.query_pline(tmp_owner, pos_line).await?;
+                    plin_param = self.query_pline(plin_owner, pos_line).await?;
                     if plin_param.is_some() {
                         break;
                     }
-                    if let Some(t) = self.get_refno_basic(ref_basic.owner) {
-                        tmp_owner = t.get_owner();
+                    if let Some(t) = self.get_refno_basic(plin_owner) {
+                        plin_owner = t.get_owner();
                     } else {
                         break;
                     }
@@ -798,18 +800,28 @@ impl PdmsDataInterface for AiosDBManager {
                 }
                 let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
                 let y_axis = Vec3::Z;
-                let z_axis = -pline_plax;
+                let z_axis = pline_plax;
                 let x_axis = y_axis.cross(z_axis).normalize();
-                let quat = Quat::from_mat3(&Mat3::from_cols(
+                let posl_quat = Quat::from_mat3(&Mat3::from_cols(
                     x_axis,
                     y_axis,
                     z_axis,
                 ));
+                // dbg!(quat_to_pdms_ori_str(&posl_quat));
                 // dbg!(quat_to_pdms_ori_str(&quat));
+                let new_quat = posl_quat * quat;
+                // dbg!(quat_to_pdms_ori_str(&new_quat));
+                // dbg!(translation);
+                // dbg!(quat_to_pdms_ori_str(&rotation));
                 translation = translation
-                    + rotation * (pos + zdis + plin_pos - jusl_vec)
-                    + rotation * quat * bangle_rot * delta_vec;
-                rotation = rotation * quat * bangle_rot;
+                    + rotation * pos
+                    + rotation * new_quat * (zdis + plin_pos)
+                    + rotation * new_quat * bangle_rot * delta_vec
+                ;
+                // dbg!(translation);
+                // dbg!(quat_to_pdms_ori_str(&rotation));
+                rotation = rotation * new_quat * bangle_rot;
+                // dbg!(quat_to_pdms_ori_str(&rotation));
             } else {
                 translation = translation + rotation * pos;
                 rotation = rotation * quat;

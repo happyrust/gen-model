@@ -199,7 +199,12 @@ async fn main() -> anyhow::Result<()> {
         let mut time = Instant::now();
         //
 
-        // let refno = RefU64::from_two_nums(17496, 171259);
+        // let refno = RefU64::from_two_nums(17496, 156940);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(17496, 156942);
         // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
         // dbg!(quat_to_pdms_ori_str(&transform.rotation));
         // dbg!(transform);
@@ -248,6 +253,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_MESH_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_COMPOUND_INST_INFO_COLLECTION, Document).await?;
+    create_arango_document(&database, AQL_PDMS_NGMS_INST_INFO_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_INFO_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_GEO_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_TUBI_COLLECTION, Document).await?;
