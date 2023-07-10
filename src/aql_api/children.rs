@@ -221,7 +221,7 @@ pub async fn query_deep_children_refnos_fuzzy(database: &ArDatabase, refno: &[Re
     let aql = AqlQuery::new("\
     for id in @ids
         FOR z in 0..10 INBOUND id pdms_edges
-        prune z.noun in @nouns
+        // prune z.noun in @nouns
         filter z._key != null
         filter z.noun in @nouns
         return z._key

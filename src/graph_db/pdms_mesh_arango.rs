@@ -81,12 +81,6 @@ pub async fn save_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &mut PlantMes
 
     for chunk in &meshes.iter().chunks(1000) {
         for k in chunk {
-            // if !replace {
-            //     //如果已经存在，不需要替换
-            //     if exist_geo_hashs.contains(k.0) {
-            //         continue;
-            //     }
-            // }
             let json = serde_json::to_value(k.1).unwrap();
             data.push(json);
         }

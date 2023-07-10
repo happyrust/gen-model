@@ -166,7 +166,9 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
 
     let rpro_re = Regex::new(r"(RPRO)\s+([a-zA-Z0-9]+)").unwrap();
     if new_exp.contains("RPRO") {
-        // dbg!(&new_exp);
+        // if new_exp.contains("RPRO PH") {
+        //     dbg!(&new_exp);
+        // }
         new_exp = rpro_re.replace_all(&new_exp, |caps: &Captures| {
             let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
             let default_key: String = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
@@ -442,7 +444,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     CateGeoParam::Unknown
                 }
             }
-            "LSNO" | "NSNO" => {
+            "LSNO" | "NLSN" => {
                 if gmse.paxises.len() >= 2 && gmse.diameters.len() >= 2 && gmse.distances.len() >= 2 {
                     CateGeoParam::Snout(CateSnoutParam {
                         refno: gmse.refno,
@@ -549,7 +551,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SREV" | "NREV" => {
+            "SREV" | "NSRE" => {
                 CateGeoParam::Revolution(CateRevolutionParam {
                     refno: gmse.refno,
                     pa: (gmse.paxises[0].clone()),
@@ -564,7 +566,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SRTO" | "NRTO" => {
+            "SRTO" | "NSRT" => {
                 // 截面为矩形的弯管
                 CateGeoParam::RectTorus(CateRectTorusParam {
                     refno: gmse.refno,
