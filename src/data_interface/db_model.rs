@@ -46,7 +46,7 @@ use crate::aql_api::pdms_mesh::{query_all_geo_hashs, query_pdms_mesh_aql};
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
 use crate::cata::resolve_helper::eval_str_to_f32;
-use crate::consts::{GLOBAL_DATABASE, PDMS_INFO_DB, PUHUA_MATERIAL_DATABASE};
+use crate::consts::{GLOBAL_DATABASE,FUZZY_QUERT, SSC_DATABASE,PDMS_INFO_DB, PUHUA_MATERIAL_DATABASE};
 use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager, CATAEXPRCONTEXT_MAP};
@@ -336,6 +336,32 @@ impl AiosDBManager {
             .map_err({ |x| anyhow!(x.to_string()) })
     }
 
+    ///获取mysql数据库保存ssc的连接pool
+    #[inline]
+    pub async fn get_ssc_pool(&self) -> anyhow::Result<Pool<MySql>> {
+        let connection_str = self.default_conn_str();
+        let url = &format!("{connection_str}/{}", SSC_DATABASE);
+        PoolOptions::new()
+            .max_connections(500)
+            .acquire_timeout(Duration::from_secs(10 * 60))
+            .connect(url)
+            .await
+            .map_err({ |x| anyhow!(x.to_string()) })
+    }
+
+    ///获取mysql数据库模糊查询的连接pool
+    #[inline]
+    pub async fn get_fuzzy_query_pool(&self) -> anyhow::Result<Pool<MySql>> {
+        let connection_str = self.default_conn_str();
+        let url = &format!("{connection_str}/{}", FUZZY_QUERT);
+        PoolOptions::new()
+            .max_connections(500)
+            .acquire_timeout(Duration::from_secs(10 * 60))
+            .connect(url)
+            .await
+            .map_err({ |x| anyhow!(x.to_string()) })
+    }
+
     ///获取图数据库的连接pool
     #[inline]
     pub async fn get_arango_db(&self) -> anyhow::Result<ArDatabase> {
@@ -430,7 +456,7 @@ impl AiosDBManager {
                 .mode(sled::Mode::HighThroughput)
                 .cache_capacity(10_000_000_000)
                 .flush_every_ms(Some(1000));
-            if let Ok(db) = config.open(){
+            if let Ok(db) = config.open() {
                 local_attr_db_map.entry(project.clone()).or_insert(db.open_tree("attr_map")?);
                 local_children_db_map.entry(project.clone()).or_insert(db.open_tree("children")?);
             }
@@ -590,7 +616,7 @@ impl AiosDBManager {
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
                     if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {
-                        let Some(db_num) = att.get_i32("NUMBDB") else{
+                        let Some(db_num) = att.get_i32("NUMBDB") else {
                             continue;
                         };
                         dbg!(&db_num);
