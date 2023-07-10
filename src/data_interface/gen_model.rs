@@ -754,11 +754,12 @@ pub async fn gen_cata_geos(
                                     //稍微扩张一点
                                     // dbg!(refno);
                                     // let s = if is_ngmr || is_neg {
-                                    //     Mat4::from_scale(Vec3::new(1.0, 1.0, 1.1))
+                                    //     Mat4::from_scale(Vec3::splat(1.1))
                                     // }else{
                                     //     Mat4::IDENTITY
                                     // };
-                                    let new_mesh = mesh.transform_by(&(local_trans.compute_matrix()));
+                                    let s = Mat4::IDENTITY;
+                                    let new_mesh = mesh.transform_by(&(local_trans.compute_matrix() * s));
                                     // dbg!(new_mesh.indices.len());
                                     manifold_map.insert(refno, new_mesh.into());
                                 };
@@ -1736,7 +1737,6 @@ pub async fn gen_geos_data(
                         let mut found_non_manifold = false;
                         //如果数量比较少，直接用慢的csg方法
                         let mut use_csg = total_refnos.len() < 20;
-                        ;
                         for (index, t_refno) in total_refnos.into_iter().enumerate() {
                             // if t_refno != RefU64::from_two_nums(17496, 168894) {
                             //     continue;
@@ -1825,7 +1825,7 @@ pub async fn gen_geos_data(
                             for m in batch_manifolds {
                                 m.destroy();
                             }
-                            final_manifold.destroy();
+                            // final_manifold.destroy();
                             #[cfg(debug_assertions)]
                             final_mesh.export_obj(false, "final.obj").unwrap();
                             PlantGeoData {
@@ -1949,6 +1949,7 @@ pub async fn gen_geos_data(
                     let mat4 = p_inst.transform.compute_matrix();
                     // let mut parent_csg = parent_mesh.into_csg_mesh(Some(&mat4));
                     let mut parent_manifold: ManifoldRust = (parent_mesh, &mat4).into();
+                    #[cfg(debug_assertions)]
                     dbg!(parent_manifold.num_tri());
                     let mut neg_ms = vec![];
                     for refno in refnos {
@@ -1972,6 +1973,7 @@ pub async fn gen_geos_data(
                         }
                     }
                     let mut final_manifold = parent_manifold.batch_boolean_subtract( &neg_ms);
+                    #[cfg(debug_assertions)]
                     dbg!(final_manifold.num_tri());
                     let mut new_geos_info = parent_geos_info.clone();
                     new_geos_info.update_to_compound();
@@ -1984,7 +1986,7 @@ pub async fn gen_geos_data(
                     for f in neg_ms {
                         f.destroy();
                     }
-                    final_manifold.destroy();
+                    // final_manifold.destroy();
                     let mut new_geos_data = parent_geos_data.clone();
                     new_geos_data.insts = vec![p_inst];
                     new_geos_data.inst_key = geo_hash;

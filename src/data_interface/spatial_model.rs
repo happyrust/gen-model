@@ -39,14 +39,14 @@ impl AiosDBManager {
                     SweepPath3D::Line(l) => {
                         let mut dir = (l.end - l.start).normalize();
                         pos += dir * tmp_dist + l.start;
-                        let z_axis = Vec3::Y;
-                        let x_axis = -Vec3::X;
-                        let y_axis = Vec3::Z;
-                        quat = Quat::from_mat3(&Mat3::from_cols(
-                            x_axis,
-                            y_axis,
-                            z_axis,
-                        ));
+                        // let z_axis = Vec3::Y;
+                        // let x_axis = -Vec3::X;
+                        // let y_axis = Vec3::Z;
+                        // quat = Quat::from_mat3(&Mat3::from_cols(
+                        //     x_axis,
+                        //     y_axis,
+                        //     z_axis,
+                        // ));
                         break;
                     }
                     SweepPath3D::SpineArc(arc) => {
@@ -64,7 +64,10 @@ impl AiosDBManager {
                             theta = start_angle + theta;
                             pos = arc.center + arc.radius * Vec3::new(theta.cos(), theta.sin(), 0.0);
                             let y_axis = Vec3::Z;
-                            let x_axis = (arc.center - pos).normalize();
+                            let mut x_axis = (arc.center - pos).normalize();
+                            if arc.clock_wise {
+                                x_axis = -x_axis;
+                            }
                             let z_axis = x_axis.cross(y_axis).normalize();
                             quat = Quat::from_mat3(&Mat3::from_cols(
                                 x_axis,

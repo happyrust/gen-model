@@ -671,58 +671,35 @@ impl PdmsDataInterface for AiosDBManager {
                 }
             }
             //土建特殊情况的一些处理
-            match type_name {
-                // "FLOOR" => {
-                //     let sjus = att.get_str("JUSL").unwrap_or("unset");
-                //     let height = self
-                //         .get_attr(refno)
-                //         .await?
-                //         .get_f32("HEIG")
-                //         .unwrap_or_default();
-                //     let mut off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                //         -height
-                //     } else if sjus == "UCEN" || sjus == "DCEN" {
-                //         -height / 2.0
-                //     } else {
-                //         0.0
-                //     };
-                //     pos.z += off_z;
-                // }
-                //Justification Line Datum
-                "JLDATU" => {
-                    let zdist = att.get_f32("ZDIS").unwrap_or_default();
-                    let pkdi = att.get_f32("PKDI").unwrap_or_default();
-                    let result = self.cal_zdis_pkdi_in_section(ref_basic.owner, pkdi, zdist);
-                    pos += result.1;
-                    quat *= result.0;
-                }
-                "SBFI" => {
-                    //need to check out owner's SJUS
-                    if let Ok(owner_att) = self.get_attr_from_localdb(ref_basic.owner) {
-                        if let Some(owner_sjus) = owner_att.get_str("SJUS") {
-                            //如果发现了SJUS，需要找到同一层集的PLOO，得到height
-                            let children = self.get_children_from_localdb(owner_att.get_owner().unwrap())?;
-                            for c in children {
-                                let c_att = self.get_attr_from_localdb(c)?;
-                                // dbg!(c_att.get_type());
-                                if c_att.get_type() == "PLOO" {
-                                    let height = c_att.get_f32("HEIG").unwrap_or_default();
-                                    let mut off_z = if owner_sjus == "UTOP" || owner_sjus == "DTOP" {
-                                        height
-                                    } else if owner_sjus == "UCEN" || owner_sjus == "DCEN" {
-                                        height / 2.0
-                                    } else {
-                                        0.0
-                                    };
-                                    pos.z += off_z;
-                                    break;
-                                }
-                            }
+            if att.contains_attr_name("ZDIS") {
+                let zdist = att.get_f32("ZDIS").unwrap_or_default();
+                let pkdi = att.get_f32("PKDI").unwrap_or_default();
+                let result = self.cal_zdis_pkdi_in_section(ref_basic.owner, pkdi, zdist);
+                pos += result.1;
+                quat *= result.0;
+            }
+
+            if let Ok(owner_att) = self.get_attr_from_localdb(ref_basic.owner) {
+                if let Some(owner_sjus) = owner_att.get_str("SJUS") {
+                    //如果发现了SJUS，需要找到同一层集的PLOO，得到height
+                    let children = self.get_children_from_localdb(owner_att.get_owner().unwrap())?;
+                    for c in children {
+                        let c_att = self.get_attr_from_localdb(c)?;
+                        // dbg!(c_att.get_type());
+                        if c_att.get_type() == "PLOO" {
+                            let height = c_att.get_f32("HEIG").unwrap_or_default();
+                            let mut off_z = if owner_sjus == "UTOP" || owner_sjus == "DTOP" {
+                                height
+                            } else if owner_sjus == "UCEN" || owner_sjus == "DCEN" {
+                                height / 2.0
+                            } else {
+                                0.0
+                            };
+                            pos.z += off_z;
+                            break;
                         }
                     }
                 }
-
-                _ =>{}
             }
 
             let mut quat_v = att.get_rotation();
@@ -769,9 +746,7 @@ impl PdmsDataInterface for AiosDBManager {
                 let mut pline_plax = Vec3::NEG_X;
 
                 let delta_vec = att.get_vec3("DELP").unwrap_or_default();
-                //todo 这里不一定正确
-                let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
-                let bangle = att.get_f32("BANG").unwrap_or_default();
+                // let bangle = att.get_f32("BANG").unwrap_or_default();
 
                 let mut plin_owner = att.get_owner().unwrap();
                 // let mut tmp_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
@@ -793,35 +768,52 @@ impl PdmsDataInterface for AiosDBManager {
                         break;
                     }
                 }
+                let target_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
+                let is_lmirror = target_att.get_bool("LMIRR").unwrap_or_default();
                 if let Some(param) = plin_param {
                     // dbg!(&param);
                     plin_pos = param.pt;
                     pline_plax = param.plax;
                 }
-                let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
+                // let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
                 let y_axis = Vec3::Z;
-                let z_axis = pline_plax;
+                //和LMIRROR 有关系
+                let z_axis = if is_lmirror {
+                    -pline_plax
+                }else{
+                    pline_plax
+                };
                 let x_axis = y_axis.cross(z_axis).normalize();
                 let posl_quat = Quat::from_mat3(&Mat3::from_cols(
                     x_axis,
                     y_axis,
                     z_axis,
                 ));
-                // dbg!(quat_to_pdms_ori_str(&posl_quat));
-                // dbg!(quat_to_pdms_ori_str(&quat));
+                #[cfg(debug_assertions)]
+                {
+                    dbg!(quat_to_pdms_ori_str(&posl_quat));
+                    dbg!(quat_to_pdms_ori_str(&quat));
+                }
                 let new_quat = posl_quat * quat;
-                // dbg!(quat_to_pdms_ori_str(&new_quat));
-                // dbg!(translation);
-                // dbg!(quat_to_pdms_ori_str(&rotation));
+                #[cfg(debug_assertions)]
+                {
+                    dbg!(quat_to_pdms_ori_str(&new_quat));
+                    dbg!(translation);
+                    dbg!(quat_to_pdms_ori_str(&rotation));
+                }
                 translation = translation
                     + rotation * pos
-                    + rotation * new_quat * (zdis + plin_pos)
-                    + rotation * new_quat * bangle_rot * delta_vec
+                    + rotation * new_quat * (plin_pos + delta_vec)
+                    // + rotation * new_quat * bangle_rot * delta_vec
                 ;
-                // dbg!(translation);
-                // dbg!(quat_to_pdms_ori_str(&rotation));
-                rotation = rotation * new_quat * bangle_rot;
-                // dbg!(quat_to_pdms_ori_str(&rotation));
+                #[cfg(debug_assertions)]
+                {
+                    dbg!(translation);
+                    dbg!(quat_to_pdms_ori_str(&rotation));
+                }
+                rotation = rotation * new_quat;  // * bangle_rot
+                #[cfg(debug_assertions)]
+                dbg!(quat_to_pdms_ori_str(&rotation));
             } else {
                 translation = translation + rotation * pos;
                 rotation = rotation * quat;

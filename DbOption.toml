@@ -61,7 +61,7 @@ only_rebuild_pdms_element = false
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
 #included_db_files = ["zdj7600_0001"]
-included_db_files = ["ams5052_0001"]
+included_db_files = ["ams1112_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 manual_db_nums = [1112]  #, 8000
 plat_url = ""
@@ -170,9 +170,15 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/171101"]
 
 #FIXING 的调试
-debug_root_refnos = ["17496/106824"]  #墙
+#debug_root_refnos = ["17496/106824"]  #墙
 #debug_root_refnos = ["17496/145250"]  #FIXING
 #debug_root_refnos = ["17496/106409"]  #墙
+#debug_root_refnos = ["17496/173624"]  #墙 顺时针的情况
+
+#FIT 的调试
+#17496/173050
+#debug_root_refnos = ["17496/173050"]
+#debug_root_refnos = ["17496/173049"]
 
 #debug_root_refnos = ["17496/169983"]
 #debug_root_refnos = ["24381/148471"]
@@ -219,7 +225,7 @@ debug_root_refnos = ["17496/106824"]  #墙
 
 #debug_root_refnos = ["17496/161421"]
 #debug_root_refnos = ["17496/171102"]
-#debug_root_refnos = ["17496/171102"]
+debug_root_refnos = ["17496/171102"]
 #debug_root_refnos = ["24381/57302"]
 
 
@@ -266,12 +272,14 @@ debug_root_refnos = ["17496/106824"]  #墙
 #debug_root_refnos = ["17496/168790"]
 
 #debug_root_refnos = ["17496/171134"]
+#debug_root_refnos = ["17496/172861"]
 
 #重点测试管道
 #debug_root_refnos = ["17496/169986"]
 #debug_root_refnos = ["17496/171009"]
 #debug_root_refnos = ["17496/170902"]
 
+#debug_root_refnos = ["17496/173811"]
 #debug_root_refnos = ["17496/168790"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
