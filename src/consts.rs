@@ -50,6 +50,7 @@ pub const AQL_PDMS_MESH_COLLECTION: &'static str = "pdms_mesh";
 pub const AQL_PDMS_EDGES_COLLECTION: &'static str = "pdms_edges";
 /// 负实体运算后的inst infos数据
 pub const AQL_PDMS_COMPOUND_INST_INFO_COLLECTION: &'static str = "pdms_compound_inst_infos";
+pub const AQL_PDMS_NGMS_INST_INFO_COLLECTION: &'static str = "pdms_ngmr_inst_infos";
 pub const AQL_PDMS_INST_INFO_COLLECTION: &'static str = "pdms_inst_infos";
 /// 负实体运算后的inst geos数据
 pub const AQL_PDMS_COMPOUND_INST_GEO_COLLECTION: &'static str = "pdms_compound_inst_geos";

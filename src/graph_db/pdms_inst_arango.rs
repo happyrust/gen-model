@@ -102,7 +102,7 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
     }
 
     let collection = AQL_PDMS_INST_INFO_COLLECTION;
-    for chunk in &inst_mgr.inst_info_map.iter().filter(|(_, v)| !v.is_compound()).chunks(1000) {
+    for chunk in &inst_mgr.inst_info_map.iter().chunks(1000) {
         for k in chunk {
             let json = serde_json::to_value(k.1).unwrap();
             instances.push(json);
@@ -127,11 +127,37 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
         database.aql_query::<Vec<()>>(aql).await?;
     }
 
+    let collection = AQL_PDMS_COMPOUND_INST_INFO_COLLECTION;
+    println!("开始保存负实体instance数据");
+    for chunk in &inst_mgr.compound_inst_info_map.iter().chunks(1000) {
+        for k in chunk {
+            let json = serde_json::to_value(k.1).unwrap();
+            instances.push(json);
+        }
+        let aql = AqlQuery::new(r#"LET data = @elements
+                    FOR d IN data
+                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
+            .bind_var("@collection", collection)
+            .bind_var("elements", take(&mut instances));
+        database.aql_query::<Vec<()>>(aql).await?;
+    }
+
+    let collection = AQL_PDMS_NGMS_INST_INFO_COLLECTION;
+    for chunk in &inst_mgr.ngmr_inst_info_map.iter().chunks(1000) {
+        for k in chunk {
+            let json = serde_json::to_value(k.1).unwrap();
+            instances.push(json);
+        }
+        let aql = AqlQuery::new(r#"LET data = @elements
+                    FOR d IN data
+                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
+            .bind_var("@collection", collection)
+            .bind_var("elements", take(&mut instances));
+        database.aql_query::<Vec<()>>(aql).await?;
+    }
 
     Ok(())
 }
-
-
 
 ///获取element inst的几何数据
 /// 默认直接优先取负实体的数据
@@ -198,10 +224,12 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
         inst_tubi_map.insert(g.refno, g);
     }
 
-    return Ok(ShapeInstancesData{
+    return Ok(ShapeInstancesData {
         inst_info_map,
         inst_tubi_map,
         inst_geos_map,
+        compound_inst_info_map: Default::default(),
+        ngmr_inst_info_map: Default::default(),
     });
 }
 
@@ -231,7 +259,7 @@ pub async fn query_instance_level_with_ssc_refno_in_arangodb(refno: RefU64, data
         // Filter document(@collection,c._key) != null
         return c._key")
         .bind_var("refno", refno_aql);
-        // .bind_var("collection", pdms_inst_infos);
+    // .bind_var("collection", pdms_inst_infos);
     let result: Vec<String> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(vec![]); }
     let result = convert_refno_vec_from_vec_string(result);
