@@ -68,31 +68,31 @@ impl SiteExcelData {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RoomExcelData {
     ///房间代码
-    #[serde(rename="房间代码")]
+    #[serde(rename = "房间代码")]
     pub room_code: Option<String>,
     /// 所属机组
-    #[serde(rename="所属机组")]
+    #[serde(rename = "所属机组")]
     pub aff_unit: Option<String>,
     ///安装厂房
-    #[serde(rename="安装厂房")]
+    #[serde(rename = "安装厂房")]
     pub install_plant: Option<String>,
     ///区域
-    #[serde(rename="区域")]
+    #[serde(rename = "区域")]
     pub zone: Option<String>,
     ///安装层位
-    #[serde(rename="安装层位")]
+    #[serde(rename = "安装层位")]
     pub install_level: Option<String>,
     ///厂房
-    #[serde(rename="厂房")]
+    #[serde(rename = "厂房")]
     pub plant: Option<String>,
     ///分区
-    #[serde(rename="分区")]
+    #[serde(rename = "分区")]
     pub partion: Option<String>,
     ///层位及标高
-    #[serde(rename="层位及标高")]
+    #[serde(rename = "层位及标高")]
     pub layer_elevation: Option<String>,
     /// 序号
-    #[serde(rename="序号")]
+    #[serde(rename = "序号")]
     pub number: Option<u32>,
 }
 
@@ -204,9 +204,9 @@ fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, Da
                 }
             }
 
-        let read_site_name = v.name.unwrap();
-        zone_name = read_site_name.clone();
-        zone_code = read_site_code.clone();
+            let read_site_name = v.name.unwrap();
+            zone_name = read_site_name.clone();
+            zone_code = read_site_code.clone();
 
 
             name_map.insert(read_site_code, read_site_name);
@@ -812,11 +812,14 @@ pub async fn query_ssc_room_refnos(room_info: &HashMap<String, RefU64>, pool: &P
 /// 通过 专业分类.xlsx 表中 pdms name 包含的关键字，将pdms_eles保存上对应的专业代码
 ///
 /// name_map: 从 get_room_level_from_excel() 直接读出来的 , pdms site 和 其下面 zone 的 name 对应的专业代码
-pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>, db_option: &DbOption, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<()> {
+pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>,
+                                       sites: Vec<(RefU64, String)>,
+                                       db_option: &DbOption,
+                                       database: &ArDatabase,
+                                       pool: &Pool<MySql>) -> anyhow::Result<()> {
     let numbs = query_db_nums_of_mdb(&db_option.mdb_name, &db_option.module, pool).await?;
     // 先查找到 mdb下的所有 site
-    let sites = query_types_refnos_names(&vec!["SITE"], pool, Some(&numbs)).await?;
-    // let sites = vec![(RefU64::from_refno_str("24383/66456").unwrap(), "/1WCC-PIPEBJ".to_string())];
+    // let sites = query_types_refnos_names(&vec!["SITE"], pool, Some(&numbs)).await?;
     let mut update_aqls = Vec::new();
     // 将mdb所有的site查找到后，用 name_map 进行分组和过滤，一个site下面的zone为一组
     for (site_refno, site_name) in sites {
@@ -857,7 +860,7 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>, db_opti
     }
     // todo 不能同时update多次 后期将这些aql优化到一次执行
     for update_aql in update_aqls {
-        let _r = database.aql_query::<()>(AqlQuery::new(update_aql.as_str()) ).await;
+        let _r = database.aql_query::<()>(AqlQuery::new(update_aql.as_str())).await;
     }
     Ok(())
 }
@@ -907,10 +910,10 @@ async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
                 cata_hash: None,
             });
 
-            edge_results.push(AqlEdge{
+            edge_results.push(AqlEdge {
                 _key: refno.hash_with_another_refno(owner).to_string(),
-                _from: format!("{}/{}",AQL_SSC_ELES_COLLECTION,refno.to_url_refno()),
-                _to: format!("{}/{}",AQL_SSC_ELES_COLLECTION,owner.to_url_refno()),
+                _from: format!("{}/{}", AQL_SSC_ELES_COLLECTION, refno.to_url_refno()),
+                _to: format!("{}/{}", AQL_SSC_ELES_COLLECTION, owner.to_url_refno()),
             })
         }
     }
