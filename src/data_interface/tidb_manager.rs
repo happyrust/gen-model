@@ -48,7 +48,7 @@ use aios_core::options::DbOption;
 use aios_core::pdms_data::ScomInfo;
 use aios_core::prim_geo;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType, SweepPath3D};
-use aios_core::tool::math_tool::quat_to_pdms_ori_str;
+use aios_core::tool::math_tool::{quat_to_pdms_ori_str, to_pdms_vec_str};
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use log::{error, info};
@@ -78,6 +78,7 @@ use crate::graph_db::pdms_inst_arango::*;
 use crate::mdb::get_project_mdb;
 use crate::tables::{gen_create_project_mdb_json_sql, gen_create_project_mdb_sql};
 use bb8_arangodb::{ArangoConnectionManager, AuthenticationMethod};
+use futures::future::ok;
 use parry3d::query::{Ray, RayCast};
 use redb::{ReadableTable, TableDefinition};
 use crate::data_interface::db_manager::GeoEnum;
@@ -523,7 +524,7 @@ impl PdmsDataInterface for AiosDBManager {
                 FOR v,e,p in 0..15 INBOUND key pdms_edges
                 PRUNE v.noun in @neg_nouns
                 OPTIONS { "order": "bfs"}
-                filter v.noun in @neg_nouns
+                filter (v.noun in @neg_nouns)
                 let parent = p.vertices[-2]
                 let children = ( for cc in 1 INBOUND parent._id pdms_edges return cc )
                 return [
@@ -533,13 +534,11 @@ impl PdmsDataInterface for AiosDBManager {
                         let parent_is_pos = parent.noun in @pos_nouns
                         return parent_is_pos ? PUSH(pos_vec, parent._key) : pos_vec
                      )[0],
-                    (for c in children filter c.noun in @neg_nouns  return c._key)
+                    (for c in children filter (c.noun in @neg_nouns) return c._key)
                 ]
         "#).bind_var("keys", refno_urls)
-            .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
-            .bind_var("pos_nouns", GENRAL_POS_NOUN_NAMES.to_vec())
-
-            ;
+            .bind_var("neg_nouns", TOTAL_NEG_NOUN_NAMES.to_vec())
+            .bind_var("pos_nouns", GENRAL_POS_NOUN_NAMES.to_vec());
         let result: HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)> = self.get_arango_db().await?
             .aql_query::<RefnoHasNegPosInfoTuple>(aql).await?.into_iter().map(|x| (x.0, (x.1, x.2))).collect();
 
@@ -658,79 +657,45 @@ impl PdmsDataInterface for AiosDBManager {
         }
         //需要判断owner 下是不是有spine，如wall，顺时针逆时针会影响plin的方向
         for (refno, ref_basic) in ancestors {
-            let mut jusl_vec = Vec3::new(0.0, 0.0, 0.0);
             let att = self.get_attr_from_localdb(refno)?;
             let mut pos = att.get_position().unwrap_or_default();
             let mut quat = Quat::IDENTITY;
             let type_name = att.get_type();
             if let Some(jusl) = att.get_str("JUSL") {
                 if let Some(param) = self.query_pline(refno, jusl).await? {
-                    jusl_vec = param.pt;
+                    pos -= param.pt;
                 }
             }
-
-            let check_type = if type_name == "PLOO" || type_name == "LOOP" {
-                self.get_refno_basic(ref_basic.owner).unwrap().get_type().to_string()
-            } else {
-                type_name.to_string()
-            };
             //土建特殊情况的一些处理
-            match check_type.as_str() {
-                "FLOOR" => {
-                    let sjus = att.get_str("JUSL").unwrap_or("unset");
-                    let height = self
-                        .get_attr(refno)
-                        .await?
-                        .get_f32("HEIG")
-                        .unwrap_or_default();
-                    let mut off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                        -height
-                    } else if sjus == "UCEN" || sjus == "DCEN" {
-                        -height / 2.0
-                    } else {
-                        0.0
-                    };
-                    pos.z += off_z;
-                }
-                "SBFI" => {
-                    let axis_dir = att.get_vec3("ZDIR").unwrap_or_default().normalize();
-                    // let axis_dir = Vec3::X;
-                    if axis_dir.is_normalized() {
-                        quat = Quat::from_rotation_arc(-Vec3::Z, axis_dir);
-                        // let d = axis_dir.dot(Vec3::Z).abs();
-                        // let mut ref_axis = if abs_diff_eq!(1.0, d) {
-                        //     Vec3::Y
-                        // } else {
-                        //     Vec3::Z
-                        // };
-                        // let p_axis = ref_axis.cross(axis_dir).normalize();
-                        // let y_axis = p_axis.cross(axis_dir).normalize();
-                        // quat = Quat::from_mat3(&Mat3::from_cols(
-                        //     p_axis,
-                        //     axis_dir,
-                        //     y_axis,
-                        // ));
-                        dbg!(quat_to_pdms_ori_str(&quat));
+            if att.contains_attr_name("ZDIS") {
+                let zdist = att.get_f32("ZDIS").unwrap_or_default();
+                let pkdi = att.get_f32("PKDI").unwrap_or_default();
+                let result = self.cal_zdis_pkdi_in_section(ref_basic.owner, pkdi, zdist);
+                pos += result.1;
+                quat *= result.0;
+            }
+
+            if let Ok(owner_att) = self.get_attr_from_localdb(ref_basic.owner) {
+                if let Some(owner_sjus) = owner_att.get_str("SJUS") {
+                    //如果发现了SJUS，需要找到同一层集的PLOO，得到height
+                    let children = self.get_children_from_localdb(owner_att.get_owner().unwrap())?;
+                    for c in children {
+                        let c_att = self.get_attr_from_localdb(c)?;
+                        // dbg!(c_att.get_type());
+                        if c_att.get_type() == "PLOO" {
+                            let height = c_att.get_f32("HEIG").unwrap_or_default();
+                            let mut off_z = if owner_sjus == "UTOP" || owner_sjus == "DTOP" {
+                                height
+                            } else if owner_sjus == "UCEN" || owner_sjus == "DCEN" {
+                                height / 2.0
+                            } else {
+                                0.0
+                            };
+                            pos.z += off_z;
+                            break;
+                        }
                     }
                 }
-                "CMPF" => {
-                    quat = Quat::from_mat3(&Mat3::from_cols(
-                        Vec3::X,
-                        Vec3::NEG_Y,
-                        Vec3::NEG_Z,
-                    ));
-                }
-                //Justification Line Datum
-                "JLDATU" => {
-                    let zdist = att.get_f32("ZDIS").unwrap_or_default();
-                    let pkdi = att.get_f32("PKDI").unwrap_or_default();
-                    let result = self.cal_zdis_pkdi_in_section(ref_basic.owner, pkdi, zdist);
-                    pos += result.1;
-                    quat *= result.0;
-                }
-                //Positioning Line Datum
-                "PLDATU" => {}
-                _ => {}
             }
 
             let mut quat_v = att.get_rotation();
@@ -769,52 +734,82 @@ impl PdmsDataInterface for AiosDBManager {
                     quat = quat * Quat::from_rotation_z(bangle.to_radians());
                 }
             }
-            //弧墙下方没有fitt
-            //处理有POSL的情况
+            //如果有posl
             if let Some(pos_line) = att.get_str("POSL") {
                 // dbg!(pos_line);
                 //plin里的位置偏移
-                let mut plin_pos = Vec3::new(0.0, 0.0, 0.0);
-                let mut pline_plax = -Vec3::X;
+                let mut plin_pos = Vec3::ZERO;
+                let mut pline_plax = Vec3::NEG_X;
 
                 let delta_vec = att.get_vec3("DELP").unwrap_or_default();
-                //todo 这里不一定正确
-                let zdis = (att.get_f32("ZDIS").unwrap_or_default() * Vec3::Z);
-                let bangle = att.get_f32("BANG").unwrap_or_default();
+                // let bangle = att.get_f32("BANG").unwrap_or_default();
 
-                let mut tmp_owner = ref_basic.get_owner();
+                let mut plin_owner = att.get_owner().unwrap();
+                // let mut tmp_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
+                // while !tmp_att.contains_attr_name("JUSL") {
+                //     tmp_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
+                //     plin_owner = tmp_att.get_owner().unwrap();
+                // }
+
                 // POSL 的处理, 获得父节点的形集
                 let mut plin_param = None;
                 while plin_param.is_none() {
-                    plin_param = self.query_pline(tmp_owner, pos_line).await?;
+                    plin_param = self.query_pline(plin_owner, pos_line).await?;
                     if plin_param.is_some() {
                         break;
                     }
-                    if let Some(t) = self.get_refno_basic(ref_basic.owner) {
-                        tmp_owner = t.get_owner();
+                    if let Some(t) = self.get_refno_basic(plin_owner) {
+                        plin_owner = t.get_owner();
                     } else {
                         break;
                     }
                 }
+                let target_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
+                let is_lmirror = target_att.get_bool("LMIRR").unwrap_or_default();
                 if let Some(param) = plin_param {
                     // dbg!(&param);
                     plin_pos = param.pt;
                     pline_plax = param.plax;
                 }
-                let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
+                // let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
                 let y_axis = Vec3::Z;
-                let z_axis = -pline_plax;
+                //和LMIRROR 有关系
+                let z_axis = if is_lmirror {
+                    -pline_plax
+                }else{
+                    pline_plax
+                };
                 let x_axis = y_axis.cross(z_axis).normalize();
-                let quat = Quat::from_mat3(&Mat3::from_cols(
+                let posl_quat = Quat::from_mat3(&Mat3::from_cols(
                     x_axis,
                     y_axis,
                     z_axis,
                 ));
-                // dbg!(quat_to_pdms_ori_str(&quat));
+                #[cfg(debug_assertions)]
+                {
+                    dbg!(quat_to_pdms_ori_str(&posl_quat));
+                    dbg!(quat_to_pdms_ori_str(&quat));
+                }
+                let new_quat = posl_quat * quat;
+                #[cfg(debug_assertions)]
+                {
+                    dbg!(quat_to_pdms_ori_str(&new_quat));
+                    dbg!(translation);
+                    dbg!(quat_to_pdms_ori_str(&rotation));
+                }
                 translation = translation
-                    + rotation * (pos + zdis + plin_pos - jusl_vec)
-                    + rotation * quat * bangle_rot * delta_vec;
-                rotation = rotation * quat * bangle_rot;
+                    + rotation * pos
+                    + rotation * new_quat * (plin_pos + delta_vec)
+                    // + rotation * new_quat * bangle_rot * delta_vec
+                ;
+                #[cfg(debug_assertions)]
+                {
+                    dbg!(translation);
+                    dbg!(quat_to_pdms_ori_str(&rotation));
+                }
+                rotation = rotation * new_quat;  // * bangle_rot
+                #[cfg(debug_assertions)]
+                dbg!(quat_to_pdms_ori_str(&rotation));
             } else {
                 translation = translation + rotation * pos;
                 rotation = rotation * quat;

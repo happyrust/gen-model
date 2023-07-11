@@ -230,6 +230,19 @@ impl AiosDBManager{
         }
         Err(anyhow!("not exist"))
     }
+
+    pub fn get_ancestor_refno_till_type(&self, mut refno: RefU64, att_types: &[&str]) -> Option<RefU64> {
+        let types = att_types.iter().map(|&x| qualified_table_name(x).to_uppercase()).collect::<Vec<_>>();
+        let types = types.iter().map(|x| x.as_str()).collect::<Vec<_>>();
+        while let Some(basic) = self.get_refno_basic(refno) {
+            if types.contains(&basic.get_type()) {
+                return Some(refno);
+            }
+            refno = basic.get_owner();
+        }
+        None
+    }
+
 }
 
 

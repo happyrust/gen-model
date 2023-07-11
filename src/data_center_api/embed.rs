@@ -6,11 +6,12 @@ use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, Data
 use aios_core::negative_mesh_type::NegativeEdges;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{RefU64, UdaMajorType};
+use aios_core::tool::hash_tool::hash_two_str;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
-use crate::data_center_api::hole::{convert_time_to_vec, get_pos_from_str, hash_two_str};
+use crate::data_center_api::hole::{convert_time_to_vec, get_pos_from_str};
 use crate::consts::{AQL_EMBED_DATA_COLLECTION, AQL_EMBED_EDGE_COLLECTION, EMBED_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{ArDatabase, save_arangodb_doc};

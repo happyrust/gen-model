@@ -588,7 +588,7 @@ impl AiosDBManager {
             // let Ok(mdb_attr) = query_attr(mdb_refno, self, None).await else {
             //     continue;
             // };
-            dbg!(&mdb_refno);
+            // dbg!(&mdb_refno);
             let Ok(mdb_attr) = self.get_attr_from_localdb(mdb_refno) else {
                 continue;
             };
@@ -596,8 +596,8 @@ impl AiosDBManager {
             // let Ok(mdb_name) = query_name(mdb_refno, &project_pool).await else {
             //     continue;
             // };
-            dbg!(&mdb_name);
-            dbg!(&mdb_attr);
+            // dbg!(&mdb_name);
+            // dbg!(&mdb_attr);
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 dbg!(&dbs);
                 let mut map = HashMap::new();
@@ -606,9 +606,9 @@ impl AiosDBManager {
                         let Some(db_num) = att.get_i32("NUMBDB") else {
                             continue;
                         };
-                        dbg!(&db_num);
+                        // dbg!(&db_num);
                         if let Ok(Some(mut quick_info)) = self.query_quick_info_by_dbno(*db_refno, db_num, info_pool).await {
-                            dbg!(&quick_info.db_type);
+                            // dbg!(&quick_info.db_type);
                             quick_info.order_number = i as _;
                             map.entry(quick_info.db_type.clone())
                                 .or_insert_with(Vec::new).push(quick_info);
