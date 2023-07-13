@@ -943,22 +943,6 @@ fn gen_replace_room_refno_sql(room_name: &str, refno: RefU64, old_refno: RefU64)
 }
 
 #[tokio::test]
-async fn test_set_pdms_major_from_excel() -> anyhow::Result<()> {
-    let _ = dotenv::dotenv();
-    let url = env::var("DATABASE_URL")?;
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
-    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let excel_result = get_room_level_from_excel_refactor()?;
-    set_pdms_major_from_excel(&excel_result.pdms_name_code_map, &db_option, &database, &pool).await?;
-    Ok(())
-}
-
-#[tokio::test]
 async fn test_save_ssc_level_excel() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;

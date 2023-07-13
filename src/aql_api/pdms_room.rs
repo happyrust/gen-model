@@ -122,9 +122,12 @@ pub async fn query_all_need_compute_room_refno(dbno: &Vec<i32>,
 pub async fn query_room_name_from_refno_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<String>> {
     let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
+    With @@collection
     for v,e in 1 inbound @id room_edges
          return v.name )
-    ").bind_var("id", refno);
+    ")
+        .bind_var("id", refno)
+        .bind_var("@collection",AQL_PDMS_ELES_COLLECTION);
     let result = database.aql_query::<String>(aql).await;
     match result {
         Ok(data) => {
