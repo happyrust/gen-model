@@ -1,6 +1,7 @@
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use crate::aql_api::children::query_travel_children_filter_negative_sibl_nodes;
+use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
@@ -30,14 +31,22 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
     let interface = get_test_ams_db_manager_async().await;
     let database = interface.get_arango_db().await?;
     println!("here");
-    // let d = query_insts_shape_data(&database, &[RefU64::from_two_nums(25688, 4138)]).await?;
-    // dbg!(d);
+    let shape_insts = query_insts_shape_data(&database, &[RefU64::from_two_nums(17496, 171859)]).await?;
+    dbg!(shape_insts.inst_geos_map.len());
+    let geo_hashs = shape_insts.get_geo_hashs().iter().map(|x| *x).collect::<Vec<_>>();
+    if let Ok(meshes_data) = query_pdms_mesh_aql(&database, &geo_hashs).await {
+        dbg!(meshes_data.meshes.len());
+        // let r = PdmsInstanceMeshData{
+        //     shape_insts,
+        //     meshes_data,
+        // };
+    }
     // let result = interface.query_refnos_has_neg_pos_map(refno).await?;
     // dbg!(&result);
     // query_refnos_has_neg_map
-    let refno = RefU64::from_refno_str("17496/169987").unwrap();
-    // let refno = RefU64::from_refno_str("24381/101405").unwrap();
-    let result = interface.query_refnos_has_pos_neg_map(&[refno]).await?;
-    dbg!(&result);
+    // let refno = RefU64::from_refno_str("17496/169987").unwrap();
+    // // let refno = RefU64::from_refno_str("24381/101405").unwrap();
+    // let result = interface.query_refnos_has_pos_neg_map(&[refno]).await?;
+    // dbg!(&result);
     Ok(())
 }

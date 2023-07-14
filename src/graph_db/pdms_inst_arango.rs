@@ -163,13 +163,6 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
 /// 默认直接优先取负实体的数据
 pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) -> anyhow::Result<ShapeInstancesData> {
     let refno_strs = refnos.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
-    // dbg!(&refnos);
-    //过滤掉负实体计算后的多余几何体
-    //pdms_compound_inst_infos
-    // let parent = p.vertices[-2]
-    // PRUNE c.noun in @neg_nouns
-    // OPTIONS { order: "bfs"  }
-    //filter f != null and (parent == null or document('pdms_inst_infos', parent._key).geo_type != "Compound")
     //如果单独拖入负实体，允许把负实体显示出来
     let aql = AqlQuery::new(r#"
             FOR refno in @refnos

@@ -298,7 +298,8 @@ puhua_database_password = ""
 
 #SANN 的柱子计算
 #debug_root_refnos = ["17496/173810"]
-debug_root_refnos = ["17496/171753"]
+#debug_root_refnos = ["17496/171555"]
+debug_root_refnos = ["17496/171751"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]
