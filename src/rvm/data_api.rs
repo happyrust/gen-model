@@ -1,7 +1,10 @@
+use std::io::Write;
 use std::ops::Mul;
 use aios_core::pdms_types::{EleInstGeo, EleGeosInfo, RefU64};
-use aios_core::geom_types::RvmGeoInfo;
+use aios_core::geom_types::{RvmGeoInfo, RvmGeoInfos, RvmInstGeo};
+use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+use arangors_lite::AqlQuery;
 use bb8_arangodb::arangors_lite::Database;
 use bevy_transform::prelude::Transform;
 use glam::{Mat3, Mat3A, Quat, Vec3};
@@ -9,7 +12,11 @@ use id_tree::{NodeId, Tree};
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::Vector;
 use regex::Regex;
+use crate::graph_db::pdms_arango::ArDatabase;
 use crate::graph_db::pdms_inst_arango::query_rvm_instance_data_from_refno_aql;
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
+use crate::rvm::head::create_head_data;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 #[derive(Debug, Clone)]
 pub enum ShapeModule {
@@ -100,24 +107,63 @@ impl RvmShapeTypeData {
 }
 
 // type_data: prim 最后一列不同 att_type 存放的数据不一样
-pub fn gen_prim_data(rvm_instance: RvmGeoInfo, shape_type: RvmShapeTypeData, shape_module: ShapeModule) -> Vec<u8> {
-    let mut data = vec![];
-    if rvm_instance.aabb.is_none() { return data; }
-    let aabb = rvm_instance.aabb.unwrap();
-    data.append(&mut gen_prim_head_data());
-    data.append(&mut format!("     {}\r\n", shape_type.get_shape_number()).into_bytes());
-    data.append(&mut gen_prim_scale_position_data(rvm_instance.world_transform.rotation, Vec3::ONE,
-                                                  rvm_instance.world_transform.translation));
-    match shape_module {
-        ShapeModule::Desi => { data.append(&mut gen_desi_prim_aabb_data(aabb, rvm_instance.world_transform, &PdmsGeoParam::default())); }
-        ShapeModule::Cata => { data.append(&mut gen_cata_prim_aabb_data(aabb)); }
-    }
+// pub fn gen_prim_data(rvm_instance: RvmInstGeo, shape_type: RvmShapeTypeData, shape_module: ShapeModule) -> Vec<u8> {
+//     let mut data = vec![];
+//     if rvm_instance.aabb.is_none() { return data; }
+//     let aabb = rvm_instance.aabb.unwrap();
+//     data.append(&mut gen_prim_head_data());
+//     data.append(&mut format!("     {}\r\n", shape_type.get_shape_number()).into_bytes());
+//     data.append(&mut gen_prim_scale_position_data(rvm_instance.transform.rotation, Vec3::ONE,
+//                                                   rvm_instance.transform.translation));
+//     match shape_module {
+//         ShapeModule::Desi => { data.append(&mut gen_desi_prim_aabb_data(aabb, /*rvm_instance.world_transform,*/ &PdmsGeoParam::default())); }
+//         ShapeModule::Cata => { data.append(&mut gen_cata_prim_aabb_data(aabb)); }
+//     }
+//
+//     data.append(&mut shape_type.convert_shape_type_to_bytes());
+//     data
+// }
 
-    data.append(&mut shape_type.convert_shape_type_to_bytes());
-    data
+/// 生成 rvm 文件
+pub async fn create_refnos_rvm_data(refnos:Vec<RefU64>,db_option:&DbOption,database:&ArDatabase) -> anyhow::Result<Vec<u8>> {
+    let mut file_data = Vec::new();
+    let head = create_head_data(db_option);
+
+    let refno_geo_infos = query_rvm_geo_instance_aql(refnos,database).await?;
+    Ok(file_data)
 }
 
-pub fn gen_prim_data_test(geo_instance: &EleInstGeo, desi_transform: Transform, b_desi_cyli: bool) -> Vec<u8> {
+/// 从inst中查询rvm需要的数据
+pub async fn query_rvm_geo_instance_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<RvmGeoInfos>> {
+    let refnos = refnos.into_iter()
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .collect::<Vec<_>>();
+    let refno = refnos[0].clone(); // todo 先拿一个测试
+    let aql = AqlQuery::new("let hashes = (
+    for v,e in 0..100 inbound @id pdms_edges
+    let inst = document('pdms_inst_infos',v._key)
+    filter inst != null
+        return {
+            'refno': inst._key,
+            'noun' : v.noun,
+            'world_transform': inst.world_transform,
+            'hash':inst.cata_hash == null ? inst._key : inst.cata_hash
+        }
+    )
+    for hash in hashes
+        let inst = document('pdms_inst_geos',hash.hash).insts
+        filter inst != null
+        return {
+            'refno': hash.refno,
+            'att_type' : hash.noun,
+            'world_transform' : hash.world_transform,
+            'rvm_inst_geo': inst
+    }").bind_var("id", refno);
+    let result = database.aql_query::<RvmGeoInfos>(aql).await?;
+    Ok(result)
+}
+
+pub fn gen_prim_data_test(geo_instance: &RvmInstGeo, desi_transform: Transform, b_desi_cyli: bool) -> Vec<u8> {
     let mut data = vec![];
     let geo_transform = geo_instance.transform;
     let mut transform =
@@ -147,10 +193,32 @@ pub fn gen_prim_data_test(geo_instance: &EleInstGeo, desi_transform: Transform, 
         data.append(&mut format!("     {}\r\n", num).into_bytes());
         data.append(&mut gen_prim_scale_position_data(transform.rotation, Vec3::ONE,
                                                       translation));
-        data.append(&mut gen_desi_prim_aabb_data(aabb, geo_instance.transform, &geo_instance.geo_param));
+        data.append(&mut gen_desi_prim_aabb_data(aabb, /*geo_instance.transform,*/ &geo_instance.geo_param));
         data.append(&mut geo_instance.geo_param.convert_rvm_pri_data());
     }
     data
+}
+
+#[tokio::test]
+async fn test_query_rvm_geo_instance_aql() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+    let refnos = vec![RefU64::from_refno_str("24383/73933").unwrap()];
+    let infos = query_rvm_geo_instance_aql(refnos, &database).await?;
+    let mut result = Vec::new();
+    for info in infos {
+        for geo in info.rvm_inst_geo {
+            let data = gen_prim_data_test(&geo, info.world_transform, &info.att_type == "CYLI");
+            result.push(data);
+        }
+    }
+    let mut file = std::fs::File::create("test.rvm").unwrap();
+    file.write_all(&result.into_iter().flatten().collect::<Vec<u8>>()).unwrap();
+    Ok(())
 }
 
 pub fn gen_data_from_tree(tree: Tree<(RefU64, Vec<u8>)>) -> Vec<u8> {
@@ -213,7 +281,7 @@ fn gen_prim_scale_position_data(rotation: Quat, scale: Vec3, position: Vec3) -> 
     data
 }
 
-fn gen_desi_prim_aabb_data(a: Aabb, world_transform: Transform, geo_param: &PdmsGeoParam) -> Vec<u8> {
+fn gen_desi_prim_aabb_data(a: Aabb, /*world_transform: Transform,*/ geo_param: &PdmsGeoParam) -> Vec<u8> {
     let max = if let PdmsGeoParam::PrimSCylinder(data) = geo_param {
         if data.center_in_mid {
             Vec3::from((a.maxs.x, a.maxs.y, a.maxs.z / 2.0))

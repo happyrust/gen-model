@@ -641,7 +641,7 @@ impl PdmsDataInterface for AiosDBManager {
         let mut rotation = Quat::IDENTITY;
         let mut translation = Vec3::ZERO;
         let mut cur_refno = refno;
-        let database = self.get_arango_db().await?;
+        // let database = self.get_arango_db().await?;
         while let Some(ref_basic) = self.get_refno_basic(cur_refno) {
             //后面是不是要缓存这个层级结构
             if self.cached_world_transforms_map.contains_key(&cur_refno) {
