@@ -142,6 +142,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
             gm_params = query_gm_params(&gmse_am, Some(interface)).await?;
         }
     }
+    // dbg!(&gm_params);
 
     let mut ngm_params = vec![];
     //-ve， 和design发生左右的负实体

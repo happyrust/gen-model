@@ -680,7 +680,7 @@ impl PdmsDataInterface for AiosDBManager {
             }
 
             if let Ok(owner_att) = self.get_attr_from_localdb(ref_basic.owner) {
-                if let Some(owner_sjus) = owner_att.get_str("SJUS") {
+                if let Some(sjus) = owner_att.get_str("SJUS") {
                     //如果发现了SJUS，需要找到同一层集的PLOO，得到height
                     let children = self.get_children_from_localdb(owner_att.get_owner().unwrap())?;
                     for c in children {
@@ -688,9 +688,9 @@ impl PdmsDataInterface for AiosDBManager {
                         // dbg!(c_att.get_type());
                         if c_att.get_type() == "PLOO" {
                             let height = c_att.get_f32("HEIG").unwrap_or_default();
-                            let mut off_z = if owner_sjus == "UTOP" || owner_sjus == "DTOP" {
+                            let mut off_z = if sjus == "UTOP" || sjus == "DTOP" {
                                 height
-                            } else if owner_sjus == "UCEN" || owner_sjus == "DCEN" {
+                            } else if sjus == "UCEN" || sjus == "DCEN" {
                                 height / 2.0
                             } else {
                                 0.0

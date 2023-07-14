@@ -76,6 +76,11 @@ pub fn eval_str_to_f32<T: PdmsDataInterface>(input_expr: impl AsRef<str>,
     eval_str_to_f64(&input_expr, context, interface, true).map(|x| x as f32)
 }
 
+pub fn eval_str_to_f32_or_default<T: PdmsDataInterface>(input_expr: impl AsRef<str>,
+                                             context: &BTreeMap<String, String>, interface: Option<&T>) -> f32 {
+    eval_str_to_f32(input_expr, context, interface).unwrap_or(0.0)
+}
+
 //  SIN  00 00 03 85
 //  COS  00 00 03 86
 //  TAN  00 00 03 87
@@ -643,7 +648,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
             }
         }
     } else {
-        dir = parse_str_axis_to_vec3(dir_str, context, interface)?.into();
+        dir = parse_str_axis_to_vec3(dir_str, context, interface).unwrap_or(Vec3::Z);
     }
     return Ok((dir, pos));
 }
@@ -738,7 +743,7 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeM
         }
     }
     let dir_str = new_dir_str.replace(" ", "");
-    let v = parse_expr_to_dir(&dir_str).ok_or(anyhow!(format!("方向字符串: {} 不正确。", &dir_str)))?;
+    let v = parse_expr_to_dir(&dir_str).ok_or(anyhow!(format!("方向字符串: {} 不正确。", pdir)))?;
     Ok(v)
 }
 
