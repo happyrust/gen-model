@@ -9,7 +9,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["STRU"]).await{
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["STRU".to_string()]).await{
         for stru in children {
             let mut attr = Vec::new();
             attr.push(DataCenterAttr {
@@ -63,6 +63,10 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
             attr.push(DataCenterAttr {
                 attribute_model_code: "STUCC14".to_string(),
                 value: AttrValue::AttrString("Q355B".to_string()).into(),
+            });
+            attr.push(DataCenterAttr {
+                attribute_model_code: "ERECAB49".to_string(),
+                value: AttrValue::AttrFloatArray(vec![0.0,0.0]).into(),
             });
             result.push(DataCenterInstance {
                 object_model_code: "ERECAB".to_string(),

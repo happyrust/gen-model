@@ -14,6 +14,7 @@ pub mod tubi;
 pub mod virtual_hole;
 pub mod atta_pos;
 pub mod lock_refnos;
+pub mod vague_search;
 
 /// 存放在图数据库的attr
 #[derive(Debug, Default, Serialize, Deserialize)]

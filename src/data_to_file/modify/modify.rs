@@ -644,8 +644,8 @@ fn test_convert_new_modify_name_data() {
         refno: RefU64::from_refno_str("23584/5931").unwrap(),
         attr_type: "STWALL".to_string(),
         noun_type: "NAME".to_string(),
-        data: AttrVal::StringType(SmolStr::new("/Test/WALL/Write")),
-        old_data: AttrVal::StringType(SmolStr::new("/Test/WALL")),
+        data: AttrVal::StringType("/Test/WALL/Write".to_string()),
+        old_data: AttrVal::StringType("/Test/WALL".to_string()),
         user_name: "admin".to_string(),
         commit_comment: "Default session comment".to_string(),
     };

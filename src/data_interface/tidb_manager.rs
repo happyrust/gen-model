@@ -7,13 +7,11 @@ use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_types::*;
-use aios_core::prim_geo::category::{CateBrepShape, convert_to_brep_shapes};
 use aios_core::prim_geo::extrusion::Extrusion;
 use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
 use aios_core::prim_geo::revolution::Revolution;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
 use aios_core::prim_geo::wire::CurveType;
-use aios_core::shape::pdms_shape::{BrepShapeTrait, LEN_TOL, PlantMesh, TRI_TOL, VerifiedShape};
 use aios_core::tool::db_tool::{db1_hash, GLOBAL_UDA_NAME_MAP};
 use aios_core::tool::math_tool;
 use anyhow::anyhow;
@@ -56,7 +54,7 @@ use futures::StreamExt;
 use log::{error, info};
 use nom::combinator::map;
 use tokio::sync::{mpsc, RwLock};
-
+use aios_core::shape::pdms_shape::PlantMesh;
 use crate::api::attr::*;
 use crate::api::children::*;
 use crate::api::element::*;
@@ -71,8 +69,6 @@ use crate::cata::direction_parse::parse_expr_to_dir;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
 use crate::cata::resolve_helper::{eval_str_to_f32, parse_str_axis_to_vec3};
-use crate::cata::sctn;
-use crate::cata::sctn::geo::create_profile_geos;
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
@@ -645,7 +641,7 @@ impl PdmsDataInterface for AiosDBManager {
         let mut rotation = Quat::IDENTITY;
         let mut translation = Vec3::ZERO;
         let mut cur_refno = refno;
-        let database = self.get_arango_db().await?;
+        // let database = self.get_arango_db().await?;
         while let Some(ref_basic) = self.get_refno_basic(cur_refno) {
             //后面是不是要缓存这个层级结构
             if self.cached_world_transforms_map.contains_key(&cur_refno) {

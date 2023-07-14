@@ -9,7 +9,7 @@ pub async fn query_ssc_children_aql(refno: RefU64, database: &ArDatabase) -> any
     let aql = AqlQuery::new("\
     FOR z in 1 INBOUND @id ssc_edges
     return {
-        'refno':z._key,
+        '_key':z._key,
         'owner':z.owner,
         'name':z.name,
         'noun':z.noun,

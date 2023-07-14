@@ -13,6 +13,7 @@ pub mod bran;
 pub (crate) mod tubi;
 pub mod supp;
 pub mod sctn;
+pub mod stru;
 mod tee;
 mod elbo;
 mod flan;

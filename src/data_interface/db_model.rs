@@ -20,7 +20,6 @@ use aios_core::tool::db_tool::{db1_dehash, db1_hash, GLOBAL_UDA_NAME_MAP};
 use tokio::sync::{mpsc, RwLock};
 use aios_core::pdms_data::ScomInfo;
 use aios_core::parsed_data::CateGeomsInfo;
-use aios_core::prim_geo::category::convert_to_brep_shapes;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
 use aios_core::parsed_data::geo_params_data::CateGeoParam::TubeImplied;
 use std::default::default;
@@ -31,7 +30,6 @@ use aios_core::prim_geo::cylinder::SCylinder;
 use aios_core::prim_geo::TUBI_GEO_HASH;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use approx::abs_diff_eq;
-use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use futures::StreamExt;
 // use heed::byteorder::BE;
 // use heed::EnvOpenOptions;
@@ -48,11 +46,9 @@ use crate::aql_api::pdms_mesh::{query_all_geo_hashs, query_pdms_mesh_aql};
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
 use crate::cata::resolve_helper::eval_str_to_f32;
-use crate::cata::sctn::geo::create_profile_geos;
-use crate::consts::{GLOBAL_DATABASE, PDMS_INFO_DB, PUHUA_MATERIAL_DATABASE};
+use crate::consts::{GLOBAL_DATABASE, FUZZY_QUERT, PDMS_INFO_DB, PUHUA_MATERIAL_DATABASE};
 use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::structs::{AIOSAxisMap, CateBrepShapeMap};
 use crate::data_interface::tidb_manager::{AiosDBManager, CATAEXPRCONTEXT_MAP};
 use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_PLIN_MAP, CACHED_REFNO_BASIC_MAP};
 use crate::graph_db::pdms_arango::{ArDatabase, connect_arangodb};
@@ -340,6 +336,19 @@ impl AiosDBManager {
             .map_err({ |x| anyhow!(x.to_string()) })
     }
 
+    ///获取mysql数据库模糊查询的连接pool
+    #[inline]
+    pub async fn get_fuzzy_query_pool(&self) -> anyhow::Result<Pool<MySql>> {
+        let connection_str = self.default_conn_str();
+        let url = &format!("{connection_str}/{}", FUZZY_QUERT);
+        PoolOptions::new()
+            .max_connections(500)
+            .acquire_timeout(Duration::from_secs(10 * 60))
+            .connect(url)
+            .await
+            .map_err({ |x| anyhow!(x.to_string()) })
+    }
+
     ///获取图数据库的连接pool
     #[inline]
     pub async fn get_arango_db(&self) -> anyhow::Result<ArDatabase> {
@@ -387,6 +396,8 @@ impl AiosDBManager {
             println!("正在加载 CACHED_REFNO_BASIC_MAP");
             CACHED_REFNO_BASIC_MAP.load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP)).expect("CACHED_REFNO_BASIC_MAP 文件不存在。");
         }
+        println!("加载 CACHED_REFNO_BASIC_MAP 成功");
+
         // 将 mdb对应的 module 下的所有 numbdb保存下来
         let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
         for r in results {
@@ -432,7 +443,7 @@ impl AiosDBManager {
                 .mode(sled::Mode::HighThroughput)
                 .cache_capacity(10_000_000_000)
                 .flush_every_ms(Some(1000));
-            if let Ok(db) = config.open(){
+            if let Ok(db) = config.open() {
                 local_attr_db_map.entry(project.clone()).or_insert(db.open_tree("attr_map")?);
                 local_children_db_map.entry(project.clone()).or_insert(db.open_tree("children")?);
             }
@@ -592,7 +603,7 @@ impl AiosDBManager {
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
                     if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {
-                        let Some(db_num) = att.get_i32("NUMBDB") else{
+                        let Some(db_num) = att.get_i32("NUMBDB") else {
                             continue;
                         };
                         // dbg!(&db_num);
