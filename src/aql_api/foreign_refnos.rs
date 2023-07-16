@@ -8,12 +8,13 @@ use crate::consts::AQL_FOREIGN_EDGES_COLLECTION;
 
 //可选的去过滤查询, start_types 和 endtypes，都是外键的类型
 pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], start_types: &[&[&str]], end_types: &[&str], t_types: &[&str], depth: u32) -> anyhow::Result<Vec<RefU64>> {
-    let ids = refnos.into_iter().map(|x| format!("{}/{}", "pdms_eles", x.to_url_refno())).collect::<Vec<_>>();
-    let mut aql = r#"
+    let ids = refnos.into_iter().map(|x| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, x.to_url_refno())).collect::<Vec<_>>();
+    let mut aql = format!("
+        With {AQL_PDMS_ELES_COLLECTION},{AQL_FOREIGN_EDGES_COLLECTION}
         for id in @ids
-            let t = (for ver, edge, path in 1..15 outbound id foreign_edges
-                   OPTIONS { order: "bfs"  }
-                   FILTER LENGTH(@t_types) == 0 and length(for c in 1 INBOUND ver._id foreign_edges
+            let t = (for ver, edge, path in 1..15 outbound id {AQL_FOREIGN_EDGES_COLLECTION}
+                   OPTIONS {{ order: 'bfs'  }}
+                   FILTER LENGTH(@t_types) == 0 and length(for c in 1 INBOUND ver._id {AQL_FOREIGN_EDGES_COLLECTION}
                         return 0 )
                         __START_FILTER__
                    filter LENGTH(@end_types) == 0 or (edge.foreign_type in @end_types)
@@ -21,8 +22,8 @@ pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], sta
                    filter ver != null
                    filter LENGTH(path.edges) <= @depth
                    return ver._key)
-            return LENGTH(t) == 0 ? "0/0" : t[0]
-                   "#;
+            return LENGTH(t) == 0 ? '0/0' : t[0]
+                   ");
     let mut start_aql = String::new();
     for i in 0..start_types.len() {
         let in_str = start_types[i].iter().map(|&x| format!(" \"{x}\" ")).collect::<Vec<_>>().join(",");

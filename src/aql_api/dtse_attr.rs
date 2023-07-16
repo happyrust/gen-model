@@ -6,6 +6,7 @@ use crate::aql_api::change_vec_refnos_into_vec_string;
 use crate::aql_api::children::query_children_eles;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::para_value::query_des_para_value;
+use crate::consts::AQL_DATA_ELES_COLLECTION;
 use crate::graph_db::DataDocument;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
@@ -27,16 +28,19 @@ pub async fn query_dtse_ppro_from_catr_refno(refno: RefU64, database: &ArDatabas
 async fn query_data_attr_from_refnos(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<DashMap<String, DataDocument>> {
     let children = change_vec_refnos_into_vec_string(refnos);
     let aql = AqlQuery::new("
+    With @@data_eles
     let data = @element
     for v in data
-    let e = document('data_eles',v)
+    let e = document(@@data_eles,v)
         return {
             '_key':e._key,
             'dkey':e.dkey,
             'ppro':e.ppro,
             'dpro':e.dpro,
         } "
-    ).bind_var("element", children);
+    )
+        .bind_var("element", children)
+        .bind_var("@data_eles",AQL_DATA_ELES_COLLECTION);
     let result: Vec<DataDocument> = database.aql_query(aql).await?;
     let mut data_map = DashMap::new();
     for r in result {

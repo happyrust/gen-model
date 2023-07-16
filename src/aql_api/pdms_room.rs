@@ -12,7 +12,7 @@ use crate::api::attr::{get_site_major_from_uda, query_explicit_attr};
 use crate::api::children::{query_ancestor_of_type};
 use crate::aql_api::children::query_ancestor_name_of_type_aql;
 use crate::aql_api::{convert_refno_vec_from_vec_string};
-use crate::consts::PDMS_ELEMENTS_TABLE;
+use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_ROOM_EDGES_COLLECTION, AQL_ROOM_ELES_COLLECTION, PDMS_ELEMENTS_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
@@ -143,13 +143,16 @@ pub async fn query_room_name_from_refno_aql(refno: RefU64, database: &ArDatabase
 pub async fn query_room_name_from_refnos_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsNodeBelongRoomName>> {
     let refnos = refnos.into_iter().map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("
+    With @@pdms_eles,@@room_edges
     for id in @refnos
-    for v,e in 1 inbound id room_edges
+    for v,e in 1 inbound id @@room_edges
          return {
             'refno': v._key,
             'room_name': v.name
          }
-    ").bind_var("refnos", refnos);
+    ").bind_var("refnos", refnos)
+        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@room_edges",AQL_ROOM_EDGES_COLLECTION);
     let result = database.aql_query::<PdmsNodeBelongRoomName>(aql).await;
     match result {
         Ok(data) => {
@@ -170,9 +173,12 @@ pub async fn query_node_connect_rooms(refno:RefU64,database:&ArDatabase) -> anyh
 pub async fn query_room_info_from_refno(refno: RefU64, room_name_type: &str, database: &ArDatabase) -> anyhow::Result<Option<String>> {
     let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
-    let refno = (for v,e in 1 inbound @id room_edges
+    With @@pdms_eles,@@room_edges
+    let refno = (for v,e in 1 inbound @id @@room_edges
                 return v._key )[0]
-    return refno").bind_var("id", refno);
+    return refno").bind_var("id", refno)
+        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@room_edges",AQL_ROOM_EDGES_COLLECTION);
     let result = database.aql_query::<String>(aql).await;
     return match result {
         Ok(r) => {
@@ -220,21 +226,28 @@ pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<UdaMajorT
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = if filter_major.is_none() {
         AqlQuery::new("
-        for e in 0..10 inbound @key pdms_edges
+        With @@pdms_eles,@@pdms_edges
+        for e in 0..10 inbound @key @@pdms_edges
             // filter e.noun == 'PANE'
             for v in 1 outbound CONCAT('room_eles/',e._key) room_edges
                 filter v != null
                 return v._key
-        ").bind_var("key", key)
-
+        ")
+            .bind_var("key", key)
+            .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges",AQL_ROOM_EDGES_COLLECTION)
     } else {
         let filter_data = filter_major.unwrap().to_major_str();
         AqlQuery::new("
-        for v,e in 1 outbound @key room_edges
+        With @@pdms_eles,@@room_edges
+        for v,e in 1 outbound @key @@room_edges
             filter v != null
             filter filter_major == e.major
             return v._key
-        ").bind_var("key", key).bind_var("filter_major", filter_data)
+        ").bind_var("key", key)
+            .bind_var("filter_major", filter_data)
+            .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@room_edges",AQL_ROOM_EDGES_COLLECTION)
 
     };
     let result: Vec<String> = database.aql_query(aql).await?;
@@ -244,14 +257,18 @@ pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<UdaMajorT
 /// 查找房间集合下的所有元件的参考号
 pub async fn query_rooms_refnos_aql(rooms: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<RoomNodes>> {
     let aql = AqlQuery::new("
-    for room in room_eles
+    With @@room_eles
+    for room in @@room_eles
     filter room.name in @rooms
-    for v,e in 1 outbound room._id room_edges
+    for v,e in 1 outbound room._id @@room_edges
          return {
             'refno': v._key,
             'room_name': room.name,
          }
-    ").bind_var("rooms", rooms);
+    ")
+        .bind_var("rooms", rooms)
+        .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges",AQL_ROOM_EDGES_COLLECTION);
     let result = database.aql_query::<PdmsNodeBelongRoomName>(aql).await;
     match result {
         Ok(datas) => {
@@ -275,22 +292,33 @@ pub async fn query_room_pdms_elements_aql(refno: RefU64, filter_major: Option<Ud
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = if filter_major.is_none() {
         AqlQuery::new("
-        for e in 0..10 inbound @key pdms_edges
+        With @@pdms_eles,@@pdms_edges,@@room_eles,@@room_edges
+        for e in 0..10 inbound @key @@pdms_edges
             filter e.noun == 'PANE'
-            for v in 1 outbound CONCAT('room_eles/',e._key) room_edges
+            for v in 1 outbound CONCAT('room_eles/',e._key) @@room_edges
                 filter v != null
                 return { refno:v._key , owner:v.owner , name:v.name,noun:v.noun,version:0,children_count:0 }
         ").bind_var("key", key)
+            .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION)
+            .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+            .bind_var("@room_edges",AQL_ROOM_EDGES_COLLECTION)
     } else {
         let filter_data = filter_major.unwrap().to_major_str();
         AqlQuery::new("
-        for p in 0..10 inbound @key pdms_edges
+        With @@pdms_eles,@@pdms_edges,@@room_eles,@@room_edges
+        for p in 0..10 inbound @key @@pdms_edges
             filter p.noun == 'PANE'
             for v,e in 1 outbound CONCAT('room_eles/',p._key) room_edges
                 filter v != null
                 filter @filter_major == e.major
                 return { _key:v._key , owner:v.owner , name:v.name,noun:v.noun,version:0,children_count:0 }
-        ").bind_var("key", key).bind_var("filter_major", filter_data)
+        ").bind_var("key", key)
+            .bind_var("filter_major", filter_data)
+            .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION)
+            .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+            .bind_var("@room_edges",AQL_ROOM_EDGES_COLLECTION)
     };
     let results: Vec<PdmsElement> = database.aql_query(aql).await.unwrap();
     Ok(results)
@@ -315,11 +343,12 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &ArDatabase) -> a
     let mut r = Vec::new();
     let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("
-    let elements = ( for v in 0..100 inbound @id pdms_edges
+    With @@pdms_eles,@@pdms_edges,@@room_eles,@@room_edges
+    let elements = ( for v in 0..100 inbound @id @@pdms_edges
                     filter v!= null
                     return v._id )
     let room_refnos = (for element in elements
-                        for v in 1 inbound element room_edges
+                        for v in 1 inbound element @@room_edges
                         filter v!= null
                         return v._key )
     for room_refno in room_refnos
@@ -329,7 +358,10 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &ArDatabase) -> a
             filter v.noun == 'FRMW'
             return { _key:v._key , owner:0 , name:v.name,noun:v.noun,version:0,children_count:1 }")
         .bind_var("id", id)
-        ;
+        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges",AQL_ROOM_EDGES_COLLECTION);
     let results: Vec<PdmsElement> = database.aql_query(aql).await?;
     for result in results {
         let refno = result.refno;

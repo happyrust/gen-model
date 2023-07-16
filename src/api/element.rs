@@ -145,7 +145,7 @@ pub async fn query_world(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow:
 
 /// 查询生成Element node
 pub async fn query_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
-    let sql = format!("SELECT * FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} and IS_DEL = 0;", *refno);
+    let sql = format!("SELECT NAME,TYPE,OWNER,CHILDREN_COUNT FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} and IS_DEL = 0;", *refno);
     let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
     Ok(EleTreeNode {
         refno,

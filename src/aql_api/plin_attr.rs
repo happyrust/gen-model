@@ -10,6 +10,7 @@ use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::aql_api::PdmsPLINAttrAql;
 use crate::cata::direction_parse::parse_expr_to_dir;
+use crate::consts::AQL_PLIN_ELES_COLLECTION;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -119,6 +120,7 @@ async fn query_plin_attrs_with_refnos(refnos: Vec<RefU64>, database: &ArDatabase
         children.push(RefU64::to_url_refno(&refno))
     });
     let aql = AqlQuery::new("
+    With @@plin_eles
     let data = @element
     for v in data
     let e = document('plin_eles',v)
@@ -126,20 +128,24 @@ async fn query_plin_attrs_with_refnos(refnos: Vec<RefU64>, database: &ArDatabase
             '_key':e._key,
             'attr':e.attr
         } "
-    ).bind_var("element", children)
-        ;
+    )
+        .bind_var("element", children)
+        .bind_var("@plin_eles",AQL_PLIN_ELES_COLLECTION);
     let result: Vec<PdmsPLINAttrAql> = database.aql_query(aql).await?;
     Ok(result)
 }
 
 async fn query_plin_attrs_with_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<PdmsPLINAttrAql>> {
     let aql = AqlQuery::new("
+    With @@plin_eles
     let e = document('plin_eles',@refno)
         return {
             '_key':e._key,
             'attr':e.attr
         } "
-    ).bind_var("refno", refno.to_url_refno());
+    )
+        .bind_var("refno", refno.to_url_refno())
+        .bind_var("@plin_eles",AQL_PLIN_ELES_COLLECTION);
     let result: Vec<PdmsPLINAttrAql> = database.aql_query(aql).await?;
     Ok(result)
 }

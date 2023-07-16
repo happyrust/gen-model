@@ -55,7 +55,6 @@ async fn get_dq_support_sctn_gtype_box_data(refno: RefU64, aios_mgr: &AiosDBMana
     let database = aios_mgr.get_arango_db().await?;
     let mut attr = Vec::new();
     let desc = get_refno_desc(refno, aios_mgr).await.unwrap_or("".to_string());
-    dbg!(&desc);
     attr.push(DataCenterAttr {
         attribute_model_code: "PARTD15".to_string(),
         value: AttrValue::AttrString(desc).into(),
@@ -65,7 +64,6 @@ async fn get_dq_support_sctn_gtype_box_data(refno: RefU64, aios_mgr: &AiosDBMana
         value: AttrValue::AttrString("Q355B".to_string()).into(),
     });
     let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], &database).await?.unwrap_or("".to_string());
-    dbg!(&spre_name);
     let spre_name_split = spre_name.split("-").collect::<Vec<_>>();
     if let Some(spre_name_split_last) = spre_name_split.last() {
         let spre_name_split_last_split = spre_name_split_last.split("X").collect::<Vec<_>>();
@@ -106,7 +104,7 @@ async fn get_dq_support_sctn_gtype_box_data(refno: RefU64, aios_mgr: &AiosDBMana
 async fn get_dq_support_sctn_gtype_beam_data(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<DataCenterAttr>> {
     let database = aios_mgr.get_arango_db().await?;
     let mut attr = Vec::new();
-    let desc = get_refno_desc(refno, aios_mgr).await?;
+    let desc = get_refno_desc(refno, aios_mgr).await.unwrap_or("".to_string());
     attr.push(DataCenterAttr {
         attribute_model_code: "PARTD15".to_string(),
         value: AttrValue::AttrString(desc).into(),
