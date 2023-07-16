@@ -208,9 +208,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         create_tables_elapse += table_time.elapsed().as_millis();
 
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
-        let arrango_pool = connect_arangodb(db_option).await?;
-        match  sync_total_async_threaded(
-            arrango_pool.clone(),
+        let arango_pool = connect_arangodb(db_option).await?;
+        match sync_total_async_threaded(
+            arango_pool.clone(),
             &db_option,
             project,
             project_pool.clone(),
@@ -224,7 +224,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 println!("{}", e.to_string());
             }
         }
-            // .expect("同步数据失败");
+        // .expect("同步数据失败");
     }
     println!("创建表花费时间: {} ms", create_tables_elapse);
     println!(
@@ -551,7 +551,7 @@ pub async fn sync_total_async_threaded(
         let tree = db.open_tree("attr_map").ok();
         let children_tree = db.open_tree("children").ok();
         (tree, children_tree)
-    }else{
+    } else {
         (None, None)
     };
 
@@ -690,11 +690,6 @@ pub async fn sync_total_async_threaded(
                 if let Some(tree) = local_tree.clone() && let Some(children_tree) = children_tree.clone() {
                     // let mut batch = sled::Batch::default();
                     for kv in total_attr_map_arc.as_ref() {
-                        // if *kv.key() == RefU64::from_two_nums(24381, 47210) {
-                        //     dbg!(db1_hash("CYLI"));
-                        //     dbg!(kv.value());
-                        //     break;
-                        // }
                         let mut vec = kv.value().merge_implicit_explicit_into_attr().into_rkyv_compress_bytes();
                         tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
                     }

@@ -101,7 +101,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         let parent_rot = interface.get_world_transform(parent_refno).await.unwrap_or_default().unwrap_or_default().rotation;
         let current_rot = interface.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default().rotation;
         let new_rot =  current_rot.inverse() * parent_rot;
-        dbg!(quat_to_pdms_ori_str(&new_rot));
+        // dbg!(quat_to_pdms_ori_str(&new_rot));
 
         println!("refno: {}, 原始drns: {:?}, drne: {:?}", refno, to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
         let mut tmp_drns = (new_rot.mul_vec3(drns)).normalize();
@@ -109,9 +109,13 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         ///处理随意设置方向的情况，保证一致性
         if (Vec3::Z).angle_between(tmp_drns).abs() > PI/2.0 {
             drns = -tmp_drns;
+        }else{
+            drns = tmp_drns;
         }
         if (Vec3::Z).angle_between(-tmp_drne).abs() > PI/2.0 {
             drne = -tmp_drne;
+        }else{
+            drne = tmp_drne;
         }
         println!("refno: {}, 变换后drns: {:?}, drne: {:?}", refno, to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
     }
@@ -155,6 +159,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                         is_tubi: false,
                         shape_err: None,
                         pts: Default::default(),
+                        is_ngmr: false,
                     });
                 }
             }
@@ -192,6 +197,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                             is_tubi: false,
                             shape_err: None,
                             pts: Default::default(),
+                            is_ngmr: false,
                         });
                     }
                 }

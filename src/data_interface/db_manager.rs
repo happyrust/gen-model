@@ -23,11 +23,12 @@ bitflags! {
         const PRIM = 0x1 << 1;
         const LOOP = 0x1 << 2;
         const CATA = 0x1 << 3;
-        const CATA_BRAN_AND_HANGER_REUSE = 0x1 << 4;  //branch
-        const CATA_SINGLE_REUSE = 0x1 << 5;   //sctn, fit, fixing, pfit
-        const CATA_WITHOUT_REUSE = 0x1 << 6;   //sctn, fit, fixing, pfit
+        const POHE = 0x1 << 4;
+        const CATA_BRAN_AND_HANGER_REUSE = 0x1 << 5;  //branch
+        const CATA_SINGLE_REUSE = 0x1 << 6;   //sctn, fit, fixing, pfit
+        const CATA_WITHOUT_REUSE = 0x1 << 7;   //sctn, fit, fixing, pfit
         // const CATA_ONLY_TUBI_REUSE = 0x1 << 4;
-        const ALL = Self::PRIM.bits() | Self::LOOP.bits() | Self::CATA.bits() ;
+        const ALL = Self::PRIM.bits() | Self::LOOP.bits() | Self::CATA.bits()| Self::POHE.bits() | Self::CATA_BRAN_AND_HANGER_REUSE.bits() | Self::CATA_SINGLE_REUSE.bits() | Self::CATA_WITHOUT_REUSE.bits();
     }
 }
 
@@ -75,6 +76,7 @@ impl AiosDBManager {
             GeoEnum::PRIM => GNERAL_PRIM_NOUN_NAMES.as_slice(),
             GeoEnum::LOOP => GNERAL_LOOP_NOUN_NAMES.as_slice(),
             GeoEnum::CATA => CATA_GEO_NAMES.as_slice(),
+            GeoEnum::POHE => POHE_GEO_NAMES.as_slice(),
             GeoEnum::CATA_BRAN_AND_HANGER_REUSE => CATA_HAS_TUBI_GEO_NAMES.as_slice(),
             GeoEnum::CATA_SINGLE_REUSE => CATA_SINGLE_REUSE_GEO_NAMES.as_slice(),
             GeoEnum::CATA_WITHOUT_REUSE => CATA_WITHOUT_REUSE_GEO_NAMES.as_slice(),
@@ -217,9 +219,6 @@ impl AiosDBManager {
                 .await?;
                 // dbg!(s.len());
                 for k in s {
-                    if k.cata_hash.is_none() {
-                        continue;
-                    }
                     target_refnos_map.insert(k.cata_hash.clone().unwrap_or_default(), k);
                 }
             }

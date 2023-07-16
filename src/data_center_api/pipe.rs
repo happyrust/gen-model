@@ -63,7 +63,6 @@ pub async fn get_data_center_from_pipe(aios_mgr: &AiosDBManager, pipe_refno: Ref
     // 找到所有需要统计的 bran
     let bran_refnos = query_travel_children_with_type_aql(&database, pipe_refno, "BRAN").await?;
     let bran_refnos = bran_refnos.into_iter().map(|x| x.into()).collect::<Vec<_>>();
-    dbg!(&bran_refnos.len());
     // 获得 bran的信息
     let (need_compute_bran_refnos, ref_map) = get_bran_data(&bran_refnos, aios_mgr).await?;
     let metadata_map = get_all_metadata_pipe(&pool).await?;

@@ -25,14 +25,13 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
 ) -> anyhow::Result<CateGeomsInfo> {
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
-
-
     let desi_att = interface.get_attr_from_localdb(refno)?;
     //todo 改到使用图数据库去查找
     if scom_ref.is_none() {
         if let Some(spre_ref) = desi_att.get_foreign_refno("SPRE") {
             // dbg!(spre_ref);
             let spre = interface.get_attr_from_localdb(spre_ref).unwrap_or_default();
+            // dbg!(&spre);
             if spre.contains_attr_name("CATR") {
                 scom_ref = spre.get_foreign_refno("CATR");
             } else {
@@ -46,7 +45,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
                     let tmp_ref = c_att.get_foreign_refno("PRTREF").unwrap_or_default();
                     let t_att = interface.get_attr_from_localdb(tmp_ref)?;
                     scom_ref = t_att.get_foreign_refno("CATR");
-                } else if c_att.get_type() == "SPCO"{
+                } else if c_att.get_type() == "SPCO" {
                     scom_ref = c_att.get_foreign_refno("CATR");
                 } else {
                     scom_ref = Some(catref);
@@ -79,7 +78,8 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     let scom_read = scom_info_map.read().await;
     let scom_info = scom_read.get(&scom_ref).unwrap();
-    // dbg!(scom_info);
+    // dbg!(&scom_info.gm_params);
+    // dbg!(&scom_info.axis_params);
     let mut context: BTreeMap<String, String> = BTreeMap::new();
     if let Some(v) = desi_att.get_as_string("JUSL") {
         context.insert("JUSL".into(), v.into());
@@ -100,8 +100,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     let radi = desi_att.get_as_string("RADI").unwrap_or("0.0".into());
     context.insert(DDRADIUS_STR.into(), (radi.clone()));
     context.insert("RADI".into(), (radi));
-    let geom_info = resolve_cata_comp(refno, &scom_info, Some(interface), Some(context)).await;
-    // dbg!(&geom_info);
+    let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(interface), Some(context)).await;
     if geom_info.is_err() {
         error!("{:?}", geom_info.as_ref().err());
         error!("{:?}", desi_att.to_string_hashmap());
@@ -143,6 +142,17 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
             gm_params = query_gm_params(&gmse_am, Some(interface)).await?;
         }
     }
+    // dbg!(&gm_params);
+
+    let mut ngm_params = vec![];
+    //-ve， 和design发生左右的负实体
+    if let Some(gmse_refno) = attr_map.get_foreign_refno("NGMR") {
+        if let Ok(gmse_am) = interface.get_attr_from_localdb(gmse_refno) {
+            ngm_params = query_gm_params(&gmse_am, Some(interface)).await?;
+        }
+    }
+
+
     let mut plin_map = HashMap::new();
     if let Some(pstr_refno) = attr_map.get_foreign_refno("PSTR") {
         let pstr_am = interface.get_children_attrs(pstr_refno)?;
@@ -170,6 +180,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
         gtype: attr_map.get_as_string("GTYP").unwrap_or("unset".into()),
         dtse_params: vec![],
         gm_params,
+        ngm_params,
         axis_params,
         params: attr_map
             .get_as_string("PARA")
@@ -212,9 +223,6 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
     let children = interface.get_travel_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
-    // dbg!(children.len());
-    //todo 获得所有的几何数据，需要用几何type去过滤
-    // let children = interface.get_children_attrs(refno).await.unwrap();
     for geo_am in children {
         if !geo_am.is_visible_by_level(None).unwrap_or(true) {
             continue;
@@ -231,11 +239,12 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
 
 ///对元件库的SCOM Element进行求值计算
 pub async fn resolve_cata_comp<T: PdmsDataInterface>(
-    des_refno: RefU64,
+    des_att: &AttrMap,
     scom_info: &ScomInfo,
     interface: Option<&T>,
     context: Option<BTreeMap<String, String>>,
 ) -> anyhow::Result<CateGeomsInfo> {
+    let des_refno = des_att.get_refno().unwrap_or_default();
     let mut cur_context = context.unwrap_or_default();
     //默认值
     cur_context
@@ -277,11 +286,26 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         cur_context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
     }
 
+    let mut owner_att = int.get_attr_from_localdb(des_att.get_owner().unwrap_or_default()).unwrap_or_default();
+    while !owner_att.contains_attr_name("DESP") {
+        if owner_att.get_refno().is_none() || owner_att.get_type() == "ZONE" {
+            break;
+        }
+        owner_att = int.get_attr_from_localdb(owner_att.get_owner().unwrap_or_default()).unwrap_or_default();
+    }
+    let desp = owner_att.get_f64_vec("DESP").unwrap_or_default();
+    for i in 0..desp.len() {
+        cur_context.insert(
+            format!("ODES{}", i + 1).into(),
+            desp[i].to_string().into(),
+        );
+    }
+
+
     if let Ok(Some(parent_cat_ref)) = int
         .query_first_foreign_along_path(des_refno, &["SPRE", "CATR"], &["SPRE", "CATR"], &[])
-        .await{
-        // dbg!(parent_cat_ref);
-        if let Ok(parent_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(parent_cat_ref){
+        .await {
+        if let Ok(parent_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(parent_cat_ref) {
             let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
             for i in 0..params.len() {
                 cur_context.insert(
@@ -289,20 +313,29 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
                     params[i].to_string().into(),
                 );
             }
-            let desp = parent_cat_am.get_f64_vec("DESP").unwrap_or_default();
-            for i in 0..desp.len() {
-                cur_context.insert(
-                    format!("ODES{}", i + 1).into(),
-                    desp[i].to_string().into(),
-                );
-            }
         }
-
     }
 
+    let mut c_att = int.get_attr_from_localdb(des_att.get_foreign_refno("CREF").unwrap_or_default()).unwrap_or_default();
+    while !c_att.contains_attr_name("DESP") || c_att.get_type() == "ZONE"{
+        if c_att.get_refno().is_none() {
+            break;
+        }
+        c_att = int.get_attr_from_localdb(des_att.get_foreign_refno("CREF").unwrap_or_default()).unwrap_or_default();
+    }
+
+    let desp = c_att.get_f64_vec("DESP").unwrap_or_default();
+    for i in 0..desp.len() {
+        cur_context.insert(
+            format!("ADES{}", i + 1).into(),
+            desp[i].to_string().into(),
+        );
+    }
+
+
     if let Ok(link_cat_refs) = int
-        .query_foreign_refnos(&[des_refno], &[&["CREF"], &["SPRE", "CATR"]], &["SPRE", "CATR"],&[], 4)
-        .await{
+        .query_foreign_refnos(&[des_refno], &[&["CREF"], &["SPRE", "CATR"]], &["SPRE", "CATR"], &[], 4)
+        .await {
         if !link_cat_refs.is_empty() {
             let link_cat_ref = link_cat_refs[0];
             if let Ok(link_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(link_cat_ref) {
@@ -311,13 +344,6 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
                     cur_context.insert(
                         format!("APAR{}", i + 1).into(),
                         params[i].to_string().into(),
-                    );
-                }
-                let desp = link_cat_am.get_f64_vec("DESP").unwrap_or_default();
-                for i in 0..desp.len() {
-                    cur_context.insert(
-                        format!("ADES{}", i + 1).into(),
-                        desp[i].to_string().into(),
                     );
                 }
             }
@@ -342,15 +368,17 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     // dbg!(&scom_info.gm_params);
     // dbg!(&scom_info.axis_params);
     let geometries = resolve_gms(des_refno, &scom_info.gm_params, &jusl_param, &cur_context, &axis_map, interface);
-    for geometry in &geometries {
-        if let CateGeoParam::Pyramid(l) = geometry {
-            dbg!(&l);
-        }
-    }
+    let n_geometries = resolve_gms(des_refno, &scom_info.ngm_params, &jusl_param, &cur_context, &axis_map, interface);
+    // for geometry in &geometries {
+    //     if let CateGeoParam::Pyramid(l) = geometry {
+    //         dbg!(&l);
+    //     }
+    // }
     // dbg!(&geometries);
     Ok(CateGeomsInfo {
         refno: cat_ref,
         geometries,
+        n_geometries,
         axis_map,
     })
 }
@@ -462,7 +490,7 @@ pub async fn query_gm_param(
     let mut dxy = vec![];
     let refno = a.get_refno().unwrap_or_default();
     let type_name = a.get_type();
-    if type_name == "SEXT" || type_name == "SREV" {
+    if type_name == "SEXT" || type_name == "NSEX" || type_name == "SREV" || type_name == "NSRE" {
         //先暂时不考虑负实体
         let children = interface.get_children_attrs(refno).ok()?;
         for child in children {

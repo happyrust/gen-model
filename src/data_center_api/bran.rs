@@ -74,7 +74,8 @@ pub fn get_data_center_bran_attr(refno: RefU64) -> Vec<DataCenterAttr> {
 /// 给排水专业 获取 bran和pipe的name
 pub async fn get_sg_pipe_bran_name(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["PIPE"]).await {
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos,
+                                                                     vec!["PIPE".to_string()]).await {
         for pipe in children {
             let brans = query_children_eles(&database, pipe.refno).await?;
             for bran in brans {
@@ -111,7 +112,8 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
     let mut result = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
     let regex = Regex::new(r"\d.*:\d")?; // 判断字符串是否包含有多个数字加一个:
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["BRAN"]).await {
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos,
+                                                                     vec!["BRAN".to_string()]).await {
         for bran in children {
             let bran_children = query_children_eles(&database, bran.refno).await?;
             let room_name = query_room_name_from_refno_aql(bran.refno, &database).await?.unwrap_or("".to_string());

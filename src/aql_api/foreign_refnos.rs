@@ -1,8 +1,10 @@
 use std::sync::Arc;
 use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
+use crate::consts::AQL_FOREIGN_EDGES_COLLECTION;
 
 //可选的去过滤查询, start_types 和 endtypes，都是外键的类型
 pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], start_types: &[&[&str]], end_types: &[&str], t_types: &[&str], depth: u32) -> anyhow::Result<Vec<RefU64>> {
@@ -32,8 +34,7 @@ pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], sta
         .bind_var("ids", ids)
         .bind_var("depth", depth)
         .bind_var("end_types", end_types)
-        .bind_var("t_types", t_types)
-        ;
+        .bind_var("t_types", t_types);
     let results: Vec<String> = adb.aql_query(aql).await?;
     let refnos = results.iter().map(|x| RefU64::from_url_refno_default(x)).collect::<Vec<_>>();
     Ok(refnos)
@@ -45,7 +46,8 @@ pub async fn query_foreign_refno_aql(arango_database: &ArDatabase, refno: RefU64
     let id = format!("{}/{}", "pdms_eles", refno.to_url_refno());
     if foreign_types.len() < 2 { return Ok(None); }
     let aql = AqlQuery::new("\
-    for v, e, p in 1..5 outbound @id foreign_edges
+    With @@pdms_eles,@@foreign_edges
+    for v, e, p in 1..5 outbound @id @@foreign_edges
     filter p.edges[0].foreign_type == @foreign_type_first
     filter e.foreign_type == @final_type
     filter v != null
@@ -53,7 +55,8 @@ pub async fn query_foreign_refno_aql(arango_database: &ArDatabase, refno: RefU64
         .bind_var("id", id)
         .bind_var("foreign_type_first", foreign_types[0])
         .bind_var("final_type", foreign_types[foreign_types.len() - 1])
-        ;
+        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@foreign_edges",AQL_FOREIGN_EDGES_COLLECTION);
     let results: Vec<String> = arango_database.aql_query(aql).await?;
     for result in results {
         if let Some(refno) = RefU64::from_url_refno(&result) {
@@ -65,19 +68,21 @@ pub async fn query_foreign_refno_aql(arango_database: &ArDatabase, refno: RefU64
 
 /// 查询外键对应的 name
 pub async fn query_foreign_name_aql(refno:RefU64,foreign_types:Vec<&str>,arango_database:&ArDatabase) -> anyhow::Result<Option<String>> {
-    let id = format!("{}/{}", "pdms_eles", refno.to_url_refno());
+    let id = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
     if foreign_types.len() <= 1 { return Ok(None); }
     let aql = AqlQuery::new("\
-    let foreign_key = (for v, e, p in 1..5 outbound @id foreign_edges
+    WITH @@pdms_eles,@@foreign_edges
+    let foreign_key = (for v, e, p in 1..5 outbound @id @@foreign_edges
                            filter p.edges[0].foreign_type == @foreign_type_first
                            filter e.foreign_type == @final_type
                            filter v != null
                            return v._key )
-    return document('pdms_eles',foreign_key[0]).name")
+    return document(@@pdms_eles,foreign_key[0]).name")
         .bind_var("id", id)
         .bind_var("foreign_type_first", foreign_types[0])
         .bind_var("final_type", foreign_types[foreign_types.len() - 1])
-        ;
+        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@foreign_edges",AQL_FOREIGN_EDGES_COLLECTION);
     let results: Result<Vec<String>, _> = arango_database.aql_query(aql).await;
     if results.is_err() { return Ok(None); }
     let mut results = results.unwrap();

@@ -105,7 +105,7 @@ async fn create_element_data(refno: RefU64, aios_mgr: &AiosDBManager, mut data: 
             data.append(&mut gen_cntb_data());
             let pos = query_position_from_id(refno, aios_mgr).await?.unwrap_or(Vec3::ZERO) + position;
             data.append(&mut gen_name_position_data(&child.name, pos));
-            data.append(&mut gen_prim_data(instance, shape_data, ShapeModule::Desi));
+            // data.append(&mut gen_prim_data(instance, shape_data, ShapeModule::Desi));
         } else {
             // let mut cata_element_data = create_cata_element_data(refno, instance, &database).await?;
             // if !cata_element_data.is_empty() {

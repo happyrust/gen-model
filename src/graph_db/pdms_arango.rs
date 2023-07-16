@@ -21,7 +21,7 @@ use futures::future::ok;
 use itertools::Itertools;
 use log::info;
 use parse_pdms_db::parse::WholeAttMap;
-use regex::internal::Input;
+// use regex::internal::Input;
 use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
 use crate::api::children::query_contain_noun_refnos;
 use crate::api::element::*;
@@ -373,8 +373,7 @@ pub async fn save_arangodb_with_db_option(database: &ArDatabase, json: Value, co
     let aql = //AqlQuery::new(&aql_string)
         AqlQuery::new(&aql_string)
             .bind_var("@collection", collection)
-            .bind_var("elements", json)
-            ;
+            .bind_var("elements", json);
     let _result: Vec<()> = database.aql_query(aql).await?;
     Ok(())
 }

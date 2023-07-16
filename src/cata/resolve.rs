@@ -28,9 +28,12 @@ pub fn resolve_axis_params<T: PdmsDataInterface>(
     interface: Option<&T>,
 ) -> BTreeMap<i32, CateAxisParam> {
     let mut map = BTreeMap::new();
+    // dbg!(&scom.axis_params);
     for i in 0..scom.axis_params.len() {
+        // dbg!(&scom.axis_params[i]);
         match resolve_axis_param(&scom.axis_params[i], scom, context, interface) {
             Ok(axis) => {
+                // dbg!(&axis);
                 map.insert(scom.axis_param_numbers[i], axis);
             }
             Err(e) => {
@@ -227,13 +230,13 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
         }
     }
 
-    let phei = eval_str_to_f32(&gm.phei, context, interface)?;
-    let offset = eval_str_to_f32(&gm.offset, context, interface)?;
+    let phei = eval_str_to_f32_or_default(&gm.phei, context, interface);
+    let offset = eval_str_to_f32_or_default(&gm.offset, context, interface);
 
-    let pang = eval_str_to_f32(&gm.pang, context, interface)?;
-    let pwid = eval_str_to_f32(&gm.pwid, context, interface)?;
-    let drad = eval_str_to_f32(&gm.drad, context, interface)?;
-    let dwid = eval_str_to_f32(&gm.dwid, context, interface)?;
+    let pang = eval_str_to_f32_or_default(&gm.pang, context, interface);
+    let pwid = eval_str_to_f32_or_default(&gm.pwid, context, interface);
+    let drad = eval_str_to_f32_or_default(&gm.drad, context, interface);
+    let dwid = eval_str_to_f32_or_default(&gm.dwid, context, interface);
 
     let mut frads = gm.frads
         .iter()

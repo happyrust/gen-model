@@ -24,6 +24,8 @@ pub const EMBED_TABLE: &'static str = "EMBEDDATATABLE";
 pub const SCTN_STANDARD: &'static str = "SCTN_STANDARD";
 pub const CHANNEL_STEEL_STANDARD: &'static str = "CHANNEL_STEEL_STANDARD";
 pub const GLOBAL_DATABASE: &'static str = "PROJECT_INFO";
+// pub const SSC_DATABASE: &'static str = "SSC_INFO";
+pub const FUZZY_QUERT: &'static str = "FUZZY_QUERY";
 pub const PUHUA_MATERIAL_DATABASE: &'static str = "hdey_powerpmdb";
 pub const PUHUA_MATERIAL_TABLE: &'static str = "pdms_mat_gy";
 pub const PUHUA_DQ_MATERIAL_TABLE: &'static str = "pdms_traymotlist";
@@ -32,18 +34,20 @@ pub const PUHUA_DQ_MATERIAL_TABLE: &'static str = "pdms_traymotlist";
 pub const PROFESSION_TX_XT: &'static str = "TX_XT";
 pub const TEAM_DATA_TABLE: &'static str = "TEAM_DATA";
 pub const UNSET_NOUN: u32 = 28933118;
-pub const AQL_LOCK_REFNOS_COLLECTION: &'static str = "lock_refnos";
-pub const AQL_HOLE_DATA_COLLECTION: &'static str = "hole_data";
-pub const AQL_EMBED_DATA_COLLECTION: &'static str = "embed_data";
-pub const AQL_HOLE_EDGE_COLLECTION: &'static str = "hole_edge";
-pub const AQL_EMBED_EDGE_COLLECTION: &'static str = "embed_edge";
 
-
+/// 批量块数量
 pub const BATCH_CHUNKS_CNT: usize = 50;
+/// pdms 的基本 element数据
 pub const AQL_PDMS_ELES_COLLECTION: &'static str = "pdms_eles";
+/// pdms 的 mesh数据
 pub const AQL_PDMS_MESH_COLLECTION: &'static str = "pdms_mesh";
 pub const AQL_PDMS_EDGES_COLLECTION: &'static str = "pdms_edges";
+/// 负实体运算后的inst infos数据
+pub const AQL_PDMS_COMPOUND_INST_INFO_COLLECTION: &'static str = "pdms_compound_inst_infos";
+pub const AQL_PDMS_NGMS_INST_INFO_COLLECTION: &'static str = "pdms_ngmr_inst_infos";
 pub const AQL_PDMS_INST_INFO_COLLECTION: &'static str = "pdms_inst_infos";
+/// 负实体运算后的inst geos数据
+pub const AQL_PDMS_COMPOUND_INST_GEO_COLLECTION: &'static str = "pdms_compound_inst_geos";
 pub const AQL_PDMS_INST_GEO_COLLECTION: &'static str = "pdms_inst_geos";
 pub const AQL_PDMS_INST_TUBI_COLLECTION: &'static str = "pdms_inst_tubis";
 pub const AQL_PDMS_INST_EDGE_COLLECTION: &'static str = "pdms_inst_edges";
@@ -51,3 +55,19 @@ pub const AQL_SSC_ELES_COLLECTION: &'static str = "ssc_eles";
 pub const AQL_SSC_EDGE_COLLECTION: &'static str = "ssc_edges";
 pub const AQL_THREED_REVIEW_COLLECTION: &'static str = "threed_review";
 pub const AQL_VIRTUAL_HOLE_COLLECTION: &'static str = "virtual_hole";
+pub const AQL_SIBL_EDGES_COLLECTION: &'static str = "sibl_edges";
+pub const AQL_FOREIGN_EDGES_COLLECTION: &'static str = "foreign_edges";
+pub const AQL_GEO_INFOS_COLLECTION: &'static str = "geo_infos";
+pub const AQL_ROOM_EDGES_COLLECTION: &'static str = "room_edges";
+pub const AQL_EMBED_DATA_COLLECTION: &'static str = "embed_data";
+pub const AQL_ROOM_ELES_COLLECTION: &'static str = "room_eles";
+pub const AQL_TUBI_EDGES_COLLECTION: &'static str = "tubi_edges";
+pub const AQL_PLIN_ELES_COLLECTION: &'static str = "plin_eles";
+pub const AQL_PARA_ELES_COLLECTION: &'static str = "para_eles";
+pub const AQL_INSTANCE_EDGES_COLLECTION: &'static str = "instance_edges";
+pub const AQL_DESPARA_ELES_COLLECTION: &'static str = "despara_eles";
+pub const AQL_DATA_ELES_COLLECTION: &'static str = "data_eles";
+pub const AQL_LOCK_REFNOS_COLLECTION: &'static str = "lock_refnos";
+pub const AQL_HOLE_DATA_COLLECTION: &'static str = "hole_data";
+pub const AQL_HOLE_EDGE_COLLECTION: &'static str = "hole_edge";
+pub const AQL_EMBED_EDGE_COLLECTION: &'static str = "embed_edge";

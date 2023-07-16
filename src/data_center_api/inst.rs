@@ -15,7 +15,8 @@ use crate::graph_db::pdms_arango::ArDatabase;
 
 pub async fn get_inst_data(refnos: Vec<RefU64>, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<DataCenterProject> {
     let mut instance = Vec::new();
-    if let Ok(valves) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["INST", "EQUI"]).await {
+    if let Ok(valves) = query_refnos_travel_children_with_type_aql(&database, &refnos,
+                                                                   vec!["INST".to_string(), "EQUI".to_string()]).await {
         for valv in valves {
             let room_name = query_room_code(valv.refno, pool).await?.unwrap_or("".to_string());
             let position = query_refno_height_position(valv.refno, pool).await?;
@@ -47,7 +48,8 @@ pub async fn get_inst_data(refnos: Vec<RefU64>, database: &ArDatabase, pool: &Po
 pub async fn get_inst_equi_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut instance = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
-    if let Ok(equis) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["EQUI"]).await {
+    if let Ok(equis) = query_refnos_travel_children_with_type_aql(&database, &refnos,
+                                                                  vec!["EQUI".to_string()]).await {
         for equi in equis {
             let name = if equi.name.starts_with("/") { equi.name[1..].to_string() } else { equi.name };
             if name.len() < 9 { continue; };

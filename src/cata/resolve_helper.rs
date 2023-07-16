@@ -76,6 +76,11 @@ pub fn eval_str_to_f32<T: PdmsDataInterface>(input_expr: impl AsRef<str>,
     eval_str_to_f64(&input_expr, context, interface, true).map(|x| x as f32)
 }
 
+pub fn eval_str_to_f32_or_default<T: PdmsDataInterface>(input_expr: impl AsRef<str>,
+                                             context: &BTreeMap<String, String>, interface: Option<&T>) -> f32 {
+    eval_str_to_f32(input_expr, context, interface).unwrap_or(0.0)
+}
+
 //  SIN  00 00 03 85
 //  COS  00 00 03 86
 //  TAN  00 00 03 87
@@ -163,10 +168,15 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     let re = Regex::new(r"([A-Z_]+[0-9]*)(\s*\[?\s*(([1-9]\d*\.?\d*)|(0\.\d*[1-9]))\s*\]?)?").unwrap();
     // 将NEXT PREV 的值统一换成参考号，然后 context_params 要存储 参考号对应的 attr，要是它这个值没有求解，
     // 相当于要递归去求值
-
+    // if new_exp.contains("THK") {
+    //     dbg!(&context);
+    //     dbg!(&new_exp);
+    // }
     let rpro_re = Regex::new(r"(RPRO)\s+([a-zA-Z0-9]+)").unwrap();
     if new_exp.contains("RPRO") {
-        // dbg!(&new_exp);
+        // if new_exp.contains("RPRO PH") {
+        //     dbg!(&new_exp);
+        // }
         new_exp = rpro_re.replace_all(&new_exp, |caps: &Captures| {
             let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
             let default_key: String = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
@@ -179,11 +189,12 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         }).trim().to_string();
         // dbg!(&new_exp);
     }
+
     let mut new_exp = new_exp.replace("DESIGN PARAM", "DESP").replace("DESIGN PARA", "DESP");;
     let mut result_exp = new_exp.clone();
     //默认两次
     let mut found_replaced = false;
-    let para_name_re = Regex::new(r"(DESI(GN)?\s+)?([I|C|O|A)]?PARA?M?)|DESP|(O|A|W|D)DES").unwrap();
+    let para_name_re = Regex::new(r"(DESI(GN)?\s+)?([I|C|O|A)]?PARA?M?)|DESP|(O|A|W|D)DESP?").unwrap();
     for _ in 0..100 {
         for caps in re.captures_iter(&new_exp) {
             let s = caps[0].trim();
@@ -442,7 +453,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     CateGeoParam::Unknown
                 }
             }
-            "LSNO" | "NSNO" => {
+            "LSNO" | "NLSN" => {
                 if gmse.paxises.len() >= 2 && gmse.diameters.len() >= 2 && gmse.distances.len() >= 2 {
                     CateGeoParam::Snout(CateSnoutParam {
                         refno: gmse.refno,
@@ -549,7 +560,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SREV" | "NREV" => {
+            "SREV" | "NSRE" => {
                 CateGeoParam::Revolution(CateRevolutionParam {
                     refno: gmse.refno,
                     pa: (gmse.paxises[0].clone()),
@@ -564,7 +575,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SRTO" | "NRTO" => {
+            "SRTO" | "NSRT" => {
                 // 截面为矩形的弯管
                 CateGeoParam::RectTorus(CateRectTorusParam {
                     refno: gmse.refno,
@@ -641,7 +652,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
             }
         }
     } else {
-        dir = parse_str_axis_to_vec3(dir_str, context, interface)?.into();
+        dir = parse_str_axis_to_vec3(dir_str, context, interface).unwrap_or(Vec3::Z);
     }
     return Ok((dir, pos));
 }
@@ -736,7 +747,7 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeM
         }
     }
     let dir_str = new_dir_str.replace(" ", "");
-    let v = parse_expr_to_dir(&dir_str).ok_or(anyhow!(format!("方向字符串: {} 不正确。", &dir_str)))?;
+    let v = parse_expr_to_dir(&dir_str).ok_or(anyhow!(format!("方向字符串: {} 不正确。", pdir)))?;
     Ok(v)
 }
 

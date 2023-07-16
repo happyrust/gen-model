@@ -3,6 +3,7 @@
 use aios_core::pdms_types::RefU64;
 use aios_core::prim_geo::spine::SweepPath3D;
 use aios_core::shape::pdms_shape::LEN_TOL;
+use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use glam::{Mat3, Quat, Vec3};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -38,32 +39,42 @@ impl AiosDBManager {
                     SweepPath3D::Line(l) => {
                         let mut dir = (l.end - l.start).normalize();
                         pos += dir * tmp_dist + l.start;
-                        let z_axis = Vec3::Y;
-                        let x_axis = -Vec3::X;
-                        let y_axis = Vec3::Z;
-                        quat = Quat::from_mat3(&Mat3::from_cols(
-                            x_axis,
-                            y_axis,
-                            z_axis,
-                        ));
+                        // let z_axis = Vec3::Y;
+                        // let x_axis = -Vec3::X;
+                        // let y_axis = Vec3::Z;
+                        // quat = Quat::from_mat3(&Mat3::from_cols(
+                        //     x_axis,
+                        //     y_axis,
+                        //     z_axis,
+                        // ));
                         break;
                     }
                     SweepPath3D::SpineArc(arc) => {
                         //使用弧长去计算当前的点的位置
                         if arc.radius > LEN_TOL {
+                            let v = (arc.start_pt - arc.center).normalize();
+                            let mut start_angle = Vec3::X.angle_between(v);
+                            if Vec3::X.cross(v).z < 0.0 {
+                                start_angle = -start_angle;
+                            }
                             let mut theta = (tmp_dist / arc.radius);
                             if arc.clock_wise {
                                 theta = -theta;
                             }
+                            theta = start_angle + theta;
                             pos = arc.center + arc.radius * Vec3::new(theta.cos(), theta.sin(), 0.0);
                             let y_axis = Vec3::Z;
-                            let x_axis = (pos - arc.center).normalize();
+                            let mut x_axis = (arc.center - pos).normalize();
+                            if arc.clock_wise {
+                                x_axis = -x_axis;
+                            }
                             let z_axis = x_axis.cross(y_axis).normalize();
                             quat = Quat::from_mat3(&Mat3::from_cols(
                                 x_axis,
                                 y_axis,
                                 z_axis,
                             ));
+                            // dbg!(quat_to_pdms_ori_str(&quat));
                         }
                     }
                     _ => {}

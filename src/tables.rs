@@ -112,7 +112,6 @@ pub fn gen_create_data_state_tables_sql() -> String {
 }
 
 
-
 #[inline]
 pub fn gen_create_project_mdb_sql() -> String {
     let mut sql = String::new();

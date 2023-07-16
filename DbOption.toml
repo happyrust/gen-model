@@ -29,7 +29,7 @@ gen_model_batch_size = 100
 
 #arangodb 配置
 arangodb_database = "ams"
-multi_threads = true
+multi_threads = false
 only_sync_sys = false
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
@@ -60,7 +60,7 @@ only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
-#included_db_files = ["zdj7600_0001"]
+#included_db_files = ["ams7334_0001", "ams7353_0001", "ams7741_0001", "ams7998_0001"]
 included_db_files = ["ams5052_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 manual_db_nums = [1112]  #, 8000
@@ -158,6 +158,10 @@ puhua_database_password = ""
 
 #debug_root_refnos = ["17496/169982"]
 #debug_root_refnos = ["9304/2"]
+#debug_root_refnos = ["24383/84086"]
+#debug_root_refnos = ["24383/84443"]
+#debug_root_refnos = ["24383/84337"]
+#debug_root_refnos = ["24383/84382"]
 #debug_root_refnos = ["17496/106409"]
 
 #风管的测试
@@ -171,6 +175,14 @@ puhua_database_password = ""
 
 #FIXING 的调试
 #debug_root_refnos = ["17496/106824"]  #墙
+#debug_root_refnos = ["17496/145250"]  #FIXING
+#debug_root_refnos = ["17496/106409"]  #墙
+#debug_root_refnos = ["17496/173624"]  #墙 顺时针的情况
+
+#FIT 的调试
+#17496/173050
+#debug_root_refnos = ["17496/173050"]
+#debug_root_refnos = ["17496/173049"]
 
 #debug_root_refnos = ["17496/169983"]
 #debug_root_refnos = ["24381/148471"]
@@ -219,6 +231,7 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/171102"]
 #debug_root_refnos = ["17496/171102"]
 #debug_root_refnos = ["24381/57302"]
+debug_root_refnos = ["17496/194989"]
 
 
 #直墙的显示问题
@@ -237,8 +250,30 @@ puhua_database_password = ""
 #debug_root_refnos = ["24381/42520"]
 #debug_root_refnos = ["9304/2"]
 #debug_root_refnos = ["17496/161703"]
+
+#debug_root_refnos = ["17496/105760"]
+#debug_root_refnos = ["17496/105760"]
+
+#debug_root_refnos = ["17496/171102"]
+#debug_root_refnos = ["17496/171138"]
+#debug_root_refnos = ["17496/172824"]
+#debug_root_refnos = ["17496/171158"]
+
+#SBFI
+#debug_root_refnos = ["17496/137938"]
+#GWALL
 #debug_root_refnos = ["17496/116749"]
-debug_root_refnos = ["17496/171188"]
+#debug_root_refnos = ["17496/171346"]
+
+#debug_root_refnos = ["17496/178935"]
+#debug_root_refnos = ["17496/175492"]
+
+#电气负实体测试
+#debug_root_refnos = ["24383/84480"]
+#debug_root_refnos = ["24383/84515"]
+#debug_root_refnos = ["24383/84531"]
+#debug_root_refnos = ["24383/84532"]
+
 
 #17496/116750
 
@@ -246,13 +281,31 @@ debug_root_refnos = ["17496/171188"]
 #debug_root_refnos = ["17496/168790"]
 
 #debug_root_refnos = ["17496/171134"]
+#debug_root_refnos = ["17496/172861"]
+#debug_root_refnos = ["17496/173047"]
+#debug_root_refnos = ["17496/173056"]
+#debug_root_refnos = ["17496/194989"]
+#debug_root_refnos = ["17496/194993"]
+#debug_root_refnos = ["17496/161488"]
+#debug_root_refnos = ["17496/195553"]
 
 #重点测试管道
 #debug_root_refnos = ["17496/169986"]
 #debug_root_refnos = ["17496/171009"]
 #debug_root_refnos = ["17496/170902"]
 
+#debug_root_refnos = ["17496/173811"]
 #debug_root_refnos = ["17496/168790"]
+
+#SANN 的柱子计算
+#debug_root_refnos = ["17496/173810"]
+#debug_root_refnos = ["17496/171555"]
+#debug_root_refnos = ["17496/171751"]
+#debug_root_refnos = ["17496/171134"]
+
+#debug_root_refnos = ["17496/195598"]
+#debug_root_refnos = ["17496/195555"]
+#debug_root_refnos = ["17496/195603"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]
