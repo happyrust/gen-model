@@ -1991,8 +1991,8 @@ pub async fn gen_geos_data(
                                             Mat4::from_scale(Vec3::new(1.0, 1.0, s))
                                         };
                                         let inv_t_mat = Mat4::from_translation(-center);
-                                        // local_mat = local_mat * t_mat * s_mat * inv_t_mat;
-                                        local_mat = local_mat * s_mat;
+                                        local_mat = local_mat * t_mat * s_mat * inv_t_mat;
+                                        // local_mat = local_mat * s_mat;
                                     }
 
                                     #[cfg(debug_assertions)]

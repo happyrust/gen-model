@@ -231,7 +231,7 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/171102"]
 #debug_root_refnos = ["17496/171102"]
 #debug_root_refnos = ["24381/57302"]
-debug_root_refnos = ["24381/195528"]
+debug_root_refnos = ["17496/194989"]
 
 
 #直墙的显示问题
