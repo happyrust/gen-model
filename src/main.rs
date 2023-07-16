@@ -51,7 +51,7 @@ use parry3d::shape::{Compound, ConvexPolyhedron, SharedShape};
 use parry3d::transformation::vhacd;
 use parry3d::transformation::vhacd::VHACD;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
-use regex::internal::Input;
+// use regex::internal::Input;
 use sqlx::pool::PoolConnection;
 use sqlx::Executor;
 use sqlx::{Acquire, MySql, MySqlPool, Pool, Row};
