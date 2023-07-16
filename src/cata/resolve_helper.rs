@@ -168,7 +168,10 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     let re = Regex::new(r"([A-Z_]+[0-9]*)(\s*\[?\s*(([1-9]\d*\.?\d*)|(0\.\d*[1-9]))\s*\]?)?").unwrap();
     // 将NEXT PREV 的值统一换成参考号，然后 context_params 要存储 参考号对应的 attr，要是它这个值没有求解，
     // 相当于要递归去求值
-
+    // if new_exp.contains("THK") {
+    //     dbg!(&context);
+    //     dbg!(&new_exp);
+    // }
     let rpro_re = Regex::new(r"(RPRO)\s+([a-zA-Z0-9]+)").unwrap();
     if new_exp.contains("RPRO") {
         // if new_exp.contains("RPRO PH") {
@@ -186,11 +189,12 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         }).trim().to_string();
         // dbg!(&new_exp);
     }
+
     let mut new_exp = new_exp.replace("DESIGN PARAM", "DESP").replace("DESIGN PARA", "DESP");;
     let mut result_exp = new_exp.clone();
     //默认两次
     let mut found_replaced = false;
-    let para_name_re = Regex::new(r"(DESI(GN)?\s+)?([I|C|O|A)]?PARA?M?)|DESP|(O|A|W|D)DES").unwrap();
+    let para_name_re = Regex::new(r"(DESI(GN)?\s+)?([I|C|O|A)]?PARA?M?)|DESP|(O|A|W|D)DESP?").unwrap();
     for _ in 0..100 {
         for caps in re.captures_iter(&new_exp) {
             let s = caps[0].trim();

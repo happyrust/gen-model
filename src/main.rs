@@ -80,23 +80,36 @@ use aios_database::consts::*;
 use aios_database::data_interface::gen_model::gen_geos_data;
 
 fn test_sbfi() -> anyhow::Result<()> {
-
-
-    let owner_mat3 =  Mat3::from_cols(
-        Vec3::X,
-        Vec3::NEG_Y,
-        Vec3::NEG_Z,
-    );
-
-    let axis_str = "Y27.041-X";
+    // let axis_str = "Y27.041-X";
+    let axis_str = "Y";
     let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
     let mut mat3 = cal_mat3_by_zdir(addition_axis);
     dbg!(to_pdms_ori_str(&mat3));
-    let final_mat3 = owner_mat3 * mat3;
-    dbg!(to_pdms_ori_str(&final_mat3));
-    let quat = Quat::from_mat3(&final_mat3);
-    let m = Mat3::from_quat(quat);
-    dbg!(to_pdms_ori_str(&m));
+
+    let axis_str = "-Y";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "-Y30X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "Y30-X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "-Y30-X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "-X30-Y";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
 
     return Ok(());
 
@@ -199,10 +212,16 @@ async fn main() -> anyhow::Result<()> {
         let mut time = Instant::now();
         //
 
-        // let refno = RefU64::from_two_nums(17496, 194994);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
+        let refno = RefU64::from_two_nums(17496, 195549);
+        let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        dbg!(transform);
+
+        let refno = RefU64::from_two_nums(17496, 195550);
+        let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        dbg!(transform);
+
         //
         // let refno = RefU64::from_two_nums(17496, 173130);
         // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();

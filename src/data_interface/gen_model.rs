@@ -132,7 +132,6 @@ pub async fn gen_prim_geos(
                 } else {
                     None
                 };
-                // let mut geo_aabb = None;
                 let brep_shape = if attr.get_type() == "POHE" {
                     //attr.create_brep_shape(limit_size)
                     let pgo_refnos = mgr_clone.get_children_from_localdb(refno).unwrap_or_default();
@@ -143,15 +142,15 @@ pub async fn gen_prim_geos(
                         for v in v_att {
                             verts.push(v.get_position().unwrap_or_default());
                         }
-                        polygons.push(Polygon{
+                        polygons.push(Polygon {
                             verts,
                         });
                     }
-                    let obj: Box<dyn BrepShapeTrait> = Box::new(Polyhedron{
+                    let obj: Box<dyn BrepShapeTrait> = Box::new(Polyhedron {
                         polygons,
                     });
                     Some(obj)
-                }else{
+                } else {
                     attr.create_brep_shape(limit_size)
                 };
                 let Some(brep_shape) = brep_shape else {
@@ -179,7 +178,13 @@ pub async fn gen_prim_geos(
                     }
                     aabb
                 } else {
-                    let Some((_, aabb)) = cached_mesh_mgr.gen_plant_data(brep_shape, replace_mesh, tol_ratio) else {
+                    let tmp_tol = if attr.is_neg() {
+                        // tol_ratio.map(|x| x * 3.0)
+                        tol_ratio
+                    } else {
+                        tol_ratio
+                    };
+                    let Some((_, aabb)) = cached_mesh_mgr.gen_plant_data(brep_shape, replace_mesh, tmp_tol) else {
                         continue;
                     };
                     aabb
@@ -363,7 +368,12 @@ pub async fn gen_loop_geos(
                                     }
                                     Some(aabb)
                                 } else {
-                                    let Some((_, aabb)) = cached_mesh_mgr.gen_plant_data(revo, replace_mesh, tol_ratio) else {
+                                    let tmp_tol = if parent_att.is_neg() {
+                                        tol_ratio.map(|x| x * 2.0)
+                                    } else {
+                                        tol_ratio
+                                    };
+                                    let Some((_, aabb)) = cached_mesh_mgr.gen_plant_data(revo, replace_mesh, tmp_tol) else {
                                         continue;
                                     };
                                     Some(aabb)
@@ -670,11 +680,14 @@ pub async fn gen_cata_geos(
                             let gmse_refno = cat_attmap.get_foreign_refno("GMRE").unwrap_or(
                                 cat_attmap.get_foreign_refno("GSTR").unwrap_or_default()
                             );
-                            if !gmse_refno.is_valid() { continue; }
                             // dbg!(&gmse_refno);
                             // dbg!(ele_refno);
                             //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
-                            let pos_neg_map = mgr_clone.query_refnos_has_pos_neg_map(&[gmse_refno]).await.unwrap_or_default();
+                            let pos_neg_map = if gmse_refno.is_valid(){
+                                mgr_clone.query_refnos_has_pos_neg_map(&[gmse_refno]).await.unwrap_or_default()
+                            }else{
+                                HashMap::new()
+                            };
                             // dbg!(&pos_neg_map);
                             let mut neg_refnos = pos_neg_map.values().map(|(_, neg)| neg).flatten().cloned().collect::<Vec<_>>();
                             //如果有负实体，需要合在一起
@@ -841,6 +854,9 @@ pub async fn gen_cata_geos(
                                 // break;
                             }
                             // dbg!(csg_map.len());
+                            if merged_cata_aabb.is_none() {
+                                merged_cata_aabb = n_merged_cata_aabb;
+                            }
                             //需要变换成世界坐标系下的aabb
                             if let Some(a) = merged_cata_aabb {
                                 geos_info.aabb =
@@ -872,11 +888,8 @@ pub async fn gen_cata_geos(
                                 shape_insts_data.insert_geos_data(inst_key, n_origin);
                             }
 
-                            if ele_refno.get_1() == 84382 {
-                                dbg!(geo_insts.len());
-                            }
-
                             //将负实体的运算结果，存在另外一个collection
+                            let contain_ngmr = geo_insts.iter().any(|x| x.geo_type == GeoBasicType::CateCrossNeg);
                             if geo_insts.len() > 0 {
                                 // let is_debug =  ele_refno.get_1() == 84502;
                                 let mut inst_key = geos_info.get_inst_key();
@@ -919,9 +932,8 @@ pub async fn gen_cata_geos(
                                         continue;
                                     }
                                 }
-                                if !final_compounds_map.is_empty() {
+                                if !final_compounds_map.is_empty(){
                                     final_geo_insts.retain(|x| x.geo_type == GeoBasicType::Pos);
-                                    // x.geo_type == GeoBasicType::Pos ||
                                     // final_geo_insts.retain(|x| x.geo_type == GeoBasicType::CateCrossNeg);
                                     let mut compound_geos_info = geos_info;
                                     compound_geos_info.update_to_compound();
@@ -1413,7 +1425,7 @@ pub async fn gen_pohe_geos(
     mgr: Arc<AiosDBManager>,
     instance_mgr: Arc<RwLock<ShapeInstancesData>>,
     pohe_refnos: &[RefU64],
-) -> anyhow::Result<bool>{
+) -> anyhow::Result<bool> {
     let t = Instant::now();
     let db_option = &mgr.db_option;
     let batch_size = db_option.gen_model_batch_size;
@@ -1941,6 +1953,7 @@ pub async fn gen_geos_data(
                             let Some(inst_geos) = inst_data.get_inst_geos_data(geos_info) else {
                                 continue;
                             };
+                            let mut pos_aabb = Aabb::new_invalid();
                             for geo_inst in &inst_geos.insts {
                                 let Some(mesh) = mesh_mgr_clone.get_mesh(geo_inst.geo_hash) else {
                                     continue;
@@ -1956,17 +1969,30 @@ pub async fn gen_geos_data(
                                 //如果是负实体，需要生成模型计算
                                 let is_neg = !pos_refnos.contains(&t_refno);
                                 if t_refno == comp_refno || is_neg {
-                                    if !pos_refnos.contains(&t_refno) {
+                                    if pos_refnos.contains(&t_refno) {
+                                        pos_aabb = aabb;
+                                    }else{
                                         neg_refnos.push(t_refno);
                                     }
                                     if is_neg {
                                         //根据类型来考虑是否需要扩大负实体
                                         let mut center: Vec3 = aabb.center().into();
                                         let t_mat = Mat4::from_translation(center);
-                                        let s = 1.005;
-                                        let s_mat = Mat4::from_scale(Vec3::new(1.0, 1.0, s));
+                                        let mut s = 1.008;
+                                        //如果是旋转体，xy方向都适当放大一点
+                                        if aabb.contains(&pos_aabb) {
+                                            s = 1.03;
+                                        }
+                                        //todo use brep substract, if use mesh, may exist many tolerance problem
+                                        let s_mat = if matches!(geo_inst.geo_param, PdmsGeoParam::PrimRevolution(_)) {
+                                            // Mat4::from_scale(Vec3::new(s, s, 1.0))
+                                            Mat4::from_scale(Vec3::new(1.0, s, s))
+                                        } else {
+                                            Mat4::from_scale(Vec3::new(1.0, 1.0, s))
+                                        };
                                         let inv_t_mat = Mat4::from_translation(-center);
-                                        local_mat = local_mat * t_mat * s_mat * inv_t_mat;
+                                        // local_mat = local_mat * t_mat * s_mat * inv_t_mat;
+                                        local_mat = local_mat * s_mat;
                                     }
 
                                     #[cfg(debug_assertions)]
@@ -2139,6 +2165,7 @@ pub async fn gen_geos_data(
                     dbg!(parent_manifold.num_tri());
                     let mut neg_ms = vec![];
                     for refno in refnos {
+                        // dbg!(refno);
                         let Some(geos_info) = shape_insts_data.get_ngmr_info(&refno) else {
                             continue;
                         };
@@ -2148,7 +2175,7 @@ pub async fn gen_geos_data(
                         // if refno.get_1() == 194994 {
                         //     dbg!(geos_info);
                         //     dbg!(geos_data);
-                            dbg!(refno);
+                        // dbg!(refno);
                         // }
                         let relative_mat = parent_matrix_inverse * geos_info.world_transform.compute_matrix();
                         // let relative = Transform::from_matrix(relative_mat);
@@ -2167,15 +2194,15 @@ pub async fn gen_geos_data(
                                 continue;
                             };
                             //根据类型来考虑是否需要扩大负实体
-                            // let mut center: Vec3 = aabb.center().into();
-                            // let t_mat = Mat4::from_translation(center);
-                            // let s = 1.05;
-                            // let s_mat = Mat4::from_scale(Vec3::new(1.0, 1.0, s));
-                            // // let s_mat = Mat4::from_scale(Vec3::splat(s));
-                            // let inv_t_mat = Mat4::from_translation(-center);
-                            // let final_mat = t_mat * s_mat * inv_t_mat;
+                            let mut center: Vec3 = aabb.center().into();
+                            let t_mat = Mat4::from_translation(center);
+                            let s = 1.05;
+                            let s_mat = Mat4::from_scale(Vec3::new(1.0, 1.0, s));
+                            // let s_mat = Mat4::from_scale(Vec3::splat(s));
+                            let inv_t_mat = Mat4::from_translation(-center);
+                            let final_mat = local_mat * t_mat * s_mat * inv_t_mat;
 
-                            let mut neg_manifold: ManifoldRust = (mesh, &local_mat).into();
+                            let mut neg_manifold: ManifoldRust = (mesh, &final_mat).into();
                             // dbg!(neg_manifold.num_tri());
                             if neg_manifold.num_tri() != 0 {
                                 neg_ms.push(neg_manifold);
