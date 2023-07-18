@@ -251,7 +251,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "SCTN";
+    let noun = "GENSEC";
     let hash = db1_hash(noun);
     dbg!(hash);
     let hashes = [0xAF0C5];

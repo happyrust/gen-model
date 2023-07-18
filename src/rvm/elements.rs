@@ -365,7 +365,7 @@ async fn get_rtor_shape_data(refno: RefU64, cache_basic: &CachedRefBasic, pool: 
     Ok(Some(RvmShapeTypeData::RectangularTorus([r_inside, r_outside, height, angle])))
 }
 
-fn gen_ancestor_data_str(name: &str, pos: Vec3) -> Vec<u8> {
+pub(crate) fn gen_ancestor_data_str(name: &str, pos: Vec3) -> Vec<u8> {
     format!("CNTB\r\n     1     2\r\n{}\r\n          {:.2}          {:.2}          {:.2}\r\n     1\r\n", name, pos.x, pos.y, pos.z).into_bytes()
 }
 
