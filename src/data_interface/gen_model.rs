@@ -3,7 +3,6 @@ use crate::aql_api::children::query_children_order_aql;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn::geo::create_profile_geos;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
-// use crate::data_interface::cgal_boolean;
 use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -1121,28 +1120,29 @@ pub async fn gen_cata_geos(
             }
         });
         // dbg!(&children);
-        let Ok(group_att) = mgr.get_attr_from_localdb(branch_refno) else {
+        let Ok(branch_att) = mgr.get_attr_from_localdb(branch_refno) else {
             continue;
         };
+        // dbg!(&branch_att);
         //可能只有branch 元素需要做一遍求解
         let Ok(Some(group_transform)) = mgr
             .get_world_transform(branch_refno)
             .await else {
             continue;
         };
-        let htube_pt = group_transform.transform_point(group_att.get_vec3("HPOS").unwrap());
+        let htube_pt = group_transform.transform_point(branch_att.get_vec3("HPOS").unwrap());
         let hdir = group_transform
-            .transform_point(group_att.get_vec3("HDIR").unwrap())
+            .transform_point(branch_att.get_vec3("HDIR").unwrap())
             .normalize_or_zero();
-        let bran_ttube_pt = group_transform.transform_point(group_att.get_vec3("TPOS").unwrap());
+        let bran_ttube_pt = group_transform.transform_point(branch_att.get_vec3("TPOS").unwrap());
 
-        let is_hang = group_att.get_type() == "HANG";
-        let h_ref = group_att
+        let is_hang = branch_att.get_type() == "HANG";
+        let h_ref = branch_att
             .get_foreign_refno(if is_hang { "HREF" } else { "HSTU" })
             .unwrap_or_default();
         // dbg!(h_ref);
 
-        let bran_name = group_att.get_name().0.to_string();
+        let bran_name = branch_att.get_name().0.to_string();
         let mut bore = 0.0f32;
         let mut href_type = "".to_string();
         //todo 头节点的处理
@@ -1177,7 +1177,7 @@ pub async fn gen_cata_geos(
             }
         }
 
-        let tref = group_att
+        let tref = branch_att
             .get_foreign_refno(if is_hang { "TREF" } else { "LSTU" })
             .unwrap_or_default();
         let mut current_tubing = PdmsTubing {
@@ -1228,7 +1228,7 @@ pub async fn gen_cata_geos(
                             ),
                             start_pt: current_tubing.start_pt,
                             end_pt: current_tubing.end_pt,
-                            att_type: group_att.get_type().to_string(),
+                            att_type: branch_att.get_type().to_string(),
                             extra_type: "".to_string(),
                             bore,
                             bran_name: bran_name.clone(),
@@ -1978,7 +1978,7 @@ pub async fn gen_geos_data(
                                         //根据类型来考虑是否需要扩大负实体
                                         let mut center: Vec3 = aabb.center().into();
                                         let t_mat = Mat4::from_translation(center);
-                                        let mut s = 1.008;
+                                        let mut s = 1.01;
                                         //如果是旋转体，xy方向都适当放大一点
                                         if aabb.contains(&pos_aabb) {
                                             s = 1.03;

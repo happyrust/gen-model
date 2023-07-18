@@ -351,7 +351,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     }
 
 
-    let axis_map = resolve_axis_params(scom_info, &cur_context, interface);
+    let axis_map = resolve_axis_params(des_refno, scom_info, &cur_context, interface);
     // dbg!(&scom_info.axis_params);
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
         if scom_info.plin_map.contains_key(plin.as_str()) {
@@ -388,6 +388,8 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
     let type_name = attr_map.get_as_smol_str("TYPE")?;
     let pconnect = attr_map.get_as_smol_str("PCON")?;
     let pbore = attr_map.get_as_smol_str("PBOR")?;
+    let pwidth = attr_map.get_as_smol_str("PWID")?;
+    let pheight = attr_map.get_as_smol_str("PHEI")?;
     let refno = attr_map.get_refno()?;
     let number = attr_map.get_i32("NUMB")?;
     let r = match type_name.as_ref() {
@@ -402,6 +404,8 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             direction: attr_map.get_as_smol_str("PAXI")?,
             pconnect,
             pbore,
+            pwidth,
+            pheight,
             pnt_index_str: None,
         },
         "PTCA" => AxisParam {
@@ -415,6 +419,8 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             direction: { attr_map.get_as_smol_str("PTCD").unwrap_or("Y".into()) },
             pconnect,
             pbore,
+            pwidth,
+            pheight,
             pnt_index_str: None,
         },
         "PTMI" => AxisParam {
@@ -428,6 +434,8 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             direction: attr_map.get_as_smol_str("PAXI")?,
             pconnect,
             pbore,
+            pwidth,
+            pheight,
             pnt_index_str: None,
         },
         "PTPOS" => {
@@ -443,6 +451,8 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
                 direction: attr_map.get_as_smol_str("PTCD").unwrap_or("Y".into()),
                 pconnect,
                 pbore,
+                pwidth,
+                pheight,
                 pnt_index_str: attr_map.get_as_string("PTCPOS"),
             }
         }
@@ -457,6 +467,8 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             direction: "".into(),
             pconnect,
             pbore,
+            pwidth,
+            pheight,
             pnt_index_str: None,
         },
     };
