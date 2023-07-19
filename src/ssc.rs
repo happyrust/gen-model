@@ -847,10 +847,13 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>,
             filter_aql.push_str(&format!("filter v.name like {}\r\n", contains_key[0].site_name));
         }
         // 每一个 site 和下面的 zone 的更新 pdms_eles 语句
-        let update_site_aql = format!("update {{'_key':'{}' , 'major': '{}'}} in {}", site_refno.to_url_refno(), contains_key[0].site_code, AQL_PDMS_ELES_COLLECTION);
+        let update_site_aql = format!("With {AQL_PDMS_ELES_COLLECTION}\
+        update {{'_key':'{}' , 'major': '{}'}} in {}", site_refno.to_url_refno(), contains_key[0].site_code, AQL_PDMS_ELES_COLLECTION);
         update_aqls.push(update_site_aql);
         for (zone_name, zone_code) in &contains_key[0].zone_map {
-            let mut update_zone_aql = format!("let zones = ( for v in 1 inbound '{}/{}' pdms_edges return v ) ",
+            let mut update_zone_aql = format!("\
+            With {AQL_PDMS_ELES_COLLECTION},{AQL_PDMS_EDGES_COLLECTION}
+            let zones = ( for v in 1 inbound '{}/{}' pdms_edges return v ) ",
                                               AQL_PDMS_ELES_COLLECTION, site_refno.to_url_refno());
             update_zone_aql.push_str(&format!("for zone in zones "));
             update_zone_aql.push_str(&format!("filter zone.name like '%{}%' ", zone_name));
