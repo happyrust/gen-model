@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use glam::{Quat, Vec3};
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
-use crate::consts::PDMS_MESH;
+use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_MESH_COLLECTION, PDMS_MESH};
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::graph_db::pdms_inst_arango::*;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
@@ -54,9 +54,10 @@ pub async fn query_pdms_mesh_data(hash: Vec<u64>, pool: &Pool<MySql>) -> anyhow:
 
 pub async fn query_refno_meshes_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<DashMap<RefU64, PlantMesh>> {
     let mut map = DashMap::new();
-    let key = format!("{}/{}", "pdms_eles", refno.to_url_refno());
+    let key = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
     let aql = AqlQuery::new("\
-    let refnos = (for v,e,p in 0..10 inbound @id pdms_edges
+    With @@pdms_eles,@@pdms_edges
+    let refnos = (for v,e,p in 0..10 inbound @id @@pdms_edges
                 return v._key)
     let results = ( for refno in refnos
                 let r = document('pdms_inst_infos',refno)
@@ -67,7 +68,10 @@ pub async fn query_refno_meshes_aql(refno: RefU64, database: &ArDatabase) -> any
         for d in result.data
             let r = document('pdms_mesh',d.geo_hash)
             return { refno:refno,hash: r._key, data: r.data }
-    ").bind_var("id", key);
+    ")
+        .bind_var("id", key)
+        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION);
     if let Ok(results) = database.aql_query::<PdmsMeshAql>(aql).await {
         if !results.is_empty() {
             for result in results {
@@ -86,9 +90,10 @@ pub async fn query_refno_meshes_aql(refno: RefU64, database: &ArDatabase) -> any
 
 pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<DashMap<RefU64, PlantMesh>> {
     let mut map = DashMap::new();
-    let key = format!("{}/{}", "pdms_eles", refno.to_url_refno());
+    let key = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
     let aql = AqlQuery::new("\
-    let refnos = (for v,e,p in 0..10 inbound @id pdms_edges
+    With @@pdms_eles,@@pdms_edges
+    let refnos = (for v,e,p in 0..10 inbound @id @@pdms_edges
                 return v._key)
     let results = ( for refno in refnos
                 let r = document('pdms_inst_infos',refno)
@@ -99,7 +104,10 @@ pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &ArDatabase) 
         for d in result.data
             let r = document('pdms_mesh',d.geo_hash)
             return { refno:d.refno,hash: r._key, data: r.data }
-    ").bind_var("id", key);
+    ")
+        .bind_var("id", key)
+        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION);
     if let Ok(results) = database.aql_query::<PdmsCatrMeshAql>(aql).await {
         if !results.is_empty() {
             for result in results {
@@ -117,10 +125,11 @@ pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &ArDatabase) 
 ///查询相应的mesh数据
 pub async fn query_all_geo_hashs(database: &ArDatabase) -> anyhow::Result<HashSet<u64>> {
     let aql = AqlQuery::new("\
-    for d in pdms_mesh
+    With @@pdms_mesh
+    for d in @@pdms_mesh
         filter d != null
         return d._key
-    ");
+    ").bind_var("@pdms_mesh",AQL_PDMS_MESH_COLLECTION);
     let mut hashs = HashSet::new();
     let results: Vec<String> = database.aql_query(aql).await?;
     for result in results {
@@ -137,11 +146,14 @@ pub async fn query_pdms_mesh_aql(database: &ArDatabase, hashes: &[u64]) -> anyho
     let hash_strs = hashes.into_iter().map(|x| x.to_string()).collect::<Vec<_>>();
     // dbg!(&hash_strs);
     let aql = AqlQuery::new("\
+    With @@pdms_mesh
     for hash in @hashes
-        let d = document('pdms_mesh',hash)
+        let d = document(@@pdms_mesh,hash)
         filter d != null
         return d
-    ").bind_var("hashes", hash_strs);
+    ")
+        .bind_var("hashes", hash_strs)
+        .bind_var("@pdms_mesh",AQL_PDMS_MESH_COLLECTION);
     let results: Vec<PlantGeoData> = database.aql_query(aql).await?;
     for result in results {
         cache_mgr.meshes.entry(result.geo_hash).or_insert(result);

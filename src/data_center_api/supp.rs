@@ -27,31 +27,31 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB42".to_string(),
-                value: AttrValue::AttrString("系统预设7%".to_string()).into(),
+                value: AttrValue::AttrString("7%".to_string()).into(),
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB43".to_string(),
-                value: AttrValue::AttrString("系统预设10%".to_string()).into(),
+                value: AttrValue::AttrString("10%".to_string()).into(),
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB13".to_string(),
-                value: AttrValue::AttrString("系统预设".to_string()).into(),
+                value: AttrValue::AttrString("QA2".to_string()).into(),
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB14".to_string(),
-                value: AttrValue::AttrString("系统预设".to_string()).into(),
+                value: AttrValue::AttrString("F-SC1".to_string()).into(),
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB15".to_string(),
-                value: AttrValue::AttrString("系统预设".to_string()).into(),
+                value: AttrValue::AttrString("NA".to_string()).into(),
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB16".to_string(),
-                value: AttrValue::AttrString("系统预设".to_string()).into(),
+                value: AttrValue::AttrString("抗震I级".to_string()).into(),
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB44".to_string(),
-                value: AttrValue::AttrString("系统预设".to_string()).into(),
+                value: AttrValue::AttrString("40度".to_string()).into(),
             });
             let desc = get_refno_desc(stru.refno,aios_mgr).await.unwrap_or("".to_string());
             let support_type = if desc.starts_with("S2") && desc.contains("FLOOR") { "支架".to_string() } else { "吊架".to_string() };

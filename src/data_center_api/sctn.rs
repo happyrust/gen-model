@@ -1,5 +1,5 @@
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
-use aios_core::pdms_types::RefU64;
+use aios_core::pdms_types::{EleTreeNode, RefU64};
 use crate::api::element::query_children;
 use crate::aql_api::children::{query_children_eles, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::query_foreign_name_aql;
@@ -8,7 +8,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 获取电气支吊架 型钢数据
-pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager,sctn_types:Vec<String>) -> anyhow::Result<DataCenterProject> {
+pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager, sctn_types: Vec<String>) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
     // 1516为 sctn 1907为 gensec,sctn
@@ -19,7 +19,7 @@ pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMana
             let Some(gtype) = implicit_attr.get_str("GTYP") else { continue; };
             match gtype {
                 "BOX" => {
-                    let attr = get_dq_support_sctn_gtype_box_data(child.refno, aios_mgr).await.unwrap_or(vec![]);
+                    let attr = get_dq_support_sctn_gtype_box_data(&child, aios_mgr).await.unwrap_or(vec![]);
                     result.push(DataCenterInstance {
                         object_model_code: "PARTDA".to_string(),
                         project_code: aios_mgr.db_option.project_code.to_string(),
@@ -29,7 +29,7 @@ pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMana
                     });
                 }
                 "BEAM" => {
-                    let attr = get_dq_support_sctn_gtype_beam_data(child.refno, aios_mgr).await.unwrap_or(vec![]);
+                    let attr = get_dq_support_sctn_gtype_beam_data(&child, aios_mgr).await.unwrap_or(vec![]);
                     result.push(DataCenterInstance {
                         object_model_code: "PARTDB".to_string(),
                         project_code: aios_mgr.db_option.project_code.to_string(),
@@ -38,7 +38,7 @@ pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMana
                         attributes: attr,
                     });
                 }
-                _ => { }
+                _ => {}
             }
         }
     }
@@ -51,11 +51,10 @@ pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMana
 }
 
 /// 获取电气支吊架 型钢数据 gtype 为 box
-async fn get_dq_support_sctn_gtype_box_data(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<DataCenterAttr>> {
+async fn get_dq_support_sctn_gtype_box_data(refno: &EleTreeNode, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<DataCenterAttr>> {
     let database = aios_mgr.get_arango_db().await?;
     let mut attr = Vec::new();
-    let desc = get_refno_desc(refno, aios_mgr).await.unwrap_or("".to_string());
-    dbg!(&desc);
+    let desc = get_refno_desc(refno.refno, aios_mgr).await.unwrap_or("".to_string());
     attr.push(DataCenterAttr {
         attribute_model_code: "PARTD15".to_string(),
         value: AttrValue::AttrString(desc).into(),
@@ -64,8 +63,7 @@ async fn get_dq_support_sctn_gtype_box_data(refno: RefU64, aios_mgr: &AiosDBMana
         attribute_model_code: "PARTD11".to_string(),
         value: AttrValue::AttrString("Q355B".to_string()).into(),
     });
-    let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], &database).await?.unwrap_or("".to_string());
-    dbg!(&spre_name);
+    let spre_name = query_foreign_name_aql(refno.refno, vec!["SPRE", "SPRE"], &database).await?.unwrap_or("".to_string());
     let spre_name_split = spre_name.split("-").collect::<Vec<_>>();
     if let Some(spre_name_split_last) = spre_name_split.last() {
         let spre_name_split_last_split = spre_name_split_last.split("X").collect::<Vec<_>>();
@@ -80,7 +78,7 @@ async fn get_dq_support_sctn_gtype_box_data(refno: RefU64, aios_mgr: &AiosDBMana
             });
         }
     }
-    if let Ok(Some((poss, pose))) = get_refno_world_poss_pose(refno, aios_mgr).await {
+    if let Ok(Some((poss, pose))) = get_refno_world_poss_pose(refno.refno, &refno.noun, &database, aios_mgr).await {
         attr.push(DataCenterAttr {
             attribute_model_code: "PARTDA31".to_string(),
             value: AttrValue::AttrVec3(pose).into(),
@@ -96,6 +94,10 @@ async fn get_dq_support_sctn_gtype_box_data(refno: RefU64, aios_mgr: &AiosDBMana
         });
     }
     attr.push(DataCenterAttr {
+        attribute_model_code: "PARTDA29".to_string(),
+        value: AttrValue::AttrString("全焊透".to_string()).into(),
+    });
+    attr.push(DataCenterAttr {
         attribute_model_code: "PARTDA34".to_string(),
         value: AttrValue::AttrString("100".to_string()).into(),
     });
@@ -103,10 +105,10 @@ async fn get_dq_support_sctn_gtype_box_data(refno: RefU64, aios_mgr: &AiosDBMana
 }
 
 /// 获取电气支吊架 型钢数据 gtype 为 beam
-async fn get_dq_support_sctn_gtype_beam_data(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<DataCenterAttr>> {
+async fn get_dq_support_sctn_gtype_beam_data(refno: &EleTreeNode, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<DataCenterAttr>> {
     let database = aios_mgr.get_arango_db().await?;
     let mut attr = Vec::new();
-    let desc = get_refno_desc(refno, aios_mgr).await?;
+    let desc = get_refno_desc(refno.refno, aios_mgr).await.unwrap_or("".to_string());
     attr.push(DataCenterAttr {
         attribute_model_code: "PARTD15".to_string(),
         value: AttrValue::AttrString(desc).into(),
@@ -115,7 +117,7 @@ async fn get_dq_support_sctn_gtype_beam_data(refno: RefU64, aios_mgr: &AiosDBMan
         attribute_model_code: "PARTD11".to_string(),
         value: AttrValue::AttrString("Q355B".to_string()).into(),
     });
-    let children = query_children_eles(&database, refno).await?;
+    let children = query_children_eles(&database, refno.refno).await?;
     let mut fitt = None;
     for child in children {
         if child.noun == "FITT" {
@@ -175,7 +177,7 @@ async fn get_dq_support_sctn_gtype_beam_data(refno: RefU64, aios_mgr: &AiosDBMan
         _ => {}
     }
 
-    if let Ok(Some((poss, pose))) = get_refno_world_poss_pose(refno, aios_mgr).await {
+    if let Ok(Some((poss, pose))) = get_refno_world_poss_pose(refno.refno, &refno.noun, &database, aios_mgr).await {
         let distance = poss.distance(pose);
         attr.push(DataCenterAttr {
             attribute_model_code: "PARTDB27".to_string(),
@@ -187,7 +189,7 @@ async fn get_dq_support_sctn_gtype_beam_data(refno: RefU64, aios_mgr: &AiosDBMan
         });
     }
 
-    let spre_name = query_foreign_name_aql(refno, vec!["SPRE", "SPRE"], &database).await?.unwrap_or("".to_string());
+    let spre_name = query_foreign_name_aql(refno.refno, vec!["SPRE", "SPRE"], &database).await?.unwrap_or("".to_string());
     let spre_name_split_last = spre_name.split("-").collect::<Vec<_>>().last().unwrap_or(&"").to_string();
     attr.push(DataCenterAttr {
         attribute_model_code: "PARTDB32".to_string(),
@@ -205,6 +207,10 @@ async fn get_dq_support_sctn_gtype_beam_data(refno: RefU64, aios_mgr: &AiosDBMan
     attr.push(DataCenterAttr {
         attribute_model_code: "PARTDB35".to_string(),
         value: AttrValue::AttrString("连续角焊".to_string()).into(),
+    });
+    attr.push(DataCenterAttr {
+        attribute_model_code: "PARTDB39".to_string(),
+        value: AttrValue::AttrString("A4-80".to_string()).into(),
     });
     Ok(attr)
 }

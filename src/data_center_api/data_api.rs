@@ -234,14 +234,28 @@ pub(crate) async fn get_dq_material_code(spre_name: &str, stander_num: &str, fil
 }
 
 /// 获取该节点的世界坐标下的poss和pose
-pub(crate) async fn get_refno_world_poss_pose(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<(Vec3, Vec3)>> {
-    let Some(world_transform) = aios_mgr.get_world_transform(refno).await? else { return Ok(None); };
-    let attr = aios_mgr.get_attr(refno).await?;
-    let Some(poss) = attr.get_vec3("POSS") else { return Ok(None); };
-    let Some(pose) = attr.get_vec3("POSE") else { return Ok(None); };
-    let world_poss = world_transform.transform_point(poss);
-    let world_pose = world_transform.transform_point(pose);
-    Ok(Some((world_poss, world_pose)))
+pub(crate) async fn get_refno_world_poss_pose(refno: RefU64, att_type: &str, database: &ArDatabase, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<(Vec3, Vec3)>> {
+    match att_type {
+        "GENSEC" => {
+            let points = query_travel_children_with_type_aql(&database, refno, "POINSP").await?;
+            if points.len() < 2 { return Ok(None); }
+            // 默认只有两个点
+            let poss_point = points[0].refno;
+            let pose_point = points[1].refno;
+            let Ok(Some(poss)) = aios_mgr.get_world_transform(poss_point).await else { return Ok(None); };
+            let Ok(Some(pose)) = aios_mgr.get_world_transform(pose_point).await else { return Ok(None); };
+            Ok(Some((poss.translation, pose.translation)))
+        }
+        _ => {
+            let Some(world_transform) = aios_mgr.get_world_transform(refno).await? else { return Ok(None); };
+            let attr = aios_mgr.get_attr(refno).await?;
+            let Some(poss) = attr.get_vec3("POSS") else { return Ok(None); };
+            let Some(pose) = attr.get_vec3("POSE") else { return Ok(None); };
+            let world_poss = world_transform.transform_point(poss);
+            let world_pose = world_transform.transform_point(pose);
+            Ok(Some((world_poss, world_pose)))
+        }
+    }
 }
 
 /// 返回pspec属性对应的中文名

@@ -20,7 +20,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::pcf::bran::get_bran_name_and_children;
 use crate::pcf::excel_api::get_pipe_thickness_table;
-use crate::consts::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::{AQL_PDMS_ELES_COLLECTION, AQL_TUBI_EDGES_COLLECTION};
 use crate::data_interface::db_model::TUBI_TOL;
 
 /// 找到某个节点下所有的 bran 中的 tubi
@@ -61,8 +61,9 @@ pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<
 pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<TubiEdge>> {
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
     let aql = AqlQuery::new("
-    let bran_name = ( return document('pdms_eles',@bran_refno).name )
-    for v,e in 0..1000 outbound @id tubi_edges
+    With @@pdms_eles,@@tubi_edges
+    let bran_name = ( return document(@@pdms_eles,@bran_refno).name )
+    for v,e in 0..1000 outbound @id @@tubi_edges
     filter bran_name[0] != null
     filter bran_name[0] == e.bran_name
     filter e != null
@@ -79,7 +80,8 @@ pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &ArDatabase) -> 
     }")
         .bind_var("id", key)
         .bind_var("bran_refno", bran_refno.to_url_refno())
-        ;
+        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@tubi_edges",AQL_TUBI_EDGES_COLLECTION);
     let mut results: Vec<TubiEdge> = database.aql_query(aql).await?;
     // 过滤不是 tubi 的数据
     results.retain(|r| {
@@ -94,8 +96,9 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArD
     let mut tubi = Vec::new();
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
     let aql = AqlQuery::new("
-    let bran_name = ( return document('pdms_eles',@bran_refno).name )
-    for v,e in 0..1000 outbound @id tubi_edges
+    With @@pdms_eles,@@tubi_edges
+    let bran_name = ( return document(@@pdms_eles,@bran_refno).name )
+    for v,e in 0..1000 outbound @id @@tubi_edges
     filter bran_name[0] != null
     filter bran_name[0] == e.bran_name
     filter e != null
@@ -112,7 +115,8 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArD
     }")
         .bind_var("id", key)
         .bind_var("bran_refno", bran_refno.to_url_refno())
-        ;
+        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@tubi_edges",AQL_TUBI_EDGES_COLLECTION);
     let results: Vec<TubiEdge> = database.aql_query(aql).await?;
     // 过滤 atta
     let mut i = 0;
@@ -237,8 +241,9 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArD
 pub async fn query_bran_info(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<TubiEdge>> {
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
     let aql = AqlQuery::new("
-    let bran_name = ( return document('pdms_eles',@bran_refno).name )
-    for v,e in 0..1000 outbound @id tubi_edges
+    With @@pdms_eles,@@tubi_edges
+    let bran_name = ( return document(@@pdms_eles,@bran_refno).name )
+    for v,e in 0..1000 outbound @id @@tubi_edges
     filter bran_name[0] != null
     filter bran_name[0] == e.bran_name
     filter e != null
@@ -255,7 +260,8 @@ pub async fn query_bran_info(bran_refno: RefU64, database: &ArDatabase) -> anyho
     }")
         .bind_var("id", key)
         .bind_var("bran_refno", bran_refno.to_url_refno())
-        ;
+        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@tubi_edges",AQL_TUBI_EDGES_COLLECTION);
     let results: Vec<TubiEdge> = database.aql_query(aql).await?;
     Ok(results)
 }
