@@ -61,7 +61,8 @@ only_rebuild_pdms_element = false
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
 #included_db_files = ["ams7334_0001", "ams7353_0001", "ams7741_0001", "ams7998_0001"]
-included_db_files = ["ams5052_0001"]
+#included_db_files = ["ams5052_0001"]
+included_db_files = ["acp7002_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 manual_db_nums = [1112]  #, 8000
 plat_url = ""
@@ -307,6 +308,8 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/195555"]
 #debug_root_refnos = ["17496/195603"]
 #debug_root_refnos = ["17496/161488"]
+#debug_root_refnos = ["17496/161704"]
+#debug_root_refnos = ["17496/171102"]
 debug_root_refnos = ["17496/161704"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体

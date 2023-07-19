@@ -231,6 +231,10 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
         }
     }
 
+    if gm.phei.contains("LEA") {
+        dbg!(&gm);
+    }
+
     let phei = eval_str_to_f32_or_default(&gm.phei, context, interface);
     let offset = eval_str_to_f32_or_default(&gm.offset, context, interface);
 
@@ -299,6 +303,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
                 pbore: 0.0,
                 pwidth: 0.0,
                 pheight: 0.0,
+                ref_dir: Default::default(),
             };
             paxises.push(Some(axis));
         }
@@ -364,7 +369,7 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
     match axis_param.type_name.as_str() {
         "PTAX" => {
             let d = eval_str_to_f32(&axis_param.distance, &context, interface)?;
-            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)?;
+            let (dir, ref_dir,  pos) = resolve_dir_and_pos(axis_param, scom, context, interface)?;
             Ok(CateAxisParam {
                 refno: axis_param.refno,
                 number,
@@ -374,13 +379,14 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
                 pbore,
                 pwidth,
                 pheight,
+                ref_dir,
             })
         }
         "PTCA" | "PTMI" => {
             let x = eval_str_to_f32(&axis_param.x, &context, interface)?;
             let y = eval_str_to_f32(&axis_param.y, &context, interface)?;
             let z = eval_str_to_f32(&axis_param.z, &context, interface)?;
-            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)?;
+            let (dir, ref_dir,  pos)  = resolve_dir_and_pos(axis_param, scom, context, interface)?;
             Ok(CateAxisParam {
                 refno: axis_param.refno,
                 number,
@@ -390,10 +396,11 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
                 pbore,
                 pwidth,
                 pheight,
+                ref_dir,
             })
         }
         "PTPOS" => {
-            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)?;
+            let (dir, ref_dir,  pos)  = resolve_dir_and_pos(axis_param, scom, context, interface)?;
             let pnt_index_str = axis_param.pnt_index_str.as_ref().ok_or(anyhow!("pnt_index_str 错误"))?;
             let paras = pnt_index_str.split_whitespace().map(|x| x.trim().to_owned()).collect::<Vec<_>>();
             if paras.len() == 2 {
@@ -409,6 +416,7 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
                         pbore,
                         pwidth,
                         pheight,
+                        ref_dir,
                     });
                 }
             }

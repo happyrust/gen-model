@@ -123,12 +123,12 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     let mut new_exp = input_expr.replace("ATTRIB", "");
     if input_expr.contains(" OF ") {
         // // dbg!(&input_expr);
-        // let re = Regex::new(r"([A-Z\s]+) OF (PREV|NEXT|\d+/\d+)").unwrap();
+        let re = Regex::new(r"([A-Z\s]+) OF (PREV|NEXT|\d+/\d+)").unwrap();
         // let interface = Arc::new(interface.ok_or(anyhow!("unknown interface"))?);
-        // for caps in re.captures_iter(&input_expr) {
-        //     let s = &caps[0];
-        //     let c1 = caps.get(1).map_or("", |m| m.as_str());
-        //     let c2 = caps.get(2).map_or("", |m| m.as_str());
+        for caps in re.captures_iter(&input_expr) {
+            let s = &caps[0];
+            let c1 = caps.get(1).map_or("", |m| m.as_str());
+            let c2 = caps.get(2).map_or("", |m| m.as_str());
         //     // let ref_att =
         //     //     match c2 {
         //     //         // "PREV" => interface.get_prev_att()
@@ -160,15 +160,15 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         //             "DESP[1]".to_string()
         //         }
         //     };
-        //     new_exp = new_exp.replace(s, &value);
-        // }
+            new_exp = new_exp.replace(s, c1);
+        }
     }
 
     //说明：匹配带小数的情况 PARA[1.1]
-    let re = Regex::new(r"([A-Z_]+[0-9]*)(\s*\[?\s*(([1-9]\d*\.?\d*)|(0\.\d*[1-9]))\s*\]?)?").unwrap();
+    let re = Regex::new(r"(:?[A-Z_]+[0-9]*)(\s*\[?\s*(([1-9]\d*\.?\d*)|(0\.\d*[1-9]))\s*\]?)?").unwrap();
     // 将NEXT PREV 的值统一换成参考号，然后 context_params 要存储 参考号对应的 attr，要是它这个值没有求解，
     // 相当于要递归去求值
-    // if new_exp.contains("THK") {
+    // if new_exp.contains("HXYS") {
     //     dbg!(&context);
     //     dbg!(&new_exp);
     // }
@@ -369,15 +369,10 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 }))
             }
             "BOXI" => {
-                let z_length = if gmse.box_lengths.len() >= 3 {
-                    gmse.box_lengths[2]
-                } else {
-                    gmse.box_lengths[1]
-                };
-                CateGeoParam::Boxi(CateBoxImpliedParam {
-                    axis: (gmse.paxises[0].clone()),
-                    x_length: gmse.box_lengths[0],
-                    z_length,
+                CateGeoParam::BoxImplied(CateBoxImpliedParam {
+                    axis: None,
+                    width: gmse.box_lengths[2],
+                    height: gmse.box_lengths[0],
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
                 })
@@ -387,11 +382,11 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 CateGeoParam::LCylinder(CateLCylinderParam {
                     refno: gmse.refno,
                     axis: (gmse.paxises[0].clone()),
-                    dist_to_btm: gmse.distances[0],
+                    dist_to_btm: gmse.distances[1],
                     diameter: gmse.diameters[0],
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
-                    dist_to_top: gmse.distances[1],
+                    dist_to_top: gmse.distances[2],
                 })
             }
             "NSCY" | "SCYL" => {
@@ -399,9 +394,9 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 CateGeoParam::SCylinder(CateSCylinderParam {
                     refno: gmse.refno,
                     axis: (gmse.paxises[0].clone()),
-                    dist_to_btm: gmse.distances[0],
+                    dist_to_btm: gmse.distances[1],
                     height: gmse.phei,
-                    diameter: gmse.diameters.get(0).map(|x| *x).unwrap_or_default(),
+                    diameter: gmse.diameters[0],
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
                 })
@@ -426,8 +421,8 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     y_bottom: gmse.xyz[1],
                     x_top: gmse.xyz[2],
                     y_top: gmse.xyz[3],
-                    dist_to_btm: gmse.distances[0],
-                    dist_to_top: gmse.distances[1],
+                    dist_to_btm: gmse.distances[1],
+                    dist_to_top: gmse.distances[2],
                     x_offset: gmse.xyz[4],
                     y_offset: gmse.xyz[5],
                     centre_line_flag: gmse.centre_line_flag,
@@ -441,7 +436,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                         axis: (gmse.paxises[0].clone()),
                         height: gmse.phei,
                         diameter: gmse.diameters[0],
-                        dist_to_btm: gmse.distances[0],
+                        dist_to_btm: gmse.distances[1],
                         x_shear: gmse.shears[0],
                         y_shear: gmse.shears[1],
                         alt_x_shear: gmse.shears[2],
@@ -459,10 +454,10 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                         refno: gmse.refno,
                         pa: (gmse.paxises[0].clone()),
                         pb: (gmse.paxises[1].clone()),
-                        dist_to_btm: gmse.distances[0],
-                        dist_to_top: gmse.distances[1],
-                        btm_diameter: gmse.diameters[0],
-                        top_diameter: gmse.diameters[1],
+                        dist_to_btm: gmse.distances[1],
+                        dist_to_top: gmse.distances[2],
+                        btm_diameter: gmse.diameters[1],
+                        top_diameter: gmse.diameters[2],
                         offset: gmse.offset,
                         centre_line_flag: gmse.centre_line_flag,
                         tube_flag: gmse.tube_flag,
@@ -497,7 +492,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 CateGeoParam::Cone(CateConeParam {
                     refno: gmse.refno,
                     axis: (gmse.paxises[0].clone()),
-                    dist_to_btm: gmse.distances[0],
+                    dist_to_btm: gmse.distances[1],
                     diameter: gmse.diameters[0],
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
@@ -527,7 +522,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 CateGeoParam::Dish(CateDishParam {
                     refno: gmse.refno,
                     axis: (gmse.paxises[0].clone()),
-                    dist_to_btm: gmse.distances[0],
+                    dist_to_btm: gmse.distances[1],
                     height: gmse.phei,
                     diameter: gmse.diameters[0],
                     radius: gmse.radius,
@@ -587,28 +582,13 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            // "SSLC" => {
-            //todo
-            // Some(CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam {
-            //     axis: (gmse.paxises[0].clone()),
-            //     height: gmse.phei,
-            //     diameter: gmse.diameters[0],
-            //     distance: gmse.distances[0],
-            //     x_shear: 0.0,
-            //     y_shear: 0.0,
-            //     alt_x_shear: 0.0,
-            //     alt_y_shear: 0.0,
-            //     centre_line_flag: gmse.centre_line_flag,
-            //     tube_flag: gmse.tube_flag,
-            // }))
-            // }
             "SSPH" | "NSSP" => {
                 // dbg!(&gmse);
                 // 球
                 CateGeoParam::Sphere(CateSphereParam {
                     refno: gmse.refno,
                     axis: (gmse.paxises[0].clone()),
-                    dist_to_center: gmse.distances[0],
+                    dist_to_center: gmse.distances[1],
                     diameter: gmse.diameters[0],
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
@@ -632,9 +612,11 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
 pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
                                                  scom: &ScomInfo,
                                                  context: &BTreeMap<String, String>,
-                                                 interface: Option<&T>) -> anyhow::Result<(Vec3, Vec3)> {
+                                                 interface: Option<&T>) -> anyhow::Result<(Vec3, Vec3, Vec3)> {
     let mut dir_str = axis.direction.trim();
+    let mut ref_dir_str = axis.ref_direction.trim();
     let mut dir = Vec3::ZERO;
+    let mut ref_dir = Vec3::ZERO;
     let mut pos = Vec3::ZERO;
 
     let re = Regex::new(r"^(-?)P(\d+)$").unwrap();
@@ -654,7 +636,25 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
     } else {
         dir = parse_str_axis_to_vec3(dir_str, context, interface).unwrap_or(Vec3::Z);
     }
-    return Ok((dir, pos));
+
+    if re.is_match(ref_dir_str) {
+        if let Some(cap) = re.captures(ref_dir_str) {
+            let is_neg = cap.get(1).map_or("", |m| m.as_str()) == "-";
+            let pnt_indx = cap.get(2).map_or("", |m| m.as_str()).parse::<i32>().unwrap_or(-1);
+            if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
+                let mut axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
+                let flag = if is_neg { -1.0 } else { 1.0 };
+                ref_dir = flag * mem::take(&mut axis.dir);
+            }else{
+                return Err(anyhow!("未找到点索引: {}", pnt_indx));
+            }
+        }
+    } else {
+        //unset 不存在 ref dir的情况
+        ref_dir = parse_str_axis_to_vec3(ref_dir_str, context, interface).unwrap_or(Vec3::Y);
+    }
+
+    return Ok((dir, ref_dir, pos));
 }
 
 //Y is N and Z is U

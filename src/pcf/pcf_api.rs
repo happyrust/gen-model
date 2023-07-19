@@ -1,5 +1,5 @@
 use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
-use aios_core::prim_geo::tubing::TubiEdge;
+use aios_core::prim_geo::tubing::{TubiEdge, TubiSize};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use sqlx::{MySql, Pool};
@@ -55,10 +55,17 @@ pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut mate
     if !PCF_NODES.contains(type_name) { return false; }
     if !["ATTA", "TEE"].contains(&type_name) { // TEE 需要做特殊处理
         data.append(&mut gen_type_name_data(type_name));
-        let start_point = start_edge.end_pt;
-        data.append(&mut gen_endpoint_data(start_point, start_edge.bore));
-        let end_point = end_edge.start_pt;
-        data.append(&mut gen_endpoint_data(end_point, end_edge.bore));
+
+        if let TubiSize::BoreSize(bore) = start_edge.tubi_size {
+            let start_point = start_edge.end_pt;
+            data.append(&mut gen_endpoint_data(start_point, bore));
+        }
+
+        if let TubiSize::BoreSize(bore) = end_edge.tubi_size {
+            let end_point = end_edge.start_pt;
+            data.append(&mut gen_endpoint_data(end_point, bore));
+        }
+
     }
     match type_name {
         "ATTA" => { data.append(&mut gen_atta_data(aios_mgr, &attr, pool, materials).await); }
