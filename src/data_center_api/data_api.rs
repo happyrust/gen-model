@@ -178,7 +178,7 @@ pub(crate) async fn get_refno_desc(refno: RefU64, aios_mgr: &AiosDBManager) -> a
     let database = aios_mgr.get_arango_db().await?;
     let Some(catr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "CATR"]).await?
         else { return Ok("".to_string()); };
-    let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok("".to_string()); };
+    // let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok("".to_string()); };
     let attr = aios_mgr.get_attr(refno).await?;
     Ok(attr.get_str("DESC").unwrap_or("").to_string())
 }
@@ -273,6 +273,13 @@ pub(crate) async fn get_pspec_code(refno: RefU64, database: &ArDatabase) -> anyh
         }
     }
     Ok(kind)
+}
+
+/// 获取该节点的方位并转为pdms oria形式
+pub(crate) async fn get_ori_angle_str(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<String> {
+    let Ok(ori) = aios_mgr.get_implicit_attr(refno, Some(vec!["ORI"])).await else { return Ok("".to_string()); };
+    let Some(ori) = ori.get_vec3("ORI") else { return Ok("0degree 0degree 0degree".to_string()); };
+    Ok(format!("{}degree {}degree {}degree", ori.x, ori.y, ori.z))
 }
 
 fn gen_dq_material_code_sql(spre_name_split: &str, stander_num: &str, fileds: &Vec<String>) -> String {
