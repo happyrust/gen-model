@@ -268,6 +268,7 @@ impl PdmsDataInterface for AiosDBManager {
     async fn query_first_foreign_along_path(&self, refno: RefU64, start_types: &[&str], end_types: &[&str], t_types: &[&str]) -> anyhow::Result<Option<RefU64>> {
         let id = format!("{}/{}", "pdms_eles", refno.to_url_refno());
         let aql = AqlQuery::new(r#"
+            With @@pdms_eles,@@pdms_edges,@@foreign_edges
             FOR v,e,p in 1..15 OUTBOUND @id pdms_edges
                 filter document(v._id) != null
                 let xx = (for ver, edge, path in 1..10 OUTBOUND v._id foreign_edges
@@ -288,7 +289,9 @@ impl PdmsDataInterface for AiosDBManager {
             .bind_var("start_types", start_types)
             .bind_var("end_types", end_types)
             .bind_var("t_types", t_types)
-
+            .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION)
+            .bind_var("@foreign_edges",AQL_FOREIGN_EDGES_COLLECTION)
             ;
         let results: Vec<String> = self.get_arango_db().await?.aql_query(aql).await?;
         for result in results {
