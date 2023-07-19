@@ -679,7 +679,7 @@ impl PdmsDataInterface for AiosDBManager {
             }
 
             if let Ok(owner_att) = self.get_attr_from_localdb(ref_basic.owner) {
-                if let Some(owner_sjus) = owner_att.get_str("SJUS") {
+                if let Some(sjus) = owner_att.get_str("SJUS") {
                     //如果发现了SJUS，需要找到同一层集的PLOO，得到height
                     let children = self.get_children_from_localdb(owner_att.get_owner().unwrap())?;
                     for c in children {
@@ -687,9 +687,9 @@ impl PdmsDataInterface for AiosDBManager {
                         // dbg!(c_att.get_type());
                         if c_att.get_type() == "PLOO" {
                             let height = c_att.get_f32("HEIG").unwrap_or_default();
-                            let mut off_z = if owner_sjus == "UTOP" || owner_sjus == "DTOP" {
+                            let mut off_z = if sjus == "UTOP" || sjus == "DTOP" {
                                 height
-                            } else if owner_sjus == "UCEN" || owner_sjus == "DCEN" {
+                            } else if sjus == "UCEN" || sjus == "DCEN" {
                                 height / 2.0
                             } else {
                                 0.0
@@ -730,12 +730,9 @@ impl PdmsDataInterface for AiosDBManager {
                 }
             }
 
-            if let Some(bangle) = att.get_f32("BANG") {
-                //是否需要考虑beta angle
-                need_bangle |= type_name == "PFIT";
-                if need_bangle {
-                    quat = quat * Quat::from_rotation_z(bangle.to_radians());
-                }
+            let bangle = att.get_f32("BANG").unwrap_or_default();
+            if need_bangle || att.contains_attr_name("BANG") {
+                quat = quat * Quat::from_rotation_z(bangle.to_radians());
             }
             //如果有posl
             if let Some(pos_line) = att.get_str("POSL") {
@@ -775,11 +772,15 @@ impl PdmsDataInterface for AiosDBManager {
                     pline_plax = param.plax;
                 }
                 // let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
-                let y_axis = Vec3::Z;
+                let mut y_axis = if att.contains_attr_name("YDIR") {
+                    att.get_vec3("YDIR").unwrap_or_default()
+                } else {
+                    Vec3::Z
+                };
                 //和LMIRROR 有关系
                 let z_axis = if is_lmirror {
                     -pline_plax
-                }else{
+                } else {
                     pline_plax
                 };
                 let x_axis = y_axis.cross(z_axis).normalize();
@@ -801,16 +802,14 @@ impl PdmsDataInterface for AiosDBManager {
                     dbg!(quat_to_pdms_ori_str(&rotation));
                 }
                 translation = translation
-                    + rotation * pos
-                    + rotation * new_quat * (plin_pos + delta_vec)
-                    // + rotation * new_quat * bangle_rot * delta_vec
-                ;
+                    + rotation * (pos + plin_pos)
+                    + rotation * new_quat * delta_vec;
                 #[cfg(debug_assertions)]
                 {
                     dbg!(translation);
                     dbg!(quat_to_pdms_ori_str(&rotation));
                 }
-                rotation = rotation * new_quat;  // * bangle_rot
+                rotation = rotation * new_quat;
                 #[cfg(debug_assertions)]
                 dbg!(quat_to_pdms_ori_str(&rotation));
             } else {

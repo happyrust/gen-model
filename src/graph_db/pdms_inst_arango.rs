@@ -163,13 +163,6 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
 /// 默认直接优先取负实体的数据
 pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) -> anyhow::Result<ShapeInstancesData> {
     let refno_strs = refnos.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
-    // dbg!(&refnos);
-    //过滤掉负实体计算后的多余几何体
-    //pdms_compound_inst_infos
-    // let parent = p.vertices[-2]
-    // PRUNE c.noun in @neg_nouns
-    // OPTIONS { order: "bfs"  }
-    //filter f != null and (parent == null or document('pdms_inst_infos', parent._key).geo_type != "Compound")
     //如果单独拖入负实体，允许把负实体显示出来
     let aql = AqlQuery::new(r#"
             With @@pdms_eles,@@pdms_inst_infos
@@ -192,7 +185,8 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     }
 
     //还有的直段会放在branch上，需要特殊处理
-
+    // inst_keys.clear();
+    inst_keys.push("1".to_string());
     inst_keys.push("2".to_string());
     let mut inst_geos_map = HashMap::new();
     let aql = AqlQuery::new(r#"
@@ -200,7 +194,13 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
             FOR inst_key in @inst_keys
                 let f = document('pdms_inst_geos', inst_key)
                 filter f != null
-                return f
+                return {
+                    _key: f._key,
+                    refno: f.refno,
+                    insts: f.insts,
+                    aabb: f.aabb,
+                    type_name: f.type_name
+                }
             "#)
         .bind_var("inst_keys", inst_keys)
         .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);

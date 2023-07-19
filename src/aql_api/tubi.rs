@@ -137,7 +137,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArD
                             end_pt: results[j].end_pt,
                             att_type: results[j].att_type.to_string(),
                             extra_type: results[j].extra_type.to_string(),
-                            bore: results[j].bore,
+                            tubi_size: results[j].tubi_size.clone(),
                             bran_name: results[i].bran_name.to_string(),
                         });
                         i = j;
@@ -153,7 +153,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArD
                     end_pt: results[i].end_pt,
                     att_type: results[i].att_type.to_string(),
                     extra_type: results[i].extra_type.to_string(),
-                    bore: results[i].bore,
+                    tubi_size: results[i].tubi_size.clone(),
                     bran_name: results[i].bran_name.to_string(),
                 });
             }
