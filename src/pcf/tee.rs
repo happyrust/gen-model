@@ -1,6 +1,6 @@
 use std::task::Poll;
 use aios_core::pdms_types::{AttrMap, RefU64};
-use aios_core::prim_geo::tubing::TubiEdge;
+use aios_core::prim_geo::tubing::{TubiEdge, TubiSize};
 use dashmap::DashMap;
 use glam::Vec3;
 use sqlx::{MySql, Pool};
@@ -32,10 +32,15 @@ pub async fn gen_tee_data(aios_mgr: &AiosDBManager, attr: &AttrMap, bran_attr: &
         data.append(&mut create_refno_data(attr));
     } else {
         data.append(&mut gen_type_name_data(type_name));
-        let start_point = start_edge.end_pt;
-        data.append(&mut gen_endpoint_data(start_point, start_edge.bore));
-        let end_point = end_edge.start_pt;
-        data.append(&mut gen_endpoint_data(end_point, end_edge.bore));
+        if let TubiSize::BoreSize(bore) = start_edge.tubi_size {
+            let start_point = start_edge.end_pt;
+            data.append(&mut gen_endpoint_data(start_point, bore));
+        }
+
+        if let TubiSize::BoreSize(bore) = end_edge.tubi_size {
+            let end_point = end_edge.start_pt;
+            data.append(&mut gen_endpoint_data(end_point, bore));
+        }
         data.append(&mut create_center_point_data(refno, aios_mgr).await);
         data.append(&mut create_tee_branch_point_data(aios_mgr, attr, pool).await);
         data.append(&mut gen_s_key_data_str(s_key.as_str()));

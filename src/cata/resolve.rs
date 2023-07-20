@@ -21,8 +21,9 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 
 
-/// 求解axis的数值, 得到 {num:  }
+/// 求解axis的数值
 pub fn resolve_axis_params<T: PdmsDataInterface>(
+    refno: RefU64,
     scom: &ScomInfo,
     context: &BTreeMap<String, String>,
     interface: Option<&T>,
@@ -37,7 +38,7 @@ pub fn resolve_axis_params<T: PdmsDataInterface>(
                 map.insert(scom.axis_param_numbers[i], axis);
             }
             Err(e) => {
-                println!("resolve_axis_params 出错： {:?}", &e);
+                println!("{} resolve_axis_params 出错： {:?}", refno, &e);
             }
         }
     }
@@ -230,6 +231,10 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
         }
     }
 
+    if gm.phei.contains("LEA") {
+        dbg!(&gm);
+    }
+
     let phei = eval_str_to_f32_or_default(&gm.phei, context, interface);
     let offset = eval_str_to_f32_or_default(&gm.offset, context, interface);
 
@@ -296,6 +301,9 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
                 dir,
                 pconnect: "".to_string(),
                 pbore: 0.0,
+                pwidth: 0.0,
+                pheight: 0.0,
+                ref_dir: Default::default(),
             };
             paxises.push(Some(axis));
         }
@@ -356,10 +364,12 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
     };
     let number = axis_param.number;
     let pbore = eval_str_to_f32(&axis_param.pbore, &context, interface)?;
+    let pwidth = eval_str_to_f32(&axis_param.pwidth, &context, interface)?;
+    let pheight = eval_str_to_f32(&axis_param.pheight, &context, interface)?;
     match axis_param.type_name.as_str() {
         "PTAX" => {
             let d = eval_str_to_f32(&axis_param.distance, &context, interface)?;
-            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)?;
+            let (dir, ref_dir,  pos) = resolve_dir_and_pos(axis_param, scom, context, interface)?;
             Ok(CateAxisParam {
                 refno: axis_param.refno,
                 number,
@@ -367,24 +377,47 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
                 dir,
                 pconnect,
                 pbore,
+                pwidth,
+                pheight,
+                ref_dir,
             })
         }
         "PTCA" | "PTMI" => {
             let x = eval_str_to_f32(&axis_param.x, &context, interface)?;
             let y = eval_str_to_f32(&axis_param.y, &context, interface)?;
             let z = eval_str_to_f32(&axis_param.z, &context, interface)?;
-            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)?;
-            Ok(CateAxisParam { refno: axis_param.refno, number, pt: Vec3::new(pos[0] + x, pos[1] + y, pos[2] + z), dir, pconnect, pbore })
+            let (dir, ref_dir,  pos)  = resolve_dir_and_pos(axis_param, scom, context, interface)?;
+            Ok(CateAxisParam {
+                refno: axis_param.refno,
+                number,
+                pt: Vec3::new(pos[0] + x, pos[1] + y, pos[2] + z),
+                dir,
+                pconnect,
+                pbore,
+                pwidth,
+                pheight,
+                ref_dir,
+            })
         }
         "PTPOS" => {
-            let (dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)?;
+            let (dir, ref_dir,  pos)  = resolve_dir_and_pos(axis_param, scom, context, interface)?;
             let pnt_index_str = axis_param.pnt_index_str.as_ref().ok_or(anyhow!("pnt_index_str 错误"))?;
             let paras = pnt_index_str.split_whitespace().map(|x| x.trim().to_owned()).collect::<Vec<_>>();
             if paras.len() == 2 {
                 let pnt_index = paras[1].parse::<i32>().unwrap_or(i32::MAX);
                 if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_index) {
                     let axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
-                    return Ok(CateAxisParam { refno: axis_param.refno, number, pt: axis.pt, dir, pconnect, pbore });
+                    return Ok(CateAxisParam {
+                        refno: axis_param.refno,
+                        number,
+                        pt: axis.pt,
+                        dir,
+                        pconnect,
+                        pbore,
+                        pwidth,
+                        pheight,
+                        ref_dir,
+                    });
                 }
             }
             return Ok(CateAxisParam::default());

@@ -31,8 +31,8 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
     let interface = get_test_ams_db_manager_async().await;
     let database = interface.get_arango_db().await?;
     println!("here");
-    let shape_insts = query_insts_shape_data(&database, &[RefU64::from_two_nums(17496, 171859)]).await?;
-    dbg!(shape_insts.inst_geos_map.len());
+    let shape_insts = query_insts_shape_data(&database, &[RefU64::from_two_nums(17496, 161711)]).await?;
+    dbg!(&shape_insts.inst_geos_map);
     let geo_hashs = shape_insts.get_geo_hashs().iter().map(|x| *x).collect::<Vec<_>>();
     if let Ok(meshes_data) = query_pdms_mesh_aql(&database, &geo_hashs).await {
         dbg!(meshes_data.meshes.len());

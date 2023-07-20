@@ -173,9 +173,7 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
                     filter d != null and (d.geo_type != "Neg" or e == null)
                     return distinct d
             "#)
-        .bind_var("refnos", refno_strs.clone())
-        // .bind_var("neg_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
-        ;
+        .bind_var("refnos", refno_strs.clone());
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     let mut inst_info_map = HashMap::new();
     let mut inst_keys = geos_info.iter().map(|x| x.get_inst_key().to_string()).collect::<Vec<_>>();
@@ -184,16 +182,24 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     }
 
     //还有的直段会放在branch上，需要特殊处理
-
+    // inst_keys.clear();
+    inst_keys.push("1".to_string());
     inst_keys.push("2".to_string());
     let mut inst_geos_map = HashMap::new();
     let aql = AqlQuery::new(r#"
             FOR inst_key in @inst_keys
                 let f = document('pdms_inst_geos', inst_key)
                 filter f != null
-                return f
+                return {
+                    _key: f._key,
+                    refno: f.refno,
+                    insts: f.insts,
+                    aabb: f.aabb,
+                    type_name: f.type_name
+                }
             "#)
         .bind_var("inst_keys", inst_keys);
+
     let inst_geos: Vec<EleInstGeosData> = database.aql_query(aql).await.unwrap();
     for g in inst_geos {
         inst_geos_map.insert(g.inst_key, g);
@@ -210,8 +216,7 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
                 filter f != null
                 return f
             "#)
-        .bind_var("refnos", all_refnos)
-        ;
+        .bind_var("refnos", all_refnos);
     let inst_tubi: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     for g in inst_tubi {
         inst_tubi_map.insert(g.refno, g);
