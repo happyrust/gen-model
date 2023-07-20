@@ -675,6 +675,11 @@ impl PdmsDataInterface for AiosDBManager {
                 quat *= result.0;
             }
 
+            if att.contains_attr_name("NPOS") {
+                let npos = att.get_vec3("NPOS").unwrap_or_default();
+                pos += npos;
+            }
+
             if let Ok(owner_att) = self.get_attr_from_localdb(ref_basic.owner) {
                 if let Some(sjus) = owner_att.get_str("SJUS") {
                     //如果发现了SJUS，需要找到同一层集的PLOO，得到height

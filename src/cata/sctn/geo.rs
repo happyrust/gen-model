@@ -103,7 +103,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         let new_rot =  current_rot.inverse() * parent_rot;
         // dbg!(quat_to_pdms_ori_str(&new_rot));
 
-        println!("refno: {}, 原始drns: {:?}, drne: {:?}", refno, to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
+        // println!("refno: {}, 原始drns: {:?}, drne: {:?}", refno, to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
         let mut tmp_drns = (new_rot.mul_vec3(drns)).normalize();
         let mut tmp_drne = (new_rot.mul_vec3(drne)).normalize();
         ///处理随意设置方向的情况，保证一致性
@@ -117,7 +117,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         }else{
             drne = tmp_drne;
         }
-        println!("refno: {}, 变换后drns: {:?}, drne: {:?}", refno, to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
+        // println!("refno: {}, 变换后drns: {:?}, drne: {:?}", refno, to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
     }
 
     let mut height = 0.0;

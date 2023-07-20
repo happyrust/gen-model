@@ -211,16 +211,21 @@ async fn main() -> anyhow::Result<()> {
         let mut time = Instant::now();
         //
 
-        let refno = RefU64::from_two_nums(17496, 195549);
+        let refno = RefU64::from_two_nums(24383, 92836);
         let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
         dbg!(quat_to_pdms_ori_str(&transform.rotation));
         dbg!(transform);
 
-        let refno = RefU64::from_two_nums(17496, 195550);
+        let refno = RefU64::from_two_nums(24383, 92837);
         let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
         dbg!(quat_to_pdms_ori_str(&transform.rotation));
         dbg!(transform);
 
+        //
+        // let refno = RefU64::from_two_nums(17496, 195550);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
         //
         // let refno = RefU64::from_two_nums(17496, 173130);
         // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();

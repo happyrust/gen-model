@@ -780,10 +780,13 @@ pub async fn gen_cata_geos(
                                 });
 
                                 if let Some(mesh) = cached_mesh_mgr.get_mesh(geo_hash) {
-                                    let local_trans = Transform {
+                                    let mut local_mat = Transform {
                                         translation,
                                         rotation: rot,
                                         scale,
+                                    }.compute_matrix();
+                                    let Some(aabb) = cached_mesh_mgr.get_aabb(geo_hash) else {
+                                        continue;
                                     };
                                     //稍微扩张一点
                                     // dbg!(refno);
@@ -792,8 +795,22 @@ pub async fn gen_cata_geos(
                                     // }else{
                                     //     Mat4::IDENTITY
                                     // };
-                                    let s = Mat4::IDENTITY;
-                                    let new_mesh = mesh.transform_by(&(local_trans.compute_matrix() * s));
+                                    if is_neg{
+                                        let mut center: Vec3 = aabb.center().into();
+                                        let t_mat = Mat4::from_translation(center);
+                                        let mut s = 1.01;
+                                        //todo use brep substract, if use mesh, may exist many tolerance problem
+                                        // let s_mat = if matches!(geo_inst.geo_param, PdmsGeoParam::PrimRevolution(_)) {
+                                        //     // Mat4::from_scale(Vec3::new(s, s, 1.0))
+                                        //     Mat4::from_scale(Vec3::new(1.0, s, s))
+                                        // } else {
+                                        //     Mat4::from_scale(Vec3::new(1.0, 1.0, s))
+                                        // };
+                                        let s_mat = Mat4::from_scale(Vec3::new(1.0, 1.0, s));
+                                        let inv_t_mat = Mat4::from_translation(-center);
+                                        local_mat = local_mat * t_mat * s_mat * inv_t_mat;
+                                    }
+                                    let new_mesh = mesh.transform_by(&(local_mat));
                                     // dbg!(new_mesh.indices.len());
                                     manifold_map.insert(refno, new_mesh.into());
                                 };
@@ -976,7 +993,7 @@ pub async fn gen_cata_geos(
                                 }
 
                                 for t in total_manifolds {
-                                    t.destroy();
+                                    // t.destroy();
                                 }
                             }
                             //只有一个，现在不采用branch的方式去生成了
@@ -1251,7 +1268,6 @@ pub async fn gen_cata_geos(
                 let a_pos = world_trans.transform_point(axis_map[&arrive].pt);
                 let dir = axis_map[&arrive].dir;
                 let a_dir = world_trans.transform_vec3(dir).normalize_or_zero();
-                dbg!(refno);
                 if a_pos.distance(current_tubing.start_pt) > TUBI_TOL {
                     current_tubing.end_pt = a_pos;
                     current_tubing.desire_arrive_dir = a_dir;
@@ -1879,7 +1895,7 @@ pub async fn gen_geos_data(
                             let final_manifold = src_manifold.batch_boolean_subtract(&batch_manifolds);
                             let final_mesh: PlantMesh = final_manifold.clone().into();
                             for m in batch_manifolds {
-                                m.destroy();
+                                // m.destroy();
                             }
                             // final_manifold.destroy();
                             // #[cfg(debug_assertions)]
@@ -2061,7 +2077,7 @@ pub async fn gen_geos_data(
                     p_inst.transform = Transform::IDENTITY;
                     let mut mesh: PlantMesh = (final_manifold.clone()).into();
                     for f in neg_ms {
-                        f.destroy();
+                        // f.destroy();
                     }
                     // final_manifold.destroy();
                     let mut new_geos_data = parent_geos_data.clone();

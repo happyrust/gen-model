@@ -31,13 +31,13 @@ gen_model_batch_size = 100
 arangodb_database = "ams"
 multi_threads = false
 only_sync_sys = false
-arangodb_url = "http://127.0.0.1:8529"
+arangodb_url = "http://192.168.31.179:8529"
 rebuild_ssc_tree = false
 arangodb_user = "root"
 arangodb_password = ""
 
 #tidb 配置
-ip = "127.0.0.1"
+ip = "192.168.31.179"
 user = "root"
 password = ""
 #port = "3306"
@@ -64,7 +64,8 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #included_db_files = ["ams5052_0001"]
 included_db_files = ["acp7002_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
-manual_db_nums = [1112]  #, 8000
+manual_db_nums = [7999]
+#manual_db_nums = [1112]  #, 8000
 plat_url = ""
 
 #puhua
@@ -310,7 +311,9 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/161488"]
 #debug_root_refnos = ["17496/161704"]
 #debug_root_refnos = ["17496/171102"]
-debug_root_refnos = ["17496/161704"]
+#debug_root_refnos = ["17496/161704"]
+debug_root_refnos = ["24383/92833"]
+#debug_root_refnos = ["24383/92837"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]

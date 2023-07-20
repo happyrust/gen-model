@@ -374,7 +374,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         if c_att.get_refno().is_none() {
             break;
         }
-        c_att = int.get_attr_from_localdb(des_att.get_foreign_refno("CREF").unwrap_or_default()).unwrap_or_default();
+        c_att = int.get_attr_from_localdb(c_att.get_foreign_refno("CREF").unwrap_or_default()).unwrap_or_default();
     }
 
     let desp = c_att.get_f64_vec("DESP").unwrap_or_default();
