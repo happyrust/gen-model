@@ -6,17 +6,21 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::consts::AQL_FOREIGN_EDGES_COLLECTION;
 
-//可选的去过滤查询, start_types 和 endtypes，都是外键的类型
+///可选的去过滤查询, start_types 和 endtypes，都是外键的类型
 pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], start_types: &[&[&str]], end_types: &[&str], t_types: &[&str], depth: u32) -> anyhow::Result<Vec<RefU64>> {
     let ids = refnos.into_iter().map(|x| format!("{}/{}", "pdms_eles", x.to_url_refno())).collect::<Vec<_>>();
+    //             FILTER LENGTH(@t_types) == 0 and LENGTH(for c in 1 INBOUND ver._id foreign_edges
+    //                         return 0 )
+    // foreign edges 必须要在 end_types里，而且得到的节点的foreign edge不能再有别的外键也在edge types里, 相当于要过滤完路径
     let mut aql = r#"
+        with foreign_edges
         for id in @ids
             let t = (for ver, edge, path in 1..15 outbound id foreign_edges
                    OPTIONS { order: "bfs"  }
-                   FILTER LENGTH(@t_types) == 0 and length(for c in 1 INBOUND ver._id foreign_edges
-                        return 0 )
                         __START_FILTER__
-                   filter LENGTH(@end_types) == 0 or (edge.foreign_type in @end_types)
+                   filter LENGTH(@end_types) == 0 or ((edge.foreign_type in @end_types) and (LENGTH(for c,e in 1 OUTBOUND ver._id foreign_edges
+                        filter e.foreign_type in @end_types
+                        return 1 ) == 0))
                    filter LENGTH(@t_types) == 0 or (ver.noun in @t_types)
                    filter ver != null
                    filter LENGTH(path.edges) <= @depth
@@ -26,7 +30,7 @@ pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], sta
     let mut start_aql = String::new();
     for i in 0..start_types.len() {
         let in_str = start_types[i].iter().map(|&x| format!(" \"{x}\" ")).collect::<Vec<_>>().join(",");
-       start_aql.push_str(&format!("filter LENGTH(path.edges) > {i} and path.edges[{i}].foreign_type in [{in_str}] "));
+        start_aql.push_str(&format!("filter LENGTH(path.edges) > {i} and path.edges[{i}].foreign_type in [{in_str}] "));
     }
     let final_aql = aql.replace("__START_FILTER__", &start_aql);
     // dbg!(&final_aql);
@@ -46,7 +50,7 @@ pub async fn query_foreign_refno_aql(arango_database: &ArDatabase, refno: RefU64
     let id = format!("{}/{}", "pdms_eles", refno.to_url_refno());
     if foreign_types.len() < 2 { return Ok(None); }
     let aql = AqlQuery::new("\
-    With @@pdms_eles,@@foreign_edges
+    With @@pdms_eles, @@foreign_edges
     for v, e, p in 1..5 outbound @id @@foreign_edges
     filter p.edges[0].foreign_type == @foreign_type_first
     filter e.foreign_type == @final_type
@@ -55,8 +59,8 @@ pub async fn query_foreign_refno_aql(arango_database: &ArDatabase, refno: RefU64
         .bind_var("id", id)
         .bind_var("foreign_type_first", foreign_types[0])
         .bind_var("final_type", foreign_types[foreign_types.len() - 1])
-        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@foreign_edges",AQL_FOREIGN_EDGES_COLLECTION);
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@foreign_edges", AQL_FOREIGN_EDGES_COLLECTION);
     let results: Vec<String> = arango_database.aql_query(aql).await?;
     for result in results {
         if let Some(refno) = RefU64::from_url_refno(&result) {
@@ -67,7 +71,7 @@ pub async fn query_foreign_refno_aql(arango_database: &ArDatabase, refno: RefU64
 }
 
 /// 查询外键对应的 name
-pub async fn query_foreign_name_aql(refno:RefU64,foreign_types:Vec<&str>,arango_database:&ArDatabase) -> anyhow::Result<Option<String>> {
+pub async fn query_foreign_name_aql(refno: RefU64, foreign_types: Vec<&str>, arango_database: &ArDatabase) -> anyhow::Result<Option<String>> {
     let id = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
     if foreign_types.len() <= 1 { return Ok(None); }
     let aql = AqlQuery::new("\
@@ -81,8 +85,8 @@ pub async fn query_foreign_name_aql(refno:RefU64,foreign_types:Vec<&str>,arango_
         .bind_var("id", id)
         .bind_var("foreign_type_first", foreign_types[0])
         .bind_var("final_type", foreign_types[foreign_types.len() - 1])
-        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@foreign_edges",AQL_FOREIGN_EDGES_COLLECTION);
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@foreign_edges", AQL_FOREIGN_EDGES_COLLECTION);
     let results: Result<Vec<String>, _> = arango_database.aql_query(aql).await;
     if results.is_err() { return Ok(None); }
     let mut results = results.unwrap();

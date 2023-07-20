@@ -687,6 +687,7 @@ impl AiosDBManager {
         let arango_db = self.get_arango_db().await?;
         let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
         let aql = AqlQuery::new("\
+            with pdms_eles
             return document(pdms_eles, @id)
         ").bind_var("id", refno_aql);
         let mut r = arango_db.aql_query::<PdmsEleGraphNode>(aql).await?;

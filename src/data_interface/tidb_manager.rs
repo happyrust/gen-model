@@ -268,6 +268,7 @@ impl PdmsDataInterface for AiosDBManager {
     async fn query_first_foreign_along_path(&self, refno: RefU64, start_types: &[&str], end_types: &[&str], t_types: &[&str]) -> anyhow::Result<Option<RefU64>> {
         let id = format!("{}/{}", "pdms_eles", refno.to_url_refno());
         let aql = AqlQuery::new(r#"
+            with pdms_eles, pdms_edges, foreign_edges
             FOR v,e,p in 1..15 OUTBOUND @id pdms_edges
                 filter document(v._id) != null
                 let xx = (for ver, edge, path in 1..10 OUTBOUND v._id foreign_edges
@@ -287,9 +288,7 @@ impl PdmsDataInterface for AiosDBManager {
             .bind_var("id", id)
             .bind_var("start_types", start_types)
             .bind_var("end_types", end_types)
-            .bind_var("t_types", t_types)
-
-            ;
+            .bind_var("t_types", t_types);
         let results: Vec<String> = self.get_arango_db().await?.aql_query(aql).await?;
         for result in results {
             if let Some(refno) = RefU64::from_url_refno(&result) {
@@ -803,9 +802,18 @@ impl PdmsDataInterface for AiosDBManager {
                     dbg!(translation);
                     dbg!(quat_to_pdms_ori_str(&rotation));
                 }
-                translation = translation
-                    + rotation * (pos + plin_pos)
-                    + rotation * new_quat * delta_vec;
+                //对于有CUTB的情况，需要直接对齐过去, 不需要在这里计算
+                let c_ref = att.get_foreign_refno("CREF").unwrap_or_default();
+                if att.contains_attr_name("CUTB") && c_ref.is_valid() && let Some(c_t) = self.get_world_transform(c_ref).await? {
+                    let cut_dir = att.get_vec3("CUTP").unwrap_or_default();
+                    let cut_len = att.get_f32("CUTB").unwrap_or_default();
+                    translation = c_t.translation - cut_dir * cut_len;
+                }else{
+                    translation = translation
+                        + rotation * (pos + plin_pos)
+                        + rotation * new_quat * delta_vec;
+                }
+
                 #[cfg(debug_assertions)]
                 {
                     dbg!(translation);

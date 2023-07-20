@@ -354,17 +354,22 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         );
     }
 
-
-    if let Ok(Some(parent_cat_ref)) = int
-        .query_first_foreign_along_path(des_refno, &["SPRE", "CATR"], &["SPRE", "CATR"], &[])
+    let owner_ref = owner_att.get_refno().unwrap_or_default();
+    // dbg!(owner_ref);
+    if let Ok(mut parent_cat_refs) = int
+        .query_foreign_refnos(&[owner_ref], &[&["SPRE", "CATR"]], &["SPRE", "CATR"], &[], 4)
         .await {
-        if let Ok(parent_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(parent_cat_ref) {
-            let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
-            for i in 0..params.len() {
-                cur_context.insert(
-                    format!("OPAR{}", i + 1).into(),
-                    params[i].to_string().into(),
-                );
+        if let Some(parent_cat_ref) = parent_cat_refs.pop() {
+            // dbg!(parent_cat_ref);
+            if let Ok(parent_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(parent_cat_ref) {
+                // dbg!(&parent_cat_am);
+                let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
+                for i in 0..params.len() {
+                    cur_context.insert(
+                        format!("OPAR{}", i + 1).into(),
+                        params[i].to_string().into(),
+                    );
+                }
             }
         }
     }
@@ -386,12 +391,15 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     }
 
 
+    let c_refno = c_att.get_refno().unwrap_or_default();
     if let Ok(link_cat_refs) = int
-        .query_foreign_refnos(&[des_refno], &[&["CREF"], &["SPRE", "CATR"]], &["SPRE", "CATR"], &[], 4)
+        .query_foreign_refnos(&[c_refno], &[&["SPRE", "CATR"]], &["SPRE", "CATR"], &[], 4)
         .await {
+        // dbg!(&link_cat_refs);
         if !link_cat_refs.is_empty() {
             let link_cat_ref = link_cat_refs[0];
             if let Ok(link_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(link_cat_ref) {
+                // dbg!(&link_cat_am);
                 let params = link_cat_am.get_f64_vec("PARA").unwrap_or_default();
                 for i in 0..params.len() {
                     cur_context.insert(
