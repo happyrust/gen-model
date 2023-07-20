@@ -1,5 +1,5 @@
 #同步文件配置false
-total_sync = false
+total_sync = true
 enable_log = false
 sync_graph_db = true
 sync_tidb = true
@@ -8,7 +8,8 @@ incr_sync = false
 replace_dbs = true
 
 #项目设置
-project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
+#project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
+project_path = "D:\\e3d-models\\E3D" #TestCatalogue
 included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
 #included_projects = ["SCB", "ZDJ"]  #"AvevaPlantSample",
 #included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
@@ -40,10 +41,11 @@ arangodb_password = ""
 ip = "127.0.0.1"
 user = "root"
 password = ""
-#port = "3306"
-port = "4000"
-sql_threads_number = 50
+port = "3306"
+#port = "4000"
+sql_threads_number = 10
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
+#batch_insert_sql_cnt = 10   #mysql 批量插入的数量
 
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"
@@ -61,7 +63,7 @@ only_rebuild_pdms_element = false
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
 #included_db_files = ["ams7334_0001", "ams7353_0001", "ams7741_0001", "ams7998_0001"]
-included_db_files = ["ams5052_0001"]
+#included_db_files = ["ams5052_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 manual_db_nums = [1112]  #, 8000
 plat_url = ""

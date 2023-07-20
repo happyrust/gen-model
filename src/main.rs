@@ -1,5 +1,4 @@
 #![feature(let_chains)]
-#![feature(default_free_fn)]
 // 暂时屏蔽warnings
 #![allow(warnings)]
 #![recursion_limit = "256"]

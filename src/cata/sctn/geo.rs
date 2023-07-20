@@ -1,4 +1,4 @@
-use std::default::default;
+use std::default;
 use std::f32::consts::PI;
 use std::f32::EPSILON;
 use std::vec::Vec;
@@ -88,7 +88,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                         pt1,
                         curve_type: SpineCurveType::LINE,
                         preferred_dir: spine_att.get_vec3("YDIR").unwrap_or(Vec3::Z),
-                        ..default()
+                        ..Default::default()
                     });
                 }
             }

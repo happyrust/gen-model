@@ -22,7 +22,7 @@ use aios_core::pdms_data::ScomInfo;
 use aios_core::parsed_data::CateGeomsInfo;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
 use aios_core::parsed_data::geo_params_data::CateGeoParam::TubeImplied;
-use std::default::default;
+use std::default;
 use bevy_transform::prelude::Transform;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use std::mem::take;

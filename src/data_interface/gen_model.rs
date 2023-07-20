@@ -38,7 +38,7 @@ use parry3d::math::{Isometry, Vector};
 use rayon::iter::IntoParallelIterator;
 use rayon::iter::ParallelIterator;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::default::default;
+use std::default;
 use std::io::Read;
 use std::mem::take;
 use std::panic;
@@ -881,7 +881,7 @@ pub async fn gen_cata_geos(
                                     insts: ngmr_geo_insts,
                                     aabb: n_merged_cata_aabb,
                                     type_name: cur_type.to_string(),
-                                    ptset_map: default(),
+                                    ptset_map: Default::default(),
                                     reuse_unit: is_reuse_unit,
                                 };
                                 shape_insts_data.insert_ngmr_info(ele_refno, n_geos_info);

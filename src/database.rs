@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::default::default;
+use std::default;
 use std::fmt::format;
 use std::fs;
 use std::fs::{File, OpenOptions};
@@ -178,33 +178,47 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 type_name.as_str(),
                 &attr_map,
             ));
-            tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
-            tables_sql.push_str(&tables::gen_create_uda_tables_sql());
+            //todo create table in dolt database
+            // let result = conn.execute(tables_sql.as_str()).await;
+            // match result {
+            //     Ok(_) => {}
+            //     Err(e) => {
+            //         match &e {
+            //             Error::Database(error) => {
+            //                 //index already exist
+            //                 if error.code() == Some(Cow::from("42000")) {} else {
+            //                     dbg!(tables_sql.as_str());
+            //                 }
+            //             }
+            //             _ => {
+            //                 dbg!(&e);
+            //             }
+            //         }
+            //     }
+            // }
+            execute_sql(&mut project_pool.acquire().await?, tables_sql.as_mut_str()).await;
+            tables_sql.clear();
         }
+
         let mut conn = project_pool.acquire().await?;
-        tables_sql.push_str(&tables::gen_create_element_tables_sql());
-        tables_sql.push_str(&gen_create_project_mdb_sql());
-        tables_sql.push_str(&gen_create_data_state_tables_sql());
-        tables_sql.push_str(&gen_create_pdms_version_table_sql());
-        tables_sql.push_str(&gen_create_room_code_table_sql());
-        tables_sql.push_str(&gen_create_file_version_table_sql());
-        let result = conn.execute(tables_sql.as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                match &e {
-                    Error::Database(error) => {
-                        //index already exist
-                        if error.code() == Some(Cow::from("42000")) {} else {
-                            dbg!(tables_sql.as_str());
-                        }
-                    }
-                    _ => {
-                        dbg!(&e);
-                    }
-                }
-            }
-        }
+        // tables_sql.push_str(&gen_create_explicit_tables_sql());
+        // tables_sql.push_str(&gen_create_uda_tables_sql());
+        // tables_sql.push_str(&gen_create_element_tables_sql());
+        // tables_sql.push_str(&gen_create_project_mdb_sql());
+        // tables_sql.push_str(&gen_create_data_state_tables_sql());
+        // tables_sql.push_str(&gen_create_pdms_version_table_sql());
+        // tables_sql.push_str(&gen_create_room_code_table_sql());
+        // tables_sql.push_str(&gen_create_file_version_table_sql());
+
+        let mut conn = project_pool.acquire().await?;
+        execute_sql(&mut conn, &gen_create_explicit_tables_sql()).await;
+        execute_sql(&mut conn, &gen_create_uda_tables_sql()).await;
+        execute_sql(&mut conn, &gen_create_element_tables_sql()).await;
+        execute_sql(&mut conn, &gen_create_project_mdb_sql()).await;
+        execute_sql(&mut conn, &gen_create_data_state_tables_sql()).await;
+        execute_sql(&mut conn, &gen_create_pdms_version_table_sql()).await;
+        execute_sql(&mut conn, &gen_create_room_code_table_sql()).await;
+        execute_sql(&mut conn, &gen_create_file_version_table_sql()).await;
         create_tables_elapse += table_time.elapsed().as_millis();
 
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
@@ -233,6 +247,28 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     );
 
     Ok(())
+}
+
+pub async fn execute_sql(conn: &mut PoolConnection<MySql>, sql: &str) -> bool{
+    match conn.execute(sql).await {
+        Ok(_) => {
+            return true;
+        }
+        Err(e) => {
+            match &e {
+                Error::Database(error) => {
+                    //index already exist
+                    if error.code() == Some(Cow::from("42000")) {} else {
+                        dbg!(sql);
+                    }
+                }
+                _ => {
+                    dbg!(&e);
+                }
+            }
+            return false;
+        }
+    }
 }
 
 pub fn gen_explicit_att_insert_sql(

@@ -35,7 +35,7 @@ use sqlx::pool::PoolOptions;
 use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
 use std::boxed::Box;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::default::default;
+use std::default;
 use std::default::Default;
 use std::env;
 use std::f32::EPSILON;
@@ -914,7 +914,7 @@ impl PdmsDataInterface for AiosDBManager {
                         pt1,
                         curve_type: SpineCurveType::LINE,
                         preferred_dir: spine_att.get_vec3("YDIR").unwrap_or(Vec3::Z),
-                        ..default()
+                        ..Default::default()
                     });
                 }
             }
@@ -930,7 +930,7 @@ impl PdmsDataInterface for AiosDBManager {
                     pt1: pose,
                     curve_type: SpineCurveType::LINE,
                     preferred_dir: Vec3::Z,
-                    ..default()
+                    ..Default::default()
                 });
             }
         }
