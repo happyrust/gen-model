@@ -8,7 +8,7 @@ incr_sync = false
 replace_dbs = true
 
 #项目设置
-project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
+project_path = "D:/new/AVEVA/Plant/Projects12.1.SP4" #TestCatalogue
 included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
 #included_projects = ["SCB", "ZDJ"]  #"AvevaPlantSample",
 #included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
@@ -20,7 +20,7 @@ module = "DESI"
 #是否生成模型数据
 gen_model = true
 mesh_tol_ratio = 3.0
-apply_boolean_operation = true
+apply_boolean_operation = false
 #是否生成房间树
 gen_spatial_tree = false
 save_spatial_tree_to_db = false
@@ -29,7 +29,7 @@ gen_model_batch_size = 100
 
 #arangodb 配置
 arangodb_database = "ams"
-multi_threads = false
+multi_threads = true
 only_sync_sys = false
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
@@ -40,8 +40,8 @@ arangodb_password = ""
 ip = "127.0.0.1"
 user = "root"
 password = ""
-#port = "3306"
-port = "4000"
+port = "3306"
+#port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
@@ -71,8 +71,7 @@ puhua_database_ip = ""
 puhua_database_user = ""
 puhua_database_password = ""
 
-#joint还有问题，方位对齐的问题
-#debug_root_refnos = ["23708/26027"]
+debug_root_refnos = ["17496/8518"]
 
 
 #管道不出来的情况，需要查一下原因, *以解决
@@ -225,7 +224,7 @@ puhua_database_password = ""
 
 #debug_root_refnos = ["17496/161421"]
 #debug_root_refnos = ["17496/171102"]
-debug_root_refnos = ["17496/171102"]
+#debug_root_refnos = ["17496/171102"]
 #debug_root_refnos = ["24381/57302"]
 
 
