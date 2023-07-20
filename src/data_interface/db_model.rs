@@ -22,7 +22,7 @@ use aios_core::pdms_data::ScomInfo;
 use aios_core::parsed_data::CateGeomsInfo;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
 use aios_core::parsed_data::geo_params_data::CateGeoParam::TubeImplied;
-use std::default::default;
+use std::default;
 use bevy_transform::prelude::Transform;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use std::mem::take;
@@ -687,10 +687,9 @@ impl AiosDBManager {
         let arango_db = self.get_arango_db().await?;
         let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
         let aql = AqlQuery::new("\
-            With @@pdms_eles
-            return document(@@pdms_eles, @id)
-        ").bind_var("id", refno_aql)
-            .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION);
+            with pdms_eles
+            return document(pdms_eles, @id)
+        ").bind_var("id", refno_aql);
         let mut r = arango_db.aql_query::<PdmsEleGraphNode>(aql).await?;
         Ok(r.pop())
     }

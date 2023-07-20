@@ -1,5 +1,4 @@
 #![feature(let_chains)]
-#![feature(default_free_fn)]
 // 暂时屏蔽warnings
 #![allow(warnings)]
 #![recursion_limit = "256"]
@@ -212,16 +211,26 @@ async fn main() -> anyhow::Result<()> {
         let mut time = Instant::now();
         //
 
-        let refno = RefU64::from_two_nums(17496, 195549);
-        let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        dbg!(transform);
+        // let refno = RefU64::from_two_nums(23708, 1233);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
 
-        let refno = RefU64::from_two_nums(17496, 195550);
-        let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        dbg!(transform);
+        // let refno = RefU64::from_two_nums(23708, 1234);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(23708, 26027);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
 
+        //
+        // let refno = RefU64::from_two_nums(17496, 195550);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
         //
         // let refno = RefU64::from_two_nums(17496, 173130);
         // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
