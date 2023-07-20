@@ -13,7 +13,7 @@ use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBo
 use aios_core::db_number::DbNumMgr;
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::pdms_types::*;
-use aios_core::{get_default_pdms_db_info, prim_geo};
+use aios_core::prim_geo;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_bin};
 use aios_database::api::admin::sync_system_db;
 use aios_database::api::attr::insert_attr_info;
@@ -51,7 +51,7 @@ use parry3d::shape::{Compound, ConvexPolyhedron, SharedShape};
 use parry3d::transformation::vhacd;
 use parry3d::transformation::vhacd::VHACD;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
-// use regex::internal::Input;
+use regex::internal::Input;
 use sqlx::pool::PoolConnection;
 use sqlx::Executor;
 use sqlx::{Acquire, MySql, MySqlPool, Pool, Row};
@@ -80,23 +80,36 @@ use aios_database::consts::*;
 use aios_database::data_interface::gen_model::gen_geos_data;
 
 fn test_sbfi() -> anyhow::Result<()> {
-
-
-    let owner_mat3 =  Mat3::from_cols(
-        Vec3::X,
-        Vec3::NEG_Y,
-        Vec3::NEG_Z,
-    );
-
-    let axis_str = "Y27.041-X";
+    // let axis_str = "Y27.041-X";
+    let axis_str = "Y";
     let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
     let mut mat3 = cal_mat3_by_zdir(addition_axis);
     dbg!(to_pdms_ori_str(&mat3));
-    let final_mat3 = owner_mat3 * mat3;
-    dbg!(to_pdms_ori_str(&final_mat3));
-    let quat = Quat::from_mat3(&final_mat3);
-    let m = Mat3::from_quat(quat);
-    dbg!(to_pdms_ori_str(&m));
+
+    let axis_str = "-Y";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "-Y30X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "Y30-X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "-Y30-X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "-X30-Y";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
 
     return Ok(());
 
@@ -153,6 +166,8 @@ fn test_sbfi() -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
+
+    // return test_sbfi();
 
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
@@ -219,11 +234,11 @@ async fn main() -> anyhow::Result<()> {
 async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     let pool = connect_arangodb(db_option).await?;
     let database = pool.get().await?.db(db_option.arangodb_database.as_str()).await?;
-    create_arango_document(&database, AQL_DATA_ELES_COLLECTION, Document).await?;
-    create_arango_document(&database, AQL_DESPARA_ELES_COLLECTION, Document).await?;
-    create_arango_document(&database, AQL_FOREIGN_EDGES_COLLECTION, Edge).await?;
-    create_arango_document(&database, AQL_INSTANCE_EDGES_COLLECTION, Edge).await?;
-    create_arango_document(&database, AQL_PARA_ELES_COLLECTION, Document).await?;
+    create_arango_document(&database, "data_eles", Document).await?;
+    create_arango_document(&database, "despara_eles", Document).await?;
+    create_arango_document(&database, "foreign_edges", Edge).await?;
+    create_arango_document(&database, "instance_edges", Edge).await?;
+    create_arango_document(&database, "para_eles", Document).await?;
     create_arango_document(&database, AQL_PDMS_EDGES_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_PDMS_ELES_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_MESH_COLLECTION, Document).await?;
@@ -233,15 +248,16 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, AQL_PDMS_INST_GEO_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_TUBI_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_INST_EDGE_COLLECTION, Edge).await?;
-    create_arango_document(&database, AQL_PLIN_ELES_COLLECTION, Document).await?;
-    create_arango_document(&database, AQL_SIBL_EDGES_COLLECTION, Edge).await?;
-    create_arango_document(&database, AQL_SSC_EDGE_COLLECTION, Edge).await?;
-    create_arango_document(&database, AQL_SSC_ELES_COLLECTION, Document).await?;
-    create_arango_document(&database, AQL_TUBI_EDGES_COLLECTION, Edge).await?;
-    create_arango_document(&database, AQL_ROOM_ELES_COLLECTION, Document).await?;
-    create_arango_document(&database, AQL_HOLE_DATA_COLLECTION, Document).await?;
-    create_arango_document(&database, AQL_ROOM_EDGES_COLLECTION, Edge).await?;
-    create_arango_document(&database, AQL_GEO_INFOS_COLLECTION, Document).await?;
+    create_arango_document(&database, "plin_eles", Document).await?;
+    create_arango_document(&database, "sibl_edges", Edge).await?;
+    create_arango_document(&database, "ssc_edges", Edge).await?;
+    create_arango_document(&database, "ssc_eles", Document).await?;
+    create_arango_document(&database, "tubi_edges", Edge).await?;
+    create_arango_document(&database, "room_eles", Document).await?;
+    create_arango_document(&database, "hole_data", Document).await?;
+    create_arango_document(&database, "embed_data", Document).await?;
+    create_arango_document(&database, "room_edges", Edge).await?;
+    create_arango_document(&database, "geo_infos", Document).await?;
     create_arango_document(&database, AQL_HOLE_DATA_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_EMBED_DATA_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_HOLE_EDGE_COLLECTION, Edge).await?;
@@ -251,10 +267,10 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "SCTN";
+    let noun = "GENSEC";
     let hash = db1_hash(noun);
     dbg!(hash);
-    let hashes = [0xAF0C5];
+    let hashes = [798355,644698,640493,907462,631900,855442,926170,239044746,566245];
     for hash in hashes {
         let str = db1_dehash(hash);
         dbg!(&hash);
@@ -339,13 +355,4 @@ fn test_log() {
     let mut builder = Builder::from_default_env();
     builder.target(Target::Pipe(Box::new(file))).init();
     error!("Some error");
-}
-
-#[test]
-fn test_db_info_json() {
-    let json = get_default_pdms_db_info();
-    let noun_map = json.noun_attr_info_map;
-    if let Some(value) = noun_map.get(&8830234) {
-        dbg!(&value.value());
-    };
 }

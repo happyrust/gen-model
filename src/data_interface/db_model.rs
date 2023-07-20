@@ -599,7 +599,7 @@ impl AiosDBManager {
             // dbg!(&mdb_name);
             // dbg!(&mdb_attr);
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
-                dbg!(&dbs);
+                // dbg!(&dbs);
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
                     if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {
@@ -687,8 +687,10 @@ impl AiosDBManager {
         let arango_db = self.get_arango_db().await?;
         let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
         let aql = AqlQuery::new("\
-            return document(pdms_eles, @id)
-        ").bind_var("id", refno_aql);
+            With @@pdms_eles
+            return document(@@pdms_eles, @id)
+        ").bind_var("id", refno_aql)
+            .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION);
         let mut r = arango_db.aql_query::<PdmsEleGraphNode>(aql).await?;
         Ok(r.pop())
     }

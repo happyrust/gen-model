@@ -78,7 +78,7 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
                 }
                 let from_refno = RefU64::from_arangodb_refno_str(&bran_infos[i]._from);
                 let mut tubi_data = gen_tubi_data(bran_infos[i].start_pt, bran_infos[tubi_end_index].end_pt,
-                                                  bran_infos[tubi_end_index].bore, &bran_attr, from_refno,
+                                                  bran_infos[tubi_end_index].tubi_size, &bran_attr, from_refno,
                                                   &mut materials, &pipe_thickness_data, aios_mgr).await;
                 data.append(&mut tubi_data);
             }

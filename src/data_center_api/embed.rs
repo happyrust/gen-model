@@ -7,6 +7,7 @@ use aios_core::negative_mesh_type::NegativeEdges;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{RefU64, UdaMajorType};
 use aios_core::tool::hash_tool::hash_two_str;
+use aios_core::create_attas_structs::VirtualEmbedGraphNodeQuery;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
@@ -524,11 +525,11 @@ pub async fn query_embed_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase
     Ok(result)
 }
 
-pub async fn get_embed_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<VirtualEmbedGraphNode>> {
+pub async fn get_embed_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<VirtualEmbedGraphNodeQuery>> {
     let aql = AqlQuery::new("\
     for c in @@collection
         return unset(c , '_id','_rev')").bind_var("@collection", AQL_EMBED_DATA_COLLECTION);
-    let result = database.aql_query::<VirtualEmbedGraphNode>(aql).await?;
+    let result = database.aql_query::<VirtualEmbedGraphNodeQuery>(aql).await?;
     Ok(result)
 }
 

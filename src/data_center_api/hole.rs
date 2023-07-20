@@ -15,6 +15,7 @@ use glam::Vec3;
 use regex::Regex;
 use sqlx::{Error, Executor, MySql, Pool, Row};
 use sqlx::mysql::{MySqlQueryResult, MySqlRow};
+use aios_core::create_attas_structs::VirtualHoleGraphNodeQuery;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -887,11 +888,11 @@ pub async fn query_hole_data_by_keys_aql(keys: Vec<String>, database: &ArDatabas
 }
 
 /// 查询所有的孔洞信息
-pub async fn query_hole_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
+pub async fn query_hole_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNodeQuery>> {
     let aql = AqlQuery::new("
     for c in @@collection
         return unset(c , '_id','_rev')").bind_var("@collection", AQL_HOLE_DATA_COLLECTION);
-    let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
+    let result = database.aql_query::<VirtualHoleGraphNodeQuery>(aql).await?;
     Ok(result)
 }
 

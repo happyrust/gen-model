@@ -1,17 +1,19 @@
 use crate::cata::resolve::{resolve_axis_params, resolve_gms};
 use crate::data_interface::interface::PdmsDataInterface;
 // use crate::defines::CACHED_SCOM_INFO_MAP;
-use aios_core::parsed_data::CateGeomsInfo;
+use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::AttrVal::IntArrayType;
-use aios_core::pdms_types::{AttrMap, RefU64, TOTAL_CATA_GEO_NOUN_NAMES, TOTAL_GEO_NOUN_NAMES};
+use aios_core::pdms_types::{AttrMap, AttrVal, RefU64, TOTAL_CATA_GEO_NOUN_NAMES, TOTAL_GEO_NOUN_NAMES};
 use anyhow::anyhow;
 use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
 use log::{error, info};
 use sled::pin;
 use std::collections::{BTreeMap, HashMap};
+use aios_core::data_center::AttrValue;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
+use aios_core::tool::db_tool::db1_dehash;
 use glam::Vec3;
 use tokio::sync::RwLock;
 use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
@@ -23,6 +25,8 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     refno: RefU64,
     mut scom_ref: Option<RefU64>,
     scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
+    //传入额外的参数进来，用于解析轴线参数
+    desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
 ) -> anyhow::Result<CateGeomsInfo> {
     let interface = interface.ok_or(anyhow!("unknown interface"))?;
     let desi_att = interface.get_attr_from_localdb(refno)?;
@@ -31,6 +35,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         if let Some(spre_ref) = desi_att.get_foreign_refno("SPRE") {
             // dbg!(spre_ref);
             let spre = interface.get_attr_from_localdb(spre_ref).unwrap_or_default();
+            // dbg!(&spre);
             if spre.contains_attr_name("CATR") {
                 scom_ref = spre.get_foreign_refno("CATR");
             } else {
@@ -44,7 +49,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
                     let tmp_ref = c_att.get_foreign_refno("PRTREF").unwrap_or_default();
                     let t_att = interface.get_attr_from_localdb(tmp_ref)?;
                     scom_ref = t_att.get_foreign_refno("CATR");
-                } else if c_att.get_type() == "SPCO"{
+                } else if c_att.get_type() == "SPCO" {
                     scom_ref = c_att.get_foreign_refno("CATR");
                 } else {
                     scom_ref = Some(catref);
@@ -65,6 +70,9 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     if !scom_info_map.read().await.contains_key(&scom_ref) {
         match query_scom_info(scom_ref, Some(interface)).await {
             Ok(scom_info) => {
+                if refno.get_1() == 161704  {
+
+                }
                 scom_info_map.write().await.insert(scom_ref, scom_info);
             }
             Err(e) => {
@@ -92,14 +100,59 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     let height = desi_att.get_as_string("HEIG").unwrap_or("0.0".into());
     context.insert(DDHEIGHT_STR.into(), (height.clone()));
-    context.insert("HEIG".into(), (height));
     let angle = desi_att.get_as_string("ANGL").unwrap_or("0.0".into());
     context.insert(DDANGLE_STR.into(), (angle.clone()));
-    context.insert("ANGL".into(), (angle));
     let radi = desi_att.get_as_string("RADI").unwrap_or("0.0".into());
     context.insert(DDRADIUS_STR.into(), (radi.clone()));
-    context.insert("RADI".into(), (radi));
-    let geom_info = resolve_cata_comp(refno, &scom_info, Some(interface), Some(context)).await;
+
+    //将attrmap里，是double的UDA属性，放入context
+    for (k, v) in desi_att.iter() {
+        let str = db1_dehash(*k);
+        let n = if str.starts_with(":") {
+            if str.len() < 5 {
+                str.to_uppercase()
+            }else{
+                str[0..5].to_uppercase()
+            }
+        }else{
+            str.to_uppercase()
+        };
+        match v {
+            AttrVal::DoubleType(d) => {
+                context.insert(n, d.to_string());
+            }
+            AttrVal::DoubleArrayType(ds) => {
+                for (i, d) in ds.into_iter().enumerate() {
+                    // dbg!(format!("{}{}", &n, i+1));
+                    context.insert(format!("{}{}", &n, i+1), d.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+
+    //添加 LEAWID、 LEAHEI、ARRWID、ARRHEI的值
+    if let Some(axis_map) = desi_axis_map {
+        if desi_att.contains_attr_name("LEAV") {
+            let arrive = desi_att.get_i32("ARRI").unwrap_or_default();
+            let leave = desi_att.get_i32("LEAV").unwrap_or_default();
+
+            if axis_map.contains_key(&arrive) {
+                let v = axis_map.get(&arrive).unwrap();
+                context.insert("ARRWID".into(), v.pwidth.to_string());
+                context.insert("ARRHEI".into(), v.pheight.to_string());
+            }
+
+            if axis_map.contains_key(&leave) {
+                let v = axis_map.get(&leave).unwrap();
+                context.insert("LEAWID".into(), v.pwidth.to_string());
+                context.insert("LEAHEI".into(), v.pheight.to_string());
+            }
+        }
+    }
+
+
+    let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(interface), Some(context)).await;
     // dbg!(&geom_info);
     if geom_info.is_err() {
         error!("{:?}", geom_info.as_ref().err());
@@ -142,6 +195,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
             gm_params = query_gm_params(&gmse_am, Some(interface)).await?;
         }
     }
+    // dbg!(&gm_params);
 
     let mut ngm_params = vec![];
     //-ve， 和design发生左右的负实体
@@ -238,11 +292,12 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
 
 ///对元件库的SCOM Element进行求值计算
 pub async fn resolve_cata_comp<T: PdmsDataInterface>(
-    des_refno: RefU64,
+    des_att: &AttrMap,
     scom_info: &ScomInfo,
     interface: Option<&T>,
     context: Option<BTreeMap<String, String>>,
 ) -> anyhow::Result<CateGeomsInfo> {
+    let des_refno = des_att.get_refno().unwrap_or_default();
     let mut cur_context = context.unwrap_or_default();
     //默认值
     cur_context
@@ -284,10 +339,26 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         cur_context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
     }
 
+    let mut owner_att = int.get_attr_from_localdb(des_att.get_owner().unwrap_or_default()).unwrap_or_default();
+    while !owner_att.contains_attr_name("DESP") {
+        if owner_att.get_refno().is_none() || owner_att.get_type() == "ZONE" {
+            break;
+        }
+        owner_att = int.get_attr_from_localdb(owner_att.get_owner().unwrap_or_default()).unwrap_or_default();
+    }
+    let desp = owner_att.get_f64_vec("DESP").unwrap_or_default();
+    for i in 0..desp.len() {
+        cur_context.insert(
+            format!("ODES{}", i + 1).into(),
+            desp[i].to_string().into(),
+        );
+    }
+
+
     if let Ok(Some(parent_cat_ref)) = int
         .query_first_foreign_along_path(des_refno, &["SPRE", "CATR"], &["SPRE", "CATR"], &[])
-        .await{
-        if let Ok(parent_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(parent_cat_ref){
+        .await {
+        if let Ok(parent_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(parent_cat_ref) {
             let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
             for i in 0..params.len() {
                 cur_context.insert(
@@ -295,20 +366,29 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
                     params[i].to_string().into(),
                 );
             }
-            let desp = parent_cat_am.get_f64_vec("DESP").unwrap_or_default();
-            for i in 0..desp.len() {
-                cur_context.insert(
-                    format!("ODES{}", i + 1).into(),
-                    desp[i].to_string().into(),
-                );
-            }
         }
-
     }
 
+    let mut c_att = int.get_attr_from_localdb(des_att.get_foreign_refno("CREF").unwrap_or_default()).unwrap_or_default();
+    while !c_att.contains_attr_name("DESP") || c_att.get_type() == "ZONE"{
+        if c_att.get_refno().is_none() {
+            break;
+        }
+        c_att = int.get_attr_from_localdb(des_att.get_foreign_refno("CREF").unwrap_or_default()).unwrap_or_default();
+    }
+
+    let desp = c_att.get_f64_vec("DESP").unwrap_or_default();
+    for i in 0..desp.len() {
+        cur_context.insert(
+            format!("ADES{}", i + 1).into(),
+            desp[i].to_string().into(),
+        );
+    }
+
+
     if let Ok(link_cat_refs) = int
-        .query_foreign_refnos(&[des_refno], &[&["CREF"], &["SPRE", "CATR"]], &["SPRE", "CATR"],&[], 4)
-        .await{
+        .query_foreign_refnos(&[des_refno], &[&["CREF"], &["SPRE", "CATR"]], &["SPRE", "CATR"], &[], 4)
+        .await {
         if !link_cat_refs.is_empty() {
             let link_cat_ref = link_cat_refs[0];
             if let Ok(link_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(link_cat_ref) {
@@ -319,20 +399,11 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
                         params[i].to_string().into(),
                     );
                 }
-                let desp = link_cat_am.get_f64_vec("DESP").unwrap_or_default();
-                for i in 0..desp.len() {
-                    cur_context.insert(
-                        format!("ADES{}", i + 1).into(),
-                        desp[i].to_string().into(),
-                    );
-                }
             }
         }
     }
 
-
-    let axis_map = resolve_axis_params(scom_info, &cur_context, interface);
-    // dbg!(&scom_info.axis_params);
+    let axis_map = resolve_axis_params(des_refno, scom_info, &cur_context, interface);
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
         if scom_info.plin_map.contains_key(plin.as_str()) {
             Some(scom_info.plin_map.get(plin.as_str()).unwrap().clone())
@@ -344,6 +415,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     } else {
         None
     };
+
     //说明: 需要传递 interface, 因为可能需要取属性值
     // dbg!(&scom_info.gm_params);
     // dbg!(&scom_info.axis_params);
@@ -365,11 +437,13 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
 
 ///获得AxisParam
 pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
-    let type_name = attr_map.get_as_smol_str("TYPE")?;
-    let pconnect = attr_map.get_as_smol_str("PCON")?;
-    let pbore = attr_map.get_as_smol_str("PBOR")?;
+    let type_name = attr_map.get_as_string("TYPE").unwrap_or_default();
+    let pconnect = attr_map.get_as_string("PCON").unwrap_or_default();
+    let pbore = attr_map.get_as_string("PBOR").unwrap_or_default();
+    let pwidth = attr_map.get_as_string("PWID").unwrap_or_default();
+    let pheight = attr_map.get_as_string("PHEI").unwrap_or_default();
     let refno = attr_map.get_refno()?;
-    let number = attr_map.get_i32("NUMB")?;
+    let number = attr_map.get_i32("NUMB").unwrap_or_default();
     let r = match type_name.as_ref() {
         "PTAX" => AxisParam {
             refno,
@@ -380,8 +454,11 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             z: "".into(),
             distance: attr_map.get_as_smol_str("PDIS")?,
             direction: attr_map.get_as_smol_str("PAXI")?,
+            ref_direction: attr_map.get_as_smol_str("PZAXI").unwrap_or_default(),
             pconnect,
             pbore,
+            pwidth,
+            pheight,
             pnt_index_str: None,
         },
         "PTCA" => AxisParam {
@@ -393,8 +470,11 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             z: attr_map.get_as_smol_str("PZ")?,
             distance: "".into(),
             direction: { attr_map.get_as_smol_str("PTCD").unwrap_or("Y".into()) },
+            ref_direction: attr_map.get_as_smol_str("PZAXI").unwrap_or_default(),
             pconnect,
             pbore,
+            pwidth,
+            pheight,
             pnt_index_str: None,
         },
         "PTMI" => AxisParam {
@@ -406,8 +486,11 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             z: attr_map.get_as_smol_str("PZ")?,
             distance: "".into(),
             direction: attr_map.get_as_smol_str("PAXI")?,
+            ref_direction: attr_map.get_as_smol_str("PZAXI").unwrap_or_default(),
             pconnect,
             pbore,
+            pwidth,
+            pheight,
             pnt_index_str: None,
         },
         "PTPOS" => {
@@ -421,8 +504,11 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
                 z: "".into(),
                 distance: attr_map.get_as_smol_str("PTCP").unwrap_or("0".into()),
                 direction: attr_map.get_as_smol_str("PTCD").unwrap_or("Y".into()),
+                ref_direction: attr_map.get_as_smol_str("PZAXI").unwrap_or_default(),
                 pconnect,
                 pbore,
+                pwidth,
+                pheight,
                 pnt_index_str: attr_map.get_as_string("PTCPOS"),
             }
         }
@@ -435,8 +521,11 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             z: "".into(),
             distance: "".into(),
             direction: "".into(),
+            ref_direction: "".into(),
             pconnect,
             pbore,
+            pwidth,
+            pheight,
             pnt_index_str: None,
         },
     };
@@ -518,13 +607,13 @@ pub async fn query_gm_param(
         prad: (a.get_as_string("PRAD").unwrap_or_default()),
         pang: (a.get_as_string("PANG").unwrap_or_default()),
         pwid: (a.get_as_string("PWID").unwrap_or_default()),
-        diameters: a.get_attr_strings_without_default(&["PDIA", "PBDM", "PTDM", "DIAM"]),
+        diameters: a.get_attr_strings(&["PDIA", "PBDM", "PTDM", "DIAM"]),
         distances: a.get_attr_strings(&["PDIS", "PBDI", "PTDI"]),
         shears: a.get_attr_strings(&["PXTS", "PYTS", "PXBS", "PYBS"]),
         phei: (a.get_as_string("PHEI").unwrap_or_default()),
         offset: (a.get_as_string("POFF").unwrap_or_default()),
         box_lengths: a.get_attr_strings(&["PXLE", "PYLE", "PZLE"]),
-        xyz: a.get_attr_strings(&[
+        xyz: a.get_attr_strings_without_default(&[
             "PX", "PY", "PZ", "PBBT", "PCBT", "PBTP", "PCTP", "PBOF", "PCOF",
         ]),
         verts,
