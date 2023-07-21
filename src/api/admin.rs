@@ -10,7 +10,7 @@ use sqlx::mysql::MySqlRow;
 use crate::api::attr::{query_explicit_attr, query_attr, query_full_attr_with_pool};
 use crate::api::children::query_ancestor_of_type;
 use crate::api::element::query_name;
-use crate::aql_api::children::query_ancestor_till_type_aql;
+use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_ancestor_till_type_aql, query_ancestor_till_types_aql};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::consts::TEAM_DATA_TABLE;
 use aios_core::pdms_user::PdmsElementWithUser;
@@ -30,6 +30,7 @@ pub struct AdminData {
 ///同步system db的信息
 pub async fn sync_system_db(mgr: &AiosDBManager) -> anyhow::Result<()> {
     let mut team_name_map = DashMap::new();
+    let database = mgr.get_arango_db().await?;
     for project_db in mgr.project_map.iter() {
         let mut r = vec![];
         let all_db_refnos = query_all_db_refnos(project_db.value()).await?;
@@ -37,11 +38,11 @@ pub async fn sync_system_db(mgr: &AiosDBManager) -> anyhow::Result<()> {
             let db_attr = query_full_attr_with_pool(db_refno, &mgr, Some(vec!["NUMBDB", "STYP"]), project_db.value()).await;
             if db_attr.is_err() { continue; }
             let db_attr = db_attr.unwrap();
-            let team_refno = query_ancestor_of_type(db_refno, "TEAM", project_db.value()).await?;
+            let team_refno = query_ancestor_till_types_aql(&database,db_refno, vec!["TEAM"]).await?;
             if team_refno.is_none() {
                 continue;
             }
-            let team_refno = team_refno.unwrap();
+            let team_refno = team_refno.unwrap().refno;
 
             let team_name = if !team_name_map.contains_key(&team_refno) {
                 let team_name = query_name(team_refno, project_db.value()).await?;
