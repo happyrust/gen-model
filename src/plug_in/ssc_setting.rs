@@ -1,41 +1,52 @@
 use aios_core::pdms_types::RefU64;
 use sqlx::{Executor, MySql};
-use aios_core::ssc_setting::{SelectedSiteVec, SiteVec};
+use aios_core::ssc_setting::{SelectedSiteVec, SiteData};
 use sqlx::Pool;
 use sqlx::Row;
 
 
-pub async fn save_selected_site(sites: SelectedSiteVec, pool: &Pool<MySql>) -> anyhow::Result<()> {
-    let create_table_sql = create_selected_ssc_sql();
+pub async fn update_selected_ssc_site(sites: (Vec<SiteData>, Vec<SiteData>), pool: &Pool<MySql>) -> anyhow::Result<()> {
+    //若没有selected_site,则创建表
+    let create_table_sql = create_selected_ssc_site_sql();
     let mut conn = pool.clone().acquire().await?;
     let create_table_result = conn.execute(create_table_sql.as_str()).await;
     let Ok(_) = create_table_result else { return Ok(()); };
 
+    let add_site = sites.0;
+    let delete_site = sites.1;
 
-    let clear_table_sql = clear_selected_ssc_sql();
-    let clear_table_result = conn.execute(clear_table_sql.as_str()).await;
-    let Ok(_) = clear_table_result else { return Ok(()); };
-
-    if sites.data.is_empty() { return Ok(()); }
-    let insert_value_sql = gen_insert_selected_ssc_sql(sites);
+    let insert_value_sql = gen_insert_selected_ssc_site_sql(add_site);
     let _ = conn.execute(insert_value_sql.as_str()).await;
+
+    let delete_value_sql = delete_selected_ssc_site_sql(delete_site);
+    let _ = conn.execute(delete_value_sql.as_str()).await;
+
     Ok(())
 }
 
-
-fn gen_insert_selected_ssc_sql(sites: SelectedSiteVec) -> String {
-    let mut sql = String::from("INSERT IGNORE INTO Selected_Ssc_Data (refno, name) VALUES ");
-    for site in sites.data {
-        sql.push_str(&format!("( '{}', '{}' ),", site.refno, site.name))
+fn gen_insert_selected_ssc_site_sql(sites: Vec<SiteData>) -> String {
+    let mut insert_sql = String::from("INSERT IGNORE INTO Selected_Ssc_Data (refno, name) VALUES ");
+    for site in sites {
+        insert_sql.push_str(&format!("( '{}', '{}' ) ,", site.refno, site.name));
     }
-    sql.remove(sql.len() - 1);
-    sql
+    insert_sql.remove(insert_sql.len() - 1);
+    insert_sql
 }
 
 
-pub async fn query_selected_ssc(pool: &Pool<MySql>) -> anyhow::Result<Vec<(String, String)>> {
+/// 删除site
+fn delete_selected_ssc_site_sql(sites: Vec<SiteData>) -> String {
+    let mut delete_sql = String::new();
+    for site in sites {
+        delete_sql.push_str(&format!("DELETE FROM selected_ssc_data WHERE refno ='{}';", site.refno));
+    }
+    delete_sql
+}
+
+
+pub async fn query_selected_ssc_site(pool: &Pool<MySql>) -> anyhow::Result<Vec<(String, String)>> {
     let mut result = Vec::new();
-    let sql = gen_query_selected_ssc_sql();
+    let sql = gen_query_selected_ssc_site_sql();
     let mut conn = pool.acquire().await?;
     let Ok(query_results) = conn.fetch_all(sql.as_str()).await else { return Ok(vec![]); };
     for query_result in query_results {
@@ -60,7 +71,7 @@ pub async fn query_table_ssc(pool: &Pool<MySql>) -> anyhow::Result<&'static str>
 }
 
 
-fn gen_query_selected_ssc_sql() -> String {
+fn gen_query_selected_ssc_site_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT name,refno FROM Selected_Ssc_Data"));
     sql
@@ -74,15 +85,15 @@ fn gen_query_table_sql() -> String {
 }
 
 
-/// 创建selected ssc sql
-fn create_selected_ssc_sql() -> String {
+/// 创建selected_ssc_data
+fn create_selected_ssc_site_sql() -> String {
     format!("CREATE TABLE IF NOT EXISTS Selected_Ssc_Data (
         refno VARCHAR(255) NOT NULL,
-        name VARCHAR(255) NOT NULL
+        name VARCHAR(255) NOT NULL,
+        UNIQUE (refno)
     );")
 }
 
-
-fn clear_selected_ssc_sql() -> String {
+fn clear_selected_ssc_site_sql() -> String {
     format!("truncate table Selected_Ssc_Data;")
 }
