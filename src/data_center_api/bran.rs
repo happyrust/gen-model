@@ -138,7 +138,7 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
             // 找到bran下的第一个ftub
             for child in &bran_children {
                 if child.noun == "ATTA" { continue; }
-                if !bridge_dir.is_empty() {
+                if bridge_dir.is_empty() {
                     let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], &database).await?;
                     if let Some(spre_name) = spre_name {
                         if spre_name.contains("Riser") || spre_name.contains("RDivider") {
