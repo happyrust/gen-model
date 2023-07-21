@@ -179,6 +179,12 @@ pub(crate) async fn get_refno_desc(refno: RefU64, aios_mgr: &AiosDBManager) -> a
     let Some(catr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "CATR"]).await?
         else { return Ok("".to_string()); };
     // let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok("".to_string()); };
+    let attr = aios_mgr.get_attr(catr).await?;
+    Ok(attr.get_str("DESC").unwrap_or("").to_string())
+}
+
+/// 获取元件在desi中的desc
+pub(crate) async fn get_refno_desi_desc(refno:RefU64,aios_mgr:&AiosDBManager) -> anyhow::Result<String> {
     let attr = aios_mgr.get_attr(refno).await?;
     Ok(attr.get_str("DESC").unwrap_or("").to_string())
 }
@@ -194,8 +200,8 @@ pub(crate) async fn get_refno_paras(refno: RefU64, aios_mgr: &AiosDBManager) -> 
     let database = aios_mgr.get_arango_db().await?;
     let Some(catr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "CATR"]).await?
         else { return Ok(vec![]); };
-    let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok(vec![]); };
-    let attr = aios_mgr.get_attr(refno).await?;
+    // let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok(vec![]); };
+    let attr = aios_mgr.get_attr(catr).await?;
     Ok(attr.get_f64_vec("PARA").unwrap_or(vec![]))
 }
 

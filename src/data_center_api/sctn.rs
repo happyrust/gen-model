@@ -1,9 +1,9 @@
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::{EleTreeNode, RefU64};
 use crate::api::element::query_children;
-use crate::aql_api::children::{query_children_eles, query_refnos_travel_children_with_type_aql};
+use crate::aql_api::children::{query_ancestor_till_type_aql, query_ancestor_till_types_aql, query_children_eles, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::query_foreign_name_aql;
-use crate::data_center_api::data_api::{get_ori_angle_str, get_refno_desc, get_refno_paras, get_refno_world_poss_pose};
+use crate::data_center_api::data_api::{get_ori_angle_str, get_refno_desc, get_refno_desi_desc, get_refno_paras, get_refno_world_poss_pose};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
@@ -18,12 +18,11 @@ pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMana
         for child in children {
             let Ok(implicit_attr) = aios_mgr.get_implicit_attr(child.refno, Some(vec!["GTYP"])).await else { continue; };
             let Some(gtype) = implicit_attr.get_str("GTYP") else { continue; };
-            let mut sctn_desc = None;
+            let mut stru_desc = None;
             match gtype {
                 "BOX" => {
                     let attr = get_dq_support_sctn_gtype_box_data(
                         &child, aios_mgr).await.unwrap_or((vec![], "".to_string()));
-                    sctn_desc = Some(attr.1);
                     result.push(DataCenterInstance {
                         object_model_code: "PARTDA".to_string(),
                         project_code: aios_mgr.db_option.project_code.to_string(),
@@ -35,7 +34,6 @@ pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMana
                 "BEAM" => {
                     let attr = get_dq_support_sctn_gtype_beam_data(
                         &child, aios_mgr).await.unwrap_or((vec![], "".to_string()));
-                    sctn_desc = Some(attr.1);
                     result.push(DataCenterInstance {
                         object_model_code: "PARTDB".to_string(),
                         project_code: aios_mgr.db_option.project_code.to_string(),
@@ -71,8 +69,13 @@ pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMana
                                 attribute_model_code: "PARTDK2".to_string(),
                                 value: AttrValue::AttrFloat(*(paras.get(2).unwrap_or(&0.0)) as f32).into(),
                             });
-                            if let Some(sctn_desc) = &sctn_desc {
-                                match sctn_desc {
+                            let stru = query_ancestor_till_types_aql(&database, fixing.refno, vec!["STRU"]).await?;
+                            if let Some(stru) = stru {
+                                let desc = get_refno_desi_desc(stru.refno, &aios_mgr).await.unwrap_or("".to_string());
+                                stru_desc = Some(desc);
+                            }
+                            if let Some(stru_desc) = &stru_desc {
+                                match stru_desc {
                                     s if s.contains("S1-150") => {
                                         fixing_attrs.push(DataCenterAttr {
                                             attribute_model_code: "PARTDK3".to_string(),
@@ -85,7 +88,7 @@ pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMana
                                             value: AttrValue::AttrFloat(*paras.get(4).unwrap_or(&0.0) as f32).into(),
                                         });
                                     }
-                                    _ => { continue; }
+                                    _ => {}
                                 }
                             }
                         }
@@ -114,7 +117,7 @@ pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMana
                     result.push(DataCenterInstance {
                         object_model_code: "PARTDK".to_string(),
                         project_code: aios_mgr.db_option.project_code.to_string(),
-                        instance_code: fixing.name,
+                        instance_code: fixing.refno.to_refno_str(),
                         version: "A版".to_string(),
                         attributes: fixing_attrs,
                     });
@@ -179,7 +182,7 @@ async fn get_dq_support_sctn_gtype_box_data(refno: &EleTreeNode, aios_mgr: &Aios
     });
     let ori_str = get_ori_angle_str(refno.refno, aios_mgr).await.unwrap_or("".to_string());
     attr.push(DataCenterAttr {
-        attribute_model_code: "PARTDA32".to_string(),
+        attribute_model_code: "PARTDA33".to_string(),
         value: AttrValue::AttrString(ori_str).into(),
     });
     attr.push(DataCenterAttr {

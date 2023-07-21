@@ -818,7 +818,7 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>,
                                        sites: Vec<(RefU64, String)>,
                                        db_option: &DbOption,
                                        database: &ArDatabase,
-                                       pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64,String)>> {
+                                       pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let numbs = query_db_nums_of_mdb(&db_option.mdb_name, &db_option.module, pool).await?;
     // 先查找到 mdb下的所有 site
     // let sites = query_types_refnos_names(&vec!["SITE"], pool, Some(&numbs)).await?;
@@ -826,19 +826,19 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>,
     // 不符合命名规则的site
     let mut error_sites = Vec::new();
     // 将mdb所有的site查找到后，用 name_map 进行分组和过滤，一个site下面的zone为一组
-    dbg!(&sites);
     for (site_refno, site_name) in sites {
         let mut contains_key = Vec::new();
         let mut filter_aql = String::new();
-        // 匹配 site 的 名字包含哪个专业代码
+        // 匹配 site 的 名字包含哪些专业代码
         for name in name_map {
             if site_name.contains(&name.site_name) {
                 contains_key.push(name.clone());
-            } else {
-                error_sites.push((site_refno,site_name.clone()));
             }
         }
-        if contains_key.is_empty() { continue; }
+        if contains_key.is_empty() {
+            error_sites.push((site_refno, site_name.clone()));
+            continue;
+        }
         // 如果site 名字 同时包含两个专业代码，取长度最长的那个
         if contains_key.len() > 1 {
             let Some(max_site_code) = contains_key.clone().into_iter().max_by(|a, b| a.site_name.len().cmp(&b.site_name.len())) else { continue; };

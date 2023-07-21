@@ -4,7 +4,7 @@ use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, Data
 use aios_core::pdms_types::RefU64;
 use regex::Regex;
 use crate::api::attr::query_explicit_attr;
-use crate::aql_api::children::{query_children_eles, query_refnos_travel_children_with_type_aql};
+use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_paras};
@@ -115,7 +115,7 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
     if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos,
                                                                      vec!["BRAN".to_string()]).await {
         for bran in children {
-            let bran_children = query_children_eles(&database, bran.refno).await?;
+            let bran_children = query_children_order_aql(&database, bran.refno).await?;
             let room_name = query_room_name_from_refno_aql(bran.refno, &database).await?.unwrap_or("".to_string());
             let pspe_name = query_foreign_name_aql(bran.refno, vec!["PSPE", "PSPE"], &database).await?;
             let mut kind = "".to_string();
