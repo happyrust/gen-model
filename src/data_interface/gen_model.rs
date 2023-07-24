@@ -1990,9 +1990,6 @@ pub async fn gen_geos_data(
                         let Some(geos_data) = shape_insts_data.get_inst_geos_data(parent_geos_info) else {
                             continue;
                         };
-                        if geos_data.insts.len() != 1 {
-                            continue;
-                        }
                         boolean_ngmr_map.entry(parent).or_insert_with(|| Vec::new()).push(refno);
                     }
                 }
@@ -2007,16 +2004,22 @@ pub async fn gen_geos_data(
                     let Some(parent_geos_data) = shape_insts_data.get_inst_geos_data(parent_geos_info) else {
                         continue;
                     };
-                    if parent_geos_data.insts.len() != 1 {
+                    if parent_geos_data.insts.is_empty() {
                         continue;
                     }
                     let mut p_inst = parent_geos_data.insts[0].clone();
-                    let Some(parent_mesh) = mesh_mgr.get_mesh(p_inst.geo_hash) else {
-                        continue;
-                    };
                     let parent_matrix_inverse = parent_geos_info.world_transform.compute_matrix().inverse();
-                    let mat4 = p_inst.transform.compute_matrix();
-                    let mut parent_manifold: ManifoldRust = (parent_mesh, &mat4).into();
+                    let mut pos_monifolds = vec![];
+                    for p_inst in parent_geos_data.insts.clone() {
+                        let Some(parent_mesh) = mesh_mgr.get_mesh(p_inst.geo_hash) else {
+                            continue;
+                        };
+                        let mat4 = p_inst.transform.compute_matrix();
+                        let mut tmp_manifold: ManifoldRust = (parent_mesh, &mat4).into();
+                        pos_monifolds.push(tmp_manifold);
+                    }
+                    let mut parent_manifold = ManifoldRust::batch_boolean(&pos_monifolds, 0);
+
                     #[cfg(debug_assertions)]
                     dbg!(parent_manifold.num_tri());
                     let mut neg_ms = vec![];
@@ -2080,7 +2083,7 @@ pub async fn gen_geos_data(
                     // final_manifold.destroy();
                     let mut new_geos_data = parent_geos_data.clone();
                     new_geos_data.insts = vec![p_inst];
-                    new_geos_data.inst_key = new_geos_info.get_inst_key();
+                    new_geos_data.inst_key = geo_hash.to_string();
                     // new_geos_data.aabb = d.aabb;
 
                     mesh_mgr.insert(geo_hash, PlantGeoData {
@@ -2088,7 +2091,7 @@ pub async fn gen_geos_data(
                         mesh: Some(mesh),
                         aabb: new_geos_data.aabb,
                     });
-                    shape_insts_data.insert_geos_data(new_geos_info.get_inst_key(), new_geos_data);
+                    shape_insts_data.insert_geos_data( geo_hash.to_string(), new_geos_data);
                     shape_insts_data.insert_compound_info(parent, new_geos_info);
                 }
             }
