@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use aios_core::data_center::AttrValue::{AttrIntArray, AttrMap, AttrString};
-use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
+use aios_core::data_center::{AttrValue, CableWeight, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::RefU64;
+use anyhow::anyhow;
+use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use regex::Regex;
+use serde::{Serialize, Deserialize};
 use crate::api::attr::query_explicit_attr;
 use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
@@ -294,4 +297,50 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
         owner: "KY1801".to_string(),
         instances: result,
     })
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub(crate) struct CableWeightExcel {
+    pub types: Option<String>,
+    pub width: Option<String>,
+    /// 托盘重量
+    pub tray_weight: Option<String>,
+    /// 电缆线重
+    pub cable_weight: Option<String>,
+}
+
+impl CableWeightExcel {
+    pub(crate) fn is_null(&self) -> bool {
+        if self.types.is_none() || self.width.is_none() || self.tray_weight.is_none() || self.cable_weight.is_none() {
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// 读取 电缆桥架及电缆线重 表
+pub async fn read_cable_weight_excel() -> anyhow::Result<HashMap<String, HashMap<String, CableWeight>>> {
+    let mut map = HashMap::new();
+    let mut workbook: Xlsx<_> = open_workbook("./resource/电缆桥架及电缆线重.xlsx")?;
+    let range = workbook.worksheet_range("Sheet1")
+        .ok_or(anyhow!("Cannot find Sheet 'Sheet1'"))??;
+
+    let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
+    while let Some(result) = iter.next() {
+        let v: CableWeightExcel = result?;
+        if v.is_null() { break; }
+        let types = v.types.unwrap();
+        let width = v.width.unwrap();
+        let tray_weight = v.tray_weight.unwrap();
+        let cable_weight = v.cable_weight.unwrap();
+        let cable = CableWeight {
+            types: types.clone(),
+            width: width.clone(),
+            tray_weight,
+            cable_weight,
+        };
+        map.entry(types).or_insert_with(HashMap::new).entry(width).or_insert(cable);
+    }
+    Ok(map)
 }

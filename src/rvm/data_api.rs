@@ -135,7 +135,6 @@ pub async fn create_refnos_rvm_data(refnos: Vec<RefU64>, db_option: &DbOption, d
     let root = gen_ancestor_data_str("root", Vec3::ZERO);
     file_data.push(root);
     let refno_geo_infos = query_rvm_geo_instance_aql(refnos.clone(), database).await?;
-    dbg!(&refno_geo_infos);
     let tubi_infos = query_rvm_tubi_instances_aql(refnos,database).await?;
     for info in refno_geo_infos {
         // cntb
@@ -282,25 +281,6 @@ pub fn gen_prim_data_test(geo_instance: &RvmInstGeo, desi_transform: Transform, 
     data
 }
 
-#[tokio::test]
-async fn test_query_rvm_geo_instance_aql() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let bran_refno = RefU64::from_refno_str("24383/73930").unwrap();
-    let refnos = vec![RefU64::from_refno_str("24383/91850").unwrap()];
-    // let mut refnos = query_children_order_aql(&database, bran_refno).await?
-    //     .into_iter().map(|refno| refno.refno).collect::<Vec<_>>();
-    // refnos.push(bran_refno);
-    let result = create_refnos_rvm_data(refnos, &db_option, &database).await?;
-    let mut file = std::fs::File::create("test.rvm").unwrap();
-    file.write_all(&result).unwrap();
-    Ok(())
-}
-
 pub fn gen_data_from_tree(tree: Tree<(RefU64, Vec<u8>)>) -> Vec<u8> {
     let mut data = Vec::new();
     let root = tree.root_node_id();
@@ -440,5 +420,23 @@ async fn test_query_rvm_tubi_instances_aql() -> anyhow::Result<()> {
     let refnos = vec![RefU64::from_refno_str("24383/73930").unwrap()];
     let tubi = query_rvm_tubi_instances_aql(refnos, &database).await?;
     dbg!(&tubi);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_rvm_geo_instance_aql() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+    let refnos = vec![RefU64::from_refno_str("24381/100677").unwrap()];
+    // let mut refnos = query_children_order_aql(&database, bran_refno).await?
+    //     .into_iter().map(|refno| refno.refno).collect::<Vec<_>>();
+    // refnos.push(bran_refno);
+    let result = create_refnos_rvm_data(refnos, &db_option, &database).await?;
+    let mut file = std::fs::File::create("test.rvm").unwrap();
+    file.write_all(&result).unwrap();
     Ok(())
 }
