@@ -1,21 +1,29 @@
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::RefU64;
-use crate::aql_api::children::query_refnos_travel_children_with_type_aql;
+use crate::aql_api::children::{query_children_eles, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
-use crate::data_center_api::data_api::get_refno_desc;
+use crate::data_center_api::data_api::{get_refno_desc, get_refno_desi_desc};
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 获取电气支吊架信息
 pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["STRU".to_string()]).await{
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["STRU".to_string()]).await {
         for stru in children {
             let mut attr = Vec::new();
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB1".to_string(),
                 value: AttrValue::AttrString(stru.name.to_string()).into(),
             });
+            let frmw = query_children_eles(&database, stru.refno).await?;
+            if !frmw.is_empty() {
+                let desc = get_refno_desi_desc(frmw[0].refno, aios_mgr).await.unwrap_or("".to_string());
+                attr.push(DataCenterAttr {
+                    attribute_model_code: "ERECAB4".to_string(),
+                    value: AttrValue::AttrString(desc).into(),
+                });
+            }
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB48".to_string(),
                 value: AttrValue::AttrString("施工图阶段".to_string()).into(),
@@ -53,7 +61,7 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
                 attribute_model_code: "ERECAB44".to_string(),
                 value: AttrValue::AttrString("40度".to_string()).into(),
             });
-            let desc = get_refno_desc(stru.refno,aios_mgr).await.unwrap_or("".to_string());
+            let desc = get_refno_desc(stru.refno, aios_mgr).await.unwrap_or("".to_string());
             let support_type = if desc.starts_with("S2") && desc.contains("FLOOR") { "支架".to_string() } else { "吊架".to_string() };
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB45".to_string(),
@@ -66,7 +74,7 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
             });
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB49".to_string(),
-                value: AttrValue::AttrFloatArray(vec![0.0,0.0]).into(),
+                value: AttrValue::AttrFloatArray(vec![0.0, 0.0]).into(),
             });
             result.push(DataCenterInstance {
                 object_model_code: "ERECAB".to_string(),

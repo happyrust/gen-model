@@ -4,7 +4,7 @@ use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, Data
 use aios_core::pdms_types::RefU64;
 use regex::Regex;
 use crate::api::attr::query_explicit_attr;
-use crate::aql_api::children::{query_children_eles, query_refnos_travel_children_with_type_aql};
+use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_paras};
@@ -115,7 +115,7 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
     if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos,
                                                                      vec!["BRAN".to_string()]).await {
         for bran in children {
-            let bran_children = query_children_eles(&database, bran.refno).await?;
+            let bran_children = query_children_order_aql(&database, bran.refno).await?;
             let room_name = query_room_name_from_refno_aql(bran.refno, &database).await?.unwrap_or("".to_string());
             let pspe_name = query_foreign_name_aql(bran.refno, vec!["PSPE", "PSPE"], &database).await?;
             let mut kind = "".to_string();
@@ -133,11 +133,12 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
             let mut tray_width = "".to_string();
             let mut tray_height = "".to_string();
             let mut bridge_dir = "".to_string();
-
+            let mut b_climbing = false;
+            let mut b_wheel = false;
             // 找到bran下的第一个ftub
             for child in &bran_children {
                 if child.noun == "ATTA" { continue; }
-                if !bridge_dir.is_empty() {
+                if bridge_dir.is_empty() {
                     let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], &database).await?;
                     if let Some(spre_name) = spre_name {
                         if spre_name.contains("Riser") || spre_name.contains("RDivider") {
@@ -150,9 +151,19 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
 
                 if child.noun == "FTUB" {
                     let mut paras = get_refno_paras(child.refno, aios_mgr).await?;
-                    tray_width = paras.pop().unwrap_or(0.0).to_string();
-                    tray_height = paras.pop().unwrap_or(0.0).to_string();
+                    tray_width = paras.get(0).unwrap_or(&0.0).to_string();
+                    tray_height = paras.get(1).unwrap_or(&0.0).to_string();
                     break;
+                }
+                if !b_climbing {
+                    if child.noun == "ELBO" {
+                        b_climbing = true;
+                    }
+                }
+                if !b_wheel {
+                    if child.noun == "BEND" {
+                        b_wheel = true;
+                    }
                 }
             }
 
@@ -175,6 +186,18 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
             erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB3".to_string(),
                 value: AttrValue::AttrString(room_name.clone()).into(),
+            });
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB25".to_string(),
+                value: AttrValue::AttrBool(b_climbing).into(),
+            });
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB27".to_string(),
+                value: AttrValue::AttrBool(b_wheel).into(),
+            });
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB21".to_string(),
+                value: AttrValue::AttrString(format!("{}mm{}", tray_width, kind)).into(),
             });
             erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB31".to_string(),

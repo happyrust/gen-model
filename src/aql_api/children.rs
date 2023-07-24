@@ -194,13 +194,13 @@ pub async fn query_ancestor_till_types_aql(arango_database: &ArDatabase, refno: 
     for o in 1..10 outbound @id @@pdms_edges
         PRUNE o.noun in @nouns
         FILTER o.noun in @nouns
-        return return {
+        return {
             '_key':o._key,
             'owner':o.owner,
             'name':o.name,
             'noun':o.noun,
             'version':0,
-            'children_count':0 ),
+            'children_count':0,
         }")
         .bind_var("id", refno_aql)
         .bind_var("nouns", att_types)
