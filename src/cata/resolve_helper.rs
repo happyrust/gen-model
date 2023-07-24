@@ -394,7 +394,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 CateGeoParam::SCylinder(CateSCylinderParam {
                     refno: gmse.refno,
                     axis: (gmse.paxises[0].clone()),
-                    dist_to_btm: gmse.distances[1],
+                    dist_to_btm: gmse.distances[0],
                     height: gmse.phei,
                     diameter: gmse.diameters[0],
                     centre_line_flag: gmse.centre_line_flag,
@@ -436,7 +436,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                         axis: (gmse.paxises[0].clone()),
                         height: gmse.phei,
                         diameter: gmse.diameters[0],
-                        dist_to_btm: gmse.distances[1],
+                        dist_to_btm: gmse.distances[0],
                         x_shear: gmse.shears[0],
                         y_shear: gmse.shears[1],
                         alt_x_shear: gmse.shears[2],
@@ -492,7 +492,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 CateGeoParam::Cone(CateConeParam {
                     refno: gmse.refno,
                     axis: (gmse.paxises[0].clone()),
-                    dist_to_btm: gmse.distances[1],
+                    dist_to_btm: gmse.distances[0],
                     diameter: gmse.diameters[0],
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
@@ -522,7 +522,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 CateGeoParam::Dish(CateDishParam {
                     refno: gmse.refno,
                     axis: (gmse.paxises[0].clone()),
-                    dist_to_btm: gmse.distances[1],
+                    dist_to_btm: gmse.distances[0],
                     height: gmse.phei,
                     diameter: gmse.diameters[0],
                     radius: gmse.radius,
@@ -588,7 +588,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 CateGeoParam::Sphere(CateSphereParam {
                     refno: gmse.refno,
                     axis: (gmse.paxises[0].clone()),
-                    dist_to_center: gmse.distances[1],
+                    dist_to_center: gmse.distances[0],
                     diameter: gmse.diameters[0],
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
