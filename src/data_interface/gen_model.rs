@@ -179,7 +179,6 @@ pub async fn gen_prim_geos(
                     aabb
                 } else {
                     let tmp_tol = if attr.is_neg() {
-                        // tol_ratio.map(|x| x * 3.0)
                         tol_ratio
                     } else {
                         tol_ratio
@@ -216,9 +215,9 @@ pub async fn gen_prim_geos(
                 if geo_insts.len() > 0 {
                     shape_insts_data.insert_info(refno, geos_info);
                     shape_insts_data.insert_geos_data(
-                        *refno,
+                        refno.to_url_refno(),
                         EleInstGeosData {
-                            inst_key: *refno,
+                            inst_key: refno.to_url_refno(),
                             refno,
                             insts: geo_insts,
                             aabb: Some(geo_aabb),
@@ -474,9 +473,9 @@ pub async fn gen_loop_geos(
                 geos_info.aabb = Some(aabb_apply_transform(&ele_aabb, &trans_origin));
                 shape_insts_data.insert_info(parent_refno, geos_info.clone());
                 shape_insts_data.insert_geos_data(
-                    *parent_refno,
+                    parent_refno.to_url_refno(),
                     EleInstGeosData {
-                        inst_key: *parent_refno,
+                        inst_key: parent_refno.to_url_refno(),
                         refno: parent_refno,
                         insts: vec![geom_inst.clone()],
                         aabb: Some(ele_aabb),
@@ -891,7 +890,7 @@ pub async fn gen_cata_geos(
                                 n_geos_info.update_to_ngmr();
                                 let mut inst_key = n_geos_info.get_inst_key();
                                 let n_origin = EleInstGeosData {
-                                    inst_key,
+                                    inst_key: inst_key.clone(),
                                     refno: cat_refno,
                                     insts: ngmr_geo_insts,
                                     aabb: n_merged_cata_aabb,
@@ -920,7 +919,7 @@ pub async fn gen_cata_geos(
                                 };
                                 shape_insts_data.insert_info(ele_refno, geos_info.clone());
                                 target_geo_data_option = Some(origin.clone());
-                                shape_insts_data.insert_geos_data(inst_key, origin.clone());
+                                shape_insts_data.insert_geos_data(geos_info.get_inst_key(), origin.clone());
 
                                 //在这里执行负实体的运算
                                 let mut final_geo_insts = geo_insts;
@@ -977,14 +976,13 @@ pub async fn gen_cata_geos(
                                         final_geo_insts.push(compound_geom_inst);
                                     }
                                     let compound_geos_data = EleInstGeosData {
-                                        inst_key,
+                                        inst_key: inst_key.clone(),
                                         refno: cat_refno,
                                         insts: final_geo_insts,
                                         aabb: origin.aabb.clone(),
                                         type_name: origin.type_name.clone(),
                                         ptset_map: origin.ptset_map.clone(),
                                     };
-                                    // target_geo_data_option = Some(compound_geos_data.clone());
                                     shape_insts_data.insert_geos_data(inst_key, compound_geos_data);
                                     shape_insts_data.insert_compound_info(
                                         ele_refno,
@@ -1081,7 +1079,7 @@ pub async fn gen_cata_geos(
                             let mut n_geos_info = geos_info.clone();
                             //更新为ngmr类型
                             n_geos_info.update_to_ngmr();
-                            let geo_hash = n_geos_info.get_inst_key();
+                            let geo_hash = n_geos_info.get_inst_key_u64();
                             //将ngmr的mesh加载到内存，方便后续处理负实体
                             if let Ok(aabb) = mgr_clone.get_mesh_aabb_from_localdb(geo_hash) {
                                 if let Ok(mesh) = mgr_clone.get_mesh_from_localdb(geo_hash) {
@@ -1461,9 +1459,9 @@ pub async fn gen_geos_data(
         let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
         let unit_box_aabb = Aabb::new(Point3::new(-0.5, -0.5, -0.5), Point3::new(0.5, 0.5, 0.5));
         shape_insts_data.insert_geos_data(
-            TUBI_GEO_HASH,
+            TUBI_GEO_HASH.to_string(),
             EleInstGeosData {
-                inst_key: TUBI_GEO_HASH,
+                inst_key: TUBI_GEO_HASH.to_string(),
                 refno: Default::default(),
                 insts: vec![EleInstGeo {
                     geo_hash: TUBI_GEO_HASH,
@@ -1482,9 +1480,9 @@ pub async fn gen_geos_data(
             },
         );
         shape_insts_data.insert_geos_data(
-            BOXI_GEO_HASH,
+            BOXI_GEO_HASH.to_string(),
             EleInstGeosData {
-                inst_key: BOXI_GEO_HASH,
+                inst_key: BOXI_GEO_HASH.to_string(),
                 refno: Default::default(),
                 insts: vec![EleInstGeo {
                     geo_hash: BOXI_GEO_HASH,
@@ -1936,8 +1934,8 @@ pub async fn gen_geos_data(
                         // dbg!(&comp_geos_info);
                         inst_info_result_map_clone.insert(comp_refno, comp_geos_info);
                         let comp_type = mgr.get_refno_basic(comp_refno).unwrap().get_type().to_string();
-                        inst_geos_result_map_clone.insert(inst_key, EleInstGeosData {
-                            inst_key,
+                        inst_geos_result_map_clone.insert(inst_key.to_string(), EleInstGeosData {
+                            inst_key: inst_key.to_string(),
                             refno: comp_refno,
                             insts: vec![geom_inst],
                             aabb: origin_comp_geos_info.aabb.clone(),
@@ -2072,7 +2070,7 @@ pub async fn gen_geos_data(
                     dbg!(final_manifold.num_tri());
                     let mut new_geos_info = parent_geos_info.clone();
                     new_geos_info.update_to_compound();
-                    let geo_hash = new_geos_info.get_inst_key();
+                    let geo_hash = new_geos_info.get_inst_key_u64();
                     p_inst.geo_hash = geo_hash;
                     p_inst.transform = Transform::IDENTITY;
                     let mut mesh: PlantMesh = (final_manifold.clone()).into();
@@ -2082,7 +2080,7 @@ pub async fn gen_geos_data(
                     // final_manifold.destroy();
                     let mut new_geos_data = parent_geos_data.clone();
                     new_geos_data.insts = vec![p_inst];
-                    new_geos_data.inst_key = geo_hash;
+                    new_geos_data.inst_key = new_geos_info.get_inst_key();
                     // new_geos_data.aabb = d.aabb;
 
                     mesh_mgr.insert(geo_hash, PlantGeoData {
@@ -2090,7 +2088,7 @@ pub async fn gen_geos_data(
                         mesh: Some(mesh),
                         aabb: new_geos_data.aabb,
                     });
-                    shape_insts_data.insert_geos_data(geo_hash, new_geos_data);
+                    shape_insts_data.insert_geos_data(new_geos_info.get_inst_key(), new_geos_data);
                     shape_insts_data.insert_compound_info(parent, new_geos_info);
                 }
             }
