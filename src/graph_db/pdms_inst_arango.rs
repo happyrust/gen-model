@@ -179,7 +179,7 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
         .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     let mut inst_info_map = HashMap::new();
-    let mut inst_keys = geos_info.iter().map(|x| x.get_inst_key().to_string()).collect::<Vec<_>>();
+    let mut inst_keys = geos_info.iter().map(|x| x.get_inst_key()).collect::<Vec<_>>();
     for g in geos_info {
         inst_info_map.insert(g.refno, g);
     }
