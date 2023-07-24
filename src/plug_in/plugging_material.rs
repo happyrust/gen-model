@@ -1,4 +1,4 @@
-use std::default::default;
+use std::default;
 use std::sync::Arc;
 use aios_core::pdms_types::RefU64;
 use crate::api::children::travel_children_with_type;
@@ -63,7 +63,7 @@ pub async fn get_plugging_data_detail(aios_mgr: &AiosDBManager, refnos: Vec<(Ref
                     size: desp,
                     own_refno: i.1.clone(),
                     materials,
-                    ..default()
+                    ..Default::default()
                 });
             }
         }
@@ -101,7 +101,7 @@ pub async fn get_plugging_data_detail(aios_mgr: &AiosDBManager, refnos: Vec<(Ref
                 size: desp,
                 own_refno: i.1.clone(),
                 materials,
-                ..default()
+                ..Default::default()
             });
         }
     }
