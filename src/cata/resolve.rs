@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::default::default;
+use std::default;
 use std::ops::Neg;
 use std::panic;
 use std::sync::Arc;
@@ -184,12 +184,12 @@ impl CataExprContext {
 
         for i in 0..self.params.len() {
             //todo OPAR需要去有catalog的父节点里去找
-            context.insert(format!("OPAR{}", i + 1).into(), self.params[i].to_string().into());
-            context.insert(format!("APAR{}", i + 1).into(), self.params[i].to_string().into());
-            context.insert(format!("CPAR{}", i + 1).into(), self.params[i].to_string().into());
+            // context.insert(format!("OPAR{}", i + 1).into(), self.params[i].to_string().into());
+            // context.insert(format!("APAR{}", i + 1).into(), self.params[i].to_string().into());
+            // context.insert(format!("CPAR{}", i + 1).into(), self.params[i].to_string().into());
             context.insert(format!("PARA{}", i + 1).into(), self.params[i].to_string().into());
-            context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
-            context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
+            // context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
+            // context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
         }
         context
     }
