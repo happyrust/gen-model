@@ -202,7 +202,7 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
 
     let inst_geos: Vec<EleInstGeosData> = database.aql_query(aql).await.unwrap();
     for g in inst_geos {
-        inst_geos_map.insert(g.inst_key, g);
+        inst_geos_map.insert(g.inst_key.clone(), g);
     }
 
     let mut inst_tubi_map = HashMap::new();
