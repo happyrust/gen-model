@@ -7,7 +7,7 @@ edition = "2021"
 default = []
 truck = []
 viewer = []  #是否开启视图
-gen_model = ["aios_core/gen_model"]
+gen_model = []
 
 [dependencies]
 config = "0.13.1"
