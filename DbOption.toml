@@ -54,7 +54,7 @@ puhua_database_password = "ZYuser@123"
 
 #调试选项
 replace_mesh = true
-apply_boolean_operation = false
+apply_boolean_operation = true
 need_sync_refno_basic = false
 save_model_mesh_to_graph_db = true
 only_update_dbinfo = false
