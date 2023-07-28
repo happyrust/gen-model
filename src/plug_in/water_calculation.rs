@@ -31,7 +31,7 @@ pub async fn get_hole_refno(aios_mgr: &AiosDBManager, types: &HashSet<&str>, wat
 }
 
 ///得到导出stp所需孔洞数据
-pub async fn get_detail_data_for_export_stp(aios_mgr: &AiosDBManager, mut data: ExportFloodingStpEvent) -> ExportFloodingStpEvent {
+pub async fn get_detail_data_for_export_stp(aios_mgr: &AiosDBManager, mut data: ExportFloodingStpEvent) -> WaterComputeStp {
     //向上找到对应的wall
     let att_type = HashSet::from(["CWALL", "STWALL", "GWALL", "WALL", "CFLOOR", "FLOOR"]);
     for i in &data.refnos {
@@ -67,11 +67,11 @@ pub async fn get_detail_data_for_export_stp(aios_mgr: &AiosDBManager, mut data: 
             refno = basic.get_owner();
         }
     }
-    data
+    data.stp
 }
 
 ///导出水淹计算stp
-pub fn export_stp(data: ExportFloodingStpEvent) -> ExportFloodingStpEvent {
-    dbg!(&data.stp);
+pub fn export_stp(data: WaterComputeStp) -> WaterComputeStp {
+    dbg!(&data);
     data
 }
