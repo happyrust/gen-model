@@ -266,15 +266,15 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "AIDLIN";
-    let hash = db1_hash(noun);
-    dbg!(hash);
-    // let hashes = [798355,644698,640493,907462,631900,855442,926170,239044746,566245];
-    // for hash in hashes {
-    //     let str = db1_dehash(hash);
-    //     dbg!(&hash);
-    //     dbg!(str);
-    // }
+    // let noun = "AIDLIN";
+    // let hash = db1_hash(noun);
+    // dbg!(hash);
+    let hashes = [397059875];
+    for hash in hashes {
+        let str = db1_dehash(hash);
+        dbg!(&hash);
+        dbg!(str);
+    }
 }
 
 #[test]

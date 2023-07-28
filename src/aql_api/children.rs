@@ -211,6 +211,34 @@ pub async fn query_ancestor_till_types_aql(arango_database: &ArDatabase, refno: 
     Ok(Some(result[0].clone()))
 }
 
+/// 向上遍历多个节点父节点直到某个类型集合，只返回类型为该att_types中的数据
+pub async fn query_refnos_ancestor_till_types_aql(arango_database: &ArDatabase, refnos: Vec<RefU64>, att_types: Vec<&str>) -> anyhow::Result<Vec<PdmsElement>> {
+    let refnos = refnos
+        .into_iter()
+        .map(|refno|format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .collect::<Vec<_>>();
+    let aql = AqlQuery::new("
+    With @@pdms_eles,@@pdms_edges
+    for id in @ids
+    for o in 1..10 outbound id @@pdms_edges
+        PRUNE o.noun in @nouns
+        FILTER o.noun in @nouns
+        return {
+            '_key':o._key,
+            'owner':o.owner,
+            'name':o.name,
+            'noun':o.noun,
+            'version':0,
+            'children_count':0,
+        }")
+        .bind_var("ids", refnos)
+        .bind_var("nouns", att_types)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+    let result = arango_database.aql_query::<PdmsElement>(aql).await?;
+    Ok(result)
+}
+
 pub async fn query_ancestor_with_name_till_type_aql(arango_database: &ArDatabase, refno: RefU64, att_type: &str) -> anyhow::Result<Vec<PdmsRefnoNameAql>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("

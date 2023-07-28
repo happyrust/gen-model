@@ -9,6 +9,7 @@ use crate::api::refno_info::query_refno_height_position;
 use crate::api::room_code::query_room_code;
 use crate::aql_api::children::{query_refnos_travel_children_with_type_aql};
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
+use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -24,7 +25,7 @@ pub async fn get_inst_data(refnos: Vec<RefU64>, database: &ArDatabase, pool: &Po
                 object_model_code: "COMPADD".to_string(),
                 project_code: "1516".to_string(),
                 instance_code: if valv.name.starts_with("/") { valv.name[1..].to_string() } else { valv.name },
-                version: "A版".to_string(),
+                version: get_refno_latest_version(),
                 attributes: vec![DataCenterAttr {
                     attribute_model_code: "COMP8".to_string(),
                     value: room_name,
@@ -96,7 +97,7 @@ pub async fn get_inst_equi_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -
                 object_model_code: "COMPAD".to_string(),
                 project_code: "1516".to_string(),
                 instance_code: name,
-                version: "A版".to_string(),
+                version: get_refno_latest_version(),
                 attributes: attr,
             });
         }

@@ -299,6 +299,11 @@ fn gen_dq_material_code_sql(spre_name_split: &str, stander_num: &str, fileds: &V
     sql
 }
 
+/// 获取该节点的当年校审版本
+pub fn get_refno_latest_version() -> String {
+    "A版".to_string()
+}
+
 #[tokio::test]
 async fn test_get_inst_data_from_inst_major() -> anyhow::Result<()> {
     let mgr = AiosDBManager::init_form_config().await?;

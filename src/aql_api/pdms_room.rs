@@ -377,6 +377,10 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &ArDatabase) -> a
     Ok(r)
 }
 
+/// 返回贯穿件 穿过的两个房间号 ， tuple.0：距离核岛中心 世界坐标 0，0，0 最近的点
+pub async fn query_through_element_rooms(refno:RefU64) -> anyhow::Result<Option<(String,String)>> {
+    Ok(Some(("R101".to_string(),"R102".to_string())))
+}
 
 #[tokio::test]
 async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
