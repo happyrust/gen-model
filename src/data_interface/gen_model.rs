@@ -521,7 +521,6 @@ pub async fn gen_cata_single_geoms(
     let geoms_info = resolve_desi_comp(Some(mgr.as_ref()), design_refno, None, scom_info_map, None)
         .await
         .unwrap_or_default();
-    dbg!(geoms_info.geometries.len());
     if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" {
         create_profile_geos(
             design_refno,
@@ -730,22 +729,6 @@ pub async fn gen_cata_geos(
                                 }
                                 let mut trans = brep_shape.get_trans();
                                 let is_neg = neg_refnos.contains(&refno);
-                                // if is_scaled_reuse {
-                                //     if brep_shape.is_reuse_unit() {
-                                //         let attr = mgr
-                                //             .get_attr_from_localdb(ele_refno)
-                                //             .unwrap_or_default();
-                                //         let poss = attr.get_vec3("POSS").unwrap_or_default();
-                                //         let pose = attr.get_vec3("POSE").unwrap_or_default();
-                                //         let v = (pose - poss).length();
-                                //         if v < f32::EPSILON {
-                                //             continue;
-                                //         }
-                                //         geos_info.world_transform.scale = Vec3::new(1.0, 1.0, v);
-                                //         trans.scale = Vec3::ONE;
-                                //         is_reuse_unit = true;
-                                //     }
-                                // }
                                 let geo_hash = brep_shape.hash_unit_mesh_params();
                                 let mut geo_aabb = if !replace_mesh && let Ok(aabb) = mgr_clone.get_mesh_aabb_from_localdb(geo_hash) {
                                     if let Ok(mesh) = mgr_clone.get_mesh_from_localdb(geo_hash) {
@@ -788,23 +771,10 @@ pub async fn gen_cata_geos(
                                         continue;
                                     };
                                     //稍微扩张一点
-                                    // dbg!(refno);
-                                    // let s = if is_ngmr || is_neg {
-                                    //     Mat4::from_scale(Vec3::splat(1.1))
-                                    // }else{
-                                    //     Mat4::IDENTITY
-                                    // };
                                     if is_neg{
                                         let mut center: Vec3 = aabb.center().into();
                                         let t_mat = Mat4::from_translation(center);
                                         let mut s = 1.01;
-                                        //todo use brep substract, if use mesh, may exist many tolerance problem
-                                        // let s_mat = if matches!(geo_inst.geo_param, PdmsGeoParam::PrimRevolution(_)) {
-                                        //     // Mat4::from_scale(Vec3::new(s, s, 1.0))
-                                        //     Mat4::from_scale(Vec3::new(1.0, s, s))
-                                        // } else {
-                                        //     Mat4::from_scale(Vec3::new(1.0, 1.0, s))
-                                        // };
                                         let s_mat = Mat4::from_scale(Vec3::new(1.0, 1.0, s));
                                         let inv_t_mat = Mat4::from_translation(-center);
                                         local_mat = local_mat * t_mat * s_mat * inv_t_mat;
@@ -885,10 +855,14 @@ pub async fn gen_cata_geos(
                                 }
                             }
 
+                            //保存ngmr的信息
                             if ngmr_geo_insts.len() > 0 {
                                 let mut n_geos_info = geos_info.clone();
-                                n_geos_info.update_to_ngmr();
+                                n_geos_info.update_to_ngmr(None);
                                 let mut inst_key = n_geos_info.get_inst_key();
+                                // if ele_refno.get_1() == 7994  {
+                                //     dbg!(&ngmr_geo_insts);
+                                // }
                                 let n_origin = EleInstGeosData {
                                     inst_key: inst_key.clone(),
                                     refno: cat_refno,
@@ -904,7 +878,6 @@ pub async fn gen_cata_geos(
                             //将负实体的运算结果，存在另外一个collection
                             let contain_ngmr = geo_insts.iter().any(|x| x.geo_type == GeoBasicType::CateCrossNeg);
                             if geo_insts.len() > 0 {
-                                // let is_debug =  ele_refno.get_1() == 84502;
                                 let mut inst_key = geos_info.get_inst_key();
                                 let origin = EleInstGeosData {
                                     inst_key,
@@ -944,11 +917,12 @@ pub async fn gen_cata_geos(
                                         continue;
                                     }
                                 }
+                                //元件库内部的负实体计算
                                 if !final_compounds_map.is_empty() {
                                     final_geo_insts.retain(|x| x.geo_type == GeoBasicType::Pos);
                                     // final_geo_insts.retain(|x| x.geo_type == GeoBasicType::CateCrossNeg);
                                     let mut compound_geos_info = geos_info;
-                                    compound_geos_info.update_to_compound();
+                                    compound_geos_info.update_to_compound(None);
                                     let inst_key = compound_geos_info.get_inst_key();
                                     for (k, v) in final_compounds_map {
                                         //组合成新的hash
@@ -1027,16 +1001,6 @@ pub async fn gen_cata_geos(
                         let Some(ref_basic) = mgr_clone.get_refno_basic(ele_refno) else {
                             continue;
                         };
-                        // let is_scaled_reuse =
-                        //     SCALED_REUSE_GEO_NAMES.contains(&ref_basic.get_type());
-                        // if is_scaled_reuse && target_geo_data.reuse_unit {
-                        //     let attr = mgr.get_attr_from_localdb(ele_refno).unwrap_or_default();
-                        //     let poss = attr.get_vec3("POSS").unwrap_or_default();
-                        //     let pose = attr.get_vec3("POSE").unwrap_or_default();
-                        //     let v = (pose - poss).length();
-                        //     o.scale = Vec3::new(1.0, 1.0, v);
-                        // }
-
                         let mut flow_pt_indexs = vec![];
                         let Some(own_ref_basic) = mgr_clone.get_refno_basic(ref_basic.owner) else {
                             continue;
@@ -1066,7 +1030,7 @@ pub async fn gen_cata_geos(
                         //如果有负实体，需要特殊处理
                         if target_geo_data.has_cata_neg() {
                             let mut compound_geos_info = geos_info.clone();
-                            compound_geos_info.update_to_compound();
+                            compound_geos_info.update_to_compound(None);
                             //为了不覆盖，这里需要动一下
                             shape_insts_data.insert_compound_info(
                                 ele_refno,
@@ -1078,18 +1042,18 @@ pub async fn gen_cata_geos(
                         if target_geo_data.has_ngmr() {
                             let mut n_geos_info = geos_info.clone();
                             //更新为ngmr类型
-                            n_geos_info.update_to_ngmr();
+                            n_geos_info.update_to_ngmr(None);
                             let geo_hash = n_geos_info.get_inst_key_u64();
                             //将ngmr的mesh加载到内存，方便后续处理负实体
-                            if let Ok(aabb) = mgr_clone.get_mesh_aabb_from_localdb(geo_hash) {
-                                if let Ok(mesh) = mgr_clone.get_mesh_from_localdb(geo_hash) {
-                                    cached_mesh_mgr.insert(geo_hash, PlantGeoData {
-                                        geo_hash,
-                                        mesh: Some(mesh),
-                                        aabb: Some(aabb),
-                                    });
-                                }
-                            }
+                            // if let Ok(aabb) = mgr_clone.get_mesh_aabb_from_localdb(geo_hash) {
+                            //     if let Ok(mesh) = mgr_clone.get_mesh_from_localdb(geo_hash) {
+                            //         cached_mesh_mgr.insert(geo_hash, PlantGeoData {
+                            //             geo_hash,
+                            //             mesh: Some(mesh),
+                            //             aabb: Some(aabb),
+                            //         });
+                            //     }
+                            // }
                             shape_insts_data.insert_ngmr_info(
                                 ele_refno,
                                 n_geos_info,
@@ -1255,9 +1219,6 @@ pub async fn gen_cata_geos(
             let axis_map = &inst_geos_data.ptset_map;
             let arrive = inst_info.flow_pt_indexs[0];
             let leave = inst_info.flow_pt_indexs[1];
-            if refno.get_1() == 161711 {
-                dbg!(arrive);
-            }
             //有隐含管段
             // dbg!(axis_map);
             bran_comp_vec.push(refno);
@@ -1849,7 +1810,6 @@ pub async fn gen_geos_data(
                                         };
                                         let inv_t_mat = Mat4::from_translation(-center);
                                         local_mat = local_mat * t_mat * s_mat * inv_t_mat;
-                                        // local_mat = local_mat * s_mat;
                                     }
 
                                     #[cfg(debug_assertions)]
@@ -1893,7 +1853,8 @@ pub async fn gen_geos_data(
                             let final_manifold = src_manifold.batch_boolean_subtract(&batch_manifolds);
                             let final_mesh: PlantMesh = final_manifold.clone().into();
                             for m in batch_manifolds {
-                                // m.destroy();
+                                // #[cfg(target_os = "macos" || target_os = "linux")]
+                                m.destroy();
                             }
                             // final_manifold.destroy();
                             // #[cfg(debug_assertions)]
@@ -1996,6 +1957,9 @@ pub async fn gen_geos_data(
                 // boolean_ngmr_map.clear();
                 //开始进行boolean操作
                 for (parent, refnos) in boolean_ngmr_map {
+                    // if parent.get_1() == 7971 {
+                    //     dbg!(&refnos);
+                    // }
                     //这里优先取compound的数据参与计算，如果没有再使用原生的info数据
                     let Some(parent_geos_info) = shape_insts_data.get_compound_info(parent)
                         .or(shape_insts_data.get_inst_info(parent)) else {
@@ -2024,6 +1988,9 @@ pub async fn gen_geos_data(
                     dbg!(parent_manifold.num_tri());
                     let mut neg_ms = vec![];
                     for refno in refnos {
+                        // if parent.get_1() == 7971 && refno.get_1() != 7994 {
+                        //     continue;
+                        // }
                         // dbg!(refno);
                         let Some(geos_info) = shape_insts_data.get_ngmr_info(&refno) else {
                             continue;
@@ -2031,21 +1998,15 @@ pub async fn gen_geos_data(
                         let Some(geos_data) = shape_insts_data.get_inst_geos_data(geos_info) else {
                             continue;
                         };
-                        // if refno.get_1() == 194994 {
-                        //     dbg!(geos_info);
-                        //     dbg!(geos_data);
-                        // dbg!(refno);
-                        // }
                         let relative_mat = parent_matrix_inverse * geos_info.world_transform.compute_matrix();
                         // let relative = Transform::from_matrix(relative_mat);
                         // dbg!(relative);
                         // dbg!(quat_to_pdms_ori_str(&relative.rotation));
+                        // if parent.get_1() == 7971 && refno.get_1() == 7994 {
+                        //     dbg!(&geos_data.insts);
+                        // }
                         for g in &geos_data.insts {
                             let local_mat = relative_mat * g.transform.compute_matrix();
-                            // dbg!(&local_mat);
-                            // let tmp = Transform::from_matrix(local_mat);
-                            // dbg!(tmp);
-                            // dbg!(quat_to_pdms_ori_str(&tmp.rotation));
                             let Some(mesh) = mesh_mgr.get_mesh(g.geo_hash) else {
                                 continue;
                             };
@@ -2057,7 +2018,6 @@ pub async fn gen_geos_data(
                             let t_mat = Mat4::from_translation(center);
                             let s = 1.05;
                             let s_mat = Mat4::from_scale(Vec3::new(1.0, 1.0, s));
-                            // let s_mat = Mat4::from_scale(Vec3::splat(s));
                             let inv_t_mat = Mat4::from_translation(-center);
                             let final_mat = local_mat * t_mat * s_mat * inv_t_mat;
 
@@ -2071,14 +2031,18 @@ pub async fn gen_geos_data(
                     let mut final_manifold = parent_manifold.batch_boolean_subtract(&neg_ms);
                     #[cfg(debug_assertions)]
                     dbg!(final_manifold.num_tri());
+                    //相当于更新
                     let mut new_geos_info = parent_geos_info.clone();
-                    new_geos_info.update_to_compound();
+                    //如果和ngmr发生相减后， 没有复用了
+                    // new_geos_info.cata_hash = Some(parent.to_url_refno());
+                    new_geos_info.update_to_compound(Some(parent.to_url_refno().as_str()));
                     let geo_hash = new_geos_info.get_inst_key_u64();
                     p_inst.geo_hash = geo_hash;
                     p_inst.transform = Transform::IDENTITY;
                     let mut mesh: PlantMesh = (final_manifold.clone()).into();
                     for f in neg_ms {
-                        // f.destroy();
+                        // #[cfg(target_os = "macos"|| target_os = "linux")]
+                        f.destroy();
                     }
                     // final_manifold.destroy();
                     let mut new_geos_data = parent_geos_data.clone();

@@ -50,7 +50,7 @@ use parry3d::shape::{Compound, ConvexPolyhedron, SharedShape};
 use parry3d::transformation::vhacd;
 use parry3d::transformation::vhacd::VHACD;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
-// use regex::internal::Input;
+use regex::internal::Input;
 use sqlx::pool::PoolConnection;
 use sqlx::Executor;
 use sqlx::{Acquire, MySql, MySqlPool, Pool, Row};
@@ -203,6 +203,55 @@ async fn main() -> anyhow::Result<()> {
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
+    }
+
+    #[cfg(feature = "gen_model")]
+    if db_option.gen_model {
+        println!("正在生成模型");
+        let mut time = Instant::now();
+        //
+
+        let refno = RefU64::from_two_nums(25688, 7972);
+        let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        dbg!(transform);
+
+        // let refno = RefU64::from_two_nums(23708, 1234);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(23708, 26027);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+
+        //
+        // let refno = RefU64::from_two_nums(17496, 195550);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(17496, 173130);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(17496, 173131);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(17496, 156942);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+
+        // let branch_refnos = query_deep_children_refnos_fuzzy(&database, &[refno], &CATA_HAS_TUBI_GEO_NAMES).await?;
+        // dbg!(branch_refnos);
+
+        gen_geos_data(mgr.clone()).await?;
+        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
     ///生成ssc 树

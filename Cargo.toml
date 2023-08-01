@@ -4,10 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
+default = ["opencascade_rs"]
 truck = []
 viewer = []  #是否开启视图
-gen_model = []
+gen_model = ["aios_core/gen_model"]
+opencascade_rs = ["aios_core/opencascade_rs"]
 
 [dependencies]
 config = "0.13.1"
@@ -65,11 +66,11 @@ debug_print = "1.0.0"
 
 
 #造型功能，先在database测试
-#opencascade = { path = "../dslcad/crates/opencascade", optional = true }
+opencascade = { path = "../crates/opencascade-rs/crates/opencascade"} #, optional = true
 serde_with = "3.0.0"
 tokio-stream = "0.1.14"
 rayon = "1.7.0"
-redb = "0.22.0"
+redb = "1.0.5"
 #geo = "0.24.1"
 
 #mcut-sys = { path = "../crates/mcut-sys"}
