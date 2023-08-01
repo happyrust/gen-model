@@ -414,7 +414,7 @@ fn get_instance_data_element(metadata_map: &HashMap<String, Vec<String>>, refno:
         "FLAN" => { get_data_center_flan_attr(refno) }
         "REDU" => { get_data_center_redu_attr(refno) }
         "TEE" => { get_data_center_tee_attr(refno) }
-        "TUBE" | "TUBI" => { get_data_center_tubi_attr(refno) }
+        // "TUBE" | "TUBI" => { get_data_center_tubi_attr(refno) }
         &_ => { Vec::new() }
     };
     Some(DataCenterInstance {

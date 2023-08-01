@@ -299,6 +299,18 @@ fn gen_dq_material_code_sql(spre_name_split: &str, stander_num: &str, fileds: &V
     sql
 }
 
+/// 通过spre name 返回材料编码 命名规则为 第二个 / 到 :
+///
+/// 例如 "/VMB1/CPP00102:P,50" -> "CPP00102"
+pub(crate) fn get_spre_material_code(spre_name:&str) -> Option<String> {
+    let spre_name_split = spre_name.split("/").collect::<Vec<_>>();
+    if spre_name_split.len() < 3 { return None; }
+    let spre_name_last = spre_name_split[2];
+    let split = spre_name_last.split(":").collect::<Vec<_>>();
+    if split.len() < 2 { return None; }
+    Some(split[0].to_string())
+}
+
 /// 获取该节点的当年校审版本
 pub fn get_refno_latest_version() -> String {
     "A版".to_string()

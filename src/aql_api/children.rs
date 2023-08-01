@@ -317,6 +317,22 @@ pub async fn query_travel_children_aql(arango_database: &ArDatabase, refno: RefU
     Ok(results)
 }
 
+/// 遍历该refno的所有子节点包含自己，并只返回参考号
+pub async fn query_travel_children_refnos_aql(arango_database: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let aql = AqlQuery::new("\
+    With @@pdms_eles,@@pdms_edges
+    for c in 0..10 inbound @id @@pdms_edges
+    return c._key
+    ")
+        .bind_var("id", refno_aql)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+    let result: Vec<String> = arango_database.aql_query(aql).await?;
+    let refnos = convert_refno_vec_from_vec_string(result);
+    Ok(refnos)
+}
+
 /// 遍历该refno的所有子节点，不包含叶子节点
 pub async fn query_travel_children_with_out_leaf_aql(arango_database: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());

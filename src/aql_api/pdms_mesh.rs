@@ -161,6 +161,26 @@ pub async fn query_pdms_mesh_aql(database: &ArDatabase, hashes: &[u64]) -> anyho
     Ok(cache_mgr)
 }
 
+///查询相应的mesh数据
+pub async fn query_pdms_mesh_from_hash_str_aql(database: &ArDatabase, hash_strs: Vec<String>) -> anyhow::Result<PlantMeshesData> {
+    let mut cache_mgr = PlantMeshesData::default();
+    // dbg!(&hash_strs);
+    let aql = AqlQuery::new("\
+    With @@pdms_mesh
+    for hash in @hashes
+        let d = document(@@pdms_mesh,hash)
+        filter d != null
+        return d
+    ")
+        .bind_var("hashes", hash_strs)
+        .bind_var("@pdms_mesh",AQL_PDMS_MESH_COLLECTION);
+    let results: Vec<PlantGeoData> = database.aql_query(aql).await?;
+    for result in results {
+        cache_mgr.meshes.entry(result.geo_hash).or_insert(result);
+    }
+    Ok(cache_mgr)
+}
+
 //
 // pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<PlantMeshesData> {
 //     let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());

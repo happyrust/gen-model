@@ -20,7 +20,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::pcf::bran::get_bran_name_and_children;
 use crate::pcf::excel_api::get_pipe_thickness_table;
-use crate::consts::{AQL_PDMS_ELES_COLLECTION, AQL_TUBI_EDGES_COLLECTION};
+use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_TUBI_EDGES_COLLECTION};
 use crate::data_interface::db_model::TUBI_TOL;
 
 /// 找到某个节点下所有的 bran 中的 tubi
@@ -61,26 +61,24 @@ pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<
 pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<TubiEdge>> {
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
     let aql = AqlQuery::new("
-    With @@pdms_eles,@@tubi_edges
-    let bran_name = ( return document(@@pdms_eles,@bran_refno).name )
-    for v,e in 0..1000 outbound @id @@tubi_edges
-    filter bran_name[0] != null
-    filter bran_name[0] == e.bran_name
-    filter e != null
+    With @@pdms_eles,@@tubi_edges,@@pdms_edges
+    for v in 0..1 inbound @id @@pdms_edges
+    filter v != null
+    for tubi,e in 1 outbound v._id tubi_edges
     return {
-        '_key': e._key,
-        '_from': e._from,
+        '_key':e._key,
+        '_from':e._from,
         '_to':e._to,
-        'start_pt': e.start_pt,
-        'end_pt': e.end_pt,
-        'att_type': e.att_type,
-        'bran_name': e.bran_name,
+        'att_type':e.att_type,
+        'start_pt':e.start_pt,
+        'end_pt':e.end_pt,
         'extra_type': e.extra_type,
-        'bore': e.bore
+        'bran_name':e.bran_name,
+        'tubi_size':e.tubi_size,
     }")
         .bind_var("id", key)
-        .bind_var("bran_refno", bran_refno.to_url_refno())
         .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION)
         .bind_var("@tubi_edges",AQL_TUBI_EDGES_COLLECTION);
     let mut results: Vec<TubiEdge> = database.aql_query(aql).await?;
     // 过滤不是 tubi 的数据
