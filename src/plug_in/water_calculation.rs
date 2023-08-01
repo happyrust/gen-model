@@ -74,6 +74,7 @@ pub async fn get_detail_data_for_export_stp(aios_mgr: &AiosDBManager, mut data: 
 }
 
 ///导出水淹计算stp
+#[cfg(feature = "opencascade_rs")]
 pub async fn export_stp(mgr: &AiosDBManager, stp_packet: &WaterComputeStp) -> anyhow::Result<bool> {
 
     let pos_refnos: Vec<RefU64> = stp_packet.civil_engineering.iter()
