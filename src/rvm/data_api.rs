@@ -224,18 +224,20 @@ pub async fn query_rvm_geo_instance_aql(refnos: Vec<RefU64>, database: &ArDataba
     let refnos = refnos.into_iter()
         .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
         .collect::<Vec<_>>();
+    // pub geo_type: GeoBasicType,
     let aql = AqlQuery::new("
     With @@pdms_eles,@@pdms_edges,@@pdms_inst_infos,@@pdms_inst_geos
     let hashes = (
     for id in @refnos
-    for v,e in 0 inbound id @@pdms_edges
+    for v,e in 0..10 inbound id @@pdms_edges
     let inst = document(@@pdms_inst_infos,v._key)
     filter inst != null
         return {
             'refno': inst._key,
             'noun' : v.noun,
             'world_transform': inst.world_transform,
-            'hash':inst.cata_hash == null ? inst._key : inst.cata_hash
+            'hash':inst.cata_hash == null ? inst._key : inst.cata_hash,
+            'geo_type': v.geo_type,
         }
     )
     for hash in hashes
