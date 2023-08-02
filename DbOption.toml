@@ -1,6 +1,6 @@
 
 #同步文件配置
-total_sync = false
+total_sync = true
 enable_log = false
 sync_graph_db = true
 sync_tidb = false
@@ -55,7 +55,7 @@ puhua_database_password = "ZYuser@123"
 #调试选项
 replace_mesh = true
 apply_boolean_operation = true
-need_sync_refno_basic = false
+need_sync_refno_basic = true
 save_model_mesh_to_graph_db = true
 only_update_dbinfo = false
 debug_print_world_transform = false
@@ -64,7 +64,7 @@ replace_dbs = true
 #debug_root_refnos = ["24381/48841"]
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #manual_db_nums =[]
-#included_db_files = ["ams6890_0001"]
+included_db_files = ["ams1112_0001"]
 #replace_types = ["SDTE"]
 #plat_url = "http://10.27.11.78/"
 
