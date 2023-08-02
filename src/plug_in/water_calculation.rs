@@ -73,6 +73,7 @@ pub async fn get_detail_data_for_export_stp(aios_mgr: &AiosDBManager, mut data: 
     data.stp
 }
 
+#[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
 pub async fn export_stp(mgr: &AiosDBManager, stp_packet: &WaterComputeStp) -> anyhow::Result<bool> {
 
