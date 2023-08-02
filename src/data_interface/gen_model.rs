@@ -1279,11 +1279,15 @@ pub async fn gen_cata_geos(
                 let l_dir = world_trans.transform_vec3(dir).normalize_or_zero();
                 let l_ref_dir = world_trans.transform_vec3(ref_dir).normalize_or_zero();
                 let l_pos = world_trans.transform_point(axis_map[&leave].pt);
-                let lstube_cat_ref = refno_lstube_map
-                    .get(&refno)
-                    .map(|x| *x.value())
-                    .unwrap_or_default();
-                // let bore = lstube_bores_map
+                // let lstube_cat_ref = refno_lstube_map
+                //     .get(&refno)
+                //     .map(|x| *x.value())
+                //     .unwrap_or_default();
+                let att_map = mgr.get_attr_from_localdb(refno).unwrap_or_default();
+                let lstube_ref = att_map.get_foreign_refno("LSTU").unwrap_or_default();
+                let lstube_cat_ref = mgr.get_attr_from_localdb(lstube_ref).unwrap_or_default()
+                    .get_foreign_refno("CATR").unwrap_or_default();
+                    // let bore = lstube_bores_map
                 //     .get(&lstube)
                 //     .map(|x| *x.value())
                 //     .unwrap_or_default();
