@@ -4,11 +4,12 @@ use aios_core::pdms_types::RefU64;
 use aios_core::water_calculation::{CivilEngineeringStp, WaterComputeStp};
 use opencascade::primitives::Compound;
 use sqlx::encode::IsNull::No;
+#[cfg(feature = "opencascade_rs")]
 use crate::plug_in::water_calculation::export_stp;
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 
-
+#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 async fn test_export_water_calculation_stp()  -> anyhow::Result<()> {
     let mut stp_packet = WaterComputeStp::default();
