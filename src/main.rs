@@ -209,7 +209,9 @@ async fn main() -> anyhow::Result<()> {
     if db_option.gen_model {
         println!("正在生成模型");
         let mut time = Instant::now();
-        //
+        // let refno = RefU64::from_two_nums(25688, 8189);
+        // dbg!(mgr.get_attr_from_localdb(refno));
+        // dbg!(mgr.get_children_refs(refno).await);
 
         let refno = RefU64::from_two_nums(25688, 7972);
         let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();

@@ -22,7 +22,7 @@ use anyhow::anyhow;
 use dashmap::{DashMap, DashSet};
 use itertools::Itertools;
 use nom::character::complete::u64;
-use parse_pdms_db::parse::{parse_file_total_refnos, parse_file_with_chunk, PdmsDbData, WholeAttMap};
+use parse_pdms_db::parse::*;
 use parse_pdms_db::parse_file;
 use smol_str::SmolStr;
 use sqlx::mysql::MySqlArguments;
@@ -605,381 +605,396 @@ pub async fn sync_total_async_threaded(
             println!("path={:?}", &file_name);
             let project_clone = project.clone();
             let project_name = project.as_str().to_string();
-            let mut all_refnos = parse_file_total_refnos(&path, &None, &file_name, project_name.clone().as_str(), "").unwrap_or_default();
-            dbg!(all_refnos.len());
+            let mut children_map = parse_file_children_map(&path, &None, &file_name, project_name.clone().as_str(), "").unwrap_or_default();
+            dbg!(children_map.len());
+            let all_refnos = children_map.keys().cloned().collect::<Vec<_>>();
+            let children_map_clone = Arc::new(children_map);
 
             for chunk_refnos in all_refnos.chunks(CHUNK_NUM){
-                let path_clone = path.clone();
-                let file_name_clone = file_name.clone();
-                let chunk_refnos_clone = chunk_refnos.to_vec();
-                let project_name_clone = project_name.clone();
-                if let Ok(Ok(PdmsDbData {
-                                 all_attr_map,
-                                 total_attr_map,
-                                 type_ele_map,
-                                 refno_info_map,
-                                 children_map,
-                                 db_type,
-                                 db_no,
-                                 field_no,
-                                 version,
-                                 room_code_map,
-                                 foreign_refnos_map,
-                                 ..
-                             })) = tokio::task::spawn_blocking(move || {
-                    // parse_file(&path, &None, &file_name, project_name.clone().as_str(), "")
-                    parse_file_with_chunk(&path_clone, &None, &file_name_clone, project_name_clone.as_str(), "", &chunk_refnos_clone)
-                }).await
-                {
-                    //save dbno info first
-                    let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(
-                        db_no,
-                        &file_name,
-                        version,
-                        project_clone.clone().as_str(),
-                        db_type.clone(),
-                    );
-                    let mut info_conn = info_pool.acquire().await.unwrap();
+                println!("path={:?}", &file_name);
+                let project_clone = project.clone();
+                let project_name = project.as_str().to_string();
+                let mut children_map = parse_file_children_map(&path, &None, &file_name, project_name.clone().as_str(), "").unwrap_or_default();
+                let all_refnos = children_map.keys().cloned().collect::<Vec<_>>();
+                let children_map_clone = Arc::new(children_map);
 
-                    //保存dbno的信息表
-                    let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( id, NUMBDB, FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
-                    sql.push_str(dbinfo_value_sql.as_str());
-                    if is_replace {
-                        sql = sql.replace("INSERT IGNORE", "REPLACE");
+                if db_option.sync_graph_db.unwrap_or(true) {
+                    let database = arango_pool.get().await?.db(&db_option.arangodb_database).await?;
+                    save_pdms_level_edges_in_sync(&database, &children_map_clone).await?;
+                }
+
+                if let Some(children_tree) = children_tree.clone() {
+                    dbg!(children_map_clone.len());
+                    for (k, v) in children_map_clone.as_ref() {
+                        let mut vec = v.to_bytes()?;
+                        children_tree.insert((**k).to_be_bytes().as_slice(), &*vec)?;
                     }
-                    let result = info_conn.execute(sql.as_str()).await;
-                    match result {
-                        Ok(_) => {}
-                        Err(e) => {
-                            dbg!(&e);
-                            dbg!(sql.as_str());
+                }
+                for chunk_refnos in all_refnos.chunks(CHUNK_NUM){
+                    let path_clone = path.clone();
+                    let file_name_clone = file_name.clone();
+                    let chunk_refnos_clone = chunk_refnos.to_vec();
+                    let project_name_clone = project_name.clone();
+                    if let Ok(Ok(PdmsDbData {
+                                     total_attr_map,
+                                     type_ele_map,
+                                     refno_info_map,
+                                     db_type,
+                                     db_no,
+                                     version,
+                                     room_code_map,
+                                     foreign_refnos_map,
+                                     ..
+                                 })) = tokio::task::spawn_blocking(move || {
+                        // parse_file(&path, &None, &file_name, project_name.clone().as_str(), "")
+                        parse_file_with_chunk(&path_clone, &None, &file_name_clone, project_name_clone.as_str(), "", &chunk_refnos_clone)
+                    }).await
+                    {
+                        //save dbno info first
+                        let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(
+                            db_no,
+                            &file_name,
+                            version,
+                            project_clone.clone().as_str(),
+                            db_type.clone(),
+                        );
+                        let mut info_conn = info_pool.acquire().await.unwrap();
+
+                        //保存dbno的信息表
+                        let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( id, NUMBDB, FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
+                        sql.push_str(dbinfo_value_sql.as_str());
+                        if is_replace {
+                            sql = sql.replace("INSERT IGNORE", "REPLACE");
                         }
-                    }
-                    //保存refno的信息表
-                    let mut sql = format!(
-                        "INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (ID, REF0, PROJECT) VALUES "
-                    );
-                    for kv in &refno_info_map {
-                        let mut s: FxHasher32 = Default::default();
-                        kv.value().ref_0.hash(&mut s);
-                        project_clone.hash(&mut s);
-                        let h = s.finish();
-                        sql.push_str(&format!(
-                            r#"({}, {},'{}') ,"#,
-                            h,
-                            kv.value().ref_0,
-                            project_clone.as_str()
-                        ));
-                    }
-                    sql.remove(sql.len() - 1);
-                    if is_replace {
-                        sql = sql.replace("INSERT IGNORE", "REPLACE");
-                    }
-                    let result = info_conn.execute(sql.as_str()).await;
-                    match result {
-                        Ok(_) => {}
-                        Err(e) => {
-                            dbg!(&e);
-                            dbg!(sql.as_str());
+                        let result = info_conn.execute(sql.as_str()).await;
+                        match result {
+                            Ok(_) => {}
+                            Err(e) => {
+                                dbg!(&e);
+                                dbg!(sql.as_str());
+                            }
                         }
-                    }
-
-                    version_map
-                        .entry(file_name.clone())
-                        .or_insert(version);
-                    set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
-                    //类型暂时不多线程
-                    let total_attr_map_arc = Arc::new(total_attr_map);
-                    let children_map_arc = Arc::new(children_map);
-                    let mut type_handles = vec![];
-                    // 将部分数据保存到图数据库
-                    if db_option.sync_graph_db.unwrap_or(true) {
-                        if db_type == "CATA" || db_type == "DESI" {
-                            let database = arango_pool.get().await?.db(&db_option.arangodb_database).await?;
-                            // 将 pdms_element 部分数据保存到图数据库中
-                            save_pdms_element_to_arango(
-                                &database,
-                                &total_attr_map_arc,
-                                &children_map_arc,
-                                db_no as i32,
-                            ).await?;
-                            // 将兄弟关系保存到图数据库中
-                            save_pdms_level_edges_in_sync(&database, &children_map_arc).await?;
-
-                            save_foreign_refno_edges_in_sync(&database, foreign_refnos_map).await?;
-                            // 单独保存plin
-                            save_plin_attr_arangodb(&database, &type_ele_map, &total_attr_map_arc)
-                                .await?;
-                            // 将 para 和 des_para保存的图数据库中
-                            save_paras_into_arangodb(&database, &total_attr_map_arc).await?;
-                            // 将 dtse下的data部分数据保存到图数据库
-                            save_dtse_value_to_arangodb(&database, &type_ele_map, &total_attr_map_arc)
-                                .await?;
+                        //保存refno的信息表
+                        let mut sql = format!(
+                            "INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (ID, REF0, PROJECT) VALUES "
+                        );
+                        for kv in &refno_info_map {
+                            let mut s: FxHasher32 = Default::default();
+                            kv.value().ref_0.hash(&mut s);
+                            project_clone.hash(&mut s);
+                            let h = s.finish();
+                            sql.push_str(&format!(
+                                r#"({}, {},'{}') ,"#,
+                                h,
+                                kv.value().ref_0,
+                                project_clone.as_str()
+                            ));
                         }
-                        println!("图数据库保存完成");
-                    }
-
-                    if let Some(tree) = local_tree.clone() && let Some(children_tree) = children_tree.clone() {
-                        // let mut batch = sled::Batch::default();
-                        for kv in total_attr_map_arc.as_ref() {
-                            let mut vec = kv.value().merge_implicit_explicit_into_attr().into_rkyv_compress_bytes();
-                            tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
+                        sql.remove(sql.len() - 1);
+                        if is_replace {
+                            sql = sql.replace("INSERT IGNORE", "REPLACE");
                         }
-                        // tree.apply_batch(batch)?;
-
-                        // let mut batch = sled::Batch::default();
-                        for (k, v) in children_map_arc.as_ref() {
-                            let mut vec = v.to_bytes()?;
-                            children_tree.insert((**k).to_be_bytes().as_slice(), &*vec)?;
+                        let result = info_conn.execute(sql.as_str()).await;
+                        match result {
+                            Ok(_) => {}
+                            Err(e) => {
+                                dbg!(&e);
+                                dbg!(sql.as_str());
+                            }
                         }
-                        // children_tree.apply_batch(batch)?;
 
-                        // let c = total_attr_map_arc.clone();
-                        // let tree = db.open_tree("attr_map")?;
-                        // tree.transaction::<_, _, ()>(|tx_db| {
-                        //     for kv in c.as_ref() {
+                        version_map
+                            .entry(file_name.clone())
+                            .or_insert(version);
+                        set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
+                        //类型暂时不多线程
+                        let total_attr_map_arc = Arc::new(total_attr_map);
+                        let children_map_arc = children_map_clone.clone();
+                        let mut type_handles = vec![];
+                        // 将部分数据保存到图数据库
+                        if db_option.sync_graph_db.unwrap_or(true) {
+                            if db_type == "CATA" || db_type == "DESI" {
+                                let database = arango_pool.get().await?.db(&db_option.arangodb_database).await?;
+                                // 将 pdms_element 部分数据保存到图数据库中
+                                save_pdms_element_to_arango(
+                                    &database,
+                                    &total_attr_map_arc,
+                                    &children_map_arc,
+                                    db_no as i32,
+                                ).await?;
+
+
+                                save_foreign_refno_edges_in_sync(&database, foreign_refnos_map).await?;
+                                // 单独保存plin
+                                save_plin_attr_arangodb(&database, &type_ele_map, &total_attr_map_arc)
+                                    .await?;
+                                // 将 para 和 des_para保存的图数据库中
+                                save_paras_into_arangodb(&database, &total_attr_map_arc).await?;
+                                // 将 dtse下的data部分数据保存到图数据库
+                                save_dtse_value_to_arangodb(&database, &type_ele_map, &total_attr_map_arc)
+                                    .await?;
+                            }
+                            println!("图数据库保存完成");
+                        }
+
+                        if let Some(tree) = local_tree.clone()  {
+                            // let mut batch = sled::Batch::default();
+                            for kv in total_attr_map_arc.as_ref() {
+                                let mut vec = kv.value().merge_implicit_explicit_into_attr().into_rkyv_compress_bytes();
+                                tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
+                            }
+
+
+                            // children_tree.apply_batch(batch)?;
+
+                            // let c = total_attr_map_arc.clone();
+                            // let tree = db.open_tree("attr_map")?;
+                            // tree.transaction::<_, _, ()>(|tx_db| {
+                            //     for kv in c.as_ref() {
+                            //         let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                            //         tx_db.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
+                            //     }
+                            //     Ok(())
+                            //     // Ok::<(), ConflictableTransactionError<_>>(())
+                            // }).expect("Error inserting local db ");
+                        }
+
+                        //heed lmdb 的实现
+                        // if db_option.sync_localdb.unwrap_or(true) {
+                        //     use heed::bytemuck::{Pod, Zeroable};
+                        //     use heed::byteorder::BE;
+                        //     use heed::types::*;
+                        //     use heed::{Database, EnvOpenOptions};
+                        //     let path = Path::new(".").join(format!("{}.mdb", &project_clone));
+                        //
+                        //     fs::create_dir_all(&path)?;
+                        //
+                        //     let env = EnvOpenOptions::new()
+                        //         .map_size(10 * 1024 * 1024 * 1024) // 10MB
+                        //         .max_dbs(3000)
+                        //         .open(path)?;
+                        //
+                        //     // you can specify that a database will support some typed key/data
+                        //     //
+                        //     // like here we specify that the key will be an array of two i32
+                        //     // and the data will be an str
+                        //     let mut wtxn = env.write_txn()?;
+                        //     let db: Database<U64<BE>, heed::types::ByteSlice> = env.create_database(&mut wtxn, Some("att"))?;
+                        //     for kv in total_attr_map_arc.as_ref() {
                         //         let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
-                        //         tx_db.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
+                        //         db.put(&mut wtxn, &**kv.key(), &*vec)?;
                         //     }
-                        //     Ok(())
-                        //     // Ok::<(), ConflictableTransactionError<_>>(())
-                        // }).expect("Error inserting local db ");
-                    }
+                        //     wtxn.commit()?;
+                        //     println!("保存到本地db完成");
+                        // }
 
-                    //heed lmdb 的实现
-                    // if db_option.sync_localdb.unwrap_or(true) {
-                    //     use heed::bytemuck::{Pod, Zeroable};
-                    //     use heed::byteorder::BE;
-                    //     use heed::types::*;
-                    //     use heed::{Database, EnvOpenOptions};
-                    //     let path = Path::new(".").join(format!("{}.mdb", &project_clone));
-                    //
-                    //     fs::create_dir_all(&path)?;
-                    //
-                    //     let env = EnvOpenOptions::new()
-                    //         .map_size(10 * 1024 * 1024 * 1024) // 10MB
-                    //         .max_dbs(3000)
-                    //         .open(path)?;
-                    //
-                    //     // you can specify that a database will support some typed key/data
-                    //     //
-                    //     // like here we specify that the key will be an array of two i32
-                    //     // and the data will be an str
-                    //     let mut wtxn = env.write_txn()?;
-                    //     let db: Database<U64<BE>, heed::types::ByteSlice> = env.create_database(&mut wtxn, Some("att"))?;
-                    //     for kv in total_attr_map_arc.as_ref() {
-                    //         let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
-                    //         db.put(&mut wtxn, &**kv.key(), &*vec)?;
-                    //     }
-                    //     wtxn.commit()?;
-                    //     println!("保存到本地db完成");
-                    // }
+                        //redb 的实现
+                        // if db_option.sync_localdb.unwrap_or(true) {
+                        //     use redb::{Database, Error, ReadableTable, TableDefinition};
+                        //     let db = Database::create(format!("{}.redb", &project_clone))?;
+                        //     // let table_name = format!("{db_no}");
+                        //     let table_name = format!("kv");
+                        //     let table: TableDefinition<u64, &[u8]> = TableDefinition::new(&table_name);
+                        //     let write_txn = db.begin_write()?;
+                        //     {
+                        //         let mut table = write_txn.open_table(table)?;
+                        //         for kv in total_attr_map_arc.as_ref() {
+                        //             let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                        //             table.insert(**kv.key(), &*vec)?;
+                        //         }
+                        //     }
+                        //     write_txn.commit()?;
+                        //     println!("保存到本地db完成");
+                        // }
 
-                    //redb 的实现
-                    // if db_option.sync_localdb.unwrap_or(true) {
-                    //     use redb::{Database, Error, ReadableTable, TableDefinition};
-                    //     let db = Database::create(format!("{}.redb", &project_clone))?;
-                    //     // let table_name = format!("{db_no}");
-                    //     let table_name = format!("kv");
-                    //     let table: TableDefinition<u64, &[u8]> = TableDefinition::new(&table_name);
-                    //     let write_txn = db.begin_write()?;
-                    //     {
-                    //         let mut table = write_txn.open_table(table)?;
-                    //         for kv in total_attr_map_arc.as_ref() {
-                    //             let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
-                    //             table.insert(**kv.key(), &*vec)?;
-                    //         }
-                    //     }
-                    //     write_txn.commit()?;
-                    //     println!("保存到本地db完成");
-                    // }
-
-                    //如果不需要同步tidb，continue
-                    if !db_option.sync_tidb.unwrap_or(true) {
-                        continue;
-                    }
-
-                    for (type_hash, type_refnos) in type_ele_map {
-                        if b_replace_types {
-                            let replace_types = replace_types.clone().unwrap();
-                            let att_type = db1_dehash(type_hash);
-                            if !replace_types.contains(&att_type) {
-                                continue;
-                            }
+                        //如果不需要同步tidb，continue
+                        if !db_option.sync_tidb.unwrap_or(true) {
+                            continue;
                         }
-                        let total_attr_map_arc = total_attr_map_arc.clone();
-                        let children_map_arc = children_map_arc.clone();
-                        let pool_clone = pool.clone();
-                        let arango_pool_clone = arango_pool.clone();
-                        let error_sql_clone = error_sql.clone();
-                        // println!("类型: {} 数量: {}", db1_dehash(type_hash), type_refnos.len());
 
-                        let type_handle = tokio::spawn(async move {
-                            let refnos_cnt = type_refnos.len();
-                            // 线程初步估计数量
-                            let mut threads_cnt = refnos_cnt / (batch_insert_sql_cnt * 5) + 1;
-                            threads_cnt = threads_cnt.min(max_sql_threads_number);
-                            let thread_chunks_cnt = refnos_cnt / threads_cnt + 1;
-                            let mut handles = vec![];
-                            let all_refnos = Arc::new(type_refnos.into_iter().collect::<Vec<_>>());
+                        for (type_hash, type_refnos) in type_ele_map {
+                            if b_replace_types {
+                                let replace_types = replace_types.clone().unwrap();
+                                let att_type = db1_dehash(type_hash);
+                                if !replace_types.contains(&att_type) {
+                                    continue;
+                                }
+                            }
+                            let total_attr_map_arc = total_attr_map_arc.clone();
+                            let children_map_arc = children_map_arc.clone();
+                            let pool_clone = pool.clone();
+                            let arango_pool_clone = arango_pool.clone();
+                            let error_sql_clone = error_sql.clone();
+                            // println!("类型: {} 数量: {}", db1_dehash(type_hash), type_refnos.len());
 
-                            for i in 0..threads_cnt as usize {
-                                let total_attr_map_arc_clone = total_attr_map_arc.clone();
-                                let children_map_arc_clone = children_map_arc.clone();
-                                let all_refnos = all_refnos.clone();
-                                let pool_clone = pool_clone.clone();
-                                let arango_pool_clone = arango_pool_clone.clone();
-                                let error_sql_clone = error_sql_clone.clone();
-                                let mut implicit_values_sql = String::new();
-                                let mut explicit_values_sql = String::new();
-                                let mut pdms_elements_sql = String::new();
-                                let insert_handle = tokio::spawn(async move {
-                                    let start_idx = i * thread_chunks_cnt;
-                                    let mut end_idx = start_idx + thread_chunks_cnt;
-                                    if end_idx > refnos_cnt {
-                                        end_idx = refnos_cnt;
+                            let type_handle = tokio::spawn(async move {
+                                let refnos_cnt = type_refnos.len();
+                                // 线程初步估计数量
+                                let mut threads_cnt = refnos_cnt / (batch_insert_sql_cnt * 5) + 1;
+                                threads_cnt = threads_cnt.min(max_sql_threads_number);
+                                let thread_chunks_cnt = refnos_cnt / threads_cnt + 1;
+                                let mut handles = vec![];
+                                let all_refnos = Arc::new(type_refnos.into_iter().collect::<Vec<_>>());
+
+                                for i in 0..threads_cnt as usize {
+                                    let total_attr_map_arc_clone = total_attr_map_arc.clone();
+                                    let children_map_arc_clone = children_map_arc.clone();
+                                    let all_refnos = all_refnos.clone();
+                                    let pool_clone = pool_clone.clone();
+                                    let arango_pool_clone = arango_pool_clone.clone();
+                                    let error_sql_clone = error_sql_clone.clone();
+                                    let mut implicit_values_sql = String::new();
+                                    let mut explicit_values_sql = String::new();
+                                    let mut pdms_elements_sql = String::new();
+                                    let insert_handle = tokio::spawn(async move {
+                                        let start_idx = i * thread_chunks_cnt;
+                                        let mut end_idx = start_idx + thread_chunks_cnt;
+                                        if end_idx > refnos_cnt {
+                                            end_idx = refnos_cnt;
+                                        }
+
+                                        let implicit_columns_sql = gen_implicit_attr_insert_sql(type_hash);
+                                        let column_hashs = &implicit_columns_sql.1;
+                                        for j in (start_idx..end_idx)
+                                            .into_iter()
+                                            .step_by(batch_insert_sql_cnt)
+                                        {
+                                            let mut end = j + batch_insert_sql_cnt;
+                                            if end > refnos_cnt {
+                                                end = refnos_cnt;
+                                            }
+                                            //合并sql语句
+                                            for k in j..end {
+                                                let refno = all_refnos[k];
+                                                let att = total_attr_map_arc_clone.get(&refno).unwrap();
+
+                                                implicit_values_sql.push_str(&gen_implicit_attr_value_sql(
+                                                    att.value(),
+                                                    column_hashs,
+                                                ));
+                                                explicit_values_sql
+                                                    .push_str(&gen_explicit_attr_value_sql(att.value()));
+                                                let name = get_name(
+                                                    &total_attr_map_arc_clone,
+                                                    &children_map_arc_clone,
+                                                    refno,
+                                                )
+                                                    .replace(r#"'"#, r#"\'"#)
+                                                    .replace(r#"""#, r#"\""#);
+                                                let order = get_order(
+                                                    &total_attr_map_arc_clone,
+                                                    &children_map_arc_clone,
+                                                    refno,
+                                                );
+                                                let children_count = children_map_arc_clone
+                                                    .get(&refno)
+                                                    .unwrap_or(&RefU64Vec::default())
+                                                    .len();
+                                                pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(
+                                                    att.value(),
+                                                    &name,
+                                                    db_no,
+                                                    order,
+                                                    children_count,
+                                                ));
+                                            }
+                                            if !only_update_dbinfo {
+                                                let mut project_conn = pool_clone.acquire().await.unwrap();
+                                                let mut sql = String::new();
+                                                sql.push_str(implicit_columns_sql.0.as_str());
+                                                sql.push_str(implicit_values_sql.as_str());
+                                                sql.remove(sql.len() - 1);
+                                                if is_replace {
+                                                    sql = sql.replace("INSERT IGNORE", "REPLACE");
+                                                }
+                                                let result = project_conn.execute(sql.as_str()).await;
+                                                match result {
+                                                    Ok(_) => {}
+                                                    Err(e) => {
+                                                        dbg!(&e);
+                                                        dbg!(sql.as_str());
+                                                        error_sql_clone.insert(sql);
+                                                    }
+                                                }
+
+                                                //执行显示数据保存
+                                                let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
+                                                sql.push_str(explicit_values_sql.as_str());
+                                                sql.remove(sql.len() - 1);
+                                                if is_replace {
+                                                    sql = sql.replace("INSERT IGNORE", "REPLACE");
+                                                }
+                                                let result = project_conn.execute(sql.as_str()).await;
+                                                match result {
+                                                    Ok(_) => {}
+                                                    Err(e) => {
+                                                        dbg!(&e);
+                                                        dbg!(sql.as_str());
+                                                        error_sql_clone.insert(sql);
+                                                    }
+                                                }
+
+                                                // {PDMS_ELEMENTS_TABLE} 保存
+                                                let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
+                                                sql.push_str(pdms_elements_sql.as_str());
+                                                sql.remove(sql.len() - 1);
+                                                if is_replace {
+                                                    sql = sql.replace("INSERT IGNORE", "REPLACE");
+                                                }
+                                                let result = project_conn.execute(sql.as_str()).await;
+                                                match result {
+                                                    Ok(_) => {}
+                                                    Err(e) => {
+                                                        dbg!(&e);
+                                                        dbg!(sql.as_str());
+                                                        error_sql_clone.insert(sql);
+                                                    }
+                                                }
+                                            }
+                                            implicit_values_sql.clear();
+                                            explicit_values_sql.clear();
+                                            pdms_elements_sql.clear();
+                                        }
+                                    });
+                                    handles.push(insert_handle);
+                                }
+                                futures::future::join_all(take(&mut handles)).await;
+                            });
+
+                            type_handles.push(type_handle);
+                        }
+
+                        futures::future::join_all(take(&mut type_handles)).await;
+
+                        let mut project_conn = pool.acquire().await.unwrap();
+                        // 将带有 room_code 属性的保存下来
+                        if !db_option.only_update_dbinfo {
+                            for (room_name, refnos) in room_code_map.clone() {
+                                let mut room_code_sql =
+                                    format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                                for refno in refnos.clone() {
+                                    room_code_sql.push_str(&format!(
+                                        "( {},'{}' ) ,",
+                                        refno.0,
+                                        room_name.clone()
+                                    ));
+                                }
+                                room_code_sql.remove(room_code_sql.len() - 1);
+                                if is_replace {
+                                    room_code_sql = room_code_sql.replace("INSERT IGNORE", "REPLACE");
+                                }
+                                let result = project_conn.execute(room_code_sql.as_str()).await;
+                                match result {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(&e);
+                                        dbg!(room_code_sql.as_str());
                                     }
-
-                                    let implicit_columns_sql = gen_implicit_attr_insert_sql(type_hash);
-                                    let column_hashs = &implicit_columns_sql.1;
-                                    for j in (start_idx..end_idx)
-                                        .into_iter()
-                                        .step_by(batch_insert_sql_cnt)
-                                    {
-                                        let mut end = j + batch_insert_sql_cnt;
-                                        if end > refnos_cnt {
-                                            end = refnos_cnt;
-                                        }
-                                        //合并sql语句
-                                        for k in j..end {
-                                            let refno = all_refnos[k];
-                                            let att = total_attr_map_arc_clone.get(&refno).unwrap();
-
-                                            implicit_values_sql.push_str(&gen_implicit_attr_value_sql(
-                                                att.value(),
-                                                column_hashs,
-                                            ));
-                                            explicit_values_sql
-                                                .push_str(&gen_explicit_attr_value_sql(att.value()));
-                                            let name = get_name(
-                                                &total_attr_map_arc_clone,
-                                                &children_map_arc_clone,
-                                                refno,
-                                            )
-                                                .replace(r#"'"#, r#"\'"#)
-                                                .replace(r#"""#, r#"\""#);
-                                            let order = get_order(
-                                                &total_attr_map_arc_clone,
-                                                &children_map_arc_clone,
-                                                refno,
-                                            );
-                                            let children_count = children_map_arc_clone
-                                                .get(&refno)
-                                                .unwrap_or(&RefU64Vec::default())
-                                                .len();
-                                            pdms_elements_sql.push_str(&gen_pdms_element_insert_sql(
-                                                att.value(),
-                                                &name,
-                                                db_no,
-                                                order,
-                                                children_count,
-                                            ));
-                                        }
-                                        if !only_update_dbinfo {
-                                            let mut project_conn = pool_clone.acquire().await.unwrap();
-                                            let mut sql = String::new();
-                                            sql.push_str(implicit_columns_sql.0.as_str());
-                                            sql.push_str(implicit_values_sql.as_str());
-                                            sql.remove(sql.len() - 1);
-                                            if is_replace {
-                                                sql = sql.replace("INSERT IGNORE", "REPLACE");
-                                            }
-                                            let result = project_conn.execute(sql.as_str()).await;
-                                            match result {
-                                                Ok(_) => {}
-                                                Err(e) => {
-                                                    dbg!(&e);
-                                                    dbg!(sql.as_str());
-                                                    error_sql_clone.insert(sql);
-                                                }
-                                            }
-
-                                            //执行显示数据保存
-                                            let mut sql = format!("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA) VALUES ");
-                                            sql.push_str(explicit_values_sql.as_str());
-                                            sql.remove(sql.len() - 1);
-                                            if is_replace {
-                                                sql = sql.replace("INSERT IGNORE", "REPLACE");
-                                            }
-                                            let result = project_conn.execute(sql.as_str()).await;
-                                            match result {
-                                                Ok(_) => {}
-                                                Err(e) => {
-                                                    dbg!(&e);
-                                                    dbg!(sql.as_str());
-                                                    error_sql_clone.insert(sql);
-                                                }
-                                            }
-
-                                            // {PDMS_ELEMENTS_TABLE} 保存
-                                            let mut sql = format!("INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES ");
-                                            sql.push_str(pdms_elements_sql.as_str());
-                                            sql.remove(sql.len() - 1);
-                                            if is_replace {
-                                                sql = sql.replace("INSERT IGNORE", "REPLACE");
-                                            }
-                                            let result = project_conn.execute(sql.as_str()).await;
-                                            match result {
-                                                Ok(_) => {}
-                                                Err(e) => {
-                                                    dbg!(&e);
-                                                    dbg!(sql.as_str());
-                                                    error_sql_clone.insert(sql);
-                                                }
-                                            }
-                                        }
-                                        implicit_values_sql.clear();
-                                        explicit_values_sql.clear();
-                                        pdms_elements_sql.clear();
-                                    }
-                                });
-                                handles.push(insert_handle);
-                            }
-                            futures::future::join_all(take(&mut handles)).await;
-                        });
-
-                        type_handles.push(type_handle);
-                    }
-
-                    futures::future::join_all(take(&mut type_handles)).await;
-
-                    let mut project_conn = pool.acquire().await.unwrap();
-                    // 将带有 room_code 属性的保存下来
-                    if !db_option.only_update_dbinfo {
-                        for (room_name, refnos) in room_code_map.clone() {
-                            let mut room_code_sql =
-                                format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
-                            for refno in refnos.clone() {
-                                room_code_sql.push_str(&format!(
-                                    "( {},'{}' ) ,",
-                                    refno.0,
-                                    room_name.clone()
-                                ));
-                            }
-                            room_code_sql.remove(room_code_sql.len() - 1);
-                            if is_replace {
-                                room_code_sql = room_code_sql.replace("INSERT IGNORE", "REPLACE");
-                            }
-                            let result = project_conn.execute(room_code_sql.as_str()).await;
-                            match result {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(&e);
-                                    dbg!(room_code_sql.as_str());
                                 }
                             }
                         }
                     }
+
                 }
 
             }
