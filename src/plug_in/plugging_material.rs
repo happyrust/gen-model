@@ -61,7 +61,7 @@ pub async fn get_plugging_data_detail(aios_mgr: &AiosDBManager, refnos: Vec<(Ref
                 hole_data_vec.data.push(PluggingData {
                     name: attr.get_name().to_string(),
                     size: desp,
-                    own_refno: i.1.clone(),
+                    refno: i.1.clone(),
                     materials,
                     ..Default::default()
                 });
@@ -99,7 +99,7 @@ pub async fn get_plugging_data_detail(aios_mgr: &AiosDBManager, refnos: Vec<(Ref
             hole_data_vec.data.push(PluggingData {
                 name,
                 size: desp,
-                own_refno: i.1.clone(),
+                refno: i.1.clone(),
                 materials,
                 ..Default::default()
             });

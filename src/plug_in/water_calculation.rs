@@ -1,16 +1,24 @@
+use std::collections::hash_map::DefaultHasher;
 use aios_core::pdms_types::RefU64;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use std::collections::HashSet;
 use aios_core::pdms_types::AttrMap;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use crate::api::children::travel_children_with_type;
 use crate::data_interface::interface::PdmsDataInterface;
 use aios_core::water_calculation::{CivilEngineeringStp, FloodingHole, FloodingHoleVec, WaterComputeStp};
 use aios_core::water_calculation::ExportFloodingStpEvent;
+#[cfg(feature = "opencascade_rs")]
 use opencascade::primitives::Compound;
 use crate::api::attr::query_attr;
-use crate::graph_db::pdms_arango::ArDatabase;
+
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
+use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
+use crate::graph_db::pdms_arango::{ArDatabase, save_arangodb_doc};
+use aios_core::water_calculation::FloodingStpToArangodb;
+use arangors_lite::AqlQuery;
+
 
 ///得到导出stp的选中节点的参考号
 pub async fn get_hole_refno(aios_mgr: &AiosDBManager, types: &HashSet<&str>, water_compute: &mut WaterComputeStp, flooding_hole_vec: &mut FloodingHoleVec, i: &(RefU64, String)) {
@@ -34,7 +42,7 @@ pub async fn get_hole_refno(aios_mgr: &AiosDBManager, types: &HashSet<&str>, wat
 }
 
 ///得到导出stp所需孔洞数据
-pub async fn get_detail_data_for_export_stp(aios_mgr: &AiosDBManager, mut data: ExportFloodingStpEvent) -> WaterComputeStp {
+pub async fn get_detail_data_for_export_stp(aios_mgr: &AiosDBManager, mut data: ExportFloodingStpEvent) -> ExportFloodingStpEvent {
     //向上找到对应的wall
     let att_type = HashSet::from(["CWALL", "STWALL", "GWALL", "WALL", "CFLOOR", "FLOOR"]);
     for i in &data.refnos {
@@ -70,13 +78,12 @@ pub async fn get_detail_data_for_export_stp(aios_mgr: &AiosDBManager, mut data: 
             refno = basic.get_owner();
         }
     }
-    data.stp
+    data
 }
 
 #[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
 pub async fn export_stp(mgr: &AiosDBManager, stp_packet: &WaterComputeStp) -> anyhow::Result<bool> {
-
     let pos_refnos: Vec<RefU64> = stp_packet.civil_engineering.iter()
         .map(|x| x.keys().cloned())
         .flatten()
@@ -109,3 +116,22 @@ pub async fn export_stp(mgr: &AiosDBManager, stp_packet: &WaterComputeStp) -> an
 
     Ok(true)
 }
+
+
+pub async fn query_water_calculation_data(database: &ArDatabase, key_value: String) -> anyhow::Result<Option<Vec<FloodingStpToArangodb>>> {
+    let aql = AqlQuery::new("let v = document('water_calculaion',@_key)\
+        return unset(v , '_id','_rev') ")
+        .bind_var("_key", key_value);
+    let data_vec: Vec<FloodingStpToArangodb> = database.aql_query(aql).await?;
+    return Ok(Some((data_vec)));
+}
+
+pub async fn query_water_calculation_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<FloodingStpToArangodb>> {
+    let aql = AqlQuery::new("
+    for c in @@collection
+        return unset(c , '_id','_rev')").bind_var("@collection", AQL_WATER_CALCULATION_COLLECTION);
+    let result = database.aql_query::<FloodingStpToArangodb>(aql).await?;
+    Ok(result)
+}
+
+

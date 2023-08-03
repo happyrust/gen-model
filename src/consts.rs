@@ -27,7 +27,7 @@ pub const GLOBAL_DATABASE: &'static str = "PROJECT_INFO";
 // pub const SSC_DATABASE: &'static str = "SSC_INFO";
 pub const FUZZY_QUERT: &'static str = "FUZZY_QUERY";
 pub const PUHUA_MATERIAL_DATABASE: &'static str = "hdey_powerpmdb";
-pub const PUHUA_MATERIAL_TABLE: &'static str = "pdms_mat_gy";
+pub const PUHUA_GY_MATERIAL_TABLE: &'static str = "pdms_mat_gy";
 pub const PUHUA_DQ_MATERIAL_TABLE: &'static str = "pdms_traymotlist";
 // project_mdb
 // 专业表单
@@ -71,3 +71,4 @@ pub const AQL_LOCK_REFNOS_COLLECTION: &'static str = "lock_refnos";
 pub const AQL_HOLE_DATA_COLLECTION: &'static str = "hole_data";
 pub const AQL_HOLE_EDGE_COLLECTION: &'static str = "hole_edge";
 pub const AQL_EMBED_EDGE_COLLECTION: &'static str = "embed_edge";
+pub const AQL_WATER_CALCULATION_COLLECTION: &'static str = "water_calculation";

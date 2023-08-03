@@ -1,7 +1,7 @@
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::RefU64;
 use crate::aql_api::children::query_refnos_travel_children_with_type_aql;
-use crate::data_center_api::data_api::{get_refno_desc, get_refno_paras};
+use crate::data_center_api::data_api::{get_refno_desc, get_refno_latest_version, get_refno_paras};
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 获取电气螺纹杆数据
@@ -27,7 +27,7 @@ pub async fn get_dq_stru_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
                 object_model_code: "PARTDG".to_string(),
                 project_code: aios_mgr.db_option.project_code.to_string(),
                 instance_code: child.name,
-                version: "A版".to_string(),
+                version: get_refno_latest_version(),
                 attributes: attr,
             });
         }
@@ -71,7 +71,7 @@ pub async fn get_dq_scoj_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
                     object_model_code: "PARTDK2".to_string(),
                     project_code: aios_mgr.db_option.project_code.to_string(),
                     instance_code: child.name,
-                    version: "A版".to_string(),
+                    version: get_refno_latest_version(),
                     attributes: attr,
                 });
             }

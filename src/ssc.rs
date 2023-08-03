@@ -973,3 +973,11 @@ fn test_parse_room_info_from_excel() -> anyhow::Result<()> {
     dbg!(&result);
     Ok(())
 }
+
+#[test]
+fn test_get_room_level_from_excel_refactor() {
+    let result = get_room_level_from_excel_refactor().unwrap();
+    // dbg!(&result.level);
+    // dbg!(&result.name_map.len());
+    dbg!(&result.pdms_name_code_map);
+}

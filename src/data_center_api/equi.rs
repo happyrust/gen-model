@@ -9,6 +9,7 @@ use crate::api::refno_info::query_refno_height_position;
 use crate::api::room_code::query_room_code;
 use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_owner_with_type_aql, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
+use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -35,7 +36,7 @@ pub async fn get_gy_equi_data(refnos: Vec<RefU64>, database: &ArDatabase) -> any
                 object_model_code: "COMPB".to_string(),
                 project_code: "1516".to_string(),
                 instance_code: child.name,
-                version: "A版".to_string(),
+                version: get_refno_latest_version(),
                 attributes: attr,
             });
         }
@@ -72,7 +73,7 @@ pub async fn get_sg_fire_hydrant_equi_data(refnos: Vec<RefU64>, aios_mgr:&AiosDB
                 object_model_code: "COMPBTHA".to_string(),
                 project_code: aios_mgr.db_option.project_code.to_string(),
                 instance_code: name,
-                version: "A版".to_string(),
+                version: get_refno_latest_version(),
                 attributes: attr,
             });
         }
@@ -129,7 +130,7 @@ pub async fn get_dq_cross_element_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMan
                 object_model_code: "COMPBSDB".to_string(),
                 project_code: aios_mgr.db_option.project_code.to_string(),
                 instance_code: child.name,
-                version: "A版".to_string(),
+                version: get_refno_latest_version(),
                 attributes: attr,
             });
         }
@@ -171,7 +172,7 @@ pub async fn get_dq_equi_data(refnos: Vec<RefU64>, database: &ArDatabase, projec
                 object_model_code: "COMPAA".to_string(),
                 project_code: project_code.to_string(),
                 instance_code: child.name,
-                version: "A版".to_string(),
+                version: get_refno_latest_version(),
                 attributes: attr,
             });
         }
