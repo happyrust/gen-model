@@ -9,10 +9,9 @@ use crate::api::children::travel_children_with_type;
 use crate::data_interface::interface::PdmsDataInterface;
 use aios_core::water_calculation::{CivilEngineeringStp, FloodingHole, FloodingHoleVec, WaterComputeStp};
 use aios_core::water_calculation::ExportFloodingStpEvent;
-use opencascade::primitives::Compound;
+// use opencascade::primitives::Compound;
 use arangors_lite::AqlQuery;
 use crate::api::attr::query_attr;
-use crate::graph_db::pdms_arango::ArDatabase;
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
 use crate::graph_db::pdms_arango::{ArDatabase, save_arangodb_doc};
@@ -97,13 +96,9 @@ pub async fn save_stp_data_to_arangodb(aios_mgr: &AiosDBManager, mut stp: Export
     "Ok".to_string()
 }
 
-///导出水淹计算stp
-pub fn export_stp(data: WaterComputeStp) -> WaterComputeStp {
-    // dbg!(&data);
-    data
+
 #[cfg(feature = "opencascade_rs")]
 pub async fn export_stp(mgr: &AiosDBManager, stp_packet: &WaterComputeStp) -> anyhow::Result<bool> {
-
     let pos_refnos: Vec<RefU64> = stp_packet.civil_engineering.iter()
         .map(|x| x.keys().cloned())
         .flatten()
@@ -128,12 +123,10 @@ pub async fn export_stp(mgr: &AiosDBManager, stp_packet: &WaterComputeStp) -> an
     for n in ngmr_shapes{
         wall_shape = wall_shape.subtract_shape(&n).0;
     }
-
     // let range = &pos_shapes[..];
     // // let range = &shapes[2..3];
     // let compound_shape = Compound::from_shapes(range);
     wall_shape.write_step("walter_steps/wall_shape.step").unwrap();
-
     Ok(true)
 }
 

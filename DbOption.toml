@@ -3,7 +3,7 @@
 total_sync = true
 enable_log = false
 sync_graph_db = true
-sync_tidb = false
+sync_tidb = true
 sync_localdb = true
 incr_sync = false
 
@@ -61,11 +61,10 @@ only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
 replace_dbs = true
-#debug_root_refnos = ["24381/48841"]
+#debug_root_refnos = ["25688/8143"]
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #manual_db_nums =[]
-included_db_files = ["ams1112_0001"]
+#included_db_files = ["ams1112_0001"]
 #replace_types = ["SDTE"]
 #plat_url = "http://10.27.11.78/"
-
 plat_url = "http://pms.powerpms.net:1801/"
