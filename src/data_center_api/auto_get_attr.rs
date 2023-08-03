@@ -14,7 +14,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use dashmap::DashMap;
 use sqlx::{Executor, MySql, Pool, Row};
-use crate::consts::PUHUA_MATERIAL_TABLE;
+use crate::consts::PUHUA_GY_MATERIAL_TABLE;
 use crate::data_center_api::pipe::get_datacenter_bran_data;
 
 lazy_static! {
@@ -44,7 +44,7 @@ pub struct DataCenterMetadata {
 }
 
 /// 通过处理后的元数据表，根据用户填的function获取部分数据
-pub async fn auto_get_datacenter_attr(refno: RefU64, aios_mgr: &AiosDBManager,attr:&AttrMap,
+pub async fn auto_get_datacenter_attr(refno: RefU64, aios_mgr: &AiosDBManager, attr: &AttrMap,
                                       metadata_excel_map: &HashMap<String, Vec<DataCenterMetadata>>) -> anyhow::Result<BTreeMap<String, DataCenterAttr>> {
     let mut map = BTreeMap::new();
     let att_type = attr.get_type();
@@ -197,17 +197,17 @@ fn auto_get_attr_from_metadata_excel_attr_function(function: &Vec<&str>, attr: &
 }
 
 /// 通过材料编码获取大宗材料表的数据
-async fn get_material_map_from_code(code: &str, mut filedes: Vec<String>, puhua_pool: &Pool<MySql>) -> DashMap<String, String> {
+pub(crate) async fn get_material_map_from_code(code: &str, mut filedes: Vec<String>, puhua_pool: &Pool<MySql>) -> DashMap<String, String> {
+    if code.is_empty() || filedes.is_empty() {
+        return DashMap::default();
+    }
     if let Some(map) = MATERIAL_MAP.get(code) {
         map.value().clone()
     } else {
         let mut query_map = DashMap::new();
-        // 并非填在excel表的function中的 需要手动做处理，但是也一起查询了
-        if !filedes.is_empty() {
-            filedes.push("Pressure".to_string());
-        }
+        filedes.push("Pressure".to_string());
         // 查询普华的材料表
-        let sql = gen_query_material_sql(&filedes);
+        let sql = gen_query_gy_material_sql(&filedes);
         if let Ok(mut puhua_conn) = puhua_pool.acquire().await {
             let Ok(query_results) = puhua_conn.fetch_all(sql.as_str()).await else { return DashMap::new(); };
             for query_result in query_results {
@@ -222,13 +222,13 @@ async fn get_material_map_from_code(code: &str, mut filedes: Vec<String>, puhua_
     }
 }
 
-fn gen_query_material_sql(fileds: &Vec<String>) -> String {
+fn gen_query_gy_material_sql(fileds: &Vec<String>) -> String {
     let mut sql = String::from("SELECT ");
     for filed in fileds {
         sql.push_str(format!("{} ,", filed).as_str());
     }
     sql.remove(sql.len() - 1);
-    sql.push_str(format!(" FROM {}", PUHUA_MATERIAL_TABLE).as_str());
+    sql.push_str(format!(" FROM {}", PUHUA_GY_MATERIAL_TABLE).as_str());
     sql
 }
 

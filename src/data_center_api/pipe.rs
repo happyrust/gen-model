@@ -17,13 +17,11 @@ use crate::api::metadata_manage::{query_metadata_table_code_sql, query_metadata_
 use crate::aql_api::children::{query_children_eles, query_children_refnos, query_travel_children_with_type_aql};
 use crate::aql_api::tubi::{query_bran_info, query_tubi_from_bran, query_tubi_from_bran_filter_atta};
 use crate::data_center_api::auto_get_attr::{auto_get_datacenter_attr, DataCenterMetadata};
-use crate::data_center_api::bran::get_data_center_bran_attr;
+use crate::data_center_api::bran::bran_attr::get_data_center_bran_attr;
 use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_center_api::elbo::get_data_center_elbo_attr;
 use crate::data_center_api::flan::get_data_center_flan_attr;
 use crate::data_center_api::redu::get_data_center_redu_attr;
-use crate::data_center_api::tee::get_data_center_tee_attr;
-use crate::data_center_api::tubi::get_data_center_tubi_attr;
 use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -413,7 +411,7 @@ fn get_instance_data_element(metadata_map: &HashMap<String, Vec<String>>, refno:
         "ELBO" => { get_data_center_elbo_attr(refno) }
         "FLAN" => { get_data_center_flan_attr(refno) }
         "REDU" => { get_data_center_redu_attr(refno) }
-        "TEE" => { get_data_center_tee_attr(refno) }
+        // "TEE" => { get_data_center_tee_attr(refno) }
         // "TUBE" | "TUBI" => { get_data_center_tubi_attr(refno) }
         &_ => { Vec::new() }
     };

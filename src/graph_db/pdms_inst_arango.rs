@@ -298,19 +298,15 @@ pub async fn query_rvm_instance_data_from_refno_aql(refno: RefU64, database: &Ar
 
 pub async fn query_compound_inst_hashes_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<EleGeosInfo>> {
     let ids = refnos.into_iter()
-        .map(|x| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, x.to_url_refno()))
+        .map(|x|  x.to_url_refno())
         .collect::<Vec<_>>();
     let aql = AqlQuery::new("\
-    With @@pdms_eles,@@pdms_edges,@@pdms_compound_inst_infos
+    With @@pdms_compound_inst_infos
     for id in @ids
-    for v in 0 inbound id @@pdms_edges
-        filter v != null
-        let compound_inst = document(@@pdms_compound_inst_infos,v._key)
-        filter compound_inst != null
-        return compound_inst
+    let compound_inst = document(@@pdms_compound_inst_infos,id)
+    filter compound_inst != null
+    return compound_inst
     ").bind_var("ids", ids)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
         .bind_var("@pdms_compound_inst_infos", AQL_PDMS_COMPOUND_INST_INFO_COLLECTION);
     let result = database.aql_query::<EleGeosInfo>(aql).await?;
     Ok(result)

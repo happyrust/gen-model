@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use aios_core::data_center::AttrValue::{AttrString, AttrVec3};
 use aios_core::data_center::DataCenterAttr;
-use aios_core::pdms_types::{AttrMap, RefU64};
+use aios_core::pdms_types::{AttrMap, PdmsElement, RefU64};
+use aios_core::tool::math_tool::quat_to_pdms_ori_str;
+use dashmap::DashMap;
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
@@ -13,6 +16,7 @@ use crate::aql_api::children::query_travel_children_with_type_aql;
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
 use crate::aql_api::pdms_room::*;
 use crate::consts::PUHUA_DQ_MATERIAL_TABLE;
+use crate::data_center_api::auto_get_attr::get_material_map_from_code;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -64,6 +68,68 @@ pub async fn get_inst_data_from_inst_major(refno: RefU64, mgr: &AiosDBManager) -
 pub struct PipeRoomCodeData {
     pub refno: String,
     pub room_code: String,
+}
+
+/// 获取工艺管件 itema等重复的数据
+pub(crate) async fn get_bran_itema_attr(refno:PdmsElement,bran_name:&str,
+                                        database:&ArDatabase,aios_mgr:&AiosDBManager,mut result:&mut Vec<DataCenterAttr>) {
+    let item_1 = DataCenterAttr {
+        attribute_model_code: "ITEM1".to_string(),
+        value: AttrString(refno.refno.to_refno_string()).into(),
+    };
+    result.push(item_1);
+    let item_2 = DataCenterAttr {
+        attribute_model_code: "ITEMA1".to_string(),
+        value:AttrString(refno.name).into(),
+    };
+    result.push(item_2);
+    let item_3 = DataCenterAttr {
+        attribute_model_code: "ITEMA2".to_string(),
+        value:  AttrString(refno.noun).into(),
+    };
+    result.push(item_3);
+    let item_4 = DataCenterAttr {
+        attribute_model_code: "ITEMAB3".to_string(),
+        value:  AttrString(bran_name.to_string()).into(),
+    };
+    result.push(item_4);
+    let item_5 = DataCenterAttr {
+        attribute_model_code: "ITEMAB4".to_string(),
+        value: AttrString("".to_string()).into(),
+    };
+    result.push(item_5);
+    let world_position = aios_mgr.get_world_transform(refno.refno).await.unwrap_or(None).unwrap_or_default();
+    let item_5 = DataCenterAttr {
+        attribute_model_code: "ITEMA5".to_string(),
+        value: AttrVec3(world_position.translation).into(),
+    };
+    result.push(item_5);
+    let item_8 = DataCenterAttr {
+        attribute_model_code: "ITEMA8".to_string(),
+        value: AttrString(quat_to_pdms_ori_str(&world_position.rotation)).into(),
+    };
+    result.push(item_8);
+    let room_code = query_room_name_from_refno_aql(refno.refno,database).await.unwrap_or(None).unwrap_or("".to_string());
+    result.push(DataCenterAttr {
+        attribute_model_code: "ITEMA20".to_string(),
+        value: AttrString(room_code).into(),
+    });
+    let attr = aios_mgr.get_attr(refno.refno).await.unwrap_or_default();
+    let ispec = get_ispec_from_attr(&attr,&aios_mgr).await.unwrap_or("".to_string());
+    result.push(DataCenterAttr {
+        attribute_model_code: "ITEMA21".to_string(),
+        value: AttrString(ispec).into(),
+    });
+    let tspe = query_foreign_name_aql(refno.refno, vec!["TSPE", "TSPE"], database).await.unwrap_or(None).unwrap_or("".to_string());
+    result.push(DataCenterAttr {
+        attribute_model_code: "ITEMA22".to_string(),
+        value: AttrString(tspe).into(),
+    });
+    let r_text = get_rtext_from_attr(&attr,aios_mgr).await.unwrap_or("".to_string());
+    result.push(DataCenterAttr {
+        attribute_model_code: "ITEMA24".to_string(),
+        value: AttrString(r_text).into(),
+    });
 }
 
 /// 获取阀门所处的房间号，工艺专业

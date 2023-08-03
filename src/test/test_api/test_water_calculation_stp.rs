@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use aios_core::pdms_types::RefU64;
 use aios_core::water_calculation::{CivilEngineeringStp, WaterComputeStp};
-use opencascade::primitives::Compound;
+// use opencascade::primitives::Compound;
 use sqlx::encode::IsNull::No;
 #[cfg(feature = "opencascade_rs")]
 use crate::plug_in::water_calculation::export_stp;

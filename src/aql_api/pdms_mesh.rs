@@ -164,7 +164,6 @@ pub async fn query_pdms_mesh_aql(database: &ArDatabase, hashes: &[u64]) -> anyho
 ///查询相应的mesh数据
 pub async fn query_pdms_mesh_from_hash_str_aql(database: &ArDatabase, hash_strs: Vec<String>) -> anyhow::Result<PlantMeshesData> {
     let mut cache_mgr = PlantMeshesData::default();
-    // dbg!(&hash_strs);
     let aql = AqlQuery::new("\
     With @@pdms_mesh
     for hash in @hashes

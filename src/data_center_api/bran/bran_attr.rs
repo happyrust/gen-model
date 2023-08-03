@@ -300,7 +300,7 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub(crate) struct CableWeightExcel {
+pub struct CableWeightExcel {
     pub types: Option<String>,
     pub width: Option<String>,
     /// 托盘重量
@@ -310,7 +310,7 @@ pub(crate) struct CableWeightExcel {
 }
 
 impl CableWeightExcel {
-    pub(crate) fn is_null(&self) -> bool {
+    pub fn is_null(&self) -> bool {
         if self.types.is_none() || self.width.is_none() || self.tray_weight.is_none() || self.cable_weight.is_none() {
             true
         } else {

@@ -5,6 +5,8 @@ use aios_core::pdms_types::{EleInstGeo, EleGeosInfo, RefU64, PlantMeshesData};
 use aios_core::geom_types::{RvmGeoInfo, RvmGeoInfos, RvmInstGeo, RvmTubiGeoInfos};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam::PrimExtrusion;
+use aios_core::prim_geo::extrusion::Extrusion;
 use aios_core::shape::pdms_shape::PlantMesh;
 use arangors_lite::AqlQuery;
 use bb8_arangodb::arangors_lite::Database;
@@ -141,22 +143,17 @@ pub async fn create_refnos_rvm_data(select_refno: RefU64, db_option: &DbOption, 
     // 先查询经过负实体计算的
     let compound_insts = query_compound_inst_hashes_aql(refnos.clone(), database).await?;
     // 过滤掉负实体之后再查询
-    let filter_refnos = filter_compound_refnos(refnos,&compound_insts);
-    let mut refno_geo_infos = query_rvm_geo_instance_aql(filter_refnos.clone(), database).await?;
+    let filter_refnos = filter_compound_refnos(refnos, &compound_insts);
+    let mut refno_geo_infos = query_single_rvm_geo_instance_aql(filter_refnos.clone(), database).await?;
     let tubi_infos = query_rvm_tubi_instances_aql(filter_refnos, database).await?;
-    // 将extrusion单独提出来
+    // 将extrusion单独提出来 , 该部分为 extrusion 中不为负实体得
     let mut extrusion_geo_hashes: Vec<u64> = Vec::new();
-    for mut geo in refno_geo_infos.iter_mut() {
-        for mut rvm_inst in geo.rvm_inst_geo.iter_mut() {
+    for geo in refno_geo_infos.iter() {
+        for rvm_inst in geo.rvm_inst_geo.iter() {
             match rvm_inst.geo_param {
                 PdmsGeoParam::PrimExtrusion(_) => {
-                    // todo 现在这里是处理排除了 compound后的 extrusion
-                    // for inst in compound_insts {
-                    //     let Some(hash) = inst.cata_hash else { continue; };
-                    //     let Ok(hash) = hash.parse() else { continue; };
-                    //     extrusion_geo_hashes.push(hash);
-                    //     rvm_inst.geo_hash = hash.to_string();
-                    // }
+                    let Ok(hash) = rvm_inst.geo_hash.parse() else { continue; };
+                    extrusion_geo_hashes.push(hash);
                     break;
                 }
                 _ => { continue; }
@@ -168,14 +165,42 @@ pub async fn create_refnos_rvm_data(select_refno: RefU64, db_option: &DbOption, 
         .filter(|info| info.cata_hash.is_some())
         .map(|info| info.cata_hash.clone().unwrap())
         .collect::<Vec<_>>();
-    let compound_mesh = query_pdms_mesh_from_hash_str_aql(database,compound_hashes).await?;
-
+    let compound_mesh = query_pdms_mesh_from_hash_str_aql(database, compound_hashes).await?;
+    for info in compound_insts {
+        let mut info_vec = Vec::new();
+        // cntb
+        info_vec.append(&mut gen_cntb_data());
+        // name
+        let mut name = gen_name_position_data(&info.refno.to_url_refno(), info.world_transform.translation);
+        info_vec.append(&mut name);
+        // prim
+        let Some(hash) = info.cata_hash else { continue; };
+        let geo = RvmInstGeo {
+            geo_param: PrimExtrusion(Extrusion::default()),
+            geo_hash: hash,
+            aabb: info.aabb,
+            transform: Transform::default(),
+            visible: info.visible,
+            is_tubi: false,
+            geo_type: info.geo_type,
+        };
+        let mut prim_vec = Vec::new();
+        let Some(mut data) = gen_prim_data_test(info.refno, &geo, info.world_transform,
+                                                false, &compound_mesh) else { continue; };
+        prim_vec.append(&mut data);
+        if prim_vec.is_empty() { continue; };
+        info_vec.append(&mut prim_vec);
+        // cnte
+        info_vec.append(&mut gen_cnte_data());
+        file_data.push(info_vec)
+    }
     // 通过查找pdms_mesh找到extrusion的数据
     let extrusion_mesh = if extrusion_geo_hashes.is_empty() {
         PlantMeshesData::default()
     } else {
         query_pdms_mesh_aql(database, &extrusion_geo_hashes).await.unwrap_or_default()
     };
+    // 不带负实体得元件
     for info in refno_geo_infos {
         let mut info_vec = Vec::new();
         // cntb
@@ -258,6 +283,45 @@ pub async fn query_rvm_geo_instance_aql(refnos: Vec<RefU64>, database: &ArDataba
     Ok(result)
 }
 
+pub async fn query_single_rvm_geo_instance_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<RvmGeoInfos>> {
+    let refnos = refnos.into_iter()
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .collect::<Vec<_>>();
+    // pub geo_type: GeoBasicType,
+    let aql = AqlQuery::new("
+    With @@pdms_eles,@@pdms_edges,@@pdms_inst_infos,@@pdms_inst_geos
+    let hashes = (
+    for id in @refnos
+    for v,e in 0 inbound id @@pdms_edges
+    let inst = document(@@pdms_inst_infos,v._key)
+    filter inst != null
+        return {
+            'refno': inst._key,
+            'noun' : v.noun,
+            'world_transform': inst.world_transform,
+            'hash':inst.cata_hash == null ? inst._key : inst.cata_hash,
+            'geo_type': v.geo_type,
+        }
+    )
+    for hash in hashes
+        let inst = document(@@pdms_inst_geos,hash.hash).insts
+        filter inst != null
+        return {
+            'refno': hash.refno,
+            'att_type' : hash.noun,
+            'world_transform' : hash.world_transform,
+            'rvm_inst_geo': inst
+    }")
+        .bind_var("refnos", refnos)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION)
+        .bind_var("@pdms_inst_geos", AQL_PDMS_INST_GEO_COLLECTION);
+    let result = database.aql_query::<RvmGeoInfos>(aql).await?;
+    Ok(result)
+}
+
+
 pub async fn query_rvm_tubi_instances_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<RvmGeoInfos>> {
     let refnos = refnos.into_iter()
         .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
@@ -266,7 +330,7 @@ pub async fn query_rvm_tubi_instances_aql(refnos: Vec<RefU64>, database: &ArData
     With @@pdms_eles,@@pdms_edges,@@pdms_inst_tubis,@@pdms_inst_geos
     let hashes = (
     for id in @refnos
-    for v,e in 0..2 inbound id @@pdms_edges
+    for v,e in 0 inbound id @@pdms_edges
     let inst = document(@@pdms_inst_tubis,v._key)
     filter inst != null
         return {
@@ -330,16 +394,13 @@ pub fn gen_prim_data_test(refno: RefU64, geo_instance: &RvmInstGeo, desi_transfo
         data.append(&mut gen_prim_scale_position_data(transform.rotation, Vec3::ONE,
                                                       translation));
         data.append(&mut gen_desi_prim_aabb_data(aabb, /*geo_instance.transform,*/ &geo_instance.geo_param));
-        match geo_instance.geo_param {
-            PdmsGeoParam::PrimExtrusion(_) => {
-                let Ok(hash) = geo_instance.geo_hash.parse::<u64>() else { return None; };
-                let Some(mesh) = extrusion_mesh.get_mesh(hash) else { return None; };
-                data.append(&mut gen_extrusion_data(transform, mesh.clone()));
-            }
-            _ => {
-                let Some(mut geo) = geo_instance.geo_param.convert_rvm_pri_data() else { return None; };
-                data.append(&mut geo);
-            }
+        let Ok(hash) = geo_instance.geo_hash.parse::<u64>() else { return None; };
+        if extrusion_mesh.meshes.contains_key(&hash) {
+            let Some(mesh) = extrusion_mesh.get_mesh(hash) else { return None; };
+            data.append(&mut gen_extrusion_data(transform, mesh.clone()));
+        } else {
+            let Some(mut geo) = geo_instance.geo_param.convert_rvm_pri_data() else { return None; };
+            data.append(&mut geo);
         }
     }
     Some(data)
@@ -540,7 +601,7 @@ async fn test_query_rvm_geo_instance_aql() -> anyhow::Result<()> {
     // let mut refnos = query_children_order_aql(&database, bran_refno).await?24381/100677
     //     .into_iter().map(|refno| refno.refno).collect::<Vec<_>>();
     // refnos.push(bran_refno);
-    let result = create_refnos_rvm_data(refnos, &db_option, &database).await?;
+    let result = create_refnos_rvm_data(refnos[0], &db_option, &database).await?;
     let mut file = std::fs::File::create("test.rvm").unwrap();
     file.write_all(&result).unwrap();
     Ok(())
