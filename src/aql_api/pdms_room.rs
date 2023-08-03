@@ -395,6 +395,11 @@ async fn test_query_through_element_rooms() -> anyhow::Result<()> {
     //测试样例3
     let room_number = query_through_element_rooms(RefU64::from_url_refno("24383_83960").unwrap()).await;
     assert_eq!(room_number.unwrap(), Some(("R361".to_string(), "".to_string())));
+
+    //测试样例4
+    let room_number = query_through_element_rooms(RefU64::from_url_refno("17496_145366").unwrap()).await;
+    assert_eq!(room_number.unwrap(), Some(("R532".to_string(), "R320".to_string())));
+
     Ok(())
 }
 
