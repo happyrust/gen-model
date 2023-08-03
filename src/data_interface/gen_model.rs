@@ -1268,6 +1268,7 @@ pub async fn gen_cata_geos(
                             });
                         }
                     } else {
+                        #[cfg(debug_assertions)]
                         dbg!(&current_tubing);
                         println!("{} 的直段方向有问题", refno.to_refno_string());
                     }
