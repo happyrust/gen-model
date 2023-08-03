@@ -27,7 +27,7 @@ pub const GLOBAL_DATABASE: &'static str = "PROJECT_INFO";
 // pub const SSC_DATABASE: &'static str = "SSC_INFO";
 pub const FUZZY_QUERT: &'static str = "FUZZY_QUERY";
 pub const PUHUA_MATERIAL_DATABASE: &'static str = "hdey_powerpmdb";
-pub const PUHUA_MATERIAL_TABLE: &'static str = "pdms_mat_gy";
+pub const PUHUA_GY_MATERIAL_TABLE: &'static str = "pdms_mat_gy";
 pub const PUHUA_DQ_MATERIAL_TABLE: &'static str = "pdms_traymotlist";
 // project_mdb
 // 专业表单

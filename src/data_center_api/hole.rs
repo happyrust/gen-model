@@ -18,6 +18,7 @@ use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use aios_core::create_attas_structs::VirtualHoleGraphNodeQuery;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
+use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{ArDatabase, remove_arangodb_with_refno_key, save_arangodb_doc};
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
@@ -41,7 +42,7 @@ async fn query_hole_data_tidb(id: u32, pool: &Pool<MySql>) -> Option<DataCenterI
                     object_model_code: "STUCJ".to_string(),
                     project_code: "1516".to_string(),
                     instance_code: format!("STUCJ{}", id),
-                    version: "A版".to_string(),
+                    version: get_refno_latest_version(),
                     attributes: gen_stucj_data(id, pool).await,
                 }
             }
@@ -50,7 +51,7 @@ async fn query_hole_data_tidb(id: u32, pool: &Pool<MySql>) -> Option<DataCenterI
                     object_model_code: "STUCG".to_string(),
                     project_code: "1516".to_string(),
                     instance_code: format!("STUCG{}", id),
-                    version: "A版".to_string(),
+                    version: get_refno_latest_version(),
                     attributes: gen_stucg_data(id, pool).await,
                 }
             }
@@ -59,7 +60,7 @@ async fn query_hole_data_tidb(id: u32, pool: &Pool<MySql>) -> Option<DataCenterI
                     object_model_code: "STUCH".to_string(),
                     project_code: "1516".to_string(),
                     instance_code: format!("STUCH{}", id),
-                    version: "A版".to_string(),
+                    version: get_refno_latest_version(),
                     attributes: gen_stuch_data(id, pool).await,
                 }
             }
@@ -81,7 +82,7 @@ pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>,project_code:&st
                         object_model_code: "STUCJ".to_string(),
                         project_code: project_code.to_string(),
                         instance_code: format!("STUCJ{}", idx),
-                        version: "A版".to_string(),
+                        version: get_refno_latest_version(),
                         attributes: gen_stucj_data_aql(instance).await,
                     }
                 }
@@ -90,7 +91,7 @@ pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>,project_code:&st
                         object_model_code: "STUCG".to_string(),
                         project_code: project_code.to_string(),
                         instance_code: format!("STUCG{}", idx),
-                        version: "A版".to_string(),
+                        version: get_refno_latest_version(),
                         attributes: gen_stucg_data_aql(instance).await,
                     }
                 }
@@ -99,7 +100,7 @@ pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>,project_code:&st
                         object_model_code: "STUCH".to_string(),
                         project_code: project_code.to_string(),
                         instance_code: format!("STUCH{}", idx),
-                        version: "A版".to_string(),
+                        version: get_refno_latest_version(),
                         attributes: gen_stuch_data_aql(instance).await,
                     }
                 }

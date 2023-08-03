@@ -2,7 +2,7 @@ use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, Data
 use aios_core::pdms_types::RefU64;
 use crate::aql_api::children::{query_children_eles, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
-use crate::data_center_api::data_api::{get_refno_desc, get_refno_desi_desc};
+use crate::data_center_api::data_api::{get_refno_desc, get_refno_desi_desc, get_refno_latest_version};
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 获取电气支吊架信息
@@ -80,7 +80,7 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
                 object_model_code: "ERECAB".to_string(),
                 project_code: aios_mgr.db_option.project_code.to_string(),
                 instance_code: stru.name,
-                version: "A版".to_string(),
+                version: get_refno_latest_version(),
                 attributes: attr,
             });
         }

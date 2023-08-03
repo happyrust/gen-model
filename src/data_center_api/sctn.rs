@@ -3,7 +3,7 @@ use aios_core::pdms_types::{EleTreeNode, RefU64};
 use crate::api::element::query_children;
 use crate::aql_api::children::{query_ancestor_till_type_aql, query_ancestor_till_types_aql, query_children_eles, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::query_foreign_name_aql;
-use crate::data_center_api::data_api::{get_ori_angle_str, get_refno_desc, get_refno_desi_desc, get_refno_paras, get_refno_world_poss_pose};
+use crate::data_center_api::data_api::{get_ori_angle_str, get_refno_desc, get_refno_desi_desc, get_refno_latest_version, get_refno_paras, get_refno_world_poss_pose};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
@@ -27,7 +27,7 @@ pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMana
                         object_model_code: "PARTDA".to_string(),
                         project_code: aios_mgr.db_option.project_code.to_string(),
                         instance_code: child.name,
-                        version: "A版".to_string(),
+                        version: get_refno_latest_version(),
                         attributes: attr.0,
                     });
                 }
@@ -38,7 +38,7 @@ pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMana
                         object_model_code: "PARTDB".to_string(),
                         project_code: aios_mgr.db_option.project_code.to_string(),
                         instance_code: child.name,
-                        version: "A版".to_string(),
+                        version: get_refno_latest_version(),
                         attributes: attr.0,
                     });
                 }
@@ -118,7 +118,7 @@ pub async fn get_dq_support_sctn_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMana
                         object_model_code: "PARTDK".to_string(),
                         project_code: aios_mgr.db_option.project_code.to_string(),
                         instance_code: fixing.refno.to_refno_str(),
-                        version: "A版".to_string(),
+                        version: get_refno_latest_version(),
                         attributes: fixing_attrs,
                     });
                 }

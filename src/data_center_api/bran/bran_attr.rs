@@ -10,7 +10,7 @@ use crate::api::attr::query_explicit_attr;
 use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
-use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_paras};
+use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_latest_version, get_refno_paras};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -96,7 +96,7 @@ pub async fn get_sg_pipe_bran_name(refnos: Vec<RefU64>, database: &ArDatabase) -
                     object_model_code: "SEGMA".to_string(),
                     project_code: "1516".to_string(),
                     instance_code: bran.name,
-                    version: "A版".to_string(),
+                    version: get_refno_latest_version(),
                     attributes: attr,
                 })
             }
@@ -226,7 +226,7 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 object_model_code: "ERECB".to_string(),
                 project_code: aios_mgr.db_option.project_code.to_string(),
                 instance_code: bran.name,
-                version: "A版".to_string(),
+                version: get_refno_latest_version(),
                 attributes: erecb_attr,
             });
 
@@ -285,7 +285,7 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                     object_model_code: object_code.unwrap().to_string(),
                     project_code: aios_mgr.db_option.project_code.to_string(),
                     instance_code: child.name.to_string(),
-                    version: "A版".to_string(),
+                    version: get_refno_latest_version(),
                     attributes: attr,
                 });
             }
@@ -300,7 +300,7 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-pub(crate) struct CableWeightExcel {
+pub struct CableWeightExcel {
     pub types: Option<String>,
     pub width: Option<String>,
     /// 托盘重量
@@ -310,7 +310,7 @@ pub(crate) struct CableWeightExcel {
 }
 
 impl CableWeightExcel {
-    pub(crate) fn is_null(&self) -> bool {
+    pub fn is_null(&self) -> bool {
         if self.types.is_none() || self.width.is_none() || self.tray_weight.is_none() || self.cable_weight.is_none() {
             true
         } else {

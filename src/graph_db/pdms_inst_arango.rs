@@ -296,6 +296,22 @@ pub async fn query_rvm_instance_data_from_refno_aql(refno: RefU64, database: &Ar
     Ok(Some(result.remove(0)))
 }
 
+pub async fn query_compound_inst_hashes_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<EleGeosInfo>> {
+    let ids = refnos.into_iter()
+        .map(|x|  x.to_url_refno())
+        .collect::<Vec<_>>();
+    let aql = AqlQuery::new("\
+    With @@pdms_compound_inst_infos
+    for id in @ids
+    let compound_inst = document(@@pdms_compound_inst_infos,id)
+    filter compound_inst != null
+    return compound_inst
+    ").bind_var("ids", ids)
+        .bind_var("@pdms_compound_inst_infos", AQL_PDMS_COMPOUND_INST_INFO_COLLECTION);
+    let result = database.aql_query::<EleGeosInfo>(aql).await?;
+    Ok(result)
+}
+
 #[test]
 fn test_get_matrix() {
     // let world_transform = bevy::prelude::Transform {
