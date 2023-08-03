@@ -66,7 +66,3 @@ pub fn test_x_deviation_angle() {
     dbg!(angle_i32);
 }
 
-#[test]
-pub fn test_room_number() {
-    assert_eq!(response.status(), 200);
-}

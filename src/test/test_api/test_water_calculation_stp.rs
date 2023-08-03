@@ -11,8 +11,8 @@ use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 
 
-#[test]
-async fn test_export_water_calculation_stp() {
+#[tokio::test]
+pub async fn test_export_water_calculation_stp() {
     let aios_mgr = AiosDBManager::init_form_config().await.unwrap();
 
     //测试样例1(孔洞模型测试)
@@ -66,5 +66,5 @@ async fn test_export_water_calculation_stp() {
     // stp.civil_engineering = vec![map_1];
 
 
-    export_stp(&aios_mgr, &stp);
+    // export_stp(&aios_mgr, &stp);
 }

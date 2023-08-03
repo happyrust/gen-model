@@ -9,13 +9,14 @@ use crate::api::children::travel_children_with_type;
 use crate::data_interface::interface::PdmsDataInterface;
 use aios_core::water_calculation::{CivilEngineeringStp, FloodingHole, FloodingHoleVec, WaterComputeStp};
 use aios_core::water_calculation::ExportFloodingStpEvent;
-use opencascade::primitives::Compound;
+// use opencascade::primitives::Compound;
 use crate::api::attr::query_attr;
-use crate::graph_db::pdms_arango::ArDatabase;
+
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
 use crate::graph_db::pdms_arango::{ArDatabase, save_arangodb_doc};
 use aios_core::water_calculation::FloodingStpToArangodb;
+use arangors_lite::AqlQuery;
 
 
 ///得到导出stp的选中节点的参考号
@@ -99,7 +100,6 @@ pub async fn save_stp_data_to_arangodb(aios_mgr: &AiosDBManager, mut stp: Export
 
 #[cfg(feature = "opencascade_rs")]
 pub async fn export_stp(mgr: &AiosDBManager, stp_packet: &WaterComputeStp) -> anyhow::Result<bool> {
-
     let pos_refnos: Vec<RefU64> = stp_packet.civil_engineering.iter()
         .map(|x| x.keys().cloned())
         .flatten()
