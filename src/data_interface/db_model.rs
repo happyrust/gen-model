@@ -108,11 +108,11 @@ impl AiosDBManager {
         loop {
             //需要排除负实体
             let aql = AqlQuery::new(r#"
+            with pdms_inst_infos
             FOR doc IN pdms_inst_infos
                 SORT doc._key
                 LIMIT @offset, @batch_size
                 filter doc.aabb != null
-                filter LENGTH(doc.geo_insts) > 1 or (LENGTH(doc.geo_insts) == 1 and !doc.geo_insts[0].is_neg)
                 RETURN [
                     doc._key,
                     doc.aabb,
@@ -138,6 +138,7 @@ impl AiosDBManager {
         }
 
         dbg!(offset);
+        dbg!(rstar_objs.len());
 
         self.rtree = Some(AccelerationTree::load(rstar_objs));
         dbg!(self.rtree.as_ref().unwrap().size());
@@ -146,67 +147,65 @@ impl AiosDBManager {
     }
 
     ///计算房间数据
-    async fn calculate_room(&self, inst: &EleGeosInfo, inst_geo: &EleInstGeo, rtree: &AccelerationTree) -> anyhow::Result<Vec<RefU64>> {
-        // let mut withing_room_items = vec![];
-        // let room_refno = inst.refno;
-        // let database = self.get_arango_db().await?;
-        // if let Some(room_abb) = inst.aabb {
-        //     // dbg!(&room_abb);
-        //     withing_room_items = rtree
-        //         .locate_intersecting_bounds(&room_abb)
-        //         .collect::<Vec<_>>();
-        //     let hashes = inst.geo_basics.iter().map(|x| x.geo_hash).collect::<Vec<_>>();
-        //     let room_mesh_mgr = query_pdms_mesh_aql(&database, &hashes).await.unwrap_or_default();
-        //     for hash in hashes {
-        //         if let Some(room_mesh) = room_mesh_mgr.get_mesh(hash) {
-        //             let t = inst.get_geo_world_transform(inst_geo);
-        //             // dbg!(&t);
-        //             let collider_mesh = room_mesh.get_tri_mesh(t.compute_matrix());
-        //             // let local_aabb = collider_mesh.local_aabb();
-        //             // dbg!(collider_mesh.local_aabb());
-        //             let mut outer_refnos = vec![];
-        //             //需要批量去获取数据
-        //
-        //             for (refno, world_point) in &withing_room_items {
-        //                 // let world_trans = self.get_world_transform(*refno).await?.unwrap_or_default();
-        //                 // let world_point: parry3d::math::Point<f32> = world_trans.translation.into();
-        //
-        //                 //检查目标的坐标点不在它自身包围盒的情况，这种就需要用相交的算法去计算
-        //
-        //                 //check 是否包含在房间内
-        //                 let contain_point = match collider_mesh.cast_local_ray_and_get_normal(
-        //                     &Ray::new(Point3::from_slice(world_point), Vector::new(0.0, 0.0, 1.0)),
-        //                     100000.0,
-        //                     false,
-        //                 ) {
-        //                     Some(intersection) => {
-        //                         collider_mesh.is_backface(intersection.feature)
-        //                     }
-        //                     None => false,
-        //                 };
-        //                 // dbg!(contain_point);
-        //                 // dbg!(outer_refnos.len());
-        //                 if !contain_point {
-        //                     outer_refnos.push(*refno);
-        //                 }
-        //                 //如果是风管，就需要这么去检测是否发生碰撞
-        //                 //后续需要用包围盒再去判断一次
-        //                 // collider_mesh.intersection_with_aabb();
-        //             }
-        //
-        //             withing_room_items.retain(|(refno, _)| {
-        //                 !outer_refnos.contains(refno) && *refno != room_refno
-        //             });
-        //
-        //             // dbg!(&withing_room_refnos);
-        //         }
-        //     }
-        //     //再次过滤room，通过判断位置是否在room的mesh里来判断
-        // }
-        //
-        // return Ok(withing_room_items.iter().map(|x| x.0).collect());
+    async fn calculate_room(&self, info: &EleGeosInfo, inst_geos: &Vec<EleInstGeo>, rtree: &AccelerationTree) -> anyhow::Result<Vec<RefU64>> {
+        let mut withing_room_items = vec![];
+        let room_refno = info.refno;
+        let database = self.get_arango_db().await?;
+        if let Some(room_abb) = info.aabb {
+            withing_room_items = rtree
+                .locate_intersecting_bounds(&room_abb)
+                .collect::<Vec<_>>();
+            // let inst_key = info.get_inst_key();
+            let hashes = inst_geos.iter().map(|x| x.geo_hash).collect::<Vec<_>>();
+            let room_mesh_mgr = query_pdms_mesh_aql(&database, &hashes).await.unwrap_or_default();
+            for (&hash, geo) in hashes.iter().zip(inst_geos) {
+                if let Some(room_mesh) = room_mesh_mgr.get_mesh(hash) {
+                    let t = info.get_geo_world_transform(geo);
+                    // dbg!(&t);
+                    let collider_mesh = room_mesh.get_tri_mesh(t.compute_matrix());
+                    // let local_aabb = collider_mesh.local_aabb();
+                    // dbg!(collider_mesh.local_aabb());
+                    let mut outer_refnos = vec![];
+                    //需要批量去获取数据
 
-        return Ok(vec![]);
+                    for (refno, world_point) in &withing_room_items {
+                        // let world_trans = self.get_world_transform(*refno).await?.unwrap_or_default();
+                        // let world_point: parry3d::math::Point<f32> = world_trans.translation.into();
+
+                        //检查目标的坐标点不在它自身包围盒的情况，这种就需要用相交的算法去计算
+
+                        //check 是否包含在房间内
+                        let contain_point = match collider_mesh.cast_local_ray_and_get_normal(
+                            &Ray::new(Point3::from_slice(world_point), Vector::new(0.0, 0.0, 1.0)),
+                            100000.0,
+                            false,
+                        ) {
+                            Some(intersection) => {
+                                collider_mesh.is_backface(intersection.feature)
+                            }
+                            None => false,
+                        };
+                        // dbg!(contain_point);
+                        // dbg!(outer_refnos.len());
+                        if !contain_point {
+                            outer_refnos.push(*refno);
+                        }
+                        //如果是风管，就需要这么去检测是否发生碰撞
+                        //后续需要用包围盒再去判断一次
+                        // collider_mesh.intersection_with_aabb();
+                    }
+
+                    withing_room_items.retain(|(refno, _)| {
+                        !outer_refnos.contains(refno) && *refno != room_refno
+                    });
+
+                    // dbg!(&withing_room_refnos);
+                }
+            }
+            //再次过滤room，通过判断位置是否在room的mesh里来判断
+        }
+
+        return Ok(withing_room_items.iter().map(|x| x.0).collect());
     }
 
     ///计算所有房间包含的其他参考号
@@ -230,12 +229,11 @@ impl AiosDBManager {
             // dbg!(&instances);
             let mut final_within_room_refnos = vec![];
             for (_, info) in &inst_data.inst_info_map {
-                //todo 需要使用图数据库来处理
-                // let Some(Some(inst_geo)) = inst_data.get_inst_geo(info).into_iter().next() else{
-                //     continue;
-                // };
-                // let r = self.calculate_room(info, inst_geo, rtree).await?;
-                // final_within_room_refnos.extend_from_slice(&r);
+                let Some(inst_geos) = inst_data.get_inst_geos(info) else{
+                    continue;
+                };
+                let r = self.calculate_room(info, inst_geos, rtree).await?;
+                final_within_room_refnos.extend_from_slice(&r);
             }
 
             // dbg!(&final_within_room_refnos);

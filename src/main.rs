@@ -168,70 +168,114 @@ async fn main() -> anyhow::Result<()> {
 
     // return test_sbfi();
 
-    // let s = Config::builder()
-    //     .add_source(File::with_name("DbOption"))
-    //     .build()?;
-    // let db_option: DbOption = s.try_deserialize().unwrap();
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
 
-    // if db_option.enable_log {
-    //     let now = chrono::offset::Local::now();
-    //     let filename = format!("{}-{}-{}-{}-{}-{}_dblog.txt", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
-    //     let file = std::fs::OpenOptions::new()
-    //         .read(true)
-    //         .write(true)
-    //         .create(true)
-    //         .open(filename)
-    //         .unwrap();
-    //     let mut builder = Builder::from_default_env();
-    //     builder.filter(Some("aios_database"), LevelFilter::Info);
-    //     builder.filter(Some("aios_core"), LevelFilter::Info);
-    //     builder.target(Target::Pipe(Box::new(file))).init();
-    // }
-
-    // create_arangodb_docs(&db_option)
-    //     .await
-    //     .expect("Failed to create arangodb conns");
-    // /// 是否全部同步模型
-    // if db_option.total_sync {
-    //     create_arangodb_docs(&db_option)
-    //         .await
-    //         .expect("Failed to create arangodb docs");
-    //     // 同步pdms数据
-    //     sync_pdms(&db_option).await.unwrap();
-    // }
-    /// 创建db manager
-    let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-
-    if let Ok(attr_map) = mgr.get_attr(RefU64::from_url_refno("17496_178935").unwrap()).await {
-        dbg!("****");
-        dbg!(&attr_map);
+    if db_option.enable_log {
+        let now = chrono::offset::Local::now();
+        let filename = format!("{}-{}-{}-{}-{}-{}_dblog.txt", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(filename)
+            .unwrap();
+        let mut builder = Builder::from_default_env();
+        builder.filter(Some("aios_database"), LevelFilter::Info);
+        builder.filter(Some("aios_core"), LevelFilter::Info);
+        builder.target(Target::Pipe(Box::new(file))).init();
     }
 
-    //
-    // if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
-    //     Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
-    // }
-    //
-    // ///生成ssc 树
-    // if db_option.rebuild_ssc_tree {
-    //     println!("正在同步SSC");
-    //     if let Some(project_db) = mgr.project_map.get(&mgr.db_option.project_name) {
-    //         // 保存ssc
-    //         async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
-    //         set_arangodb_all_ssc_nodes(project_db.value(), &mgr.get_arango_db().await?).await?;
-    //     }
-    //     println!("SSC同步完成");
-    // }
-    //
-    // if db_option.only_sync_sys {
-    //     println!("正在同步TEAM DATA");
-    //     sync_system_db(&mgr).await?;
-    // }
-    //
-    // //房间树要重写
-    // if db_option.gen_spatial_tree {
-    //     mgr.calculate_rooms().await.expect("房间计算失败");
-    // }
+    create_arangodb_docs(&db_option)
+        .await
+        .expect("Failed to create arangodb conns");
+    /// 是否全部同步模型
+    if db_option.total_sync {
+        create_arangodb_docs(&db_option)
+            .await
+            .expect("Failed to create arangodb docs");
+        // 同步pdms数据
+        sync_pdms(&db_option).await.unwrap();
+    }
+    /// 创建db manager
+    let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
+    if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
+        Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
+    }
+
+    #[cfg(feature = "gen_model")]
+    if db_option.gen_model {
+        println!("正在生成模型");
+        let mut time = Instant::now();
+        // let refno = RefU64::from_two_nums(25688, 8189);
+        // dbg!(mgr.get_attr_from_localdb(refno));
+        // dbg!(mgr.get_children_refs(refno).await);
+
+        let refno = RefU64::from_two_nums(25688, 7972);
+        let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        dbg!(transform);
+
+        // let refno = RefU64::from_two_nums(23708, 1234);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(23708, 26027);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+
+        //
+        // let refno = RefU64::from_two_nums(17496, 195550);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(17496, 173130);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(17496, 173131);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(17496, 156942);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+
+        // let branch_refnos = query_deep_children_refnos_fuzzy(&database, &[refno], &CATA_HAS_TUBI_GEO_NAMES).await?;
+        // dbg!(branch_refnos);
+
+        gen_geos_data(mgr.clone()).await?;
+        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+    }
+
+    ///生成ssc 树
+    if db_option.rebuild_ssc_tree {
+        println!("正在同步SSC");
+        if let Some(project_db) = mgr.project_map.get(&mgr.db_option.project_name) {
+            // 保存ssc
+            async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
+            set_arangodb_all_ssc_nodes(project_db.value(), &mgr.get_arango_db().await?).await?;
+        }
+        println!("SSC同步完成");
+    }
+
+    if db_option.only_sync_sys {
+        println!("正在同步TEAM DATA");
+        sync_system_db(&mgr).await?;
+    }
+
+    //房间树要重写
+    if db_option.gen_spatial_tree {
+        mgr.calculate_rooms().await.expect("房间计算失败");
+    }
 
     Ok(())
 }
@@ -273,15 +317,15 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    // let noun = "AIDLIN";
-    // let hash = db1_hash(noun);
-    // dbg!(hash);
-    let hashes = [397059875];
-    for hash in hashes {
-        let str = db1_dehash(hash);
-        dbg!(&hash);
-        dbg!(str);
-    }
+    let noun = "AIDLIN";
+    let hash = db1_hash(noun);
+    dbg!(hash);
+    // let hashes = [798355,644698,640493,907462,631900,855442,926170,239044746,566245];
+    // for hash in hashes {
+    //     let str = db1_dehash(hash);
+    //     dbg!(&hash);
+    //     dbg!(str);
+    // }
 }
 
 #[test]
@@ -320,7 +364,7 @@ fn test_turn_bin_into_json() {
 //         dbg!(&value.value());
 //     };
 // }
-
+//
 // #[test]
 // fn test_compare_attr_info_file() {
 //     let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
