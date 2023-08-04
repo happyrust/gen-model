@@ -378,9 +378,31 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &ArDatabase) -> a
 }
 
 /// 返回贯穿件 穿过的两个房间号 ， tuple.0：距离核岛中心 世界坐标 0，0，0 最近的点
-pub async fn query_through_element_rooms(refno:RefU64) -> anyhow::Result<Option<(String,String)>> {
-    Ok(Some(("R101".to_string(),"R102".to_string())))
+pub async fn query_through_element_rooms(refno: RefU64) -> anyhow::Result<Option<(String, String)>> {
+    Ok(Some(("R101".to_string(), "R102".to_string())))
 }
+
+#[tokio::test]
+async fn test_query_through_element_rooms() -> anyhow::Result<()> {
+    //测试样例1
+    let room_number = query_through_element_rooms(RefU64::from_url_refno("24383_83638").unwrap()).await;
+    assert_eq!(room_number.unwrap(), Some(("R661".to_string(), "".to_string())));
+
+    //测试样例2
+    let room_number = query_through_element_rooms(RefU64::from_url_refno("24383_83589").unwrap()).await;
+    assert_eq!(room_number.unwrap(), Some(("R661".to_string(), "".to_string())));
+
+    //测试样例3
+    let room_number = query_through_element_rooms(RefU64::from_url_refno("24383_83960").unwrap()).await;
+    assert_eq!(room_number.unwrap(), Some(("R361".to_string(), "".to_string())));
+
+    //测试样例4
+    let room_number = query_through_element_rooms(RefU64::from_url_refno("17496_145366").unwrap()).await;
+    assert_eq!(room_number.unwrap(), Some(("R532".to_string(), "R320".to_string())));
+
+    Ok(())
+}
+
 
 #[tokio::test]
 async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
