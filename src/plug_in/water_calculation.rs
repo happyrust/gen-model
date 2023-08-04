@@ -81,6 +81,24 @@ pub async fn get_detail_data_for_export_stp(aios_mgr: &AiosDBManager, mut data: 
     data
 }
 
+pub async fn save_stp_data_to_arangodb(aios_mgr: &AiosDBManager, mut stp: ExportFloodingStpEvent) -> String {
+    // 将数据保存至图数据库
+    if let Ok(database) = aios_mgr.get_arango_db().await {
+        let mut hasher = DefaultHasher::new();
+        stp.file_name.hash(&mut hasher);
+        let key = hasher.finish();
+        let json_data = vec![stp.to_arango_struct()];
+        let Ok(send_value) = serde_json::to_value(&json_data) else { return "数据结构反序列化失败".to_string(); };
+        if let Ok(_result) = query_water_calculation_data(&database, key.to_string()).await {
+            let _ = save_arangodb_doc(send_value, AQL_WATER_CALCULATION_COLLECTION, &database, true).await.unwrap();
+        } else {
+            let _ = save_arangodb_doc(send_value, AQL_WATER_CALCULATION_COLLECTION, &database, false).await.unwrap();
+        }
+    }
+    "Ok".to_string()
+}
+
+
 #[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
 pub async fn export_stp(mgr: &AiosDBManager, stp_packet: &WaterComputeStpInput, name: &str) -> anyhow::Result<bool> {
@@ -95,10 +113,10 @@ pub async fn export_stp(mgr: &AiosDBManager, stp_packet: &WaterComputeStpInput, 
         let refnos = rvm_infos.iter().map(|x| x.refno).collect::<Vec<_>>();
         dbg!(&refnos);
         let Some(mut final_shape) = rvm_infos.iter()
-            .filter(|x| x.refno == pos_refno )
+            .filter(|x| x.refno == pos_refno)
             .map(|x| x.gen_occ_shape())
             .flatten()
-            .nth(0) else{
+            .nth(0) else {
             continue;
         };
 
@@ -107,7 +125,7 @@ pub async fn export_stp(mgr: &AiosDBManager, stp_packet: &WaterComputeStpInput, 
             .map(|x| x.gen_ngmr_occ_shape())
             .flatten()
             .collect::<Vec<_>>();
-        for n in ngmr_shapes{
+        for n in ngmr_shapes {
             // final_shape = final_shape.subtract_shape(&n).0;
             final_shape = final_shape.union_shape(&n).0;
         }
@@ -120,7 +138,6 @@ pub async fn export_stp(mgr: &AiosDBManager, stp_packet: &WaterComputeStpInput, 
 
     Ok(true)
 }
-
 
 pub async fn query_water_calculation_data(database: &ArDatabase, key_value: String) -> anyhow::Result<Option<Vec<FloodingStpToArangodb>>> {
     let aql = AqlQuery::new("let v = document('water_calculaion',@_key)\
