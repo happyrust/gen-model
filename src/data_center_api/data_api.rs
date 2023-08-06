@@ -1,11 +1,12 @@
 use std::collections::HashMap;
-use aios_core::data_center::AttrValue::{AttrString, AttrVec3};
+use aios_core::data_center::AttrValue::{AttrFloat, AttrString, AttrVec3};
 use aios_core::data_center::DataCenterAttr;
 use aios_core::pdms_types::{AttrMap, PdmsElement, RefU64};
 use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use dashmap::DashMap;
 
 use glam::Vec3;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use sqlx::{Executor, Row};
@@ -130,6 +131,32 @@ pub(crate) async fn get_bran_itema_attr(refno:PdmsElement,bran_name:&str,
         attribute_model_code: "ITEMA24".to_string(),
         value: AttrString(r_text).into(),
     });
+}
+
+pub(crate) async fn get_material_pressure_code(mut result:&mut Vec<DataCenterAttr>,material_map: DashMap<String, String>) {
+    if let Some(pressure) = material_map.get("Pressure") {
+        if let Some((char,number)) = split_char_and_number(pressure.value()) {
+            if char.to_lowercase() == "sch".to_string() {
+                result.push(DataCenterAttr{
+                    attribute_model_code: "ITEMAA3".to_string(),
+                    value: AttrString(char).into(),
+                });
+                result.push(DataCenterAttr{
+                    attribute_model_code: "ITEMAA4".to_string(),
+                    value: AttrString(number).into(),
+                })
+            } else if char.to_lowercase() == "cl" || char.to_lowercase() == "pn"{
+                result.push(DataCenterAttr{
+                    attribute_model_code: "ITEMAA4".to_string(),
+                    value: AttrString(number).into(),
+                });
+                result.push(DataCenterAttr{
+                    attribute_model_code: "ITEMAA6".to_string(),
+                    value: AttrString(char).into(),
+                });
+            }
+        }
+    }
 }
 
 /// 获取阀门所处的房间号，工艺专业
@@ -382,6 +409,18 @@ pub fn get_refno_latest_version() -> String {
     "A版".to_string()
 }
 
+/// 分割字符串的字符部分和数字部分 例如 "sch400" -> sch  400
+fn split_char_and_number(input: &str) -> Option<(String,String)> {
+    let re = Regex::new(r"(?P<char_part>[A-Za-z]+)(?P<number_part>\d+)$").unwrap();
+    if let Some(captures) = re.captures(input) {
+        let Some(char_part) = captures.name("char_part") else { return None; };
+        let Some(number_part) = captures.name("number_part") else { return None; };
+        Some((char_part.as_str().to_string(), number_part.as_str().to_string()))
+    } else {
+        None
+    }
+}
+
 #[tokio::test]
 async fn test_get_inst_data_from_inst_major() -> anyhow::Result<()> {
     let mgr = AiosDBManager::init_form_config().await?;
@@ -400,5 +439,13 @@ async fn test_get_dq_material_code() -> anyhow::Result<()> {
     let material_map = get_dq_material_code(&spre_name,
                                             &stander_num, &fileds, &aios_mgr).await?;
     dbg!(&material_map);
+
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn attr_export_to_excel() -> anyhow::Result<()> {
+
     Ok(())
 }

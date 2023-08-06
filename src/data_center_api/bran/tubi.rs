@@ -75,7 +75,7 @@ pub async fn get_data_center_tubi_attr(bran_refno: RefU64,bran_name:&str, databa
         let material_code = if from == bran_refno {
             bran_spre_material_code.clone()
         } else {
-            let from_lstu = query_foreign_name_aql(bran_refno, vec!["LSTU", "LSTU"], database).await.unwrap_or(None).unwrap_or("".to_string());
+            let from_lstu = query_foreign_name_aql(from, vec!["LSTU", "LSTU"], database).await.unwrap_or(None).unwrap_or("".to_string());
             get_spre_material_code(&from_lstu).unwrap_or("".to_string())
         };
         let material_map = if let Ok(puhua_pool) = aios_mgr.get_puhua_pool().await {
@@ -98,6 +98,10 @@ pub async fn get_data_center_tubi_attr(bran_refno: RefU64,bran_name:&str, databa
         }
         // 单位 mm
         let length = tubi.start_pt.distance(tubi.end_pt);
+        result.push(DataCenterAttr {
+            attribute_model_code: "ITEMAA1".to_string(),
+            value: AttrFloat(length).into(),
+        });
         // 单位 m
         let weight_unit:f32 = if material_map.contains_key("Weight") {
             material_map.get("Weight").unwrap().value().clone().parse().unwrap_or(0.0)
@@ -145,8 +149,8 @@ pub async fn get_data_center_tubi_attr(bran_refno: RefU64,bran_name:&str, databa
 async fn test_get_data_center_tubi_attr() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let database = aios_mgr.get_arango_db().await?;
-    let bran_refno = RefU64::from_refno_str("24383/66748").unwrap();
-    let result = get_data_center_tubi_attr(bran_refno,"",&database,&aios_mgr).await;
+    let bran_refno = RefU64::from_refno_str("24383/66761").unwrap();
+    let result = get_data_center_tubi_attr(bran_refno,"/1WCC0578-21.3-NACJ-R54-R220",&database,&aios_mgr).await;
     let mut file = std::fs::File::create("tubi.json")?;
     let json = serde_json::to_vec(&result)?;
     file.write_all(&json)?;

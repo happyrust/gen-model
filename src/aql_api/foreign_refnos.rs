@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
+use clap::builder::Str;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -87,8 +88,10 @@ pub async fn query_foreign_name_aql(refno: RefU64, foreign_types: Vec<&str>, ara
         .bind_var("final_type", foreign_types[foreign_types.len() - 1])
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@foreign_edges", AQL_FOREIGN_EDGES_COLLECTION);
-    let results: Result<Vec<String>, _> = arango_database.aql_query(aql).await;
-    if results.is_err() { return Ok(None); }
+    let results = arango_database.aql_query::<String>(aql).await;
+    if results.is_err() {
+        return Ok(None);
+    }
     let mut results = results.unwrap();
     if results.len() == 0 { return Ok(None); }
     Ok(Some(results.remove(0)))

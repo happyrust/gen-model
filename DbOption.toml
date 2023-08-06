@@ -1,31 +1,27 @@
-#同步文件配置false
+#同步文件配置
 total_sync = false
 enable_log = false
-sync_graph_db = true
-sync_tidb = true
+sync_graph_db = false
 sync_localdb = true
+sync_tidb = false
 incr_sync = false
 replace_dbs = true
 
 #项目设置
-project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
-included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
-#included_projects = ["SCB", "ZDJ"]  #"AvevaPlantSample",
+project_path = "D:/AVEVA/Projects/E3D2.1" #TestCatalogue
+included_projects = ["AvevaMarineSample","AvevaCatalogue","ZDJ"]
+#included_projects = ["AvevaCatalogue"]  #"AvevaPlantSample",
 #included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
 
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
-project_code = 1516
+project_code = "1516"
 module = "DESI"
-#是否生成模型数据
-gen_model = false
-mesh_tol_ratio = 3.0
-apply_boolean_operation = true
+gen_model_mesh = true
 #是否生成房间树
-gen_spatial_tree = true
+gen_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 100
-
 
 #arangodb 配置
 arangodb_database = "ams"
@@ -39,42 +35,43 @@ arangodb_password = ""
 #tidb 配置
 ip = "127.0.0.1"
 user = "root"
-password = ""
-#port = "3306"
-port = "4000"
+password = "root"
+port = "3306"
+#port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
+
+#是否生成模型数据
+gen_model = true
+mesh_tol_ratio = 5.0
+apply_boolean_operation = false
 
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"
 
-
 #调试选项
-replace_mesh = true
+replace_mesh = false
 save_model_mesh_to_graph_db = true
 need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
-reset_mdb_project =  false     #是否重新生成 mdb 缓存
+reset_mdb_project = false      #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
-#included_db_files = ["ams7334_0001", "ams7353_0001", "ams7741_0001", "ams7998_0001"]
-included_db_files = ["ams1112_0001"]
-#included_db_files = ["acp7002_0001"]
+#included_db_files = ["ams7351_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
-#manual_db_nums = [7999]
-#manual_db_nums = [1112]  #, 8000
+manual_db_nums = [7999]  #, 8000
 plat_url = ""
 
 #puhua
-puhua_database_ip = ""
-puhua_database_user = ""
-puhua_database_password = ""
+puhua_database_ip = "pms.powerpms.net:23306"
+puhua_database_user = "ZY_User"
+puhua_database_password = "ZYuser@123"
 
 #joint还有问题，方位对齐的问题
-#debug_root_refnos = ["23708/26027"]
+debug_root_refnos = ["24383/66764"]
 
 
 #管道不出来的情况，需要查一下原因, *以解决
@@ -159,164 +156,21 @@ puhua_database_password = ""
 
 
 #debug_root_refnos = ["17496/169982"]
-#debug_root_refnos = ["9304/2"]
-#debug_root_refnos = ["24383/84086"]
-#debug_root_refnos = ["24383/84443"]
-#debug_root_refnos = ["24383/84337"]
-#debug_root_refnos = ["24383/84382"]
-#debug_root_refnos = ["17496/106409"]
-
-#风管的测试
 #debug_root_refnos = ["24381/46775"]
-
-#测试风管bend的问题
-#debug_root_refnos = ["24381/47158"]
-
-#错误的pyramid
-#debug_root_refnos = ["17496/171101"]
-
-#FIXING 的调试
-#debug_root_refnos = ["17496/106824"]  #墙
-#debug_root_refnos = ["17496/145250"]  #FIXING
-#debug_root_refnos = ["17496/106409"]  #墙
-#debug_root_refnos = ["17496/173624"]  #墙 顺时针的情况
-
-#FIT 的调试
-#17496/173050
-#debug_root_refnos = ["17496/173050"]
-#debug_root_refnos = ["17496/173049"]
-
-#debug_root_refnos = ["17496/169983"]
-#debug_root_refnos = ["24381/148471"]
-#debug_root_refnos = ["24383/74047"]
-#debug_root_refnos = ["25688/4361"]
-#debug_root_refnos = ["24381/159290"]
-
-#debug_root_refnos = ["24383/73928"]
-
-
-#VALVE 有问题
-#debug_root_refnos = ["17496/170701"]
-
-#DISH  显示有问题
-#debug_root_refnos = ["17496/170884"]
-
-#debug_root_refnos = ["24381/42520"]
-#debug_root_refnos = ["24381/44462"]
-#debug_root_refnos = ["17496/169987"]
-
-#负实体的计算问题
-#debug_root_refnos = ["17496/169983"]
 #debug_root_refnos = ["9304/2"]
-#debug_root_refnos = ["17496/98576"]
-#生成多个分段了的负实体，会崩溃，需要跳过
-#debug_root_refnos = ["17496/99813"]
+#debug_root_refnos = ["17496/169984"]
 
-#拉伸体有一些异性，需要处理掉不必要的边
-#debug_root_refnos = ["17496/99969"]
-
-#重点测试负实体
-#debug_root_refnos = ["17496/99813"]
-#debug_root_refnos = ["17496/170391"]
-
-#debug_root_refnos = ["17496/79888"]
-
-#有问题的负实体
-#debug_root_refnos = ["24381/44462"]
-#debug_root_refnos = ["24381/44372"]
-#debug_root_refnos = ["24381/44372"]
-
-#cut a sphere cap
-#debug_root_refnos = ["24381/36945"]
-
-#debug_root_refnos = ["17496/161421"]
-#debug_root_refnos = ["17496/171102"]
-#debug_root_refnos = ["17496/171102"]
-#debug_root_refnos = ["24381/57302"]
-#debug_root_refnos = ["17496/8518"]
-
-
-#直墙的显示问题
-#debug_root_refnos = ["17496/172197"]
-#debug_root_refnos = ["17496/171750"]
-#debug_root_refnos = ["24381/48631"]
-
-#debug_root_refnos = ["17496/172361"]
-#debug_root_refnos = ["17496/171256"]
-#debug_root_refnos = ["17496/171254"]
-#debug_root_refnos = ["17496/172817"]
-#debug_root_refnos = ["17496/172816"]
-#debug_root_refnos = ["17496/172852"]
-
-#debug_root_refnos = ["24381/44495", "17496/171256", "17496/171302"]
-#debug_root_refnos = ["24381/42520"]
-#debug_root_refnos = ["9304/2"]
-#debug_root_refnos = ["17496/161703"]
-
-#debug_root_refnos = ["17496/105760"]
-#debug_root_refnos = ["17496/105760"]
-
-#debug_root_refnos = ["17496/171102"]
-#debug_root_refnos = ["17496/171138"]
-#debug_root_refnos = ["17496/172824"]
-#debug_root_refnos = ["17496/171158"]
-
-#SBFI
-#debug_root_refnos = ["17496/137938"]
-#GWALL
-#debug_root_refnos = ["17496/116749"]
-#debug_root_refnos = ["17496/171346"]
-
-#debug_root_refnos = ["17496/178935"]
-#debug_root_refnos = ["17496/175492"]
-
-#电气负实体测试
-#debug_root_refnos = ["24383/84480"]
-#debug_root_refnos = ["24383/84515"]
-#debug_root_refnos = ["24383/84531"]
-#debug_root_refnos = ["24383/84532"]
-
-
-#17496/116750
-
-#debug_root_refnos = ["17496/72861"]
-#debug_root_refnos = ["17496/168790"]
-
-#debug_root_refnos = ["17496/171134"]
-#debug_root_refnos = ["17496/172861"]
-#debug_root_refnos = ["17496/173047"]
-#debug_root_refnos = ["17496/173056"]
-#debug_root_refnos = ["17496/194989"]
-#debug_root_refnos = ["17496/194993"]
-#debug_root_refnos = ["17496/161488"]
-#debug_root_refnos = ["17496/195553"]
-
-#重点测试管道
-#debug_root_refnos = ["17496/169986"]
-#debug_root_refnos = ["17496/171009"]
-#debug_root_refnos = ["17496/170902"]
-
-#debug_root_refnos = ["17496/173811"]
-#debug_root_refnos = ["17496/168790"]
-
-#SANN 的柱子计算
-#debug_root_refnos = ["17496/173810"]
-#debug_root_refnos = ["17496/171555"]
-#debug_root_refnos = ["17496/171751"]
-#debug_root_refnos = ["17496/171134"]
-
-#debug_root_refnos = ["17496/195598"]
-#debug_root_refnos = ["17496/195555"]
-#debug_root_refnos = ["17496/195603"]
-#debug_root_refnos = ["17496/161488"]
-#debug_root_refnos = ["17496/161704"]
-#debug_root_refnos = ["17496/171102"]
-#debug_root_refnos = ["17496/161704"]
-#debug_root_refnos = ["17496/106409"]
-#debug_root_refnos = ["25688/7956"]
-#debug_root_refnos = ["25688/7972"]
-#debug_root_refnos = ["25688/7971"]
-#debug_root_refnos = ["25688/8188"]
+#24381/34109,
+#24381/42520,
+#24381/44873,
+#24381/46775,
+#24381/48631,
+#24381/57476,
+#24381/76564,
+#24381/79977,
+#24381/100675,
+#24381/101405,
+#24381/177373,
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 room_root_refnos = ["24381/35538", "24381/35622"]
