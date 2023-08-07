@@ -53,7 +53,7 @@ pub fn get_x_deviation_angle(mut data: &mut PenetrationData) {
 
 
 #[test]
-pub fn test() {
+pub fn test_x_deviation_angle() {
     let x: f32 = 21815.76;
     let y: f32 = 11599.72;
     let mut angle = 0.0;

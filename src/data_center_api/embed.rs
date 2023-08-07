@@ -14,6 +14,7 @@ use sqlx::mysql::MySqlRow;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::data_center_api::hole::{convert_time_to_vec, get_pos_from_str};
 use crate::consts::{AQL_EMBED_DATA_COLLECTION, AQL_EMBED_EDGE_COLLECTION, EMBED_TABLE};
+use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{ArDatabase, save_arangodb_doc};
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
@@ -199,7 +200,7 @@ async fn query_embed_data(id: u64, pool: &Pool<MySql>) -> anyhow::Result<Option<
                         object_model_code: "STUCCA".to_string(),
                         project_code: "1516".to_string(),
                         instance_code: format!("STUCCA{}", id),
-                        version: "A版".to_string(),
+                        version: get_refno_latest_version(),
                         attributes: instances,
                     }))
                 }
@@ -230,7 +231,7 @@ async fn query_embed_data(id: u64, pool: &Pool<MySql>) -> anyhow::Result<Option<
                         object_model_code: "STUCCB".to_string(),
                         project_code: "1516".to_string(),
                         instance_code: format!("STCUCCB{}", id),
-                        version: "A版".to_string(),
+                        version: get_refno_latest_version(),
                         attributes: instances,
                     }))
                 }
@@ -386,7 +387,7 @@ async fn get_embed_data_aql(idx: usize, embed_data: VirtualEmbedGraphNode,projec
                 object_model_code: "STUCCA".to_string(),
                 project_code: project_code.to_string(),
                 instance_code: format!("STUCCA{}", idx),
-                version: "A版".to_string(),
+                version: get_refno_latest_version(),
                 attributes: instances,
             }))
         }
@@ -417,7 +418,7 @@ async fn get_embed_data_aql(idx: usize, embed_data: VirtualEmbedGraphNode,projec
                 object_model_code: "STUCCB".to_string(),
                 project_code: project_code.to_string(),
                 instance_code: format!("STCUCCB{}", idx),
-                version: "A版".to_string(),
+                version: get_refno_latest_version(),
                 attributes: instances,
             }))
         }

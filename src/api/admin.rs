@@ -14,6 +14,7 @@ use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_ancestor_t
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::consts::TEAM_DATA_TABLE;
 use aios_core::pdms_user::PdmsElementWithUser;
+use crate::data_interface::interface::PdmsDataInterface;
 
 ///管理员信息
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -35,10 +36,12 @@ pub async fn sync_system_db(mgr: &AiosDBManager) -> anyhow::Result<()> {
         let mut r = vec![];
         let all_db_refnos = query_all_db_refnos(project_db.value()).await?;
         for db_refno in all_db_refnos {
-            let db_attr = query_full_attr_with_pool(db_refno, &mgr, Some(vec!["NUMBDB", "STYP"]), project_db.value()).await;
-            if db_attr.is_err() { continue; }
+            let db_attr = mgr.get_attr(db_refno).await;
+            if db_attr.is_err() {
+                continue;
+            }
             let db_attr = db_attr.unwrap();
-            let team_refno = query_ancestor_till_types_aql(&database,db_refno, vec!["TEAM"]).await?;
+            let team_refno = query_ancestor_till_types_aql(&database, db_refno, vec!["TEAM"]).await?;
             if team_refno.is_none() {
                 continue;
             }

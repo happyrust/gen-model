@@ -17,12 +17,13 @@ use crate::api::metadata_manage::{query_metadata_table_code_sql, query_metadata_
 use crate::aql_api::children::{query_children_eles, query_children_refnos, query_travel_children_with_type_aql};
 use crate::aql_api::tubi::{query_bran_info, query_tubi_from_bran, query_tubi_from_bran_filter_atta};
 use crate::data_center_api::auto_get_attr::{auto_get_datacenter_attr, DataCenterMetadata};
-use crate::data_center_api::bran::get_data_center_bran_attr;
-use crate::data_center_api::elbo::get_data_center_elbo_attr;
+use crate::data_center_api::bran::bran_attr::get_data_center_bran_attr;
+use crate::data_center_api::bran::elbo::get_data_center_elbo_attr;
+use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_center_api::flan::get_data_center_flan_attr;
+// use crate::data_center_api::elbo::get_data_center_elbo_attr;
+// use crate::data_center_api::flan::get_data_center_flan_attr;
 use crate::data_center_api::redu::get_data_center_redu_attr;
-use crate::data_center_api::tee::get_data_center_tee_attr;
-use crate::data_center_api::tubi::get_data_center_tubi_attr;
 use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -211,7 +212,7 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
         let end_instance = end_instance.unwrap();
 
         relations.push(DataCenterRelations {
-            version: "A版".to_string(),
+            version: get_refno_latest_version(),
             object_model_code: "RELAPOPC".to_string(),
             instance_code: "".to_string(),
             start_object_code: start_instance.object_model_code.clone(),
@@ -237,7 +238,7 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
                 let child_instance = child_instance.unwrap();
 
                 relations.push(DataCenterRelations {
-                    version: "A版".to_string(),
+                    version: get_refno_latest_version(),
                     object_model_code: "RELAPOPC".to_string(),
                     instance_code: "".to_string(),
                     start_object_code: bran_instances.object_model_code.clone(),
@@ -293,7 +294,7 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
             let first_element_instance = instance_map.get(&first_elements[0]);
             if let Some(first_element_instance) = first_element_instance {
                 relations.push(DataCenterRelations {
-                    version: "A版".to_string(),
+                    version: get_refno_latest_version(),
                     object_model_code: "RELAPOPC".to_string(),
                     instance_code: "".to_string(),
                     start_object_code: href_instance.object_model_code.clone(),
@@ -309,7 +310,7 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
             let last_element_instance = instance_map.get(last_refno);
             if let Some(last_element_instance) = last_element_instance {
                 relations.push(DataCenterRelations {
-                    version: "A版".to_string(),
+                    version: get_refno_latest_version(),
                     object_model_code: "RELAPOPC".to_string(),
                     instance_code: "".to_string(),
                     start_object_code: last_element_instance.object_model_code.clone(),
@@ -339,7 +340,7 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
             let end_instance = end_instance.unwrap();
 
             let relation = DataCenterRelations {
-                version: "A版".to_string(),
+                version: get_refno_latest_version(),
                 object_model_code: "RELAPOPC".to_string(),
                 instance_code: "".to_string(),
                 start_object_code: start_instance.object_model_code.clone(),
@@ -378,7 +379,7 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
                 let first_instance = first_instance.unwrap();
                 let end_instance = end_instance.unwrap();
                 let relation = DataCenterRelations {
-                    version: "A版".to_string(),
+                    version: get_refno_latest_version(),
                     object_model_code: "RELAPOPC".to_string(),
                     instance_code: "".to_string(),
                     start_object_code: first_instance.object_model_code.clone(),
@@ -409,18 +410,18 @@ fn get_instance_data_element(metadata_map: &HashMap<String, Vec<String>>, refno:
     let code = get_characters_in_str(&metadata_values[0]);
     let result = match att_type.to_uppercase().as_str() {
         "BRAN" => { get_data_center_bran_attr(refno) }
-        "ELBO" => { get_data_center_elbo_attr(refno) }
+        // "ELBO" => { get_data_center_elbo_attr(refno) }
         "FLAN" => { get_data_center_flan_attr(refno) }
         "REDU" => { get_data_center_redu_attr(refno) }
-        "TEE" => { get_data_center_tee_attr(refno) }
-        "TUBE" | "TUBI" => { get_data_center_tubi_attr(refno) }
+        // "TEE" => { get_data_center_tee_attr(refno) }
+        // "TUBE" | "TUBI" => { get_data_center_tubi_attr(refno) }
         &_ => { Vec::new() }
     };
     Some(DataCenterInstance {
         object_model_code: code,
         project_code: "1516".to_string(),
         instance_code,
-        version: "A版".to_string(),
+        version: get_refno_latest_version(),
         attributes: result,
     })
 }

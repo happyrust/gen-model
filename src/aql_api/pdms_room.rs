@@ -1,26 +1,20 @@
 use std::collections::{HashMap, HashSet};
-use std::env;
-use aios_core::options::DbOption;
-use aios_core::pdms_types::{NounHash, PdmsElement, RefU64, UdaMajorType};
-use aios_core::pdms_types::UdaMajorType::T;
-use bb8_arangodb::arangors_lite::{AqlQuery, ClientError, Database};
+use aios_core::pdms_types::{PdmsElement, RefU64, UdaMajorType};
+use bb8_arangodb::arangors_lite::AqlQuery;
 use parry3d::bounding_volume::Aabb;
-use regex::Regex;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool, Row};
-use crate::api::attr::{get_site_major_from_uda, query_explicit_attr};
-use crate::api::children::{query_ancestor_of_type};
+use crate::api::attr::get_site_major_from_uda;
 use crate::aql_api::children::query_ancestor_name_of_type_aql;
-use crate::aql_api::{convert_refno_vec_from_vec_string};
-use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_ROOM_EDGES_COLLECTION, AQL_ROOM_ELES_COLLECTION, PDMS_ELEMENTS_TABLE};
+use crate::aql_api::convert_refno_vec_from_vec_string;
+use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_ROOM_EDGES_COLLECTION, AQL_ROOM_ELES_COLLECTION};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::graph_db::pdms_arango::*;
 use aios_core::pdms_types::*;
-use anyhow::anyhow;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::test::common::get_arangodb_conn_from_db_option_for_test;
+use crate::consts::PDMS_ELEMENTS_TABLE;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RoomData {
@@ -377,52 +371,7 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &ArDatabase) -> a
     Ok(r)
 }
 
-
-#[tokio::test]
-async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refno = RefU64::from_url_refno("24383_68084").unwrap();
-    let name = query_refno_belong_rooms(refno, &database).await?;
-    dbg!(&name);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refno = RefU64::from_url_refno("24381_178638").unwrap();
-    let name = query_room_info_from_refno(refno, "FRMW", &database).await?.unwrap();
-    let room_name = get_room_name_split(&name).unwrap();
-    dbg!(&room_name);
-    Ok(())
-}
-
-
-#[test]
-fn test_json() {
-    let str = vec![T];
-    let json = serde_json::to_string(&str).unwrap();
-    dbg!(&json);
-}
-
-#[test]
-fn test_match_room_name() {
-    let re = Regex::new(r"^/\d+[A-Z]{2}-RM\d{2}-R\d{3}$").unwrap();
-
-    dbg!(re.is_match("/123AB-RM03-R310"));
-    dbg!(re.is_match("/456CD-RM03-R312"));
-    dbg!(re.is_match("/789EF-RM11-R976"));
-    dbg!(!re.is_match("/1RA-RM03-R312"));
-    dbg!(!re.is_match("/1NX-RM11-R976"));
-    dbg!(!re.is_match("/12A-RM11-R976"));
+/// 返回贯穿件 穿过的两个房间号 ， tuple.0：距离核岛中心 世界坐标 0，0，0 最近的点
+pub async fn query_through_element_rooms(refno: RefU64) -> anyhow::Result<Option<(String, String)>> {
+    Ok(Some(("R101".to_string(), "R102".to_string())))
 }

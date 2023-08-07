@@ -502,7 +502,7 @@ fn gen_query_uda_name_sql() -> String {
 
 fn gen_query_uda_ukey_sql(uda: &str) -> String {
     let mut sql = String::new();
-    sql.push_str(&format!("SELECT UKEY,UDNA FROM {PDMS_UDA_TABLE} WHERE UDNA == '{}'", uda));
+    sql.push_str(&format!("SELECT UKEY,UDNA FROM {PDMS_UDA_TABLE} WHERE UDNA = '{}'", uda));
     sql
 }
 
@@ -514,5 +514,16 @@ async fn test_query_foreign_refno() -> anyhow::Result<()> {
     let refno: RefU64 = RefI32Tuple((24575, 2178)).into();
     let v = query_explicit_attr(refno, &pool).await?;
     println!("v={:?}", v);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_refno_uda_value() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
+    let refno: RefU64 = RefI32Tuple((17496,124126)).into();
+    let result = query_refno_uda_value(refno,":JGOBJBASE",&pool).await?;
+    dbg!(&result);
     Ok(())
 }
