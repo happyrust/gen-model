@@ -176,7 +176,7 @@ impl PdmsDataInterface for AiosDBManager {
                 return Ok(a);
             }
         }
-        Err(anyhow!("Not found att"))
+        Err(anyhow!("{refno}: not found att"))
     }
 
     fn get_type_name(&self, refno: RefU64) -> anyhow::Result<String> {
@@ -185,14 +185,15 @@ impl PdmsDataInterface for AiosDBManager {
         ).unwrap_or(Ok("unset".to_string()))
     }
 
-    //get_children_from_localdb
+    ///获得子节点的参考号集合
     fn get_children_from_localdb(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
         for project in &self.db_option.included_projects {
             if let Ok(a) = self.get_children_within_project(refno, project.as_str()) {
                 return Ok(a);
             }
         }
-        Err(anyhow!("Not found children"))
+        Ok(Default::default())
+        // Err(anyhow!("{refno}: not found children"))
     }
 
 

@@ -213,10 +213,10 @@ async fn main() -> anyhow::Result<()> {
         // dbg!(mgr.get_attr_from_localdb(refno));
         // dbg!(mgr.get_children_refs(refno).await);
 
-        let refno = RefU64::from_two_nums(25688, 7972);
-        let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        dbg!(transform);
+        // let refno = RefU64::from_two_nums(25688, 7972);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
 
         // let refno = RefU64::from_two_nums(23708, 1234);
         // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();

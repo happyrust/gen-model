@@ -1858,7 +1858,7 @@ pub async fn gen_geos_data(
                             let final_mesh: PlantMesh = final_manifold.clone().into();
                             for m in batch_manifolds {
                                 // #[cfg(target_os = "macos" || target_os = "linux")]
-                                m.destroy();
+                                // m.destroy();
                             }
                             // final_manifold.destroy();
                             // #[cfg(debug_assertions)]
@@ -2046,7 +2046,7 @@ pub async fn gen_geos_data(
                     let mut mesh: PlantMesh = (final_manifold.clone()).into();
                     for f in neg_ms {
                         // #[cfg(target_os = "macos"|| target_os = "linux")]
-                        f.destroy();
+                        // f.destroy();
                     }
                     // final_manifold.destroy();
                     let mut new_geos_data = parent_geos_data.clone();
