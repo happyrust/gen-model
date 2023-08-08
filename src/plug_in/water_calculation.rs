@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use crate::api::children::travel_children_with_type;
 use crate::data_interface::interface::PdmsDataInterface;
-use aios_core::water_calculation::{CivilEngineeringStp, FloodingHole, FloodingHoleVec};
+use aios_core::water_calculation::{ FloodingHole, FloodingHoleVec};
 use aios_core::water_calculation::ExportFloodingStpEvent;
 #[cfg(feature = "opencascade_rs")]
 use opencascade::primitives::Compound;
