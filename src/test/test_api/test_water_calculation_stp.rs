@@ -7,6 +7,7 @@ use opencascade::primitives::Compound;
 use sqlx::encode::IsNull::No;
 #[cfg(feature = "opencascade_rs")]
 use crate::plug_in::water_calculation::export_stp;
+use crate::plug_in::water_calculation::save_stp_data_to_arangodb;
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 
@@ -24,7 +25,7 @@ async fn test_export_water_calculation_stp() -> anyhow::Result<()> {
     }];
     stp_packet_vec.model_list = vec![(RefU64::from_str("17496/106430").unwrap(), "STWALL 1".to_string())];
 
-    let all_hole_map = HashMap::default();
+    let mut all_hole_map = HashMap::default();
     let map_value = vec![FloodingHole {
         refno: RefU64::from_str("17496/145221").unwrap(),
         name: "/1RS05TT0016T".to_string(),
@@ -39,7 +40,7 @@ async fn test_export_water_calculation_stp() -> anyhow::Result<()> {
     all_hole_map.insert(RefU64::from_str("17496/106430").unwrap(), map_value);
     stp_packet_vec.all_hole_list = vec![all_hole_map];
 
-    let selected_hole_map = HashMap::default();
+    let mut selected_hole_map = HashMap::default();
     let map_value = vec![FloodingHole {
         refno: RefU64::from_str("17496/145333").unwrap(),
         name: "/1RS05LL0028T".to_string(),
