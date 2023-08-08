@@ -14,6 +14,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use dashmap::DashMap;
 use sqlx::{Executor, MySql, Pool, Row};
+use sqlx::types::Decimal;
 use crate::consts::PUHUA_GY_MATERIAL_TABLE;
 use crate::data_center_api::pipe::get_datacenter_bran_data;
 
@@ -212,8 +213,17 @@ pub(crate) async fn get_material_map_from_code(code: &str, mut filedes: Vec<Stri
             let Ok(query_results) = puhua_conn.fetch_all(sql.as_str()).await else { return DashMap::new(); };
             for query_result in query_results {
                 for filed in &filedes {
-                    let data = query_result.try_get::<String, _>(filed.as_str()).unwrap_or("".to_string());
-                    query_map.entry(filed.to_string()).or_insert(data);
+                    if filed == "Weight" {
+                        let mut data = query_result.try_get::<Decimal, _>(filed.as_str()).unwrap_or(Decimal::new(0, 0));
+                        if let Ok(_) = data.set_scale(6) {
+                            query_map.entry(filed.to_string()).or_insert(data.to_string());
+                        } else {
+                            query_map.entry(filed.to_string()).or_insert("0.0".to_string());
+                        }
+                    } else {
+                        let data = query_result.try_get::<String, _>(filed.as_str()).unwrap_or("".to_string());
+                        query_map.entry(filed.to_string()).or_insert(data);
+                    }
                 }
             }
         }
