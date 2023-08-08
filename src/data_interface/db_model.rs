@@ -719,7 +719,7 @@ impl AiosDBManager {
             with pdms_eles
             return document(pdms_eles, @id)
         ").bind_var("id", refno_aql);
-        let mut r = arango_db.aql_query::<PdmsEleGraphNode>(aql).await?;
+        let mut r = arango_db.aql_query::<PdmsEleGraphNode>(aql).await.unwrap_or_default();
         Ok(r.pop())
     }
 

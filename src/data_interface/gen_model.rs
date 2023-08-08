@@ -252,14 +252,14 @@ pub async fn gen_loop_geos(
 ) -> anyhow::Result<bool> {
     let t = Instant::now();
     let db_option = &mgr.db_option;
-    let batch_size = mgr.db_option.gen_model_batch_size;
+    let mut batch_size = mgr.db_option.gen_model_batch_size;
     let mut is_debug = false;
     let loop_cnt = loop_refnos.len();
     if loop_cnt == 0 {
         return Ok(true);
     }
     //处理loop elements
-    let batch_chunks_cnt = loop_cnt / batch_size + 1;
+    let mut batch_chunks_cnt = (loop_cnt / batch_size + 1);
     let mut handles = vec![];
     let all_refnos = Arc::new(loop_refnos.to_vec());
     let processed_cnt = Arc::new(Mutex::new(loop_cnt));
@@ -276,9 +276,9 @@ pub async fn gen_loop_geos(
             if end_idx > loop_cnt as usize {
                 end_idx = loop_cnt as usize;
             }
+            let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
+            let mut shape_insts_data = instance_mgr.write().await;
             for j in start_idx..end_idx {
-                let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
-                let mut shape_insts_data = instance_mgr.write().await;
                 let loop_refno = all_loop_refnos[j];
                 let Ok(Some(trans_origin)) = mgr
                     .get_world_transform(loop_refno)
@@ -301,9 +301,9 @@ pub async fn gen_loop_geos(
                 let mut loop_verts: Vec<Vec3> = vec![];
                 let mut fradius_vec: Vec<f32> = vec![];
 
-                if let Ok(children_refs) = mgr.get_children_refs(loop_refno).await {
-                    for x in children_refs {
-                        if let Ok(a) = mgr.get_implicit_attr(x, Some(vec!["POS", "FRAD"])).await {
+                if let Ok(children_atts) = mgr.get_children_attrs(loop_refno) {
+                    for a in children_atts {
+                        // if let Ok(a) = mgr.get_implicit_attr(att, Some(vec!["POS", "FRAD"])).await {
                             let pt = a.get_position().unwrap_or_default();
                             if loop_verts.len() > 0 {
                                 if pt.distance(*loop_verts.last().unwrap()) > f32::EPSILON {
@@ -314,7 +314,7 @@ pub async fn gen_loop_geos(
                                 loop_verts.push(pt);
                                 fradius_vec.push(a.get_f32("FRAD").unwrap_or_default());
                             }
-                        }
+                        // }
                     }
                 }
                 if loop_verts.is_empty() {
@@ -447,7 +447,6 @@ pub async fn gen_loop_geos(
                     println!("LOOP 有问题：{} ", loop_refno.to_refno_string());
                     continue;
                 };
-
                 let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
                 geos_info.visible = visible;
                 if item_trans.is_nan() {
@@ -485,6 +484,7 @@ pub async fn gen_loop_geos(
                 );
             }
         });
+
         handles.push(handle);
         if !db_option.multi_threads {
             if !handles.is_empty() {
@@ -1857,7 +1857,7 @@ pub async fn gen_geos_data(
                             let final_mesh: PlantMesh = final_manifold.clone().into();
                             for m in batch_manifolds {
                                 // #[cfg(target_os = "macos" || target_os = "linux")]
-                                m.destroy();
+                                // m.destroy();
                             }
                             // final_manifold.destroy();
                             // #[cfg(debug_assertions)]
@@ -2045,7 +2045,7 @@ pub async fn gen_geos_data(
                     let mut mesh: PlantMesh = (final_manifold.clone()).into();
                     for f in neg_ms {
                         // #[cfg(target_os = "macos"|| target_os = "linux")]
-                        f.destroy();
+                        // f.destroy();
                     }
                     // final_manifold.destroy();
                     let mut new_geos_data = parent_geos_data.clone();
