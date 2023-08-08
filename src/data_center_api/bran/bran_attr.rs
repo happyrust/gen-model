@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 use aios_core::data_center::AttrValue::{AttrIntArray, AttrMap, AttrString};
 use aios_core::data_center::{AttrValue, CableWeight, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::RefU64;
@@ -20,6 +21,7 @@ use crate::data_center_api::bran::gask::get_data_center_gask_attr;
 use crate::data_center_api::bran::olet::get_data_center_olet_attr;
 use crate::data_center_api::bran::redu::get_data_center_redu_attr;
 use crate::data_center_api::bran::tee::get_data_center_tee_attr;
+use crate::data_center_api::bran::tubi::get_data_center_tubi_attr;
 use crate::data_center_api::bran::weld::get_data_center_weld_attr;
 use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_latest_version, get_refno_paras};
 use crate::data_interface::interface::PdmsDataInterface;
@@ -363,6 +365,7 @@ pub async fn query_gy_bran_data_datacenter(select_refno: RefU64, aios_mgr: &Aios
     let brans = query_travel_children_with_type_aql(&database, select_refno, "BRAN").await?;
     for bran in brans {
         let children = query_children_order_aql(&database, bran.refno).await?;
+        //  bran 下的元件
         for child in children {
             match child.noun.clone().as_str() {
                 "ATTA" => {
@@ -412,6 +415,9 @@ pub async fn query_gy_bran_data_datacenter(select_refno: RefU64, aios_mgr: &Aios
                 _ => {}
             }
         }
+        // tubi
+        let mut tubi_instances = get_data_center_tubi_attr(bran.refno,&bran.name,&database,aios_mgr).await;
+        instances.append(&mut tubi_instances);
     }
     Ok(DataCenterProject {
         package_code: DataCenterProject::convert_package_code(),
@@ -419,4 +425,15 @@ pub async fn query_gy_bran_data_datacenter(select_refno: RefU64, aios_mgr: &Aios
         owner: "KY1801".to_string(),
         instances,
     })
+}
+
+#[tokio::test]
+async fn test_query_gy_bran_data_datacenter() -> anyhow::Result<()> {
+    let aios_mgr = AiosDBManager::init_form_config().await?;
+    let tee_refno = RefU64::from_refno_str("24383/66761").unwrap();
+    let result = query_gy_bran_data_datacenter(tee_refno,&aios_mgr).await?;
+    let mut file = std::fs::File::create("bran.json")?;
+    let json = serde_json::to_vec(&result)?;
+    file.write_all(&json)?;
+    Ok(())
 }

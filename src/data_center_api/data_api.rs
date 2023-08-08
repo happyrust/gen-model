@@ -241,14 +241,13 @@ pub async fn get_rtext_from_attr(attr: &AttrMap, aios_mgr: &AiosDBManager) -> an
     let database = aios_mgr.get_arango_db().await?;
     let Some(detr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "DETR"]).await?
         else { return Ok("".to_string()); };
-    let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(detr).await else { return Ok("".to_string()); };
-    let detr_map = query_explicit_attr(detr, &pool).await?;
+    let detr_map = aios_mgr.get_attr(detr).await?;
     let rtext = detr_map.get_str("RTEX");
     if let Some(rtext) = rtext {
         let codes = vec!["E4001", "E4004", "E4006"];
         for code in codes {
             if rtext.contains(code) {
-                return Ok(rtext.to_string());
+                return Ok(code.to_string());
             }
         }
     }

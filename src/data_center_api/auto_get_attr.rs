@@ -202,11 +202,21 @@ pub(crate) async fn get_material_map_from_code(code: &str, mut filedes: Vec<Stri
     if code.is_empty() || filedes.is_empty() {
         return DashMap::default();
     }
+    // 取了对应编码的数据， 但是不含某个字段的情况
+    let mut cache_not_contains_filed = Vec::new();
     if let Some(map) = MATERIAL_MAP.get(code) {
+        for filed in &filedes {
+            if !map.value().contains_key(filed) {
+                cache_not_contains_filed.push(filed.to_string());
+            }
+        }
         map.value().clone()
     } else {
         let mut query_map = DashMap::new();
         filedes.push("Pressure".to_string());
+        if !cache_not_contains_filed.is_empty() {
+            filedes.append(&mut cache_not_contains_filed);
+        }
         // 查询普华的材料表
         let sql = gen_query_gy_material_sql(&filedes);
         if let Ok(mut puhua_conn) = puhua_pool.acquire().await {

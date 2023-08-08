@@ -26,7 +26,7 @@ pub async fn get_data_center_atta_attr(refno: PdmsElement,bran_name:&str,databas
     result.push(item_1);
     let item_2 = DataCenterAttr {
         attribute_model_code: "ITEMB1".to_string(),
-        value: AttrString(refno.name).into(),
+        value: AttrString(refno.name.clone()).into(),
     };
     result.push(item_2);
     let item_3 = DataCenterAttr {
@@ -102,7 +102,7 @@ pub async fn get_data_center_atta_attr(refno: PdmsElement,bran_name:&str,databas
 }
 
 #[tokio::test]
-async fn test_get_data_center_tee_attr() -> anyhow::Result<()> {
+async fn test_get_data_center_atta_attr() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let database = aios_mgr.get_arango_db().await?;
     let tee_refno = RefU64::from_refno_str("24383/66752").unwrap();
@@ -110,7 +110,7 @@ async fn test_get_data_center_tee_attr() -> anyhow::Result<()> {
     let tee_node = query_ele_node(tee_refno,&pool.1).await.unwrap();
     let owner_name = query_name(tee_node.owner,&pool.1).await.unwrap();
 
-    let result = get_data_center_tee_attr(tee_node.into(),&owner_name,&database,&aios_mgr).await;
+    let result = get_data_center_atta_attr(tee_node.into(),&owner_name,&database,&aios_mgr).await;
     let mut file = std::fs::File::create("tee.json")?;
     let json = serde_json::to_vec(&result)?;
     file.write_all(&json)?;
