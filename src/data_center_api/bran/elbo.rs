@@ -19,6 +19,7 @@ pub async fn get_data_center_elbo_attr(refno: PdmsElement, bran_name: &str, data
                                         ("ITEMA16".to_string(), "Spec".to_string()),
                                         ("ITEMA17".to_string(), "RCCM".to_string()),
                                         ("ITEMA18".to_string(), "QAGrade".to_string()),
+                                        ("ITEMA19".to_string(), "Weight".to_string()),
                                         ("ITEMAD5".to_string(), "Diameter".to_string()),
                                         ("ITEMAD7".to_string(), "Link".to_string())];
     let mut result = Vec::new();

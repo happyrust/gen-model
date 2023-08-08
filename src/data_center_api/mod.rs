@@ -12,5 +12,3 @@ pub mod inst;
 pub mod supp;
 pub mod sctn;
 pub mod stru;
-mod flan;
-mod redu;

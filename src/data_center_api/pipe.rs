@@ -20,10 +20,7 @@ use crate::data_center_api::auto_get_attr::{auto_get_datacenter_attr, DataCenter
 use crate::data_center_api::bran::bran_attr::get_data_center_bran_attr;
 use crate::data_center_api::bran::elbo::get_data_center_elbo_attr;
 use crate::data_center_api::data_api::get_refno_latest_version;
-use crate::data_center_api::flan::get_data_center_flan_attr;
-// use crate::data_center_api::elbo::get_data_center_elbo_attr;
-// use crate::data_center_api::flan::get_data_center_flan_attr;
-use crate::data_center_api::redu::get_data_center_redu_attr;
+use crate::data_center_api::bran::flan::get_data_center_flan_attr;
 use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -409,10 +406,10 @@ fn get_instance_data_element(metadata_map: &HashMap<String, Vec<String>>, refno:
     if metadata_values.is_empty() { return None; }
     let code = get_characters_in_str(&metadata_values[0]);
     let result = match att_type.to_uppercase().as_str() {
-        "BRAN" => { get_data_center_bran_attr(refno) }
+        // "BRAN" => { get_data_center_bran_attr(refno) }
         // "ELBO" => { get_data_center_elbo_attr(refno) }
-        "FLAN" => { get_data_center_flan_attr(refno) }
-        "REDU" => { get_data_center_redu_attr(refno) }
+        // "FLAN" => { get_data_center_flan_attr(refno) }
+        // "REDU" => { get_data_center_redu_attr(refno) }
         // "TEE" => { get_data_center_tee_attr(refno) }
         // "TUBE" | "TUBI" => { get_data_center_tubi_attr(refno) }
         &_ => { Vec::new() }

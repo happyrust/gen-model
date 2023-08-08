@@ -66,7 +66,7 @@ debug_print = "1.0.0"
 
 
 #造型功能，先在database测试
-opencascade = { path = "../crates/opencascade-rs/crates/opencascade"} #, optional = true
+#opencascade = { path = "../crates/opencascade-rs/crates/opencascade"} #, optional = true
 serde_with = "3.0.0"
 tokio-stream = "0.1.14"
 rayon = "1.7.0"

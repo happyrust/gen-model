@@ -26,23 +26,19 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_through_element_rooms() -> anyhow::Result<()> {
-    let mgr = get_test_ams_db_manager_async().await;
     //测试样例1
-    // let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83638").unwrap()).await;
-    // assert_ne!(room_number.unwrap(), Some(("R661".to_string(), "".to_string())));
-    //
-    // //测试样例2
-    // let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83589").unwrap()).await;
-    // assert_ne!(room_number.unwrap(), Some(("R661".to_string(), "".to_string())));
-    //
-    // //测试样例3
-    // let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83960").unwrap()).await;
-    // assert_ne!(room_number.unwrap(), Some(("R361".to_string(), "".to_string())));
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83638").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R661".to_string(), "".to_string())));
 
-    //测试样例4
-    //=17496/145366
-    let mut room_number = pdms_room::query_through_element_rooms(&mgr, &[RefU64::from_str("17496/145366").unwrap()]).await?;
-    assert_eq!(room_number.pop(), Some(("R532".to_string(), "R320".to_string())));
+    //测试样例2
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83589").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R661".to_string(), "".to_string())));
+
+    //测试样例3
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83960").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R361".to_string(), "".to_string())));
+
+
 
     Ok(())
 }
