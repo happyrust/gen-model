@@ -1707,6 +1707,7 @@ pub async fn gen_geos_data(
                     .expect("Save mesh to local db failed.");
             }
 
+            //总的负实体计算
             if db_option.apply_boolean_operation && !has_pos_neg_map.is_empty() {
                 let now = Instant::now();
                 let mut trans_map = DashMap::new();
@@ -1767,9 +1768,6 @@ pub async fn gen_geos_data(
                         let mut use_csg = total_refnos.len() < 20;
                         use_csg = false;
                         for (index, t_refno) in total_refnos.into_iter().enumerate() {
-                            // if t_refno != RefU64::from_two_nums(17496, 168894) {
-                            //     continue;
-                            // }
                             let Some(geos_info) = inst_data.get_info(&t_refno).or(inst_data.get_ngmr_info(&t_refno)) else {
                                 continue;
                             };
@@ -1802,12 +1800,12 @@ pub async fn gen_geos_data(
                                         let mut center: Vec3 = aabb.center().into();
                                         let t_mat = Mat4::from_translation(center);
                                         let mut s = 1.01;
-                                        //如果是旋转体，xy方向都适当放大一点
-                                        if aabb.contains(&pos_aabb) {
-                                            s = 1.03;
-                                        }
                                         //todo use brep substract, if use mesh, may exist many tolerance problem
                                         let s_mat = if matches!(geo_inst.geo_param, PdmsGeoParam::PrimRevolution(_)) {
+                                            //如果是旋转体，xy方向都适当放大一点
+                                            if aabb.contains(&pos_aabb) {
+                                                s = 1.03;
+                                            }
                                             // Mat4::from_scale(Vec3::new(s, s, 1.0))
                                             Mat4::from_scale(Vec3::new(1.0, s, s))
                                         } else {

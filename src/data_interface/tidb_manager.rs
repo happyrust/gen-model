@@ -143,6 +143,10 @@ pub struct AiosDBManager {
 
     pub rtree: Option<AccelerationTree>,
 
+    pub room_rtree: Option<AccelerationTree>,
+
+    pub room_refnos: HashSet<RefU64>,
+
 }
 
 impl Debug for AiosDBManager {

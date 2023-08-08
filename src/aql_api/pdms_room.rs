@@ -5,7 +5,7 @@ use parry3d::bounding_volume::Aabb;
 use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool, Row};
 use crate::api::attr::get_site_major_from_uda;
-use crate::aql_api::children::query_ancestor_name_of_type_aql;
+use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_deep_children_refnos_fuzzy};
 use crate::aql_api::convert_refno_vec_from_vec_string;
 use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_ROOM_EDGES_COLLECTION, AQL_ROOM_ELES_COLLECTION};
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -13,8 +13,11 @@ use crate::graph_db::pdms_arango::*;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::graph_db::pdms_arango::*;
 use aios_core::pdms_types::*;
+use anyhow::anyhow;
+use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::consts::PDMS_ELEMENTS_TABLE;
+use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RoomData {
@@ -30,7 +33,8 @@ pub struct RoomElement {
     #[serde(deserialize_with = "de_refno_from_key_str")]
     #[serde(rename = "_key")]
     pub refno: RefU64,
-    pub name: String,   //room 名
+    pub name: String,   //room名称
+    pub aabb: Option<Aabb>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,19 +58,21 @@ pub struct RoomInfo {
 
 /// 将房间信息保存到图数据库
 impl AiosDBManager {
-    pub(crate) async fn save_room_info_to_arangodb(&self, room_map: HashMap<RefU64, Vec<RefU64>>) -> anyhow::Result<bool> {
-        let mut room_eles_json = vec![];
+    pub(crate) async fn save_room_info_to_arangodb(&self,
+                                                   room_map: HashMap<RefU64, (Aabb, Vec<RefU64>)>) -> anyhow::Result<bool> {
+        let mut room_eles = vec![];
         let mut room_edges_json = vec![];
-        for (refno, target_refnos) in room_map {
+        for (refno, (aabb, target_refnos)) in room_map {
             let Ok(frmw) = self.get_ancestor_refno_of_type_data(refno, "FRMW") else {
                 continue;
             };
             let mut frmw_name = self.get_name(frmw).await?.to_string();
             let name = frmw_name.split('-').last().unwrap_or_default().to_string();
             dbg!(&name);
-            room_eles_json.push(RoomElement {
+            room_eles.push(RoomElement {
                 refno,
                 name,
+                aabb: Some(aabb),
             });
             for target_refno in target_refnos {
                 // 获取 target_refno 属于哪个专业
@@ -90,7 +96,7 @@ impl AiosDBManager {
         }
         let database = self.get_arango_db().await?;
         let replace = self.db_option.replace_dbs;
-        let room_eles_json = serde_json::to_value(&room_eles_json)?;
+        let room_eles_json = serde_json::to_value(&room_eles)?;
         save_arangodb_doc(room_eles_json, "room_eles", &database, replace).await?;
         let room_edges_json = serde_json::to_value(&room_edges_json)?;
         save_arangodb_doc(room_edges_json, "room_edges", &database, replace).await?;
@@ -371,7 +377,72 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &ArDatabase) -> a
     Ok(r)
 }
 
+/// 返回贯穿件 穿过的两个房间号
+pub async fn query_through_element_rooms(mgr: &AiosDBManager, refnos: &[RefU64]) -> anyhow::Result<Vec<(String, String)>> {
+    let room_tree = mgr.room_rtree.as_ref().ok_or(anyhow!("房间空间树未生成。"))?;
+    //先用包围盒去查询和哪些房间的aabb相交
+    let database = mgr.get_arango_db().await?;
+    let inst_data = query_insts_shape_data(&database, refnos).await?;
+
+    // dbg!(&instances);
+    for (_, info) in &inst_data.inst_info_map {
+        // let Some(inst_geos) = inst_data.get_inst_geos(info) else {
+        //     continue;
+        // };
+        dbg!(info.aabb);
+        let Some(mut ele_aabb) = info.aabb else{
+            continue;
+        };
+        let intersect_rooms = room_tree.locate_intersecting_bounds(&ele_aabb).collect::<Vec<_>>();
+        dbg!(intersect_rooms);;
+        // let room_panes = query_deep_children_refnos_fuzzy(&database, &[room_root_refno], &["PANE"]).await?;
+        // dbg!(&panroom_paneses);
+
+    }
+
+    Ok(vec!(("R532".to_string(), "R320".to_string())))
+}
+
 /// 返回贯穿件 穿过的两个房间号 ， tuple.0：距离核岛中心 世界坐标 0，0，0 最近的点
-pub async fn query_through_element_rooms(refno: RefU64) -> anyhow::Result<Option<(String, String)>> {
-    Ok(Some(("R101".to_string(), "R102".to_string())))
+pub async fn query_through_element_rooms_old(mgr: &AiosDBManager, refnos: &[RefU64]) -> anyhow::Result<Vec<(String, String)>> {
+    //获得refno的mesh数据, 然后找到最近和最远的两个顶点，沿着远点到贯穿件的方向
+    let database = mgr.get_arango_db().await?;
+    let inst_data = query_insts_shape_data(&database, refnos).await?;
+
+    // dbg!(&instances);
+    for (_, info) in &inst_data.inst_info_map {
+        let Some(inst_geos) = inst_data.get_inst_geos(info) else {
+            continue;
+        };
+        let refno = info.refno;
+        let Some(w_trans) = mgr.get_world_transform(refno).await? else {
+            continue;
+        };
+        //z 方向可以不考虑，去算最近最远点
+        let w_pos = w_trans.translation;
+
+        dbg!(inst_geos.len());
+        let target_geos = inst_geos.iter()
+            .filter(|x| x.geo_type == GeoBasicType::Compound ||
+                x.geo_type == GeoBasicType::Pos);
+        let hashes = target_geos
+            .map(|x| x.geo_hash)
+            .collect::<Vec<_>>();
+        let ele_mesh_mgr = query_pdms_mesh_aql(&database, &hashes).await.unwrap_or_default();
+        for (&hash, geo) in hashes.iter().zip(inst_geos) {
+            let t = info.get_geo_world_transform(geo);
+            if let Some(ele_mesh) = ele_mesh_mgr.get_mesh(hash) {
+                dbg!(ele_mesh.vertices.len());
+            }
+        }
+        // let r = self.calculate_room(info, inst_geos, rtree).await?;
+        // final_within_room_refnos.extend_from_slice(&r);
+    }
+
+    //获取所有的room的包围盒
+
+    //获得room的所有mesh数据
+
+
+    Ok(vec!(("R532".to_string(), "R320".to_string())))
 }

@@ -108,8 +108,8 @@ pub async fn export_stp(mgr: &AiosDBManager, stp_packet: &WaterComputeStpInput, 
             .flatten()
             .collect::<Vec<_>>();
         for n in ngmr_shapes{
-            // final_shape = final_shape.subtract_shape(&n).0;
-            final_shape = final_shape.union_shape(&n).0;
+            final_shape = final_shape.subtract_shape(&n).0;
+            // final_shape = final_shape.union_shape(&n).0;
         }
         total_shapes.push(final_shape);
     }
