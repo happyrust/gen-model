@@ -1,4 +1,3 @@
-
 //for test
 // let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(E), &database).await?;
 
@@ -24,26 +23,25 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_through_element_rooms() -> anyhow::Result<()> {
-    // //测试样例1
-    // let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83638").unwrap()).await;
-    // assert_ne!(room_number.unwrap(), Some(("R661".to_string(), "".to_string())));
-    //
-    // //测试样例2
-    // let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83589").unwrap()).await;
-    // assert_ne!(room_number.unwrap(), Some(("R661".to_string(), "".to_string())));
-    //
-    // //测试样例3
-    // let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83960").unwrap()).await;
-    // assert_ne!(room_number.unwrap(), Some(("R361".to_string(), "".to_string())));
-    //
-    // //测试样例4
-    // let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83673").unwrap()).await;
-    // assert_ne!(room_number.unwrap(), Some(("R361".to_string(), "".to_string())));
-
-    //测试
+    //测试样例1
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83722").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R530".to_string(), "R561".to_string())));
 
+    //测试样例2
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_84073").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R630".to_string(), "R663".to_string())));
+
+    //测试样例3
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83694").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R610".to_string(), "R661".to_string())));
+
+    //测试样例4
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83561").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R610".to_string(), "R661".to_string())));
+
+    //测试样例5
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83697").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R310".to_string(), "R361".to_string())));
 
     Ok(())
 }
