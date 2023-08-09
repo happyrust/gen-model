@@ -43,6 +43,55 @@ async fn test_query_through_element_rooms() -> anyhow::Result<()> {
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83697").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R310".to_string(), "R361".to_string())));
 
+
+
+
+    //测试样例6
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_84009").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R310".to_string(), "R361".to_string())));
+
+    //测试样例7
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83974").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R310".to_string(), "R361".to_string())));
+
+    //测试样例8
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83939").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R430".to_string(), "R461".to_string())));
+
+    //测试样例9
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83869").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R430".to_string(), "R461".to_string())));
+
+    //测试样例10
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83995").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R510".to_string(), "R562".to_string())));
+
+
+
+
+    //测试样例11
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83729").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R530".to_string(), "R561".to_string())));
+
+    //测试样例12
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_84079").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R630".to_string(), "R663".to_string())));
+
+    //测试样例13
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83596").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R610".to_string(), "R661".to_string())));
+
+    //测试样例14
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83708").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R710".to_string(), "R761".to_string())));
+
+    //测试样例15
+    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83813").unwrap()).await;
+    assert_ne!(room_number.unwrap(), Some(("R710".to_string(), "R761".to_string())));
+
+
+
+
     Ok(())
 }
 
@@ -91,7 +140,6 @@ fn test_json() {
 #[test]
 fn test_match_room_name() {
     let re = Regex::new(r"^/\d+[A-Z]{2}-RM\d{2}-R\d{3}$").unwrap();
-
     dbg!(re.is_match("/123AB-RM03-R310"));
     dbg!(re.is_match("/456CD-RM03-R312"));
     dbg!(re.is_match("/789EF-RM11-R976"));
