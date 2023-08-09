@@ -273,9 +273,9 @@ pub async fn query_ancestor_name_of_type_aql(arango_database: &ArDatabase, refno
 }
 
 /// 遍历refno获取所有子节点的RefU64
-pub async fn query_deep_children_refnos_fuzzy(database: &ArDatabase, refno: &[RefU64], nouns: &[&str]) -> anyhow::Result<Vec<RefU64>> {
+pub async fn query_deep_children_refnos_fuzzy(database: &ArDatabase, refno: impl IntoIterator<Item=&RefU64>, nouns: &[&str]) -> anyhow::Result<Vec<RefU64>> {
     let refno_aqls =
-        refno.iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
+        refno.into_iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("\
     With @@pdms_eles,@@pdms_edges
     for id in @ids

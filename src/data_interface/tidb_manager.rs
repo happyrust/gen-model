@@ -86,6 +86,7 @@ use crate::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
+use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 use crate::consts::{AQL_PDMS_ELES_COLLECTION};
 // use heed::types::*;
 // use heed::byteorder::BE;
@@ -141,11 +142,17 @@ pub struct AiosDBManager {
 
     pub mdb_dbnums: BTreeSet<i32>,
 
+    ///所有元素的tree
     pub rtree: Option<AccelerationTree>,
 
-    pub room_rtree: Option<AccelerationTree>,
+    ///room panels的aabb tree
+    pub room_panels_rtree: Option<AccelerationTree>,
 
-    pub room_refnos: HashSet<RefU64>,
+    ///room 对应的信息
+    pub room_info_map: HashMap<RefU64, RoomElement>,
+
+    ///room panel对应的信息
+    pub room_panel_info_map: HashMap<RefU64, RoomPanelElement>,
 
 }
 
@@ -873,7 +880,7 @@ impl PdmsDataInterface for AiosDBManager {
         let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
 
         let db = &self.get_arango_db().await?;
-        let instances = query_insts_shape_data(db, &[refno]).await?;
+        let instances = query_insts_shape_data(db, &[refno], &[GeoBasicType::Pos, GeoBasicType::Compound]).await?;
         if instances.inst_info_map.is_empty() { return Ok(vec![]); }
         let pos = instances.inst_info_map.iter().next().unwrap().1.world_transform.translation;
         let target_refnos = rtree.query_within_distance(pos, distance)

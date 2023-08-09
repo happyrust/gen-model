@@ -198,7 +198,7 @@ pub async fn create_refnos_rvm_data(select_refno: RefU64, db_option: &DbOption, 
     let extrusion_mesh = if extrusion_geo_hashes.is_empty() {
         PlantMeshesData::default()
     } else {
-        query_pdms_mesh_aql(database, &extrusion_geo_hashes).await.unwrap_or_default()
+        query_pdms_mesh_aql(database, extrusion_geo_hashes.iter()).await.unwrap_or_default()
     };
     // 不带负实体得元件
     for info in refno_geo_infos {
@@ -245,7 +245,7 @@ pub async fn create_refnos_rvm_data(select_refno: RefU64, db_option: &DbOption, 
 }
 
 /// 从inst中查询rvm需要的数据
-pub async fn query_rvm_geo_instance_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<RvmGeoInfos>> {
+pub async fn query_rvm_geo_instance_aql(database: &ArDatabase, refnos: Vec<RefU64>) -> anyhow::Result<Vec<RvmGeoInfos>> {
     let refnos = refnos.into_iter()
         .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
         .collect::<Vec<_>>();

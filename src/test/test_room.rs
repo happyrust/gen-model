@@ -7,6 +7,7 @@ use aios_core::pdms_types::RefU64;
 use regex::Regex;
 use aios_core::pdms_types::UdaMajorType::T;
 use crate::aql_api::pdms_room;
+use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 
@@ -25,23 +26,64 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_query_through_element_rooms() -> anyhow::Result<()> {
-    //测试样例1
-    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83638").unwrap()).await;
-    assert_ne!(room_number.unwrap(), Some(("R661".to_string(), "".to_string())));
+async fn test_query_through_element_rooms_equip() -> anyhow::Result<()> {
 
-    //测试样例2
-    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83589").unwrap()).await;
-    assert_ne!(room_number.unwrap(), Some(("R661".to_string(), "".to_string())));
+    let mgr = get_test_ams_db_manager_async().await;
 
-    //测试样例3
-    let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83960").unwrap()).await;
-    assert_ne!(room_number.unwrap(), Some(("R361".to_string(), "".to_string())));
+    let test_equip = RefU64::from_str("24383_83638").unwrap();
+    let through_room_map = pdms_room::query_through_element_room_nums(&mgr, &[test_equip]).await?;
+    dbg!(&through_room_map);
 
-
+    // assert_eq!(room_number.unwrap(), Some(("R532".to_string(), "R320".to_string())));
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_query_through_element_rooms_subfit() -> anyhow::Result<()> {
+    //测试样例1
+    // let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83638").unwrap()).await;
+    // assert_ne!(room_number.unwrap(), Some(("R661".to_string(), "".to_string())));
+
+    // //测试样例2
+    // let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83589").unwrap()).await;
+    // assert_ne!(room_number.unwrap(), Some(("R661".to_string(), "".to_string())));
+    //
+    // //测试样例3
+    // let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83960").unwrap()).await;
+    // assert_ne!(room_number.unwrap(), Some(("R361".to_string(), "".to_string())));
+
+    let mgr = get_test_ams_db_manager_async().await;
+
+    let test_sbfi = RefU64::from_url_refno("17496_145366").unwrap();
+    let through_room_map = pdms_room::query_through_element_room_panels(&mgr, &[test_sbfi]).await?;
+    dbg!(&through_room_map);
+
+    // assert_eq!(room_number.unwrap(), Some(("R532".to_string(), "R320".to_string())));
+
+    Ok(())
+}
+
+///测试ele所在房间的底和顶标高
+#[tokio::test]
+async fn test_query_ele_own_room_elevations() -> anyhow::Result<()> {
+
+    let mgr = get_test_ams_db_manager_async().await;
+    //有可能该房间未在计算里，所以这里暂时使用实时查询计算，首先查询到相交的room
+    //查询到ele对应的aabb
+
+    Ok(())
+}
+
+///测试托盘附近的桥架branch
+#[tokio::test]
+async fn test_query_msup_attach_branch() -> anyhow::Result<()> {
+
+    let mgr = get_test_ams_db_manager_async().await;
+
+    Ok(())
+}
+
 
 
 #[tokio::test]

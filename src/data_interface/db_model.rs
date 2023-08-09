@@ -43,6 +43,7 @@ use crate::api::refno_info::{cache_plin_plax, get_ref0_projects, sync_refno_basi
 use crate::aql_api::children::{query_children_order_aql, query_deep_children_refnos_fuzzy};
 use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
 use crate::aql_api::pdms_mesh::{query_all_geo_hashs, query_pdms_mesh_aql};
+use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
 use crate::cata::resolve_helper::eval_str_to_f32;
@@ -147,24 +148,26 @@ impl AiosDBManager {
         let aql = AqlQuery::new(r#"
             with room_eles
             FOR doc IN room_eles
-                SORT doc._key
                 filter doc.aabb != null
-                RETURN [
-                    doc._key,
-                    doc.aabb,
-                ]
+                return doc
+                // RETURN [
+                //     doc._key,
+                //     doc.aabb,
+                // ]
         "#);
         let mut room_rstar_objs = vec![];
-        if let Ok(room_aabbs) = database.aql_query::<(String, Aabb)>(aql).await {
-            for (refno_str, aabb) in room_aabbs {
-                if aabb.extents().magnitude().is_finite() {
-                    let refno = RefU64::from_url_refno(&refno_str).unwrap();
-                    self.room_refnos.insert(refno);
-                    room_rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, refno));
+        if let Ok(room_eles) = database.aql_query::<RoomElement>(aql).await {
+            for room_ele in room_eles {
+                if room_ele.aabb.is_some() {
+                    for panel in &room_ele.panels {
+                        room_rstar_objs.push(RStarBoundingBox::from_aabb(&panel.aabb, panel.refno));
+                        self.room_panel_info_map.insert(panel.refno, panel.clone());
+                    }
                 }
+                self.room_info_map.insert(room_ele.refno, room_ele);
             }
-            self.room_rtree = Some(AccelerationTree::load(room_rstar_objs));
-            dbg!(self.room_rtree.as_ref().unwrap().size());
+            self.room_panels_rtree = Some(AccelerationTree::load(room_rstar_objs));
+            dbg!(self.room_panels_rtree.as_ref().unwrap().size());
         }
 
         Ok(true)
@@ -181,7 +184,7 @@ impl AiosDBManager {
                 .collect::<Vec<_>>();
 
             let hashes = inst_geos.iter().map(|x| x.geo_hash).collect::<Vec<_>>();
-            let room_mesh_mgr = query_pdms_mesh_aql(&database, &hashes).await.unwrap_or_default();
+            let room_mesh_mgr = query_pdms_mesh_aql(&database, hashes.iter()).await.unwrap_or_default();
             for (&hash, geo) in hashes.iter().zip(inst_geos) {
                 if let Some(room_mesh) = room_mesh_mgr.get_mesh(hash) {
                     let t = info.get_geo_world_transform(geo);
@@ -235,19 +238,17 @@ impl AiosDBManager {
             return Ok(());
         };
 
-        let mut room_hashmap: HashMap<RefU64, (Aabb, Vec<RefU64>)> = HashMap::new();
+        let mut room_eles_map: HashMap<RefU64, (Aabb, Vec<RefU64>)> = HashMap::new();
+        let mut room_panels_map: HashMap<RefU64, Vec<RoomPanelElement>> = HashMap::new();
         for r in room_root_refnos {
             let Ok(room_root_refno) = RefU64::from_refno_str(r) else {
                 continue;
             };
             let room_panels = query_deep_children_refnos_fuzzy(&database, &[room_root_refno], &["PANE"]).await?;
             //以panel的owner为房间的参考号
-            // dbg!(&panroom_paneses);
             println!("房间下的panel数量为: {}", room_panels.len());
-            let inst_data = query_insts_shape_data(&database, &room_panels).await?;
-            // dbg!(&instances);
-            // let mut room_aabb = Aabb::new_invalid();
-            for (_, info) in &inst_data.inst_info_map {
+            let inst_data = query_insts_shape_data(&database, &room_panels, &[GeoBasicType::Pos, GeoBasicType::Compound]).await?;
+            for (panel_refno, info) in &inst_data.inst_info_map {
                 let Some(inst_geos) = inst_data.get_inst_geos(info) else{
                     continue;
                 };
@@ -256,23 +257,25 @@ impl AiosDBManager {
                 };
                 let r = self.calculate_room(info, inst_geos, rtree).await?;
                 let room_refno = self.get_owner(info.refno);
-                // room_hashmap.entry(room_refno).or_insert((aa))
-                if let Some((room_aabb, refnos)) = room_hashmap.get_mut(&room_refno){
+                let room_panel_ele = RoomPanelElement{
+                    refno: *panel_refno,
+                    aabb,
+                    inst_geo: inst_geos.first().cloned().unwrap_or_default(),
+                    transform: info.world_transform,
+                };
+                if let Some((room_aabb, refnos)) = room_eles_map.get_mut(&room_refno){
                     room_aabb.merge(&aabb);
                     refnos.extend_from_slice(&r);
+                    room_panels_map.get_mut(&room_refno).unwrap().push(room_panel_ele);
                 }else{
-                    room_hashmap.insert(room_refno, (aabb, r));
+                    room_eles_map.insert(room_refno, (aabb, r));
+                    room_panels_map.insert(room_refno, vec![room_panel_ele]);
                 }
-
-                // final_within_room_refnos.extend_from_slice(&r);
             }
-
-            // dbg!(&final_within_room_refnos);
-            // println!("房间内元件的数量为：{}", final_within_room_refnos.len());
-            // room_hashmap.insert(room_root_refno, (room_aabb, final_within_room_refnos));
+            println!("房间内元件的数量为：{}", room_eles_map.len());
         }
 
-        self.save_room_info_to_arangodb(room_hashmap).await?;
+        self.save_room_info_to_arangodb(room_eles_map, room_panels_map).await?;
         Ok(())
     }
 
@@ -532,8 +535,9 @@ impl AiosDBManager {
             cache_module_numbdbs: Default::default(),
             mdb_dbnums: Default::default(),
             rtree: None,
-            room_rtree: None,
-            room_refnos: Default::default(),
+            room_panels_rtree: None,
+            room_info_map: Default::default(),
+            room_panel_info_map: Default::default(),
         })
     }
 
