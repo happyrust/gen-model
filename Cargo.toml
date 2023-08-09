@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["opencascade_rs"]
+default = []
 truck = []
 viewer = []  #是否开启视图
 gen_model = ["aios_core/gen_model"]

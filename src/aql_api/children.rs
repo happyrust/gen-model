@@ -21,7 +21,7 @@ use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 pub async fn query_children_eles(arango_db: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
-    With @@pdms_eles,@@pdms_edges
+    With @@pdms_eles, @@pdms_edges
     for z in 1 inbound @id pdms_edges
         return {
         '_key':z._key,

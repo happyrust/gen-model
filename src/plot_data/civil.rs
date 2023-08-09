@@ -34,6 +34,7 @@ pub struct AxisEdge {
 pub async fn query_axis_from_sbfr_aql(sbfr_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<AxisData>> {
     let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", sbfr_refno.to_url_refno());
     let aql = AqlQuery::new("\
+    with axis_edge
     for v in 1 outbound @id axis_edge
         return {
         '_key':v._key,

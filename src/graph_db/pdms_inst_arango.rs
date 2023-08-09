@@ -48,7 +48,9 @@ pub async fn save_compound_inst_info_to_graph_db(mgr: &AiosDBManager, inst_info_
             // };
             // edges.push(serde_json::to_value(&edge).unwrap());
         }
-        let aql = AqlQuery::new(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"
+                with @@collection
+                LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
@@ -77,7 +79,9 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             let json = serde_json::to_value(k.1).unwrap();
             instances.push(json);
         }
-        let aql = AqlQuery::new(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"
+                    with @@collection
+                    LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
@@ -92,7 +96,9 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             let json = serde_json::to_value(k).unwrap();
             instances.push(json);
         }
-        let aql = AqlQuery::new(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"
+        with @@collection
+        LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
@@ -113,13 +119,17 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             };
             edges.push(serde_json::to_value(&edge).unwrap());
         }
-        let aql = AqlQuery::new(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"
+        with @@collection
+        LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
             .bind_var("elements", take(&mut instances));
         database.aql_query::<Vec<()>>(aql).await?;
-        let aql = AqlQuery::new(r#"LET data = @edges
+        let aql = AqlQuery::new(r#"
+                with @@collection
+                LET data = @edges
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
             .bind_var("@collection", edge_collection)
@@ -134,7 +144,9 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             let json = serde_json::to_value(k.1).unwrap();
             instances.push(json);
         }
-        let aql = AqlQuery::new(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"
+        with @@collection
+        LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
@@ -148,7 +160,9 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             let json = serde_json::to_value(k.1).unwrap();
             instances.push(json);
         }
-        let aql = AqlQuery::new(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"
+        with @@collection
+        LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)

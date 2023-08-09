@@ -1651,7 +1651,7 @@ pub async fn gen_geos_data(
             let refnos = mgr.query_refnos_has_geos(root_refno).await?;
             has_geom_refnos.extend_from_slice(&refnos);
         }
-        // dbg!(has_geom_refnos.len());
+        dbg!(has_geom_refnos.len());
         if !has_geom_refnos.is_empty() {
             let target_loop_refnos = mgr
                 .get_gen_model_target_refnos(GeoEnum::LOOP, &target_dbnos, false)

@@ -284,7 +284,7 @@ pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<UdaMajorT
 /// 查找房间集合下的所有元件的参考号
 pub async fn query_rooms_refnos_aql(rooms: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<RoomNodes>> {
     let aql = AqlQuery::new("
-    With @@room_eles
+    With @@room_eles, @@room_edges
     for room in @@room_eles
     filter room.name in @rooms
     for v,e in 1 outbound room._id @@room_edges
@@ -379,7 +379,7 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &ArDatabase) -> a
                         filter v!= null
                         return v._key )
     for room_refno in room_refnos
-        let id = document('pdms_eles',room_refno)._id
+        let id = document(pdms_eles,room_refno)._id
         for v in 0..10 outbound id pdms_edges
             filter v!= null
             filter v.noun == 'FRMW'
