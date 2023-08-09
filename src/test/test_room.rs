@@ -21,77 +21,128 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
     Ok(())
 }
 
+//15组贯穿件房间号测试样例
 #[tokio::test]
-async fn test_query_through_element_rooms() -> anyhow::Result<()> {
+async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
     //测试样例1
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83722").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R530".to_string(), "R561".to_string())));
+    Ok(())
+}
 
+
+#[tokio::test]
+async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
     //测试样例2
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_84073").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R630".to_string(), "R663".to_string())));
+    Ok(())
+}
 
+#[tokio::test]
+async fn test_query_through_element_rooms_3() -> anyhow::Result<()> {
     //测试样例3
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83694").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R610".to_string(), "R661".to_string())));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_through_element_rooms_4() -> anyhow::Result<()> {
     //测试样例4
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83561").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R610".to_string(), "R661".to_string())));
+    Ok(())
+}
 
+#[tokio::test]
+async fn test_query_through_element_rooms_5() -> anyhow::Result<()> {
     //测试样例5
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83697").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R310".to_string(), "R361".to_string())));
+    Ok(())
+}
 
-
-
-
+#[tokio::test]
+async fn test_query_through_element_rooms_6() -> anyhow::Result<()> {
     //测试样例6
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_84009").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R310".to_string(), "R361".to_string())));
-
+    Ok(())
+}
+#[tokio::test]
+async fn test_query_through_element_rooms_7() -> anyhow::Result<()> {
     //测试样例7
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83974").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R310".to_string(), "R361".to_string())));
+    Ok(())
+}
 
+#[tokio::test]
+async fn test_query_through_element_rooms_8() -> anyhow::Result<()> {
     //测试样例8
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83939").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R430".to_string(), "R461".to_string())));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_through_element_rooms_9() -> anyhow::Result<()> {
     //测试样例9
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83869").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R430".to_string(), "R461".to_string())));
+    Ok(())
+}
 
+#[tokio::test]
+async fn test_query_through_element_rooms_10() -> anyhow::Result<()> {
     //测试样例10
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83995").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R510".to_string(), "R562".to_string())));
+    Ok(())
+}
 
 
-
-
+#[tokio::test]
+async fn test_query_through_element_rooms_11() -> anyhow::Result<()> {
     //测试样例11
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83729").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R530".to_string(), "R561".to_string())));
+    Ok(())
+}
 
+#[tokio::test]
+async fn test_query_through_element_rooms_12() -> anyhow::Result<()> {
     //测试样例12
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_84079").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R630".to_string(), "R663".to_string())));
+    Ok(())
+}
 
+#[tokio::test]
+async fn test_query_through_element_rooms_13() -> anyhow::Result<()> {
     //测试样例13
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83596").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R610".to_string(), "R661".to_string())));
+    Ok(())
+}
 
+
+#[tokio::test]
+async fn test_query_through_element_rooms_14() -> anyhow::Result<()> {
     //测试样例14
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83708").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R710".to_string(), "R761".to_string())));
+    Ok(())
+}
 
+#[tokio::test]
+async fn test_query_through_element_rooms_15() -> anyhow::Result<()> {
     //测试样例15
     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83813").unwrap()).await;
     assert_ne!(room_number.unwrap(), Some(("R710".to_string(), "R761".to_string())));
-
-
-
-
     Ok(())
 }
 
