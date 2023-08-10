@@ -511,7 +511,7 @@ impl PdmsDataInterface for AiosDBManager {
     async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
         let aql = AqlQuery::new("\
-        with pdms_edges
+        with pdms_edges, pdms_eles
         let negatives = ( FOR v,e,p in 0..15 INBOUND @key pdms_edges
                     PRUNE v.noun in @negative_nouns
                     filter v.noun in @negative_nouns
@@ -584,7 +584,7 @@ impl PdmsDataInterface for AiosDBManager {
             .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
             .collect::<Vec<_>>();
         let aql = AqlQuery::new(r#"
-            with pdms_edges
+            with pdms_edges, pdms_eles
             for key in @keys
                 FOR v,e,p in 0..15 INBOUND key pdms_edges
                     filter v.noun in @neg_geo_nouns
@@ -603,7 +603,7 @@ impl PdmsDataInterface for AiosDBManager {
     async fn query_refnos_has_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, Vec<RefU64>>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
         let aql = AqlQuery::new(r#"
-            with pdms_edges
+            with pdms_edges, pdms_eles
             FOR v,e,p in 0..15 INBOUND @key pdms_edges
                 PRUNE v.noun in @negative_nouns
                 OPTIONS { "order": "bfs"}

@@ -146,7 +146,6 @@ pub async fn save_virtual_hole_value_to_arangodb(db_option: &DbOption) -> anyhow
 }
 
 
-
 ///保存层级关系到图数据库
 pub async fn save_pdms_level_edges_in_sync(database: &ArDatabase, children_map: &HashMap<RefU64, RefU64Vec>) -> anyhow::Result<()> {
     let mut results = vec![];
@@ -374,7 +373,7 @@ pub async fn save_arangodb_with_db_option(database: &ArDatabase, json: Value, co
                 LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#.to_string();
-    let aql = //AqlQuery::new(&aql_string)
+    let aql =
         AqlQuery::new(&aql_string)
             .bind_var("@collection", collection)
             .bind_var("elements", json);
@@ -389,7 +388,7 @@ pub async fn save_arangodb_doc(json: Value, collection: &str, database: &ArDatab
         LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#
-    } else{
+    } else {
         r#"
         with @@collection
         LET data = @elements
@@ -410,7 +409,7 @@ pub async fn remove_arangodb_with_refno_key(refnos: &Vec<RefU64>, collection: &s
         "
             with @@collection
             FOR D IN @DATA
-                    REMOVE D IN @COLLECTION")
+                    REMOVE D IN @@COLLECTION")
         .bind_var("data", keys)
         .bind_var("collection", collection)
         ;
@@ -418,7 +417,7 @@ pub async fn remove_arangodb_with_refno_key(refnos: &Vec<RefU64>, collection: &s
     Ok(!result.is_err())
 }
 
-pub async fn save_arangodb_with_db_option_create_collection(database: &ArDatabase, json: Value,  collection: &str, collection_type: CollectionType) -> anyhow::Result<()> {
+pub async fn save_arangodb_with_db_option_create_collection(database: &ArDatabase, json: Value, collection: &str, collection_type: CollectionType) -> anyhow::Result<()> {
     match collection_type {
         CollectionType::Document => {
             database.create_collection(collection).await?;

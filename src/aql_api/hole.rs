@@ -6,14 +6,13 @@ use aios_core::pdms_types::{GeoBasicType, PdmsElement, RefU64};
 use aios_core::pdms_types::GeoBasicType::CateNeg;
 use aios_core::plugging_material::PluggingData;
 use aios_core::virtual_hole::HoleInstInfo;
-
 use anyhow::anyhow;
 use arangors_lite::AqlQuery;
 use bitvec::macros::internal::funty::Floating;
 use glam::Vec3;
-use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_ancestor_till_types_aql, query_ancestor_with_name_till_type_aql, query_refnos_ancestor_till_types_aql};
-use crate::aql_api::pdms_room::{query_through_element_room_nums, query_through_element_room_panels};
-use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_GEO_COLLECTION, AQL_PDMS_INST_INFO_COLLECTION};
+use crate::aql_api::children::*;
+use crate::aql_api::pdms_room::*;
+use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
@@ -126,7 +125,7 @@ pub async fn compute_hole_instance_data(mgr: &AiosDBManager,
                 // 这几个类型name取他上面的对应层级
                 query_ancestor_till_types_aql(&mgr.get_arango_db().await?, hole.refno, vec!["JLDATUM", "CMFI", "CMPF"]).await?.unwrap_or_default()
             };
-            let (room_1, room_2) = query_through_element_room_nums(mgr, &[hole.refno]).await?.values().nth(0).cloned().unwrap_or_default();
+            let (room_1, room_2) = mgr.query_through_element_room_nums(&[hole.refno]).await?.values().nth(0).cloned().unwrap_or_default();
             let cable_area = get_cable_area(&element.name).await;
             let plugging_area = f32::PI * (diameter / 2.0) * (diameter / 2.0) - cable_area;
             let fill_percent = get_plugging_fill_percent().await;

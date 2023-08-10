@@ -43,7 +43,7 @@ pub async fn query_children_eles(arango_db: &ArDatabase, refno: RefU64) -> anyho
 pub async fn query_children_order_aql(adb: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
-    WITH @@pdms_eles , @@pdms_edges , @@sibl_edges
+    WITH @@pdms_eles,@@pdms_edges,@@sibl_edges
     let datas = (
     for v,e in 1 inbound @id @@pdms_edges
         filter v!= null

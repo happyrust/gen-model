@@ -21,7 +21,7 @@ impl AiosDBManager {
                 geo_hashes.into_iter().cloned().collect::<Vec<_>>()
             }
         };
-        dbg!(&new_hashes);
+        if new_hashes.is_empty() { return Ok(true);  }
         let plant_mesh = query_pdms_mesh_aql(&self.get_arango_db().await?, &new_hashes).await?;
         let mut cache_mesh_mgr = self.cached_mesh_mgr.write().await;
         for (k, v) in plant_mesh.meshes {
