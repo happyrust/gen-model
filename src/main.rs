@@ -46,7 +46,7 @@ use nom::Parser;
 use nom_derive::Parse;
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::{Isometry, Point, Vector};
-use parry3d::shape::{Compound, ConvexPolyhedron, SharedShape};
+use parry3d::shape::*;
 use parry3d::transformation::vhacd;
 use parry3d::transformation::vhacd::VHACD;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
@@ -75,8 +75,7 @@ use tokio::sync::RwLock;
 use aios_database::aql_api::children::query_deep_children_refnos_fuzzy;
 use aios_database::cata::resolve_helper::parse_str_axis_to_vec3;
 use aios_database::consts::*;
-#[cfg(feature = "gen_model")]
-use aios_database::data_interface::gen_model::gen_geos_data;
+
 
 fn test_sbfi() -> anyhow::Result<()> {
     // let axis_str = "Y27.041-X";
@@ -203,57 +202,6 @@ async fn main() -> anyhow::Result<()> {
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
-    }
-
-    #[cfg(feature = "gen_model")]
-    if db_option.gen_model {
-        println!("正在生成模型");
-        let mut time = Instant::now();
-        // let refno = RefU64::from_two_nums(25688, 8189);
-        // dbg!(mgr.get_attr_from_localdb(refno));
-        // dbg!(mgr.get_children_refs(refno).await);
-
-        // let refno = RefU64::from_two_nums(25688, 7972);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-
-        // let refno = RefU64::from_two_nums(23708, 1234);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(23708, 26027);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-
-        //
-        // let refno = RefU64::from_two_nums(17496, 195550);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(17496, 173130);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(17496, 173131);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(17496, 156942);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-
-        // let branch_refnos = query_deep_children_refnos_fuzzy(&database, &[refno], &CATA_HAS_TUBI_GEO_NAMES).await?;
-        // dbg!(branch_refnos);
-
-        gen_geos_data(mgr.clone()).await?;
-        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
     ///生成ssc 树
