@@ -43,6 +43,7 @@ use crate::api::refno_info::{cache_plin_plax, get_ref0_projects, sync_refno_basi
 use crate::aql_api::children::{query_children_order_aql, query_deep_children_refnos_fuzzy};
 use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
 use crate::aql_api::pdms_mesh::{query_all_geo_hashs, query_pdms_mesh_aql};
+use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
 use crate::cata::resolve_helper::eval_str_to_f32;
@@ -94,13 +95,15 @@ impl AiosDBManager {
             &db_option.mdb_name,
             &db_option.module,
         ).await?;
-        if db_option.gen_spatial_tree {
-            mgr.compute_aabb_tree().await?;
+        // if db_option.gen_spatial_tree
+        //加载空间树
+        {
+            mgr.compute_aabb_trees().await?;
         }
         Ok(mgr)
     }
 
-    pub async fn compute_aabb_tree(&mut self) -> anyhow::Result<bool> {
+    pub async fn compute_aabb_trees(&mut self) -> anyhow::Result<bool> {
         //测试分页查询
         let mut rstar_objs = vec![];
         let mut offset = 0;
@@ -110,7 +113,6 @@ impl AiosDBManager {
             let aql = AqlQuery::new(r#"
             with pdms_inst_infos
             FOR doc IN pdms_inst_infos
-                SORT doc._key
                 LIMIT @offset, @batch_size
                 filter doc.aabb != null
                 RETURN [
@@ -119,8 +121,7 @@ impl AiosDBManager {
                 ]
         "#)
                 .bind_var("offset", offset)
-                .bind_var("batch_size", 5000)
-                ;
+                .bind_var("batch_size", 5000);
             offset += 5000;
             if let Ok(refno_aabbs) = database.aql_query::<(String, Aabb)>(aql).await {
                 if refno_aabbs.is_empty() {
@@ -143,6 +144,31 @@ impl AiosDBManager {
         self.rtree = Some(AccelerationTree::load(rstar_objs));
         dbg!(self.rtree.as_ref().unwrap().size());
 
+        let aql = AqlQuery::new(r#"
+            with room_eles
+            FOR doc IN room_eles
+                filter doc.aabb != null
+                return doc
+                // RETURN [
+                //     doc._key,
+                //     doc.aabb,
+                // ]
+        "#);
+        let mut room_rstar_objs = vec![];
+        if let Ok(room_eles) = database.aql_query::<RoomElement>(aql).await {
+            for room_ele in room_eles {
+                if room_ele.aabb.is_some() {
+                    for panel in &room_ele.panels {
+                        room_rstar_objs.push(RStarBoundingBox::from_aabb(&panel.aabb, panel.refno));
+                        self.room_panel_info_map.insert(panel.refno, panel.clone());
+                    }
+                }
+                self.room_info_map.insert(room_ele.refno, room_ele);
+            }
+            self.room_panels_rtree = Some(AccelerationTree::load(room_rstar_objs));
+            dbg!(self.room_panels_rtree.as_ref().unwrap().size());
+        }
+
         Ok(true)
     }
 
@@ -155,25 +181,18 @@ impl AiosDBManager {
             withing_room_items = rtree
                 .locate_intersecting_bounds(&room_abb)
                 .collect::<Vec<_>>();
-            // let inst_key = info.get_inst_key();
+
             let hashes = inst_geos.iter().map(|x| x.geo_hash).collect::<Vec<_>>();
-            let room_mesh_mgr = query_pdms_mesh_aql(&database, &hashes).await.unwrap_or_default();
+            let room_mesh_mgr = query_pdms_mesh_aql(&database, hashes.iter()).await.unwrap_or_default();
             for (&hash, geo) in hashes.iter().zip(inst_geos) {
                 if let Some(room_mesh) = room_mesh_mgr.get_mesh(hash) {
                     let t = info.get_geo_world_transform(geo);
-                    // dbg!(&t);
                     let collider_mesh = room_mesh.get_tri_mesh(t.compute_matrix());
-                    // let local_aabb = collider_mesh.local_aabb();
-                    // dbg!(collider_mesh.local_aabb());
                     let mut outer_refnos = vec![];
                     //需要批量去获取数据
 
                     for (refno, world_point) in &withing_room_items {
-                        // let world_trans = self.get_world_transform(*refno).await?.unwrap_or_default();
-                        // let world_point: parry3d::math::Point<f32> = world_trans.translation.into();
-
                         //检查目标的坐标点不在它自身包围盒的情况，这种就需要用相交的算法去计算
-
                         //check 是否包含在房间内
                         let contain_point = match collider_mesh.cast_local_ray_and_get_normal(
                             &Ray::new(Point3::from_slice(world_point), Vector::new(0.0, 0.0, 1.0)),
@@ -195,6 +214,7 @@ impl AiosDBManager {
                         // collider_mesh.intersection_with_aabb();
                     }
 
+                    //排除room的类型
                     withing_room_items.retain(|(refno, _)| {
                         !outer_refnos.contains(refno) && *refno != room_refno
                     });
@@ -217,33 +237,44 @@ impl AiosDBManager {
             return Ok(());
         };
 
-        let mut room_hashmap = HashMap::new();
+        let mut room_eles_map: HashMap<RefU64, (Aabb, Vec<RefU64>)> = HashMap::new();
+        let mut room_panels_map: HashMap<RefU64, Vec<RoomPanelElement>> = HashMap::new();
         for r in room_root_refnos {
             let Ok(room_root_refno) = RefU64::from_refno_str(r) else {
                 continue;
             };
-            let panes = query_deep_children_refnos_fuzzy(&database, &[room_root_refno], &["PANE"]).await?;
-            // dbg!(&panes);
-            println!("房间下的panel数量为: {}", panes.len());
-            let inst_data = query_insts_shape_data(&database, &panes).await?;
-            // dbg!(&instances);
-            let mut final_within_room_refnos = vec![];
-            for (_, info) in &inst_data.inst_info_map {
+            let room_panels = query_deep_children_refnos_fuzzy(&database, &[room_root_refno], &["PANE"]).await?;
+            //以panel的owner为房间的参考号
+            println!("房间下的panel数量为: {}", room_panels.len());
+            let inst_data = query_insts_shape_data(&database, &room_panels, &[GeoBasicType::Pos, GeoBasicType::Compound]).await?;
+            for (panel_refno, info) in &inst_data.inst_info_map {
                 let Some(inst_geos) = inst_data.get_inst_geos(info) else{
                     continue;
                 };
+                let Some(aabb) = info.aabb else{
+                    continue;
+                };
                 let r = self.calculate_room(info, inst_geos, rtree).await?;
-                final_within_room_refnos.extend_from_slice(&r);
+                let room_refno = self.get_owner(info.refno);
+                let room_panel_ele = RoomPanelElement{
+                    refno: *panel_refno,
+                    aabb,
+                    inst_geo: inst_geos.first().cloned().unwrap_or_default(),
+                    transform: info.world_transform,
+                };
+                if let Some((room_aabb, refnos)) = room_eles_map.get_mut(&room_refno){
+                    room_aabb.merge(&aabb);
+                    refnos.extend_from_slice(&r);
+                    room_panels_map.get_mut(&room_refno).unwrap().push(room_panel_ele);
+                }else{
+                    room_eles_map.insert(room_refno, (aabb, r));
+                    room_panels_map.insert(room_refno, vec![room_panel_ele]);
+                }
             }
-
-            // dbg!(&final_within_room_refnos);
-            println!("房间内元件的数量为：{}", final_within_room_refnos.len());
-            room_hashmap.insert(room_root_refno, final_within_room_refnos);
+            println!("房间内元件的数量为：{}", room_eles_map.len());
         }
 
-        self.save_room_info_to_arangodb(room_hashmap).await?;
-
-
+        self.save_room_info_to_arangodb(room_eles_map, room_panels_map).await?;
         Ok(())
     }
 
@@ -503,6 +534,9 @@ impl AiosDBManager {
             cache_module_numbdbs: Default::default(),
             mdb_dbnums: Default::default(),
             rtree: None,
+            room_panels_rtree: None,
+            room_info_map: Default::default(),
+            room_panel_info_map: Default::default(),
         })
     }
 
@@ -688,7 +722,7 @@ impl AiosDBManager {
             with pdms_eles
             return document(pdms_eles, @id)
         ").bind_var("id", refno_aql);
-        let mut r = arango_db.aql_query::<PdmsEleGraphNode>(aql).await?;
+        let mut r = arango_db.aql_query::<PdmsEleGraphNode>(aql).await.unwrap_or_default();
         Ok(r.pop())
     }
 

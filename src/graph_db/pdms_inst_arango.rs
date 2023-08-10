@@ -48,7 +48,9 @@ pub async fn save_compound_inst_info_to_graph_db(mgr: &AiosDBManager, inst_info_
             // };
             // edges.push(serde_json::to_value(&edge).unwrap());
         }
-        let aql = AqlQuery::new(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"
+                with @@collection
+                LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
@@ -77,7 +79,9 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             let json = serde_json::to_value(k.1).unwrap();
             instances.push(json);
         }
-        let aql = AqlQuery::new(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"
+                    with @@collection
+                    LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
@@ -92,7 +96,9 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             let json = serde_json::to_value(k).unwrap();
             instances.push(json);
         }
-        let aql = AqlQuery::new(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"
+        with @@collection
+        LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
@@ -113,13 +119,17 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             };
             edges.push(serde_json::to_value(&edge).unwrap());
         }
-        let aql = AqlQuery::new(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"
+        with @@collection
+        LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
             .bind_var("elements", take(&mut instances));
         database.aql_query::<Vec<()>>(aql).await?;
-        let aql = AqlQuery::new(r#"LET data = @edges
+        let aql = AqlQuery::new(r#"
+                with @@collection
+                LET data = @edges
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
             .bind_var("@collection", edge_collection)
@@ -134,7 +144,9 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             let json = serde_json::to_value(k.1).unwrap();
             instances.push(json);
         }
-        let aql = AqlQuery::new(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"
+        with @@collection
+        LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
@@ -148,7 +160,9 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
             let json = serde_json::to_value(k.1).unwrap();
             instances.push(json);
         }
-        let aql = AqlQuery::new(r#"LET data = @elements
+        let aql = AqlQuery::new(r#"
+        with @@collection
+        LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
@@ -161,8 +175,10 @@ pub async fn save_instance_to_graph_db(mgr: &AiosDBManager, inst_mgr: &ShapeInst
 
 ///获取element inst的几何数据
 /// 默认直接优先取负实体的数据
-pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) -> anyhow::Result<ShapeInstancesData> {
-    let refno_strs = refnos.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
+pub async fn query_insts_shape_data(database: &ArDatabase, refnos: impl IntoIterator<Item=&RefU64>, filter: &[GeoBasicType]) -> anyhow::Result<ShapeInstancesData> {
+    let new_refnos = refnos.into_iter().cloned().collect::<Vec<_>>();
+    let refno_strs = new_refnos.iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
+    let include_compound = filter.contains(&GeoBasicType::Compound);
     //如果单独拖入负实体，允许把负实体显示出来
     let aql = AqlQuery::new(r#"
             With @@pdms_eles,@@pdms_inst_infos
@@ -170,11 +186,12 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
                 FOR c,e,p IN 0..20 inbound CONCAT('pdms_eles/',refno) pdms_edges
                     let comp_f = document('pdms_compound_inst_infos', c._key)
                     let f = document('pdms_inst_infos', c._key)
-                    let d = comp_f == null ? f : comp_f
+                    let d = (@include_compound and comp_f != null) ? comp_f : f
                     filter d != null and (d.geo_type != "Neg" or e == null)
                     return distinct d
             "#)
         .bind_var("refnos", refno_strs.clone())
+        .bind_var("include_compound", include_compound)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
@@ -212,7 +229,7 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: &[RefU64]) ->
     let mut inst_tubi_map = HashMap::new();
     let mut all_refnos = inst_info_map.keys().map(|x| x.to_url_refno()).collect::<Vec<_>>();
     //这里需要直接通过这个查询下面的所有的branch那些
-    let branch_refnos = query_deep_children_refnos_fuzzy(&database, refnos, &CATA_HAS_TUBI_GEO_NAMES).await?;
+    let branch_refnos = query_deep_children_refnos_fuzzy(&database, &new_refnos, &CATA_HAS_TUBI_GEO_NAMES).await?;
     all_refnos.extend(branch_refnos.iter().map(|x| x.to_url_refno()));
     let aql = AqlQuery::new(r#"
             With @@pdms_inst_tubis

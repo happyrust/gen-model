@@ -1,5 +1,5 @@
 use aios_core::options::DbOption;
-use aios_core::pdms_types::RefU64;
+use aios_core::pdms_types::{GeoBasicType, RefU64};
 use crate::aql_api::children::query_travel_children_filter_negative_sibl_nodes;
 use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -31,10 +31,12 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
     let interface = get_test_ams_db_manager_async().await;
     let database = interface.get_arango_db().await?;
     println!("here");
-    let shape_insts = query_insts_shape_data(&database, &[RefU64::from_two_nums(17496, 161711)]).await?;
+    let shape_insts = query_insts_shape_data(&database,
+                                             &[RefU64::from_two_nums(17496, 161711)],
+                                                &[GeoBasicType::Pos, GeoBasicType::Compound]).await?;
     dbg!(&shape_insts.inst_geos_map);
     let geo_hashs = shape_insts.get_geo_hashs().iter().map(|x| *x).collect::<Vec<_>>();
-    if let Ok(meshes_data) = query_pdms_mesh_aql(&database, &geo_hashs).await {
+    if let Ok(meshes_data) = query_pdms_mesh_aql(&database, geo_hashs.iter()).await {
         dbg!(meshes_data.meshes.len());
         // let r = PdmsInstanceMeshData{
         //     shape_insts,

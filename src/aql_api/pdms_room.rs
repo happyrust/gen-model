@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 use aios_core::pdms_types::{PdmsElement, RefU64, UdaMajorType};
 use bb8_arangodb::arangors_lite::AqlQuery;
-use parry3d::bounding_volume::Aabb;
+use parry3d::bounding_volume::{Aabb, BoundingSphere, BoundingVolume};
 use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool, Row};
 use crate::api::attr::get_site_major_from_uda;
-use crate::aql_api::children::query_ancestor_name_of_type_aql;
+use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_deep_children_refnos_fuzzy};
 use crate::aql_api::convert_refno_vec_from_vec_string;
 use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_ROOM_EDGES_COLLECTION, AQL_ROOM_ELES_COLLECTION};
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -13,8 +14,18 @@ use crate::graph_db::pdms_arango::*;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::graph_db::pdms_arango::*;
 use aios_core::pdms_types::*;
+use anyhow::anyhow;
+use bevy_transform::prelude::Transform;
+use glam::Vec3;
+use itertools::Itertools;
+use nalgebra::Point3;
+use parry3d::math::Vector;
+use parry3d::query::{Ray, RayCast};
+use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::consts::PDMS_ELEMENTS_TABLE;
+use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
+use crate::rvm::data_api::query_rvm_geo_instance_aql;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RoomData {
@@ -24,13 +35,41 @@ pub struct RoomData {
     pub target_refnos: Vec<RefU64>,
 }
 
+///Room元素
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RoomElement {
     #[serde(serialize_with = "ser_refno_as_key_str")]
     #[serde(deserialize_with = "de_refno_from_key_str")]
     #[serde(rename = "_key")]
     pub refno: RefU64,
-    pub name: String,   //room 名
+    ///room名称
+    pub name: String,
+    ///room的aabb
+    pub aabb: Option<Aabb>,
+    ///room的panels
+    pub panels: Vec<RoomPanelElement>,
+}
+
+//提前缓存，经常需要使用到的
+///房间panel的信息, panel 的owner就是房间节点
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RoomPanelElement {
+    #[serde(serialize_with = "ser_refno_as_key_str")]
+    #[serde(deserialize_with = "de_refno_from_key_str")]
+    pub refno: RefU64,
+    ///对应的aabb
+    pub aabb: Aabb,
+    ///对应的几何体
+    pub inst_geo: EleInstGeo,
+    ///对应的方位
+    pub transform: Transform,
+}
+
+impl RoomPanelElement {
+    #[inline]
+    pub fn get_final_transform(&self) -> Transform {
+        self.transform * self.inst_geo.transform
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -54,19 +93,24 @@ pub struct RoomInfo {
 
 /// 将房间信息保存到图数据库
 impl AiosDBManager {
-    pub(crate) async fn save_room_info_to_arangodb(&self, room_map: HashMap<RefU64, Vec<RefU64>>) -> anyhow::Result<bool> {
-        let mut room_eles_json = vec![];
+    pub(crate) async fn save_room_info_to_arangodb(&self,
+                                                   room_map: HashMap<RefU64, (Aabb, Vec<RefU64>)>,
+                                                   room_panels_map: HashMap<RefU64, Vec<RoomPanelElement>>) -> anyhow::Result<bool> {
+        let mut room_eles = vec![];
         let mut room_edges_json = vec![];
-        for (refno, target_refnos) in room_map {
+        for (refno, (aabb, target_refnos)) in room_map {
             let Ok(frmw) = self.get_ancestor_refno_of_type_data(refno, "FRMW") else {
                 continue;
             };
             let mut frmw_name = self.get_name(frmw).await?.to_string();
             let name = frmw_name.split('-').last().unwrap_or_default().to_string();
             dbg!(&name);
-            room_eles_json.push(RoomElement {
+            let panels_info = room_panels_map.get(&refno).cloned().unwrap_or_default();
+            room_eles.push(RoomElement {
                 refno,
                 name,
+                aabb: Some(aabb),
+                panels: panels_info,
             });
             for target_refno in target_refnos {
                 // 获取 target_refno 属于哪个专业
@@ -90,7 +134,7 @@ impl AiosDBManager {
         }
         let database = self.get_arango_db().await?;
         let replace = self.db_option.replace_dbs;
-        let room_eles_json = serde_json::to_value(&room_eles_json)?;
+        let room_eles_json = serde_json::to_value(&room_eles)?;
         save_arangodb_doc(room_eles_json, "room_eles", &database, replace).await?;
         let room_edges_json = serde_json::to_value(&room_edges_json)?;
         save_arangodb_doc(room_edges_json, "room_edges", &database, replace).await?;
@@ -249,7 +293,7 @@ pub async fn query_room_refnos_aql(refno: RefU64, filter_major: Option<UdaMajorT
 /// 查找房间集合下的所有元件的参考号
 pub async fn query_rooms_refnos_aql(rooms: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<RoomNodes>> {
     let aql = AqlQuery::new("
-    With @@room_eles
+    With @@room_eles, @@room_edges
     for room in @@room_eles
     filter room.name in @rooms
     for v,e in 1 outbound room._id @@room_edges
@@ -344,7 +388,7 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &ArDatabase) -> a
                         filter v!= null
                         return v._key )
     for room_refno in room_refnos
-        let id = document('pdms_eles',room_refno)._id
+        let id = document(pdms_eles,room_refno)._id
         for v in 0..10 outbound id pdms_edges
             filter v!= null
             filter v.noun == 'FRMW'
@@ -371,7 +415,283 @@ pub async fn query_refno_belong_rooms(refno: RefU64, database: &ArDatabase) -> a
     Ok(r)
 }
 
-/// 返回贯穿件 穿过的两个房间号 ， tuple.0：距离核岛中心 世界坐标 0，0，0 最近的点
-pub async fn query_through_element_rooms(refno: RefU64) -> anyhow::Result<Option<(String, String)>> {
-    Ok(Some(("R101".to_string(), "R102".to_string())))
+
+impl AiosDBManager {
+    /// 返回贯穿件穿过的两个房间号
+    pub async fn query_through_element_room_nums(&self, refnos: &[RefU64]) -> anyhow::Result<HashMap<RefU64, (String, String)>> {
+        let mut own_panels_map = self.query_through_element_room_panels(refnos).await?;
+        Ok(
+            own_panels_map.iter().map(|(refno, (p0, p1))| {
+                let room0 = self.get_owner(*p0);
+                let room1 = self.get_owner(*p1);
+
+                let room0_num = self.room_info_map.get(&room0).map(|x| x.name.clone()).unwrap_or_default();
+                let room1_num = self.room_info_map.get(&room1).map(|x| x.name.clone()).unwrap_or_default();
+                (*refno, (room0_num, room1_num))
+            }).collect()
+        )
+    }
+
+    /// 返回贯穿件穿过的两个房间panels
+    pub async fn query_through_element_room_panels(&self, refnos: &[RefU64]) -> anyhow::Result<HashMap<RefU64, (RefU64, RefU64)>> {
+        let through_children_map: HashMap<RefU64, Vec<RefU64>> = refnos.into_iter()
+            .map(|x|
+                (*x, (self.get_children_from_localdb(*x).unwrap_or_default()).0)
+            ).collect();
+        let mut res_map = HashMap::new();
+        for (through_refno, children) in through_children_map {
+            if let Ok(mut result) = self.query_ele_own_room_panels(&children, Some(through_refno)).await {
+                for (k, mut v) in result {
+                    let r1 = v.pop().unwrap_or_default();
+                    let r0 = v.pop().unwrap_or_default();
+                    res_map.insert(k, (r0, r1));
+                }
+            }
+        }
+        Ok(res_map)
+    }
+
+    /// 返回元件所属的房间panels
+    pub async fn query_ele_own_room_panels(&self, refnos: &[RefU64], as_whole_to: Option<RefU64>) -> anyhow::Result<HashMap<RefU64, Vec<RefU64>>> {
+        let room_panels_tree = self.room_panels_rtree.as_ref().ok_or(anyhow!("房间空间树未生成。"))?;
+        //先用包围盒去查询和哪些房间的aabb相交
+        let database = self.get_arango_db().await?;
+        let inst_data = query_insts_shape_data(&database, refnos, &[GeoBasicType::Pos]).await?;
+        let is_as_whole = as_whole_to.is_some();
+        if inst_data.inst_info_map.is_empty() { return Ok(Default::default()); }
+        let mut own_panels_map = HashMap::new();
+        let mut whole_key_points = vec![];
+        let mut whole_aabb = Aabb::new_invalid();
+        if is_as_whole {
+            for (&refno, info) in &inst_data.inst_info_map {
+                let Some(inst_geos) = inst_data.get_inst_geos(info) else {
+                    continue;
+                };
+                let key_points = inst_geos.iter()
+                    .map(|x| x.geo_param.key_points().into_iter().map(|v| x.transform.transform_point(v)))
+                    .flatten()
+                    .map(|x| info.world_transform.transform_point(x))
+                    .collect::<Vec<_>>();
+                whole_key_points.extend_from_slice(&key_points);
+                whole_aabb.merge(&info.aabb.unwrap());
+            }
+            if whole_key_points.len() < 2 { return Ok(Default::default()); }
+            whole_key_points.sort_by(|a, b| a.length().partial_cmp(&b.length()).unwrap());
+            let final_key_points = [whole_key_points.first().cloned().unwrap(), whole_key_points.last().cloned().unwrap()];
+            dbg!(&final_key_points);
+            // dbg!(&whole_aabb);
+            let intersect_room_panels = room_panels_tree.locate_intersecting_bounds(&whole_aabb).collect::<Vec<_>>();
+            // dbg!(&intersect_room_panels);
+            let mut geo_hashes = HashSet::new();
+            let mut panel_infos = vec![];
+            for (panel_refno, _) in &intersect_room_panels {
+                if let Some(panel_info) = self.room_panel_info_map.get(panel_refno) {
+                    geo_hashes.insert(panel_info.inst_geo.geo_hash);
+                    panel_infos.push(panel_info);
+                }
+            }
+            self.cache_plant_meshes(&geo_hashes, false).await?;
+            let mut target_panels = vec![];
+            //这里需要考虑顺序
+            for key_point in &final_key_points {
+                for &panel_info in &panel_infos {
+                    let Ok(Some(room_panel_mesh)) = self.get_plant_mesh(panel_info.inst_geo.geo_hash).await else {
+                        continue;
+                    };
+                    let t = panel_info.transform * panel_info.inst_geo.transform;
+                    let collider_mesh = room_panel_mesh.get_tri_mesh(t.compute_matrix());
+
+                    let contain_point = match collider_mesh.cast_local_ray_and_get_normal(
+                        &Ray::new(Point3::from_slice(&key_point.to_array()), Vector::new(0.0, 0.0, 1.0)),
+                        100000.0,
+                        false,
+                    ) {
+                        Some(intersection) => {
+                            collider_mesh.is_backface(intersection.feature)
+                        }
+                        None => false,
+                    };
+                    if contain_point {
+                        target_panels.push(panel_info.refno);
+                        break;
+                    }
+                }
+            }
+            // dbg!(&target_panels);
+            if !target_panels.is_empty() {
+                own_panels_map.insert(as_whole_to.unwrap(), target_panels);
+            }
+            return Ok(own_panels_map);
+        }
+
+        for (&refno, info) in &inst_data.inst_info_map {
+            let Some(inst_geos) = inst_data.get_inst_geos(info) else {
+                continue;
+            };
+            // dbg!(inst_geos.iter().map(|x| &x.geo_param));
+            let key_points = inst_geos.iter()
+                .map(|x| x.geo_param.key_points().into_iter().map(|v| x.transform.transform_point(v)))
+                .flatten()
+                .map(|x| info.world_transform.transform_point(x))
+                .collect::<Vec<_>>();
+            let mut intersect_room_panels = vec![];
+            // dbg!(&key_points);
+            // dbg!(info.aabb);
+            let Some(mut ele_aabb) = info.aabb else {
+                continue;
+            };
+            // dbg!(&ele_aabb);
+            intersect_room_panels = room_panels_tree.locate_intersecting_bounds(&ele_aabb).collect::<Vec<_>>();
+            // dbg!(&intersect_room_panels);
+            let mut geo_hashes = HashSet::new();
+            let mut panel_infos = vec![];
+            for (panel_refno, _) in &intersect_room_panels {
+                if let Some(panel_info) = self.room_panel_info_map.get(panel_refno) {
+                    geo_hashes.insert(panel_info.inst_geo.geo_hash);
+                    panel_infos.push(panel_info);
+                }
+            }
+            self.cache_plant_meshes(&geo_hashes, false).await?;
+            let mut target_panels = vec![];
+            for panel_info in panel_infos {
+                let Ok(Some(room_panel_mesh)) = self.get_plant_mesh(panel_info.inst_geo.geo_hash).await else {
+                    continue;
+                };
+                let t = panel_info.transform * panel_info.inst_geo.transform;
+                let collider_mesh = room_panel_mesh.get_tri_mesh(t.compute_matrix());
+                for key_point in &key_points {
+                    let contain_point = match collider_mesh.cast_local_ray_and_get_normal(
+                        &Ray::new(Point3::from_slice(&key_point.to_array()), Vector::new(0.0, 0.0, 1.0)),
+                        100000.0,
+                        false,
+                    ) {
+                        Some(intersection) => {
+                            collider_mesh.is_backface(intersection.feature)
+                        }
+                        None => false,
+                    };
+                    if contain_point {
+                        target_panels.push(panel_info.refno);
+                        break;
+                    }
+                }
+            }
+
+            let target_refno = as_whole_to.unwrap_or(refno);
+            own_panels_map.insert(target_refno, target_panels);
+        }
+
+        Ok(own_panels_map)
+    }
+
+    ///查询节点所在房间的顶标高和底标高
+    pub async fn query_own_room_panel_elevations(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, (f32, f32)>> {
+        let mut elevs_map = HashMap::new();
+        let mut panels_map = self.query_ele_own_room_panels(&[refno], None).await?;
+        if let Some(panels) = panels_map.remove(&refno) {
+            for panel in panels {
+                if let Some((geo_hash, t)) = self.room_panel_info_map.get(&panel).map(|x|
+                    (x.inst_geo.geo_hash, x.get_final_transform())
+                ) {
+                    if let Some(elv) = self.get_transformed_mesh_elev(geo_hash, &t).await? {
+                        elevs_map.insert(panel, elv);
+                    }
+                }
+            }
+        }
+        Ok(elevs_map)
+    }
+
+    pub async fn query_around_owner_within_radius(&self,
+                                                  refno: RefU64,
+                                                  is_aabb: bool,
+                                                  offset: Option<f32>,
+                                                  nearest: bool,
+                                                  own_filter_types: Vec<&str>) -> anyhow::Result<Vec<RefU64>> {
+        let around = self.query_around_eles_within_radius(refno, is_aabb, offset, nearest, vec![], own_filter_types).await?;
+        let result = around.iter().map(|x| self.get_owner(x.0)).unique().collect::<Vec<_>>();
+        Ok(result)
+    }
+
+    ///通过包围盒查询周围的构件
+    pub async fn query_around_eles_within_radius(&self,
+                                                 refno: RefU64,
+                                                 is_aabb: bool,
+                                                 offset: Option<f32>,
+                                                 nearest: bool,
+                                                 filter_types: Vec<&str>,
+                                                 own_filter_types: Vec<&str>, ) -> anyhow::Result<Vec<(RefU64, f32)>> {
+        let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
+        let database = self.get_arango_db().await?;
+        let inst_data = query_insts_shape_data(&database, &[refno], &[GeoBasicType::Pos]).await?;
+        if inst_data.inst_info_map.is_empty() { return Ok(Default::default()); }
+        let mut whole_key_points = vec![];
+        let mut whole_aabb = Aabb::new_invalid();
+        for (&refno, info) in &inst_data.inst_info_map {
+            let Some(inst_geos) = inst_data.get_inst_geos(info) else {
+                continue;
+            };
+            let key_points = inst_geos.iter()
+                .map(|x| x.geo_param.key_points().into_iter().map(|v| x.transform.transform_point(v)))
+                .flatten()
+                .map(|x| info.world_transform.transform_point(x))
+                .collect::<Vec<_>>();
+            whole_key_points.extend_from_slice(&key_points);
+            whole_aabb.merge(&info.aabb.unwrap());
+        }
+        // let mut whole_sphere = BoundingSphere::new(whole_aabb.center(), whole_aabb.half_extents().magnitude());
+        if let Some(s) = offset {
+            if s > 0.0 {
+                whole_aabb.loosen(s);
+            } else {
+                whole_aabb.tighten(s);
+            }
+        }
+        // dbg!(&whole_aabb);
+        let mut intersects = if is_aabb {
+            rtree.locate_intersecting_bounds(&whole_aabb)
+                .filter(|x| x.0 != refno)
+                .filter(|x| filter_types.is_empty() ||
+                    filter_types.contains(&self.get_type_name(x.0).unwrap_or_default().as_str())
+                )
+                .filter(|x| own_filter_types.is_empty() ||
+                    own_filter_types.contains(&self.get_type_name(self.get_owner(x.0)).unwrap_or_default().as_str())
+                )
+                .collect::<Vec<_>>()
+        } else {
+            rtree.query_within_distance(whole_aabb.center().into(), whole_aabb.half_extents().magnitude())
+                .filter(|x| x.0 != refno)
+                .filter(|x| filter_types.is_empty() ||
+                    filter_types.contains(&self.get_type_name(x.0).unwrap_or_default().as_str())
+                )
+                .filter(|x| own_filter_types.is_empty() ||
+                    own_filter_types.contains(&self.get_type_name(self.get_owner(x.0)).unwrap_or_default().as_str())
+                )
+                .collect::<Vec<_>>()
+        };
+
+        // dbg!(&intersects);
+        let pos: Vec3 = whole_aabb.center().into();
+        let mut result = vec![];
+        //超过连个值的时候，需要做比较
+        let mut compute = false;
+        if nearest {
+            if intersects.len() >= 2 {
+                let nearest_ele = intersects.iter().max_by(|&(_, p0), &(_, p1)| {
+                    pos.distance((*p0).into()).partial_cmp(&pos.distance((*p1).into())).unwrap()
+                }).unwrap();
+                dbg!(nearest_ele);
+                result.push((nearest_ele.0, pos.distance((nearest_ele.1).into())));
+                compute = true;
+            }
+        }
+
+        if !compute {
+            result = intersects.into_iter()
+                .map(|(r, v)| (r, pos.distance(v.into())))
+                .collect();
+        }
+        Ok(result)
+    }
 }
+

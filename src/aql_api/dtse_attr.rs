@@ -40,7 +40,7 @@ async fn query_data_attr_from_refnos(refnos: Vec<RefU64>, database: &ArDatabase)
         } "
     )
         .bind_var("element", children)
-        .bind_var("@data_eles",AQL_DATA_ELES_COLLECTION);
+        .bind_var("@data_eles", AQL_DATA_ELES_COLLECTION);
     let result: Vec<DataDocument> = database.aql_query(aql).await?;
     let mut data_map = DashMap::new();
     for r in result {

@@ -131,6 +131,7 @@ pub trait PdmsDataInterface : Send + Sync{
 
     ///获得在一定范围的构件参考号列表
     async fn get_refnos_within_bound_radius(&self, refno: RefU64, distance: f32) -> anyhow::Result<Vec<RefU64>>;
+    fn get_refnos_within_bound_radius_by_pos(&self, pos: Vec3, distance: f32) -> anyhow::Result<Vec<RefU64>>;
 
     ///获得spline的路径，包括直线路径，圆弧路径
     fn get_spline_path(&self, refno: RefU64) -> anyhow::Result<Vec<Spine3D>>;
