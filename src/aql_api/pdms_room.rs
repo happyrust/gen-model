@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Deref;
 use aios_core::pdms_types::{PdmsElement, RefU64, UdaMajorType};
 use bb8_arangodb::arangors_lite::AqlQuery;
-use parry3d::bounding_volume::{Aabb, BoundingVolume};
+use parry3d::bounding_volume::{Aabb, BoundingSphere, BoundingVolume};
 use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool, Row};
 use crate::api::attr::get_site_major_from_uda;
@@ -66,7 +67,7 @@ pub struct RoomPanelElement {
 
 impl RoomPanelElement {
     #[inline]
-    pub fn get_final_transform(&self) -> Transform{
+    pub fn get_final_transform(&self) -> Transform {
         self.transform * self.inst_geo.transform
     }
 }
@@ -516,8 +517,10 @@ impl AiosDBManager {
                     }
                 }
             }
-            dbg!(&target_panels);
-            own_panels_map.insert(as_whole_to.unwrap(), target_panels);
+            // dbg!(&target_panels);
+            if !target_panels.is_empty() {
+                own_panels_map.insert(as_whole_to.unwrap(), target_panels);
+            }
             return Ok(own_panels_map);
         }
 
@@ -532,14 +535,14 @@ impl AiosDBManager {
                 .map(|x| info.world_transform.transform_point(x))
                 .collect::<Vec<_>>();
             let mut intersect_room_panels = vec![];
-            dbg!(&key_points);
+            // dbg!(&key_points);
             // dbg!(info.aabb);
             let Some(mut ele_aabb) = info.aabb else {
                 continue;
             };
-            dbg!(&ele_aabb);
+            // dbg!(&ele_aabb);
             intersect_room_panels = room_panels_tree.locate_intersecting_bounds(&ele_aabb).collect::<Vec<_>>();
-            dbg!(&intersect_room_panels);
+            // dbg!(&intersect_room_panels);
             let mut geo_hashes = HashSet::new();
             let mut panel_infos = vec![];
             for (panel_refno, _) in &intersect_room_panels {
@@ -585,19 +588,110 @@ impl AiosDBManager {
     pub async fn query_own_room_panel_elevations(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, (f32, f32)>> {
         let mut elevs_map = HashMap::new();
         let mut panels_map = self.query_ele_own_room_panels(&[refno], None).await?;
-        dbg!(&panels_map);
         if let Some(panels) = panels_map.remove(&refno) {
-             for panel in panels {
+            for panel in panels {
                 if let Some((geo_hash, t)) = self.room_panel_info_map.get(&panel).map(|x|
                     (x.inst_geo.geo_hash, x.get_final_transform())
-                ){
-                    if let Some(elv) = self.get_transformed_mesh_elev(geo_hash, &t).await?{
+                ) {
+                    if let Some(elv) = self.get_transformed_mesh_elev(geo_hash, &t).await? {
                         elevs_map.insert(panel, elv);
                     }
                 }
             }
         }
         Ok(elevs_map)
+    }
+
+    pub async fn query_around_owner_within_radius(&self,
+                                                  refno: RefU64,
+                                                  is_aabb: bool,
+                                                  offset: Option<f32>,
+                                                  nearest: bool,
+                                                  own_filter_types: Vec<&str>) -> anyhow::Result<Vec<RefU64>> {
+        let around = self.query_around_eles_within_radius(refno, is_aabb, offset, nearest, vec![], own_filter_types).await?;
+        let result = around.iter().map(|x| self.get_owner(x.0)).unique().collect::<Vec<_>>();
+        Ok(result)
+    }
+
+    ///通过包围盒查询周围的构件
+    pub async fn query_around_eles_within_radius(&self,
+                                                 refno: RefU64,
+                                                 is_aabb: bool,
+                                                 offset: Option<f32>,
+                                                 nearest: bool,
+                                                 filter_types: Vec<&str>,
+                                                 own_filter_types: Vec<&str>, ) -> anyhow::Result<Vec<(RefU64, f32)>> {
+        let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
+        let database = self.get_arango_db().await?;
+        let inst_data = query_insts_shape_data(&database, &[refno], &[GeoBasicType::Pos]).await?;
+        if inst_data.inst_info_map.is_empty() { return Ok(Default::default()); }
+        let mut whole_key_points = vec![];
+        let mut whole_aabb = Aabb::new_invalid();
+        for (&refno, info) in &inst_data.inst_info_map {
+            let Some(inst_geos) = inst_data.get_inst_geos(info) else {
+                continue;
+            };
+            let key_points = inst_geos.iter()
+                .map(|x| x.geo_param.key_points().into_iter().map(|v| x.transform.transform_point(v)))
+                .flatten()
+                .map(|x| info.world_transform.transform_point(x))
+                .collect::<Vec<_>>();
+            whole_key_points.extend_from_slice(&key_points);
+            whole_aabb.merge(&info.aabb.unwrap());
+        }
+        // let mut whole_sphere = BoundingSphere::new(whole_aabb.center(), whole_aabb.half_extents().magnitude());
+        if let Some(s) = offset {
+            if s > 0.0 {
+                whole_aabb.loosen(s);
+            } else {
+                whole_aabb.tighten(s);
+            }
+        }
+        // dbg!(&whole_aabb);
+        let mut intersects = if is_aabb {
+            rtree.locate_intersecting_bounds(&whole_aabb)
+                .filter(|x| x.0 != refno)
+                .filter(|x| filter_types.is_empty() ||
+                    filter_types.contains(&self.get_type_name(x.0).unwrap_or_default().as_str())
+                )
+                .filter(|x| own_filter_types.is_empty() ||
+                    own_filter_types.contains(&self.get_type_name(self.get_owner(x.0)).unwrap_or_default().as_str())
+                )
+                .collect::<Vec<_>>()
+        } else {
+            rtree.query_within_distance(whole_aabb.center().into(), whole_aabb.half_extents().magnitude())
+                .filter(|x| x.0 != refno)
+                .filter(|x| filter_types.is_empty() ||
+                    filter_types.contains(&self.get_type_name(x.0).unwrap_or_default().as_str())
+                )
+                .filter(|x| own_filter_types.is_empty() ||
+                    own_filter_types.contains(&self.get_type_name(self.get_owner(x.0)).unwrap_or_default().as_str())
+                )
+                .collect::<Vec<_>>()
+        };
+
+        // dbg!(&intersects);
+        let pos: Vec3 = whole_aabb.center().into();
+        let mut result = vec![];
+        //超过连个值的时候，需要做比较
+        let mut compute = false;
+        if nearest {
+            if intersects.len() >= 2 {
+                let nearest_ele = intersects.iter().max_by(|&(_, p0), &(_, p1)| {
+                    pos.distance((*p0).into()).partial_cmp(&pos.distance((*p1).into())).unwrap()
+                }).unwrap();
+                dbg!(nearest_ele);
+                result.push((nearest_ele.0, pos.distance((nearest_ele.1).into())));
+                compute = true;
+            }
+        }
+
+        if !compute {
+            result = intersects.into_iter()
+                .map(|(r, v)| (r, pos.distance(v.into())))
+                .collect();
+        }
+        Ok(result)
     }
 }
 

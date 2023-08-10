@@ -708,7 +708,7 @@ pub async fn gen_cata_geos(
                             let mut manifold_map: HashMap<RefU64, ManifoldRust> = HashMap::new();
                             let mut geo_insts = vec![];
                             let mut ngmr_geo_insts = vec![];
-                            let mut cata_aabb: Option<Aabb> = None;
+                            // let mut cata_aabb: Option<Aabb> = None;
                             //将负实体和正实体统计出来
                             let mut merged_cata_aabb: Option<Aabb> = None;
                             let mut n_merged_cata_aabb: Option<Aabb> = None;
@@ -784,24 +784,22 @@ pub async fn gen_cata_geos(
                                     manifold_map.insert(refno, new_mesh.into());
                                 };
 
-                                if let Some(mut cata_aabb) = cata_aabb {
-                                    cata_aabb.merge(&transformed_aabb);
-                                } else {
-                                    cata_aabb = Some(transformed_aabb);
-                                }
-                                if cata_aabb.is_some() {
-                                    if is_ngmr {
-                                        if let Some(mut a) = n_merged_cata_aabb {
-                                            a.merge(cata_aabb.as_ref().unwrap());
-                                        } else {
-                                            n_merged_cata_aabb = cata_aabb;
-                                        }
+                                // if let Some(mut cata_aabb) = cata_aabb {
+                                //     cata_aabb.merge(&transformed_aabb);
+                                // } else {
+                                //     cata_aabb = Some(transformed_aabb);
+                                // }
+                                if is_ngmr {
+                                    if let Some(a) = &mut n_merged_cata_aabb {
+                                        a.merge(&&transformed_aabb);
                                     } else {
-                                        if let Some(mut a) = merged_cata_aabb {
-                                            a.merge(cata_aabb.as_ref().unwrap());
-                                        } else {
-                                            merged_cata_aabb = cata_aabb;
-                                        }
+                                        n_merged_cata_aabb = Some(transformed_aabb);
+                                    }
+                                } else {
+                                    if let Some(a) = &mut merged_cata_aabb {
+                                        a.merge(&transformed_aabb);
+                                    } else {
+                                        merged_cata_aabb = Some(transformed_aabb);
                                     }
                                 }
                                 let transform = Transform {
@@ -860,9 +858,6 @@ pub async fn gen_cata_geos(
                                 let mut n_geos_info = geos_info.clone();
                                 n_geos_info.update_to_ngmr(None);
                                 let mut inst_key = n_geos_info.get_inst_key();
-                                // if ele_refno.get_1() == 7994  {
-                                //     dbg!(&ngmr_geo_insts);
-                                // }
                                 let n_origin = EleInstGeosData {
                                     inst_key: inst_key.clone(),
                                     refno: cat_refno,
@@ -876,7 +871,7 @@ pub async fn gen_cata_geos(
                             }
 
                             //将负实体的运算结果，存在另外一个collection
-                            let contain_ngmr = geo_insts.iter().any(|x| x.geo_type == GeoBasicType::CateCrossNeg);
+                            // let contain_ngmr = geo_insts.iter().any(|x| x.geo_type == GeoBasicType::CateCrossNeg);
                             if geo_insts.len() > 0 {
                                 let mut inst_key = geos_info.get_inst_key();
                                 let origin = EleInstGeosData {

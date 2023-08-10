@@ -113,7 +113,6 @@ impl AiosDBManager {
             let aql = AqlQuery::new(r#"
             with pdms_inst_infos
             FOR doc IN pdms_inst_infos
-                SORT doc._key
                 LIMIT @offset, @batch_size
                 filter doc.aabb != null
                 RETURN [

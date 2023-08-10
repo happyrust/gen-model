@@ -49,13 +49,51 @@ async fn test_query_through_element_rooms_subfit() -> anyhow::Result<()> {
 ///测试ele所在房间的底和顶标高
 #[tokio::test]
 async fn test_query_ele_own_room_elevations() -> anyhow::Result<()> {
-
     let mgr = get_test_ams_db_manager_async().await;
     //有可能该房间未在计算里，所以这里暂时使用实时查询计算，首先查询到相交的room
     //查询到ele对应的aabb
-    let target_refno = RefU64::from_str("24381/70705").unwrap();
-    let eles = mgr.query_own_room_panel_elevations(target_refno).await?;
-    dbg!(&eles);
+    let target_refno = RefU64::from_str("24381/70704").unwrap();
+    let elevs = mgr.query_own_room_panel_elevations(target_refno).await?;
+    dbg!(&elevs);
+
+    Ok(())
+}
+
+///按类型查询周边的构件，指定范围和类型
+#[tokio::test]
+async fn test_query_eles_around_target() -> anyhow::Result<()> {
+    let mgr = get_test_ams_db_manager_async().await;
+    //有可能该房间未在计算里，所以这里暂时使用实时查询计算，首先查询到相交的room
+    //查询到ele对应的aabb
+    let target_refno = RefU64::from_str("24381/70704").unwrap();
+    let refnos = mgr.query_around_eles_within_radius(target_refno, true, None,
+                                                     true, vec![],vec![]).await?;
+    //支吊架，风管
+    dbg!(&refnos);
+    let refnos = mgr.query_around_owner_within_radius(target_refno, true, None,
+                                                     true, vec!["BRAN"]).await?;
+
+    dbg!(&refnos);
+    assert_eq!(refnos[0].to_refno_string().as_str(), "24381/58848");
+
+    //拖臂，桥架
+    let target_refno = RefU64::from_str("24383/96911").unwrap();
+    // let refnos = mgr.query_around_owner_within_radius(target_refno, true, None,
+    //                                                   false, vec![]).await?;
+    // dbg!(refnos);
+    let refnos = mgr.query_around_owner_within_radius(target_refno, true, None,
+                                                     true, vec!["BRAN"]).await?;
+
+    dbg!(&refnos);
+    assert_eq!(refnos[0].to_refno_string().as_str(), "24383/95023");
+
+    //拖臂，桥架
+    let target_refno = RefU64::from_str("24383/96561").unwrap();
+    let refnos = mgr.query_around_owner_within_radius(target_refno, true, None,
+                                                      true, vec!["BRAN"]).await?;
+
+    dbg!(&refnos);
+    assert_eq!(refnos[0].to_refno_string().as_str(), "24383/94706");
 
     Ok(())
 }
@@ -65,6 +103,7 @@ async fn test_query_ele_own_room_elevations() -> anyhow::Result<()> {
 async fn test_query_msup_attach_branch() -> anyhow::Result<()> {
 
     let mgr = get_test_ams_db_manager_async().await;
+
 
     Ok(())
 }

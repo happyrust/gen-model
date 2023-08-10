@@ -881,17 +881,21 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
 
-    ///获得在一定范围的构件参考号列表
+    ///指定refno获得在一定范围的构件参考号列表
     async fn get_refnos_within_bound_radius(&self, refno: RefU64, distance: f32) -> anyhow::Result<Vec<RefU64>> {
-        let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
-
         let db = &self.get_arango_db().await?;
         let instances = query_insts_shape_data(db, &[refno], &[GeoBasicType::Pos, GeoBasicType::Compound]).await?;
         if instances.inst_info_map.is_empty() { return Ok(vec![]); }
         let pos = instances.inst_info_map.iter().next().unwrap().1.world_transform.translation;
-        let target_refnos = rtree.query_within_distance(pos, distance)
-            .collect();
+        self.get_refnos_within_bound_radius_by_pos(pos, distance)
+    }
 
+    ///指定pos获得在一定范围的构件参考号列表
+    fn get_refnos_within_bound_radius_by_pos(&self, pos: Vec3, distance: f32) -> anyhow::Result<Vec<RefU64>> {
+        let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
+        let target_refnos = rtree.query_within_distance(pos, distance)
+            .map(|x| x.0)
+            .collect();
         Ok(target_refnos)
     }
 
