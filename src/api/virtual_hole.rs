@@ -25,7 +25,7 @@ pub async fn query_virtual_hole_audit_data_by_name(database: &ArDatabase, name: 
 }
 
 pub async fn query_hole_detail_data_by_code(database: &ArDatabase, key: &str) -> anyhow::Result<Option<Vec<VirtualHoleGraphNode>>> {
-    let aql = AqlQuery::new("let v = document('hole_data',@_key)\
+    let aql = AqlQuery::new("with hole_data let v = document('hole_data',@_key)\
         return unset(v , '_id','_rev') ")
         .bind_var("_key", key);
     let data_vec: Vec<VirtualHoleGraphNode> = database.aql_query(aql).await?;
@@ -33,7 +33,7 @@ pub async fn query_hole_detail_data_by_code(database: &ArDatabase, key: &str) ->
 }
 
 pub async fn query_embed_detail_data_by_code(database: &ArDatabase, key: &str) -> anyhow::Result<Option<Vec<VirtualEmbedGraphNode>>> {
-    let aql = AqlQuery::new("let v = document('embed_data',@_key)\
+    let aql = AqlQuery::new("with embed_data let v = document('embed_data',@_key)\
         return unset(v , '_id','_rev') ")
         .bind_var("_key", key);
     let data_vec: Vec<VirtualEmbedGraphNode> = database.aql_query(aql).await?;

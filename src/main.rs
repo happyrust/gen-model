@@ -46,7 +46,7 @@ use nom::Parser;
 use nom_derive::Parse;
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::{Isometry, Point, Vector};
-use parry3d::shape::{Compound, ConvexPolyhedron, SharedShape};
+use parry3d::shape::*;
 use parry3d::transformation::vhacd;
 use parry3d::transformation::vhacd::VHACD;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
@@ -75,8 +75,7 @@ use tokio::sync::RwLock;
 use aios_database::aql_api::children::query_deep_children_refnos_fuzzy;
 use aios_database::cata::resolve_helper::parse_str_axis_to_vec3;
 use aios_database::consts::*;
-#[cfg(feature = "gen_model")]
-use aios_database::data_interface::gen_model::gen_geos_data;
+
 
 fn test_sbfi() -> anyhow::Result<()> {
     // let axis_str = "Y27.041-X";
@@ -204,6 +203,7 @@ async fn main() -> anyhow::Result<()> {
     if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
     }
+
     ///生成ssc 树
     if db_option.rebuild_ssc_tree {
         println!("正在同步SSC");
