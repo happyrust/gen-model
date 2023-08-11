@@ -406,7 +406,7 @@ async fn test_export_water_calculation_stp_4() -> anyhow::Result<()> {
     stp_packet.save_time = "2023-08-07 20:39:16.867354400 +08:00".to_string();
     //导出模型列表
     let mut export_models_map = HashMap::new();
-    export_models_map.insert(RefU64::from_str("25688/19684").unwrap(),  "STWALL 3".to_string());
+    export_models_map.insert(RefU64::from_str("25688/19684").unwrap(), "STWALL 3".to_string());
     stp_packet.export_models_map = export_models_map;
     //所有墙与孔洞的map
     let mut walls_map = HashMap::new();
@@ -430,7 +430,7 @@ async fn test_export_water_calculation_stp_4() -> anyhow::Result<()> {
         is_plugged: true,
     }, FloodingHole {
         refno: RefU64::from_str("25688/19688").unwrap(),
-        name:  "/1AR04KK1020T".to_string(),
+        name: "/1AR04KK1020T".to_string(),
         is_door: false,
         is_selected: false,
         is_plugged: true,
@@ -536,7 +536,7 @@ async fn test_export_water_calculation_stp_4() -> anyhow::Result<()> {
         is_door: false,
         is_selected: false,
         is_plugged: false,
-    },]);
+    }, ]);
     stp_packet.walls_map = walls_map;
 
     dbg!(&stp_packet);
@@ -560,7 +560,7 @@ async fn test_export_water_calculation_stp_5() -> anyhow::Result<()> {
     stp_packet.save_time = "2023-08-07 20:39:16.867354400 +08:00".to_string();
     //导出模型列表
     let mut export_models_map = HashMap::new();
-    export_models_map.insert(RefU64::from_str("25688/19684").unwrap(),  "STWALL 3".to_string());
+    export_models_map.insert(RefU64::from_str("25688/19684").unwrap(), "STWALL 3".to_string());
     stp_packet.export_models_map = export_models_map;
     //所有墙与孔洞的map
     let mut walls_map = HashMap::new();
@@ -584,7 +584,7 @@ async fn test_export_water_calculation_stp_5() -> anyhow::Result<()> {
         is_plugged: true,
     }, FloodingHole {
         refno: RefU64::from_str("25688/19688").unwrap(),
-        name:  "/1AR04KK1020T".to_string(),
+        name: "/1AR04KK1020T".to_string(),
         is_door: false,
         is_selected: false,
         is_plugged: true,
@@ -690,7 +690,7 @@ async fn test_export_water_calculation_stp_5() -> anyhow::Result<()> {
         is_door: false,
         is_selected: false,
         is_plugged: false,
-    },]);
+    }, ]);
     stp_packet.walls_map = walls_map;
 
     dbg!(&stp_packet);
