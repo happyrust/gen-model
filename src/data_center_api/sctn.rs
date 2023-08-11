@@ -302,3 +302,12 @@ async fn get_dq_support_sctn_gtype_beam_data(refno: &EleTreeNode, aios_mgr: &Aio
     });
     Ok((attr, desc))
 }
+
+
+#[tokio::test]
+async fn test_query_around_owner_within_radius() {
+    let mgr = AiosDBManager::init_form_config().await.unwrap();
+    let refno = RefU64::from_refno_str("24383/96911").unwrap();
+    let result = mgr.query_around_owner_within_radius(refno,true,None,true,vec!["BRAN"]).await.unwrap();
+    dbg!(&result);
+}
