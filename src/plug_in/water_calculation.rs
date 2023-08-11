@@ -26,7 +26,7 @@ pub async fn save_stp_data_to_arangodb(aios_mgr: &AiosDBManager, mut stp: Export
         let key = hasher.finish();
         let json_data = vec![stp.to_arango_struct()];
         let Ok(send_value) = serde_json::to_value(&json_data) else { return "数据结构反序列化失败".to_string(); };
-        if let Ok(_result) = query_water_calculation_data(&database, key.to_string()).await {
+        if let Ok(_result) = query_water_calculation_data(&database, &key.to_string()).await {
             let _ = save_arangodb_doc(send_value, AQL_WATER_CALCULATION_COLLECTION, &database, true).await.unwrap();
         } else {
             let _ = save_arangodb_doc(send_value, AQL_WATER_CALCULATION_COLLECTION, &database, false).await.unwrap();
@@ -36,9 +36,10 @@ pub async fn save_stp_data_to_arangodb(aios_mgr: &AiosDBManager, mut stp: Export
 }
 
 
-#[cfg(feature = "opencascade_rs")]
+//#[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
 pub async fn export_stp(mgr: &AiosDBManager, stp_packet: ExportFloodingStpEvent) -> anyhow::Result<bool> {
+   dbg!(&stp_packet);
     // let pos_refnos: Vec<RefU64> = stp_packet.stp.iter()
     //     .map(|x| x.keys().cloned())
     //     .flatten()
@@ -78,10 +79,9 @@ pub async fn export_stp(mgr: &AiosDBManager, stp_packet: ExportFloodingStpEvent)
 }
 
 ///查询数据库中是否已有当前名称的文件
-pub async fn query_water_calculation_data(database: &ArDatabase, key_value: String) -> anyhow::Result<Option<Vec<FloodingStpToArangodb>>> {
-    let aql = AqlQuery::new("let v = document('water_calculaion',@_key)\
-        return unset(v , '_id','_rev') ")
-        .bind_var("_key", key_value);
+pub async fn query_water_calculation_data(database: &ArDatabase, key_value: &str) -> anyhow::Result<Option<Vec<FloodingStpToArangodb>>> {
+    let aql = AqlQuery::new("let v = document('water_calculation',@_key)\
+        return unset(v , '_id','_rev') ").bind_var("_key", key_value);
     let data_vec: Vec<FloodingStpToArangodb> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }
