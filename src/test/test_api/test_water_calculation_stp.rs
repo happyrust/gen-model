@@ -6,7 +6,7 @@ use aios_core::water_calculation::{ExportFloodingStpEvent, FloodingHole};
 use opencascade::primitives::Compound;
 use sqlx::encode::IsNull::No;
 
-use crate::plug_in::water_calculation::export_stp;
+
 use crate::plug_in::water_calculation::save_stp_data_to_arangodb;
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use crate::test::test_helper::get_test_ams_db_manager_async;

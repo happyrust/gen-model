@@ -17,6 +17,9 @@ use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
 use crate::graph_db::pdms_arango::{ArDatabase, save_arangodb_doc};
 use aios_core::water_calculation::FloodingStpToArangodb;
 use arangors_lite::AqlQuery;
+use std::fs::File;
+use std::io::Write;
+
 
 /// 将数据保存至图数据库
 pub async fn save_stp_data_to_arangodb(aios_mgr: &AiosDBManager, mut stp: ExportFloodingStpEvent) -> String {
@@ -34,9 +37,18 @@ pub async fn save_stp_data_to_arangodb(aios_mgr: &AiosDBManager, mut stp: Export
     }
     "Ok".to_string()
 }
+// ///导出水淹计算stp
+// #[cfg(not(feature = "opencascade_rs"))]
+// pub async fn export_stp_(mgr: &AiosDBManager, stp_packet: ExportFloodingStpEvent) -> anyhow::Result<bool> {
+//    //生成文件
+//     let mut file = File::create(format!("./assets/walter_steps/{}.stp", stp_packet.file_name.as_str()))?;
+//     let mut test_str = "测试STP文件下载";
+//     file.write_all(test_str.as_bytes())?;
+//     //跳转url下载文件
+//     Ok(true)
+// }
 
-
-//#[cfg(feature = "opencascade_rs")]
+#[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
 pub async fn export_stp(mgr: &AiosDBManager, stp_packet: ExportFloodingStpEvent) -> anyhow::Result<bool> {
    dbg!(&stp_packet);
