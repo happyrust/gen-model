@@ -8,72 +8,31 @@ extern crate clap;
 #[macro_use]
 extern crate nom;
 
-use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
-use aios_core::db_number::DbNumMgr;
-use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::pdms_types::*;
-use aios_core::prim_geo;
-use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_bin};
+use aios_core::tool::db_tool::db1_hash;
 use aios_database::api::admin::sync_system_db;
-use aios_database::api::attr::insert_attr_info;
-use aios_database::api::element::*;
-use aios_database::api::ssc_data::{get_ancestor_till_type, query_all_room_data, update_ssc_type};
-use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
-use aios_database::aql_api::pdms_room::{
-    query_all_need_compute_room_refno, RoomEdge, RoomElement,
-};
-use aios_database::aql_api::tubi::{insert_tubi_value, query_all_tubi_from_node};
-use aios_database::cata::resolve::parse_to_i32;
 use aios_database::consts::*;
-use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::database::*;
 use aios_database::graph_db::pdms_arango::*;
-use aios_database::graph_db::pdms_inst_arango::*;
-use aios_database::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
-use aios_database::spatial_tree::recompute_spatial_tree;
-use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
-use aios_database::tables::*;
+use aios_database::ssc::async_total_ssc_data;
 use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
-use bevy_transform::prelude::Transform;
 use chrono::{Datelike, Timelike};
-use dashmap::DashMap;
 use futures::StreamExt;
 use itertools::Itertools;
-use nalgebra::{max, Quaternion, UnitQuaternion};
 use nom::Parser;
 use nom_derive::Parse;
-use parry3d::bounding_volume::Aabb;
-use parry3d::math::{Isometry, Point, Vector};
-use parry3d::shape::*;
-use parry3d::transformation::vhacd;
-use parry3d::transformation::vhacd::VHACD;
-use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
-// use regex::internal::Input;
-use sqlx::pool::PoolConnection;
-use sqlx::Executor;
-use sqlx::{Acquire, MySql, MySqlPool, Pool, Row};
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt::format;
-use std::fs;
+use sqlx::Row;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::mem::take;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
 use aios_core::options::DbOption;
 use aios_core::tool::direction_parse::parse_expr_to_dir;
-use aios_core::tool::math_tool::{cal_mat3_by_zdir, quat_to_pdms_ori_str, to_pdms_ori_str, to_pdms_vec_str};
-use approx::abs_diff_eq;
-use tokio::spawn;
+use aios_core::tool::math_tool::{cal_mat3_by_zdir, to_pdms_ori_str};
 use env_logger::{Builder, fmt::Target};
-use glam::{Mat3, Quat, Vec3};
 use log::{error, LevelFilter};
 use tokio::sync::RwLock;
-use aios_database::aql_api::children::query_deep_children_refnos_fuzzy;
-use aios_database::cata::resolve_helper::parse_str_axis_to_vec3;
 use aios_database::consts::*;
 
 
@@ -163,7 +122,7 @@ fn test_sbfi() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
+    use config::{Config, File};
 
     // return test_sbfi();
 
