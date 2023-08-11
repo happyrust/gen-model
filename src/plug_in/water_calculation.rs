@@ -4,7 +4,10 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use std::collections::HashSet;
 use aios_core::pdms_types::AttrMap;
 use std::collections::HashMap;
+use std::fs;
+use std::fs::File;
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use crate::api::children::travel_children_with_type;
 use crate::data_interface::interface::PdmsDataInterface;
 use aios_core::water_calculation::*;
@@ -17,6 +20,7 @@ use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
 use crate::graph_db::pdms_arango::{ArDatabase, save_arangodb_doc};
 use aios_core::water_calculation::FloodingStpToArangodb;
 use arangors_lite::AqlQuery;
+use itertools::Itertools;
 
 /// 将数据保存至图数据库
 pub async fn save_stp_data_to_arangodb(aios_mgr: &AiosDBManager, mut stp: ExportFloodingStpEvent) -> String {
@@ -36,43 +40,56 @@ pub async fn save_stp_data_to_arangodb(aios_mgr: &AiosDBManager, mut stp: Export
 }
 
 
+#[cfg(not(feature = "opencascade_rs"))]
+///导出水淹计算stp
+pub async fn export_stp_(mgr: &AiosDBManager, stp_packet: ExportFloodingStpEvent) -> anyhow::Result<bool> {
+
+    let mut file = File::create(format!("./assets/walter_steps/{}.stp", stp_packet.file_name.as_str()))?;
+    let mut test_str = "测试STP文件下载";
+    file.write_all(test_str.as_bytes())?;
+
+    Ok(true)
+}
+
 #[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
 pub async fn export_stp(mgr: &AiosDBManager, stp_packet: ExportFloodingStpEvent) -> anyhow::Result<bool> {
-    // let pos_refnos: Vec<RefU64> = stp_packet.stp.iter()
-    //     .map(|x| x.keys().cloned())
-    //     .flatten()
-    //     .collect();
-    // let mut total_shapes = vec![];
-    // for pos_refno in pos_refnos {
-    //     dbg!(pos_refno);
-    //     let rvm_infos = query_rvm_geo_instance_aql(vec![pos_refno], &mgr.get_arango_db().await?).await?;
-    //     let refnos = rvm_infos.iter().map(|x| x.refno).collect::<Vec<_>>();
-    //     dbg!(&refnos);
-    //     let Some(mut final_shape) = rvm_infos.iter()
-    //         .filter(|x| x.refno == pos_refno)
-    //         .map(|x| x.gen_occ_shape())
-    //         .flatten()
-    //         .nth(0) else {
-    //         continue;
-    //     };
-    //
-    //     //过滤出找到ngrm的shapes
-    //     let ngmr_shapes = rvm_infos.iter()
-    //         .map(|x| x.gen_ngmr_occ_shape())
-    //         .flatten()
-    //         .collect::<Vec<_>>();
-    //     for n in ngmr_shapes{
-    //         final_shape = final_shape.subtract_shape(&n).0;
-    //         // final_shape = final_shape.union_shape(&n).0;
-    //     }
-    //     total_shapes.push(final_shape);
-    // }
-    //
-    // let mut final_compound_shape = Compound::from_shapes(&total_shapes);
-    //
-    // // final_compound_shape.write_step(&format!("walter_steps/{name}.step")).unwrap();
-    // final_compound_shape.write_step(&format!("walter_steps/test.step")).unwrap();
+    let wall_refnos: Vec<RefU64> = stp_packet.walls().cloned().collect();
+    let mut total_shapes = vec![];
+    for pos_refno in wall_refnos {
+        dbg!(pos_refno);
+        let rvm_infos = query_rvm_geo_instance_aql(&mgr.get_arango_db().await? , vec![pos_refno]).await?;
+        let refnos = rvm_infos.iter().map(|x| x.refno).collect::<Vec<_>>();
+        dbg!(&refnos);
+        let Some(mut final_shape) = rvm_infos.iter()
+            .filter(|x| x.refno == pos_refno)
+            .map(|x| x.gen_occ_shape())
+            .flatten()
+            .nth(0) else {
+            continue;
+        };
+        let mut opening_refnos = stp_packet.opening_hole_refnos(pos_refno)
+            .map(|x| x.collect::<Vec<_>>())
+            .unwrap_or_default();
+
+        //过滤出找到ngrm的shapes
+        let ngmr_shapes = rvm_infos.iter()
+            .filter(|x| opening_refnos.contains(&x.refno))
+            .map(|x| x.gen_ngmr_occ_shape())
+            .flatten()
+            .collect::<Vec<_>>();
+        for n in ngmr_shapes{
+            final_shape = final_shape.subtract_shape(&n).0;
+            // final_shape = final_shape.union_shape(&n).0;
+        }
+        total_shapes.push(final_shape);
+    }
+
+    let mut final_compound_shape = Compound::from_shapes(&total_shapes);
+
+    // final_compound_shape.write_step(&format!("walter_steps/{name}.step")).unwrap();
+    fs::create_dir_all("./assets/walter_steps");
+    final_compound_shape.write_step(&format!("./assets/walter_steps/{}.step", &stp_packet.file_name)).unwrap();
 
     Ok(true)
 }

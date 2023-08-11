@@ -249,6 +249,7 @@ pub async fn query_insts_shape_data(database: &ArDatabase, refnos: impl IntoIter
         inst_info_map,
         inst_tubi_map,
         inst_geos_map,
+        compound_refnos_map: Default::default(),
         compound_inst_info_map: Default::default(),
         ngmr_inst_info_map: Default::default(),
     });

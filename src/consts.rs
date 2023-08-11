@@ -48,6 +48,10 @@ pub const AQL_PDMS_NGMS_INST_INFO_COLLECTION: &'static str = "pdms_ngmr_inst_inf
 pub const AQL_PDMS_INST_INFO_COLLECTION: &'static str = "pdms_inst_infos";
 /// 负实体运算后的inst geos数据
 pub const AQL_PDMS_COMPOUND_INST_GEO_COLLECTION: &'static str = "pdms_compound_inst_geos";
+
+/// 运算后的compound由哪些组成的边的关系
+pub const AQL_PDMS_COMPOUND_INST_EDGE_COLLECTION: &'static str = "pdms_compound_inst_geos";
+
 pub const AQL_PDMS_INST_GEO_COLLECTION: &'static str = "pdms_inst_geos";
 pub const AQL_PDMS_INST_TUBI_COLLECTION: &'static str = "pdms_inst_tubis";
 pub const AQL_PDMS_INST_EDGE_COLLECTION: &'static str = "pdms_inst_edges";

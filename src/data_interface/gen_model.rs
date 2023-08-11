@@ -893,6 +893,7 @@ pub async fn gen_cata_geos(
                                 let mut final_geo_insts = geo_insts;
                                 let mut final_compounds_map = HashMap::new();
                                 let mut total_manifolds = vec![];
+
                                 for (&k, (_, neg_vec)) in &pos_neg_map {
                                     if let Some(src_manifold) = manifold_map.get(&k) {
                                         let mut neg_ms = vec![];
@@ -944,6 +945,7 @@ pub async fn gen_cata_geos(
                                         };
                                         final_geo_insts.push(compound_geom_inst);
                                     }
+                                    //compound 需要建立和 inst info 里的关系，是由inst info 合并出来的，所以需要做个edges的处理
                                     let compound_geos_data = EleInstGeosData {
                                         inst_key: inst_key.clone(),
                                         refno: cat_refno,
