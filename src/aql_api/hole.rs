@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-use aios_core::parsed_data::geo_params_data::PdmsGeoParam::PrimSCylinder;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam::{PrimExtrusion, PrimSCylinder};
 use aios_core::pdms_types::{GeoBasicType, PdmsElement, RefU64};
 use aios_core::pdms_types::GeoBasicType::CateNeg;
 use aios_core::plugging_material::PluggingData;
@@ -97,24 +97,39 @@ pub async fn compute_hole_instance_data(mgr: &AiosDBManager,
                                         hole_instance: Vec<HoleInstInfo>,
                                         name_map: HashMap<RefU64, PdmsElement>,
 ) -> anyhow::Result<()> {
+    let database = &mgr.get_arango_db().await?;
     let mut result = Vec::new();
     for hole in hole_instance {
         let mut hole_circle_inst = Vec::new();
+        let mut hole_rect_inst = Vec::new();
         let insts = hole.inst;
-        for inst in insts {
+        // 统计一个节点下的所有模型，过滤掉不需要的模型
+        for inst in &insts {
             match inst.geo_type {
+                // 圆孔
                 CateNeg => {
-                    match inst.geo_param {
+                    match &inst.geo_param {
+                        // 套管做特殊处理，他是上下两个合并在一起的
                         PrimSCylinder(data) => {
                             hole_circle_inst.push(data);
                         }
                         _ => { continue; }
                     }
                 }
+                // 方孔
+                GeoBasicType::Neg => {
+                    match &inst.geo_param {
+                        PrimExtrusion(extrusion) => {
+                            if extrusion.verts.len() != 4 { continue; };
+                            hole_rect_inst.push(extrusion);
+                        }
+                        _ => {}
+                    }
+                }
                 _ => { continue; }
             }
         }
-        // 将两个模型合并在一起
+        // 将套管两个模型合并在一起
         if hole_circle_inst.len() == 2 {
             let diameter = hole_circle_inst[0].pdia;
             let height = hole_circle_inst[0].phei + hole_circle_inst[1].phei;
@@ -123,7 +138,7 @@ pub async fn compute_hole_instance_data(mgr: &AiosDBManager,
                 name_map.get(&hole.refno).unwrap().clone()
             } else {
                 // 这几个类型name取他上面的对应层级
-                query_ancestor_till_types_aql(&mgr.get_arango_db().await?, hole.refno, vec!["JLDATUM", "CMFI", "CMPF"]).await?.unwrap_or_default()
+                query_ancestor_till_types_aql(database, hole.refno, vec!["JLDATUM", "CMFI", "CMPF"]).await?.unwrap_or_default()
             };
             let (room_1, room_2) = mgr.query_through_element_room_nums(&[hole.refno]).await?.values().nth(0).cloned().unwrap_or_default();
             let cable_area = get_cable_area(&element.name).await;
@@ -141,7 +156,35 @@ pub async fn compute_hole_instance_data(mgr: &AiosDBManager,
                 plugging_volume,
                 materials: "".to_string(),
             })
-        } else {}
+        }
+        // 计算方孔的数据
+        if hole_rect_inst.len() ==1 {
+            let points = &hole_rect_inst[0].verts;
+            let height = hole_rect_inst[0].height;
+            let Some(size) = compute_rectangle_data([points[0],points[1],points[2],points[3]]) else { continue; };
+            let element = if name_map.contains_key(&hole.refno) {
+                name_map.get(&hole.refno).unwrap().clone()
+            } else {
+                // 这几个类型name取他上面的对应层级
+                query_ancestor_till_types_aql(database, hole.refno, vec!["JLDATUM", "CMFI", "CMPF"]).await?.unwrap_or_default()
+            };
+            let (room_1, room_2) = mgr.query_through_element_room_nums(&[hole.refno]).await?.values().nth(0).cloned().unwrap_or_default();
+            let cable_area = get_cable_area(&element.name).await;
+            let plugging_area = size.0 * size.1 - cable_area;
+            let fill_percent = get_plugging_fill_percent().await;
+            let plugging_volume = size.0 * size.1 * height * (1.0 - fill_percent);
+            result.push(PluggingData {
+                refno: hole.refno,
+                name: element.name,
+                size: format!("{}X{}", size.0,size.1),
+                room_1,
+                room_2,
+                cable_area,
+                plugging_area,
+                plugging_volume,
+                materials: "".to_string(),
+            })
+        }
     }
     dbg!(&result);
     Ok(())

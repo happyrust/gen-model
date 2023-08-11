@@ -1,5 +1,6 @@
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::RefU64;
+use parry3d::utils::hashmap::HashMap;
 use crate::aql_api::children::{query_children_eles, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_center_api::data_api::{get_refno_desc, get_refno_desi_desc, get_refno_latest_version};
@@ -63,6 +64,27 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
             });
             let desc = get_refno_desc(stru.refno, aios_mgr).await.unwrap_or("".to_string());
             let support_type = if desc.starts_with("S2") && desc.contains("FLOOR") { "支架".to_string() } else { "吊架".to_string() };
+            let panel = aios_mgr.query_own_room_panel_elevations(stru.refno).await.unwrap();
+            if !panel.is_empty() {
+                for (panel, (min, max)) in panel {
+                    if support_type == "支架".to_string() {
+                        attr.push(DataCenterAttr {
+                            attribute_model_code: "ERECAB41".to_string(),
+                            value: AttrValue::AttrFloat(max).into(),
+                        });
+                    } else {
+                        attr.push(DataCenterAttr {
+                            attribute_model_code: "ERECAB41".to_string(),
+                            value: AttrValue::AttrFloat(min).into(),
+                        });
+                    }
+                }
+            } else {
+                attr.push(DataCenterAttr {
+                    attribute_model_code: "ERECAB41".to_string(),
+                    value: AttrValue::AttrFloat(0.0).into(),
+                });
+            }
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB45".to_string(),
                 value: AttrValue::AttrString(support_type).into(),
