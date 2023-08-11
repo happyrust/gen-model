@@ -9,3 +9,4 @@ pub mod test_api;
 pub mod common;
 
 pub mod test_export_stp;
+mod test_room;

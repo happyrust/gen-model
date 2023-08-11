@@ -1,9 +1,9 @@
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::{EleTreeNode, RefU64};
 use crate::api::element::query_children;
-use crate::aql_api::children::{query_ancestor_till_type_aql, query_ancestor_till_types_aql, query_children_eles, query_refnos_travel_children_with_type_aql};
+use crate::aql_api::children::{query_ancestor_till_type_aql, query_ancestor_till_types_aql, query_children_eles, query_children_order_aql, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::query_foreign_name_aql;
-use crate::data_center_api::data_api::{get_ori_angle_str, get_refno_desc, get_refno_desi_desc, get_refno_latest_version, get_refno_paras, get_refno_world_poss_pose};
+use crate::data_center_api::data_api::{get_ori_angle_str, get_pspec_code, get_refno_desc, get_refno_desi_desc, get_refno_latest_version, get_refno_paras, get_refno_world_poss_pose};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
@@ -297,17 +297,137 @@ async fn get_dq_support_sctn_gtype_beam_data(refno: &EleTreeNode, aios_mgr: &Aio
         value: AttrValue::AttrString("连续角焊".to_string()).into(),
     });
     attr.push(DataCenterAttr {
+        attribute_model_code: "PARTDB38".to_string(),
+        value: AttrValue::AttrString("M12".to_string()).into(),
+    });
+    attr.push(DataCenterAttr {
         attribute_model_code: "PARTDB39".to_string(),
         value: AttrValue::AttrString("A4-80".to_string()).into(),
     });
+    let bran_refno = aios_mgr.query_around_owner_within_radius(refno.refno, true,
+                                                               None, true, vec!["BRAN"]).await.unwrap_or(vec![]);
+    let mut ftub = None;
+    if !bran_refno.is_empty() {
+        let bran_refno = bran_refno[0];
+        let children = query_children_order_aql(&database, bran_refno).await?;
+        // 找到第一个 ftub
+        for child in children {
+            if child.noun == "FTUB" {
+                ftub = Some(child.refno);
+                break;
+            }
+        }
+        if ftub.is_some() {
+            let paras = get_refno_paras(ftub.unwrap(), aios_mgr).await.unwrap_or(vec![]);
+            if !paras.is_empty() {
+                // let bolt = get_tray_bolt_specifications(paras[0] as f32);
+                let pspec = get_pspec_code(bran_refno, &database).await.unwrap_or("".to_string());
+                let spacing = get_tray_bolt_spacing(&pspec, paras[0] as f32);
+                attr.push(DataCenterAttr {
+                    attribute_model_code: "PARTDB40".to_string(),
+                    value: AttrValue::AttrString(spacing).into(),
+                });
+                let connection_method = get_tray_connection_method(paras[0] as f32);
+                attr.push(DataCenterAttr {
+                    attribute_model_code: "PARTDB41".to_string(),
+                    value: AttrValue::AttrString(connection_method).into(),
+                });
+            }
+        }
+    }
+    if bran_refno.is_empty() || ftub.is_none() {
+        attr.push(DataCenterAttr {
+            attribute_model_code: "PARTDB40".to_string(),
+            value: AttrValue::AttrString("".to_string()).into(),
+        });
+        attr.push(DataCenterAttr {
+            attribute_model_code: "PARTDB41".to_string(),
+            value: AttrValue::AttrString("".to_string()).into(),
+        });
+    }
     Ok((attr, desc))
 }
 
+/// 获取电气托盘托臂耦合螺栓规格表
+fn get_tray_bolt_specifications(para_1: f32) -> String {
+    match para_1 {
+        600.0 | 500.0 | 300.0 => {
+            "M12".to_string()
+        }
+        200.0 | 100.0 | 50.0 => {
+            "M8".to_string()
+        }
+        _ => {
+            "".to_string()
+        }
+    }
+}
+
+// 获取托臂托盘螺栓连接方式对照表
+fn get_tray_connection_method(para_1: f32) -> String {
+    match para_1 {
+        600.0 | 500.0 | 300.0 | 200.0 => {
+            "双螺栓".to_string()
+        }
+        100.0 | 50.0 => {
+            "单螺栓".to_string()
+        }
+        _ => {
+            "".to_string()
+        }
+    }
+}
+
+// 获取托臂托盘耦合螺栓间距距距离
+fn get_tray_bolt_spacing(tray_type: &str, para1: f32) -> String {
+    match tray_type {
+        "梯架" => {
+            match para1 {
+                600.0 => {
+                    "540mm".to_string()
+                }
+                500.0 => {
+                    "440mm".to_string()
+                }
+                300.0 => {
+                    "240mm".to_string()
+                }
+                _ => { "".to_string() }
+            }
+        }
+        "实底" => {
+            match para1 {
+                600.0 => {
+                    "500mm".to_string()
+                }
+                500.0 => {
+                    "400mm".to_string()
+                }
+                300.0 => {
+                    "200mm".to_string()
+                }
+                200.0 => {
+                    "100mm".to_string()
+                }
+                _ => "".to_string()
+            }
+        }
+        "带孔托盘" => {
+            match para1 {
+                200.0 => {
+                    "100mm".to_string()
+                }
+                _ => { "".to_string() }
+            }
+        }
+        _ => { "".to_string() }
+    }
+}
 
 #[tokio::test]
 async fn test_query_around_owner_within_radius() {
     let mgr = AiosDBManager::init_form_config().await.unwrap();
     let refno = RefU64::from_refno_str("24383/96911").unwrap();
-    let result = mgr.query_around_owner_within_radius(refno,true,None,true,vec!["BRAN"]).await.unwrap();
+    let result = mgr.query_around_owner_within_radius(refno, true, None, true, vec!["BRAN"]).await.unwrap();
     dbg!(&result);
 }
