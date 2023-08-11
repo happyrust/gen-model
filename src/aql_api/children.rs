@@ -21,7 +21,7 @@ use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 pub async fn query_children_eles(arango_db: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
-    With @@pdms_eles,@@pdms_edges
+    With @@pdms_eles, @@pdms_edges
     for z in 1 inbound @id pdms_edges
         return {
         '_key':z._key,
@@ -43,7 +43,7 @@ pub async fn query_children_eles(arango_db: &ArDatabase, refno: RefU64) -> anyho
 pub async fn query_children_order_aql(adb: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = AqlQuery::new("\
-    WITH @@pdms_eles , @@pdms_edges , @@sibl_edges
+    WITH @@pdms_eles,@@pdms_edges,@@sibl_edges
     let datas = (
     for v,e in 1 inbound @id @@pdms_edges
         filter v!= null
@@ -273,9 +273,9 @@ pub async fn query_ancestor_name_of_type_aql(arango_database: &ArDatabase, refno
 }
 
 /// 遍历refno获取所有子节点的RefU64
-pub async fn query_deep_children_refnos_fuzzy(database: &ArDatabase, refno: &[RefU64], nouns: &[&str]) -> anyhow::Result<Vec<RefU64>> {
+pub async fn query_deep_children_refnos_fuzzy(database: &ArDatabase, refno: impl IntoIterator<Item=&RefU64>, nouns: &[&str]) -> anyhow::Result<Vec<RefU64>> {
     let refno_aqls =
-        refno.iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
+        refno.into_iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("\
     With @@pdms_eles,@@pdms_edges
     for id in @ids
@@ -406,6 +406,8 @@ FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
 }
 
 /// 遍历refno只获取指定类型数组的refnos
+///
+/// is_parent : 指定 parent的类型
 pub async fn query_travel_children_with_types_aql(arango_database: &ArDatabase, refno: RefU64, att_types: &[&str], is_parent: bool) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());

@@ -10,11 +10,8 @@ use crate::consts::AQL_FOREIGN_EDGES_COLLECTION;
 ///可选的去过滤查询, start_types 和 endtypes，都是外键的类型
 pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], start_types: &[&[&str]], end_types: &[&str], t_types: &[&str], depth: u32) -> anyhow::Result<Vec<RefU64>> {
     let ids = refnos.into_iter().map(|x| format!("{}/{}", "pdms_eles", x.to_url_refno())).collect::<Vec<_>>();
-    //             FILTER LENGTH(@t_types) == 0 and LENGTH(for c in 1 INBOUND ver._id foreign_edges
-    //                         return 0 )
-    // foreign edges 必须要在 end_types里，而且得到的节点的foreign edge不能再有别的外键也在edge types里, 相当于要过滤完路径
     let mut aql = r#"
-        with foreign_edges
+        with foreign_edges, pdms_eles
         for id in @ids
             let t = (for ver, edge, path in 1..15 outbound id foreign_edges
                    OPTIONS { order: "bfs"  }

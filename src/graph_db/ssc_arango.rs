@@ -37,7 +37,9 @@ pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &ArDatabas
             ssc_ele_edges.push(edge);
         }
         let json = serde_json::to_value(&ssc_eles).unwrap();
-        let aql = AqlQuery::new("LET data = @elements
+        let aql = AqlQuery::new("
+        with @@collection
+        LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true }")
             .bind_var("@collection", collection)

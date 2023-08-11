@@ -1,5 +1,6 @@
 // 工艺管段
 pub mod bran_attr;
+pub(crate) mod atta;
 pub(crate) mod cros;
 pub(crate) mod cap;
 pub(crate) mod tee;

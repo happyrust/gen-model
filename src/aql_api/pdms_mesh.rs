@@ -35,22 +35,6 @@ struct PdmsMeshQueryData {
     pub data: String,
 }
 
-pub async fn query_pdms_mesh_data(hash: Vec<u64>, pool: &Pool<MySql>) -> anyhow::Result<PlantMeshesData> {
-    let mut cache_mgr = PlantMeshesData::default();
-    let query_sql = gen_query_pdms_mesh_from_refno_sql(hash);
-    let results = sqlx::query(&query_sql).fetch_all(&mut pool.acquire().await?).await;
-    if let Ok(results) = results {
-        // for result in results {
-        //     let hash = result.get::<u64, _>("HASH");
-        //     let mesh = result.get::<Vec<u8>, _>("MESH");
-        //     let mesh = PlantGeoData::from_compress_bytes(&mesh);
-        //     if mesh.is_none() { continue; }
-        //     let mesh = mesh.unwrap();
-        //     cache_mgr.meshes.entry(hash).or_insert(mesh);
-        // }
-    }
-    Ok(cache_mgr)
-}
 
 pub async fn query_refno_meshes_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<DashMap<RefU64, PlantMesh>> {
     let mut map = DashMap::new();
@@ -141,7 +125,7 @@ pub async fn query_all_geo_hashs(database: &ArDatabase) -> anyhow::Result<HashSe
 }
 
 ///查询相应的mesh数据
-pub async fn query_pdms_mesh_aql(database: &ArDatabase, hashes: &[u64]) -> anyhow::Result<PlantMeshesData> {
+pub async fn query_pdms_mesh_aql(database: &ArDatabase, hashes: impl IntoIterator<Item=&u64>) -> anyhow::Result<PlantMeshesData> {
     let mut cache_mgr = PlantMeshesData::default();
     let hash_strs = hashes.into_iter().map(|x| x.to_string()).collect::<Vec<_>>();
     // dbg!(&hash_strs);
@@ -239,7 +223,7 @@ async fn test_query_pdms_mesh_aql() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let hashes = vec![546828117367565544, 1418680084324994534];
-    let meshes = query_pdms_mesh_aql(&database, &hashes).await?;
+    let meshes = query_pdms_mesh_aql(&database, hashes.iter()).await?;
     dbg!(&meshes.meshes.len());
     Ok(())
 }

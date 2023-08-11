@@ -85,13 +85,17 @@ pub async fn save_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &mut PlantMes
             data.push(json);
         }
         let aql = if replace {
-            AqlQuery::new(r#"LET data = @elements
+            AqlQuery::new(r#"
+            with @@collection
+            LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
                 .bind_var("@collection", collection)
                 .bind_var("elements", take(&mut data))
         } else {
-            AqlQuery::new(r#"LET data = @elements
+            AqlQuery::new(r#"
+            with @@collection
+            LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "ignore" }"#)
                 .bind_var("@collection", collection)

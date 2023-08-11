@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use crate::api::children::travel_children_with_type;
 use crate::data_interface::interface::PdmsDataInterface;
-use aios_core::water_calculation::{FloodingHole, FloodingHoleVec};
+use aios_core::water_calculation::*;
 use aios_core::water_calculation::ExportFloodingStpEvent;
 #[cfg(feature = "opencascade_rs")]
-use opencascade::primitives::Compound;
+use opencascade::primitives::*;
 use crate::api::attr::query_attr;
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
@@ -39,39 +39,40 @@ pub async fn save_stp_data_to_arangodb(aios_mgr: &AiosDBManager, mut stp: Export
 #[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
 pub async fn export_stp(mgr: &AiosDBManager, stp_packet: ExportFloodingStpEvent) -> anyhow::Result<bool> {
-    let pos_refnos: Vec<RefU64> = stp_packet.civil_engineering.iter()
-        .map(|x| x.keys().cloned())
-        .flatten()
-        .collect();
-    let mut total_shapes = vec![];
-    for pos_refno in pos_refnos {
-        dbg!(pos_refno);
-        let rvm_infos = query_rvm_geo_instance_aql(vec![pos_refno], &mgr.get_arango_db().await?).await?;
-        let refnos = rvm_infos.iter().map(|x| x.refno).collect::<Vec<_>>();
-        dbg!(&refnos);
-        let Some(mut final_shape) = rvm_infos.iter()
-            .filter(|x| x.refno == pos_refno)
-            .map(|x| x.gen_occ_shape())
-            .flatten()
-            .nth(0) else {
-            continue;
-        };
-
-        //过滤出找到ngrm的shapes
-        let ngmr_shapes = rvm_infos.iter()
-            .map(|x| x.gen_ngmr_occ_shape())
-            .flatten()
-            .collect::<Vec<_>>();
-        for n in ngmr_shapes {
-            // final_shape = final_shape.subtract_shape(&n).0;
-            final_shape = final_shape.union_shape(&n).0;
-        }
-        total_shapes.push(final_shape);
-    }
-
-    let mut final_compound_shape = Compound::from_shapes(&total_shapes);
-
-    final_compound_shape.write_step(&format!("walter_steps/{name}.step")).unwrap();
+    // let pos_refnos: Vec<RefU64> = stp_packet.stp.iter()
+    //     .map(|x| x.keys().cloned())
+    //     .flatten()
+    //     .collect();
+    // let mut total_shapes = vec![];
+    // for pos_refno in pos_refnos {
+    //     dbg!(pos_refno);
+    //     let rvm_infos = query_rvm_geo_instance_aql(vec![pos_refno], &mgr.get_arango_db().await?).await?;
+    //     let refnos = rvm_infos.iter().map(|x| x.refno).collect::<Vec<_>>();
+    //     dbg!(&refnos);
+    //     let Some(mut final_shape) = rvm_infos.iter()
+    //         .filter(|x| x.refno == pos_refno)
+    //         .map(|x| x.gen_occ_shape())
+    //         .flatten()
+    //         .nth(0) else {
+    //         continue;
+    //     };
+    //
+    //     //过滤出找到ngrm的shapes
+    //     let ngmr_shapes = rvm_infos.iter()
+    //         .map(|x| x.gen_ngmr_occ_shape())
+    //         .flatten()
+    //         .collect::<Vec<_>>();
+    //     for n in ngmr_shapes{
+    //         final_shape = final_shape.subtract_shape(&n).0;
+    //         // final_shape = final_shape.union_shape(&n).0;
+    //     }
+    //     total_shapes.push(final_shape);
+    // }
+    //
+    // let mut final_compound_shape = Compound::from_shapes(&total_shapes);
+    //
+    // // final_compound_shape.write_step(&format!("walter_steps/{name}.step")).unwrap();
+    // final_compound_shape.write_step(&format!("walter_steps/test.step")).unwrap();
 
     Ok(true)
 }

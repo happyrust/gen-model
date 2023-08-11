@@ -86,6 +86,7 @@ use crate::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
+use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 use crate::consts::{AQL_PDMS_ELES_COLLECTION};
 // use heed::types::*;
 // use heed::byteorder::BE;
@@ -141,7 +142,17 @@ pub struct AiosDBManager {
 
     pub mdb_dbnums: BTreeSet<i32>,
 
+    ///所有元素的tree
     pub rtree: Option<AccelerationTree>,
+
+    ///room panels的aabb tree
+    pub room_panels_rtree: Option<AccelerationTree>,
+
+    ///room 对应的信息
+    pub room_info_map: HashMap<RefU64, RoomElement>,
+
+    ///room panel对应的信息
+    pub room_panel_info_map: HashMap<RefU64, RoomPanelElement>,
 
 }
 
@@ -176,7 +187,7 @@ impl PdmsDataInterface for AiosDBManager {
                 return Ok(a);
             }
         }
-        Err(anyhow!("Not found att"))
+        Err(anyhow!("{refno}: not found att"))
     }
 
     fn get_type_name(&self, refno: RefU64) -> anyhow::Result<String> {
@@ -185,14 +196,15 @@ impl PdmsDataInterface for AiosDBManager {
         ).unwrap_or(Ok("unset".to_string()))
     }
 
-    //get_children_from_localdb
+    ///获得子节点的参考号集合
     fn get_children_from_localdb(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
         for project in &self.db_option.included_projects {
             if let Ok(a) = self.get_children_within_project(refno, project.as_str()) {
                 return Ok(a);
             }
         }
-        Err(anyhow!("Not found children"))
+        Ok(Default::default())
+        // Err(anyhow!("{refno}: not found children"))
     }
 
 
@@ -499,6 +511,7 @@ impl PdmsDataInterface for AiosDBManager {
     async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
         let aql = AqlQuery::new("\
+        with pdms_edges, pdms_eles
         let negatives = ( FOR v,e,p in 0..15 INBOUND @key pdms_edges
                     PRUNE v.noun in @negative_nouns
                     filter v.noun in @negative_nouns
@@ -519,6 +532,7 @@ impl PdmsDataInterface for AiosDBManager {
             .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
             .collect::<Vec<_>>();
         let aql = AqlQuery::new(r#"
+            with pdms_edges, pdms_eles
             for key in @keys
                 FOR v,e,p in 0..15 INBOUND key pdms_edges
                 PRUNE v.noun in @neg_nouns
@@ -544,9 +558,11 @@ impl PdmsDataInterface for AiosDBManager {
         return Ok(result);
     }
 
+    ///查询refno下是否有几何体
     async fn query_refnos_has_geos(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
         let aql = AqlQuery::new(r#"
+            with pdms_edges, pdms_eles
             let refnos = ( FOR v,e,p in 0..15 INBOUND @key pdms_edges
                         PRUNE v.noun in @geo_nouns
                         OPTIONS { "order": "bfs"}
@@ -568,6 +584,7 @@ impl PdmsDataInterface for AiosDBManager {
             .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
             .collect::<Vec<_>>();
         let aql = AqlQuery::new(r#"
+            with pdms_edges, pdms_eles
             for key in @keys
                 FOR v,e,p in 0..15 INBOUND key pdms_edges
                     filter v.noun in @neg_geo_nouns
@@ -586,6 +603,7 @@ impl PdmsDataInterface for AiosDBManager {
     async fn query_refnos_has_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, Vec<RefU64>>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
         let aql = AqlQuery::new(r#"
+            with pdms_edges, pdms_eles
             FOR v,e,p in 0..15 INBOUND @key pdms_edges
                 PRUNE v.noun in @negative_nouns
                 OPTIONS { "order": "bfs"}
@@ -863,17 +881,21 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
 
-    ///获得在一定范围的构件参考号列表
+    ///指定refno获得在一定范围的构件参考号列表
     async fn get_refnos_within_bound_radius(&self, refno: RefU64, distance: f32) -> anyhow::Result<Vec<RefU64>> {
-        let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
-
         let db = &self.get_arango_db().await?;
-        let instances = query_insts_shape_data(db, &[refno]).await?;
+        let instances = query_insts_shape_data(db, &[refno], &[GeoBasicType::Pos, GeoBasicType::Compound]).await?;
         if instances.inst_info_map.is_empty() { return Ok(vec![]); }
         let pos = instances.inst_info_map.iter().next().unwrap().1.world_transform.translation;
-        let target_refnos = rtree.query_within_distance(pos, distance)
-            .collect();
+        self.get_refnos_within_bound_radius_by_pos(pos, distance)
+    }
 
+    ///指定pos获得在一定范围的构件参考号列表
+    fn get_refnos_within_bound_radius_by_pos(&self, pos: Vec3, distance: f32) -> anyhow::Result<Vec<RefU64>> {
+        let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
+        let target_refnos = rtree.query_within_distance(pos, distance)
+            .map(|x| x.0)
+            .collect();
         Ok(target_refnos)
     }
 
