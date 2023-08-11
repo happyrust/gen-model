@@ -36,9 +36,10 @@ pub async fn save_stp_data_to_arangodb(aios_mgr: &AiosDBManager, mut stp: Export
 }
 
 
-#[cfg(feature = "opencascade_rs")]
+//#[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
 pub async fn export_stp(mgr: &AiosDBManager, stp_packet: ExportFloodingStpEvent) -> anyhow::Result<bool> {
+   dbg!(&stp_packet);
     // let pos_refnos: Vec<RefU64> = stp_packet.stp.iter()
     //     .map(|x| x.keys().cloned())
     //     .flatten()
