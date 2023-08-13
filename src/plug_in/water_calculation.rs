@@ -1,50 +1,74 @@
-use std::collections::hash_map::DefaultHasher;
-use aios_core::pdms_types::RefU64;
+use crate::api::attr::query_attr;
+use crate::api::children::travel_children_with_type;
+use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
+use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use std::collections::HashSet;
+use crate::graph_db::pdms_arango::{save_arangodb_doc, ArDatabase};
+use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
+use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use aios_core::pdms_types::AttrMap;
+use aios_core::pdms_types::{GeoBasicType, RefU64};
+use aios_core::water_calculation::ExportFloodingStpEvent;
+use aios_core::water_calculation::FloodingStpToArangodb;
+use aios_core::water_calculation::*;
+use arangors_lite::AqlQuery;
+use itertools::Itertools;
+#[cfg(feature = "opencascade_rs")]
+use opencascade::primitives::*;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use crate::api::children::travel_children_with_type;
-use crate::data_interface::interface::PdmsDataInterface;
-use aios_core::water_calculation::*;
-use aios_core::water_calculation::ExportFloodingStpEvent;
-#[cfg(feature = "opencascade_rs")]
-use opencascade::primitives::*;
-use crate::api::attr::query_attr;
-use crate::rvm::data_api::query_rvm_geo_instance_aql;
-use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
-use crate::graph_db::pdms_arango::{ArDatabase, save_arangodb_doc};
-use aios_core::water_calculation::FloodingStpToArangodb;
-use arangors_lite::AqlQuery;
-use itertools::Itertools;
 
 /// 将数据保存至图数据库
-pub async fn save_stp_data_to_arangodb(aios_mgr: &AiosDBManager, mut stp: ExportFloodingStpEvent) -> String {
+pub async fn save_stp_data_to_arangodb(
+    aios_mgr: &AiosDBManager,
+    mut stp: ExportFloodingStpEvent,
+) -> String {
     if let Ok(database) = aios_mgr.get_arango_db().await {
         let mut hasher = DefaultHasher::new();
         stp.file_name.hash(&mut hasher);
         let key = hasher.finish();
         let json_data = vec![stp.to_arango_struct()];
-        let Ok(send_value) = serde_json::to_value(&json_data) else { return "数据结构反序列化失败".to_string(); };
+        let Ok(send_value) = serde_json::to_value(&json_data) else {
+            return "数据结构反序列化失败".to_string();
+        };
         if let Ok(_result) = query_water_calculation_data(&database, key.to_string()).await {
-            let _ = save_arangodb_doc(send_value, AQL_WATER_CALCULATION_COLLECTION, &database, true).await.unwrap();
+            let _ = save_arangodb_doc(
+                send_value,
+                AQL_WATER_CALCULATION_COLLECTION,
+                &database,
+                true,
+            )
+            .await
+            .unwrap();
         } else {
-            let _ = save_arangodb_doc(send_value, AQL_WATER_CALCULATION_COLLECTION, &database, false).await.unwrap();
+            let _ = save_arangodb_doc(
+                send_value,
+                AQL_WATER_CALCULATION_COLLECTION,
+                &database,
+                false,
+            )
+            .await
+            .unwrap();
         }
     }
     "Ok".to_string()
 }
 
-
 #[cfg(not(feature = "opencascade_rs"))]
 ///导出水淹计算stp
-pub async fn export_stp_(mgr: &AiosDBManager, stp_packet: ExportFloodingStpEvent) -> anyhow::Result<bool> {
-
-    let mut file = File::create(format!("./assets/walter_steps/{}.stp", stp_packet.file_name.as_str()))?;
+pub async fn export_stp_(
+    mgr: &AiosDBManager,
+    stp_packet: ExportFloodingStpEvent,
+) -> anyhow::Result<bool> {
+    let mut file = File::create(format!(
+        "./assets/walter_steps/{}.stp",
+        stp_packet.file_name.as_str()
+    ))?;
     let mut test_str = "测试STP文件下载";
     file.write_all(test_str.as_bytes())?;
 
@@ -53,63 +77,109 @@ pub async fn export_stp_(mgr: &AiosDBManager, stp_packet: ExportFloodingStpEvent
 
 #[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
-pub async fn export_stp(mgr: &AiosDBManager, stp_packet: ExportFloodingStpEvent) -> anyhow::Result<bool> {
-    let wall_refnos: Vec<RefU64> = stp_packet.walls().cloned().collect();
-    let mut total_shapes = vec![];
-    for pos_refno in wall_refnos {
-        dbg!(pos_refno);
-        let rvm_infos = query_rvm_geo_instance_aql(&mgr.get_arango_db().await? , vec![pos_refno]).await?;
-        let refnos = rvm_infos.iter().map(|x| x.refno).collect::<Vec<_>>();
-        dbg!(&refnos);
-        let Some(mut final_shape) = rvm_infos.iter()
-            .filter(|x| x.refno == pos_refno)
-            .map(|x| x.gen_occ_shape())
-            .flatten()
-            .nth(0) else {
+pub async fn export_stp(
+    mgr: &AiosDBManager,
+    stp_packet: ExportFloodingStpEvent,
+) -> anyhow::Result<bool> {
+    use std::collections::BTreeMap;
+
+    let all_plugged_refnos: HashSet<RefU64> = stp_packet.all_plugged_hole_refnos().collect();
+    let export_refnos: Vec<RefU64> = stp_packet.export_refnos().cloned().collect();
+    let shapes_data = query_insts_shape_data(
+        &mgr.get_arango_db().await?,
+        &export_refnos,
+        &[
+            GeoBasicType::Pos,
+            GeoBasicType::CateNeg,
+            GeoBasicType::Neg,
+            GeoBasicType::CateCrossNeg,
+        ],
+    )
+    .await?;
+
+    let mut total_shapes_map: HashMap<RefU64, Shape> = HashMap::default();
+    //one to many relationship
+    let mut boolean_map: BTreeMap<RefU64, Vec<(RefU64, Shape)>> = BTreeMap::new();
+    for (refno, geos_info) in &shapes_data.inst_info_map {
+        //被封堵了的，相当于没有出现过，直接忽略
+        if all_plugged_refnos.contains(refno) {
+            continue;
+        }
+        let Some(insts_data) = shapes_data.get_inst_geos_data(geos_info) else {
             continue;
         };
-        let mut opening_refnos = stp_packet.opening_hole_refnos(pos_refno)
-            .map(|x| x.collect::<Vec<_>>())
-            .unwrap_or_default();
-
-        //过滤出找到ngrm的shapes
-        let ngmr_shapes = rvm_infos.iter()
-            .filter(|x| opening_refnos.contains(&x.refno))
-            .map(|x| x.gen_ngmr_occ_shape())
-            .flatten()
-            .collect::<Vec<_>>();
-        for n in ngmr_shapes{
-            final_shape = final_shape.subtract_shape(&n).0;
-            // final_shape = final_shape.union_shape(&n).0;
+        if let Some((shape, own_pos_refno)) = insts_data.gen_occ_shape(&geos_info.world_transform) {
+            if let Some(o) = own_pos_refno && o.is_valid(){
+                boolean_map.entry(o).or_default().push((*refno, shape));
+            } else{
+                total_shapes_map.insert(*refno, shape);
+            }
         }
-        total_shapes.push(final_shape);
+        let ngmr_shapes = insts_data.gen_ngmr_occ_shapes(&geos_info.world_transform);
+        for (o, shape) in ngmr_shapes {
+            dbg!(o);
+            boolean_map.entry(o).or_default().push((*refno, shape));
+        }
+
+        //如果是墙，需要做一下判断是否需要被ngmr cut shape
     }
+    // boolean_map.values_mut().for_each(|x| {
+    //     x.sort_by(|a, b| a.0.cmp(&b.0));
+    // });
 
-    let mut final_compound_shape = Compound::from_shapes(&total_shapes);
+    let refnos = boolean_map
+        .values()
+        .flat_map(|x| x.iter().map(|t| t.0))
+        .collect::<Vec<_>>();
+    dbg!(&refnos);
 
-    // final_compound_shape.write_step(&format!("walter_steps/{name}.step")).unwrap();
-    fs::create_dir_all("./assets/walter_steps");
-    final_compound_shape.write_step(&format!("./assets/walter_steps/{}.step", &stp_packet.file_name)).unwrap();
+    total_shapes_map
+        .iter_mut()
+        .filter(|(k, _)| boolean_map.contains_key(k))
+        .for_each(|(k, v)| {
+            let neg_shapes = boolean_map.get(k).unwrap();
+            neg_shapes.into_iter().foreach(|t| {
+                //对于负实体要统一做一个延伸处理，否则负实体会出现薄片
+                *v = v.subtract_shape(&t.1).0;
+            });
+        });
+
+    let mut final_compound_shape = Compound::from_shapes(total_shapes_map.values());
+    fs::create_dir_all("./assets/walter_steps")?;
+    final_compound_shape
+        .write_step(&format!(
+            "./assets/walter_steps/{}.step",
+            &stp_packet.file_name
+        ))
+        .unwrap();
 
     Ok(true)
 }
 
 ///查询数据库中是否已有当前名称的文件
-pub async fn query_water_calculation_data(database: &ArDatabase, key_value: String) -> anyhow::Result<Option<Vec<FloodingStpToArangodb>>> {
-    let aql = AqlQuery::new("let v = document('water_calculaion',@_key)\
-        return unset(v , '_id','_rev') ")
-        .bind_var("_key", key_value);
+pub async fn query_water_calculation_data(
+    database: &ArDatabase,
+    key_value: String,
+) -> anyhow::Result<Option<Vec<FloodingStpToArangodb>>> {
+    let aql = AqlQuery::new(
+        "let v = document('water_calculaion',@_key)\
+        return unset(v , '_id','_rev') ",
+    )
+    .bind_var("_key", key_value);
     let data_vec: Vec<FloodingStpToArangodb> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }
 
 ///查询数据库中所有记录
-pub async fn query_water_calculation_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<FloodingStpToArangodb>> {
-    let aql = AqlQuery::new("
+pub async fn query_water_calculation_data_total_aql(
+    database: &ArDatabase,
+) -> anyhow::Result<Vec<FloodingStpToArangodb>> {
+    let aql = AqlQuery::new(
+        "
     for c in @@collection
-        return unset(c , '_id','_rev')").bind_var("@collection", AQL_WATER_CALCULATION_COLLECTION);
+        return unset(c , '_id','_rev')",
+    )
+    .bind_var("@collection", AQL_WATER_CALCULATION_COLLECTION);
     let result = database.aql_query::<FloodingStpToArangodb>(aql).await?;
     Ok(result)
 }
-
-
