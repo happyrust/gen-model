@@ -28,7 +28,7 @@ pub async fn query_hole_elements(refnos: Vec<RefU64>, database: &ArDatabase) -> 
     for id in @ids
         for v,e in 0..5 inbound id @@pdms_edges
         filter v.noun in ['FITT','PFIT','JLDATU','CMFI','CMPF','NXTR']
-        filter v.name like '%EE%' or v.name like '%KK%' or v.name like '%LL%'
+        // filter v.name like '%EE%' or v.name like '%KK%' or v.name like '%LL%'
         return {
             '_key':v._key,
             'owner':v.owner,
