@@ -62,10 +62,10 @@ async fn test_export_water_calculation_stp_0() -> anyhow::Result<()> {
     );
     stp_packet.walls_map = walls_map;
 
-    dbg!(&stp_packet);
+    // dbg!(&stp_packet);
     let mgr = get_test_ams_db_manager_async().await;
     //测试将数据保存至图数据库
-    save_stp_data_to_arangodb(&mgr, stp_packet.clone()).await;
+    // save_stp_data_to_arangodb(&mgr, stp_packet.clone()).await;
     //孔洞封堵
     export_stp(&mgr, stp_packet).await?;
     Ok(())
