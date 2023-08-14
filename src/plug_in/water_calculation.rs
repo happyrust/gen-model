@@ -36,7 +36,7 @@ pub async fn save_stp_data_to_arangodb(
         let Ok(send_value) = serde_json::to_value(&json_data) else {
             return "数据结构反序列化失败".to_string();
         };
-        if let Ok(_result) = query_water_calculation_data(&database, key.to_string()).await {
+        if let Ok(_result) = query_water_calculation_data(&database, &key.to_string()).await {
             let _ = save_arangodb_doc(
                 send_value,
                 AQL_WATER_CALCULATION_COLLECTION,
@@ -120,8 +120,6 @@ pub async fn export_stp(
             dbg!(o);
             boolean_map.entry(o).or_default().push((*refno, shape));
         }
-
-        //如果是墙，需要做一下判断是否需要被ngmr cut shape
     }
     // boolean_map.values_mut().for_each(|x| {
     //     x.sort_by(|a, b| a.0.cmp(&b.0));
@@ -131,7 +129,7 @@ pub async fn export_stp(
         .values()
         .flat_map(|x| x.iter().map(|t| t.0))
         .collect::<Vec<_>>();
-    dbg!(&refnos);
+    // dbg!(&refnos);
 
     total_shapes_map
         .iter_mut()
@@ -159,7 +157,7 @@ pub async fn export_stp(
 ///查询数据库中是否已有当前名称的文件
 pub async fn query_water_calculation_data(
     database: &ArDatabase,
-    key_value: String,
+    key_value: &str,
 ) -> anyhow::Result<Option<Vec<FloodingStpToArangodb>>> {
     let aql = AqlQuery::new(
         "let v = document('water_calculaion',@_key)\
