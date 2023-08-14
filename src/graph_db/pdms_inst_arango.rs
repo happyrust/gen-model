@@ -216,8 +216,10 @@ pub async fn query_insts_shape_data(
     .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     let mut inst_info_map = HashMap::new();
+    //过滤不需要的geo inst，比如排除neg的等等
     let mut inst_keys = geos_info
         .iter()
+        .filter(|x| filter.contains(&x.geo_type) || x.geo_type == GeoBasicType::UNKOWN)
         .map(|x| x.get_inst_key())
         .collect::<Vec<_>>();
     for g in geos_info {
