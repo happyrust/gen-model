@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-use aios_core::parsed_data::geo_params_data::PdmsGeoParam::PrimSCylinder;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam::{PrimExtrusion, PrimSCylinder};
 use aios_core::pdms_types::{GeoBasicType, PdmsElement, RefU64};
 use aios_core::pdms_types::GeoBasicType::CateNeg;
 use aios_core::plugging_material::PluggingData;
@@ -18,17 +18,28 @@ use crate::graph_db::pdms_arango::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 
+/// 返回封堵材料统计插件数据
+pub async fn get_plugging_material_datas(select_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<PluggingData>> {
+    // 找到所有需要计算的孔洞
+    let holes = query_hole_elements(select_refno, &database).await?;
+    // 查找他的instance
+    let insts = query_hole_instance(&holes, &database).await?;
+    let name_map = holes.into_iter().map(|refno| (refno.refno, refno)).collect::<HashMap<RefU64, PdmsElement>>();
+    compute_hole_instance_data(&database, insts, name_map).await
+}
+
 /// 获取需要计算的孔洞
-pub async fn query_hole_elements(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
-    let refnos = refnos.into_iter()
-        .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()))
-        .collect::<Vec<_>>();
+pub async fn query_hole_elements(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
+    // let refnos = refnos.into_iter()
+    //     .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()))
+    //     .collect::<Vec<_>>();
+    let id = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
     let aql = AqlQuery::new("
     With @@pdms_eles,@@pdms_edges
-    for id in @ids
-        for v,e in 0..5 inbound id @@pdms_edges
+    //for id in @ids
+        for v,e in 0..5 inbound @id @@pdms_edges
         filter v.noun in ['FITT','PFIT','JLDATU','CMFI','CMPF','NXTR']
-        filter v.name like '%EE%' or v.name like '%KK%' or v.name like '%LL%'
+        // filter v.name like '%EE%' or v.name like '%KK%' or v.name like '%LL%'
         return {
             '_key':v._key,
             'owner':v.owner,
@@ -39,7 +50,7 @@ pub async fn query_hole_elements(refnos: Vec<RefU64>, database: &ArDatabase) -> 
         }")
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
-        .bind_var("ids", refnos);
+        .bind_var("id", id);
     let result = database.aql_query::<PdmsElement>(aql).await?;
     if result.len() > 10000 { return Err(anyhow!("超过最大查询数量!")); }
     Ok(result)
@@ -58,7 +69,7 @@ pub async fn query_hole_instance(holes: &Vec<PdmsElement>, database: &ArDatabase
                 gtypes.push(format!("{}/{}", AQL_PDMS_ELES_COLLECTION, hole.refno.to_url_refno()));
             }
             _ => {
-                fitts.push(format!("{}/{}", AQL_PDMS_ELES_COLLECTION, hole.refno.to_url_refno()));
+                fitts.push(format!("{}", hole.refno.to_url_refno()));
             }
         }
     }
@@ -93,28 +104,44 @@ pub async fn query_hole_instance(holes: &Vec<PdmsElement>, database: &ArDatabase
 }
 
 /// 计算孔洞的体积
-pub async fn compute_hole_instance_data(mgr: &AiosDBManager,
+pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
+                                        database: &ArDatabase,
                                         hole_instance: Vec<HoleInstInfo>,
                                         name_map: HashMap<RefU64, PdmsElement>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Vec<PluggingData>> {
+    // let database = &mgr.get_arango_db().await?;
     let mut result = Vec::new();
     for hole in hole_instance {
         let mut hole_circle_inst = Vec::new();
+        let mut hole_rect_inst = Vec::new();
         let insts = hole.inst;
-        for inst in insts {
+        // 统计一个节点下的所有模型，过滤掉不需要的模型
+        for inst in &insts {
             match inst.geo_type {
+                // 圆孔
                 CateNeg => {
-                    match inst.geo_param {
+                    match &inst.geo_param {
+                        // 套管做特殊处理，他是上下两个合并在一起的
                         PrimSCylinder(data) => {
                             hole_circle_inst.push(data);
                         }
                         _ => { continue; }
                     }
                 }
+                // 方孔
+                GeoBasicType::Neg => {
+                    match &inst.geo_param {
+                        PrimExtrusion(extrusion) => {
+                            if extrusion.verts.len() != 4 { continue; };
+                            hole_rect_inst.push(extrusion);
+                        }
+                        _ => {}
+                    }
+                }
                 _ => { continue; }
             }
         }
-        // 将两个模型合并在一起
+        // 将套管两个模型合并在一起
         if hole_circle_inst.len() == 2 {
             let diameter = hole_circle_inst[0].pdia;
             let height = hole_circle_inst[0].phei + hole_circle_inst[1].phei;
@@ -123,9 +150,9 @@ pub async fn compute_hole_instance_data(mgr: &AiosDBManager,
                 name_map.get(&hole.refno).unwrap().clone()
             } else {
                 // 这几个类型name取他上面的对应层级
-                query_ancestor_till_types_aql(&mgr.get_arango_db().await?, hole.refno, vec!["JLDATUM", "CMFI", "CMPF"]).await?.unwrap_or_default()
+                query_ancestor_till_types_aql(database, hole.refno, vec!["JLDATUM", "CMFI", "CMPF"]).await?.unwrap_or_default()
             };
-            let (room_1, room_2) = mgr.query_through_element_room_nums(&[hole.refno]).await?.values().nth(0).cloned().unwrap_or_default();
+            // let (room_1, room_2) = mgr.query_through_element_room_nums(&[hole.refno]).await?.values().nth(0).cloned().unwrap_or_default();
             let cable_area = get_cable_area(&element.name).await;
             let plugging_area = f32::PI * (diameter / 2.0) * (diameter / 2.0) - cable_area;
             let fill_percent = get_plugging_fill_percent().await;
@@ -134,27 +161,54 @@ pub async fn compute_hole_instance_data(mgr: &AiosDBManager,
                 refno: hole.refno,
                 name: element.name,
                 size: format!("{}", diameter),
-                room_1,
-                room_2,
+                room_1:"".to_string(),
+                room_2:"".to_string(),
                 cable_area,
                 plugging_area,
                 plugging_volume,
                 materials: "".to_string(),
             })
-        } else {}
+        }
+        // 计算方孔的数据
+        if hole_rect_inst.len() == 1 {
+            let points = &hole_rect_inst[0].verts;
+            let height = hole_rect_inst[0].height;
+            let Some(size) = compute_rectangle_data([points[0], points[1], points[2], points[3]]) else { continue; };
+            let element = if name_map.contains_key(&hole.refno) {
+                name_map.get(&hole.refno).unwrap().clone()
+            } else {
+                // 这几个类型name取他上面的对应层级
+                query_ancestor_till_types_aql(database, hole.refno, vec!["JLDATUM", "CMFI", "CMPF"]).await?.unwrap_or_default()
+            };
+            // let (room_1, room_2) = mgr.query_through_element_room_nums(&[hole.refno]).await?.values().nth(0).cloned().unwrap_or_default();
+            let cable_area = get_cable_area(&element.name).await;
+            let plugging_area = size.0 * size.1 - cable_area;
+            let fill_percent = get_plugging_fill_percent().await;
+            let plugging_volume = size.0 * size.1 * height * (1.0 - fill_percent);
+            result.push(PluggingData {
+                refno: hole.refno,
+                name: element.name,
+                size: format!("{}X{}", size.0, size.1),
+                room_1:"".to_string(),
+                room_2:"".to_string(),
+                cable_area,
+                plugging_area,
+                plugging_volume,
+                materials: "".to_string(),
+            })
+        }
     }
-    dbg!(&result);
-    Ok(())
+    Ok(result)
 }
 
 /// 请求图为接⼝获取电缆占⽤⾯积
 pub async fn get_cable_area(hole_name: &str) -> f32 {
-    1.0
+    0.0
 }
 
 /// 获取孔洞填充率
 pub async fn get_plugging_fill_percent() -> f32 {
-    0.5
+    0.0
 }
 
 /// 判断四个点是否构成矩形，并返回长宽
@@ -176,11 +230,9 @@ async fn test_query_hole_elements() -> anyhow::Result<()> {
     let mgr = get_test_ams_db_manager_async().await;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refnos = vec![RefU64::from_refno_str("17496/118542").unwrap()];
-    let holes = query_hole_elements(refnos, &database).await?;
-    let insts = query_hole_instance(&holes, &database).await?;
-    let name_map = holes.into_iter().map(|refno| (refno.refno, refno)).collect::<HashMap<RefU64, PdmsElement>>();
-    compute_hole_instance_data(&mgr, insts, name_map).await?;
+    let refno = RefU64::from_refno_str("17496/106258").unwrap();
+    let result = get_plugging_material_datas(refno, &database).await?;
+    dbg!(&result);
     Ok(())
 }
 

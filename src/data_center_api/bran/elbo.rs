@@ -13,7 +13,8 @@ use crate::graph_db::pdms_arango::ArDatabase;
 
 pub async fn get_data_center_elbo_attr(refno: PdmsElement, bran_name: &str, database: &ArDatabase, aios_mgr: &AiosDBManager) -> DataCenterInstance {
     let need_query_material_code = vec![("ITEMA11".to_string(), "Code".to_string()),
-                                        ("ITEMA12".to_string(), "Name".to_string()), ("ITEMA13".to_string(), "Make".to_string()),
+                                        ("ITEMA12".to_string(), "Name".to_string()),
+                                        ("ITEMA13".to_string(), "Make".to_string()),
                                         ("ITEMA14".to_string(), "Mat".to_string()),
                                         ("ITEMA15".to_string(), "MatSpec".to_string()),
                                         ("ITEMA16".to_string(), "Spec".to_string()),

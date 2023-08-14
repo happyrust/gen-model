@@ -1,11 +1,13 @@
 //for test
 // let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(E), &database).await?;
 
+use std::str::FromStr;
 use aios_core::pdms_types::RefU64;
 use regex::Regex;
 use aios_core::pdms_types::UdaMajorType::T;
 use crate::aql_api::pdms_room;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
+use crate::test::test_helper::get_test_ams_db_manager_async;
 
 ///  测试获取有负实体的parent
 #[tokio::test]
