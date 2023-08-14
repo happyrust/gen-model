@@ -507,7 +507,7 @@ pub async fn gen_cata_single_geoms(
 ) -> anyhow::Result<RefU64> {
     let cur_ele = mgr
         .get_refno_basic(design_refno)
-        .ok_or(anyhow!("Element不存在"))?;
+        .ok_or(anyhow::anyhow!("Element不存在"))?;
     let type_name = cur_ele.get_type();
     let owner = mgr.get_owner_ref_basic(design_refno);
     if owner.is_none() {

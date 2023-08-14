@@ -139,7 +139,7 @@ pub async fn query_children_eles_without_children_count(refno: RefU64, pool: &Po
 pub async fn query_world(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
     let mdb = format!("/{}", mdb);
     let world_refnos = query_world_refnos(&mdb, module, pool).await?;
-    let refno = world_refnos.iter().next().ok_or(anyhow!("Not exist world refno"))?;
+    let refno = world_refnos.iter().next().ok_or(anyhow::anyhow!("Not exist world refno"))?;
     query_ele_node(*refno, pool).await
 }
 
@@ -230,7 +230,7 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>, m
     if quicks.is_empty() { return Ok(None); }
     let quick = &quicks[0];
     let sql = gen_query_node_id_from_refno_sql(quick.world_refno);
-    let world_pool = mgr.get_project_pool(&quick.project).ok_or(anyhow!("project not found"))?;
+    let world_pool = mgr.get_project_pool(&quick.project).ok_or(anyhow::anyhow!("project not found"))?;
     let result = sqlx::query(&sql).fetch_one(&mut world_pool.acquire().await?).await;
     return match result {
         Ok(val) => {

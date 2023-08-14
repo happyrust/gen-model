@@ -72,8 +72,8 @@ pub struct PipeRoomCodeData {
 }
 
 /// 获取工艺管件 itema等重复的数据
-pub(crate) async fn get_bran_itema_attr(refno:PdmsElement,bran_name:&str,
-                                        database:&ArDatabase,aios_mgr:&AiosDBManager,mut result:&mut Vec<DataCenterAttr>) {
+pub(crate) async fn get_bran_itema_attr(refno: PdmsElement, bran_name: &str,
+                                        database: &ArDatabase, aios_mgr: &AiosDBManager, mut result: &mut Vec<DataCenterAttr>) {
     let item_1 = DataCenterAttr {
         attribute_model_code: "ITEM1".to_string(),
         value: AttrString(refno.refno.to_refno_string()).into(),
@@ -81,21 +81,21 @@ pub(crate) async fn get_bran_itema_attr(refno:PdmsElement,bran_name:&str,
     result.push(item_1);
     let item_2 = DataCenterAttr {
         attribute_model_code: "ITEMA1".to_string(),
-        value:AttrString(refno.name).into(),
+        value: AttrString(refno.name).into(),
     };
     result.push(item_2);
     let item_3 = DataCenterAttr {
         attribute_model_code: "ITEMA2".to_string(),
-        value:  AttrString(refno.noun).into(),
+        value: AttrString(refno.noun).into(),
     };
     result.push(item_3);
     let item_4 = DataCenterAttr {
-        attribute_model_code: "ITEMAB3".to_string(),
-        value:  AttrString(bran_name.to_string()).into(),
+        attribute_model_code: "ITEMA3".to_string(),
+        value: AttrString(bran_name.to_string()).into(),
     };
     result.push(item_4);
     let item_5 = DataCenterAttr {
-        attribute_model_code: "ITEMAB4".to_string(),
+        attribute_model_code: "ITEMA4".to_string(),
         value: AttrString("".to_string()).into(),
     };
     result.push(item_5);
@@ -110,13 +110,13 @@ pub(crate) async fn get_bran_itema_attr(refno:PdmsElement,bran_name:&str,
         value: AttrString(quat_to_pdms_ori_str(&world_position.rotation)).into(),
     };
     result.push(item_8);
-    let room_code = query_room_name_from_refno_aql(refno.refno,database).await.unwrap_or(None).unwrap_or("".to_string());
+    let room_code = query_room_name_from_refno_aql(refno.refno, database).await.unwrap_or(None).unwrap_or("".to_string());
     result.push(DataCenterAttr {
         attribute_model_code: "ITEMA20".to_string(),
         value: AttrString(room_code).into(),
     });
     let attr = aios_mgr.get_attr(refno.refno).await.unwrap_or_default();
-    let ispec = get_ispec_from_attr(&attr,&aios_mgr).await.unwrap_or("".to_string());
+    let ispec = get_ispec_from_attr(&attr, &aios_mgr).await.unwrap_or("".to_string());
     result.push(DataCenterAttr {
         attribute_model_code: "ITEMA21".to_string(),
         value: AttrString(ispec).into(),
@@ -126,35 +126,38 @@ pub(crate) async fn get_bran_itema_attr(refno:PdmsElement,bran_name:&str,
         attribute_model_code: "ITEMA22".to_string(),
         value: AttrString(tspe).into(),
     });
-    let r_text = get_rtext_from_attr(&attr,aios_mgr).await.unwrap_or("".to_string());
+    let r_text = get_rtext_from_attr(&attr, aios_mgr).await.unwrap_or("".to_string());
     result.push(DataCenterAttr {
         attribute_model_code: "ITEMA24".to_string(),
         value: AttrString(r_text).into(),
     });
 }
 
-pub(crate) async fn get_material_pressure_code(mut result:&mut Vec<DataCenterAttr>,material_map: DashMap<String, String>) {
+/// 获取大宗材料表单壁厚值等数据
+///
+/// wall_thickness_number_code : 壁厚/管表号系列 属性编码
+///
+/// wall_thickness_value 壁厚值 属性编码
+///
+/// pressure_level 压力等级 属性编码
+pub(crate) async fn get_material_pressure_code(wall_thickness_number_code:&str,wall_thickness_value:&str,pressure_level:&str,
+                                               mut result: &mut Vec<DataCenterAttr>, material_map: &DashMap<String, String>) {
     if let Some(pressure) = material_map.get("Pressure") {
-        if let Some((char,number)) = split_char_and_number(pressure.value()) {
-            if char.to_lowercase() == "sch".to_string() {
-                result.push(DataCenterAttr{
-                    attribute_model_code: "ITEMAA3".to_string(),
-                    value: AttrString(char).into(),
-                });
-                result.push(DataCenterAttr{
-                    attribute_model_code: "ITEMAA4".to_string(),
-                    value: AttrString(number).into(),
-                })
-            } else if char.to_lowercase() == "cl" || char.to_lowercase() == "pn"{
-                result.push(DataCenterAttr{
-                    attribute_model_code: "ITEMAA4".to_string(),
-                    value: AttrString(number).into(),
-                });
-                result.push(DataCenterAttr{
-                    attribute_model_code: "ITEMAA6".to_string(),
-                    value: AttrString(char).into(),
-                });
-            }
+        if pressure.to_lowercase().starts_with("sch") {
+            result.push(DataCenterAttr {
+                attribute_model_code: wall_thickness_number_code.to_string(),
+                value: AttrString(pressure.value().clone()).into(),
+            });
+        } else if pressure.starts_with("cl") || pressure.starts_with("pn") {
+            result.push(DataCenterAttr {
+                attribute_model_code: wall_thickness_value.to_string(),
+                value: AttrString(pressure.value().clone()).into(),
+            });
+        } else {
+            result.push(DataCenterAttr {
+                attribute_model_code: pressure_level.to_string(),
+                value: AttrString(pressure.value().clone()).into(),
+            })
         }
     }
 }
@@ -238,14 +241,13 @@ pub async fn get_rtext_from_attr(attr: &AttrMap, aios_mgr: &AiosDBManager) -> an
     let database = aios_mgr.get_arango_db().await?;
     let Some(detr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "DETR"]).await?
         else { return Ok("".to_string()); };
-    let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(detr).await else { return Ok("".to_string()); };
-    let detr_map = query_explicit_attr(detr, &pool).await?;
+    let detr_map = aios_mgr.get_attr(detr).await?;
     let rtext = detr_map.get_str("RTEX");
     if let Some(rtext) = rtext {
         let codes = vec!["E4001", "E4004", "E4006"];
         for code in codes {
             if rtext.contains(code) {
-                return Ok(rtext.to_string());
+                return Ok(code.to_string());
             }
         }
     }
@@ -277,7 +279,7 @@ pub(crate) async fn get_refno_desc(refno: RefU64, aios_mgr: &AiosDBManager) -> a
 }
 
 /// 获取元件在desi中的desc
-pub(crate) async fn get_refno_desi_desc(refno:RefU64,aios_mgr:&AiosDBManager) -> anyhow::Result<String> {
+pub(crate) async fn get_refno_desi_desc(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<String> {
     let attr = aios_mgr.get_attr(refno).await?;
     Ok(attr.get_str("DESC").unwrap_or("").to_string())
 }
@@ -395,7 +397,7 @@ fn gen_dq_material_code_sql(spre_name_split: &str, stander_num: &str, fileds: &V
 /// 通过spre name 返回材料编码 命名规则为 第二个 / 到 :
 ///
 /// 例如 "/VMB1/CPP00102:P,50" -> "CPP00102"
-pub(crate) fn get_spre_material_code(spre_name:&str) -> Option<String> {
+pub(crate) fn get_spre_material_code(spre_name: &str) -> Option<String> {
     let spre_name_split = spre_name.split("/").collect::<Vec<_>>();
     if spre_name_split.len() < 3 { return None; }
     let spre_name_last = spre_name_split[2];
@@ -410,7 +412,7 @@ pub fn get_refno_latest_version() -> String {
 }
 
 /// 分割字符串的字符部分和数字部分 例如 "sch400" -> sch  400
-fn split_char_and_number(input: &str) -> Option<(String,String)> {
+fn split_char_and_number(input: &str) -> Option<(String, String)> {
     let re = Regex::new(r"(?P<char_part>[A-Za-z]+)(?P<number_part>\d+)$").unwrap();
     if let Some(captures) = re.captures(input) {
         let Some(char_part) = captures.name("char_part") else { return None; };
@@ -446,6 +448,5 @@ async fn test_get_dq_material_code() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn attr_export_to_excel() -> anyhow::Result<()> {
-
     Ok(())
 }

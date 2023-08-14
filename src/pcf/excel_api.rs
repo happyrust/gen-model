@@ -26,7 +26,7 @@ pub fn get_pipe_thickness_table() -> anyhow::Result<DashMap<String, DashMap<Stri
     let mut map = DashMap::new();
     let mut workbook: Xlsx<_> = open_workbook("resource/管道外径壁厚表.xlsx")?;
     let range = workbook.worksheet_range("Sheet1")
-        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+        .ok_or(anyhow::anyhow!("Cannot find 'Sheet1'"))??;
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
     while let Some(result) = iter.next() {
         let v: PipeThicknessTable = result?;

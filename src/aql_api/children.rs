@@ -406,6 +406,8 @@ FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
 }
 
 /// 遍历refno只获取指定类型数组的refnos
+///
+/// is_parent : 指定 parent的类型
 pub async fn query_travel_children_with_types_aql(arango_database: &ArDatabase, refno: RefU64, att_types: &[&str], is_parent: bool) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());

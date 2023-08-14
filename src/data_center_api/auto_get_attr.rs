@@ -64,7 +64,7 @@ pub(crate) fn read_data_center_metadata_excel(excel_path: &str) -> anyhow::Resul
     let mut map = HashMap::new();
     let mut workbook: Xlsx<_> = open_workbook(excel_path)?;
     let range = workbook.worksheet_range("对象类属性")
-        .ok_or(anyhow!("Cannot find Sheet '对象类属性'"))??;
+        .ok_or(anyhow::anyhow!("Cannot find Sheet '对象类属性'"))??;
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
 
@@ -198,47 +198,152 @@ fn auto_get_attr_from_metadata_excel_attr_function(function: &Vec<&str>, attr: &
 }
 
 /// 通过材料编码获取大宗材料表的数据
-pub(crate) async fn get_material_map_from_code(code: &str, mut filedes: Vec<String>, puhua_pool: &Pool<MySql>) -> DashMap<String, String> {
-    if code.is_empty() || filedes.is_empty() {
+pub(crate) async fn get_material_map_from_code(code: &str, mut fields: Vec<String>, puhua_pool: &Pool<MySql>) -> DashMap<String, String> {
+    if code.is_empty() || fields.is_empty() {
         return DashMap::default();
     }
+    let mut query_map = DashMap::new();
+    // 取了对应编码的数据， 但是不含某个字段的情况
+    let mut cache_not_contains_filed = Vec::new();
     if let Some(map) = MATERIAL_MAP.get(code) {
-        map.value().clone()
+        for filed in &fields {
+            if !map.value().contains_key(filed) {
+                cache_not_contains_filed.push(filed.to_string());
+            } else {
+                query_map.entry(filed.to_string()).or_insert(map.value().get(filed).unwrap().value().to_string());
+            }
+        }
+        if cache_not_contains_filed.is_empty() {
+            return map.value().clone();
+        }
+    }
+    let mut query_fields = if MATERIAL_MAP.contains_key(code) {
+        cache_not_contains_filed
     } else {
-        let mut query_map = DashMap::new();
-        filedes.push("Pressure".to_string());
-        // 查询普华的材料表
-        let sql = gen_query_gy_material_sql(&filedes);
+        fields
+    };
+    query_fields.push("Pressure".to_string());
+    // 查询普华的材料表
+    let sql = gen_query_gy_material_sql(code, &query_fields);
+    if let Ok(mut puhua_conn) = puhua_pool.acquire().await {
+        let Ok(query_results) = puhua_conn.fetch_all(sql.as_str()).await else { return DashMap::new(); };
+        for query_result in query_results {
+            for filed in &query_fields {
+                if filed == "Weight" {
+                    let mut data = query_result.try_get::<Decimal, _>(filed.as_str()).unwrap_or(Decimal::new(0, 0));
+                    if let Ok(_) = data.set_scale(6) {
+                        query_map.entry(filed.to_string()).or_insert(data.to_string());
+                    } else {
+                        query_map.entry(filed.to_string()).or_insert("0.0".to_string());
+                    }
+                } else {
+                    let data = query_result.try_get::<String, _>(filed.as_str()).unwrap_or("".to_string());
+                    query_map.entry(filed.to_string()).or_insert(data);
+                }
+            }
+        }
+    }
+    // 取出缓存中的数据
+    if let Some(cache_value) = MATERIAL_MAP.get(code) {
+        for cache_v in cache_value.value() {
+            query_map.entry(cache_v.key().to_string()).or_insert(cache_v.value().to_string());
+        }
+    }
+    // 将查询到的数据放到集合中
+    for query_value in &query_map {
+        MATERIAL_MAP.entry(code.to_string()).or_insert_with(DashMap::new)
+            .entry(query_value.key().clone())
+            .or_insert(query_value.value().to_string());
+    }
+    query_map
+}
+
+/// 获取多个编码对应的大宗材料属性
+pub async fn get_material_map_from_codes(codes: Vec<String>, mut filedes: Vec<String>, puhua_pool: &Pool<MySql>) -> DashMap<String, DashMap<String, String>> {
+    if codes.is_empty() || filedes.is_empty() {
+        return DashMap::default();
+    }
+    // 取了对应编码的数据， 但是不含某个字段的情况
+    let mut not_contains_filed = HashMap::new();
+    for code in &codes {
+        if let Some(map) = MATERIAL_MAP.get(code) {
+            for filed in &filedes {
+                if !map.value().contains_key(filed) {
+                    not_contains_filed.entry(code.clone()).or_insert_with(Vec::new).push(filed.to_string());
+                }
+            }
+        } else {
+            not_contains_filed.entry(code.clone()).or_insert(filedes.clone());
+        }
+    }
+    // 查询普华的材料表
+    let mut query_map: DashMap<String, DashMap<String, String>> = DashMap::new();
+    let keys = not_contains_filed.keys().into_iter().map(|x| x.to_string()).collect::<Vec<String>>();
+    if !keys.is_empty() {
+        let sql = gen_query_gy_materials_sql(keys, &filedes);
         if let Ok(mut puhua_conn) = puhua_pool.acquire().await {
             let Ok(query_results) = puhua_conn.fetch_all(sql.as_str()).await else { return DashMap::new(); };
             for query_result in query_results {
+                let Ok(code) = query_result.try_get::<String, _>("Code") else { continue; };
                 for filed in &filedes {
+                    // Weight是Decimal类型，单独做处理
                     if filed == "Weight" {
                         let mut data = query_result.try_get::<Decimal, _>(filed.as_str()).unwrap_or(Decimal::new(0, 0));
                         if let Ok(_) = data.set_scale(6) {
-                            query_map.entry(filed.to_string()).or_insert(data.to_string());
+                            query_map.entry(code.to_string()).or_insert_with(DashMap::new).insert(filed.clone(), data.to_string());
                         } else {
-                            query_map.entry(filed.to_string()).or_insert("0.0".to_string());
+                            query_map.entry(code.to_string()).or_insert_with(DashMap::new).insert(filed.clone(), "0.0".to_string());
                         }
                     } else {
                         let data = query_result.try_get::<String, _>(filed.as_str()).unwrap_or("".to_string());
-                        query_map.entry(filed.to_string()).or_insert(data);
+                        query_map.entry(code.to_string()).or_insert_with(DashMap::new).insert(filed.clone(), data.to_string());
                     }
                 }
             }
         }
-        MATERIAL_MAP.entry(code.to_string()).or_insert(query_map.clone());
-        query_map
     }
+    // 取出缓存中的数据
+    for code in &codes {
+        if let Some(map) = MATERIAL_MAP.get(code) {
+            for v in map.value() {
+                query_map.entry(code.clone()).or_insert_with(DashMap::new).entry(v.key().clone()).or_insert(v.value().clone());
+            }
+        }
+    }
+    // 将查询的数据放到缓存中
+    for query_value in &query_map {
+        let value = query_value.value();
+        for v in value {
+            MATERIAL_MAP.entry(query_value.key().clone())
+                .or_insert_with(DashMap::new).entry(v.key().to_string()).or_insert(v.value().clone());
+        }
+    }
+    query_map
 }
 
-fn gen_query_gy_material_sql(fileds: &Vec<String>) -> String {
+
+fn gen_query_gy_materials_sql(codes: Vec<String>, fileds: &Vec<String>) -> String {
     let mut sql = String::from("SELECT ");
     for filed in fileds {
         sql.push_str(format!("{} ,", filed).as_str());
     }
     sql.remove(sql.len() - 1);
-    sql.push_str(format!(" FROM {}", PUHUA_GY_MATERIAL_TABLE).as_str());
+    sql.push_str(format!(" FROM {} WHERE Code  in (", PUHUA_GY_MATERIAL_TABLE, ).as_str());
+    for code in codes {
+        sql.push_str(format!("'{}',", code).as_str());
+    }
+    sql.remove(sql.len() - 1);
+    sql.push_str(")");
+    sql
+}
+
+fn gen_query_gy_material_sql(code: &str, fileds: &Vec<String>) -> String {
+    let mut sql = String::from("SELECT ");
+    for filed in fileds {
+        sql.push_str(format!("{} ,", filed).as_str());
+    }
+    sql.remove(sql.len() - 1);
+    sql.push_str(format!(" FROM {} WHERE Code = '{}'", PUHUA_GY_MATERIAL_TABLE, code).as_str());
     sql
 }
 

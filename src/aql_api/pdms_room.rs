@@ -453,7 +453,7 @@ impl AiosDBManager {
 
     /// 返回元件所属的房间panels
     pub async fn query_ele_own_room_panels(&self, refnos: &[RefU64], as_whole_to: Option<RefU64>) -> anyhow::Result<HashMap<RefU64, Vec<RefU64>>> {
-        let room_panels_tree = self.room_panels_rtree.as_ref().ok_or(anyhow!("房间空间树未生成。"))?;
+        let room_panels_tree = self.room_panels_rtree.as_ref().ok_or(anyhow::anyhow!("房间空间树未生成。"))?;
         //先用包围盒去查询和哪些房间的aabb相交
         let database = self.get_arango_db().await?;
         let inst_data = query_insts_shape_data(&database, refnos, &[GeoBasicType::Pos]).await?;
@@ -621,7 +621,7 @@ impl AiosDBManager {
                                                  nearest: bool,
                                                  filter_types: Vec<&str>,
                                                  own_filter_types: Vec<&str>, ) -> anyhow::Result<Vec<(RefU64, f32)>> {
-        let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
+        let rtree = self.rtree.as_ref().ok_or(anyhow::anyhow!("空间树未生成。"))?;
         let database = self.get_arango_db().await?;
         let inst_data = query_insts_shape_data(&database, &[refno], &[GeoBasicType::Pos]).await?;
         if inst_data.inst_info_map.is_empty() { return Ok(Default::default()); }
