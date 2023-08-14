@@ -23,7 +23,8 @@ pub async fn get_data_center_tubi_attr(bran_refno: RefU64,bran_name:&str, databa
     let bran_lstu_name = query_foreign_name_aql(bran_refno, vec!["HSTU", "HSTU"], database).await.unwrap_or(None).unwrap_or("".to_string());
     let bran_spre_material_code = get_spre_material_code(&bran_lstu_name).unwrap_or("".to_string());
     let need_query_material_code = vec![("ITEMA11".to_string(), "Code".to_string()),
-                                        ("ITEMA12".to_string(), "Name".to_string()), ("ITEMA13".to_string(), "Make".to_string()),
+                                        ("ITEMA12".to_string(), "Name".to_string()),
+                                        ("ITEMA13".to_string(), "Make".to_string()),
                                         ("ITEMA14".to_string(), "Mat".to_string()),
                                         ("ITEMA15".to_string(), "MatSpec".to_string()),
                                         ("ITEMA16".to_string(), "Spec".to_string()),
@@ -96,6 +97,7 @@ pub async fn get_data_center_tubi_attr(bran_refno: RefU64,bran_name:&str, databa
                 value: material,
             });
         }
+
         // 单位 mm
         let length = tubi.start_pt.distance(tubi.end_pt);
         result.push(DataCenterAttr {

@@ -8,5 +8,4 @@ pub mod mesh_manager;
 
 pub mod db_manager;
 
-#[cfg(feature = "gen_model")]
-pub mod gen_model;
+

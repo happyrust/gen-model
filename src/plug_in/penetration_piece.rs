@@ -5,6 +5,7 @@ use nalgebra::{Unit, Vector2, Vector3};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_interface::interface::PdmsDataInterface;
 
+//得到贯穿件详细信息
 pub async fn get_penetration_detail_by_refno(aios_mgr: &AiosDBManager, refno_vec: &mut Vec<(RefU64, RefU64)>) -> anyhow::Result<PenetrationVec> {
     let mut hole_data_vec = PenetrationVec::default();
     for i in refno_vec {

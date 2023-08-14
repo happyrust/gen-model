@@ -1,5 +1,5 @@
 use std::io::Write;
-use aios_core::data_center::{AttrValue, DataCenterAttr};
+use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance};
 use aios_core::data_center::AttrValue::{AttrFloat, AttrString, AttrVec3};
 use aios_core::pdms_types::{PdmsElement, RefU64};
 use aios_core::tool::math_tool::quat_to_pdms_ori_str;
@@ -8,12 +8,12 @@ use crate::api::element::{query_ele_node, query_name};
 use crate::aql_api::foreign_refnos::query_foreign_name_aql;
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_center_api::auto_get_attr::get_material_map_from_code;
-use crate::data_center_api::data_api::{get_bran_itema_attr, get_spre_material_code};
+use crate::data_center_api::data_api::{get_bran_itema_attr, get_refno_latest_version, get_spre_material_code};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 
-pub async fn get_data_center_weld_attr(refno: PdmsElement,bran_name:&str,database:&ArDatabase,aios_mgr:&AiosDBManager) -> Vec<DataCenterAttr> {
+pub async fn get_data_center_weld_attr(refno: PdmsElement,bran_name:&str,database:&ArDatabase,aios_mgr:&AiosDBManager) -> DataCenterInstance {
     let mut result = Vec::new();
     let item_1 = DataCenterAttr {
         attribute_model_code: "ITEM1".to_string(),
@@ -22,7 +22,7 @@ pub async fn get_data_center_weld_attr(refno: PdmsElement,bran_name:&str,databas
     result.push(item_1);
     let item_2 = DataCenterAttr {
         attribute_model_code: "ITEMA1".to_string(),
-        value:AttrString(refno.name).into(),
+        value:AttrString(refno.name.clone()).into(),
     };
     result.push(item_2);
     let item_3 = DataCenterAttr {
@@ -56,7 +56,13 @@ pub async fn get_data_center_weld_attr(refno: PdmsElement,bran_name:&str,databas
         attribute_model_code: "ITEMA20".to_string(),
         value: AttrString(room_code).into(),
     });
-    result
+    DataCenterInstance {
+        object_model_code: "ITEMC".to_string(),
+        project_code: aios_mgr.db_option.project_code.to_string(),
+        instance_code: refno.name,
+        version: get_refno_latest_version(),
+        attributes: result,
+    }
 }
 
 #[tokio::test]
