@@ -535,12 +535,12 @@ pub async fn sync_total_async_threaded(
     let max_sql_threads_number = db_option.sql_threads_number as usize;
     let batch_insert_sql_cnt = db_option.batch_insert_sql_cnt as usize;
     if max_sql_threads_number * batch_insert_sql_cnt == 0 {
-        return Err(anyhow!(
+        return Err(anyhow::anyhow!(
             "batch_insert_sql_cnt 或者  sql_threads_number 不能为0"
         ));
     }
     if !Path::new(&project_dir).exists() {
-        return Err(anyhow!(
+        return Err(anyhow::anyhow!(
             "项目文件夹指定不正确"
         ));
     }

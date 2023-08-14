@@ -64,7 +64,7 @@ pub(crate) fn read_data_center_metadata_excel(excel_path: &str) -> anyhow::Resul
     let mut map = HashMap::new();
     let mut workbook: Xlsx<_> = open_workbook(excel_path)?;
     let range = workbook.worksheet_range("对象类属性")
-        .ok_or(anyhow!("Cannot find Sheet '对象类属性'"))??;
+        .ok_or(anyhow::anyhow!("Cannot find Sheet '对象类属性'"))??;
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
 

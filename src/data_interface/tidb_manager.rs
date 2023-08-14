@@ -187,7 +187,7 @@ impl PdmsDataInterface for AiosDBManager {
                 return Ok(a);
             }
         }
-        Err(anyhow!("{refno}: not found att"))
+        Err(anyhow::anyhow!("{refno}: not found att"))
     }
 
     fn get_type_name(&self, refno: RefU64) -> anyhow::Result<String> {
@@ -204,7 +204,7 @@ impl PdmsDataInterface for AiosDBManager {
             }
         }
         Ok(Default::default())
-        // Err(anyhow!("{refno}: not found children"))
+        // Err(anyhow::anyhow!("{refno}: not found children"))
     }
 
 
@@ -215,7 +215,7 @@ impl PdmsDataInterface for AiosDBManager {
                 return RefU64Vec::from_bytes(bytes.as_ref());
             }
         }
-        Err(anyhow!(format!("{refno} att not exist in {project}")))
+        Err(anyhow::anyhow!(format!("{refno} att not exist in {project}")))
     }
 
     /// 从本地数据库获得最全的数据
@@ -226,7 +226,7 @@ impl PdmsDataInterface for AiosDBManager {
                 return AttrMap::from_rkvy_compress_bytes(bytes.as_ref());
             }
         }
-        Err(anyhow!(format!("{refno} att not exist")))
+        Err(anyhow::anyhow!(format!("{refno} att not exist")))
     }
 
     fn get_mesh_from_localdb(&self, geo_hash: u64) -> anyhow::Result<PlantMesh> {
@@ -234,7 +234,7 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(bytes) = self.local_mesh_db.get(&k)? {
             return PlantMesh::from_compress_bytes(bytes.as_ref());
         }
-        Err(anyhow!(format!("{geo_hash} mesh not exist")))
+        Err(anyhow::anyhow!(format!("{geo_hash} mesh not exist")))
     }
 
     fn get_mesh_aabb_from_localdb(&self, geo_hash: u64) -> anyhow::Result<Aabb> {
@@ -242,7 +242,7 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(bytes) = self.local_mesh_aabb_db.get(&k)? {
             return Aabb::from_bytes(bytes.as_ref());
         }
-        Err(anyhow!(format!("{geo_hash} aabb not exist.")))
+        Err(anyhow::anyhow!(format!("{geo_hash} aabb not exist.")))
     }
 
     /// 获得最全的数据
@@ -397,7 +397,7 @@ impl PdmsDataInterface for AiosDBManager {
             let v = query_world("SAMPLE", "DESI", project_pool.value()).await?;
             return Ok(v);
         }
-        return Err(anyhow!("World not found".to_string()));
+        return Err(anyhow::anyhow!("World not found".to_string()));
     }
 
     ///获得子节点集合
@@ -449,7 +449,7 @@ impl PdmsDataInterface for AiosDBManager {
             let name = query_name(refno, &project_pool).await?;
             return Ok(name);
         }
-        Err(anyhow!("Element不存在"))
+        Err(anyhow::anyhow!("Element不存在"))
     }
 
     /// dbnos为空代表所有db都会去获取
@@ -892,7 +892,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///指定pos获得在一定范围的构件参考号列表
     fn get_refnos_within_bound_radius_by_pos(&self, pos: Vec3, distance: f32) -> anyhow::Result<Vec<RefU64>> {
-        let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
+        let rtree = self.rtree.as_ref().ok_or(anyhow::anyhow!("空间树未生成。"))?;
         let target_refnos = rtree.query_within_distance(pos, distance)
             .map(|x| x.0)
             .collect();

@@ -324,7 +324,7 @@ pub async fn read_cable_weight_excel() -> anyhow::Result<HashMap<String, HashMap
     let mut map = HashMap::new();
     let mut workbook: Xlsx<_> = open_workbook("./resource/电缆桥架及电缆线重.xlsx")?;
     let range = workbook.worksheet_range("Sheet1")
-        .ok_or(anyhow!("Cannot find Sheet 'Sheet1'"))??;
+        .ok_or(anyhow::anyhow!("Cannot find Sheet 'Sheet1'"))??;
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
     while let Some(result) = iter.next() {
