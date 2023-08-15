@@ -823,6 +823,8 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>,
     // 先查找到 mdb下的所有 site
     // let sites = query_types_refnos_names(&vec!["SITE"], pool, Some(&numbs)).await?;
     let mut update_aqls = Vec::new();
+    // site 下其余name的情况
+    let mut res_aqls = Vec::new();
     // 不符合命名规则的site
     let mut error_sites = Vec::new();
     // 将mdb所有的site查找到后，用 name_map 进行分组和过滤，一个site下面的zone为一组
@@ -839,7 +841,7 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>,
             error_sites.push((site_refno, site_name.clone()));
             continue;
         }
-        // 如果site 名字 同时包含两个专业代码，取长度最长的那个
+        // 如果site 名字 同时包含两个专业代码，取长度最长的那个,例如 PIPE , PIPE-F
         if contains_key.len() > 1 {
             let Some(max_site_code) = contains_key.clone().into_iter().max_by(|a, b| a.site_name.len().cmp(&b.site_name.len())) else { continue; };
             filter_aql.push_str(&format!("filter v.name like {}\r\n", max_site_code.site_name));
@@ -858,14 +860,25 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>,
         update {{'_key':'{}' , 'major': '{}'}} in {}", site_refno.to_url_refno(), contains_key[0].site_code, AQL_PDMS_ELES_COLLECTION);
         update_aqls.push(update_site_aql);
         for (zone_name, zone_code) in &contains_key[0].zone_map {
-            let mut update_zone_aql = format!("\
-            With {AQL_PDMS_ELES_COLLECTION},{AQL_PDMS_EDGES_COLLECTION}
-            let zones = ( for v in 1 inbound '{}/{}' pdms_edges return v ) ",
-                                              AQL_PDMS_ELES_COLLECTION, site_refno.to_url_refno());
-            update_zone_aql.push_str(&format!("for zone in zones "));
-            update_zone_aql.push_str(&format!("filter zone.name like '%{}%' ", zone_name));
-            update_zone_aql.push_str(&format!("update {{'_key':zone._key , 'major': '{}'}} in {}", zone_code, AQL_PDMS_ELES_COLLECTION));
-            update_aqls.push(update_zone_aql);
+            if zone_name == "%ELSE" {
+                let mut update_zone_aql = format!("\
+                With {AQL_PDMS_ELES_COLLECTION},{AQL_PDMS_EDGES_COLLECTION}
+                let zones = ( for v in 1 inbound '{}/{}' pdms_edges return v ) ",
+                                                  AQL_PDMS_ELES_COLLECTION, site_refno.to_url_refno());
+                update_zone_aql.push_str(&format!("for zone in zones "));
+                update_zone_aql.push_str(&format!("filter zone.major !like '%{}%' ", zone_name));
+                update_zone_aql.push_str(&format!("update {{'_key':zone._key , 'major': '{}'}} in {}", zone_code, AQL_PDMS_ELES_COLLECTION));
+                res_aqls.push(update_zone_aql);
+            } else {
+                let mut update_zone_aql = format!("\
+                With {AQL_PDMS_ELES_COLLECTION},{AQL_PDMS_EDGES_COLLECTION}
+                let zones = ( for v in 1 inbound '{}/{}' pdms_edges return v ) ",
+                                                  AQL_PDMS_ELES_COLLECTION, site_refno.to_url_refno());
+                update_zone_aql.push_str(&format!("for zone in zones "));
+                update_zone_aql.push_str(&format!("filter zone.name like '%{}%' ", zone_name));
+                update_zone_aql.push_str(&format!("update {{'_key':zone._key , 'major': '{}'}} in {}", zone_code, AQL_PDMS_ELES_COLLECTION));
+                update_aqls.push(update_zone_aql);
+            }
         }
     }
     // todo 不能同时update多次 后期将这些aql优化到一次执行
