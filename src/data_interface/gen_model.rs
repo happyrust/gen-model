@@ -315,6 +315,10 @@ pub async fn gen_loop_geos(
                     continue;
                 }
                 let mut parent_att = mgr.get_attr_from_localdb(parent_refno).unwrap_or_default();
+                let mut sibling_refnos = mgr
+                    .get_children_from_localdb(parent_refno)
+                    .unwrap_or_default();
+                // dbg!(&sibling_refnos);
                 let mut geos_info = EleGeosInfo {
                     refno: parent_refno,
                     cata_hash: None,
@@ -449,6 +453,7 @@ pub async fn gen_loop_geos(
                 }
                 let tr: Transform = item_trans;
                 let ele_aabb = aabb_apply_transform(&geo_aabb, &tr);
+                //需要判断多个PLOO、LOOP的情况，第二个开始都是负实体
                 let geom_inst = EleInstGeo {
                     geo_hash,
                     refno: parent_refno,
@@ -459,7 +464,14 @@ pub async fn gen_loop_geos(
                     visible,
                     is_tubi: false,
                     geo_param: geo_param.clone(),
-                    geo_type: if parent_att.is_neg() {
+                    geo_type: if parent_att.is_neg()
+                        || (sibling_refnos
+                            .into_iter()
+                            .position(|x| x == loop_refno)
+                            .unwrap_or_default()
+                            >= 1)
+                    {
+                        // dbg!("Neg");
                         GeoBasicType::Neg
                     } else {
                         GeoBasicType::Pos
@@ -784,8 +796,9 @@ pub async fn gen_cata_geos(
                                     if is_neg {
                                         let mut center: Vec3 = aabb.center().into();
                                         let t_mat = Mat4::from_translation(center);
-                                        let mut s = 1.01;
-                                        let s_mat = Mat4::from_scale(Vec3::new(1.0, 1.0, s));
+                                        let mut s = 1.001;
+                                        // let s_mat = Mat4::from_scale(Vec3::new(1.0, 1.0, s));
+                                        let s_mat = Mat4::from_scale(Vec3::splat(s));
                                         let inv_t_mat = Mat4::from_translation(-center);
                                         local_mat = local_mat * t_mat * s_mat * inv_t_mat;
                                     }
@@ -854,7 +867,7 @@ pub async fn gen_cata_geos(
 
                             if let Some(mut aabb) = &mut geos_info.aabb {
                                 if aabb.mins.x.is_infinite() {
-                                    dbg!(&geos_info);
+                                    // dbg!(&geos_info);
                                     aabb =
                                         Aabb::new(Point3::new(0., 0., 0.), Point3::new(0., 0., 0.));
                                 }
@@ -986,7 +999,7 @@ pub async fn gen_cata_geos(
                         continue;
                     };
                     if target_geo_data.aabb.is_none() {
-                        dbg!(&target_geo_data);
+                        // dbg!(&target_geo_data);
                         continue;
                     }
                     //如果已经有了，需要生成transform和bbox那些
@@ -1079,7 +1092,7 @@ pub async fn gen_cata_geos(
     for b in branch_map.iter() {
         let shape_insts_data = main_instance_mgr.read().await;
         let branch_refno = *b.key();
-        dbg!(branch_refno);
+        // dbg!(branch_refno);
         let Ok(children_refnos) = mgr.get_children_from_localdb(branch_refno) else {
             continue;
         };
@@ -1417,7 +1430,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
     }
 
     let adb = mgr.get_arango_db().await?;
-    dbg!(&db_nos);
+    // dbg!(&db_nos);
     let scom_info_map: Arc<RwLock<HashMap<RefU64, ScomInfo>>> =
         Arc::new(RwLock::new(HashMap::new()));
     let replace_mesh = mgr.db_option.replace_mesh;
@@ -1482,7 +1495,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
 
         let target_dbnos = [db_no];
         let root_refnos = mgr.get_gen_model_root_refnos(&target_dbnos).await?;
-        dbg!(&root_refnos);
+        // dbg!(&root_refnos);
         if root_refnos.is_empty() {
             println!("输入的调试参考号或者db号不正确");
             continue;
@@ -1699,7 +1712,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                 .query_refnos_has_pos_neg_map(&root_refnos)
                 .await
                 .unwrap_or_default();
-            // dbg!(&has_pos_neg_map);
+            dbg!(&has_pos_neg_map);
             dbg!(has_pos_neg_map.len());
 
             //负实体的结果不需要保存到本地
@@ -1752,12 +1765,12 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                                 compound_inst_geos_result_map.clone();
 
                             let mut batch_manifolds = vec![];
-                            // let mut batch_meshes = vec![];
                             //没有正实体的情况，直接跳过
-                            if neg_refnos.is_empty() {
-                                return;
-                            }
+                            // if neg_refnos.is_empty() {
+                            //     return;
+                            // }
                             pos_refnos.push(comp_refno);
+                            // dbg!(&pos_refnos);
                             let Some(w_trans) =
                                 trans_map.get(&comp_refno).map(|x| x.value().clone())
                             else {
@@ -1808,7 +1821,8 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
 
                                     //如果是第一个正实体，需要生成模型计算
                                     //如果是负实体，需要生成模型计算
-                                    let is_neg = !pos_refnos.contains(&t_refno);
+                                    let is_neg =
+                                        !pos_refnos.contains(&t_refno) || geo_inst.is_neg();
                                     if t_refno == comp_refno || is_neg {
                                         if pos_refnos.contains(&t_refno) {
                                             pos_aabb = aabb;
@@ -1855,7 +1869,12 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                                                 // #[cfg(debug_assertions)]
                                                 // new_mesh.export_obj(false, &format!("{}_not_manifold.obj", t_refno.to_url_refno())).unwrap();
                                             } else {
-                                                batch_manifolds.push(manifold);
+                                                if is_neg {
+                                                    batch_manifolds.push(manifold);
+                                                } else {
+                                                    //正实体放在最前面
+                                                    batch_manifolds.insert(0, manifold);
+                                                }
                                             }
                                         }
                                         // batch_meshes.push(new_mesh);
@@ -1950,7 +1969,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
 
                 {
                     let mut inst_data = instance_mgr.write().await;
-                    dbg!(compound_inst_geos_result_map.len());
+                    // dbg!(compound_inst_geos_result_map.len());
                     let inst_geos_result_map_inner =
                         Arc::try_unwrap(compound_inst_geos_result_map).unwrap();
                     for (k, v) in inst_geos_result_map_inner {
@@ -2081,8 +2100,9 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             //根据类型来考虑是否需要扩大负实体
                             let mut center: Vec3 = aabb.center().into();
                             let t_mat = Mat4::from_translation(center);
-                            let s = 1.05;
-                            let s_mat = Mat4::from_scale(Vec3::new(1.0, 1.0, s));
+                            let s = 1.005;
+                            // let s_mat = Mat4::from_scale(Vec3::new(1.0, 1.0, s));
+                            let s_mat = Mat4::from_scale(Vec3::splat(s));
                             let inv_t_mat = Mat4::from_translation(-center);
                             let final_mat = local_mat * t_mat * s_mat * inv_t_mat;
 

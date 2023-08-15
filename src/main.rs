@@ -8,33 +8,75 @@ extern crate clap;
 #[macro_use]
 extern crate nom;
 
+use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
+use aios_core::db_number::DbNumMgr;
+use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::pdms_types::*;
-use aios_core::tool::db_tool::db1_hash;
+use aios_core::prim_geo;
+use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_bin};
 use aios_database::api::admin::sync_system_db;
+use aios_database::api::attr::insert_attr_info;
+use aios_database::api::element::*;
+use aios_database::api::ssc_data::{get_ancestor_till_type, query_all_room_data, update_ssc_type};
+use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
+use aios_database::aql_api::pdms_room::{
+    query_all_need_compute_room_refno, RoomEdge, RoomElement,
+};
+use aios_database::aql_api::tubi::{insert_tubi_value, query_all_tubi_from_node};
+use aios_database::cata::resolve::parse_to_i32;
 use aios_database::consts::*;
+use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::database::*;
 use aios_database::graph_db::pdms_arango::*;
+use aios_database::graph_db::pdms_inst_arango::*;
+use aios_database::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
-use aios_database::ssc::async_total_ssc_data;
+use aios_database::spatial_tree::recompute_spatial_tree;
+use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
+use aios_database::tables::*;
 use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
+use bevy_transform::prelude::Transform;
 use chrono::{Datelike, Timelike};
+use dashmap::DashMap;
 use futures::StreamExt;
 use itertools::Itertools;
+use nalgebra::{max, Quaternion, UnitQuaternion};
 use nom::Parser;
 use nom_derive::Parse;
-use sqlx::Row;
+use parry3d::bounding_volume::Aabb;
+use parry3d::math::{Isometry, Point, Vector};
+use parry3d::shape::{Compound, ConvexPolyhedron, SharedShape};
+use parry3d::transformation::vhacd;
+use parry3d::transformation::vhacd::VHACD;
+use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
+// use regex::internal::Input;
+use sqlx::pool::PoolConnection;
+use sqlx::Executor;
+use sqlx::{Acquire, MySql, MySqlPool, Pool, Row};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::format;
+use std::fs;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::sync::Arc;
+use std::mem::take;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use aios_core::options::DbOption;
 use aios_core::tool::direction_parse::parse_expr_to_dir;
-use aios_core::tool::math_tool::{cal_mat3_by_zdir, to_pdms_ori_str};
+use aios_core::tool::math_tool::{cal_mat3_by_zdir, quat_to_pdms_ori_str, to_pdms_ori_str, to_pdms_vec_str};
+use approx::abs_diff_eq;
+use tokio::spawn;
 use env_logger::{Builder, fmt::Target};
+use glam::{Mat3, Quat, Vec3};
 use log::{error, LevelFilter};
 use tokio::sync::RwLock;
+use aios_database::aql_api::children::query_deep_children_refnos_fuzzy;
+use aios_database::cata::resolve_helper::parse_str_axis_to_vec3;
 use aios_database::consts::*;
-
+#[cfg(feature = "gen_model")]
+use aios_database::data_interface::gen_model::gen_geos_data;
 
 fn test_sbfi() -> anyhow::Result<()> {
     // let axis_str = "Y27.041-X";
@@ -122,7 +164,7 @@ fn test_sbfi() -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use config::{Config, File};
+    use config::{Config, ConfigError, Environment, File};
 
     // return test_sbfi();
 
@@ -161,6 +203,57 @@ async fn main() -> anyhow::Result<()> {
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
+    }
+
+    #[cfg(feature = "gen_model")]
+    if db_option.gen_model {
+        println!("正在生成模型");
+        let mut time = Instant::now();
+        // let refno = RefU64::from_two_nums(25688, 8189);
+        // dbg!(mgr.get_attr_from_localdb(refno));
+        // dbg!(mgr.get_children_refs(refno).await);
+
+        // let refno = RefU64::from_two_nums(25688, 7972);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+
+        // let refno = RefU64::from_two_nums(23708, 1234);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(23708, 26027);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+
+        //
+        // let refno = RefU64::from_two_nums(17496, 195550);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(17496, 173130);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(17496, 173131);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = RefU64::from_two_nums(17496, 156942);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+
+        // let branch_refnos = query_deep_children_refnos_fuzzy(&database, &[refno], &CATA_HAS_TUBI_GEO_NAMES).await?;
+        // dbg!(branch_refnos);
+
+        gen_geos_data(mgr.clone()).await?;
+        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
     ///生成ssc 树

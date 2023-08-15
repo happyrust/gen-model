@@ -1,60 +1,3 @@
-use aios_core::cache::mgr::*;
-use aios_core::cache::refno::*;
-use aios_core::consts::*;
-use aios_core::db_number::DbNumMgr;
-use aios_core::parsed_data::geo_params_data::CateGeoParam::*;
-use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
-use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
-use aios_core::pdms_types::*;
-use aios_core::prim_geo::extrusion::Extrusion;
-use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
-use aios_core::prim_geo::revolution::Revolution;
-use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
-use aios_core::prim_geo::wire::CurveType;
-use aios_core::tool::db_tool::{db1_hash, GLOBAL_UDA_NAME_MAP};
-use aios_core::tool::math_tool;
-use anyhow::anyhow;
-use approx::{abs_diff_eq, abs_diff_ne};
-use bb8_arangodb::arangors_lite::{AqlQuery, Database};
-use async_trait::async_trait;
-use bevy_transform::prelude::Transform;
-use config::{Config, ConfigError, Environment, File};
-use dashmap::mapref::one::Ref;
-use dashmap::{DashMap, DashSet};
-use glam::{DMat4, EulerRot, Mat3, Mat4, quat, Quat, Vec2, Vec3};
-use id_tree::{Node, NodeId};
-use itertools::Itertools;
-use lazy_static::lazy_static;
-use nalgebra::{Isometry3, Point3, Quaternion, RealField, UnitQuaternion, Vector3};
-use once_cell::sync::Lazy;
-use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
-use parry3d::math::{Isometry, Real, Vector};
-use smol_str::SmolStr;
-use sqlx::pool::PoolOptions;
-use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
-use std::boxed::Box;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::default;
-use std::default::Default;
-use std::env;
-use std::f32::EPSILON;
-use std::fmt::{Debug, Formatter};
-use std::mem::take;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
-use aios_core::options::DbOption;
-use aios_core::pdms_data::ScomInfo;
-use aios_core::prim_geo;
-use aios_core::prim_geo::spine::{Spine3D, SpineCurveType, SweepPath3D};
-use aios_core::tool::math_tool::{quat_to_pdms_ori_str, to_pdms_vec_str};
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
-use log::{error, info};
-use nom::combinator::map;
-use tokio::sync::{mpsc, RwLock};
-use aios_core::shape::pdms_shape::PlantMesh;
 use crate::api::attr::*;
 use crate::api::children::*;
 use crate::api::element::*;
@@ -70,24 +13,81 @@ use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
 use crate::cata::resolve_helper::{eval_str_to_f32, parse_str_axis_to_vec3};
 use crate::consts::*;
+use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
-use crate::graph_db::pdms_arango::{ArDatabase, ArPool, connect_arangodb, save_arangodb_doc};
+use crate::graph_db::pdms_arango::{connect_arangodb, save_arangodb_doc, ArDatabase, ArPool};
 use crate::graph_db::pdms_inst_arango::*;
+use crate::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 use crate::mdb::get_project_mdb;
 use crate::tables::{gen_create_project_mdb_json_sql, gen_create_project_mdb_sql};
+use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
+use aios_core::cache::mgr::*;
+use aios_core::cache::refno::*;
+use aios_core::consts::*;
+use aios_core::db_number::DbNumMgr;
+use aios_core::options::DbOption;
+use aios_core::parsed_data::geo_params_data::CateGeoParam::*;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
+use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
+use aios_core::pdms_data::ScomInfo;
+use aios_core::pdms_types::*;
+use aios_core::prim_geo;
+use aios_core::prim_geo::extrusion::Extrusion;
+use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
+use aios_core::prim_geo::revolution::Revolution;
+use aios_core::prim_geo::spine::{Spine3D, SpineCurveType, SweepPath3D};
+use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
+use aios_core::prim_geo::wire::CurveType;
+use aios_core::shape::pdms_shape::PlantMesh;
+use aios_core::tool::db_tool::{db1_hash, GLOBAL_UDA_NAME_MAP};
+use aios_core::tool::math_tool;
+use aios_core::tool::math_tool::{quat_to_pdms_ori_str, to_pdms_vec_str};
+use anyhow::anyhow;
+use approx::{abs_diff_eq, abs_diff_ne};
+use async_trait::async_trait;
+use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use bb8_arangodb::{ArangoConnectionManager, AuthenticationMethod};
+use bevy_transform::prelude::Transform;
+use config::{Config, ConfigError, Environment, File};
+use dashmap::mapref::one::Ref;
+use dashmap::{DashMap, DashSet};
 use futures::future::ok;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
+use glam::{quat, DMat4, EulerRot, Mat3, Mat4, Quat, Vec2, Vec3};
+use id_tree::{Node, NodeId};
+use itertools::Itertools;
+use lazy_static::lazy_static;
+use log::{error, info};
+use nalgebra::{Isometry3, Point3, Quaternion, RealField, UnitQuaternion, Vector3};
+use nom::combinator::map;
+use once_cell::sync::Lazy;
+use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
+use parry3d::math::{Isometry, Real, Vector};
 use parry3d::query::{Ray, RayCast};
 use redb::{ReadableTable, TableDefinition};
-use crate::data_interface::db_manager::GeoEnum;
-use crate::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
+use smol_str::SmolStr;
+use sqlx::pool::PoolOptions;
+use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
+use std::boxed::Box;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+use std::default;
+use std::default::Default;
+use std::env;
+use std::f32::EPSILON;
+use std::fmt::{Debug, Formatter};
+use std::mem::take;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, RwLock};
 
-use tokio_stream::wrappers::UnboundedReceiverStream;
 use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
-use crate::consts::{AQL_PDMS_ELES_COLLECTION};
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
+use tokio_stream::wrappers::UnboundedReceiverStream;
 // use heed::types::*;
 // use heed::byteorder::BE;
 
@@ -153,7 +153,6 @@ pub struct AiosDBManager {
 
     ///room panel对应的信息
     pub room_panel_info_map: HashMap<RefU64, RoomPanelElement>,
-
 }
 
 impl Debug for AiosDBManager {
@@ -191,9 +190,9 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     fn get_type_name(&self, refno: RefU64) -> anyhow::Result<String> {
-        self.get_refno_basic(refno).map(|x|
-            Ok(x.get_type().to_string())
-        ).unwrap_or(Ok("unset".to_string()))
+        self.get_refno_basic(refno)
+            .map(|x| Ok(x.get_type().to_string()))
+            .unwrap_or(Ok("unset".to_string()))
     }
 
     ///获得子节点的参考号集合
@@ -207,15 +206,20 @@ impl PdmsDataInterface for AiosDBManager {
         // Err(anyhow::anyhow!("{refno}: not found children"))
     }
 
-
-    fn get_children_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<RefU64Vec> {
+    fn get_children_within_project(
+        &self,
+        refno: RefU64,
+        project: &str,
+    ) -> anyhow::Result<RefU64Vec> {
         if let Some(db) = self.local_children_db_map.get(project) {
             let k = refno.0.to_be_bytes();
             if let Ok(Some(bytes)) = db.get(k.as_slice()) {
                 return RefU64Vec::from_bytes(bytes.as_ref());
             }
         }
-        Err(anyhow::anyhow!(format!("{refno} att not exist in {project}")))
+        Err(anyhow::anyhow!(format!(
+            "{refno} att not exist in {project}"
+        )))
     }
 
     /// 从本地数据库获得最全的数据
@@ -271,13 +275,34 @@ impl PdmsDataInterface for AiosDBManager {
 
     /// t_types 为目标的类型
     #[inline]
-    async fn query_foreign_refnos(&self, refnos: &[RefU64], start_types: &[&[&str]], end_types: &[&str], t_types: &[&str], depth: u32) -> anyhow::Result<Vec<RefU64>> {
-        let t_refnos = query_foreign_refnos_fuzzy(&self.get_arango_db().await?, refnos, start_types, end_types, t_types, depth).await;
+    async fn query_foreign_refnos(
+        &self,
+        refnos: &[RefU64],
+        start_types: &[&[&str]],
+        end_types: &[&str],
+        t_types: &[&str],
+        depth: u32,
+    ) -> anyhow::Result<Vec<RefU64>> {
+        let t_refnos = query_foreign_refnos_fuzzy(
+            &self.get_arango_db().await?,
+            refnos,
+            start_types,
+            end_types,
+            t_types,
+            depth,
+        )
+        .await;
         t_refnos
     }
 
     ///沿着owner path找到需要找的第一个foreign目标节点，可以找到父节点，也可以找到子节点
-    async fn query_first_foreign_along_path(&self, refno: RefU64, start_types: &[&str], end_types: &[&str], t_types: &[&str]) -> anyhow::Result<Option<RefU64>> {
+    async fn query_first_foreign_along_path(
+        &self,
+        refno: RefU64,
+        start_types: &[&str],
+        end_types: &[&str],
+        t_types: &[&str],
+    ) -> anyhow::Result<Option<RefU64>> {
         let id = format!("{}/{}", "pdms_eles", refno.to_url_refno());
         let aql = AqlQuery::new(r#"
             with pdms_eles, pdms_edges, foreign_edges
@@ -309,7 +334,6 @@ impl PdmsDataInterface for AiosDBManager {
         }
         Ok(None)
     }
-
 
     /// 获得隐含数据的属性
     async fn get_implicit_attr(
@@ -510,36 +534,52 @@ impl PdmsDataInterface for AiosDBManager {
     ///查询哪些有负实体的参考号
     async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-        let aql = AqlQuery::new("\
+        let aql = AqlQuery::new(
+            "\
         with pdms_edges, pdms_eles
         let negatives = ( FOR v,e,p in 0..15 INBOUND @key pdms_edges
                     PRUNE v.noun in @negative_nouns
                     filter v.noun in @negative_nouns
                     return p.vertices[-2]._key)
         return UNIQUE(negatives)
-        "
-        ).bind_var("key", refno_url)
-            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
-            ;
-        let refno_strs = self.get_arango_db().await?.aql_query::<Vec<String>>(aql).await?;
-        let refnos = refno_strs.iter().flatten().map(|x| RefU64::from_url_refno(x).unwrap()).collect();
+        ",
+        )
+        .bind_var("key", refno_url)
+        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        let refno_strs = self
+            .get_arango_db()
+            .await?
+            .aql_query::<Vec<String>>(aql)
+            .await?;
+        let refnos = refno_strs
+            .iter()
+            .flatten()
+            .map(|x| RefU64::from_url_refno(x).unwrap())
+            .collect();
         Ok(refnos)
     }
 
     ///返回有负实体和正实体的参考号集合，还有对应的NOUN
-    async fn query_refnos_has_pos_neg_map(&self, refnos: &[RefU64]) -> anyhow::Result<HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)>> {
-        let refno_urls = refnos.iter()
+    ///还要考虑下面有多个LOOP或者PLOO的情况，第二个开始都是负实体
+    async fn query_refnos_has_pos_neg_map(
+        &self,
+        refnos: &[RefU64],
+    ) -> anyhow::Result<HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)>> {
+        let refno_urls = refnos
+            .iter()
             .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
             .collect::<Vec<_>>();
-        let aql = AqlQuery::new(r#"
+        let aql = AqlQuery::new(
+            r#"
             with pdms_edges, pdms_eles
             for key in @keys
                 FOR v,e,p in 0..15 INBOUND key pdms_edges
                 PRUNE v.noun in @neg_nouns
                 OPTIONS { "order": "bfs"}
-                filter (v.noun in @neg_nouns)
                 let parent = p.vertices[-2]
                 let children = ( for cc in 1 INBOUND parent._id pdms_edges return cc )
+                let has_neg_internal = length(for c in children filter (c.noun in ["LOOP", "PLOO"]) return c._key) >= 2
+                filter (v.noun in @neg_nouns) || has_neg_internal
                 return [
                      parent._key,
                      (
@@ -549,11 +589,19 @@ impl PdmsDataInterface for AiosDBManager {
                      )[0],
                     (for c in children filter (c.noun in @neg_nouns) return c._key)
                 ]
-        "#).bind_var("keys", refno_urls)
-            .bind_var("neg_nouns", TOTAL_NEG_NOUN_NAMES.to_vec())
-            .bind_var("pos_nouns", GENRAL_POS_NOUN_NAMES.to_vec());
-        let result: HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)> = self.get_arango_db().await?
-            .aql_query::<RefnoHasNegPosInfoTuple>(aql).await?.into_iter().map(|x| (x.0, (x.1, x.2))).collect();
+        "#,
+        )
+        .bind_var("keys", refno_urls)
+        .bind_var("neg_nouns", TOTAL_NEG_NOUN_NAMES.to_vec())
+        .bind_var("pos_nouns", GENRAL_POS_NOUN_NAMES.to_vec());
+        let result: HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)> = self
+            .get_arango_db()
+            .await?
+            .aql_query::<RefnoHasNegPosInfoTuple>(aql)
+            .await?
+            .into_iter()
+            .map(|x| (x.0, (x.1, x.2)))
+            .collect();
 
         return Ok(result);
     }
@@ -561,7 +609,8 @@ impl PdmsDataInterface for AiosDBManager {
     ///查询refno下是否有几何体
     async fn query_refnos_has_geos(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-        let aql = AqlQuery::new(r#"
+        let aql = AqlQuery::new(
+            r#"
             with pdms_edges, pdms_eles
             let refnos = ( FOR v,e,p in 0..15 INBOUND @key pdms_edges
                         PRUNE v.noun in @geo_nouns
@@ -571,19 +620,33 @@ impl PdmsDataInterface for AiosDBManager {
                         return LENGTH(p.vertices) > 1 ? p.vertices[-2]._key : p.vertices[0]._key
                     )
             return UNIQUE(refnos)
-        "#
-        ).bind_var("key", refno_url)
-            .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
-        let refno_strs = self.get_arango_db().await?.aql_query::<Vec<String>>(aql).await?;
-        let refnos = refno_strs.iter().flatten().map(|x| RefU64::from_url_refno(x).unwrap()).collect();
+        "#,
+        )
+        .bind_var("key", refno_url)
+        .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
+        let refno_strs = self
+            .get_arango_db()
+            .await?
+            .aql_query::<Vec<String>>(aql)
+            .await?;
+        let refnos = refno_strs
+            .iter()
+            .flatten()
+            .map(|x| RefU64::from_url_refno(x).unwrap())
+            .collect();
         Ok(refnos)
     }
 
-    async fn query_parent_refnos_has_neg_geos(&self, refnos: &[RefU64]) -> anyhow::Result<Vec<RefU64>> {
-        let refno_urls = refnos.iter()
+    async fn query_parent_refnos_has_neg_geos(
+        &self,
+        refnos: &[RefU64],
+    ) -> anyhow::Result<Vec<RefU64>> {
+        let refno_urls = refnos
+            .iter()
             .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
             .collect::<Vec<_>>();
-        let aql = AqlQuery::new(r#"
+        let aql = AqlQuery::new(
+            r#"
             with pdms_edges, pdms_eles
             for key in @keys
                 FOR v,e,p in 0..15 INBOUND key pdms_edges
@@ -591,18 +654,26 @@ impl PdmsDataInterface for AiosDBManager {
                     filter LENGTH(p.vertices) >= 2
                     let parent = p.vertices[-2]
                     return distinct parent._key
-        "#
-        ).bind_var("keys", refno_urls)
-            .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        "#,
+        )
+        .bind_var("keys", refno_urls)
+        .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self.get_arango_db().await?.aql_query::<String>(aql).await?;
-        let refnos = refno_strs.iter().map(|x| RefU64::from_url_refno(x).unwrap()).collect();
+        let refnos = refno_strs
+            .iter()
+            .map(|x| RefU64::from_url_refno(x).unwrap())
+            .collect();
         Ok(refnos)
     }
 
     ///返回有负实体的参考号集合，还有对应的NOUN
-    async fn query_refnos_has_neg_map(&self, refno: RefU64) -> anyhow::Result<HashMap<RefU64, Vec<RefU64>>> {
+    async fn query_refnos_has_neg_map(
+        &self,
+        refno: RefU64,
+    ) -> anyhow::Result<HashMap<RefU64, Vec<RefU64>>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-        let aql = AqlQuery::new(r#"
+        let aql = AqlQuery::new(
+            r#"
             with pdms_edges, pdms_eles
             FOR v,e,p in 0..15 INBOUND @key pdms_edges
                 PRUNE v.noun in @negative_nouns
@@ -613,11 +684,18 @@ impl PdmsDataInterface for AiosDBManager {
                      parent._key,
                      (for v in grouped[*].v filter v.noun in @negative_nouns  return v._key),
                 ]
-        "#).bind_var("key", refno_url)
-            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
-            ;
-        let result: HashMap<RefU64, Vec<RefU64>> = self.get_arango_db().await?
-            .aql_query::<RefnoHasNegInfoTuple>(aql).await?.into_iter().map(|x| (x.0, x.1)).collect();
+        "#,
+        )
+        .bind_var("key", refno_url)
+        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        let result: HashMap<RefU64, Vec<RefU64>> = self
+            .get_arango_db()
+            .await?
+            .aql_query::<RefnoHasNegInfoTuple>(aql)
+            .await?
+            .into_iter()
+            .map(|x| (x.0, x.1))
+            .collect();
 
         return Ok(result);
     }
@@ -650,7 +728,6 @@ impl PdmsDataInterface for AiosDBManager {
         }
         Ok(ancestors)
     }
-
 
     ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
     async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
@@ -700,7 +777,8 @@ impl PdmsDataInterface for AiosDBManager {
             if let Ok(owner_att) = self.get_attr_from_localdb(ref_basic.owner) {
                 if let Some(sjus) = owner_att.get_str("SJUS") {
                     //如果发现了SJUS，需要找到同一层集的PLOO，得到height
-                    let children = self.get_children_from_localdb(owner_att.get_owner().unwrap())?;
+                    let children =
+                        self.get_children_from_localdb(owner_att.get_owner().unwrap())?;
                     for c in children {
                         let c_att = self.get_attr_from_localdb(c)?;
                         // dbg!(c_att.get_type());
@@ -797,17 +875,9 @@ impl PdmsDataInterface for AiosDBManager {
                     Vec3::Z
                 };
                 //和LMIRROR 有关系
-                let z_axis = if is_lmirror {
-                    -pline_plax
-                } else {
-                    pline_plax
-                };
+                let z_axis = if is_lmirror { -pline_plax } else { pline_plax };
                 let x_axis = y_axis.cross(z_axis).normalize();
-                let posl_quat = Quat::from_mat3(&Mat3::from_cols(
-                    x_axis,
-                    y_axis,
-                    z_axis,
-                ));
+                let posl_quat = Quat::from_mat3(&Mat3::from_cols(x_axis, y_axis, z_axis));
                 #[cfg(debug_assertions)]
                 {
                     dbg!(quat_to_pdms_ori_str(&posl_quat));
@@ -850,7 +920,9 @@ impl PdmsDataInterface for AiosDBManager {
                 translation,
                 scale: Vec3::ONE,
             };
-            if trans.is_nan() { return Ok(None); }
+            if trans.is_nan() {
+                return Ok(None);
+            }
             self.cached_world_transforms_map
                 .entry(refno)
                 .or_insert(trans);
@@ -859,9 +931,16 @@ impl PdmsDataInterface for AiosDBManager {
         if self.db_option.debug_print_world_transform {
             let rot_mat = Mat3::from_quat(rotation);
             let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
-            println!("{} : {} {:?}", refno.to_refno_str(), rot_mat, (translation, ori_str));
+            println!(
+                "{} : {} {:?}",
+                refno.to_refno_str(),
+                rot_mat,
+                (translation, ori_str)
+            );
         }
-        if rotation.is_nan() || translation.is_nan() { return Ok(None); }
+        if rotation.is_nan() || translation.is_nan() {
+            return Ok(None);
+        }
         Ok(Some(Transform {
             rotation,
             translation,
@@ -870,9 +949,14 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///获得子节点集合的属性
-    async fn get_travel_children_attrs(&self, refno: RefU64, nouns: &[&str]) -> anyhow::Result<Vec<AttrMap>> {
+    async fn get_travel_children_attrs(
+        &self,
+        refno: RefU64,
+        nouns: &[&str],
+    ) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
-        let children = query_deep_children_refnos_fuzzy(&self.get_arango_db().await?, &[refno], nouns).await?;
+        let children =
+            query_deep_children_refnos_fuzzy(&self.get_arango_db().await?, &[refno], nouns).await?;
         for child in children {
             let attr = self.get_attr_from_localdb(child).unwrap_or_default();
             r.push(attr);
@@ -880,25 +964,46 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(r)
     }
 
-
     ///指定refno获得在一定范围的构件参考号列表
-    async fn get_refnos_within_bound_radius(&self, refno: RefU64, distance: f32) -> anyhow::Result<Vec<RefU64>> {
+    async fn get_refnos_within_bound_radius(
+        &self,
+        refno: RefU64,
+        distance: f32,
+    ) -> anyhow::Result<Vec<RefU64>> {
         let db = &self.get_arango_db().await?;
-        let instances = query_insts_shape_data(db, &[refno], &[GeoBasicType::Pos, GeoBasicType::Compound]).await?;
-        if instances.inst_info_map.is_empty() { return Ok(vec![]); }
-        let pos = instances.inst_info_map.iter().next().unwrap().1.world_transform.translation;
+        let instances =
+            query_insts_shape_data(db, &[refno], &[GeoBasicType::Pos, GeoBasicType::Compound])
+                .await?;
+        if instances.inst_info_map.is_empty() {
+            return Ok(vec![]);
+        }
+        let pos = instances
+            .inst_info_map
+            .iter()
+            .next()
+            .unwrap()
+            .1
+            .world_transform
+            .translation;
         self.get_refnos_within_bound_radius_by_pos(pos, distance)
     }
 
     ///指定pos获得在一定范围的构件参考号列表
-    fn get_refnos_within_bound_radius_by_pos(&self, pos: Vec3, distance: f32) -> anyhow::Result<Vec<RefU64>> {
-        let rtree = self.rtree.as_ref().ok_or(anyhow::anyhow!("空间树未生成。"))?;
-        let target_refnos = rtree.query_within_distance(pos, distance)
+    fn get_refnos_within_bound_radius_by_pos(
+        &self,
+        pos: Vec3,
+        distance: f32,
+    ) -> anyhow::Result<Vec<RefU64>> {
+        let rtree = self
+            .rtree
+            .as_ref()
+            .ok_or(anyhow::anyhow!("空间树未生成。"))?;
+        let target_refnos = rtree
+            .query_within_distance(pos, distance)
             .map(|x| x.0)
             .collect();
         Ok(target_refnos)
     }
-
 
     ///获取对应的截面sweep 线，包含了sctn的处理情况
     fn get_spline_path(&self, refno: RefU64) -> anyhow::Result<Vec<Spine3D>> {
@@ -923,9 +1028,9 @@ impl PdmsDataInterface for AiosDBManager {
                     let mid_pt = att2.get_position().unwrap_or_default();
                     let cur_type_str = att2.get_str("CURTYP").unwrap_or("unset");
                     let curve_type = match cur_type_str {
-                        "CENT" => { SpineCurveType::CENT }
-                        "THRU" => { SpineCurveType::THRU }
-                        _ => { SpineCurveType::UNKNOWN }
+                        "CENT" => SpineCurveType::CENT,
+                        "THRU" => SpineCurveType::THRU,
+                        _ => SpineCurveType::UNKNOWN,
                     };
                     paths.push(Spine3D {
                         pt0,
