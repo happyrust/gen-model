@@ -22,7 +22,7 @@ gen_model = true
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树
-gen_spatial_tree = true
+gen_spatial_tree = false
 save_spatial_tree_to_db = true
 gen_model_batch_size = 100
 
@@ -317,7 +317,8 @@ puhua_database_password = ""
 #debug_root_refnos = ["25688/7972"]
 #debug_root_refnos = ["25688/7971"]
 #debug_root_refnos = ["25688/8188"]
-debug_root_refnos = ["24381/102939"]
+# debug_root_refnos = ["17496/172226"]
+debug_root_refnos = ["24381/36945"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 #room_root_refnos = ["24381/34110"]
@@ -326,7 +327,3 @@ room_root_refnos = ["24381/36068"]
 
 #room_root_refnos = ["24381/35622"]
 #24381_105593\
-
-
-
-

@@ -94,10 +94,10 @@ pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
                 resolve_to_cate_geo_params(&gm_data)
                     .expect("resolve geom failed")
             })
-                .map_err(|e| anyhow!("元件库求解失败."))
+                .map_err(|e| anyhow::anyhow!("元件库求解失败."))
         }
         Err(e) => {
-            Err(anyhow!(format!("几何数据解析失败: {:?}, 原因：{}", des_refno.to_refno_string(), &e)))
+            Err(anyhow::anyhow!(format!("几何数据解析失败: {:?}, 原因：{}", des_refno.to_refno_string(), &e)))
         }
     }
 }
@@ -401,7 +401,7 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
         }
         "PTPOS" => {
             let (dir, ref_dir,  pos)  = resolve_dir_and_pos(axis_param, scom, context, interface)?;
-            let pnt_index_str = axis_param.pnt_index_str.as_ref().ok_or(anyhow!("pnt_index_str 错误"))?;
+            let pnt_index_str = axis_param.pnt_index_str.as_ref().ok_or(anyhow::anyhow!("pnt_index_str 错误"))?;
             let paras = pnt_index_str.split_whitespace().map(|x| x.trim().to_owned()).collect::<Vec<_>>();
             if paras.len() == 2 {
                 let pnt_index = paras[1].parse::<i32>().unwrap_or(i32::MAX);

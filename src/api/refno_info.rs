@@ -65,7 +65,7 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>/*, mdb_dbnums: &BTreeSet<i3
         Err(e) => {
             dbg!(&e);
             dbg!(sql);
-            return Err(anyhow!(e.to_string()));
+            return Err(anyhow::anyhow!(e.to_string()));
         }
     }
     Ok(true)

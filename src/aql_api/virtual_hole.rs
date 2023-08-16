@@ -26,7 +26,7 @@ pub async fn get_plugging_hole_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManage
         let cable_area = get_cable_area(refno).await?.unwrap_or(0.0);
         // 封堵面积
         let plugging_area = hole_area - cable_area;
-        if plugging_area < 0.0 { return Err(anyhow!("电缆面积大于孔洞面积，请排查错误")); };
+        if plugging_area < 0.0 { return Err(anyhow::anyhow!("电缆面积大于孔洞面积，请排查错误")); };
         // 填充率
         let Some(fill_percent) = get_cable_fill_percent().await? else { continue; };
         // 封堵体积

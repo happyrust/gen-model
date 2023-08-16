@@ -28,7 +28,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     //传入额外的参数进来，用于解析轴线参数
     desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
 ) -> anyhow::Result<CateGeomsInfo> {
-    let interface = interface.ok_or(anyhow!("unknown interface"))?;
+    let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
     let desi_att = interface.get_attr_from_localdb(refno)?;
     //todo 改到使用图数据库去查找
     if scom_ref.is_none() {
@@ -58,7 +58,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         }
     }
     // dbg!(scom_ref);
-    let scom_ref = scom_ref.ok_or(anyhow!(format!(
+    let scom_ref = scom_ref.ok_or(anyhow::anyhow!(format!(
         "SCOM not exist in element: {}",
         refno.to_refno_str()
     )))?;
@@ -79,7 +79,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
                 let error_info = format!("Design的元件：{} 使用的元件库: {} 解析出错 {}",
                                          refno.to_refno_string(), scom_ref.to_refno_string(), e.to_string());
                 println!("{}", &error_info);
-                return Err(anyhow!(error_info));
+                return Err(anyhow::anyhow!(error_info));
             }
         }
     }
@@ -166,11 +166,11 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     refno: RefU64,
     interface: Option<&T>,
 ) -> anyhow::Result<ScomInfo> {
-    let interface = interface.ok_or(anyhow!("unknown interface"))?;
+    let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
     let attr_map = interface.get_attr_from_localdb(refno)?;
     let type_noun = attr_map
         .get_type_cloned()
-        .ok_or(anyhow!(format!("{} 元件库属性不正确: {:?}", refno.to_refno_string(), &attr_map)))?;
+        .ok_or(anyhow::anyhow!(format!("{} 元件库属性不正确: {:?}", refno.to_refno_string(), &attr_map)))?;
     let ptref_name = match type_noun.as_str() {
         "SPRF" => "PSTR",
         _ => "PTRE"
@@ -253,7 +253,7 @@ pub async fn query_axis_params<T: PdmsDataInterface>(
     interface: Option<&T>,
 ) -> anyhow::Result<BTreeMap<i32, AxisParam>> {
     // 查找ptse
-    let interface = interface.ok_or(anyhow!("unknown interface"))?;
+    let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
     let mut map = BTreeMap::new();
     let refno = attr_map.get_refno().unwrap_or_default();
     let children = interface.get_children_attrs(refno)?;
@@ -272,7 +272,7 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     attr_map: &AttrMap,
     interface: Option<&T>,
 ) -> anyhow::Result<Vec<GmParam>> {
-    let interface = interface.ok_or(anyhow!("unknown interface"))?;
+    let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
     let children = interface.get_travel_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
