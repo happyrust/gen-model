@@ -752,8 +752,15 @@ async fn test_get_attr() -> anyhow::Result<()> {
 
 #[test]
 fn test_compute_distance() {
-    let x = Vec3::new(3460.0, 9230.0, 5013.23);
-    let y = Vec3::new(3460.0, 9230.0, 5081.305);
-    let distance = x.distance(y);
-    dbg!(&distance);
+    let x = Vec3::new(19373.929 ,-2923.338, 15286.0);
+    let y = Vec3::new(19381.39, -2894.83, 15286.0);
+    let arrive = x.distance(y);
+    let z = Vec3::new(19381.39,-2865.362, 15286.0);
+    let leave = z.distance(y);
+    let inst_a = Vec3::new(28.508010864257812,7.4603271484375,0.0);
+    let inst_b = Vec3::new(0.0,0.0,0.0);
+    let inst_dis = inst_a.distance(inst_b);
+    dbg!(&inst_dis);
+    dbg!(&arrive);
+    dbg!(&leave);
 }
