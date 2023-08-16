@@ -657,7 +657,9 @@ pub async fn gen_cata_geos(
                         else {
                             continue;
                         };
-                        let mut is_reuse_unit = false;
+                        if ele_refno.get_1() == 48687 {
+                            dbg!(&brep_shapes_map);
+                        }
                         ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
                         for (ele_refno, shapes) in brep_shapes_map {
                             let Ok(Some(mut o)) = mgr_clone.get_world_transform(ele_refno).await
@@ -2047,7 +2049,10 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             continue;
                         };
                         let mat4 = p_inst.transform.compute_matrix();
+                        dbg!(&p_inst.transform);
+                        dbg!(parent_mesh.vertices.len());
                         let mut tmp_manifold: ManifoldRust = (parent_mesh, &mat4).into();
+                        dbg!(tmp_manifold.num_tri());
                         pos_monifolds.push(tmp_manifold);
                     }
                     let mut parent_manifold = ManifoldRust::batch_boolean(&pos_monifolds, 0);

@@ -8,8 +8,8 @@ incr_sync = false
 replace_dbs = true
 
 #项目设置
-project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
-included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
+project_path = "D:/AVEVA/Projects/E3D2.1" #TestCatalogue
+included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ", "AvevaPlantSample"]
 #included_projects = ["SCB", "ZDJ"]  #"AvevaPlantSample",
 #included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
 
@@ -39,9 +39,9 @@ arangodb_password = ""
 #tidb 配置
 ip = "127.0.0.1"
 user = "root"
-password = ""
-#port = "3306"
-port = "4000"
+password = "root"
+port = "3306"
+#port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
@@ -64,8 +64,8 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 included_db_files = ["ams1112_0001"]
 #included_db_files = ["acp7002_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
-manual_db_nums = [7997]
-#manual_db_nums = [1112]  #, 8000
+#  manual_db_nums = [7000]
+manual_db_nums = [1112]  #, 8000
 plat_url = ""
 
 #puhua
@@ -74,7 +74,7 @@ puhua_database_user = ""
 puhua_database_password = ""
 
 #joint还有问题，方位对齐的问题
-#debug_root_refnos = ["23708/26027"]
+debug_root_refnos = ["25688/48687"]
 
 
 #管道不出来的情况，需要查一下原因, *以解决
@@ -317,8 +317,7 @@ puhua_database_password = ""
 #debug_root_refnos = ["25688/7972"]
 #debug_root_refnos = ["25688/7971"]
 #debug_root_refnos = ["25688/8188"]
-# debug_root_refnos = ["17496/172226"]
-debug_root_refnos = ["24381/36945"]
+#debug_root_refnos = ["17496/172226"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 #room_root_refnos = ["24381/34110"]

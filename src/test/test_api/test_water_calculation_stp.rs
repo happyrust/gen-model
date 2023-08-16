@@ -129,7 +129,7 @@ async fn test_export_water_calculation_stp_2() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
     //孔洞封堵
-    // export_stp(&mgr, stp_packet).await?;
+    export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
