@@ -20,7 +20,7 @@ use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
 use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{ArDatabase, remove_arangodb_with_refno_key, save_arangodb_doc};
+use crate::graph_db::pdms_arango::{ArDatabase, remove_arangodb_with_refno_key, save_arangodb_doc, update_arangodb_doc};
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 /// 正则匹配字符串中的数字
@@ -71,7 +71,7 @@ async fn query_hole_data_tidb(id: u32, pool: &Pool<MySql>) -> Option<DataCenterI
     None
 }
 
-pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>,project_code:&str, database: &ArDatabase) -> Option<Vec<DataCenterInstance>> {
+pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>, project_code: &str, database: &ArDatabase) -> Option<Vec<DataCenterInstance>> {
     let mut instances_result = Vec::new();
     let Ok(instances) = query_hole_data_by_keys_aql(keys, &database).await else { return Some(instances_result); };
     for (idx, instance) in instances.into_iter().enumerate() {
@@ -800,23 +800,33 @@ pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, dat
     ").bind_var("keys", keys);
     let result = database.aql_query::<Vec<()>>(edge_aql).await?;
     // 重新插入新的边
-    match replace_hole_data_edge(&datas, &database).await{
+    match replace_hole_data_edge(&datas, &database).await {
         Ok(_) => {}
         Err(e) => {
-            return Ok(e.to_string())
+            return Ok(e.to_string());
         }
     }
+    let data_len = datas.len();
     // 替换数据
-    let json = serde_json::to_value(&datas);
-    if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
-    let json = json.unwrap();
-    match save_arangodb_doc(json, AQL_HOLE_DATA_COLLECTION, &database, true).await {
-        Ok(_) => {}
-        Err(e) => {
-            return Ok(e.to_string())
+    for data in datas {
+        let json = serde_json::to_value(&data)?;
+        match update_arangodb_doc(&data._key,json, AQL_HOLE_DATA_COLLECTION, &database).await {
+            Ok(_) => {}
+            Err(e) => {
+                return Ok(e.to_string());
+            }
         }
     }
-    Ok(format!("替换 {} 条数据 成功",datas.len()))
+    // let json = serde_json::to_value(&datas);
+    // if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
+    // let json = json.unwrap();
+    // match save_arangodb_doc(json, AQL_HOLE_DATA_COLLECTION, &database, true).await {
+    //     Ok(_) => {}
+    //     Err(e) => {
+    //         return Ok(e.to_string())
+    //     }
+    // }
+    Ok(format!("替换 {} 条数据 成功", data_len))
 }
 
 async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArDatabase) -> anyhow::Result<()> {
@@ -898,17 +908,17 @@ pub async fn query_hole_data_total_aql(database: &ArDatabase) -> anyhow::Result<
 }
 
 /// 删除孔洞的信息，并删除边
-pub async fn delete_hole_data_aql(keys:Vec<String>,database:&ArDatabase) -> anyhow::Result<bool> {
+pub async fn delete_hole_data_aql(keys: Vec<String>, database: &ArDatabase) -> anyhow::Result<bool> {
     let edge_aql = AqlQuery::new("\
     for key in @keys
         for c,e in 1 inbound CONCAT('hole_data/',key) hole_edge
             REMOVE e._key IN hole_edge
-    ").bind_var("keys",keys.clone());
+    ").bind_var("keys", keys.clone());
     let result = database.aql_query::<Vec<()>>(edge_aql).await;
     let data_aql = AqlQuery::new("\
     for key in @keys
        REMOVE key IN hole_data
-    ").bind_var("keys",keys);
+    ").bind_var("keys", keys);
     let result = database.aql_query::<Vec<()>>(data_aql).await;
     Ok(!result.is_err())
 }
@@ -982,7 +992,7 @@ async fn test_gen_stucj_data_aql() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let keys = vec!["8DB55F00DF18E30-B32E-19".to_string()];
-    let instances = gen_hole_datacenter_instance_aql(keys, &db_option.project_code,&database).await.unwrap_or_default();
+    let instances = gen_hole_datacenter_instance_aql(keys, &db_option.project_code, &database).await.unwrap_or_default();
     let mut file = fs::File::create("孔洞_aql.json")?;
     let data = DataCenterProject {
         package_code: DataCenterProject::convert_package_code(),
