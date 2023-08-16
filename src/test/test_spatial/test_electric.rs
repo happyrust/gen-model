@@ -8,7 +8,7 @@ use aios_core::pdms_types::RefU64;
 ///获得branch下的所有托臂
 #[tokio::test]
 async fn test_query_support_arms() -> anyhow::Result<()> {
-    let bran_refno: RefU64 = "24383/95023".into();
+    let bran_refno: RefU64 = RefU64::from_refno_str("24383/95023").unwrap();
     let mgr = get_test_ams_db_manager_async().await;
     let support_arms = mgr
         .query_children_around_eles_within_radius(bran_refno, true, None, true, &["SCTN"], &[])
