@@ -1,13 +1,13 @@
 //for test
 // let compute_contains_refno = query_room_refnos_aql(test_room_refno, Some(E), &database).await?;
 
-use std::str::FromStr;
-use aios_core::pdms_types::RefU64;
-use regex::Regex;
-use aios_core::pdms_types::UdaMajorType::T;
 use crate::aql_api::pdms_room;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::test::test_helper::get_test_ams_db_manager_async;
+use aios_core::pdms_types::RefU64;
+use aios_core::pdms_types::UdaMajorType::T;
+use regex::Regex;
+use std::str::FromStr;
 
 ///  测试获取有负实体的parent
 #[tokio::test]
@@ -148,12 +148,11 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
 //     Ok(())
 // }
 
-
 #[tokio::test]
 async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    use aios_core::options::DbOption;
     use crate::aql_api::pdms_room;
+    use aios_core::options::DbOption;
+    use config::{Config, ConfigError, Environment, File};
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
         .build()?;
@@ -167,21 +166,22 @@ async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    use aios_core::options::DbOption;
     use crate::aql_api::pdms_room;
+    use aios_core::options::DbOption;
+    use config::{Config, ConfigError, Environment, File};
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let refno = RefU64::from_url_refno("24381_178638").unwrap();
-    let name = pdms_room::query_room_info_from_refno(refno, "FRMW", &database).await?.unwrap();
+    let name = pdms_room::query_room_info_from_refno(refno, "FRMW", &database)
+        .await?
+        .unwrap();
     let room_name = pdms_room::get_room_name_split(&name).unwrap();
     dbg!(&room_name);
     Ok(())
 }
-
 
 #[test]
 fn test_json() {
