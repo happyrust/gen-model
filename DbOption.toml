@@ -1,5 +1,5 @@
 #同步文件配置false
-total_sync = false
+total_sync = true
 enable_log = false
 sync_graph_db = true
 sync_tidb = true
@@ -8,7 +8,7 @@ incr_sync = false
 replace_dbs = true
 
 #项目设置
-project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
+project_path = "D:/new/AVEVA/Plant/Projects12.1.SP4" #TestCatalogue
 included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
 #included_projects = ["SCB", "ZDJ"]  #"AvevaPlantSample",
 #included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
@@ -18,11 +18,11 @@ project_name = "AvevaMarineSample"
 project_code = 1516
 module = "DESI"
 #是否生成模型数据
-gen_model = false
+gen_model = true
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树
-gen_spatial_tree = true
+gen_spatial_tree = false
 save_spatial_tree_to_db = true
 gen_model_batch_size = 100
 
@@ -40,8 +40,8 @@ arangodb_password = ""
 ip = "127.0.0.1"
 user = "root"
 password = ""
-#port = "3306"
-port = "4000"
+port = "3306"
+#port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
@@ -317,7 +317,8 @@ puhua_database_password = ""
 #debug_root_refnos = ["25688/7972"]
 #debug_root_refnos = ["25688/7971"]
 #debug_root_refnos = ["25688/8188"]
-debug_root_refnos = ["24381/102939"]
+# debug_root_refnos = ["17496/172226"]
+debug_root_refnos = ["24381/36945"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
 #room_root_refnos = ["24381/34110"]
@@ -326,7 +327,3 @@ room_root_refnos = ["24381/36068"]
 
 #room_root_refnos = ["24381/35622"]
 #24381_105593\
-
-
-
-

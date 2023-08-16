@@ -13,10 +13,10 @@ pub async fn get_penetration_detail_by_refno(aios_mgr: &AiosDBManager, refno_vec
         if let Ok(Some(translation)) = aios_mgr.get_world_transform(i.0.clone()).await {
             data.position = translation.translation;
         }
-        //X偏移角
+        // //X偏移角
         get_x_deviation_angle(&mut data);
         //壳内房间号和壳外房间号
-        get_room_number(&mut data);
+        // get_room_number(&mut data);
         if let Ok(attr) = aios_mgr.get_attr(i.0.clone()).await {
             data.owner_refno = i.1.clone();
             data.refno = i.0.clone();

@@ -124,7 +124,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     if input_expr.contains(" OF ") {
         // // dbg!(&input_expr);
         let re = Regex::new(r"([A-Z\s]+) OF (PREV|NEXT|\d+/\d+)").unwrap();
-        // let interface = Arc::new(interface.ok_or(anyhow!("unknown interface"))?);
+        // let interface = Arc::new(interface.ok_or(anyhow::anyhow!("unknown interface"))?);
         for caps in re.captures_iter(&input_expr) {
             let s = &caps[0];
             let c1 = caps.get(1).map_or("", |m| m.as_str());
@@ -220,7 +220,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                 found_replaced = true;
             } else if is_some_param {
                 if !replace_err_by_zero {
-                    return Err(anyhow!(format!("{input_expr}： {} not found.", &k)));
+                    return Err(anyhow::anyhow!(format!("{input_expr}： {} not found.", &k)));
                 }
                 println!("{input_expr}： {} not found, use 0.", &k);
                 result_exp = result_exp.replace(s, " 0");
@@ -330,12 +330,12 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         }
         Err(_) => {
             return if let Ok(mut stack) = Stack::init(&result_string) {
-                stack.eval().ok_or(anyhow!(format!("后缀表达式求解失败 {}", &input_expr)))
+                stack.eval().ok_or(anyhow::anyhow!(format!("后缀表达式求解失败 {}", &input_expr)))
             } else {
                 // println!("输入表达式 : {}", &input_expr);
                 // dbg!(&context);
                 // println!("计算后表达式 : {}", &result_string);
-                Err(anyhow!(format!("求解失败 {}", &input_expr)))
+                Err(anyhow::anyhow!(format!("求解失败 {}", &input_expr)))
             };
         }
     }
@@ -606,7 +606,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
         }
     });
     // Ok(geo.expect(&format!("几何体生成出错, 数据: {:?}", &gmse)))
-    geo.map_err(|x| anyhow!(format!("几何体生成出错, 数据: {:?}", &gmse)))
+    geo.map_err(|x| anyhow::anyhow!(format!("几何体生成出错, 数据: {:?}", &gmse)))
 }
 
 pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
@@ -630,7 +630,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
                 dir = flag * mem::take(&mut axis.dir);
                 pos = flag *  mem::take(&mut axis.pt);
             }else{
-                return Err(anyhow!("未找到点索引: {}", pnt_indx));
+                return Err(anyhow::anyhow!("未找到点索引: {}", pnt_indx));
             }
         }
     } else {
@@ -646,7 +646,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
                 let flag = if is_neg { -1.0 } else { 1.0 };
                 ref_dir = flag * mem::take(&mut axis.dir);
             }else{
-                return Err(anyhow!("未找到点索引: {}", pnt_indx));
+                return Err(anyhow::anyhow!("未找到点索引: {}", pnt_indx));
             }
         }
     } else {
@@ -662,7 +662,7 @@ pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(ori_str: &str, context: &BTre
     let dir_strs = ori_str.split(" and ").collect::<Vec<_>>();
     // dbg!(&dir_strs);
     if dir_strs.len() < 2 {
-        return Err(anyhow!("不是方位字符串"));
+        return Err(anyhow::anyhow!("不是方位字符串"));
     };
     let mut mat = Mat3::IDENTITY;
     let mut comb_dir_str = String::new();
@@ -671,7 +671,7 @@ pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(ori_str: &str, context: &BTre
         let strs = d.split("is").collect::<Vec<_>>();
         // dbg!(&strs);
         if strs.len() != 2 {
-            return Err(anyhow!("不是方位字符串"));
+            return Err(anyhow::anyhow!("不是方位字符串"));
         }
 
         // dbg!(d.chars().next().unwrap());
@@ -747,7 +747,7 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeM
         }
     }
     let dir_str = new_dir_str.replace(" ", "");
-    let v = parse_expr_to_dir(&dir_str).ok_or(anyhow!(format!("方向字符串: {} 不正确。", pdir)))?;
+    let v = parse_expr_to_dir(&dir_str).ok_or(anyhow::anyhow!(format!("方向字符串: {} 不正确。", pdir)))?;
     Ok(v)
 }
 

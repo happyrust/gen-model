@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::{env, fs};
+
 use std::io::Write;
 use aios_core::create_attas_structs::VirtualHoleGraphNode;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject, HoleType, ItemValue};
@@ -16,6 +17,7 @@ use regex::Regex;
 use sqlx::{Error, Executor, MySql, Pool, Row};
 use sqlx::mysql::{MySqlQueryResult, MySqlRow};
 use aios_core::create_attas_structs::VirtualHoleGraphNodeQuery;
+use config::{Config, File};
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
 use crate::data_center_api::data_api::get_refno_latest_version;
@@ -906,6 +908,19 @@ pub async fn query_hole_data_total_aql(database: &ArDatabase) -> anyhow::Result<
     let result = database.aql_query::<VirtualHoleGraphNodeQuery>(aql).await?;
     Ok(result)
 }
+
+#[tokio::test]
+async fn test_query_hole_data_total_aql() {
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build().unwrap();
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await.unwrap();
+    if let Ok(result) = query_hole_data_total_aql(&database).await {
+        dbg!(&result);
+    }
+}
+
 
 /// 删除孔洞的信息，并删除边
 pub async fn delete_hole_data_aql(keys: Vec<String>, database: &ArDatabase) -> anyhow::Result<bool> {

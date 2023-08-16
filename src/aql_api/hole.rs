@@ -52,7 +52,7 @@ pub async fn query_hole_elements(refno: RefU64, database: &ArDatabase) -> anyhow
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
         .bind_var("id", id);
     let result = database.aql_query::<PdmsElement>(aql).await?;
-    if result.len() > 10000 { return Err(anyhow!("超过最大查询数量!")); }
+    if result.len() > 10000 { return Err(anyhow::anyhow!("超过最大查询数量!")); }
     Ok(result)
 }
 

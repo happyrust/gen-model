@@ -11,7 +11,7 @@ impl StackItem {
     pub fn get_f64(&self) -> anyhow::Result<f64> {
         match self {
             StackItem::Number(x) => Ok(x.to_owned()),
-            _ => Err(anyhow!("unwrap called on non-numeric value".to_string())),
+            _ => Err(anyhow::anyhow!("unwrap called on non-numeric value".to_string())),
         }
     }
 }
@@ -54,7 +54,7 @@ impl Stack {
             }
         });
         if has_error.is_some() {
-            return Err(anyhow!(format!("表达式: {}有错误", input)));
+            return Err(anyhow::anyhow!(format!("表达式: {}有错误", input)));
         }
         Ok(Stack {
             stack,
