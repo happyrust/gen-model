@@ -230,7 +230,7 @@ impl AiosDBManager {
 
     ///计算所有房间包含的其他参考号
     pub async fn calculate_rooms(&self) -> anyhow::Result<()> {
-        let rtree = self.rtree.as_ref().ok_or(anyhow!("空间树未生成。"))?;
+        let rtree = self.rtree.as_ref().ok_or(anyhow::anyhow!("空间树未生成。"))?;
         let database = self.get_arango_db().await?;
         //指定哪个site下有房间节点
         let Some(room_root_refnos) = &self.db_option.room_root_refnos else {
@@ -296,7 +296,7 @@ impl AiosDBManager {
             .add_source(File::with_name("DbOption"))
             .build()?;
         s.try_deserialize::<DbOption>()
-            .map_err(|x| anyhow!(x.to_string()))
+            .map_err(|x| anyhow::anyhow!(x.to_string()))
     }
 
     ///获得默认的连接字符串
@@ -318,7 +318,7 @@ impl AiosDBManager {
             .acquire_timeout(Duration::from_secs(10 * 60))
             .connect(url)
             .await
-            .map_err({ |x| anyhow!(x.to_string()) })
+            .map_err({ |x| anyhow::anyhow!(x.to_string()) })
     }
 
     ///获得默认的连接字符串
@@ -340,7 +340,7 @@ impl AiosDBManager {
             .acquire_timeout(Duration::from_secs(10 * 60))
             .connect(url)
             .await
-            .map_err({ |x| anyhow!(x.to_string()) })
+            .map_err({ |x| anyhow::anyhow!(x.to_string()) })
     }
 
     #[inline]
@@ -362,7 +362,7 @@ impl AiosDBManager {
             .acquire_timeout(Duration::from_secs(10 * 60))
             .connect(url)
             .await
-            .map_err({ |x| anyhow!(x.to_string()) })
+            .map_err({ |x| anyhow::anyhow!(x.to_string()) })
     }
 
     ///获取mysql数据库模糊查询的连接pool
@@ -375,7 +375,7 @@ impl AiosDBManager {
             .acquire_timeout(Duration::from_secs(10 * 60))
             .connect(url)
             .await
-            .map_err({ |x| anyhow!(x.to_string()) })
+            .map_err({ |x| anyhow::anyhow!(x.to_string()) })
     }
 
     ///获取图数据库的连接pool
@@ -390,13 +390,13 @@ impl AiosDBManager {
     pub async fn get_default_pool(conn_str: &str) -> anyhow::Result<Pool<MySql>> {
         MySqlPool::connect(conn_str)
             .await
-            .map_err(|x| anyhow!(x.to_string()))
+            .map_err(|x| anyhow::anyhow!(x.to_string()))
     }
 
 
     /// 初始化mdb
     pub async fn init_mdb(&mut self, project: &str, mdb: &str, module: &str) -> anyhow::Result<()> {
-        let project_pool = self.get_project_pool(project).ok_or(anyhow!("Unknown project pool"))?;
+        let project_pool = self.get_project_pool(project).ok_or(anyhow::anyhow!("Unknown project pool"))?;
         println!("正在初始化mdb: {mdb}");
         let mut conn = project_pool.acquire().await?;
         let time = Instant::now();
@@ -590,7 +590,7 @@ impl AiosDBManager {
         let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
         for v in result {
             if let project = v.get::<String, _>(1) {
-                let project_pool = self.get_project_pool(&project).ok_or(anyhow!("Unknown project pool"))?;
+                let project_pool = self.get_project_pool(&project).ok_or(anyhow::anyhow!("Unknown project pool"))?;
                 if let Some(world_refno) = query_world_refno_by_dbno(db_num, &project_pool).await? {
                     let db_type = v.get::<String, _>(0);
                     return Ok(Some(DbQuickInfo {

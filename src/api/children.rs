@@ -228,7 +228,7 @@ impl AiosDBManager{
             }
             refno = basic.get_owner();
         }
-        Err(anyhow!("not exist"))
+        Err(anyhow::anyhow!("not exist"))
     }
 
     pub fn get_ancestor_refno_till_type(&self, mut refno: RefU64, att_types: &[&str]) -> Option<RefU64> {

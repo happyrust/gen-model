@@ -10,15 +10,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use bitflags::bitflags;
 use dashmap::DashMap;
 
-// pub enum GeoEnum {
-//     ALL,
-//     PRIM,
-//     LOOP,
-//     CATA,
-// }
-
 bitflags! {
-    // #[derive(, Copy, Clone, PartialEq, Eq, Hash)]
     pub struct GeoEnum: u8 {
         const PRIM = 0x1 << 1;
         const LOOP = 0x1 << 2;

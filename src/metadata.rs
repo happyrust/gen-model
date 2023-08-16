@@ -219,7 +219,7 @@ fn read_excel_file_to_sql(file_path: &str) -> anyhow::Result<(DashMap<u64, Metad
     let mut workbook: Xlsx<_> = open_workbook(file_path)?;
     // 树节点数据
     let range = workbook.worksheet_range("对象")
-        .ok_or(anyhow!("Cannot find Sheet '对象'"))??;
+        .ok_or(anyhow::anyhow!("Cannot find Sheet '对象'"))??;
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
     let mut b_head = true; // 第一个默认为根节点
     while let Some(result) = iter.next() {
@@ -255,7 +255,7 @@ fn read_excel_file_to_sql(file_path: &str) -> anyhow::Result<(DashMap<u64, Metad
     // 表格的数据
     let mut table_map = Vec::new();
     let range_two = workbook.worksheet_range("属性")
-        .ok_or(anyhow!("Cannot find Sheet '属性'"))??;
+        .ok_or(anyhow::anyhow!("Cannot find Sheet '属性'"))??;
     let mut iter = RangeDeserializerBuilder::new().from_range(&range_two)?;
     while let Some(result) = iter.next() {
         let v: MetadataManagerExcelTableData = result?;

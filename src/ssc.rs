@@ -175,7 +175,7 @@ fn get_room_level_from_excel() -> anyhow::Result<(Vec<(String, Vec<String>)>, Da
     let mut workbook: Xlsx<_> = open_workbook("resource/专业分类.xlsx")?;
     dbg!("加载专业分类.xlsx 成功");
     let range = workbook.worksheet_range("Sheet2")
-        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+        .ok_or(anyhow::anyhow!("Cannot find 'Sheet1'"))??;
     dbg!("打开Sheet2成功");
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
@@ -251,7 +251,7 @@ pub fn get_room_level_from_excel_refactor() -> anyhow::Result<SscMajorCodeExcel>
     let mut workbook: Xlsx<_> = open_workbook("resource/专业分类.xlsx")?;
     dbg!("加载专业分类.xlsx 成功");
     let range = workbook.worksheet_range("Sheet2")
-        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+        .ok_or(anyhow::anyhow!("Cannot find 'Sheet1'"))??;
     dbg!("打开Sheet2成功");
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
@@ -311,7 +311,7 @@ pub fn parse_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i
     let mut r = HashMap::new();
     let mut workbook: Xlsx<_> = open_workbook("resource/ssc_room.xlsx")?;
     let range = workbook.worksheet_range("Sheet1")
-        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+        .ok_or(anyhow::anyhow!("Cannot find 'Sheet1'"))??;
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
 
@@ -337,7 +337,7 @@ pub fn get_rooms_from_excel() -> anyhow::Result<Vec<String>> {
     let mut r = vec![];
     let mut workbook: Xlsx<_> = open_workbook("../resource/ssc_room.xlsx")?;
     let range = workbook.worksheet_range("Sheet1")
-        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+        .ok_or(anyhow::anyhow!("Cannot find 'Sheet1'"))??;
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
 
@@ -911,7 +911,7 @@ async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
 
     let mut workbook: Xlsx<_> = open_workbook("resource/ssc_level.xlsx")?;
     let range = workbook.worksheet_range("Sheet1")
-        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+        .ok_or(anyhow::anyhow!("Cannot find 'Sheet1'"))??;
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
 
