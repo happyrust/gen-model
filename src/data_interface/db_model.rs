@@ -1,40 +1,38 @@
-use glam::Vec3;
-use once_cell::sync::Lazy;
-use smol_str::SmolStr;
-use arangors_lite::AqlQuery;
-use parry3d::bounding_volume::{Aabb, BoundingVolume};
-use aios_core::pdms_types::*;
 use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
-use parry3d::query::{Ray, RayCast};
-use parry3d::math::{Isometry, Vector};
-use anyhow::anyhow;
-use std::collections::{HashMap, HashSet};
 use aios_core::options::DbOption;
-use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
-use sqlx::pool::PoolOptions;
-use std::time::{Duration, Instant};
-use log::{error, info};
-use dashmap::DashMap;
-use std::sync::{Arc, Mutex};
-use aios_core::tool::db_tool::{db1_dehash, db1_hash, GLOBAL_UDA_NAME_MAP};
-use tokio::sync::{mpsc, RwLock};
-use aios_core::pdms_data::ScomInfo;
-use aios_core::parsed_data::CateGeomsInfo;
-use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
 use aios_core::parsed_data::geo_params_data::CateGeoParam::TubeImplied;
-use std::default;
-use bevy_transform::prelude::Transform;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-use std::mem::take;
+use aios_core::parsed_data::CateGeomsInfo;
+use aios_core::pdms_data::ScomInfo;
+use aios_core::pdms_types::*;
 use aios_core::prim_geo::cylinder::SCylinder;
+use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
 use aios_core::prim_geo::TUBI_GEO_HASH;
-use tokio_stream::wrappers::UnboundedReceiverStream;
+use aios_core::tool::db_tool::{db1_dehash, db1_hash, GLOBAL_UDA_NAME_MAP};
+use anyhow::anyhow;
 use approx::abs_diff_eq;
+use arangors_lite::AqlQuery;
+use bevy_transform::prelude::Transform;
+use dashmap::DashMap;
 use futures::StreamExt;
+use glam::Vec3;
+use log::{error, info};
+use once_cell::sync::Lazy;
+use parry3d::bounding_volume::{Aabb, BoundingVolume};
+use parry3d::math::{Isometry, Vector};
+use parry3d::query::{Ray, RayCast};
+use smol_str::SmolStr;
+use sqlx::pool::PoolOptions;
+use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
+use std::collections::{HashMap, HashSet};
+use std::default;
+use std::mem::take;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::sync::{mpsc, RwLock};
+use tokio_stream::wrappers::UnboundedReceiverStream;
 // use heed::byteorder::BE;
 // use heed::EnvOpenOptions;
-use nalgebra::Point3;
-use rayon::prelude::*;
 use crate::api::attr::{query_attr, query_uda_ukey_udna_all};
 use crate::api::children::*;
 use crate::api::element::*;
@@ -47,18 +45,20 @@ use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::resolve::CataExprContext;
 use crate::cata::resolve_helper::eval_str_to_f32;
-use crate::consts::{GLOBAL_DATABASE, FUZZY_QUERT, PDMS_INFO_DB, PUHUA_MATERIAL_DATABASE};
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::PDMS_DBNO_INFOS_TABLE;
+use crate::consts::{FUZZY_QUERT, GLOBAL_DATABASE, PDMS_INFO_DB, PUHUA_MATERIAL_DATABASE};
 use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager, CATAEXPRCONTEXT_MAP};
 use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_PLIN_MAP, CACHED_REFNO_BASIC_MAP};
-use crate::graph_db::pdms_arango::{ArDatabase, connect_arangodb};
+use crate::graph_db::pdms_arango::{connect_arangodb, ArDatabase};
 use crate::graph_db::pdms_inst_arango::{query_insts_shape_data, save_instance_to_graph_db};
 use crate::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
-use crate::tables::gen_create_project_mdb_sql;
-use crate::consts::PDMS_DBNO_INFOS_TABLE;
-use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::graph_db::structs::PdmsEleGraphNode;
+use crate::tables::gen_create_project_mdb_sql;
+use nalgebra::Point3;
+use rayon::prelude::*;
 
 pub const TUBI_TOL: f32 = 10.0f32;
 
@@ -81,7 +81,6 @@ static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> 
     m
 });
 
-
 impl AiosDBManager {
     /// 从默认配置文件初始化
     pub async fn init_form_config() -> anyhow::Result<Self> {
@@ -94,11 +93,12 @@ impl AiosDBManager {
             &db_option.project_name,
             &db_option.mdb_name,
             &db_option.module,
-        ).await?;
+        )
+        .await?;
         // if db_option.gen_spatial_tree
         //加载空间树
         {
-            mgr.compute_aabb_trees().await?;
+            // mgr.compute_aabb_trees().await?;
         }
         Ok(mgr)
     }
@@ -110,7 +110,8 @@ impl AiosDBManager {
         let database = self.get_arango_db().await?;
         loop {
             //需要排除负实体
-            let aql = AqlQuery::new(r#"
+            let aql = AqlQuery::new(
+                r#"
             with pdms_inst_infos
             FOR doc IN pdms_inst_infos
                 LIMIT @offset, @batch_size
@@ -119,9 +120,10 @@ impl AiosDBManager {
                     doc._key,
                     doc.aabb,
                 ]
-        "#)
-                .bind_var("offset", offset)
-                .bind_var("batch_size", 5000);
+        "#,
+            )
+            .bind_var("offset", offset)
+            .bind_var("batch_size", 5000);
             offset += 5000;
             if let Ok(refno_aabbs) = database.aql_query::<(String, Aabb)>(aql).await {
                 if refno_aabbs.is_empty() {
@@ -144,7 +146,8 @@ impl AiosDBManager {
         self.rtree = Some(AccelerationTree::load(rstar_objs));
         dbg!(self.rtree.as_ref().unwrap().size());
 
-        let aql = AqlQuery::new(r#"
+        let aql = AqlQuery::new(
+            r#"
             with room_eles
             FOR doc IN room_eles
                 filter doc.aabb != null
@@ -153,7 +156,8 @@ impl AiosDBManager {
                 //     doc._key,
                 //     doc.aabb,
                 // ]
-        "#);
+        "#,
+        );
         let mut room_rstar_objs = vec![];
         if let Ok(room_eles) = database.aql_query::<RoomElement>(aql).await {
             for room_ele in room_eles {
@@ -173,7 +177,12 @@ impl AiosDBManager {
     }
 
     ///计算房间数据
-    async fn calculate_room(&self, info: &EleGeosInfo, inst_geos: &Vec<EleInstGeo>, rtree: &AccelerationTree) -> anyhow::Result<Vec<RefU64>> {
+    async fn calculate_room(
+        &self,
+        info: &EleGeosInfo,
+        inst_geos: &Vec<EleInstGeo>,
+        rtree: &AccelerationTree,
+    ) -> anyhow::Result<Vec<RefU64>> {
         let mut withing_room_items = vec![];
         let room_refno = info.refno;
         let database = self.get_arango_db().await?;
@@ -183,7 +192,9 @@ impl AiosDBManager {
                 .collect::<Vec<_>>();
 
             let hashes = inst_geos.iter().map(|x| x.geo_hash).collect::<Vec<_>>();
-            let room_mesh_mgr = query_pdms_mesh_aql(&database, hashes.iter()).await.unwrap_or_default();
+            let room_mesh_mgr = query_pdms_mesh_aql(&database, hashes.iter())
+                .await
+                .unwrap_or_default();
             for (&hash, geo) in hashes.iter().zip(inst_geos) {
                 if let Some(room_mesh) = room_mesh_mgr.get_mesh(hash) {
                     let t = info.get_geo_world_transform(geo);
@@ -199,9 +210,7 @@ impl AiosDBManager {
                             100000.0,
                             false,
                         ) {
-                            Some(intersection) => {
-                                collider_mesh.is_backface(intersection.feature)
-                            }
+                            Some(intersection) => collider_mesh.is_backface(intersection.feature),
                             None => false,
                         };
                         // dbg!(contain_point);
@@ -215,9 +224,8 @@ impl AiosDBManager {
                     }
 
                     //排除room的类型
-                    withing_room_items.retain(|(refno, _)| {
-                        !outer_refnos.contains(refno) && *refno != room_refno
-                    });
+                    withing_room_items
+                        .retain(|(refno, _)| !outer_refnos.contains(refno) && *refno != room_refno);
 
                     // dbg!(&withing_room_refnos);
                 }
@@ -230,7 +238,10 @@ impl AiosDBManager {
 
     ///计算所有房间包含的其他参考号
     pub async fn calculate_rooms(&self) -> anyhow::Result<()> {
-        let rtree = self.rtree.as_ref().ok_or(anyhow::anyhow!("空间树未生成。"))?;
+        let rtree = self
+            .rtree
+            .as_ref()
+            .ok_or(anyhow::anyhow!("空间树未生成。"))?;
         let database = self.get_arango_db().await?;
         //指定哪个site下有房间节点
         let Some(room_root_refnos) = &self.db_option.room_root_refnos else {
@@ -243,30 +254,39 @@ impl AiosDBManager {
             let Ok(room_root_refno) = RefU64::from_refno_str(r) else {
                 continue;
             };
-            let room_panels = query_deep_children_refnos_fuzzy(&database, &[room_root_refno], &["PANE"]).await?;
+            let room_panels =
+                query_deep_children_refnos_fuzzy(&database, &[room_root_refno], &["PANE"]).await?;
             //以panel的owner为房间的参考号
             println!("房间下的panel数量为: {}", room_panels.len());
-            let inst_data = query_insts_shape_data(&database, &room_panels, &[GeoBasicType::Pos, GeoBasicType::Compound]).await?;
+            let inst_data = query_insts_shape_data(
+                &database,
+                &room_panels,
+                &[GeoBasicType::Pos, GeoBasicType::Compound],
+            )
+            .await?;
             for (panel_refno, info) in &inst_data.inst_info_map {
-                let Some(inst_geos) = inst_data.get_inst_geos(info) else{
+                let Some(inst_geos) = inst_data.get_inst_geos(info) else {
                     continue;
                 };
-                let Some(aabb) = info.aabb else{
+                let Some(aabb) = info.aabb else {
                     continue;
                 };
                 let r = self.calculate_room(info, inst_geos, rtree).await?;
                 let room_refno = self.get_owner(info.refno);
-                let room_panel_ele = RoomPanelElement{
+                let room_panel_ele = RoomPanelElement {
                     refno: *panel_refno,
                     aabb,
                     inst_geo: inst_geos.first().cloned().unwrap_or_default(),
                     transform: info.world_transform,
                 };
-                if let Some((room_aabb, refnos)) = room_eles_map.get_mut(&room_refno){
+                if let Some((room_aabb, refnos)) = room_eles_map.get_mut(&room_refno) {
                     room_aabb.merge(&aabb);
                     refnos.extend_from_slice(&r);
-                    room_panels_map.get_mut(&room_refno).unwrap().push(room_panel_ele);
-                }else{
+                    room_panels_map
+                        .get_mut(&room_refno)
+                        .unwrap()
+                        .push(room_panel_ele);
+                } else {
                     room_eles_map.insert(room_refno, (aabb, r));
                     room_panels_map.insert(room_refno, vec![room_panel_ele]);
                 }
@@ -274,10 +294,10 @@ impl AiosDBManager {
             println!("房间内元件的数量为：{}", room_eles_map.len());
         }
 
-        self.save_room_info_to_arangodb(room_eles_map, room_panels_map).await?;
+        self.save_room_info_to_arangodb(room_eles_map, room_panels_map)
+            .await?;
         Ok(())
     }
-
 
     ///快速获得table名称
     pub fn get_table_name(&self, refno: RefU64) -> String {
@@ -286,7 +306,6 @@ impl AiosDBManager {
             .map(|x| x.get_table_name().to_string())
             .unwrap_or("UNSET".to_string())
     }
-
 
     ///获得db option
     #[inline]
@@ -381,9 +400,13 @@ impl AiosDBManager {
     ///获取图数据库的连接pool
     #[inline]
     pub async fn get_arango_db(&self) -> anyhow::Result<ArDatabase> {
-        Ok(self.arango_pool.get().await?.db(&self.db_option.arangodb_database).await?)
+        Ok(self
+            .arango_pool
+            .get()
+            .await?
+            .db(&self.db_option.arangodb_database)
+            .await?)
     }
-
 
     ///获得默认的pool
     #[inline]
@@ -393,10 +416,11 @@ impl AiosDBManager {
             .map_err(|x| anyhow::anyhow!(x.to_string()))
     }
 
-
     /// 初始化mdb
     pub async fn init_mdb(&mut self, project: &str, mdb: &str, module: &str) -> anyhow::Result<()> {
-        let project_pool = self.get_project_pool(project).ok_or(anyhow::anyhow!("Unknown project pool"))?;
+        let project_pool = self
+            .get_project_pool(project)
+            .ok_or(anyhow::anyhow!("Unknown project pool"))?;
         println!("正在初始化mdb: {mdb}");
         let mut conn = project_pool.acquire().await?;
         let time = Instant::now();
@@ -414,16 +438,22 @@ impl AiosDBManager {
             let create_sql = gen_create_project_mdb_sql();
             let _ = conn.execute(create_sql.as_str()).await;
             println!("正在插入mdb数据");
-            let _ = self.insert_project_mdb(&project_pool, &self.info_pool).await;
+            let _ = self
+                .insert_project_mdb(&project_pool, &self.info_pool)
+                .await;
         }
         cache_mdb_site_map(mdb, module, &project_pool).await;
         self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
         let database = self.get_arango_db().await?;
         if need_sync_refno_basic {
-            CACHED_REFNO_BASIC_MAP.save_to_file(stringify!(CACHED_REFNO_BASIC_MAP)).expect("CACHED_REFNO_BASIC_MAP 保存文件失败。");
+            CACHED_REFNO_BASIC_MAP
+                .save_to_file(stringify!(CACHED_REFNO_BASIC_MAP))
+                .expect("CACHED_REFNO_BASIC_MAP 保存文件失败。");
         } else {
             println!("正在加载 CACHED_REFNO_BASIC_MAP");
-            CACHED_REFNO_BASIC_MAP.load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP)).expect("CACHED_REFNO_BASIC_MAP 文件不存在。");
+            CACHED_REFNO_BASIC_MAP
+                .load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP))
+                .expect("CACHED_REFNO_BASIC_MAP 文件不存在。");
         }
         println!("加载 CACHED_REFNO_BASIC_MAP 成功");
 
@@ -456,8 +486,6 @@ impl AiosDBManager {
         let local_mesh_aabb_db = db.open_tree("aabb")?;
 
         for project in &db_option.included_projects {
-
-
             //redb 的实现
             // if let Ok(db) = redb::Database::builder()
             //     .set_cache_size(500 * 1024 * 1024)
@@ -473,8 +501,12 @@ impl AiosDBManager {
                 .cache_capacity(10_000_000_000)
                 .flush_every_ms(Some(1000));
             if let Ok(db) = config.open() {
-                local_attr_db_map.entry(project.clone()).or_insert(db.open_tree("attr_map")?);
-                local_children_db_map.entry(project.clone()).or_insert(db.open_tree("children")?);
+                local_attr_db_map
+                    .entry(project.clone())
+                    .or_insert(db.open_tree("attr_map")?);
+                local_children_db_map
+                    .entry(project.clone())
+                    .or_insert(db.open_tree("children")?);
             }
             // let env = EnvOpenOptions::new()
             //     .map_size(10 * 1024 * 1024 * 1024) // 10G 的映射大小
@@ -508,13 +540,17 @@ impl AiosDBManager {
                 &db_option.project_name.to_uppercase()
             ),
         )
-            .await?;
+        .await?;
         let ref0_projects = get_ref0_projects(&info_conn).await?;
         // dbg!(&ref0_projects);
         let projects = db_option.included_projects.clone();
         println!("正在创建图数据库连接");
         let arango_pool = connect_arangodb(&db_option).await?;
-        let db = arango_pool.get().await?.db(&db_option.arangodb_database).await?;
+        let db = arango_pool
+            .get()
+            .await?
+            .db(&db_option.arangodb_database)
+            .await?;
 
         Ok(Self {
             project_map,
@@ -572,7 +608,10 @@ impl AiosDBManager {
             } else {
                 for project in &self.db_option.included_projects {
                     if let Some(pool) = self.get_project_pool(project) {
-                        if check_exist_refno(refno, &pool, &self.mdb_dbnums).await.ok()? {
+                        if check_exist_refno(refno, &pool, &self.mdb_dbnums)
+                            .await
+                            .ok()?
+                        {
                             return Some((project.clone(), pool.clone()));
                         }
                     }
@@ -583,14 +622,26 @@ impl AiosDBManager {
     }
 
     /// 获得dbnum 对应的 dbtype 和 world refno
-    pub async fn query_quick_info_by_dbno(&self, db_refno: RefU64, db_num: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<DbQuickInfo>> {
+    pub async fn query_quick_info_by_dbno(
+        &self,
+        db_refno: RefU64,
+        db_num: i32,
+        pool: &Pool<MySql>,
+    ) -> anyhow::Result<Option<DbQuickInfo>> {
         let mut sql = String::new();
         //todo 参考号相同的情况，导致refno获取出来的不准
-        sql.push_str(&format!(r#"SELECT DB_TYPE, PROJECT  FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {}"#, db_num));
-        let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+        sql.push_str(&format!(
+            r#"SELECT DB_TYPE, PROJECT  FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {}"#,
+            db_num
+        ));
+        let result = sqlx::query(&sql)
+            .fetch_all(&mut pool.acquire().await?)
+            .await?;
         for v in result {
             if let project = v.get::<String, _>(1) {
-                let project_pool = self.get_project_pool(&project).ok_or(anyhow::anyhow!("Unknown project pool"))?;
+                let project_pool = self
+                    .get_project_pool(&project)
+                    .ok_or(anyhow::anyhow!("Unknown project pool"))?;
                 if let Some(world_refno) = query_world_refno_by_dbno(db_num, &project_pool).await? {
                     let db_type = v.get::<String, _>(0);
                     return Ok(Some(DbQuickInfo {
@@ -634,16 +685,23 @@ impl AiosDBManager {
                 // dbg!(&dbs);
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
-                    if let Ok(att) = self.get_implicit_attr(*db_refno, Some(vec!["NUMBDB"])).await {
+                    if let Ok(att) = self
+                        .get_implicit_attr(*db_refno, Some(vec!["NUMBDB"]))
+                        .await
+                    {
                         let Some(db_num) = att.get_i32("NUMBDB") else {
                             continue;
                         };
                         // dbg!(&db_num);
-                        if let Ok(Some(mut quick_info)) = self.query_quick_info_by_dbno(*db_refno, db_num, info_pool).await {
+                        if let Ok(Some(mut quick_info)) = self
+                            .query_quick_info_by_dbno(*db_refno, db_num, info_pool)
+                            .await
+                        {
                             // dbg!(&quick_info.db_type);
                             quick_info.order_number = i as _;
                             map.entry(quick_info.db_type.clone())
-                                .or_insert_with(Vec::new).push(quick_info);
+                                .or_insert_with(Vec::new)
+                                .push(quick_info);
                         }
                     }
                 }
@@ -659,7 +717,9 @@ impl AiosDBManager {
         project_pool: &Pool<MySql>,
         info_pool: &Pool<MySql>,
     ) -> anyhow::Result<()> {
-        let project_mdb_map = self.query_mdb_quickinfo_map(project_pool, info_pool).await?;
+        let project_mdb_map = self
+            .query_mdb_quickinfo_map(project_pool, info_pool)
+            .await?;
         if !project_mdb_map.is_empty() {
             let sql = gen_insert_project_mdb_sql(&project_mdb_map);
             let mut conn = project_pool.acquire().await?;
@@ -688,7 +748,6 @@ impl AiosDBManager {
         PdmsGenericType::UNKOWN
     }
 
-
     /// 通用的解析表达式的方法, 解析desi参考号下的 表达式值
     /// 如果 desi_refno 为空，代表design的数据不需要参与计算
     pub async fn resolve_expression_to_f32(
@@ -712,17 +771,20 @@ impl AiosDBManager {
     }
 
     ///查询单个element
-    pub async fn query_element(
-        &self,
-        refno: RefU64,
-    ) -> anyhow::Result<Option<PdmsEleGraphNode>> {
+    pub async fn query_element(&self, refno: RefU64) -> anyhow::Result<Option<PdmsEleGraphNode>> {
         let arango_db = self.get_arango_db().await?;
         let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-        let aql = AqlQuery::new("\
+        let aql = AqlQuery::new(
+            "\
             with pdms_eles
             return document(pdms_eles, @id)
-        ").bind_var("id", refno_aql);
-        let mut r = arango_db.aql_query::<PdmsEleGraphNode>(aql).await.unwrap_or_default();
+        ",
+        )
+        .bind_var("id", refno_aql);
+        let mut r = arango_db
+            .aql_query::<PdmsEleGraphNode>(aql)
+            .await
+            .unwrap_or_default();
         Ok(r.pop())
     }
 
