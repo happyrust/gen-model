@@ -847,15 +847,13 @@ impl AiosDBManager {
                 .filter(|x| {
                     filter_types.is_empty()
                         || filter_types
-                            .contains(&self.get_type_name(x.0).unwrap_or_default().as_str())
+                            .contains(&self.get_type_name(x.0).as_str())
                 })
                 .filter(|x| {
                     own_filter_types.is_empty()
                         || own_filter_types.contains(
                             &self
-                                .get_type_name(self.get_owner(x.0))
-                                .unwrap_or_default()
-                                .as_str(),
+                                .get_type_name(self.get_owner(x.0)).as_str(),
                         )
                 })
                 .collect::<Vec<_>>()
@@ -869,15 +867,13 @@ impl AiosDBManager {
                 .filter(|x| {
                     filter_types.is_empty()
                         || filter_types
-                            .contains(&self.get_type_name(x.0).unwrap_or_default().as_str())
+                            .contains(&self.get_type_name(x.0).as_str())
                 })
                 .filter(|x| {
                     own_filter_types.is_empty()
                         || own_filter_types.contains(
                             &self
-                                .get_type_name(self.get_owner(x.0))
-                                .unwrap_or_default()
-                                .as_str(),
+                                .get_type_name(self.get_owner(x.0)).as_str()
                         )
                 })
                 .collect::<Vec<_>>()
