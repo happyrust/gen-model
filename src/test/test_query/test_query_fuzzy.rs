@@ -9,9 +9,8 @@ use aios_core::pdms_types::RefU64;
 async fn test_query_support_arms() -> anyhow::Result<()> {
     let gensec_refno: RefU64 = "24384/25797".into();
     let mgr = get_test_ams_db_manager_async().await;
-    let tmp = mgr.query_foreign_refnos(&[gensec_refno], &[&["SPRE", "CATR"]],
+    let mut tmp = mgr.query_foreign_refnos(&[gensec_refno], &[&["SPRE", "CATR"]],
                                         &["PSTR", "PTSS"], &[], 4).await?;
-    dbg!(tmp);
     assert_eq!(tmp.pop().unwrap().to_refno_str(), "21438/2368");
 
     Ok(())

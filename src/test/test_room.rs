@@ -24,13 +24,14 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
 }
 
 // //15组贯穿件房间号测试样例
-// #[tokio::test]
-// async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
-//     //测试样例1
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83722").unwrap()).await;
-//     assert_eq!(room_number.unwrap(), Some(("R530".to_string(), "R561".to_string())));
-//     Ok(())
-// }
+#[tokio::test]
+async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
+    //测试样例1
+    let mgr = get_test_ams_db_manager_async().await;
+    let room_number_map = mgr.query_through_element_room_nums(&["24383/83722".into()]).await?;
+    dbg!(room_number_map);
+    Ok(())
+}
 //
 //
 // #[tokio::test]

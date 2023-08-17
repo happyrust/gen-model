@@ -189,10 +189,10 @@ impl PdmsDataInterface for AiosDBManager {
         Err(anyhow::anyhow!("{refno}: not found att"))
     }
 
-    fn get_type_name(&self, refno: RefU64) -> anyhow::Result<String> {
+    fn get_type_name(&self, refno: RefU64) -> String {
         self.get_refno_basic(refno)
-            .map(|x| Ok(x.get_type().to_string()))
-            .unwrap_or(Ok("unset".to_string()))
+            .map(|x| x.get_type().to_string())
+            .unwrap_or("unset".to_string())
     }
 
     ///获得子节点的参考号集合
@@ -768,7 +768,7 @@ impl PdmsDataInterface for AiosDBManager {
                 pos += npos;
             }
 
-            let owner_type_name = self.get_type_name(ref_basic.owner).unwrap_or("unset".to_string());
+            let owner_type_name = self.get_type_name(ref_basic.owner);
             let owner_is_gensec = owner_type_name == "GENSEC";
             let mut quat_v = att.get_rotation();
             let mut need_bangle = false;
@@ -781,7 +781,7 @@ impl PdmsDataInterface for AiosDBManager {
                         self.get_children_from_localdb(ref_basic.owner)
                             .unwrap_or_default()
                             .into_iter()
-                            .find(|x| self.get_type_name(*x).unwrap().as_str() == "SPINE")
+                            .find(|x| self.get_type_name(*x).as_str() == "SPINE")
                             .map(|x|
                                 self.get_children_attrs(x)
                                     .unwrap_or_default()
@@ -1002,7 +1002,7 @@ impl PdmsDataInterface for AiosDBManager {
         let children_refs = self.get_children_from_localdb(refno)?;
         let mut paths = vec![];
         for x in children_refs {
-            let type_name = self.get_type_name(x)?;
+            let type_name = self.get_type_name(x);
             if type_name != "SPINE" {
                 continue;
             }

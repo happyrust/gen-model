@@ -326,6 +326,7 @@ pub async fn gen_loop_geos(
                     .unwrap_or_default();
                 let cur_sibling_index = sibling_refnos
                     .iter()
+                    .filter(|&x| mgr.get_type_name(*x).as_str() == "PLOO" )
                     .position(|x| *x == loop_refno)
                     .unwrap_or_default();
                 // dbg!(&sibling_refnos);
@@ -1772,9 +1773,8 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                 .query_refnos_has_pos_neg_map(&root_refnos)
                 .await
                 .unwrap_or_default();
-            dbg!(&has_pos_neg_map);
+            // dbg!(&has_pos_neg_map);
             dbg!(has_pos_neg_map.len());
-
             //负实体的结果不需要保存到本地
             {
                 let mesh_mgr = mgr.cached_mesh_mgr.read().await;
@@ -1895,7 +1895,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                                             let mut center: Vec3 = aabb.center().into();
                                             let t_mat = Mat4::from_translation(center);
                                             let mut s = 1.01;
-                                            //todo use brep substract, if use mesh, may exist many tolerance problem
                                             let s_mat = if matches!(
                                                 geo_inst.geo_param,
                                                 PdmsGeoParam::PrimRevolution(_)
@@ -1919,6 +1918,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                                         }
 
                                         let manifold: ManifoldRust = (mesh, &local_mat).into();
+                                        // let manifold: ManifoldRust = (mesh, &Mat4::IDENTITY).into();
                                         if manifold.num_tri() == 0 {
                                             println!("Found non manifold {}", t_refno);
                                             found_non_manifold = true;
@@ -1947,6 +1947,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                                 let mut src_manifold = batch_manifolds.remove(0);
                                 let final_manifold =
                                     src_manifold.batch_boolean_subtract(&batch_manifolds);
+                                dbg!(final_manifold.num_tri());
                                 let final_mesh: PlantMesh = final_manifold.clone().into();
                                 for m in batch_manifolds {
                                     // #[cfg(target_os = "macos" || target_os = "linux")]

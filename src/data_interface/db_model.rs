@@ -98,7 +98,7 @@ impl AiosDBManager {
         // if db_option.gen_spatial_tree
         //加载空间树
         {
-            // mgr.compute_aabb_trees().await?;
+            mgr.compute_aabb_trees().await?;
         }
         //加载对齐方式的值
         {

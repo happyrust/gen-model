@@ -210,17 +210,17 @@ async fn main() -> anyhow::Result<()> {
         println!("正在生成模型");
         let mut time = Instant::now();
 
-        let refno = "24384/25801".into();
-        dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-        let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        dbg!(transform);
-
-        let refno = "24384/25802".into();
+        // let refno = "24384/25801".into();
         // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-        let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        dbg!(transform);
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
+        //
+        // let refno = "24384/25802".into();
+        // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
+        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+        // dbg!(transform);
         // let refno = RefU64::from_two_nums(24384, 25804);
         // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
         // dbg!(quat_to_pdms_ori_str(&transform.rotation));
