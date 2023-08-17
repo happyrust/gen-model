@@ -74,9 +74,12 @@ impl AiosDBManager {
     ///查询形集PLIN的值，todo 需要做缓存优化
     pub async fn query_pline(&self, refno: RefU64, jusl: &str) -> anyhow::Result<Option<PlinParamData>> {
         let database = self.get_arango_db().await?;
-        let Some(psref) = query_foreign_refno_aql(&database, refno, &["SPRE", "PSTR"]).await? else {
-            return Ok(None);
-        };
+        let psref = self.query_foreign_refnos(&[refno], &[&["SPRE", "CATR"]],
+                                            &["PSTR", "PTSS"], &[], 4).await?.pop().unwrap_or_default();
+        if !psref.is_valid() { return Ok(None);  }
+        // let Some(psref) = query_foreign_refno_aql(&database, refno, &["SPRE", "PSTR"]).await? else {
+        //     return Ok(None);
+        // };
         // dbg!(psref);
         let c_refnos = query_children_refnos(&database, psref).await?;
         // dbg!(&c_refnos);

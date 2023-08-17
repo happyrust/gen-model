@@ -11,16 +11,21 @@ use bitflags::bitflags;
 use dashmap::DashMap;
 
 bitflags! {
-    pub struct GeoEnum: u8 {
+    pub struct GeoEnum: i32 {
         const PRIM = 0x1 << 1;
-        const LOOP = 0x1 << 2;
-        const CATA = 0x1 << 3;
-        const POHE = 0x1 << 4;
-        const CATA_BRAN_AND_HANGER_REUSE = 0x1 << 5;  //branch
-        const CATA_SINGLE_REUSE = 0x1 << 6;   //sctn, fit, fixing, pfit
-        const CATA_WITHOUT_REUSE = 0x1 << 7;   //sctn, fit, fixing, pfit
+        const LOOP_AND_PLOO = 0x1 << 2;
+        const LOOP = 0x1 << 3;
+        const PLOO = 0x1 << 4;
+        const CATA = 0x1 << 5;
+        const POHE = 0x1 << 6;
+        const CATA_BRAN_AND_HANGER_REUSE = 0x1 << 7;  //branch
+        const CATA_SINGLE_REUSE = 0x1 << 8;   //sctn, fit, fixing, pfit
+        const CATA_WITHOUT_REUSE = 0x1 << 9;   //sctn, fit, fixing, pfit
         // const CATA_ONLY_TUBI_REUSE = 0x1 << 4;
-        const ALL = Self::PRIM.bits() | Self::LOOP.bits() | Self::CATA.bits()| Self::POHE.bits() | Self::CATA_BRAN_AND_HANGER_REUSE.bits() | Self::CATA_SINGLE_REUSE.bits() | Self::CATA_WITHOUT_REUSE.bits();
+        const ALL = Self::PRIM.bits() | Self::LOOP_AND_PLOO.bits() | Self::LOOP.bits() |
+        Self::PLOO.bits() | Self::CATA.bits()|
+        Self::POHE.bits() | Self::CATA_BRAN_AND_HANGER_REUSE.bits() |
+        Self::CATA_SINGLE_REUSE.bits() | Self::CATA_WITHOUT_REUSE.bits();
     }
 }
 
@@ -66,7 +71,9 @@ impl AiosDBManager {
         let mut is_debug = false;
         let types = match geo_type {
             GeoEnum::PRIM => GNERAL_PRIM_NOUN_NAMES.as_slice(),
-            GeoEnum::LOOP => GNERAL_LOOP_NOUN_NAMES.as_slice(),
+            GeoEnum::LOOP_AND_PLOO => GNERAL_LOOP_NOUN_NAMES.as_slice(),
+            GeoEnum::LOOP => &["LOOP"],
+            GeoEnum::PLOO => &["PLOO"],
             GeoEnum::CATA => CATA_GEO_NAMES.as_slice(),
             GeoEnum::POHE => POHE_GEO_NAMES.as_slice(),
             GeoEnum::CATA_BRAN_AND_HANGER_REUSE => CATA_HAS_TUBI_GEO_NAMES.as_slice(),
@@ -99,7 +106,7 @@ impl AiosDBManager {
                                 } else if CATA_SINGLE_REUSE_GEO_NAMES.contains(&k.noun.as_str()) {
                                     add = geo_type == GeoEnum::CATA_SINGLE_REUSE;
                                 } else if GNERAL_LOOP_NOUN_NAMES.contains(&k.noun.as_str()) {
-                                    add = geo_type == GeoEnum::LOOP;
+                                    add = geo_type == GeoEnum::LOOP_AND_PLOO;
                                 } else if GNERAL_PRIM_NOUN_NAMES.contains(&k.noun.as_str()) {
                                     add = geo_type == GeoEnum::PRIM;
                                 }
@@ -144,7 +151,7 @@ impl AiosDBManager {
         let mut is_debug = false;
         let types = match geo_type {
             GeoEnum::PRIM => GNERAL_PRIM_NOUN_NAMES.as_slice(),
-            GeoEnum::LOOP => GNERAL_LOOP_NOUN_NAMES.as_slice(),
+            GeoEnum::LOOP_AND_PLOO => GNERAL_LOOP_NOUN_NAMES.as_slice(),
             GeoEnum::CATA => CATA_GEO_NAMES.as_slice(),
             GeoEnum::CATA_BRAN_AND_HANGER_REUSE => CATA_HAS_TUBI_GEO_NAMES.as_slice(),
             GeoEnum::CATA_SINGLE_REUSE => CATA_SINGLE_REUSE_GEO_NAMES.as_slice(),

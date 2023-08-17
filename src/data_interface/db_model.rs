@@ -100,6 +100,10 @@ impl AiosDBManager {
         {
             // mgr.compute_aabb_trees().await?;
         }
+        //加载对齐方式的值
+        {
+            // mgr.init_loop_sjus_map().await?;
+        }
         Ok(mgr)
     }
 
