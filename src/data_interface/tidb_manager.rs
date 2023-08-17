@@ -32,7 +32,7 @@ use aios_core::parsed_data::geo_params_data::CateGeoParam::*;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
-use aios_core::pdms_data::ScomInfo;
+use aios_core::pdms_data::{PlinParam, PlinParamData, ScomInfo};
 use aios_core::pdms_types::*;
 use aios_core::prim_geo;
 use aios_core::prim_geo::extrusion::Extrusion;
@@ -153,6 +153,8 @@ pub struct AiosDBManager {
 
     ///room panel对应的信息
     pub room_panel_info_map: HashMap<RefU64, RoomPanelElement>,
+
+    pub plin_params_map: DashMap<RefU64, DashMap<String, PlinParamData>>,
 }
 
 impl Debug for AiosDBManager {
