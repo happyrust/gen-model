@@ -77,10 +77,6 @@ impl AiosDBManager {
         let psref = self.query_foreign_refnos(&[refno], &[&["SPRE", "CATR"]],
                                             &["PSTR", "PTSS"], &[], 4).await?.pop().unwrap_or_default();
         if !psref.is_valid() { return Ok(None);  }
-        // let Some(psref) = query_foreign_refno_aql(&database, refno, &["SPRE", "PSTR"]).await? else {
-        //     return Ok(None);
-        // };
-        // dbg!(psref);
         let c_refnos = query_children_refnos(&database, psref).await?;
         // dbg!(&c_refnos);
         for c_refno in c_refnos {

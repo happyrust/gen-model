@@ -839,17 +839,22 @@ impl PdmsDataInterface for AiosDBManager {
 
                 // POSL 的处理, 获得父节点的形集
                 let mut plin_param = None;
+                const HAS_PLIN_TYPES: [&str; 4] = ["SCTN", "GENSEC", "WALL", "STWALL"];
                 while plin_param.is_none() {
-                    dbg!(plin_owner);
+                    let Some(t) = self.get_refno_basic(plin_owner) else{
+                        break;
+                    };
+                    #[cfg(debug_assertions)]
+                    dbg!(t.get_type());
+                    if !HAS_PLIN_TYPES.contains(&t.get_type()) {
+                        plin_owner = t.get_owner();
+                        continue;
+                    }
                     plin_param = self.query_pline(plin_owner, pos_line).await?;
                     if plin_param.is_some() {
                         break;
                     }
-                    if let Some(t) = self.get_refno_basic(plin_owner) {
-                        plin_owner = t.get_owner();
-                    } else {
-                        break;
-                    }
+                    plin_owner = t.get_owner();
                 }
                 let target_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
                 let is_lmirror = target_att.get_bool("LMIRR").unwrap_or_default();

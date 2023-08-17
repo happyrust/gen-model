@@ -1551,7 +1551,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
             //对齐方式的距离，应该存储下来，子节点要与其保持一致的偏移
             loop_sjus_map.insert(owner, (Vec3::Z * off_z, height));
         });
-        dbg!(&loop_sjus_map);
 
         let loop_sjus_map_arc = Arc::new(loop_sjus_map);
         //元件库的模型计算
@@ -2065,6 +2064,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                     }
                 }
                 //开始进行ngmr 的 boolean操作
+                println!("开始处理ngmr的负实体模型");
                 for (parent, refnos) in boolean_ngmr_map {
                     //更新ngmr的owner
                     {
@@ -2143,6 +2143,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             let final_mat = local_mat * t_mat * s_mat * inv_t_mat;
 
                             let mut neg_manifold: ManifoldRust = (mesh, &final_mat).into();
+                            // dbg!(refno);
                             // dbg!(neg_manifold.num_tri());
                             if neg_manifold.num_tri() != 0 {
                                 neg_ms.push(neg_manifold);
