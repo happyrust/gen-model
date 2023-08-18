@@ -9,19 +9,29 @@ use crate::data_interface::interface::PdmsDataInterface;
 pub async fn get_penetration_detail_by_refno(aios_mgr: &AiosDBManager, refno_vec: &mut Vec<(RefU64, RefU64)>) -> anyhow::Result<PenetrationVec> {
     let mut hole_data_vec = PenetrationVec::default();
     for i in refno_vec {
-        let mut data = PenetrationData::default();
-        if let Ok(Some(translation)) = aios_mgr.get_world_transform(i.0.clone()).await {
-            data.position = translation.translation;
-        }
-        // //X偏移角
-        get_x_deviation_angle(&mut data);
-        //壳内房间号和壳外房间号
-        // get_room_number(&mut data);
         if let Ok(attr) = aios_mgr.get_attr(i.0.clone()).await {
-            data.owner_refno = i.1.clone();
-            data.refno = i.0.clone();
-            data.name = attr.get_name().to_string();
+            //找到name中包含“ZZZ”的元素
             if attr.get_name().to_string().contains("ZZZ") {
+                let mut data = PenetrationData::default();
+                if let Ok(Some(translation)) = aios_mgr.get_world_transform(i.0.clone()).await {
+                    //获得位置
+                    data.position = translation.translation;
+                }
+                //获得父亲结点refno
+                data.owner_refno = i.1.clone();
+                //获得自身refno
+                data.refno = i.0.clone();
+                //获得name
+                data.name = attr.get_name().to_string();
+                let rooms_number = aios_mgr.query_through_element_room_nums(&[i.0.clone()]).await;
+                if let Ok(rooms_number) = rooms_number {
+                    for (key, value) in rooms_number {
+                        //获得内房间号
+                        data.inner_room_num = value.0;
+                        //获得外房间号
+                        data.outer_room_num = value.1;
+                    }
+                }
                 hole_data_vec.data.push(data);
             }
         }

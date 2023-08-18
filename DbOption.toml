@@ -1,5 +1,5 @@
 #同步文件配置false
-total_sync = true
+total_sync = false
 enable_log = false
 sync_graph_db = true
 sync_tidb = true
@@ -18,11 +18,11 @@ project_name = "AvevaMarineSample"
 project_code = 1516
 module = "DESI"
 #是否生成模型数据
-gen_model = true
+gen_model = false
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树
-gen_spatial_tree = false
+gen_spatial_tree = true
 save_spatial_tree_to_db = true
 gen_model_batch_size = 100
 
@@ -323,7 +323,7 @@ debug_root_refnos = ["24381/36945"]
 #指定哪些根节点下面是房间，以FRMW为一个整体
 #room_root_refnos = ["24381/34110"]
 #room_root_refnos = ["24381/35342", "24381/35795", "24381/36068"]
-room_root_refnos = ["24381/36068"]
+room_root_refnos = ["24381/34109"]
 
 #room_root_refnos = ["24381/35622"]
 #24381_105593\
