@@ -143,8 +143,8 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
         }
         // 将套管两个模型合并在一起
         if hole_circle_inst.len() == 2 {
-            let diameter = hole_circle_inst[0].pdia;
-            let height = hole_circle_inst[0].phei + hole_circle_inst[1].phei;
+            let diameter = hole_circle_inst[0].pdia as f64;
+            let height = (hole_circle_inst[0].phei + hole_circle_inst[1].phei) as f64;
 
             let element = if name_map.contains_key(&hole.refno) {
                 name_map.get(&hole.refno).unwrap().clone()
@@ -154,15 +154,15 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
             };
             // let (room_1, room_2) = mgr.query_through_element_room_nums(&[hole.refno]).await?.values().nth(0).cloned().unwrap_or_default();
             let cable_area = get_cable_area(&element.name).await;
-            let plugging_area = f32::PI * (diameter / 2.0) * (diameter / 2.0) - cable_area;
+            let plugging_area = f64::PI * (diameter / 2.0) * (diameter / 2.0) - cable_area;
             let fill_percent = get_plugging_fill_percent().await;
-            let plugging_volume = f32::PI * (diameter / 2.0) * (diameter / 2.0) * height * (1.0 - fill_percent);
+            let plugging_volume = f64::PI * (diameter / 2.0) * (diameter / 2.0) * height * (1.0 - fill_percent);
             result.push(PluggingData {
                 refno: hole.refno,
                 name: element.name,
                 size: format!("{}", diameter),
-                room_1:"".to_string(),
-                room_2:"".to_string(),
+                room_1: "".to_string(),
+                room_2: "".to_string(),
                 cable_area,
                 plugging_area,
                 plugging_volume,
@@ -172,8 +172,10 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
         // 计算方孔的数据
         if hole_rect_inst.len() == 1 {
             let points = &hole_rect_inst[0].verts;
-            let height = hole_rect_inst[0].height;
-            let Some(size) = compute_rectangle_data([points[0], points[1], points[2], points[3]]) else { continue; };
+            let height = hole_rect_inst[0].height as f64;
+            let Some((size_1,size_2)) = compute_rectangle_data([points[0], points[1], points[2], points[3]]) else { continue; };
+            let size_1 = size_1 as f64;
+            let size_2 = size_2 as f64;
             let element = if name_map.contains_key(&hole.refno) {
                 name_map.get(&hole.refno).unwrap().clone()
             } else {
@@ -182,15 +184,15 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
             };
             // let (room_1, room_2) = mgr.query_through_element_room_nums(&[hole.refno]).await?.values().nth(0).cloned().unwrap_or_default();
             let cable_area = get_cable_area(&element.name).await;
-            let plugging_area = size.0 * size.1 - cable_area;
+            let plugging_area = size_1 * size_2 - cable_area;
             let fill_percent = get_plugging_fill_percent().await;
-            let plugging_volume = size.0 * size.1 * height * (1.0 - fill_percent);
+            let plugging_volume = size_1 * size_2 * height * (1.0 - fill_percent);
             result.push(PluggingData {
                 refno: hole.refno,
                 name: element.name,
-                size: format!("{}X{}", size.0, size.1),
-                room_1:"".to_string(),
-                room_2:"".to_string(),
+                size: format!("{:.2}X{:.2}", size_1, size_2),
+                room_1: "".to_string(),
+                room_2: "".to_string(),
                 cable_area,
                 plugging_area,
                 plugging_volume,
@@ -202,12 +204,12 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
 }
 
 /// 请求图为接⼝获取电缆占⽤⾯积
-pub async fn get_cable_area(hole_name: &str) -> f32 {
+pub async fn get_cable_area(hole_name: &str) -> f64 {
     0.0
 }
 
 /// 获取孔洞填充率
-pub async fn get_plugging_fill_percent() -> f32 {
+pub async fn get_plugging_fill_percent() -> f64 {
     0.0
 }
 
@@ -246,4 +248,13 @@ fn test_fn() {
     let dot2 = (p3 - p2).normalize().dot((p4 - p3).normalize());
     dbg!(&dot1);
     dbg!(&dot2);
+}
+
+#[test]
+fn test_f32() {
+    let result_f32: f32 = 1796.0686 * 70.0 * 70.0 * (1.0 - 0.0);
+    dbg!(&result_f32);
+
+    let result_f64: f64 = 1796.0686 * 70.0 * 70.0 * (1.0 - 0.0);
+    dbg!(&result_f64);
 }

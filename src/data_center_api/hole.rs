@@ -22,7 +22,7 @@ use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
 use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{ArDatabase, remove_arangodb_with_refno_key, save_arangodb_doc};
+use crate::graph_db::pdms_arango::{ArDatabase, remove_arangodb_with_refno_key, save_arangodb_doc, update_arangodb_doc};
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 /// 正则匹配字符串中的数字
@@ -808,17 +808,27 @@ pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, dat
             return Ok(e.to_string());
         }
     }
+    let data_len = datas.len();
     // 替换数据
-    let json = serde_json::to_value(&datas);
-    if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
-    let json = json.unwrap();
-    match save_arangodb_doc(json, AQL_HOLE_DATA_COLLECTION, &database, true).await {
-        Ok(_) => {}
-        Err(e) => {
-            return Ok(e.to_string());
+    for data in datas {
+        let json = serde_json::to_value(&data)?;
+        match update_arangodb_doc(&data._key,json, AQL_HOLE_DATA_COLLECTION, &database).await {
+            Ok(_) => {}
+            Err(e) => {
+                return Ok(e.to_string());
+            }
         }
     }
-    Ok(format!("替换 {} 条数据 成功", datas.len()))
+    // let json = serde_json::to_value(&datas);
+    // if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
+    // let json = json.unwrap();
+    // match save_arangodb_doc(json, AQL_HOLE_DATA_COLLECTION, &database, true).await {
+    //     Ok(_) => {}
+    //     Err(e) => {
+    //         return Ok(e.to_string())
+    //     }
+    // }
+    Ok(format!("替换 {} 条数据 成功", data_len))
 }
 
 async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArDatabase) -> anyhow::Result<()> {

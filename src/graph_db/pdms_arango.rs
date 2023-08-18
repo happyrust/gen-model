@@ -397,9 +397,20 @@ pub async fn save_arangodb_doc(json: Value, collection: &str, database: &ArDatab
     };
     let aql = AqlQuery::new(aql_str)
         .bind_var("@collection", collection)
-        .bind_var("elements", json)
-        ;
-    let _result: Vec<()> = database.aql_query(aql).await.unwrap();
+        .bind_var("elements", json);
+    let _result: Vec<()> = database.aql_query(aql).await?;
+    Ok(())
+}
+
+pub async fn update_arangodb_doc(key:&str,value: Value,collection: &str, database: &ArDatabase) -> anyhow::Result<()> {
+    let aql_str = AqlQuery::new("
+        With @@collection
+        let doc = document(@@collection,@key)
+        update doc with @value in @@collection")
+        .bind_var("@collection",collection)
+        .bind_var("key",key)
+        .bind_var("value",value);
+    let _result: Vec<()> = database.aql_query(aql_str).await?;
     Ok(())
 }
 
