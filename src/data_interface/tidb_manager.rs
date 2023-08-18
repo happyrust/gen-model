@@ -32,7 +32,7 @@ use aios_core::parsed_data::geo_params_data::CateGeoParam::*;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
-use aios_core::pdms_data::ScomInfo;
+use aios_core::pdms_data::{PlinParam, PlinParamData, ScomInfo};
 use aios_core::pdms_types::*;
 use aios_core::prim_geo;
 use aios_core::prim_geo::extrusion::Extrusion;
@@ -153,6 +153,8 @@ pub struct AiosDBManager {
 
     ///room panel对应的信息
     pub room_panel_info_map: HashMap<RefU64, RoomPanelElement>,
+
+    pub plin_params_map: DashMap<RefU64, DashMap<String, PlinParamData>>,
 }
 
 impl Debug for AiosDBManager {
@@ -189,10 +191,10 @@ impl PdmsDataInterface for AiosDBManager {
         Err(anyhow::anyhow!("{refno}: not found att"))
     }
 
-    fn get_type_name(&self, refno: RefU64) -> anyhow::Result<String> {
+    fn get_type_name(&self, refno: RefU64) -> String {
         self.get_refno_basic(refno)
-            .map(|x| Ok(x.get_type().to_string()))
-            .unwrap_or(Ok("unset".to_string()))
+            .map(|x| x.get_type().to_string())
+            .unwrap_or("unset".to_string())
     }
 
     ///获得子节点的参考号集合
@@ -441,10 +443,6 @@ impl PdmsDataInterface for AiosDBManager {
     //todo use local db to get children refnos
     fn get_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
         let mut r = vec![];
-        // if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
-        //     let children = query_children(refno, &project_pool).await?;
-        //
-        // }
         if let Ok(children) = self.get_children_from_localdb(refno) {
             for child in children {
                 let attr = self.get_attr_from_localdb(child).unwrap_or_default();
@@ -591,9 +589,9 @@ impl PdmsDataInterface for AiosDBManager {
                 ]
         "#,
         )
-        .bind_var("keys", refno_urls)
-        .bind_var("neg_nouns", TOTAL_NEG_NOUN_NAMES.to_vec())
-        .bind_var("pos_nouns", GENRAL_POS_NOUN_NAMES.to_vec());
+            .bind_var("keys", refno_urls)
+            .bind_var("neg_nouns", TOTAL_NEG_NOUN_NAMES.to_vec())
+            .bind_var("pos_nouns", GENRAL_POS_NOUN_NAMES.to_vec());
         let result: HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)> = self
             .get_arango_db()
             .await?
@@ -735,7 +733,6 @@ impl PdmsDataInterface for AiosDBManager {
         let mut rotation = Quat::IDENTITY;
         let mut translation = Vec3::ZERO;
         let mut cur_refno = refno;
-        // let database = self.get_arango_db().await?;
         while let Some(ref_basic) = self.get_refno_basic(cur_refno) {
             //后面是不是要缓存这个层级结构
             if self.cached_world_transforms_map.contains_key(&cur_refno) {
@@ -749,12 +746,11 @@ impl PdmsDataInterface for AiosDBManager {
             ancestors.push_front((cur_refno, ref_basic));
             cur_refno = tmp_owner;
         }
-        //需要判断owner 下是不是有spine，如wall，顺时针逆时针会影响plin的方向
+
         for (refno, ref_basic) in ancestors {
             let att = self.get_attr_from_localdb(refno)?;
             let mut pos = att.get_position().unwrap_or_default();
             let mut quat = Quat::IDENTITY;
-            let type_name = att.get_type();
             if let Some(jusl) = att.get_str("JUSL") {
                 if let Some(param) = self.query_pline(refno, jusl).await? {
                     pos -= param.pt;
@@ -774,37 +770,39 @@ impl PdmsDataInterface for AiosDBManager {
                 pos += npos;
             }
 
-            if let Ok(owner_att) = self.get_attr_from_localdb(ref_basic.owner) {
-                if let Some(sjus) = owner_att.get_str("SJUS") {
-                    //如果发现了SJUS，需要找到同一层集的PLOO，得到height
-                    let children =
-                        self.get_children_from_localdb(owner_att.get_owner().unwrap())?;
-                    for c in children {
-                        let c_att = self.get_attr_from_localdb(c)?;
-                        // dbg!(c_att.get_type());
-                        if c_att.get_type() == "PLOO" {
-                            let height = c_att.get_f32("HEIG").unwrap_or_default();
-                            let mut off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                                height
-                            } else if sjus == "UCEN" || sjus == "DCEN" {
-                                height / 2.0
-                            } else {
-                                0.0
-                            };
-                            pos.z += off_z;
-                            break;
-                        }
-                    }
-                }
-            }
-
+            let owner_type_name = self.get_type_name(ref_basic.owner);
+            let owner_is_gensec = owner_type_name == "GENSEC";
             let mut quat_v = att.get_rotation();
             let mut need_bangle = false;
-            if quat_v.is_some() {
+            if !owner_is_gensec && quat_v.is_some() {
                 quat = quat_v.unwrap();
             } else {
-                if let Some(poss) = att.get_poss() &&
-                    let Some(pose) = att.get_pose() {
+                let (l_poss, l_pose) = if owner_is_gensec {
+                    //找到spine，获取spine的两个顶点
+                    let mut positions: Vec<Vec3> = self
+                        .get_children_from_localdb(ref_basic.owner)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|x| self.get_type_name(*x).as_str() == "SPINE")
+                        .map(|x| {
+                            self.get_children_attrs(x)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|x| x.get_position().unwrap_or_default())
+                        })
+                        .into_iter()
+                        .flatten()
+                        .collect();
+                    if positions.len() == 2 {
+                        (Some(positions[0]), Some(positions[1]))
+                    } else {
+                        (None, None)
+                    }
+                } else {
+                    (att.get_poss(), att.get_pose())
+                };
+                if let Some(poss) = l_poss &&
+                    let Some(pose) = l_pose {
                     need_bangle = true;
                     let extru_dir = (pose - poss).normalize();
                     if !extru_dir.is_normalized() {
@@ -816,7 +814,6 @@ impl PdmsDataInterface for AiosDBManager {
                     } else {
                         Vec3::Z
                     };
-
                     let p_axis = ref_axis.cross(extru_dir).normalize();
                     let y_axis = extru_dir.cross(p_axis).normalize();
                     quat = Quat::from_mat3(&Mat3::from_cols(
@@ -831,44 +828,44 @@ impl PdmsDataInterface for AiosDBManager {
             if need_bangle || att.contains_attr_name("BANG") {
                 quat = quat * Quat::from_rotation_z(bangle.to_radians());
             }
+            //固定方位，不会怎旋转方向，但是会移动
+            let mut fixed_posl_ori = att.get_type() == "ENDATU";
             //如果有posl
-            if let Some(pos_line) = att.get_str("POSL") {
+            if att.contains_attr_name("POSL") {
+                let pos_line = att.get_str("POSL").unwrap_or_default();
                 // dbg!(pos_line);
                 //plin里的位置偏移
                 let mut plin_pos = Vec3::ZERO;
-                let mut pline_plax = Vec3::NEG_X;
+                let mut pline_plax = Vec3::X;
 
                 let delta_vec = att.get_vec3("DELP").unwrap_or_default();
-                // let bangle = att.get_f32("BANG").unwrap_or_default();
-
                 let mut plin_owner = att.get_owner().unwrap();
-                // let mut tmp_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
-                // while !tmp_att.contains_attr_name("JUSL") {
-                //     tmp_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
-                //     plin_owner = tmp_att.get_owner().unwrap();
-                // }
 
                 // POSL 的处理, 获得父节点的形集
                 let mut plin_param = None;
+                const HAS_PLIN_TYPES: [&str; 4] = ["SCTN", "GENSEC", "WALL", "STWALL"];
                 while plin_param.is_none() {
+                    let Some(t) = self.get_refno_basic(plin_owner) else {
+                        break;
+                    };
+                    #[cfg(debug_assertions)]
+                    dbg!(t.get_type());
+                    if !HAS_PLIN_TYPES.contains(&t.get_type()) {
+                        plin_owner = t.get_owner();
+                        continue;
+                    }
                     plin_param = self.query_pline(plin_owner, pos_line).await?;
                     if plin_param.is_some() {
                         break;
                     }
-                    if let Some(t) = self.get_refno_basic(plin_owner) {
-                        plin_owner = t.get_owner();
-                    } else {
-                        break;
-                    }
+                    plin_owner = t.get_owner();
                 }
                 let target_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
                 let is_lmirror = target_att.get_bool("LMIRR").unwrap_or_default();
                 if let Some(param) = plin_param {
-                    // dbg!(&param);
                     plin_pos = param.pt;
                     pline_plax = param.plax;
                 }
-                // let bangle_rot = Quat::from_rotation_z(bangle.to_radians());
                 let mut y_axis = if att.contains_attr_name("YDIR") {
                     att.get_vec3("YDIR").unwrap_or_default()
                 } else {
@@ -877,7 +874,11 @@ impl PdmsDataInterface for AiosDBManager {
                 //和LMIRROR 有关系
                 let z_axis = if is_lmirror { -pline_plax } else { pline_plax };
                 let x_axis = y_axis.cross(z_axis).normalize();
-                let posl_quat = Quat::from_mat3(&Mat3::from_cols(x_axis, y_axis, z_axis));
+                let posl_quat = if fixed_posl_ori {
+                    Quat::IDENTITY
+                } else {
+                    Quat::from_mat3(&Mat3::from_cols(x_axis, y_axis, z_axis))
+                };
                 #[cfg(debug_assertions)]
                 {
                     dbg!(quat_to_pdms_ori_str(&posl_quat));
@@ -896,7 +897,7 @@ impl PdmsDataInterface for AiosDBManager {
                     let cut_dir = att.get_vec3("CUTP").unwrap_or_default();
                     let cut_len = att.get_f32("CUTB").unwrap_or_default();
                     translation = c_t.translation - cut_dir * cut_len;
-                }else{
+                } else {
                     translation = translation
                         + rotation * (pos + plin_pos)
                         + rotation * new_quat * delta_vec;
@@ -971,21 +972,12 @@ impl PdmsDataInterface for AiosDBManager {
         distance: f32,
     ) -> anyhow::Result<Vec<RefU64>> {
         let db = &self.get_arango_db().await?;
-        let instances =
-            query_insts_shape_data(db, &[refno], &[GeoBasicType::Pos, GeoBasicType::Compound])
-                .await?;
-        if instances.inst_info_map.is_empty() {
-            return Ok(vec![]);
-        }
-        let pos = instances
-            .inst_info_map
-            .iter()
-            .next()
-            .unwrap()
-            .1
-            .world_transform
+        let world_pos = self
+            .get_world_transform(refno)
+            .await?
+            .unwrap_or_default()
             .translation;
-        self.get_refnos_within_bound_radius_by_pos(pos, distance)
+        self.get_refnos_within_bound_radius_by_pos(world_pos, distance)
     }
 
     ///指定pos获得在一定范围的构件参考号列表
@@ -1010,7 +1002,7 @@ impl PdmsDataInterface for AiosDBManager {
         let children_refs = self.get_children_from_localdb(refno)?;
         let mut paths = vec![];
         for x in children_refs {
-            let type_name = self.get_type_name(x)?;
+            let type_name = self.get_type_name(x);
             if type_name != "SPINE" {
                 continue;
             }

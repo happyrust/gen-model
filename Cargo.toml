@@ -8,7 +8,7 @@ default = [] #
 truck = []
 viewer = []  #是否开启视图
 gen_model = ["aios_core/gen_model"]
-opencascade_rs = []
+opencascade_rs = ["aios_core/opencascade_rs"]
 
 [dependencies]
 config = "0.13.1"

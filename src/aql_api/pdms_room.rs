@@ -275,45 +275,78 @@ pub async fn query_node_connect_rooms(
     todo!()
 }
 
-/// 获取该参考号属于哪个房间 room_name_type : 存放房间名的类型
-pub async fn query_room_info_from_refno(
-    refno: RefU64,
-    room_name_type: &str,
-    database: &ArDatabase,
-) -> anyhow::Result<Option<String>> {
-    let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new(
-        "
-    With @@pdms_eles,@@room_edges
-    let refno = (for v,e in 1 inbound @id @@room_edges
-                return v._key )[0]
-    return refno",
-    )
-        .bind_var("id", refno)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
-    let result = database.aql_query::<String>(aql).await;
-    return match result {
-        Ok(r) => {
-            if !r.is_empty() {
-                let room_refno = RefU64::from_url_refno(&r[0]);
-                if room_refno.is_none() {
-                    return Ok(None);
-                }
-                let room_refno = room_refno.unwrap();
-                let room_name =
-                    query_ancestor_name_of_type_aql(database, room_refno, room_name_type).await?;
-                if room_name.is_none() {
-                    return Ok(None);
-                }
-                let room_name = room_name.unwrap();
-                Ok(Some(room_name))
-            } else {
-                Ok(None)
-            }
-        }
-        Err(_) => Ok(None),
-    };
+impl AiosDBManager {
+    pub async fn query_room_eles_of_ele(
+        &self,
+        refno: RefU64,
+    ) -> anyhow::Result<HashMap<RefU64, RoomElement>> {
+        let refno_str = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let aql = AqlQuery::new(
+            "
+        With @@pdms_eles, room_edges
+        for v,e in 1 inbound @id room_edges
+            return document(room_eles, v._key)
+        ",
+        )
+            .bind_var("id", refno_str)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION);
+        let result: HashMap<RefU64, RoomElement> = self
+            .get_arango_db()
+            .await?
+            .aql_query::<RoomElement>(aql)
+            .await?
+            .into_iter()
+            .map(|x| (x.refno, x))
+            .collect();
+
+        return Ok(result);
+    }
+
+    pub async fn query_room_refno_of_ele(&self, refno: RefU64) -> anyhow::Result<HashSet<RefU64>> {
+        let refno_str = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let aql = AqlQuery::new(
+            "
+        With @@pdms_eles, room_edges
+        for v,e in 1 inbound @id room_edges
+            return v._key
+        ",
+        )
+            .bind_var("id", refno_str)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION);
+        let result: HashSet<RefU64> = self
+            .get_arango_db()
+            .await?
+            .aql_query::<String>(aql)
+            .await?
+            .into_iter()
+            .map(|x| x.as_str().into())
+            // .flatten()
+            .collect();
+
+        return Ok(result);
+    }
+
+    pub async fn query_room_names_of_ele(&self, refno: RefU64) -> anyhow::Result<HashSet<String>> {
+        let refno_str = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let aql = AqlQuery::new(
+            "
+        With @@pdms_eles, room_edges
+        for v,e in 1 inbound @id room_edges
+            return document(room_eles, v._key).name
+        ",
+        )
+            .bind_var("id", refno_str)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION);
+        let result = self
+            .get_arango_db()
+            .await?
+            .aql_query::<String>(aql)
+            .await?
+            .into_iter()
+            .collect();
+
+        return Ok(result);
+    }
 }
 
 fn gen_query_all_need_compute_room_refno_sql(
@@ -590,6 +623,51 @@ impl AiosDBManager {
         Ok(res_map)
     }
 
+    ///返回批量参考号的关键点和包围盒
+    pub async fn query_eles_keypts_and_aabb_as_whole(
+        &self,
+        refnos: &[RefU64],
+        is_end_pt: bool,
+    ) -> anyhow::Result<Option<(Vec<Vec3>, Aabb)>> {
+        let database = self.get_arango_db().await?;
+        let inst_data = query_insts_shape_data(&database, refnos, &[GeoBasicType::Pos]).await?;
+        if inst_data.inst_info_map.is_empty() {
+            return Ok(None);
+        }
+        let mut whole_key_points = vec![];
+        let mut whole_aabb = Aabb::new_invalid();
+        for (&refno, info) in &inst_data.inst_info_map {
+            let Some(inst_geos) = inst_data.get_inst_geos(info) else {
+                continue;
+            };
+            let key_points = inst_geos
+                .iter()
+                .map(|x| {
+                    x.geo_param
+                        .key_points()
+                        .into_iter()
+                        .map(|v| x.transform.transform_point(v))
+                })
+                .flatten()
+                .map(|x| info.world_transform.transform_point(x))
+                .collect::<Vec<_>>();
+            whole_key_points.extend_from_slice(&key_points);
+            whole_aabb.merge(&info.aabb.unwrap());
+        }
+
+        if is_end_pt {
+            whole_key_points.sort_by(|a, b| a.length().partial_cmp(&b.length()).unwrap());
+            let end_key_points = vec![
+                whole_key_points.first().cloned().unwrap(),
+                whole_key_points.last().cloned().unwrap(),
+            ];
+            return Ok(Some((end_key_points, whole_aabb)));
+        }
+
+        return Ok(Some((whole_key_points, whole_aabb)));
+    }
+
+
     /// 返回元件所属的房间panels
     pub async fn query_ele_own_room_panels(
         &self,
@@ -637,7 +715,7 @@ impl AiosDBManager {
                 whole_key_points.first().cloned().unwrap(),
                 whole_key_points.last().cloned().unwrap(),
             ];
-            dbg!(&final_key_points);
+            // dbg!(&final_key_points);
             // dbg!(&whole_aabb);
             let intersect_room_panels = room_panels_tree
                 .locate_intersecting_bounds(&whole_aabb)
@@ -891,17 +969,12 @@ impl AiosDBManager {
                 .filter(|x| x.0 != refno)
                 .filter(|x| {
                     filter_types.is_empty()
-                        || filter_types
-                        .contains(&self.get_type_name(x.0).unwrap_or_default().as_str())
+                        || filter_types.contains(&self.get_type_name(x.0).as_str())
                 })
                 .filter(|x| {
                     own_filter_types.is_empty()
-                        || own_filter_types.contains(
-                        &self
-                            .get_type_name(self.get_owner(x.0))
-                            .unwrap_or_default()
-                            .as_str(),
-                    )
+                        || own_filter_types
+                        .contains(&self.get_type_name(self.get_owner(x.0)).as_str())
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -913,17 +986,12 @@ impl AiosDBManager {
                 .filter(|x| x.0 != refno)
                 .filter(|x| {
                     filter_types.is_empty()
-                        || filter_types
-                        .contains(&self.get_type_name(x.0).unwrap_or_default().as_str())
+                        || filter_types.contains(&self.get_type_name(x.0).as_str())
                 })
                 .filter(|x| {
                     own_filter_types.is_empty()
-                        || own_filter_types.contains(
-                        &self
-                            .get_type_name(self.get_owner(x.0))
-                            .unwrap_or_default()
-                            .as_str(),
-                    )
+                        || own_filter_types
+                        .contains(&self.get_type_name(self.get_owner(x.0)).as_str())
                 })
                 .collect::<Vec<_>>()
         };

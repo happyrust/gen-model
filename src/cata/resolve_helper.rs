@@ -525,7 +525,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     dist_to_btm: gmse.distances[0],
                     height: gmse.phei,
                     diameter: gmse.diameters[0],
-                    radius: gmse.radius,
+                    radius: gmse.prad,
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
                 })
