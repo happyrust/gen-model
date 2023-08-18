@@ -98,7 +98,11 @@ impl AiosDBManager {
         // if db_option.gen_spatial_tree
         //加载空间树
         {
-            // mgr.compute_aabb_trees().await?;
+            mgr.compute_aabb_trees().await?;
+        }
+        //加载对齐方式的值
+        {
+            // mgr.init_loop_sjus_map().await?;
         }
         Ok(mgr)
     }
@@ -573,6 +577,7 @@ impl AiosDBManager {
             room_panels_rtree: None,
             room_info_map: Default::default(),
             room_panel_info_map: Default::default(),
+            plin_params_map: Default::default(),
         })
     }
 

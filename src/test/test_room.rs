@@ -8,6 +8,7 @@ use aios_core::pdms_types::RefU64;
 use aios_core::pdms_types::UdaMajorType::T;
 use regex::Regex;
 use std::str::FromStr;
+use crate::data_interface::interface::PdmsDataInterface;
 
 ///  测试获取有负实体的parent
 #[tokio::test]
@@ -24,13 +25,16 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
 }
 
 // //15组贯穿件房间号测试样例
-// #[tokio::test]
-// async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
-//     //测试样例1
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83722").unwrap()).await;
-//     assert_eq!(room_number.unwrap(), Some(("R530".to_string(), "R561".to_string())));
-//     Ok(())
-// }
+#[tokio::test]
+async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
+    //测试样例1
+    let mgr = get_test_ams_db_manager_async().await;
+    let room_number_map = mgr
+        .query_through_element_room_nums(&["24383/83722".into()])
+        .await?;
+    dbg!(room_number_map);
+    Ok(())
+}
 //
 //
 // #[tokio::test]
@@ -173,11 +177,14 @@ async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+    let mgr = get_test_ams_db_manager_async().await;
     let refno = RefU64::from_url_refno("24381_178638").unwrap();
-    let name = pdms_room::query_room_info_from_refno(refno, "FRMW", &database)
+    let name = mgr
+        .query_room_names_of_ele(refno)
         .await?
-        .unwrap();
+        .into_iter()
+        .next()
+        .unwrap_or_default();
     let room_name = pdms_room::get_room_name_split(&name).unwrap();
     dbg!(&room_name);
     Ok(())
@@ -199,4 +206,25 @@ fn test_match_room_name() {
     dbg!(!re.is_match("/1RA-RM03-R312"));
     dbg!(!re.is_match("/1NX-RM11-R976"));
     dbg!(!re.is_match("/12A-RM11-R976"));
+}
+
+#[tokio::test]
+async fn test_query_room_of_refno() -> anyhow::Result<()> {
+    //测试样例1
+    let mgr = get_test_ams_db_manager_async().await;
+    let room_refnos = mgr.query_room_refno_of_ele("17496/198243".into()).await?;
+    dbg!(room_refnos);
+    let room_names = mgr.query_room_names_of_ele("17496/198243".into()).await?;
+    dbg!(room_names);
+    let rooms = mgr.query_room_eles_of_ele("17496/198243".into()).await?;
+    dbg!(rooms);
+
+    let around_eles = mgr
+        .get_refnos_within_bound_radius("17496/198243".into(), 100.0)
+        .await?;
+    dbg!(around_eles);
+
+    //
+
+    Ok(())
 }
