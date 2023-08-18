@@ -180,10 +180,10 @@ pub async fn query_room_name_from_refno_aql(
          return v.name
     ",
     )
-    .bind_var("id", refno)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
-    .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
+        .bind_var("id", refno)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
     let result = database.aql_query::<String>(aql).await?;
     if !result.is_empty() {
         Ok(Some(result[0].to_string()))
@@ -203,7 +203,7 @@ pub async fn query_room_name_from_refnos_aql(
         .collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "
-    With @@pdms_eles,@@room_edges
+    With @@pdms_eles,@@room_edges,@@room_eles
     for id in @refnos
     for v,e in 1 inbound id @@room_edges
          return {
@@ -212,14 +212,59 @@ pub async fn query_room_name_from_refnos_aql(
          }
     ",
     )
-    .bind_var("refnos", refnos)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
+        .bind_var("refnos", refnos)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
     let result = database.aql_query::<PdmsNodeBelongRoomName>(aql).await;
     match result {
         Ok(data) => Ok(data),
         Err(_) => Ok(vec![]),
     }
+}
+
+/// 根据name返回name对应的房间号
+pub async fn query_room_name_from_names_aql(
+    names: Vec<String>,
+    att_type: Option<String>,
+    database: &ArDatabase) -> anyhow::Result<Vec<PdmsNameBelongRoomName>> {
+    let names = names
+        .into_iter()
+        .map(|name| if name.starts_with("/") { name } else { format!("/{}", name) })
+        .collect::<Vec<String>>();
+    let aql = if att_type.is_none() {
+        AqlQuery::new("\
+    With @@pdms_eles,@@room_edges,@@room_eles
+    for v in pdms_eles
+    filter v.name in @names
+        for r,e in 1 inbound v._id @@room_edges
+        filter r != null
+         return {
+            'name': v.name,
+            'room_name': r.name
+         } ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+            .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+            .bind_var("names", names)
+    } else {
+        let noun = att_type.unwrap();
+        AqlQuery::new("\
+    With @@pdms_eles,@@room_edges,@@room_eles
+    for v in pdms_eles
+    filter v.noun == @noun
+    filter v.name in @names
+        for r,e in 1 inbound v._id @@room_edges
+         return {
+            'name': v.name,
+            'room_name': r.name
+         }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+            .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+            .bind_var("names", names)
+            .bind_var("noun", noun)
+    };
+    let result = database.aql_query::<PdmsNameBelongRoomName>(aql).await?;
+    Ok(result)
 }
 
 /// 获取节点连接的两边的房间
@@ -244,9 +289,9 @@ pub async fn query_room_info_from_refno(
                 return v._key )[0]
     return refno",
     )
-    .bind_var("id", refno)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
+        .bind_var("id", refno)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
     let result = database.aql_query::<String>(aql).await;
     return match result {
         Ok(r) => {
@@ -317,9 +362,9 @@ pub async fn query_room_refnos_aql(
                 return v._key
         ",
         )
-        .bind_var("key", key)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges", AQL_ROOM_EDGES_COLLECTION)
+            .bind_var("key", key)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges", AQL_ROOM_EDGES_COLLECTION)
     } else {
         let filter_data = filter_major.unwrap().to_major_str();
         AqlQuery::new(
@@ -331,10 +376,10 @@ pub async fn query_room_refnos_aql(
             return v._key
         ",
         )
-        .bind_var("key", key)
-        .bind_var("filter_major", filter_data)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+            .bind_var("key", key)
+            .bind_var("filter_major", filter_data)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
     };
     let result: Vec<String> = database.aql_query(aql).await?;
     Ok(convert_refno_vec_from_vec_string(result))
@@ -357,9 +402,9 @@ pub async fn query_rooms_refnos_aql(
          }
     ",
     )
-    .bind_var("rooms", rooms)
-    .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
-    .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
+        .bind_var("rooms", rooms)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
     let result = database.aql_query::<PdmsNodeBelongRoomName>(aql).await;
     match result {
         Ok(datas) => {
@@ -463,11 +508,11 @@ pub async fn query_refno_belong_rooms(
             filter v.noun == 'FRMW'
             return { _key:v._key , owner:0 , name:v.name,noun:v.noun,version:0,children_count:1 }",
     )
-    .bind_var("id", id)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
-    .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
-    .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
+        .bind_var("id", id)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
     let results: Vec<PdmsElement> = database.aql_query(aql).await?;
     for result in results {
         let refno = result.refno;
@@ -613,9 +658,9 @@ impl AiosDBManager {
                 for &panel_info in &panel_infos {
                     let Ok(Some(room_panel_mesh)) =
                         self.get_plant_mesh(panel_info.inst_geo.geo_hash).await
-                    else {
-                        continue;
-                    };
+                        else {
+                            continue;
+                        };
                     let t = panel_info.transform * panel_info.inst_geo.transform;
                     let collider_mesh = room_panel_mesh.get_tri_mesh(t.compute_matrix());
 
@@ -683,9 +728,9 @@ impl AiosDBManager {
             for panel_info in panel_infos {
                 let Ok(Some(room_panel_mesh)) =
                     self.get_plant_mesh(panel_info.inst_geo.geo_hash).await
-                else {
-                    continue;
-                };
+                    else {
+                        continue;
+                    };
                 let t = panel_info.transform * panel_info.inst_geo.transform;
                 let collider_mesh = room_panel_mesh.get_tri_mesh(t.compute_matrix());
                 for key_point in &key_points {
@@ -847,16 +892,16 @@ impl AiosDBManager {
                 .filter(|x| {
                     filter_types.is_empty()
                         || filter_types
-                            .contains(&self.get_type_name(x.0).unwrap_or_default().as_str())
+                        .contains(&self.get_type_name(x.0).unwrap_or_default().as_str())
                 })
                 .filter(|x| {
                     own_filter_types.is_empty()
                         || own_filter_types.contains(
-                            &self
-                                .get_type_name(self.get_owner(x.0))
-                                .unwrap_or_default()
-                                .as_str(),
-                        )
+                        &self
+                            .get_type_name(self.get_owner(x.0))
+                            .unwrap_or_default()
+                            .as_str(),
+                    )
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -869,16 +914,16 @@ impl AiosDBManager {
                 .filter(|x| {
                     filter_types.is_empty()
                         || filter_types
-                            .contains(&self.get_type_name(x.0).unwrap_or_default().as_str())
+                        .contains(&self.get_type_name(x.0).unwrap_or_default().as_str())
                 })
                 .filter(|x| {
                     own_filter_types.is_empty()
                         || own_filter_types.contains(
-                            &self
-                                .get_type_name(self.get_owner(x.0))
-                                .unwrap_or_default()
-                                .as_str(),
-                        )
+                        &self
+                            .get_type_name(self.get_owner(x.0))
+                            .unwrap_or_default()
+                            .as_str(),
+                    )
                 })
                 .collect::<Vec<_>>()
         };

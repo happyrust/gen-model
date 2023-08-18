@@ -64,7 +64,7 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
             });
             let desc = get_refno_desc(stru.refno, aios_mgr).await.unwrap_or("".to_string());
             let support_type = if desc.starts_with("S2") && desc.contains("FLOOR") { "支架".to_string() } else { "吊架".to_string() };
-            let panel = aios_mgr.query_own_room_panel_elevations(stru.refno).await.unwrap();
+            let panel = aios_mgr.query_own_room_panel_elevations(stru.refno).await.unwrap_or_default();
             if !panel.is_empty() {
                 for (panel, (min, max)) in panel {
                     if support_type == "支架".to_string() {
