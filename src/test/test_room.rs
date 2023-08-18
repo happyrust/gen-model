@@ -29,8 +29,11 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
 async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
     //测试样例1
     let mgr = get_test_ams_db_manager_async().await;
+    let target_refno = "24383/83722".into();
+    let r = mgr.query_eles_keypts_and_aabb_as_whole(&[target_refno], true).await?;
+    dbg!(r);
     let room_number_map = mgr
-        .query_through_element_room_nums(&["24383/83722".into()])
+        .query_through_element_room_nums(&[target_refno])
         .await?;
     dbg!(room_number_map);
     Ok(())
