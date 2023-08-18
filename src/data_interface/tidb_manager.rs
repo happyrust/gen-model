@@ -293,7 +293,7 @@ impl PdmsDataInterface for AiosDBManager {
             t_types,
             depth,
         )
-            .await;
+        .await;
         t_refnos
     }
 
@@ -542,8 +542,8 @@ impl PdmsDataInterface for AiosDBManager {
         return UNIQUE(negatives)
         ",
         )
-            .bind_var("key", refno_url)
-            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        .bind_var("key", refno_url)
+        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self
             .get_arango_db()
             .await?
@@ -620,8 +620,8 @@ impl PdmsDataInterface for AiosDBManager {
             return UNIQUE(refnos)
         "#,
         )
-            .bind_var("key", refno_url)
-            .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
+        .bind_var("key", refno_url)
+        .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
         let refno_strs = self
             .get_arango_db()
             .await?
@@ -654,8 +654,8 @@ impl PdmsDataInterface for AiosDBManager {
                     return distinct parent._key
         "#,
         )
-            .bind_var("keys", refno_urls)
-            .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        .bind_var("keys", refno_urls)
+        .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self.get_arango_db().await?.aql_query::<String>(aql).await?;
         let refnos = refno_strs
             .iter()
@@ -684,8 +684,8 @@ impl PdmsDataInterface for AiosDBManager {
                 ]
         "#,
         )
-            .bind_var("key", refno_url)
-            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        .bind_var("key", refno_url)
+        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let result: HashMap<RefU64, Vec<RefU64>> = self
             .get_arango_db()
             .await?
@@ -779,24 +779,26 @@ impl PdmsDataInterface for AiosDBManager {
             } else {
                 let (l_poss, l_pose) = if owner_is_gensec {
                     //找到spine，获取spine的两个顶点
-                    let mut positions: Vec<Vec3> =
-                        self.get_children_from_localdb(ref_basic.owner)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .find(|x| self.get_type_name(*x).as_str() == "SPINE")
-                            .map(|x|
-                                self.get_children_attrs(x)
-                                    .unwrap_or_default()
-                                    .into_iter()
-                                    .map(|x| x.get_position().unwrap_or_default())
-                            ).into_iter().flatten().collect();
+                    let mut positions: Vec<Vec3> = self
+                        .get_children_from_localdb(ref_basic.owner)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .find(|x| self.get_type_name(*x).as_str() == "SPINE")
+                        .map(|x| {
+                            self.get_children_attrs(x)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .map(|x| x.get_position().unwrap_or_default())
+                        })
+                        .into_iter()
+                        .flatten()
+                        .collect();
                     if positions.len() == 2 {
                         (Some(positions[0]), Some(positions[1]))
-                    }else{
+                    } else {
                         (None, None)
                     }
-
-                }else{
+                } else {
                     (att.get_poss(), att.get_pose())
                 };
                 if let Some(poss) = l_poss &&
@@ -843,7 +845,7 @@ impl PdmsDataInterface for AiosDBManager {
                 let mut plin_param = None;
                 const HAS_PLIN_TYPES: [&str; 4] = ["SCTN", "GENSEC", "WALL", "STWALL"];
                 while plin_param.is_none() {
-                    let Some(t) = self.get_refno_basic(plin_owner) else{
+                    let Some(t) = self.get_refno_basic(plin_owner) else {
                         break;
                     };
                     #[cfg(debug_assertions)]
@@ -874,7 +876,7 @@ impl PdmsDataInterface for AiosDBManager {
                 let x_axis = y_axis.cross(z_axis).normalize();
                 let posl_quat = if fixed_posl_ori {
                     Quat::IDENTITY
-                }else{
+                } else {
                     Quat::from_mat3(&Mat3::from_cols(x_axis, y_axis, z_axis))
                 };
                 #[cfg(debug_assertions)]
@@ -970,21 +972,12 @@ impl PdmsDataInterface for AiosDBManager {
         distance: f32,
     ) -> anyhow::Result<Vec<RefU64>> {
         let db = &self.get_arango_db().await?;
-        let instances =
-            query_insts_shape_data(db, &[refno], &[GeoBasicType::Pos, GeoBasicType::Compound])
-                .await?;
-        if instances.inst_info_map.is_empty() {
-            return Ok(vec![]);
-        }
-        let pos = instances
-            .inst_info_map
-            .iter()
-            .next()
-            .unwrap()
-            .1
-            .world_transform
+        let world_pos = self
+            .get_world_transform(refno)
+            .await?
+            .unwrap_or_default()
             .translation;
-        self.get_refnos_within_bound_radius_by_pos(pos, distance)
+        self.get_refnos_within_bound_radius_by_pos(world_pos, distance)
     }
 
     ///指定pos获得在一定范围的构件参考号列表
