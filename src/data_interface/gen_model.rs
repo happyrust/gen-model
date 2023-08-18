@@ -572,6 +572,18 @@ fn aabb_apply_transform(aabb: &Aabb, t: &Transform) -> Aabb {
     transformed_aabb
 }
 
+#[inline]
+fn cal_sjus_value(sjus: &str, height: f32) -> f32{
+    let off_z = if sjus == "UTOP" || sjus == "DTOP" || sjus == "TOP" {
+        height
+    } else if sjus == "UCEN" || sjus == "DCEN" || sjus == "CENT"{
+        height / 2.0
+    } else {
+        0.0
+    };
+    off_z
+}
+
 /// 生成元件库的branch型几何体
 pub async fn gen_cata_geos(
     mgr: Arc<AiosDBManager>,
@@ -679,18 +691,12 @@ pub async fn gen_cata_geos(
                                 let parent = ele_att.get_owner().unwrap_or_default();
                                 if let Some(sjus_adjust) = sjus_map_clone.get(&parent) {
                                     let height = sjus_adjust.value().1;
-                                    let off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                                        height
-                                    } else if sjus == "UCEN" || sjus == "DCEN" {
-                                        height / 2.0
-                                    } else {
-                                        0.0
-                                    };
+                                    let off_z = cal_sjus_value(sjus, height);
                                     let parent_trans = mgr_clone.get_world_transform(parent).await.unwrap_or_default().unwrap_or_default();
 
                                     origin_trans.translation.z = parent_trans.translation.z;
                                     origin_trans.translation = origin_trans.translation + parent_trans.rotation.mul_vec3(sjus_adjust.value().0)
-                                        + origin_trans.rotation.mul_vec3(Vec3::new(0.0, 0.0, height));
+                                        + origin_trans.rotation.mul_vec3(Vec3::new(0.0, 0.0, off_z));
                                 }
                             }
 
@@ -1040,15 +1046,10 @@ pub async fn gen_cata_geos(
                             let parent = ref_basic.owner;
                             if let Some(sjus_adjust) = sjus_map_clone.get(&parent) {
                                 let height = sjus_adjust.value().1;
-                                let off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                                    height
-                                } else if sjus == "UCEN" || sjus == "DCEN" {
-                                    height / 2.0
-                                } else {
-                                    0.0
-                                };
+                                let off_z = cal_sjus_value(sjus, height);
                                 let parent_trans = mgr_clone.get_world_transform(parent).await.unwrap_or_default().unwrap_or_default();
-                                origin_trans.translation += parent_trans.rotation * sjus_adjust.value().0 + origin_trans.rotation * Vec3::new(0.0, 0.0, height);
+                                origin_trans.translation += parent_trans.rotation * sjus_adjust.value().0 +
+                                    origin_trans.rotation * Vec3::new(0.0, 0.0, off_z);
                             }
                         }
 
@@ -1541,13 +1542,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                 .get_f32("HEIG")
                 .unwrap_or(loop_att.get_f32("HEIG").unwrap_or_default());
             let sjus = loop_att.get_str("SJUS").unwrap_or_default();
-            let off_z = if sjus == "UTOP" || sjus == "DTOP" {
-                -height
-            } else if sjus == "UCEN" || sjus == "DCEN" {
-                -height / 2.0
-            } else {
-                0.0
-            };
+            let off_z = cal_sjus_value(sjus, height);
             //对齐方式的距离，应该存储下来，子节点要与其保持一致的偏移
             loop_sjus_map.insert(owner, (Vec3::Z * off_z, height));
         });
