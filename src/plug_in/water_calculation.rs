@@ -143,10 +143,10 @@ pub async fn export_stp(
         });
 
     let mut final_compound_shape = Compound::from_shapes(total_shapes_map.values());
-    fs::create_dir_all("./assets/walter_steps")?;
+    fs::create_dir_all("./assets/water_steps")?;
     final_compound_shape
         .write_step(&format!(
-            "./assets/walter_steps/{}.step",
+            "./assets/water_steps/{}.step",
             &stp_packet.file_name
         ))
         .unwrap();
@@ -169,15 +169,11 @@ pub async fn query_water_calculation_data(
 }
 
 ///查询数据库中所有记录
-pub async fn query_water_calculation_data_total_aql(
-    database: &ArDatabase,
-) -> anyhow::Result<Vec<FloodingStpToArangodb>> {
-    let aql = AqlQuery::new(
-        "
+pub async fn query_water_calculation_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<FloodingStpToArangodb>> {
+    let aql = AqlQuery::new("
     for c in @@collection
-        return unset(c , '_id','_rev')",
-    )
-    .bind_var("@collection", AQL_WATER_CALCULATION_COLLECTION);
+        return unset(c , '_id','_rev')").bind_var("@collection", AQL_WATER_CALCULATION_COLLECTION);
+    dbg!("*****");
     let result = database.aql_query::<FloodingStpToArangodb>(aql).await?;
     Ok(result)
 }

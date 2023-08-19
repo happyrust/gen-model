@@ -1,10 +1,10 @@
-use std::collections::BTreeMap;
-use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
-use aios_core::tiny_expr::expr_eval::interp;
-use regex::Regex;
 use crate::cata::resolve_helper::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::test::test_helper::get_test_ams_db_manager;
+use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
+use aios_core::tiny_expr::expr_eval::interp;
+use regex::Regex;
+use std::collections::BTreeMap;
 
 ///测试带小数的表达式, gitee:
 #[test]
@@ -41,7 +41,6 @@ fn test_parse_param_with_of_operator() {
     assert_eq!(r.unwrap(), 850.0);
 }
 
-
 #[test]
 fn parse_3_axis() {
     //
@@ -61,9 +60,6 @@ fn parse_3_axis() {
     let r = eval_str_to_f64::<AiosDBManager>(str, &context, None, true);
     dbg!(r);
 }
-
-
-
 
 //[(.*[^-])([-?X|Y|Z])]?
 #[test]
@@ -98,16 +94,13 @@ fn test_rpro() {
     // let mut new_exp = rpro_regex.replace_all(&new_exp, "");
     // dbg!(new_exp);
 
-
     let re = Regex::new(r"([A-Z]+[0-9]*)(\s*\[(\d+)\])?").unwrap();
     for caps in re.captures_iter(s) {
         dbg!(&caps[0]);
     }
 
     let re = Regex::new(r"(RPRO)\s+(\S+)").unwrap();
-    let result = re.replace(s, |caps: &Captures| {
-        format!("{}_{}", &caps[1], &caps[2])
-    });
+    let result = re.replace(s, |caps: &Captures| format!("{}_{}", &caps[1], &caps[2]));
     dbg!(result);
 }
 
@@ -115,13 +108,14 @@ fn test_rpro() {
 fn test_math_exp() {
     let expr = "MAX ( ( ( - 31 ) + 60 ), 29.2 )";
     let context = BTreeMap::new();
-    dbg!(eval_str_to_f64::<AiosDBManager>(expr, &context, None, true)).expect("TODO: panic message");
+    dbg!(eval_str_to_f64::<AiosDBManager>(expr, &context, None, true))
+        .expect("TODO: panic message");
 }
 
-//todo fix
 #[test]
 fn test_interp() {
-    let input_str = "((0.5*500*TAN(/2)+(500+2)*TAN(3/2)*COS(3))/2-((-(500/2+2)*TAN(3/2)+2*COS((90-3)))/2)";
+    let input_str =
+        "((0.5*500*TAN(/2)+(500+2)*TAN(3/2)*COS(3))/2-((-(500/2+2)*TAN(3/2)+2*COS((90-3)))/2)";
     let result = interp(&input_str.to_lowercase()).unwrap();
     dbg!(&result);
 }

@@ -43,8 +43,8 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         let children_refs = interface.get_children_refs(refno).await?;
         let mut paths = vec![];
         for x in children_refs.iter() {
-            let type_name = interface.get_refno_basic(*x).map(|x| x.get_type().to_string())
-                .unwrap_or("unset".to_string());
+
+            let type_name = interface.get_type_name(*x);
             if type_name != "SPINE" {
                 continue;
             }
