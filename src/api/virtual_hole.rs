@@ -16,6 +16,7 @@ pub async fn query_virtual_hole_data(database: &ArDatabase, key_value: &str) -> 
 }
 
 pub async fn query_virtual_hole_audit_data_by_name(database: &ArDatabase, name: &str) -> anyhow::Result<Option<Vec<SendHoleDataToArango>>> {
+   dbg!(&name);
     let aql = AqlQuery::new("FOR u IN @@collection
                                                 FILTER u.formdata.HumanCode==@name
                                                 return unset(u , '_id','_rev')")
@@ -25,18 +26,18 @@ pub async fn query_virtual_hole_audit_data_by_name(database: &ArDatabase, name: 
     return Ok(Some((data_vec)));
 }
 
-pub async fn query_hole_detail_data_by_code(database: &ArDatabase, key: &str) -> anyhow::Result<Option<Vec<VirtualHoleGraphNode>>> {
+pub async fn query_hole_detail_data_by_code(database: &ArDatabase, key: &str) -> anyhow::Result<Option<Vec<VirtualHoleGraphNodeQuery>>> {
     let aql = AqlQuery::new("with hole_data let v = document('hole_data',@_key)\
         return unset(v , '_id','_rev') ")
         .bind_var("_key", key);
-    let data_vec: Vec<VirtualHoleGraphNode> = database.aql_query(aql).await?;
+    let data_vec: Vec<VirtualHoleGraphNodeQuery> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }
 
-pub async fn query_embed_detail_data_by_code(database: &ArDatabase, key: &str) -> anyhow::Result<Option<Vec<VirtualEmbedGraphNode>>> {
+pub async fn query_embed_detail_data_by_code(database: &ArDatabase, key: &str) -> anyhow::Result<Option<Vec<VirtualEmbedGraphNodeQuery>>> {
     let aql = AqlQuery::new("with embed_data let v = document('embed_data',@_key)\
         return unset(v , '_id','_rev') ")
         .bind_var("_key", key);
-    let data_vec: Vec<VirtualEmbedGraphNode> = database.aql_query(aql).await?;
+    let data_vec: Vec<VirtualEmbedGraphNodeQuery> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }

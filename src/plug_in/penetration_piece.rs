@@ -23,6 +23,9 @@ pub async fn get_penetration_detail_by_refno(aios_mgr: &AiosDBManager, refno_vec
                 data.refno = i.0.clone();
                 //获得name
                 data.name = attr.get_name().to_string();
+                //获得x偏移角度
+                get_x_deviation_angle(&mut data);
+
                 let rooms_number = aios_mgr.query_through_element_room_nums(&[i.0.clone()]).await;
                 if let Ok(rooms_number) = rooms_number {
                     for (key, value) in rooms_number {
@@ -39,12 +42,6 @@ pub async fn get_penetration_detail_by_refno(aios_mgr: &AiosDBManager, refno_vec
     return Ok(hole_data_vec);
 }
 
-///得到壳内房间号和壳外房间号
-fn get_room_number(data: &mut PenetrationData) {
-//暂时默认壳内房间号
-    data.inner_room_num = "101".to_string();
-    data.outer_room_num = "102".to_string();
-}
 
 ///得到贯穿件X轴偏移角度
 pub fn get_x_deviation_angle(mut data: &mut PenetrationData) {
