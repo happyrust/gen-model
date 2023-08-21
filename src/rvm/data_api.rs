@@ -143,10 +143,14 @@ pub async fn create_refnos_rvm_data(select_refno: RefU64, db_option: &DbOption, 
     // 先查询经过负实体计算的
     let compound_insts = query_compound_inst_hashes_aql(refnos.clone(), database).await?;
     // 过滤掉负实体之后再查询
-    let filter_refnos = filter_compound_refnos(refnos, &compound_insts);
-    let mut refno_geo_infos = query_single_rvm_geo_instance_aql(filter_refnos.clone(), database).await?;
+    let filter_refnos = filter_compound_refnos(refnos.clone(), &compound_insts);
+    let refno_geo_infos = query_single_rvm_geo_instance_aql(refnos, database).await?;
     let tubi_infos = query_rvm_tubi_instances_aql(filter_refnos, database).await?;
-    // 将extrusion单独提出来 , 该部分为 extrusion 中不为负实体得
+    let refno_geo_infos_map = refno_geo_infos.clone()
+        .into_iter()
+        .map(|info| (info.refno, info))
+        .collect::<HashMap<_, _>>();
+    // 将extrusion单独提出来 , 该部分为 extrusion 中不为负实体得部分
     let mut extrusion_geo_hashes: Vec<u64> = Vec::new();
     for geo in refno_geo_infos.iter() {
         for rvm_inst in geo.rvm_inst_geo.iter() {
@@ -174,21 +178,17 @@ pub async fn create_refnos_rvm_data(select_refno: RefU64, db_option: &DbOption, 
         let mut name = gen_name_position_data(&info.refno.to_url_refno(), info.world_transform.translation);
         info_vec.append(&mut name);
         // prim
+        let Some(insts) = refno_geo_infos_map.get(&info.refno) else { continue; };
+        let mut insts = insts.clone();
         let Some(hash) = info.cata_hash else { continue; };
-        let geo = RvmInstGeo {
-            geo_param: PrimExtrusion(Extrusion::default()),
-            geo_hash: hash,
-            aabb: info.aabb,
-            transform: Transform::default(),
-            visible: info.visible,
-            is_tubi: false,
-            geo_type: info.geo_type,
-        };
         let mut prim_vec = Vec::new();
-        let Some(mut data) = gen_prim_data_test(info.refno, &geo, info.world_transform,
-                                                false, &compound_mesh) else { continue; };
-        prim_vec.append(&mut data);
-        if prim_vec.is_empty() { continue; };
+        for mut inst in insts.rvm_inst_geo.iter_mut() {
+            inst.geo_hash = hash.to_string();
+            let Some(mut data) = gen_prim_data_test(info.refno, inst, insts.world_transform,
+                                                    false, &compound_mesh) else { continue; };
+            prim_vec.append(&mut data);
+            if prim_vec.is_empty() { continue; };
+        }
         info_vec.append(&mut prim_vec);
         // cnte
         info_vec.append(&mut gen_cnte_data());

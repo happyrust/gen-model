@@ -71,7 +71,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
                 // leave 到 0 0 0 的距离
                 let leave_distance = leave_point.pt.distance(Vec3::ZERO);
                 // 如果没有tubi就去arrive的 pbore
-                let bore = if bore_size.is_empty() && bore_idx >= bore_size.len() { arrive_point.pbore } else { bore_size[bore_idx] };
+                let bore = if bore_size.is_empty() || bore_idx >= bore_size.len() { arrive_point.pbore } else { bore_size[bore_idx] };
                 let length = arrive_distance + leave_distance;
                 length_map.push(HeatDissipationData {
                     refno: point.refno,
@@ -106,7 +106,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
                 let Some(leave_point) = point.ptset_map.get(leave) else { continue; };
                 bore_idx += 1;
                 // redu 为 bran最后一个元素时 取 leave_point的 pbore
-                let mut bore = if (bore_size.is_empty() && bore_idx >= bore_size.len()) || idx == points_len - 1 {
+                let mut bore = if bore_size.is_empty() || bore_idx >= bore_size.len() || idx == points_len - 1 {
                     leave_point.pbore
                 } else {
                     bore_size[bore_idx]
@@ -125,7 +125,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
                 let Some(AttrVal::IntegerType(leave)) = attr.get_val("LEAV") else { continue; };
                 let Some(arrive_point) = point.ptset_map.get(arrive) else { continue; };
                 let Some(leave_point) = point.ptset_map.get(leave) else { continue; };
-                let bore = if bore_size.is_empty() && bore_idx >= bore_size.len() { leave_point.pbore } else { bore_size[bore_idx] };
+                let bore = if bore_size.is_empty() || bore_idx >= bore_size.len() { leave_point.pbore } else { bore_size[bore_idx] };
                 let length = arrive_point.pt.distance(leave_point.pt);
                 length_map.push(HeatDissipationData {
                     refno: point.refno,
