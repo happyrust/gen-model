@@ -631,8 +631,8 @@ pub fn gen_dbinfo_value_insert_sql(dbno: u32, filename: &str, version: u32, proj
     sql
 }
 
-pub fn get_name(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashMap<RefU64, RefU64Vec>, refno: RefU64) -> String {
-    let attr = whole_attr.get(&refno).unwrap();
+///如果名称未给定，根据属性列表和children列表获得当前的元素的名称
+pub fn get_name(refno: RefU64, attr: &WholeAttMap, children_map: &HashMap<RefU64, Vec<(RefU64, String)>>) -> String {
     let type_name = attr.implicit_attmap.get_type();
     return if let Some(name) = attr.explicit_attmap.get(&(db1_hash("NAME"))) {
         name.string_value()
@@ -640,24 +640,19 @@ pub fn get_name(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashMa
         let owner = attr.implicit_attmap.get_owner().unwrap();
         let mut idx = 1;
         if let Some(children) = children_map.get(&owner) {
-            idx = children.iter().filter(|child| {
-                if let Some(v) = whole_attr.get(child) {
-                    whole_attr.get(child).unwrap().implicit_attmap.get_type() == type_name
-                } else {
-                    false
-                }
-            }).position(|node| node == &refno).unwrap_or_default() + 1;
+            idx = children.iter().filter(|(_, type_)| {
+                type_ == type_name
+            }).position(|node| node.0 == refno).unwrap_or_default() + 1;
         }
         format!("{} {}", type_name, idx)
     };
 }
 
 #[inline]
-pub fn get_order(whole_attr: &DashMap<RefU64, WholeAttMap>, children_map: &HashMap<RefU64, RefU64Vec>, refno: RefU64) -> usize {
-    let attr = whole_attr.get(&refno).unwrap();
+pub fn get_order(refno: RefU64, attr: &WholeAttMap, children_map: &HashMap<RefU64, Vec<(RefU64, String)>>) -> usize {
     let owner = attr.implicit_attmap.get_owner().unwrap();
     if let Some(children) = children_map.get(&owner) {
-        return children.iter().position(|child| child == &refno).unwrap_or_default();
+        return children.iter().position(|child| child.0 == refno).unwrap_or_default();
     }
     0
 }
