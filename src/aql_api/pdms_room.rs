@@ -434,7 +434,7 @@ pub async fn query_room_refnos_aql(
         )
             .bind_var("key", key)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-            .bind_var("@pdms_edges", AQL_ROOM_EDGES_COLLECTION)
+            .bind_var("@pdms_edges",  AQL_PDMS_EDGES_COLLECTION)
     } else {
         let filter_data = filter_major.unwrap().to_major_str();
         AqlQuery::new(
@@ -452,6 +452,8 @@ pub async fn query_room_refnos_aql(
             .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
     };
     let result: Vec<String> = database.aql_query(aql).await?;
+    dbg!("****");
+    dbg!(&result);
     Ok(convert_refno_vec_from_vec_string(result))
 }
 
