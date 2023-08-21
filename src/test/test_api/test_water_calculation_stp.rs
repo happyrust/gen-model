@@ -150,7 +150,8 @@ async fn test_export_water_calculation_stp_01() -> anyhow::Result<()> {
 
 
 
-//#[cfg(feature = "opencascade_rs")]
+///测试导出不全的情况，墙有丢失
+#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
 async fn test_export_water_calculation_stp_02() -> anyhow::Result<()> {
@@ -163,7 +164,7 @@ async fn test_export_water_calculation_stp_02() -> anyhow::Result<()> {
     let mut export_models_map = HashMap::new();
     export_models_map.insert(
         RefU64::from_str("25688/48473").unwrap(),
-        "STWALL 1".to_string(),
+        "1RS-WF02-W-C-RR002".to_string(),
     );
     stp_packet.export_models_map = export_models_map;
     //所有墙与孔洞的map
