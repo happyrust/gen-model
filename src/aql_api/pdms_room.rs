@@ -203,7 +203,7 @@ pub async fn query_room_name_from_refnos_aql(
         .collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "
-    With @@pdms_eles,@@room_edges
+    With @@pdms_eles,@@room_edges,@@room_eles
     for id in @refnos
     for v,e in 1 inbound id @@room_edges
          return {
@@ -214,12 +214,94 @@ pub async fn query_room_name_from_refnos_aql(
     )
         .bind_var("refnos", refnos)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
     let result = database.aql_query::<PdmsNodeBelongRoomName>(aql).await;
     match result {
         Ok(data) => Ok(data),
         Err(_) => Ok(vec![]),
     }
+}
+
+/// 根据name返回name对应的房间号
+pub async fn query_room_name_from_names_aql(
+    names: Vec<String>,
+    att_type: Option<String>,
+    database: &ArDatabase) -> anyhow::Result<Vec<PdmsNameBelongRoomName>> {
+    let names = names
+        .into_iter()
+        .map(|name| if name.starts_with("/") { name } else { format!("/{}", name) })
+        .collect::<Vec<String>>();
+    let aql = if att_type.is_none() {
+        AqlQuery::new("\
+    With @@pdms_eles,@@room_edges,@@room_eles
+    for v in pdms_eles
+    filter v.name in @names
+        for r,e in 1 inbound v._id @@room_edges
+        filter r != null
+         return {
+            'name': v.name,
+            'room_name': r.name
+         } ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+            .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+            .bind_var("names", names)
+    } else {
+        let noun = att_type.unwrap();
+        AqlQuery::new("\
+    With @@pdms_eles,@@room_edges,@@room_eles
+    for v in pdms_eles
+    filter v.noun == @noun
+    filter v.name in @names
+        for r,e in 1 inbound v._id @@room_edges
+         return {
+            'name': v.name,
+            'room_name': r.name
+         }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+            .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+            .bind_var("names", names)
+            .bind_var("noun", noun)
+    };
+    let result = database.aql_query::<PdmsNameBelongRoomName>(aql).await?;
+    Ok(result)
+}
+
+/// 返回设备所在的房间号(不含贯穿件)
+pub async fn query_equi_room_name_from_names_aql(
+    names: Vec<String>,
+    database: &ArDatabase
+) -> anyhow::Result<Vec<PdmsNameBelongRoomName>> {
+    let names = names
+        .into_iter()
+        .map(|name| if name.starts_with("/") { name } else { format!("/{}", name) })
+        .collect::<Vec<String>>();
+    let aql = AqlQuery::new("
+    With @@pdms_eles,@@pdms_edges,@@room_eles,@@room_edges
+    for v in pdms_eles
+    filter v.noun == 'EQUI'
+    filter v.name in @names
+    let children = (
+    for e in 1 inbound v._id pdms_edges
+        return e._id )
+    let result = (
+        for child in children
+        for r in 1 inbound child room_edges
+            filter r != null
+            limit 1
+            return {
+                'name': v.name,
+                'room_name': r.name
+            }
+     )
+     return result ")
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+        .bind_var("names", names);
+    let result = database.aql_query::<Vec<PdmsNameBelongRoomName>>(aql).await?;
+    Ok(result.into_iter().flatten().collect())
 }
 
 /// 获取节点连接的两边的房间
