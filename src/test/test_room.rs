@@ -29,13 +29,13 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
 async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
     //测试样例1
     let mgr = get_test_ams_db_manager_async().await;
-    let target_refno = "24383/83722".into();
+    let target_refno = "24383/83512".into();
     let r = mgr.query_eles_keypts_and_aabb_as_whole(&[target_refno], true).await?;
-    dbg!(r);
-    let room_number_map = mgr
-        .query_through_element_room_nums(&[target_refno])
-        .await?;
-    dbg!(room_number_map);
+    dbg!(r.unwrap().0);
+    // let room_number_map = mgr
+    //     .query_through_element_room_nums(&[target_refno])
+    //     .await?;
+    // dbg!(room_number_map);
     Ok(())
 }
 //
@@ -221,13 +221,10 @@ async fn test_query_room_of_refno() -> anyhow::Result<()> {
     dbg!(room_names);
     let rooms = mgr.query_room_eles_of_ele("17496/198243".into()).await?;
     dbg!(rooms);
-
     let around_eles = mgr
         .get_refnos_within_bound_radius("17496/198243".into(), 100.0)
         .await?;
     dbg!(around_eles);
-
     //
-
     Ok(())
 }

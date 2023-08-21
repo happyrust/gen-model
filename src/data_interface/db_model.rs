@@ -573,6 +573,7 @@ impl AiosDBManager {
             room_panels_rtree: None,
             room_info_map: Default::default(),
             room_panel_info_map: Default::default(),
+            plin_params_map: Default::default(),
         })
     }
 
