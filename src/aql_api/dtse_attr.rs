@@ -61,6 +61,7 @@ pub async fn query_ipara_from_bran(bran_refno: RefU64, aios_mgr: &AiosDBManager)
     let temp = bran_attr.get_f32("TEMP").unwrap_or(-100000.0);
     let h_bore = bran_attr.get_f32("HBOR").unwrap_or(0.0);
     let Some(ispec) = bran_attr.get_refu64("ISPE") else { return Ok(vec![0.0]); };
+    if *ispec == 0 { return Ok(vec![0.0]); };
     // 找到ispec下所有的 bore 范围，并将其分类
     let bore_node = query_travel_children_with_types_aql(&database, ispec, &vec!["SPCO"], false).await?;
     // key 为 温度范围， value 为 外径范围
@@ -81,6 +82,7 @@ pub async fn query_ipara_from_bran(bran_refno: RefU64, aios_mgr: &AiosDBManager)
             let Some(bore_answer) = bore_attr.get_f32("ANSW") else { continue; };
             let Some(bore_max_answer) = bore_attr.get_f32("MAXA") else { continue; };
             let Some(catr_refno) = bore_attr.get_refu64("CATR") else { continue; };
+            if *catr_refno == 0 { continue; };
             bore_value_vec.push((bore_answer, bore_max_answer, catr_refno));
         }
         ispec_vec.push(((temp_answer, temp_max_answer), bore_value_vec));
@@ -119,7 +121,7 @@ async fn test_query_dtse_ppro_from_catr_refno() -> anyhow::Result<()> {
 async fn test_query_ipara_from_bran() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let bran_refno = RefU64::from_url_refno("24383_74374").unwrap();
-    let result = query_ipara_from_bran(bran_refno,&aios_mgr).await?;
+    let result = query_ipara_from_bran(bran_refno, &aios_mgr).await?;
     dbg!(&result);
     Ok(())
 }

@@ -1,22 +1,47 @@
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::RefU64;
 use parry3d::utils::hashmap::HashMap;
+use crate::api::room_code::query_room_code;
 use crate::aql_api::children::{query_children_eles, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_center_api::data_api::{get_refno_desc, get_refno_desi_desc, get_refno_latest_version};
+use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 获取电气支吊架信息
 pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
-    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["STRU".to_string()]).await {
+    if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos,
+                                                                     vec!["STRU".to_string()]).await {
         for stru in children {
             let mut attr = Vec::new();
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB1".to_string(),
                 value: AttrValue::AttrString(stru.name.to_string()).into(),
             });
+
+            let bran_refno = aios_mgr
+                .query_around_owner_within_radius(stru.refno, true, None, true, &["BRAN"])
+                .await
+                .unwrap_or(vec![]);
+            let bran_name = if !bran_refno.is_empty() {
+                let bran_name = aios_mgr.get_name(bran_refno[0]).await.unwrap_or("".to_string());
+                if bran_name.starts_with("/") { bran_name[1..].to_string() } else { bran_name }
+            } else {
+                "".to_string()
+            };
+            attr.push(DataCenterAttr {
+                attribute_model_code: "ERECAB2".to_string(),
+                value: AttrValue::AttrString(bran_name).into(),
+            });
+
+            let room_code = query_room_name_from_refno_aql(stru.refno, &database).await?;
+            attr.push(DataCenterAttr {
+                attribute_model_code: "ERECAB3".to_string(),
+                value: AttrValue::AttrString(room_code.unwrap_or("".to_string())).into(),
+            });
+
             let frmw = query_children_eles(&database, stru.refno).await?;
             if !frmw.is_empty() {
                 let desc = get_refno_desi_desc(frmw[0].refno, aios_mgr).await.unwrap_or("".to_string());
