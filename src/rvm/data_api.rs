@@ -172,13 +172,13 @@ pub async fn create_refnos_rvm_data(select_refno: RefU64, db_option: &DbOption, 
     let compound_mesh = query_pdms_mesh_from_hash_str_aql(database, compound_hashes).await?;
     for info in compound_insts {
         let mut info_vec = Vec::new();
+        let Some(insts) = refno_geo_infos_map.get(&info.refno) else { continue; };
         // cntb
         info_vec.append(&mut gen_cntb_data());
         // name
-        let mut name = gen_name_position_data(&info.refno.to_url_refno(), info.world_transform.translation);
+        let mut name = gen_name_position_data(&info.refno.to_url_refno(), insts.world_transform.translation);
         info_vec.append(&mut name);
         // prim
-        let Some(insts) = refno_geo_infos_map.get(&info.refno) else { continue; };
         let mut insts = insts.clone();
         let Some(hash) = info.cata_hash else { continue; };
         let mut prim_vec = Vec::new();

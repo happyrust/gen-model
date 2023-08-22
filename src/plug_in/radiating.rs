@@ -5,7 +5,7 @@ use aios_core::prim_geo::tubing::TubiSize;
 use arangors_lite::AqlQuery;
 use bitvec::macros::internal::funty::Floating;
 use glam::Vec3;
-use crate::aql_api::children::query_children_order_aql;
+use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_children_refnos, query_children_with_name_aql};
 use crate::aql_api::tubi::query_tubi_from_bran;
 use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_GEO_COLLECTION, AQL_PDMS_INST_INFO_COLLECTION};
 use crate::data_interface::interface::PdmsDataInterface;
@@ -14,6 +14,11 @@ use crate::graph_db::pdms_arango::ArDatabase;
 use serde::{Serialize, Deserialize};
 use aios_core::pdms_types::ser_refno_as_str;
 use aios_core::pdms_types::de_refno_from_key_str;
+use crate::api::element::query_id_from_name;
+use crate::api::room_code::query_room_code;
+use crate::aql_api::dtse_attr::query_ipara_from_bran;
+use crate::aql_api::pdms_element::query_id_from_names_aql;
+use crate::aql_api::pdms_room::{query_room_code_from_owner, query_room_name_from_refno_aql};
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct HeatDissipationData {
@@ -25,13 +30,60 @@ pub struct HeatDissipationData {
     pub length: f32,
 }
 
-/// 返回散热量信息
-pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<HeatDissipationData>> {
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+pub struct GetPipeHeatDissipationRequest {
+    pub pipe: String,
+    pub temp: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+pub struct GetPipeHeatDissipationResponse {
+    pub pipe: String,
+    pub temp: f32,
+    pub bran: String,
+    pub room: String,
+    pub heat: f32,
+}
+
+pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationRequest>, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<GetPipeHeatDissipationResponse>> {
+    let database = aios_mgr.get_arango_db().await?;
+    let request = requests
+        .into_iter()
+        .map(|r| (format!("/{}", r.pipe), r.temp))
+        .collect::<HashMap<String, f32>>();
+    let names = request.keys().map(|name| name.clone()).collect::<Vec<_>>();
+    let pipe_refnos = query_id_from_names_aql(names, Some("PIPE"), &database).await?;
+    let mut result = Vec::new();
+    for pipe_ele in pipe_refnos {
+        let Some(temp) = request.get(&pipe_ele.name) else { continue; };
+        let Some(pipe_refno) = RefU64::from_url_refno(&pipe_ele.refno) else { continue; };
+        let Ok(bran_refnos) = query_children_with_name_aql(&database, pipe_refno).await else { continue; };
+        for (bran, bran_name) in bran_refnos {
+            let area = get_heat_dissipation_data(bran, &database, aios_mgr).await.unwrap_or(0.0);
+            let heat = get_heat_dissipation_table(*temp, area, true) as f32;
+            let room_code = query_room_code_from_owner(bran, &database).await?.unwrap_or("".to_string());
+            result.push(GetPipeHeatDissipationResponse {
+                pipe: if pipe_ele.name.starts_with("/") { pipe_ele.name[1..].to_string() } else { pipe_ele.name.clone() },
+                temp: *temp,
+                bran: if bran_name.starts_with("/") { bran_name[1..].to_string() } else { bran_name },
+                room: room_code,
+                heat,
+            });
+        }
+    }
+    Ok(result)
+}
+
+/// 返回整个bran的散热面积
+pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase, aios_mgr: &AiosDBManager) -> anyhow::Result<f32> {
     let mut length_map = Vec::new();
     let bran_children = query_children_order_aql(database, bran_refno).await?;
     // 查询tubi的数据,收集改bran下的不同外径的尺寸
     let mut bore_size = Vec::new();
     let tubis = query_tubi_from_bran(bran_refno, database).await?;
+    // 查询保温层厚度
+    let iparas = query_ipara_from_bran(bran_refno,aios_mgr).await?;
+    let ipara = *iparas.get(0).unwrap_or(&0.0) as f32;
     for tubi in &tubis {
         // 只考虑工艺管道
         match &tubi.tubi_size {
@@ -40,7 +92,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
                 length_map.push(HeatDissipationData {
                     refno: from_refno,
                     att_type: "TUBI".to_string(),
-                    bore: *data,
+                    bore: *data + ipara,
                     length: tubi.start_pt.distance(tubi.end_pt),
                 });
                 if !bore_size.contains(data) {
@@ -76,7 +128,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
                 length_map.push(HeatDissipationData {
                     refno: point.refno,
                     att_type: point.att_type.clone(),
-                    bore,
+                    bore: bore + ipara,
                     length,
                 });
             }
@@ -94,7 +146,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
                 length_map.push(HeatDissipationData {
                     refno: point.refno,
                     att_type: point.att_type.clone(),
-                    bore,
+                    bore: bore + ipara,
                     length,
                 });
             }
@@ -115,7 +167,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
                 length_map.push(HeatDissipationData {
                     refno: point.refno,
                     att_type: point.att_type.clone(),
-                    bore,
+                    bore: bore + ipara,
                     length,
                 });
             }
@@ -130,7 +182,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
                 length_map.push(HeatDissipationData {
                     refno: point.refno,
                     att_type: point.att_type.clone(),
-                    bore,
+                    bore: bore + ipara,
                     length,
                 });
             }
@@ -138,11 +190,11 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
     }
     // dbg!(&length_map);
     // 计算整个bran的面积
-    // let mut area = 0.0;
-    // for length_data in length_map {
-    //     area += length_data.bore * f32::PI * length_data.length
-    // }
-    Ok(length_map)
+    let mut area = 0.0;
+    for length_data in length_map {
+        area += length_data.bore * f32::PI * length_data.length
+    }
+    Ok(area)
 }
 
 async fn query_bran_point_map(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<InstPointMap>> {
@@ -166,6 +218,26 @@ async fn query_bran_point_map(bran_refno: RefU64, database: &ArDatabase) -> anyh
         .bind_var("id", id);
     let result = database.aql_query::<InstPointMap>(aql).await?;
     Ok(result)
+}
+
+/// 根据温度和面积计算散热量(提供的表格)
+fn get_heat_dissipation_table(heat: f32, area: f32, b_reactor: bool) -> f64 {
+    // 换算成 m²
+    let area = area as f64 / 1000000.0;
+    if b_reactor {
+        if heat >= 60.0 && heat < 120.0 {
+            return area * 58.0;
+        } else if heat >= 120.0 && heat < 350.0 {
+            return area * 87.0;
+        }
+    } else {
+        if heat >= 60.0 && heat <= 200.0 {
+            return area * 93.0;
+        } else if heat > 200.0 {
+            return area * 139.0;
+        }
+    }
+    0.0
 }
 
 #[tokio::test]

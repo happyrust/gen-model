@@ -192,6 +192,31 @@ pub async fn query_room_name_from_refno_aql(
     }
 }
 
+/// 查询子节点属于哪个房间，只返回一个房间，不包含多个房间的情况
+pub async fn query_room_code_from_owner(owner_refno: RefU64,
+                                        database: &ArDatabase,) -> anyhow::Result<Option<String>> {
+    let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", owner_refno.to_url_refno());
+    let aql = AqlQuery::new("
+    With @@pdms_eles,@@pdms_edges,@@room_edges,@@room_eles
+    for v in 0..2 inbound @id pdms_edges
+    filter v != null
+    for r in 1 inbound v._id @@room_edges
+            filter r != null
+            limit 1
+            return r.name
+    ").bind_var("id", refno)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
+    let result = database.aql_query::<String>(aql).await?;
+    if !result.is_empty() {
+        Ok(Some(result[0].to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
 // 传入参考号集合 返回该参考号所在的房间
 pub async fn query_room_name_from_refnos_aql(
     refnos: Vec<RefU64>,
@@ -281,19 +306,19 @@ pub async fn query_equi_room_name_from_names_aql(
     for v in pdms_eles
     filter v.noun == 'EQUI'
     filter v.name in @names
-    let children = (
-    for e in 1 inbound v._id pdms_edges
-        return e._id )
-    let result = (
-        for child in children
-        for r in 1 inbound child room_edges
-            filter r != null
-            limit 1
-            return {
-                'name': v.name,
-                'room_name': r.name
-            }
-     )
+            let children = (
+            for e in 1..2 inbound v._id pdms_edges
+                return e._id )
+            let result = (
+                for child in children
+                for r in 1 inbound child room_edges
+                    filter r != null
+                    limit 1
+                    return {
+                        'name': v.name,
+                        'room_name': r.name
+                    }
+             )
      return result ")
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION)
@@ -305,6 +330,7 @@ pub async fn query_equi_room_name_from_names_aql(
 }
 
 /// 获取节点连接的两边的房间
+///
 pub async fn query_node_connect_rooms(
     refno: RefU64,
     database: &ArDatabase,
