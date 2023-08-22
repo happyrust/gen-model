@@ -17,7 +17,6 @@ use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 pub async fn get_audit_data(aios_mgr: &AiosDBManager, data: &mut SendHoleData) {
     let mut agree = false;
     // //如果设定人全部同意(流程结束)发送元数据包
-
     //操作人与审定人对比，
     let sz_name =data.form_data.sz_name.split('/').next().unwrap_or_default().to_string();
     if data.form_data.human_code == sz_name {
