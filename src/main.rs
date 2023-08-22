@@ -19,9 +19,7 @@ use aios_database::api::attr::insert_attr_info;
 use aios_database::api::element::*;
 use aios_database::api::ssc_data::{get_ancestor_till_type, query_all_room_data, update_ssc_type};
 use aios_database::aql_api::foreign_refnos::query_foreign_name_aql;
-use aios_database::aql_api::pdms_room::{
-    query_all_need_compute_room_refno, RoomEdge, RoomElement,
-};
+use aios_database::aql_api::pdms_room::{query_all_need_compute_room_refno, RoomEdge, RoomElement};
 use aios_database::aql_api::tubi::{insert_tubi_value, query_all_tubi_from_node};
 use aios_database::cata::resolve::parse_to_i32;
 use aios_database::consts::*;
@@ -51,6 +49,20 @@ use parry3d::transformation::vhacd;
 use parry3d::transformation::vhacd::VHACD;
 use parse_pdms_db::parse::{PdmsDbData, WholeAttMap};
 // use regex::internal::Input;
+use aios_core::options::DbOption;
+use aios_core::tool::direction_parse::parse_expr_to_dir;
+use aios_core::tool::math_tool::{
+    cal_mat3_by_zdir, quat_to_pdms_ori_str, to_pdms_ori_str, to_pdms_vec_str,
+};
+use aios_database::aql_api::children::query_deep_children_refnos_fuzzy;
+use aios_database::cata::resolve_helper::parse_str_axis_to_vec3;
+use aios_database::consts::*;
+#[cfg(feature = "gen_model")]
+use aios_database::data_interface::gen_model::gen_geos_data;
+use approx::abs_diff_eq;
+use env_logger::{fmt::Target, Builder};
+use glam::{Mat3, Quat, Vec3};
+use log::{error, LevelFilter};
 use sqlx::pool::PoolConnection;
 use sqlx::Executor;
 use sqlx::{Acquire, MySql, MySqlPool, Pool, Row};
@@ -63,20 +75,8 @@ use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use aios_core::options::DbOption;
-use aios_core::tool::direction_parse::parse_expr_to_dir;
-use aios_core::tool::math_tool::{cal_mat3_by_zdir, quat_to_pdms_ori_str, to_pdms_ori_str, to_pdms_vec_str};
-use approx::abs_diff_eq;
 use tokio::spawn;
-use env_logger::{Builder, fmt::Target};
-use glam::{Mat3, Quat, Vec3};
-use log::{error, LevelFilter};
 use tokio::sync::RwLock;
-use aios_database::aql_api::children::query_deep_children_refnos_fuzzy;
-use aios_database::cata::resolve_helper::parse_str_axis_to_vec3;
-use aios_database::consts::*;
-#[cfg(feature = "gen_model")]
-use aios_database::data_interface::gen_model::gen_geos_data;
 
 fn test_sbfi() -> anyhow::Result<()> {
     // let axis_str = "Y27.041-X";
@@ -112,7 +112,6 @@ fn test_sbfi() -> anyhow::Result<()> {
 
     return Ok(());
 
-
     let axis_str = "-X45-Y";
     let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
     // dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
@@ -137,7 +136,6 @@ fn test_sbfi() -> anyhow::Result<()> {
     let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
     dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
 
-
     // let refno = RefU64::from_two_nums(17496, 116749);
     // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
     // dbg!(quat_to_pdms_ori_str(&transform.rotation));
@@ -158,7 +156,6 @@ fn test_sbfi() -> anyhow::Result<()> {
     // dbg!(quat_to_pdms_ori_str(&transform.rotation));
     // dbg!(transform);
 
-
     return Ok(());
 }
 
@@ -175,7 +172,15 @@ async fn main() -> anyhow::Result<()> {
 
     if db_option.enable_log {
         let now = chrono::offset::Local::now();
-        let filename = format!("{}-{}-{}-{}-{}-{}_dblog.txt", now.year(), now.month(), now.day(), now.hour(), now.minute(), now.second());
+        let filename = format!(
+            "{}-{}-{}-{}-{}-{}_dblog.txt",
+            now.year(),
+            now.month(),
+            now.day(),
+            now.hour(),
+            now.minute(),
+            now.second()
+        );
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -205,16 +210,16 @@ async fn main() -> anyhow::Result<()> {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
     }
 
+    // let refno = "24381/37118".into();
+    // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
+    // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+    // dbg!(transform);
+
     #[cfg(feature = "gen_model")]
     if db_option.gen_model {
         println!("正在生成模型");
         let mut time = Instant::now();
-
-        // let refno = "24384/25801".into();
-        // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
         //
         // let refno = "24384/25802".into();
         // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
@@ -308,11 +313,14 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-
 /// 提前创建图数据库需要的几个collection
 async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     let pool = connect_arangodb(db_option).await?;
-    let database = pool.get().await?.db(db_option.arangodb_database.as_str()).await?;
+    let database = pool
+        .get()
+        .await?
+        .db(db_option.arangodb_database.as_str())
+        .await?;
     create_arango_document(&database, AQL_DATA_ELES_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_DESPARA_ELES_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_FOREIGN_EDGES_COLLECTION, Edge).await?;

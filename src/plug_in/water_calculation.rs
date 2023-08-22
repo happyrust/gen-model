@@ -117,7 +117,6 @@ pub async fn export_stp(
         }
         let ngmr_shapes = insts_data.gen_ngmr_occ_shapes(&geos_info.world_transform);
         for (o, shape) in ngmr_shapes {
-            dbg!(o);
             boolean_map.entry(o).or_default().push((*refno, shape));
         }
     }

@@ -70,10 +70,91 @@ async fn test_export_water_calculation_stp_0() -> anyhow::Result<()> {
     Ok(())
 }
 
-//#[cfg(feature = "opencascade_rs")]
+//对应xxxx.xlxs 的第几个issue
+#[cfg(feature = "opencascade_rs")]
+#[tokio::test]
+async fn test_export_water_calculation_stp_01() -> anyhow::Result<()> {
+    //测试样例1(孔洞模型测试)
+    let mut stp_packet = ExportFloodingStpEvent::default();
+    stp_packet.file_name = "孔洞测试-123".to_string();
+    stp_packet.save_time = "2023-08-07 20:39:16.867354400 +08:00".to_string();
+    //导出模型列表
+    let mut export_models_map = HashMap::new();
+    export_models_map.insert(
+        RefU64::from_str("25688/8188").unwrap(),
+        "STWALL 1".to_string(),
+    );
+    stp_packet.export_models_map = export_models_map;
+    //所有墙与孔洞的map
+    let mut walls_map = HashMap::new();
+    walls_map.insert(
+        RefU64::from_str("25688/8189").unwrap(),
+        vec![
+            FloodingHole {
+                refno: RefU64::from_str("25688/8190").unwrap(),
+                name: "FITT 4".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: true,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("25688/8191").unwrap(),
+                name: "FITT 3".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: true,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("25688/8192").unwrap(),
+                name: "/1RS05CC0611T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("25688/8193").unwrap(),
+                name: "/1RS05CC0611T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("25688/8194").unwrap(),
+                name: "/1RS05CC0611T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("25688/8195").unwrap(),
+                name: "/1RS05CC0611T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+
+        ],
+    );
+    stp_packet.walls_map = walls_map;
+
+    // dbg!(&stp_packet);
+    let mgr = get_test_ams_db_manager_async().await;
+    //测试将数据保存至图数据库
+    // save_stp_data_to_arangodb(&mgr, stp_packet.clone()).await;
+    //孔洞封堵
+    export_stp(&mgr, stp_packet).await?;
+    Ok(())
+}
+
+
+
+
+
+///测试导出不全的情况，墙有丢失
+#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
-async fn test_export_water_calculation_stp_2() -> anyhow::Result<()> {
+async fn test_export_water_calculation_stp_02() -> anyhow::Result<()> {
     let mut stp_packet = ExportFloodingStpEvent::default();
     //文件名
     stp_packet.file_name = "孔洞测试2".to_string();
@@ -82,42 +163,114 @@ async fn test_export_water_calculation_stp_2() -> anyhow::Result<()> {
     //导出模型列表
     let mut export_models_map = HashMap::new();
     export_models_map.insert(
-        RefU64::from_str("17496/106430").unwrap(),
-        "STWALL 1".to_string(),
+        RefU64::from_str("25688/48473").unwrap(),
+        "1RS-WF02-W-C-RR002".to_string(),
     );
     stp_packet.export_models_map = export_models_map;
     //所有墙与孔洞的map
     let mut walls_map = HashMap::new();
     walls_map.insert(
-        RefU64::from_str("17496/106430").unwrap(),
+        RefU64::from_str("25688/48848").unwrap(),
         vec![
             FloodingHole {
-                refno: RefU64::from_str("17496/145221").unwrap(),
+                refno: RefU64::from_str("25688/48849").unwrap(),
                 name: "/1RS05TT0016T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged:true ,
             },
             FloodingHole {
-                refno: RefU64::from_str("17496/145333").unwrap(),
-                name: "/1RS05LL0028T".to_string(),
+                refno: RefU64::from_str("25688/48852").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged:true ,
             },
             FloodingHole {
-                refno: RefU64::from_str("17496/145334").unwrap(),
+                refno: RefU64::from_str("25688/48855").unwrap(),
                 name: "/1RS05LL0027T".to_string(),
                 is_door: false,
                 is_selected: false,
                 is_plugged: true,
             },
             FloodingHole {
-                refno: RefU64::from_str("17496/157058").unwrap(),
+                refno: RefU64::from_str("25688/48858").unwrap(),
                 name: "/1RS06PP0001K".to_string(),
                 is_door: false,
                 is_selected: false,
+                is_plugged: false,
+            },
+
+        ],
+    );
+    stp_packet.walls_map = walls_map;
+
+    dbg!(&stp_packet);
+    let mgr = get_test_ams_db_manager_async().await;
+    //测试将数据保存至图数据库
+    // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
+    //孔洞封堵
+    export_stp(&mgr, stp_packet).await?;
+    Ok(())
+}
+
+
+
+//#[cfg(feature = "opencascade_rs")]
+#[tokio::test]
+//测试样例2(开孔洞测试)
+async fn test_export_water_calculation_stp_03() -> anyhow::Result<()> {
+    let mut stp_packet = ExportFloodingStpEvent::default();
+    //文件名
+    stp_packet.file_name = "孔洞测试2".to_string();
+    //保存事件
+    stp_packet.save_time = "2023-08-07 20:39:16.867354400 +08:00".to_string();
+    //导出模型列表
+    let mut export_models_map = HashMap::new();
+    export_models_map.insert(
+        RefU64::from_str("17496/106640").unwrap(),
+        "STWALL 1".to_string(),
+    );
+    stp_packet.export_models_map = export_models_map;
+    //所有墙与孔洞的map
+    let mut walls_map = HashMap::new();
+    walls_map.insert(
+        RefU64::from_str("17496/118542").unwrap(),
+        vec![
+            FloodingHole {
+                refno: RefU64::from_str("17496/161286").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged:true ,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("17496/156884").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged:true ,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("17496/156881").unwrap(),
+                name: "/1RS05LL0027T".to_string(),
+                is_door: false,
+                is_selected: false,
                 is_plugged: true,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("17496/156878").unwrap(),
+                name: "/1RS06PP0001K".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("17496/156875").unwrap(),
+                name: "/1RS06PP0001K".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
             },
         ],
     );
@@ -131,6 +284,357 @@ async fn test_export_water_calculation_stp_2() -> anyhow::Result<()> {
     export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
+
+//#[cfg(feature = "opencascade_rs")]
+#[tokio::test]
+//测试样例2(开孔洞测试)
+async fn test_export_water_calculation_stp_04() -> anyhow::Result<()> {
+    let mut stp_packet = ExportFloodingStpEvent::default();
+    //文件名
+    stp_packet.file_name = "孔洞测试2".to_string();
+    //保存事件
+    stp_packet.save_time = "2023-08-07 20:39:16.867354400 +08:00".to_string();
+    //导出模型列表
+    let mut export_models_map = HashMap::new();
+    export_models_map.insert(
+        RefU64::from_str("17496/106079").unwrap(),
+        "STWALL 1".to_string(),
+    );
+    stp_packet.export_models_map = export_models_map;
+    //所有墙与孔洞的map
+    let mut walls_map = HashMap::new();
+    walls_map.insert(
+        RefU64::from_str("17496/118352").unwrap(),
+        vec![
+            FloodingHole {
+                refno: RefU64::from_str("17496/142431").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged:true ,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("17496/142307").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged:true ,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("17496/142140").unwrap(),
+                name: "/1RS05LL0027T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: true,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("17496/142083").unwrap(),
+                name: "/1RS06PP0001K".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("17496/127639").unwrap(),
+                name: "/1RS06PP0001K".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+        ],
+    );
+    stp_packet.walls_map = walls_map;
+
+    dbg!(&stp_packet);
+    let mgr = get_test_ams_db_manager_async().await;
+    //测试将数据保存至图数据库
+    // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
+    //孔洞封堵
+    export_stp(&mgr, stp_packet).await?;
+    Ok(())
+}
+
+
+//#[cfg(feature = "opencascade_rs")]
+#[tokio::test]
+//测试样例2(开孔洞测试)
+async fn test_export_water_calculation_stp_05() -> anyhow::Result<()> {
+    let mut stp_packet = ExportFloodingStpEvent::default();
+    //文件名
+    stp_packet.file_name = "孔洞测试2".to_string();
+    //保存事件
+    stp_packet.save_time = "2023-08-07 20:39:16.867354400 +08:00".to_string();
+    //导出模型列表
+    let mut export_models_map = HashMap::new();
+    export_models_map.insert(
+        RefU64::from_str("17496/105988").unwrap(),
+        "STWALL 1".to_string(),
+    );
+    stp_packet.export_models_map = export_models_map;
+    //所有墙与孔洞的map
+    let mut walls_map = HashMap::new();
+    walls_map.insert(
+        RefU64::from_str("17496/106130").unwrap(),
+        vec![
+            FloodingHole {
+                refno: RefU64::from_str("17496/161320").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged:true ,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("17496/142402").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged:true ,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("17496/142398").unwrap(),
+                name: "/1RS05LL0027T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: true,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("17496/142322").unwrap(),
+                name: "/1RS06PP0001K".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("17496/125345").unwrap(),
+                name: "/1RS06PP0001K".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+        ],
+    );
+    stp_packet.walls_map = walls_map;
+
+    dbg!(&stp_packet);
+    let mgr = get_test_ams_db_manager_async().await;
+    //测试将数据保存至图数据库
+    // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
+    //孔洞封堵
+    export_stp(&mgr, stp_packet).await?;
+    Ok(())
+}
+
+
+//#[cfg(feature = "opencascade_rs")]
+#[tokio::test]
+//测试样例2(开孔洞测试)
+async fn test_export_water_calculation_stp_06() -> anyhow::Result<()> {
+    let mut stp_packet = ExportFloodingStpEvent::default();
+    //文件名
+    stp_packet.file_name = "孔洞测试2".to_string();
+    //保存事件
+    stp_packet.save_time = "2023-08-07 20:39:16.867354400 +08:00".to_string();
+    //导出模型列表
+    let mut export_models_map = HashMap::new();
+    export_models_map.insert(
+        RefU64::from_str("24381/44279").unwrap(),
+        "STWALL 1".to_string(),
+    );
+    stp_packet.export_models_map = export_models_map;
+    //所有墙与孔洞的map
+    let mut walls_map = HashMap::new();
+    walls_map.insert(
+        RefU64::from_str("24381/44281").unwrap(),
+        vec![
+            FloodingHole {
+                refno: RefU64::from_str("24381/44296").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged:true ,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("24381/44303").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged:true ,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("24381/44317").unwrap(),
+                name: "/1RS05LL0027T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: true,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("24381/44322").unwrap(),
+                name: "/1RS06PP0001K".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("24381/44283").unwrap(),
+                name: "/1RS06PP0001K".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+        ],
+    );
+    stp_packet.walls_map = walls_map;
+
+    dbg!(&stp_packet);
+    let mgr = get_test_ams_db_manager_async().await;
+    //测试将数据保存至图数据库
+    // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
+    //孔洞封堵
+    export_stp(&mgr, stp_packet).await?;
+    Ok(())
+}
+
+
+
+//#[cfg(feature = "opencascade_rs")]
+#[tokio::test]
+//测试样例2(开孔洞测试)
+async fn test_export_water_calculation_stp_07() -> anyhow::Result<()> {
+    let mut stp_packet = ExportFloodingStpEvent::default();
+    //文件名
+    stp_packet.file_name = "孔洞测试2".to_string();
+    //保存事件
+    stp_packet.save_time = "2023-08-07 20:39:16.867354400 +08:00".to_string();
+    //导出模型列表
+    let mut export_models_map = HashMap::new();
+    export_models_map.insert(
+        RefU64::from_str("24381/44279").unwrap(),
+        "STWALL 1".to_string(),
+    );
+    stp_packet.export_models_map = export_models_map;
+    //所有墙与孔洞的map
+    let mut walls_map = HashMap::new();
+    walls_map.insert(
+        RefU64::from_str("24381/44281").unwrap(),
+        vec![
+            FloodingHole {
+                refno: RefU64::from_str("24381/44296").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged:true ,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("24381/44303").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged:true ,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("24381/44317").unwrap(),
+                name: "/1RS05LL0027T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: true,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("24381/44322").unwrap(),
+                name: "/1RS06PP0001K".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("24381/44283").unwrap(),
+                name: "/1RS06PP0001K".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+        ],
+    );
+    stp_packet.walls_map = walls_map;
+
+    dbg!(&stp_packet);
+    let mgr = get_test_ams_db_manager_async().await;
+    //测试将数据保存至图数据库
+    // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
+    //孔洞封堵
+    export_stp(&mgr, stp_packet).await?;
+    Ok(())
+}
+
+
+//#[cfg(feature = "opencascade_rs")]
+#[tokio::test]
+//测试样例2(开孔洞测试)
+async fn test_export_water_calculation_stp_08() -> anyhow::Result<()> {
+    let mut stp_packet = ExportFloodingStpEvent::default();
+    //文件名
+    stp_packet.file_name = "孔洞测试2".to_string();
+    //保存事件
+    stp_packet.save_time = "2023-08-07 20:39:16.867354400 +08:00".to_string();
+    //导出模型列表
+    let mut export_models_map = HashMap::new();
+    export_models_map.insert(
+        RefU64::from_str("25688/7970").unwrap(),
+        "STWALL 1".to_string(),
+    );
+    stp_packet.export_models_map = export_models_map;
+    //所有墙与孔洞的map
+    let mut walls_map = HashMap::new();
+    walls_map.insert(
+        RefU64::from_str("25688/7971").unwrap(),
+        vec![
+            FloodingHole {
+                refno: RefU64::from_str("25688/7972").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged:true ,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("25688/7973").unwrap(),
+                name: "/1RS05TT0016T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged:true ,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("25688/7974").unwrap(),
+                name: "/1RS05LL0027T".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: true,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("25688/7975").unwrap(),
+                name: "/1RS06PP0001K".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+            FloodingHole {
+                refno: RefU64::from_str("25688/7976").unwrap(),
+                name: "/1RS06PP0001K".to_string(),
+                is_door: false,
+                is_selected: false,
+                is_plugged: false,
+            },
+        ],
+    );
+    stp_packet.walls_map = walls_map;
+
+    dbg!(&stp_packet);
+    let mgr = get_test_ams_db_manager_async().await;
+    //测试将数据保存至图数据库
+    // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
+    //孔洞封堵
+    export_stp(&mgr, stp_packet).await?;
+    Ok(())
+}
+
 
 //#[cfg(feature = "opencascade_rs")]
 #[tokio::test]

@@ -615,10 +615,8 @@ pub async fn sync_total_async_threaded(
             if let Some(children_tree) = children_tree.clone() {
                 dbg!(children_map_clone.len());
                 for (k, v) in children_map_clone.as_ref() {
-                    // if *k == RefU64::from_str("9304/2").unwrap() {
-                    //     dbg!(v);
-                    // }
-                    let mut vec = v.to_bytes()?;
+                    let children_refnos = RefU64Vec(v.iter().map(|x| x.0).collect::<Vec<_>>());
+                    let mut vec = children_refnos.to_bytes()?;
                     children_tree.insert((**k).to_be_bytes().as_slice(), &*vec)?;
                 }
             }
@@ -887,21 +885,21 @@ pub async fn sync_total_async_threaded(
                                                 &gen_explicit_attr_value_sql(att.value()),
                                             );
                                             let name = get_name(
-                                                &total_attr_map_arc_clone,
-                                                &children_map_arc_clone,
                                                 refno,
+                                                att.value(),
+                                                &children_map_arc_clone,
                                             )
                                             .replace(r#"'"#, r#"\'"#)
                                             .replace(r#"""#, r#"\""#);
                                             let order = get_order(
-                                                &total_attr_map_arc_clone,
-                                                &children_map_arc_clone,
                                                 refno,
+                                                att.value(),
+                                                &children_map_arc_clone,
                                             );
                                             let children_count = children_map_arc_clone
                                                 .get(&refno)
-                                                .unwrap_or(&RefU64Vec::default())
-                                                .len();
+                                                .map(|x| x.len())
+                                                .unwrap_or_default();
                                             pdms_elements_sql.push_str(
                                                 &gen_pdms_element_insert_sql(
                                                     att.value(),
