@@ -78,6 +78,7 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
                             value: AttrValue::AttrFloat(min).into(),
                         });
                     }
+                    break;
                 }
             } else {
                 attr.push(DataCenterAttr {
