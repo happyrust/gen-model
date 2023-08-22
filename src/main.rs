@@ -210,11 +210,11 @@ async fn main() -> anyhow::Result<()> {
         Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
     }
 
-    let refno = "24381/37118".into();
-    dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-    let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-    dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    dbg!(transform);
+    // let refno = "24381/37118".into();
+    // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
+    // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+    // dbg!(transform);
 
     #[cfg(feature = "gen_model")]
     if db_option.gen_model {

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["opencascade_rs"] #
+default = [] #
 truck = []
 viewer = []  #是否开启视图
 gen_model = ["aios_core/gen_model"]
@@ -66,7 +66,7 @@ debug_print = "1.0.0"
 
 
 #造型功能，先在database测试
-opencascade = { path = "../crates/opencascade-rs/crates/opencascade"} #, optional = true
+#opencascade = { path = "../crates/opencascade-rs/crates/opencascade"} #, optional = true
 serde_with = "3.0.0"
 tokio-stream = "0.1.14"
 rayon = "1.7.0"

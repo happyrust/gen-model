@@ -288,8 +288,8 @@ pub async fn gen_loop_geos(
                 if cur_type == "PLOO" && let Some(sjus_adjust) = sjus_map_clone.get(&parent_refno) {
                     let offset = trans_origin.rotation.mul_vec3(sjus_adjust.value().0);
                     trans_origin.translation += offset;
-                    dbg!(offset);
-                    dbg!(trans_origin.translation);
+                    // dbg!(offset);
+                    // dbg!(trans_origin.translation);
                 }
                 // else if let Some(sjus_adjust) = sjus_map_clone.get(&grand_refno){
                 // let grand_trans = mgr.get_world_transform(grand_refno).await.unwrap_or_default().unwrap_or_default();
@@ -592,12 +592,9 @@ pub async fn gen_cata_geos(
     mgr: Arc<AiosDBManager>,
     main_instance_mgr: Arc<RwLock<ShapeInstancesData>>,
     scom_info_map: Arc<RwLock<HashMap<RefU64, ScomInfo>>>,
-    // db_option: &DbOption,
     target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
     //branch 下按顺序的清单
     branch_map: Arc<DashMap<RefU64, Vec<PdmsElement>>>,
-    refno_lstube_map: Arc<DashMap<RefU64, RefU64>>,
-    lstube_bores_map: Arc<DashMap<RefU64, f32>>,
     sjus_map_arc: Arc<DashMap<RefU64, (Vec3, f32)>>,
 ) -> anyhow::Result<bool> {
     let batch_size = mgr.db_option.gen_model_batch_size;
@@ -942,10 +939,11 @@ pub async fn gen_cata_geos(
                                             if let Some(m) = manifold_map.get(neg) {
                                                 neg_ms.push(m.clone());
                                             } else {
-                                                break;
+                                                continue;
                                             }
                                         }
                                         total_manifolds.extend_from_slice(&neg_ms);
+                                        //元件库实体内的负实体运算
                                         let final_manifold =
                                             src_manifold.batch_boolean_subtract(&neg_ms);
                                         final_compounds_map.insert(k, final_manifold);
@@ -1051,11 +1049,9 @@ pub async fn gen_cata_geos(
                             if let Some(sjus_adjust) = sjus_map_clone.get(&parent) {
                                 let height = sjus_adjust.value().1;
                                 let off_z = cal_sjus_value(sjus, height);
-                                let parent_trans = mgr_clone.get_world_transform(parent).await.unwrap_or_default().unwrap_or_default();
-                                // origin_trans.translation += parent_trans.rotation * sjus_adjust.value().0 +
-                                //     origin_trans.rotation * Vec3::new(0.0, 0.0, off_z);
+                                // let parent_trans = mgr_clone.get_world_transform(parent).await.unwrap_or_default().unwrap_or_default();
                                 origin_trans.translation +=  sjus_adjust.value().0 +
-                                    Vec3::new(0.0, 0.0, off_z);
+                                    origin_trans.rotation * Vec3::new(0.0, 0.0, off_z);
                             }
                         }
 
@@ -1647,8 +1643,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         scom_info_map_clone,
                         Arc::new(target_bran_reuse_cata_map),
                         Arc::new(branch_refnos_map),
-                        Arc::new(refno_lstube_map),
-                        Arc::new(lstube_bores_map),
                         sjus_map_clone,
                     )
                         .await
@@ -1671,8 +1665,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         scom_info_map_clone,
                         Arc::new(target_single_reuse_cata_map),
                         Arc::new(Default::default()),
-                        Arc::new(Default::default()),
-                        Arc::new(Default::default()),
                         sjus_map_clone,
                     )
                         .await
@@ -1694,8 +1686,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         instance_mgr_clone,
                         scom_info_map_clone,
                         Arc::new(target_single_cata_map),
-                        Arc::new(Default::default()),
-                        Arc::new(Default::default()),
                         Arc::new(Default::default()),
                         sjus_map_clone,
                     )
