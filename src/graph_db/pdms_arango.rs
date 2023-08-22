@@ -88,7 +88,7 @@ pub async fn create_arango_document(database: &ArDatabase, collection_name: &str
 
 /// 在同步的时候就将 pdms_element 保存到图数据库
 pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: &DashMap<RefU64, WholeAttMap>
-                                         , children_map: &HashMap<RefU64, RefU64Vec>, dbnum: i32) -> anyhow::Result<()> {
+                                         , children_map: &HashMap<RefU64, Vec<(RefU64, String)>>, dbnum: i32) -> anyhow::Result<()> {
     let mut results = Vec::new();
     let mut edges = Vec::new();
     for (refno, whole_attr) in total_attr_map.clone() {
@@ -96,7 +96,7 @@ pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: 
         if owner.is_none() { continue; }
         let owner = owner.unwrap();
         let owner_str = owner.to_url_refno();
-        let name = get_name(total_attr_map, &children_map, refno);
+        let name = get_name(refno, &whole_attr, children_map);
         let noun = whole_attr.implicit_attmap.get_type();
         let pdms_element = PdmsEleGraphNode {
             _key: refno.to_url_refno(),
@@ -147,13 +147,13 @@ pub async fn save_virtual_hole_value_to_arangodb(db_option: &DbOption) -> anyhow
 
 
 ///保存层级关系到图数据库
-pub async fn save_pdms_level_edges_in_sync(database: &ArDatabase, children_map: &HashMap<RefU64, RefU64Vec>) -> anyhow::Result<()> {
+pub async fn save_pdms_level_edges_in_sync(database: &ArDatabase, children_map: &HashMap<RefU64, Vec<(RefU64, String)>>) -> anyhow::Result<()> {
     let mut results = vec![];
     for (_refno, children_map) in children_map {
         if children_map.len() == 0 { continue; }
         for i in 1..children_map.len() {
-            let from_refno = children_map[i];
-            let to_refno = children_map[i - 1];
+            let from_refno = children_map[i].0;
+            let to_refno = children_map[i - 1].0;
             let edge = PdmsEleGraphEdgeWithKey {
                 _key: from_refno.hash_with_another_refno(to_refno).to_string(),
                 _from: format!("{}/{}", "pdms_eles", from_refno.to_url_refno()),

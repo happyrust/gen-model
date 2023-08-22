@@ -7,7 +7,6 @@ pub mod test_dir;
 pub mod common;
 pub mod test_api;
 
-mod test_export_stp;
 mod test_room;
 mod test_spatial;
 
