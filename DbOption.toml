@@ -1,5 +1,5 @@
 #同步文件配置false
-total_sync = true
+total_sync =false
 enable_log = false
 sync_graph_db = true
 sync_tidb = true
@@ -39,9 +39,9 @@ arangodb_password = ""
 #tidb 配置
 ip = "127.0.0.1"
 user = "root"
-password = ""
+password = "root"
 port = "3306"
-#port = "4000"
+# port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
@@ -52,7 +52,7 @@ server_release_ip = "127.0.0.1:9099"
 #调试选项
 replace_mesh = true
 save_model_mesh_to_graph_db = true
-need_sync_refno_basic = true  #是否重新生成 refno_basic 缓存
+need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
 reset_mdb_project =  false     #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
@@ -64,9 +64,10 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 # included_db_files = ["ams1112_0001"]
 #included_db_files = ["acp7002_0001"]
 # manual_db_nums = [7997, 8000]
-manual_db_nums = [7999, 7997, 1112, 8000]
+# manual_db_nums = [7997, 1112, 8000]
 #  manual_db_nums = [7000]
-# manual_db_nums = [1112]  #, 8000
+# manual_db_nums = [1112]  #, 800
+manual_db_nums = [7999]
 plat_url = ""
 
 #puhua
