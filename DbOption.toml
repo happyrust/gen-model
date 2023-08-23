@@ -23,6 +23,7 @@ mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树
 gen_spatial_tree = false
+load_spatial_tree = false
 save_spatial_tree_to_db = true
 gen_model_batch_size = 100
 

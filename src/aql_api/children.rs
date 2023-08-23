@@ -1,26 +1,35 @@
-use std::collections::{HashMap, HashSet};
-use std::str::FromStr;
+use crate::api::attr::query_attr;
+use crate::aql_api::*;
+use crate::consts::{
+    AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_SIBL_EDGES_COLLECTION,
+};
+use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_arango::ArDatabase;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use aios_core::options::DbOption;
-use aios_core::pdms_types::{CataHashRefnoKV, EleTreeNode, GENRAL_NEG_NOUN_NAMES, PdmsElement, RefU64, RefU64Vec};
+use aios_core::pdms_types::{
+    CataHashRefnoKV, EleTreeNode, PdmsElement, RefU64, RefU64Vec, GENRAL_NEG_NOUN_NAMES,
+};
 use aios_core::pdms_user::*;
-use aios_core::three_dimensional_review::*;
 use aios_core::three_dimensional_review::VagueSearchCondition::And;
+use aios_core::three_dimensional_review::*;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use bitvec::ptr::replace;
 use itertools::Itertools;
 use parry3d::partitioning::QbvhDataGenerator;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 use sqlx::{MySql, Pool};
-use crate::api::attr::query_attr;
-use crate::aql_api::*;
-use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_SIBL_EDGES_COLLECTION};
-use crate::data_interface::tidb_manager::{AiosDBManager};
-use crate::graph_db::pdms_arango::ArDatabase;
-use crate::test::common::get_arangodb_conn_from_db_option_for_test;
+use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 
-pub async fn query_children_eles(arango_db: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
+pub async fn query_children_eles(
+    arango_db: &ArDatabase,
+    refno: RefU64,
+) -> anyhow::Result<Vec<PdmsElement>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::new(
+        "\
     With @@pdms_eles, @@pdms_edges
     for z in 1 inbound @id pdms_edges
         return {
@@ -31,7 +40,8 @@ pub async fn query_children_eles(arango_db: &ArDatabase, refno: RefU64) -> anyho
         'version':0,
         'children_count':length(for c in 1 inbound z._id pdms_edges
                             return 1 ),
-    }")
+    }",
+    )
         .bind_var("id", refno_aql)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
@@ -39,10 +49,13 @@ pub async fn query_children_eles(arango_db: &ArDatabase, refno: RefU64) -> anyho
     Ok(results)
 }
 
-
-pub async fn query_children_order_aql(adb: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
+pub async fn query_children_order_aql(
+    adb: &ArDatabase,
+    refno: RefU64,
+) -> anyhow::Result<Vec<PdmsElement>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::new(
+        "\
     WITH @@pdms_eles,@@pdms_edges,@@sibl_edges
     let datas = (
     for v,e in 1 inbound @id @@pdms_edges
@@ -69,7 +82,8 @@ pub async fn query_children_order_aql(adb: &ArDatabase, refno: RefU64) -> anyhow
             'version':0,
             'children_count':length(for c in 1 inbound child._id pdms_edges
                                 return 1 ),
-        }")
+        }",
+    )
         .bind_var("id", refno_aql)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
@@ -79,12 +93,18 @@ pub async fn query_children_order_aql(adb: &ArDatabase, refno: RefU64) -> anyhow
 }
 
 ///查询子节点refno集合
-pub async fn query_children_refnos(arango_database: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
+pub async fn query_children_refnos(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+) -> anyhow::Result<Vec<RefU64>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::new(
+        "\
     With @@pdms_eles, @@pdms_edges
     for z in 1 inbound @id @@pdms_edges
-        return  z._key ").bind_var("id", refno_aql)
+        return  z._key ",
+    )
+        .bind_var("id", refno_aql)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<String> = arango_database.aql_query(aql).await?;
@@ -101,7 +121,10 @@ pub async fn query_children_refnos(arango_database: &ArDatabase, refno: RefU64) 
 // }
 
 /// 找到该节点同级的上一个节点
-pub async fn query_brother_node_front(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<(RefU64, String)>> {
+pub async fn query_brother_node_front(
+    refno: RefU64,
+    database: &ArDatabase,
+) -> anyhow::Result<Option<(RefU64, String)>> {
     // let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     // let aql = AqlQuery::new("\
     //     for v in 1 outbound @key sibl_edges
@@ -117,17 +140,22 @@ pub async fn query_brother_node_front(refno: RefU64, database: &ArDatabase) -> a
 }
 
 /// 获取refno的children，返回Vec<(RefU64, String)>
-pub async fn query_children_with_name_aql(arango_database: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<(RefU64, String)>> {
+pub async fn query_children_with_name_aql(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::new(
+        "\
     With @@pdms_eles,@@pdms_edges
     FOR z in 1 INBOUND @id @@pdms_edges
         return {
             'refno':z._key,
             'name':z.name,
         }
-    ")
+    ",
+    )
         .bind_var("id", refno_aql)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
@@ -140,18 +168,22 @@ pub async fn query_children_with_name_aql(arango_database: &ArDatabase, refno: R
     Ok(r)
 }
 
-
 /// 查找该参考号的owner和 owner的type
-pub async fn query_owner_with_type_aql(arango_database: &ArDatabase, refno: RefU64) -> anyhow::Result<Option<(RefU64, String)>> {
+pub async fn query_owner_with_type_aql(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+) -> anyhow::Result<Option<(RefU64, String)>> {
     let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("
+    let aql = AqlQuery::new(
+        "
     With @@pdms_eles,@@pdms_edges
     FOR o in 1 OUTBOUND @id @@pdms_edges
         return {
             'refno':o._key,
             'noun':o.noun,
-        }")
+        }",
+    )
         .bind_var("id", refno_aql)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
@@ -169,27 +201,40 @@ pub async fn query_owner_with_type_aql(arango_database: &ArDatabase, refno: RefU
 }
 
 /// 向上遍历父节点直到某个type
-pub async fn query_ancestor_till_type_aql(arango_database: &ArDatabase, refno: RefU64, att_type: &str) -> anyhow::Result<Option<Vec<RefU64>>> {
+pub async fn query_ancestor_till_type_aql(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+    att_type: &str,
+) -> anyhow::Result<Option<Vec<RefU64>>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("
+    let aql = AqlQuery::new(
+        "
     With @@pdms_eles,@@pdms_edges
     for o in 1..10 outbound @id @@pdms_edges
         PRUNE o.noun == @noun
-        return o._key")
+        return o._key",
+    )
         .bind_var("id", refno_aql)
         .bind_var("noun", att_type)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let mut result: Vec<String> = arango_database.aql_query(aql).await?;
-    if result.len() == 0 { return Ok(None); };
+    if result.len() == 0 {
+        return Ok(None);
+    };
     let r = convert_refno_vec_from_vec_string(result);
     Ok(Some(r))
 }
 
 /// 向上遍历父节点直到某个类型集合，只返回类型为该att_types中的数据
-pub async fn query_ancestor_till_types_aql(arango_database: &ArDatabase, refno: RefU64, att_types: Vec<&str>) -> anyhow::Result<Option<PdmsElement>> {
+pub async fn query_ancestor_till_types_aql(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+    att_types: Vec<&str>,
+) -> anyhow::Result<Option<PdmsElement>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("
+    let aql = AqlQuery::new(
+        "
     With @@pdms_eles,@@pdms_edges
     for o in 1..10 outbound @id @@pdms_edges
         PRUNE o.noun in @nouns
@@ -201,23 +246,31 @@ pub async fn query_ancestor_till_types_aql(arango_database: &ArDatabase, refno: 
             'noun':o.noun,
             'version':0,
             'children_count':0,
-        }")
+        }",
+    )
         .bind_var("id", refno_aql)
         .bind_var("nouns", att_types)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result = arango_database.aql_query::<PdmsElement>(aql).await?;
-    if result.is_empty() { return Ok(None); }
+    if result.is_empty() {
+        return Ok(None);
+    }
     Ok(Some(result[0].clone()))
 }
 
 /// 向上遍历多个节点父节点直到某个类型集合，只返回类型为该att_types中的数据
-pub async fn query_refnos_ancestor_till_types_aql(arango_database: &ArDatabase, refnos: Vec<RefU64>, att_types: Vec<&str>) -> anyhow::Result<Vec<PdmsElement>> {
+pub async fn query_refnos_ancestor_till_types_aql(
+    arango_database: &ArDatabase,
+    refnos: Vec<RefU64>,
+    att_types: Vec<&str>,
+) -> anyhow::Result<Vec<PdmsElement>> {
     let refnos = refnos
         .into_iter()
-        .map(|refno|format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
         .collect::<Vec<_>>();
-    let aql = AqlQuery::new("
+    let aql = AqlQuery::new(
+        "
     With @@pdms_eles,@@pdms_edges
     for id in @ids
     for o in 1..10 outbound id @@pdms_edges
@@ -230,7 +283,8 @@ pub async fn query_refnos_ancestor_till_types_aql(arango_database: &ArDatabase, 
             'noun':o.noun,
             'version':0,
             'children_count':0,
-        }")
+        }",
+    )
         .bind_var("ids", refnos)
         .bind_var("nouns", att_types)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
@@ -239,86 +293,204 @@ pub async fn query_refnos_ancestor_till_types_aql(arango_database: &ArDatabase, 
     Ok(result)
 }
 
-pub async fn query_ancestor_with_name_till_type_aql(arango_database: &ArDatabase, refno: RefU64, att_type: &str) -> anyhow::Result<Vec<PdmsRefnoNameAql>> {
+pub async fn query_ancestor_with_name_till_type_aql(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+    att_type: &str,
+) -> anyhow::Result<Vec<PdmsRefnoNameAql>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("
+    let aql = AqlQuery::new(
+        "
     With @@pdms_eles,@@pdms_edges
     for o in 0..10 outbound @id @@pdms_edges
         PRUNE o.noun == @noun
-        return { refno:o._key, name:o.name }")
+        return { refno:o._key, name:o.name }",
+    )
         .bind_var("id", refno_aql)
         .bind_var("noun", att_type)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let mut result: Vec<PdmsRefnoNameAql> = arango_database.aql_query(aql).await?;
-    if result.len() == 0 { return Ok(vec![]); };
+    if result.len() == 0 {
+        return Ok(vec![]);
+    };
     Ok(result)
 }
 
 /// 向上遍历父节点，到某个类型停止，返回该类型的 name
-pub async fn query_ancestor_name_of_type_aql(arango_database: &ArDatabase, refno: RefU64, att_type: &str) -> anyhow::Result<Option<String>> {
+pub async fn query_ancestor_name_of_type_aql(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+    att_type: &str,
+) -> anyhow::Result<Option<String>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("
+    let aql = AqlQuery::new(
+        "
     With @@pdms_eles, @@pdms_edges
     for o in 0..10 outbound @id @@pdms_edges
         Filter o.noun == @noun
-        return o.name")
+        return o.name",
+    )
         .bind_var("id", refno_aql)
         .bind_var("noun", att_type)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let mut result: Vec<String> = arango_database.aql_query(aql).await?;
-    if result.is_empty() { return Ok(None); }
+    if result.is_empty() {
+        return Ok(None);
+    }
     Ok(Some(result.remove(0)))
 }
 
-///沿着路径搜索目标节点, nouns 指定目标搜索类型
-pub async fn search_refnos_along_path(database: &ArDatabase, refnos: impl IntoIterator<Item=&RefU64>, nouns: &[&str]) -> anyhow::Result<Vec<RefU64>> {
-    let ids =
-        refnos.into_iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
-    let aql = AqlQuery::new("\
-    With @@pdms_eles,@@pdms_edges
-    for id in @ids
-        FOR z in 0..10 INBOUND id @@pdms_edges
-        filter z._key != null
-        filter z.noun in @nouns
-        return z._key
-    ")
-        .bind_var("ids", ids)
-        .bind_var("nouns", nouns)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
-    let results: Vec<RefU64> = database.aql_query::<String>(aql).await?.iter()
-        .map(|x| RefU64::from_str(x).unwrap_or_default()).collect();
-    Ok(results)
+///搜索沿着路径查询目标节点
+#[serde_as]
+#[derive(Hash, Serialize, Deserialize, Clone, Default)]
+pub struct SearchAlongParam {
+    #[serde_as(as = "Vec<DisplayFromStr>")]
+    pub refnos: Vec<RefU64>,
+    pub fuzzy: Vec<String>,
+    pub path_nouns: Vec<String>,
+    pub children_nouns: Vec<String>,
+    pub only_path_nodes: bool,
+    pub include_path_nodes: bool,
 }
 
+impl AiosDBManager {
+    ///沿着路径搜索目标节点, nouns 指定目标搜索类型
+    #[inline]
+    pub async fn search_refnos_along_path_by_param(
+        &self,
+        param: &SearchAlongParam,
+    ) -> anyhow::Result<RefU64Vec> {
+        let arango_db = self.get_arango_db().await?;
+        search_refnos_along_path_arango(
+            &arango_db,
+            &param.refnos,
+            param.fuzzy.iter().map(|x| x.as_str()),
+            param.path_nouns.iter().map(|x| x.as_str()),
+            param.children_nouns.iter().map(|x| x.as_str()),
+            param.only_path_nodes,
+            param.include_path_nodes,
+        )
+            .await
+    }
+
+    ///沿着路径搜索目标节点, nouns 指定目标搜索类型
+    #[inline]
+    pub async fn search_refnos_along_path(
+        &self,
+        refnos: impl IntoIterator<Item=&RefU64>,
+        fuzzy: impl IntoIterator<Item=&str>,
+        path_nouns: impl IntoIterator<Item=&str>,
+        children_nouns: impl IntoIterator<Item=&str>,
+        only_path_nodes: bool,
+        include_path_nodes: bool,
+    ) -> anyhow::Result<RefU64Vec> {
+        let arango_db = self.get_arango_db().await?;
+        search_refnos_along_path_arango(
+            &arango_db,
+            refnos,
+            fuzzy,
+            path_nouns,
+            children_nouns,
+            only_path_nodes,
+            include_path_nodes,
+        )
+            .await
+    }
+}
+
+///沿着路径搜索目标节点, nouns 指定目标搜索类型
+pub async fn search_refnos_along_path_arango(
+    database: &ArDatabase,
+    refnos: impl IntoIterator<Item=&RefU64>,
+    fuzzy: impl IntoIterator<Item=&str>,
+    path_nouns: impl IntoIterator<Item=&str>,
+    children_nouns: impl IntoIterator<Item=&str>,
+    only_path_nodes: bool,
+    include_path_nodes: bool,
+) -> anyhow::Result<RefU64Vec> {
+    let ids = refnos
+        .into_iter()
+        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+        .collect::<Vec<_>>();
+    let aql = AqlQuery::new(
+        "\
+    With @@pdms_eles,@@pdms_edges
+    for id in @ids
+        let path_len = @only_path_nodes ? LENGTH(@path_nouns) : 10
+        FOR v,e,p in 0..path_len INBOUND id pdms_edges
+            prune (LENGTH(p.edges) < LENGTH(@fuzzy) ? !CONTAINS(v.name, @fuzzy[LENGTH(p.edges)]) : @only_path_nodes) or
+                (LENGTH(p.edges) < LENGTH(@path_nouns) ? (v.noun != @path_nouns[LENGTH(p.edges)]) : @only_path_nodes)
+
+            let beyond = LENGTH(p.edges) > LENGTH(@fuzzy)
+            filter beyond ? true : ( @include_path_nodes and CONTAINS(v.name, @fuzzy[LENGTH(p.edges)]))
+
+            filter LENGTH(@children_nouns) == 0  or (v.noun in @children_nouns)
+            return v._key
+    ",
+    )
+        .bind_var("ids", ids)
+        .bind_var("path_nouns", path_nouns.into_iter().collect::<Vec<_>>())
+        .bind_var(
+            "children_nouns",
+            children_nouns.into_iter().collect::<Vec<_>>(),
+        )
+        .bind_var("fuzzy", fuzzy.into_iter().collect::<Vec<_>>())
+        .bind_var("only_path_nodes", only_path_nodes)
+        .bind_var("include_path_nodes", include_path_nodes)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+    let results: Vec<RefU64> = database
+        .aql_query::<String>(aql)
+        .await?
+        .iter()
+        .map(|x| RefU64::from_str(x).unwrap_or_default())
+        .collect();
+    Ok(results.into())
+}
 
 /// 遍历参考号下获取所有指定类型的子节点参考号
-pub async fn query_deep_children_refnos_fuzzy(database: &ArDatabase, refnos: impl IntoIterator<Item=&RefU64>, nouns: &[&str]) -> anyhow::Result<Vec<RefU64>> {
-    let ids =
-        refnos.into_iter().map(|x| x.format_url_name(AQL_PDMS_ELES_COLLECTION)).collect::<Vec<_>>();
-    let aql = AqlQuery::new("\
+pub async fn query_deep_children_refnos_fuzzy(
+    database: &ArDatabase,
+    refnos: impl IntoIterator<Item=&RefU64>,
+    nouns: &[&str],
+) -> anyhow::Result<Vec<RefU64>> {
+    let ids = refnos
+        .into_iter()
+        .map(|x| x.format_url_name(AQL_PDMS_ELES_COLLECTION))
+        .collect::<Vec<_>>();
+    let aql = AqlQuery::new(
+        "\
     With @@pdms_eles,@@pdms_edges
     for id in @ids
         FOR z in 0..10 INBOUND id @@pdms_edges
         filter z._key != null
         filter z.noun in @nouns
         return z._key
-    ")
+    ",
+    )
         .bind_var("ids", ids)
         .bind_var("nouns", nouns)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
-    let results: Vec<RefU64> = database.aql_query::<String>(aql).await?.iter()
-        .map(|x| RefU64::from_str(x).unwrap_or_default()).collect();
+    let results: Vec<RefU64> = database
+        .aql_query::<String>(aql)
+        .await?
+        .iter()
+        .map(|x| RefU64::from_str(x).unwrap_or_default())
+        .collect();
     Ok(results)
 }
 
 /// 遍历refno获取所有子节点的PdmsElement
-pub async fn query_travel_children_aql(arango_database: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<PdmsElement>> {
+pub async fn query_travel_children_aql(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+) -> anyhow::Result<Vec<PdmsElement>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::new(
+        "\
     With @@pdms_eles,@@pdms_edges
     FOR z in 1..2 INBOUND @id @@pdms_edges
     filter z._key != null
@@ -330,7 +502,8 @@ pub async fn query_travel_children_aql(arango_database: &ArDatabase, refno: RefU
         'version':0,
         'children_count':0,
     }
-    ")
+    ",
+    )
         .bind_var("id", refno_aql)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
@@ -339,13 +512,18 @@ pub async fn query_travel_children_aql(arango_database: &ArDatabase, refno: RefU
 }
 
 /// 遍历该refno的所有子节点包含自己，并只返回参考号
-pub async fn query_travel_children_refnos_aql(arango_database: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
+pub async fn query_travel_children_refnos_aql(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+) -> anyhow::Result<Vec<RefU64>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::new(
+        "\
     With @@pdms_eles,@@pdms_edges
     for c in 0..10 inbound @id @@pdms_edges
     return c._key
-    ")
+    ",
+    )
         .bind_var("id", refno_aql)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
@@ -355,9 +533,13 @@ pub async fn query_travel_children_refnos_aql(arango_database: &ArDatabase, refn
 }
 
 /// 遍历该refno的所有子节点，不包含叶子节点
-pub async fn query_travel_children_with_out_leaf_aql(arango_database: &ArDatabase, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
+pub async fn query_travel_children_with_out_leaf_aql(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+) -> anyhow::Result<Vec<RefU64>> {
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::new(
+        "\
     With @@pdms_eles,@@pdms_edges
     for c in 1..10 inbound @id @@pdms_edges
     filter length(
@@ -365,7 +547,8 @@ pub async fn query_travel_children_with_out_leaf_aql(arango_database: &ArDatabas
             return 1
         ) != 0
     return c._key
-    ")
+    ",
+    )
         .bind_var("id", refno_aql)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
@@ -375,12 +558,18 @@ pub async fn query_travel_children_with_out_leaf_aql(arango_database: &ArDatabas
 }
 
 /// 遍历refno只获取指定类型数组的refnos
-pub async fn query_travel_children_with_types_and_cata_hash(arango_database: &ArDatabase, refno: RefU64,
-                                                            att_types: &[&str], check_parent: bool, skip_exist: bool) -> anyhow::Result<Vec<CataHashRefnoKV>> {
+pub async fn query_travel_children_with_types_and_cata_hash(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+    att_types: &[&str],
+    check_parent: bool,
+    skip_exist: bool,
+) -> anyhow::Result<Vec<CataHashRefnoKV>> {
     // let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = if check_parent {
-        AqlQuery::new("\
+        AqlQuery::new(
+            "\
 With @@pdms_eles,@@pdms_edges
 FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
     let parent = p.vertices[-2]
@@ -394,14 +583,16 @@ FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
         exist_geo: exist,
         group_refnos: g[*].v._key,
     }
-    ")
+    ",
+        )
             .bind_var("skip_exist", skip_exist)
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
             .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
     } else {
-        AqlQuery::new("\
+        AqlQuery::new(
+            "\
 With @@pdms_eles,@@pdms_edges
 FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
     filter v.noun in @nouns
@@ -414,7 +605,8 @@ FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
         exist_geo: exist,
         group_refnos: g[*].v._key,
     }
-    ")
+    ",
+        )
             .bind_var("skip_exist", skip_exist)
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
@@ -429,26 +621,35 @@ FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
 /// 遍历refno只获取指定类型数组的refnos
 ///
 /// is_parent : 指定 parent的类型
-pub async fn query_travel_children_with_types_aql(arango_database: &ArDatabase, refno: RefU64, att_types: &[&str], is_parent: bool) -> anyhow::Result<Vec<EleTreeNode>> {
+pub async fn query_travel_children_with_types_aql(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+    att_types: &[&str],
+    is_parent: bool,
+) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = if is_parent {
-        AqlQuery::new("\
+        AqlQuery::new(
+            "\
     With @@pdms_eles,@@pdms_edges
     FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
     let parent = p.vertices[-2]
     Filter parent.noun in @nouns
-    return v")
+    return v",
+        )
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
             .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
     } else {
-        AqlQuery::new("\
+        AqlQuery::new(
+            "\
     With @@pdms_eles,@@pdms_edges
     FOR v in 0..10 INBOUND @id @@pdms_edges
     Filter v.noun in @nouns
-    return v")
+    return v",
+        )
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
@@ -473,10 +674,15 @@ pub async fn query_travel_children_with_types_aql(arango_database: &ArDatabase, 
 /// refno: 指定该参考号下面所有的节点来进行过滤
 /// att_type: 需要查找的类型
 /// 实例  : query_travel_children_with_type_aql(&database,RefU64::from_refno_str("23584/107").unwrap(),"BRAN" )
-pub async fn query_travel_children_with_type_aql(arango_database: &ArDatabase, refno: RefU64, att_type: &str) -> anyhow::Result<Vec<EleTreeNode>> {
+pub async fn query_travel_children_with_type_aql(
+    arango_database: &ArDatabase,
+    refno: RefU64,
+    att_type: &str,
+) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::new(
+        "\
     With @@pdms_eles,@@pdms_edges
     FOR z in 0..10 INBOUND @id @@pdms_edges
     Filter z.noun == @noun
@@ -487,7 +693,8 @@ pub async fn query_travel_children_with_type_aql(arango_database: &ArDatabase, r
         'noun':z.noun,
         'version':0,
         'children_count':0,
-    }")
+    }",
+    )
         .bind_var("id", refno_aql)
         .bind_var("noun", att_type)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
@@ -505,10 +712,18 @@ pub async fn query_travel_children_with_type_aql(arango_database: &ArDatabase, r
     Ok(r)
 }
 
-pub async fn query_refnos_travel_children_with_type_aql(arango_database: &ArDatabase, refnos: &[RefU64], att_type: Vec<String>) -> anyhow::Result<Vec<EleTreeNode>> {
+pub async fn query_refnos_travel_children_with_type_aql(
+    arango_database: &ArDatabase,
+    refnos: &[RefU64],
+    att_type: Vec<String>,
+) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
-    let refno_aql = refnos.into_iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
-    let aql = AqlQuery::new("\
+    let refno_aql = refnos
+        .into_iter()
+        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+        .collect::<Vec<_>>();
+    let aql = AqlQuery::new(
+        "\
     With @@pdms_eles,@@pdms_edges
     let eles = ( for refno in @id
     FOR z in 0..100 INBOUND refno @@pdms_edges
@@ -521,7 +736,8 @@ pub async fn query_refnos_travel_children_with_type_aql(arango_database: &ArData
             'version':0,
             'children_count':0,
         })
-    return UNIQUE(eles)")
+    return UNIQUE(eles)",
+    )
         .bind_var("id", refno_aql)
         .bind_var("noun", att_type)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
@@ -540,9 +756,15 @@ pub async fn query_refnos_travel_children_with_type_aql(arango_database: &ArData
     Ok(r)
 }
 
-pub async fn query_refno_from_site_zone_name(arango_database: &ArDatabase, site_name: String, zone_name: String, att_type: String) -> anyhow::Result<Vec<RefU64>> {
+pub async fn query_refno_from_site_zone_name(
+    arango_database: &ArDatabase,
+    site_name: String,
+    zone_name: String,
+    att_type: String,
+) -> anyhow::Result<Vec<RefU64>> {
     return if zone_name != "\"\"" {
-        let aql = AqlQuery::new(r"
+        let aql = AqlQuery::new(
+            r"
         With @@pdms_eles,@@pdms_edges
         FOR site IN @@pdms_eles
             FILTER site.noun == 'SITE' AND Contains(site.name , @site_name)
@@ -550,7 +772,8 @@ pub async fn query_refno_from_site_zone_name(arango_database: &ArDatabase, site_
                 Filter Contains(c.name, @zone_name)
                 FOR z in 1..4 INBOUND c pdms_edges
                     Filter z.noun == @noun
-                    RETURN z._key")
+                    RETURN z._key",
+        )
             .bind_var("site_name", site_name)
             .bind_var("zone_name", zone_name)
             .bind_var("noun", att_type)
@@ -559,13 +782,15 @@ pub async fn query_refno_from_site_zone_name(arango_database: &ArDatabase, site_
         let result: Vec<String> = arango_database.aql_query(aql).await?;
         Ok(convert_refno_vec_from_vec_string(result))
     } else {
-        let aql = AqlQuery::new(r"
+        let aql = AqlQuery::new(
+            r"
         With @@pdms_eles,@@pdms_edges
         FOR site IN @@pdms_eles
             FILTER site.noun == 'SITE' AND Contains(site.name , @site_name)
                 FOR c IN 1..5 INBOUND site pdms_edges
                     FILTER c.noun == @noun
-                    RETURN c._key")
+                    RETURN c._key",
+        )
             .bind_var("site_name", site_name)
             .bind_var("noun", att_type)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
@@ -576,27 +801,36 @@ pub async fn query_refno_from_site_zone_name(arango_database: &ArDatabase, site_
 }
 
 /// 返回同层级的所有参考号，并按照 pdms 树的顺序排序
-pub async fn query_sibl_level_refnos(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
+pub async fn query_sibl_level_refnos(
+    refno: RefU64,
+    database: &ArDatabase,
+) -> anyhow::Result<Vec<RefU64>> {
     let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     // in 是该 refno 下面
-    let aql_in = AqlQuery::new(r"
+    let aql_in = AqlQuery::new(
+        r"
         With @@pdms_eles,@@sibl_edges
         for v in 1..1000 inbound @id sibl_edges
-            return v._key")
+            return v._key",
+    )
         .bind_var("id", refno_url.clone())
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@sibl_edges",AQL_SIBL_EDGES_COLLECTION);
+        .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION);
     let result: Vec<String> = database.aql_query(aql_in).await.unwrap_or(Vec::new());
-    if result.is_empty() { return Ok(vec![]); }
+    if result.is_empty() {
+        return Ok(vec![]);
+    }
     let in_refnos = convert_refno_vec_from_vec_string(result);
     // out 是该 refno 上面
-    let aql_out = AqlQuery::new(r"
+    let aql_out = AqlQuery::new(
+        r"
         With @@pdms_eles,@@sibl_edges
         for v in 1..1000 outbound @id @@sibl_edges
-            return v._key")
+            return v._key",
+    )
         .bind_var("id", refno_url)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@sibl_edges",AQL_SIBL_EDGES_COLLECTION);
+        .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION);
     let result: Vec<String> = database.aql_query(aql_out).await?;
     let mut out_refnos = convert_refno_vec_from_vec_string(result);
     out_refnos.push(refno);
@@ -604,43 +838,59 @@ pub async fn query_sibl_level_refnos(refno: RefU64, database: &ArDatabase) -> an
 }
 
 /// 返回该参考号的上一个或者下一个节点的attr，b_pre: true 上一个 , false 下一个
-pub async fn query_pre_or_next_node(refno: RefU64, b_pre: bool, database: &ArDatabase, aios_mgr: &AiosDBManager) -> anyhow::Result<Option<AttrMap>> {
+pub async fn query_pre_or_next_node(
+    refno: RefU64,
+    b_pre: bool,
+    database: &ArDatabase,
+    aios_mgr: &AiosDBManager,
+) -> anyhow::Result<Option<AttrMap>> {
     let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     let aql = if b_pre {
-        AqlQuery::new("\
+        AqlQuery::new(
+            "\
         With @@pdms_eles,@@sibl_edges
         for v in 1 outbound @key @@sibl_edges
             return v._key
-    ")
+    ",
+        )
             .bind_var("key", refno_url)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-            .bind_var("@sibl_edges",AQL_SIBL_EDGES_COLLECTION)
+            .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION)
     } else {
-        AqlQuery::new("\
+        AqlQuery::new(
+            "\
         With @@pdms_eles,@@sibl_edges
         for v in 1 inbound @key @@sibl_edges
             return v._key
-    ")
+    ",
+        )
             .bind_var("key", refno_url)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-            .bind_var("@sibl_edges",AQL_SIBL_EDGES_COLLECTION)
+            .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION)
     };
     let aql_result = database.aql_query::<String>(aql).await;
     // 如果为该层第一个或者最后一个 则返回 None
-    if aql_result.is_err() { return Ok(None); }
+    if aql_result.is_err() {
+        return Ok(None);
+    }
     let aql_result = aql_result.unwrap();
     let aql_result = convert_refno_vec_from_vec_string(aql_result);
-    if aql_result.is_empty() { return Ok(None); }
+    if aql_result.is_empty() {
+        return Ok(None);
+    }
     let attr = query_attr(aql_result[0], aios_mgr, None).await?;
     Ok(Some(attr))
 }
 
-
 /// 返回指定参考号下所有的负实体以及和负实体同级的其他节点
-pub async fn query_travel_children_filter_negative_sibl_nodes(refno: RefU64, database: &ArDatabase) -> anyhow::Result<HashMap<RefU64, Vec<PdmsElement>>> {
+pub async fn query_travel_children_filter_negative_sibl_nodes(
+    refno: RefU64,
+    database: &ArDatabase,
+) -> anyhow::Result<HashMap<RefU64, Vec<PdmsElement>>> {
     let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
     // todo negatives并没有去掉同层级的其他节点，同层级的所有节点都查询了一遍，应该一层只用查询一遍
-    let aql = AqlQuery::new("\
+    let aql = AqlQuery::new(
+        "\
         With @@pdms_eles,@@pdms_edges,@@sibl_edges
         let negatives = ( FOR v in 0..10 INBOUND @key @@pdms_edges
                     filter POSITION(@negative_nouns, v.noun)
@@ -655,12 +905,13 @@ pub async fn query_travel_children_filter_negative_sibl_nodes(refno: RefU64, dat
                     'version':0,
                     'children_count':0,
                 } )
-        return UNIQUE(sibls)"
-    ).bind_var("key", refno_url)
+        return UNIQUE(sibls)",
+    )
+        .bind_var("key", refno_url)
         .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
-        .bind_var("@sibl_edges",AQL_SIBL_EDGES_COLLECTION);
+        .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION);
     let results = database.aql_query::<Vec<PdmsElement>>(aql).await?;
     let mut negative_map = HashMap::new();
     for result in results {
@@ -672,9 +923,16 @@ pub async fn query_travel_children_filter_negative_sibl_nodes(refno: RefU64, dat
 }
 
 /// 过滤掉同层级拥有负实体的参考号
-pub async fn filter_negative_sibl_from_refnos(refnos: &Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
-    let keys = refnos.into_iter().map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
-    let aql = AqlQuery::new("\
+pub async fn filter_negative_sibl_from_refnos(
+    refnos: &Vec<RefU64>,
+    database: &ArDatabase,
+) -> anyhow::Result<Vec<RefU64>> {
+    let keys = refnos
+        .into_iter()
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .collect::<Vec<_>>();
+    let aql = AqlQuery::new(
+        "\
         With @@pdms_eles,@@pdms_edges
         for refno in @keys
         let contains_negative = ( for v in 0..1000 ANY refno @@sibl_edges
@@ -682,44 +940,69 @@ pub async fn filter_negative_sibl_from_refnos(refnos: &Vec<RefU64>, database: &A
                             return 1 )
         filter Length(contains_negative) == 0
         return refno
-    ").bind_var("keys", keys)
+    ",
+    )
+        .bind_var("keys", keys)
         .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result = database.aql_query::<String>(aql).await?;
-    Ok(result.into_iter().filter_map(|r| RefU64::from_arangodb_refno_str(&r)).collect::<Vec<_>>())
+    Ok(result
+        .into_iter()
+        .filter_map(|r| RefU64::from_arangodb_refno_str(&r))
+        .collect::<Vec<_>>())
 }
 
 /// 用户自定义条件模糊查询 aql
-pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, database: &ArDatabase) -> anyhow::Result<Vec<(RefU64, String)>> {
-    let mut keys = request.filter_refnos.into_iter()
-        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
+pub async fn vague_query_refnos_user_set_aql(
+    request: VagueSearchRequest,
+    database: &ArDatabase,
+) -> anyhow::Result<Vec<(RefU64, String)>> {
+    let mut keys = request
+        .filter_refnos
+        .into_iter()
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .collect::<Vec<_>>();
     let mut condition_map = HashSet::new();
-    request.filter_condition.iter().for_each(|x| if x.0 == "MAJOR" {
-        condition_map.insert(x.1.clone());
+    request.filter_condition.iter().for_each(|x| {
+        if x.0 == "MAJOR" {
+            condition_map.insert(x.1.clone());
+        }
     });
     // 对专业进行过滤
     // 先进行专业过滤查询
     if !condition_map.is_empty() {
-        let aql = format!("
+        let aql = format!(
+            "
             With {AQL_PDMS_ELES_COLLECTION}
             for refno in {}
                 let v = document(refno)
                 @@major_filter_condition
-                return v._id", serde_json::to_string(&keys).unwrap_or("[]".to_string()));
+                return v._id",
+            serde_json::to_string(&keys).unwrap_or("[]".to_string())
+        );
         let mut filter_conditions = String::new();
         for condition in &condition_map {
             match condition.0 {
                 VagueSearchCondition::And => {
-                    filter_conditions.push_str(&format!("filter v.major == '{}' OR v.noun != 'SITE' ", condition.1));
+                    filter_conditions.push_str(&format!(
+                        "filter v.major == '{}' OR v.noun != 'SITE' ",
+                        condition.1
+                    ));
                 }
                 VagueSearchCondition::Or => {
                     if condition_map.len() > 1 {
-                        filter_conditions.push_str(&format!("|| v.major == '{}' OR v.noun != 'SITE' ", condition.1));
+                        filter_conditions.push_str(&format!(
+                            "|| v.major == '{}' OR v.noun != 'SITE' ",
+                            condition.1
+                        ));
                     }
                 }
                 VagueSearchCondition::Not => {
-                    filter_conditions.push_str(&format!("filter v.major != '{}' OR v.noun != 'SITE' ", condition.1));
+                    filter_conditions.push_str(&format!(
+                        "filter v.major != '{}' OR v.noun != 'SITE' ",
+                        condition.1
+                    ));
                 }
             }
         }
@@ -729,7 +1012,8 @@ pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, databa
         keys = result;
     }
     // 生成aql模板
-    let aql = format!("\
+    let aql = format!(
+        "\
     With {AQL_PDMS_ELES_COLLECTION}
     for refno in {}
         for v in 0..1000 inbound refno {AQL_PDMS_EDGES_COLLECTION}
@@ -737,11 +1021,15 @@ pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, databa
         return {{
             'refno':v._key,
             'name':v.name,
-        }} ", serde_json::to_string(&keys).unwrap_or("[]".to_string()));
+        }} ",
+        serde_json::to_string(&keys).unwrap_or("[]".to_string())
+    );
     // 拼接过滤条件
     let mut filter_condition = String::new();
     for (key, (condition, value)) in request.filter_condition {
-        if &key == "MAJOR" { continue; };
+        if &key == "MAJOR" {
+            continue;
+        };
         let key = key.to_lowercase().replace("type", "noun");
         let value_aql = if value.contains("*") {
             // 替换通配符
@@ -758,7 +1046,11 @@ pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, databa
                 filter_condition.push_str(&format!("|| v.{} {} ", key, value_aql));
             }
             VagueSearchCondition::Not => {
-                let value_aql = if value_aql.starts_with("=") { value_aql[1..].to_string() } else { value_aql };
+                let value_aql = if value_aql.starts_with("=") {
+                    value_aql[1..].to_string()
+                } else {
+                    value_aql
+                };
                 filter_condition.push_str(&format!("filter v.{} !{} ", key, value_aql));
             }
         }
@@ -777,10 +1069,16 @@ pub async fn vague_query_refnos_user_set_aql(request: VagueSearchRequest, databa
 }
 
 /// 查询节点属于哪个专业和专业下的具体分类
-pub async fn query_refnos_belong_major(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<RefnoMajor>> {
-    let ids = refnos.into_iter()
-        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno())).collect::<Vec<_>>();
-    let aql = AqlQuery::new("
+pub async fn query_refnos_belong_major(
+    refnos: Vec<RefU64>,
+    database: &ArDatabase,
+) -> anyhow::Result<Vec<RefnoMajor>> {
+    let ids = refnos
+        .into_iter()
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .collect::<Vec<_>>();
+    let aql = AqlQuery::new(
+        "
     With @@pdms_eles,@@pdms_edges
     for id in @ids
     for v,e,p in 0..10 outbound id @@pdms_edges
@@ -792,7 +1090,9 @@ pub async fn query_refnos_belong_major(refnos: Vec<RefU64>, database: &ArDatabas
         'name':v.name,
         'noun':v.noun,
         'major':v.major,
-    }").bind_var("ids", ids)
+    }",
+    )
+        .bind_var("ids", ids)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result = database.aql_query::<PdmsElementWithMajor>(aql).await?;
@@ -828,10 +1128,17 @@ pub async fn query_refnos_belong_major(refnos: Vec<RefU64>, database: &ArDatabas
 /// 查询参考号集合分别属于哪个层级
 ///
 /// 层级：从owner一直到某个类型的name
-pub async fn query_refnos_belong_level_aql(refno: Vec<RefU64>, att_type: &str, database: &ArDatabase) -> anyhow::Result<Vec<VagueSearchExportAqlData>> {
-    let refnos = refno.into_iter()
-        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<String>>();
-    let aql = AqlQuery::new("
+pub async fn query_refnos_belong_level_aql(
+    refno: Vec<RefU64>,
+    att_type: &str,
+    database: &ArDatabase,
+) -> anyhow::Result<Vec<VagueSearchExportAqlData>> {
+    let refnos = refno
+        .into_iter()
+        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+        .collect::<Vec<String>>();
+    let aql = AqlQuery::new(
+        "
     With @@pdms_eles,@@pdms_edges
     for refno in @refnos
         let level = ( for o in 1..10 outbound refno @@pdms_edges
@@ -843,7 +1150,9 @@ pub async fn query_refnos_belong_level_aql(refno: Vec<RefU64>, att_type: &str, d
             'name': element.name,
             'level':level,
             'att_type':element.noun
-        }").bind_var("refnos", refnos)
+        }",
+    )
+        .bind_var("refnos", refnos)
         .bind_var("noun", att_type)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
@@ -874,8 +1183,15 @@ async fn test_vague_query_refnos_user_set_aql() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let request = VagueSearchRequest {
-        filter_refnos: vec![RefU64::from_refno_str("24383/66456").unwrap(), RefU64::from_refno_str("24381/100675").unwrap()],
-        filter_condition: vec![("MAJOR".to_string(), (And, "T".to_string())), ("NAME".to_string(), (And, "*WCC*".to_string())), ("TYPE".to_string(), (And, "PIPE".to_string()))],
+        filter_refnos: vec![
+            RefU64::from_refno_str("24383/66456").unwrap(),
+            RefU64::from_refno_str("24381/100675").unwrap(),
+        ],
+        filter_condition: vec![
+            ("MAJOR".to_string(), (And, "T".to_string())),
+            ("NAME".to_string(), (And, "*WCC*".to_string())),
+            ("TYPE".to_string(), (And, "PIPE".to_string())),
+        ],
     };
     let result = vague_query_refnos_user_set_aql(request, &database).await?;
     dbg!(&result);

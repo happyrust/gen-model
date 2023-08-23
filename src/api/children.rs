@@ -137,14 +137,14 @@ pub async fn travel_children_with_type(refno: RefU64, att_type: String, pool: &P
 }
 
 
-/// 遍历该节点的所有子节点为指定refno的所有数据 返回 refno name owner
+/// 遍历该节点的所有子节点为指定refno返回 refno
 pub async fn travel_children_with_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
     let children = travel_children_eles(refno, pool).await?;
     Ok(children)
 }
 
-/// 查询指定type的children 的 id 、 name
-pub async fn query_children_id_name_with_type(refno: RefU64, att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
+/// 查询指定type的children 的 （ID，name）的集合
+pub async fn query_children_id_name_with_type(pool: &Pool<MySql>, refno: RefU64, att_type: &str) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = vec![];
     let sql = gen_query_children_id_name_with_type_sql(refno, att_type);
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
@@ -400,32 +400,6 @@ pub async fn query_foreign_refnos_from_table(foreign_type: &str, table_name: &st
     }
     Ok(result)
 }
-
-// 通过用户自定义过滤条件来进行模糊查询
-//
-// conditions: key -> 过滤的类型 (NAME,TYPE等)  value -> 0: 过滤的条件(And , Or , Not) 1: 过滤的值 (/100-B*等)
-// pub async fn vague_query_refnos_by_name_sql_user_set(
-//     conditions: &Vec<(String, (VagueSearchCondition, String))>,
-//     aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<(RefU64, String)>> {
-//     let mut result = Vec::new();
-//     // 只查询当前mdb的节点
-//     if let Some(pool) = aios_mgr.get_project_pool(&aios_mgr.db_option.project_name) {
-//         let mdb = aios_mgr.mdb_dbnums.clone().into_iter().collect::<Vec<_>>();
-//         // 暂时先过滤 name 和 type
-//         let sql = gen_vague_query_refnos_by_name_sql_user_set("hello", conditions, &mdb);
-//         let query_results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
-//         for query_result in query_results {
-//             let refno = query_result.try_get::<i64, _>("ID");
-//             if refno.is_err() { continue; }
-//             let refno = refno.unwrap();
-//             let name = query_result.try_get::<String, _>("NAME");
-//             if name.is_err() { continue; }
-//             let name = name.unwrap();
-//             result.push((RefU64(refno as u64), name));
-//         }
-//     }
-//     Ok(result)
-// }
 
 fn gen_query_names_from_refnos_with_type_sql(refnos: Vec<RefU64>, att_type: String) -> String {
     let mut sql = String::new();

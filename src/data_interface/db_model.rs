@@ -95,9 +95,8 @@ impl AiosDBManager {
             &db_option.module,
         )
         .await?;
-        // if db_option.gen_spatial_tree
         //加载空间树
-        {
+        if db_option.load_spatial_tree {
             mgr.compute_aabb_trees().await?;
         }
         Ok(mgr)
