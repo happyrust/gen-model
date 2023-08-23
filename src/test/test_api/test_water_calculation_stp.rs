@@ -70,7 +70,10 @@ async fn test_export_water_calculation_stp_0() -> anyhow::Result<()> {
     Ok(())
 }
 
-//对应xxxx.xlxs 的第几个issue
+
+
+
+//对应水淹计算测试.xlxs 的第1个issue：封堵的孔洞数和生成的模型对不上
 #[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 async fn test_export_water_calculation_stp_01() -> anyhow::Result<()> {
@@ -149,9 +152,8 @@ async fn test_export_water_calculation_stp_01() -> anyhow::Result<()> {
 
 
 
-
-///测试导出不全的情况，墙有丢失
-#[cfg(feature = "opencascade_rs")]
+//对应水淹计算测试.xlxs 的第8个issue: 封堵的孔洞数量和生成的模型不一致
+//#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
 async fn test_export_water_calculation_stp_02() -> anyhow::Result<()> {
@@ -215,7 +217,7 @@ async fn test_export_water_calculation_stp_02() -> anyhow::Result<()> {
 }
 
 
-
+//对应水淹计算测试.xlxs 的第9个issue：名称乱码
 //#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
@@ -285,6 +287,7 @@ async fn test_export_water_calculation_stp_03() -> anyhow::Result<()> {
     Ok(())
 }
 
+//对应水淹计算测试.xlxs 的第10个issue:孔洞位置不正确
 //#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
@@ -354,7 +357,7 @@ async fn test_export_water_calculation_stp_04() -> anyhow::Result<()> {
     Ok(())
 }
 
-
+//对应水淹计算测试.xlxs 的第11个issue：模型生成不正确
 //#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
@@ -425,6 +428,8 @@ async fn test_export_water_calculation_stp_05() -> anyhow::Result<()> {
 }
 
 
+
+//对应水淹计算.xlxs 的第1个issue：“预处理”中的孔洞和生成的模型对不上
 //#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
