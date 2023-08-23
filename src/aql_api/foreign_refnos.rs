@@ -2,14 +2,14 @@ use std::sync::Arc;
 use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use clap::builder::Str;
-use crate::consts::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::{AQL_PDMS_ELES_COLLECTION, PDMS_ELEMENTS_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::consts::AQL_FOREIGN_EDGES_COLLECTION;
 
 ///可选的去过滤查询, start_types 和 endtypes，都是外键的类型
 pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], start_types: &[&[&str]], end_types: &[&str], t_types: &[&str], depth: u32) -> anyhow::Result<Vec<RefU64>> {
-    let ids = refnos.into_iter().map(|x| format!("{}/{}", "pdms_eles", x.to_url_refno())).collect::<Vec<_>>();
+    let ids = refnos.into_iter().map(|x| x.format_url_name(AQL_PDMS_ELES_COLLECTION)).collect::<Vec<_>>();
     let mut aql = r#"
         with foreign_edges, pdms_eles
         for id in @ids
@@ -45,7 +45,7 @@ pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], sta
 /// 查询某参考号的引用参考号  例如：refno -> spre -> catr -> ptre  可直接查到 ptre
 // 加入可选的出发，以及可选的结束
 pub async fn query_foreign_refno_aql(arango_database: &ArDatabase, refno: RefU64, foreign_types: &[&str]) -> anyhow::Result<Option<RefU64>> {
-    let id = format!("{}/{}", "pdms_eles", refno.to_url_refno());
+    let id = refno.format_url_name(AQL_PDMS_ELES_COLLECTION);
     if foreign_types.len() < 2 { return Ok(None); }
     let aql = AqlQuery::new("\
     With @@pdms_eles, @@foreign_edges

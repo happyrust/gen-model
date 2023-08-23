@@ -950,7 +950,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///获得子节点集合的属性
-    async fn get_travel_children_attrs(
+    async fn get_deep_children_attrs(
         &self,
         refno: RefU64,
         nouns: &[&str],

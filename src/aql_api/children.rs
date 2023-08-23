@@ -272,20 +272,41 @@ pub async fn query_ancestor_name_of_type_aql(arango_database: &ArDatabase, refno
     Ok(Some(result.remove(0)))
 }
 
-/// 遍历refno获取所有子节点的RefU64
-pub async fn query_deep_children_refnos_fuzzy(database: &ArDatabase, refno: impl IntoIterator<Item=&RefU64>, nouns: &[&str]) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aqls =
-        refno.into_iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
+///沿着路径搜索目标节点, nouns 指定目标搜索类型
+pub async fn search_refnos_along_path(database: &ArDatabase, refnos: impl IntoIterator<Item=&RefU64>, nouns: &[&str]) -> anyhow::Result<Vec<RefU64>> {
+    let ids =
+        refnos.into_iter().map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("\
     With @@pdms_eles,@@pdms_edges
     for id in @ids
         FOR z in 0..10 INBOUND id @@pdms_edges
-        // prune z.noun in @nouns
         filter z._key != null
         filter z.noun in @nouns
         return z._key
     ")
-        .bind_var("ids", refno_aqls)
+        .bind_var("ids", ids)
+        .bind_var("nouns", nouns)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+    let results: Vec<RefU64> = database.aql_query::<String>(aql).await?.iter()
+        .map(|x| RefU64::from_str(x).unwrap_or_default()).collect();
+    Ok(results)
+}
+
+
+/// 遍历参考号下获取所有指定类型的子节点参考号
+pub async fn query_deep_children_refnos_fuzzy(database: &ArDatabase, refnos: impl IntoIterator<Item=&RefU64>, nouns: &[&str]) -> anyhow::Result<Vec<RefU64>> {
+    let ids =
+        refnos.into_iter().map(|x| x.format_url_name(AQL_PDMS_ELES_COLLECTION)).collect::<Vec<_>>();
+    let aql = AqlQuery::new("\
+    With @@pdms_eles,@@pdms_edges
+    for id in @ids
+        FOR z in 0..10 INBOUND id @@pdms_edges
+        filter z._key != null
+        filter z.noun in @nouns
+        return z._key
+    ")
+        .bind_var("ids", ids)
         .bind_var("nouns", nouns)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);

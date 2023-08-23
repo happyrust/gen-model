@@ -36,6 +36,7 @@ pub type ArDatabase = arangors_lite::Database;
 pub type ArPool = Pool<ArangoConnectionManager>;
 
 
+///创建arangodb的连接池
 pub async fn connect_arangodb(db_option: &DbOption) -> anyhow::Result<ArPool> {
     let manager = ArangoConnectionManager::new(
         db_option.arangodb_url.to_string(),
