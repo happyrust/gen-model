@@ -1,5 +1,5 @@
 #同步文件配置false
-total_sync = false
+total_sync = true
 enable_log = false
 sync_graph_db = true
 sync_tidb = true
@@ -8,8 +8,8 @@ incr_sync = false
 replace_dbs = true
 
 #项目设置
-project_path = "/Users/dongpengcheng/Documents/models/e3d_models" #TestCatalogue
-included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
+project_path = "D:/AVEVA/Projects/E3D2.1" #TestCatalogue
+included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ", "AvevaPlantSample"]
 #included_projects = ["SCB", "ZDJ"]  #"AvevaPlantSample",
 #included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
 
@@ -40,8 +40,8 @@ arangodb_password = ""
 ip = "127.0.0.1"
 user = "root"
 password = ""
-#port = "3306"
-port = "4000"
+port = "3306"
+#port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
@@ -52,8 +52,8 @@ server_release_ip = "127.0.0.1:9099"
 #调试选项
 replace_mesh = true
 save_model_mesh_to_graph_db = true
-need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
-reset_mdb_project =  false     #是否重新生成 mdb 缓存
+need_sync_refno_basic = true  #是否重新生成 refno_basic 缓存
+reset_mdb_project =  true     #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
@@ -61,11 +61,11 @@ only_rebuild_pdms_element = false
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
 #included_db_files = ["ams7334_0001", "ams7353_0001", "ams7741_0001", "ams7998_0001"]
-included_db_files = ["acp7001_0001"]
+#included_db_files = ["ams1112_0001"]
 #included_db_files = ["acp7002_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 #  manual_db_nums = [7000]
-manual_db_nums = [1112]  #, 8000
+manual_db_nums = [7999]  #, 8000
 plat_url = ""
 
 #puhua
@@ -76,17 +76,6 @@ puhua_database_password = ""
 #joint还有问题，方位对齐的问题
 #debug_root_refnos = ["25688/48687"]
 
-#楼板FIT显示
-# debug_root_refnos = ["25688/72092", "25688/75909"]
-
-#debug_root_refnos = ["24381/36612", "24381/40192", "24381/36945", "25688/71621", "24384/22441", "24384/3115", "24384/23184", "24384/24223"]
-#debug_root_refnos = ["24384/22447"]
-#debug_root_refnos = ["24381/36945"]
-#debug_root_refnos = ["17496/202345"]
-#debug_root_refnos = ["24381/42441"]
-#debug_root_refnos = ["24381/42463"]
-#debug_root_refnos = ["24381/37115"]
-#debug_root_refnos = ["24381/36563"]
 
 #管道不出来的情况，需要查一下原因, *以解决
 #debug_root_refnos = ["24381/57428"]
@@ -129,7 +118,7 @@ puhua_database_password = ""
 #Cut 崩溃, 被offset影响
 #debug_root_refnos = ["24383/78369"]
 
-debug_root_refnos = ["23714/1108", "23714/1"]
+#debug_root_refnos = ["24383/76668"]
 
 
 #transform 有不合适的值，NAN
@@ -333,7 +322,7 @@ debug_root_refnos = ["23714/1108", "23714/1"]
 #指定哪些根节点下面是房间，以FRMW为一个整体
 #room_root_refnos = ["24381/34110"]
 #room_root_refnos = ["24381/35342", "24381/35795", "24381/36068"]
-room_root_refnos = ["24381/36068"]
+#room_root_refnos = ["24381/34109"]
 
 #room_root_refnos = ["24381/35622"]
 #24381_105593\
