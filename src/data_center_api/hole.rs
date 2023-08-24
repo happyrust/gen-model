@@ -796,6 +796,7 @@ pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, dat
     // 删除边
     let keys = datas.iter().map(|x| x._key.clone()).collect::<Vec<_>>();
     let edge_aql = AqlQuery::new("\
+    With hole_data,hole_edge
     for key in @keys
         for c,e in 1 inbound CONCAT('hole_data/',key) hole_edge
             REMOVE e._key IN hole_edge
@@ -920,7 +921,6 @@ async fn test_query_hole_data_total_aql() {
         dbg!(&result);
     }
 }
-
 
 /// 删除孔洞的信息，并删除边
 pub async fn delete_hole_data_aql(keys: Vec<String>, database: &ArDatabase) -> anyhow::Result<bool> {
