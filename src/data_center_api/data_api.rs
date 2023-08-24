@@ -4,11 +4,12 @@ use aios_core::pdms_types::{AttrMap, PdmsElement, RefU64};
 use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use dashmap::DashMap;
 use std::collections::HashMap;
+use aios_core::pdms_user::RefnoMajor;
 
 use crate::api::attr::query_explicit_attr;
 use crate::api::children::travel_children_with_type;
 use crate::api::element::*;
-use crate::aql_api::children::query_travel_children_with_type_aql;
+use crate::aql_api::children::{query_refnos_belong_major, query_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
 use crate::aql_api::pdms_room::*;
 use crate::consts::PUHUA_DQ_MATERIAL_TABLE;
@@ -591,6 +592,22 @@ fn split_char_and_number(input: &str) -> Option<(String, String)> {
     } else {
         None
     }
+}
+
+/// 获取参考号集合所属的专业代码
+pub async fn get_refnos_major_map(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<HashMap<RefU64, RefnoMajor>> {
+    let refnos_major = query_refnos_belong_major(refnos, database).await?;
+    let mut major_map = HashMap::new();
+    for major in refnos_major {
+        let Ok(refno) = RefU64::from_refno_str(&major.refno) else { continue; };
+        major_map.entry(refno).or_insert(major);
+    }
+    Ok(major_map)
+}
+
+/// 去掉 name 开头的 /
+pub(crate) fn take_off_name_first_char(name: &str) -> String {
+    if name.starts_with("/") { name[1..].to_string() } else { name.to_string() }
 }
 
 #[tokio::test]

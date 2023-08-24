@@ -450,6 +450,7 @@ pub async fn replace_embed_data_to_arangodb(datas: Vec<VirtualEmbedGraphNode>, d
     // 删除原来的边
     let keys = datas.iter().map(|x| x._key.clone()).collect::<Vec<_>>();
     let edge_aql = AqlQuery::new("\
+    With embed_data,embed_edge
     for key in @keys
         for c,e in 1 inbound CONCAT('embed_data/',key) embed_edge
             REMOVE e._key IN embed_edge
@@ -468,7 +469,7 @@ pub async fn replace_embed_data_to_arangodb(datas: Vec<VirtualEmbedGraphNode>, d
         let json = serde_json::to_value(&data);
         if json.is_err() { return Ok("输入的数据格式不符合规则".to_string()); }
         let json = json.unwrap();
-        match update_arangodb_doc(&data._key,json, AQL_EMBED_DATA_COLLECTION, &database).await {
+        match update_arangodb_doc(&data._key, json, AQL_EMBED_DATA_COLLECTION, &database).await {
             Ok(_) => {}
             Err(e) => {
                 return Ok(e.to_string());
