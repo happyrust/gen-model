@@ -4,6 +4,7 @@ use aios_core::pdms_types::RefU64;
 use aios_core::pdms_types::UdaMajorType::P;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use dashmap::DashMap;
+use crate::api::attr::query_attr;
 use crate::api::children::travel_children_with_type;
 use crate::aql_api::change_vec_refnos_into_vec_string;
 use crate::aql_api::children::{query_children_eles, query_travel_children_with_types_aql};
@@ -57,7 +58,7 @@ async fn query_data_attr_from_refnos(refnos: Vec<RefU64>, database: &ArDatabase)
 /// 查询保温层参数
 pub async fn query_ipara_from_bran(bran_refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<f64>> {
     let database = aios_mgr.get_arango_db().await?;
-    let bran_attr = aios_mgr.get_attr(bran_refno).await?;
+    let bran_attr = query_attr(bran_refno,aios_mgr,None).await?;
     let temp = bran_attr.get_f32("TEMP").unwrap_or(-100000.0);
     let h_bore = bran_attr.get_f32("HBOR").unwrap_or(0.0);
     let Some(ispec) = bran_attr.get_refu64("ISPE") else { return Ok(vec![0.0]); };

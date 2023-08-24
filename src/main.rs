@@ -354,7 +354,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "SPCO";
+    let noun = ":STACbeam";
     let hash = db1_hash(noun);
     dbg!(hash);
     // let hashes = [7146282];
@@ -393,41 +393,6 @@ fn test_turn_bin_into_json() {
     new_file.write_all(&json.into_bytes()).unwrap();
 }
 
-// #[test]
-// fn test_inst_mgr() {
-//     let map = CachedInstanceMgr::deserialize_from_bin_file(&"assets/instance/7999.inst").unwrap();
-//     let refno = RefU64::from_refno_str("24381/34919").unwrap();
-//     if let Some(value) = map.inst_data.inst_map.get(&refno) {
-//         dbg!(&value.value());
-//     };
-// }
-//
-// #[test]
-// fn test_compare_attr_info_file() {
-//     let new_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
-//     let old_info = serde_json::from_str::<PdmsDatabaseInfo>(&include_str!("../all_attr_info.json")).unwrap();
-//     let old_map = old_info.noun_attr_info_map;
-//     for (noun, new_attr) in new_info.noun_attr_info_map {
-//         if let Some(old_attr) = old_map.get(&noun) {
-//             for (new_key, new_value) in new_attr {
-//                 let old_value = old_attr.get(&new_key);
-//                 if old_value.is_none() { continue; }
-//                 let old_value = old_value.unwrap();
-//
-//                 if new_value.att_type != old_value.att_type || new_value.name != old_value.name {
-//                     dbg!(&noun);
-//                     dbg!(&new_value);
-//                     dbg!("");
-//                 }
-//             }
-//         } else {
-//             dbg!(&noun);
-//             dbg!(&db1_dehash(noun as u32));
-//             dbg!("");
-//         }
-//     }
-// }
-
 #[test]
 fn test_log() {
     use env_logger::{fmt::Target, Builder};
@@ -442,4 +407,11 @@ fn test_log() {
     let mut builder = Builder::from_default_env();
     builder.target(Target::Pipe(Box::new(file))).init();
     error!("Some error");
+}
+
+#[tokio::test]
+async fn test_db1_dehash() {
+    let mgr = AiosDBManager::init_form_config().await.unwrap();
+    let hash = db1_hash(":STACbeam");
+    dbg!(&hash);
 }
