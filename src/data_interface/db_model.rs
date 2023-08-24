@@ -29,6 +29,7 @@ use std::default;
 use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use hex::encode;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 // use heed::byteorder::BE;
@@ -322,7 +323,7 @@ impl AiosDBManager {
     #[inline]
     pub fn get_default_conn_str(d: &DbOption) -> String {
         let user = d.user.as_str();
-        let pwd = d.password.as_str();
+        let pwd = urlencoding::encode(d.password.as_str());
         let ip = d.ip.as_str();
         let port = d.port.as_str();
         format!("mysql://{user}:{pwd}@{ip}:{port}")

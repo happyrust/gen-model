@@ -228,6 +228,6 @@ fn contains_s1_to_s17(input: &str) -> bool {
 
 #[test]
 fn test_contains_s1_to_s17() {
-    let input = "f_S18_f";
+    let input = "S17-";
     dbg!(contains_s1_to_s17(input));
 }
