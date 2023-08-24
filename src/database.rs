@@ -703,6 +703,15 @@ pub async fn sync_total_async_threaded(
 
                     version_map.entry(file_name.clone()).or_insert(version);
                     set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
+
+                    // total_attr_map
+                    // default_name()
+                    // let keys = total_attr_map
+                    total_attr_map.iter_mut().for_each(|mut x|{
+                        let name = cal_default_name(*x.key(), x.value(), &children_map_clone);
+                        x.value_mut().explicit_attmap.insert(NAME_HASH, AttrVal::StringType(name));
+                    });
+
                     //类型暂时不多线程
                     let total_attr_map_arc = Arc::new(total_attr_map);
                     let children_map_arc = children_map_clone.clone();
@@ -742,16 +751,14 @@ pub async fn sync_total_async_threaded(
                     }
 
                     if let Some(tree) = local_tree.clone() {
-                        // let mut batch = sled::Batch::default();
                         for kv in total_attr_map_arc.as_ref() {
                             let mut vec = kv
                                 .value()
                                 .merge_implicit_explicit_into_attr()
                                 .into_rkyv_compress_bytes();
+
                             tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
                         }
-
-                        // children_tree.apply_batch(batch)?;
 
                         // let c = total_attr_map_arc.clone();
                         // let tree = db.open_tree("attr_map")?;
@@ -884,11 +891,7 @@ pub async fn sync_total_async_threaded(
                                             explicit_values_sql.push_str(
                                                 &gen_explicit_attr_value_sql(att.value()),
                                             );
-                                            let name = get_name(
-                                                refno,
-                                                att.value(),
-                                                &children_map_arc_clone,
-                                            )
+                                            let name = att.get_name()
                                             .replace(r#"'"#, r#"\'"#)
                                             .replace(r#"""#, r#"\""#);
                                             let order = get_order(
@@ -1073,7 +1076,6 @@ fn set_uda_attr(
     total_attr_map: &DashMap<RefU64, WholeAttMap>,
     uda_map: &mut HashMap<i32, AttrMap>,
 ) -> anyhow::Result<()> {
-    // let mut uda_map: HashMap<String, HashMap<String, String>> = HashMap::new();
     if let Some(uda_refnos) = type_ele_map.get(&db1_hash("UDA")) {
         // 获取每个 uda 的 ELEL , DFLT , UDNA属性
         for uda_refno in uda_refnos.value() {

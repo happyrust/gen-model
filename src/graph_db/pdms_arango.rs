@@ -97,7 +97,7 @@ pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: 
         if owner.is_none() { continue; }
         let owner = owner.unwrap();
         let owner_str = owner.to_url_refno();
-        let name = get_name(refno, &whole_attr, children_map);
+        let name = cal_default_name(refno, &whole_attr, children_map);
         let noun = whole_attr.implicit_attmap.get_type();
         let pdms_element = PdmsEleGraphNode {
             _key: refno.to_url_refno(),

@@ -1157,7 +1157,7 @@ pub async fn gen_cata_geos(
             .unwrap_or_default();
         // dbg!(h_ref);
 
-        let bran_name = branch_att.get_name().0.to_string();
+        let bran_name = branch_att.get_name_string();
         let tubi_att = mgr.get_attr_from_localdb(h_ref).unwrap_or_default();
         let tubi_cat_ref = tubi_att.get_foreign_refno("CATR").unwrap_or_default();
         let mut tubi_size = query_tubi_size(

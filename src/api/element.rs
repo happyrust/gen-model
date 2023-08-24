@@ -632,7 +632,7 @@ pub fn gen_dbinfo_value_insert_sql(dbno: u32, filename: &str, version: u32, proj
 }
 
 ///如果名称未给定，根据属性列表和children列表获得当前的元素的名称
-pub fn get_name(refno: RefU64, attr: &WholeAttMap, children_map: &HashMap<RefU64, Vec<(RefU64, String)>>) -> String {
+pub fn cal_default_name(refno: RefU64, attr: &WholeAttMap, children_map: &HashMap<RefU64, Vec<(RefU64, String)>>) -> String {
     let type_name = attr.implicit_attmap.get_type();
     return if let Some(name) = attr.explicit_attmap.get(&(db1_hash("NAME"))) {
         name.string_value()
