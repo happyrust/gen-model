@@ -8,7 +8,7 @@ use aios_core::pdms_types::*;
 use aios_core::prim_geo::cylinder::SCylinder;
 use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
 use aios_core::prim_geo::TUBI_GEO_HASH;
-use aios_core::tool::db_tool::{db1_dehash, db1_hash, GLOBAL_UDA_NAME_MAP};
+use aios_core::tool::db_tool::{db1_dehash, db1_hash, GLOBAL_UDA_NAME_MAP, GLOBAL_UDA_UKEY_MAP};
 use anyhow::anyhow;
 use approx::abs_diff_eq;
 use arangors_lite::AqlQuery;
@@ -29,6 +29,7 @@ use std::default;
 use std::mem::take;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use hex::encode;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 // use heed::byteorder::BE;
@@ -322,7 +323,7 @@ impl AiosDBManager {
     #[inline]
     pub fn get_default_conn_str(d: &DbOption) -> String {
         let user = d.user.as_str();
-        let pwd = d.password.as_str();
+        let pwd = urlencoding::encode(d.password.as_str());
         let ip = d.ip.as_str();
         let port = d.port.as_str();
         format!("mysql://{user}:{pwd}@{ip}:{port}")
@@ -583,7 +584,8 @@ impl AiosDBManager {
             if let Ok(uda_map) = query_uda_ukey_udna_all(pool.value()).await {
                 for (ukey, udna) in uda_map {
                     let udna = format!(":{}", udna);
-                    GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna);
+                    GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna.clone());
+                    GLOBAL_UDA_UKEY_MAP.entry(udna).or_insert(ukey);
                 }
             }
         }
