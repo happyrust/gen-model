@@ -96,9 +96,8 @@ impl AiosDBManager {
             &db_option.module,
         )
             .await?;
-        // if db_option.gen_spatial_tree
         //加载空间树
-        {
+        if db_option.load_spatial_tree {
             mgr.compute_aabb_trees().await?;
         }
         Ok(mgr)
@@ -642,7 +641,7 @@ impl AiosDBManager {
             .await?;
         for v in result {
             if let project = v.get::<String, _>(1) {
-                dbg!(&project);
+                // dbg!(&project);
                 let Some(project_pool) = self
                     .get_project_pool(&project) else { continue; };
                 if let Some(world_refno) = query_world_refno_by_dbno(db_num, &project_pool).await? {
@@ -671,41 +670,26 @@ impl AiosDBManager {
         let mdbs = query_types_refnos(&vec!["MDB"], project_pool, &[]).await?;
         dbg!(&mdbs);
         for mdb_refno in mdbs {
-            // let Ok(mdb_attr) = query_attr(mdb_refno, self, None).await else {
-            //     continue;
-            // };
-            // dbg!(&mdb_refno);
             let Ok(mdb_attr) = self.get_attr_from_localdb(mdb_refno) else {
                 continue;
             };
-            let mdb_name = mdb_attr.get_name().to_string();
-            // let Ok(mdb_name) = query_name(mdb_refno, &project_pool).await else {
-            //     continue;
-            // };
-            dbg!(&mdb_name);
-            // dbg!(&mdb_attr);
+            let mdb_name = mdb_attr.get_name_string();
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 // dbg!(&dbs);
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
-                    if let Ok(att) = self
-                        .get_implicit_attr(*db_refno, Some(vec!["NUMBDB"]))
+                    let att = self.get_attr_from_localdb(*db_refno).unwrap_or_default();
+                    let Some(db_num) = att.get_i32("NUMBDB") else {
+                        continue;
+                    };
+                    if let Ok(Some(mut quick_info)) = self
+                        .query_quick_info_by_dbno(*db_refno, db_num, info_pool)
                         .await
                     {
-                        let Some(db_num) = att.get_i32("NUMBDB") else {
-                            continue;
-                        };
-                        dbg!(&db_num);
-                        if let Ok(Some(mut quick_info)) = self
-                            .query_quick_info_by_dbno(*db_refno, db_num, info_pool)
-                            .await
-                        {
-                            // dbg!(&quick_info.db_type);
-                            quick_info.order_number = i as _;
-                            map.entry(quick_info.db_type.clone())
-                                .or_insert_with(Vec::new)
-                                .push(quick_info);
-                        }
+                        quick_info.order_number = i as _;
+                        map.entry(quick_info.db_type.clone())
+                            .or_insert_with(Vec::new)
+                            .push(quick_info);
                     }
                 }
                 mdb_map.entry(mdb_name).or_insert(map);

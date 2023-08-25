@@ -1,95 +1,46 @@
 use crate::api::attr::*;
-use crate::api::children::*;
 use crate::api::element::*;
-use crate::api::project_mdb::*;
-use crate::api::refno_info::{cache_plin_plax, get_ref0_projects, sync_refno_basic_map};
 use crate::aql_api::children::*;
-use crate::aql_api::foreign_refnos::{query_foreign_refno_aql, query_foreign_refnos_fuzzy};
-use crate::aql_api::para_value::{query_des_para_value, query_para_from_desi_refno};
-use crate::aql_api::plin_attr::*;
-use crate::cata::consts::{BANG_WIT_EXTRU_TYPES, JUSLINE_TYPES};
-use crate::cata::direction_parse::parse_expr_to_dir;
-use crate::cata::query_cata::resolve_desi_comp;
+use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
 use crate::cata::resolve::CataExprContext;
-use crate::cata::resolve_helper::{eval_str_to_f32, parse_str_axis_to_vec3};
 use crate::consts::*;
-use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
-use crate::graph_db::pdms_arango::{connect_arangodb, save_arangodb_doc, ArDatabase, ArPool};
-use crate::graph_db::pdms_inst_arango::*;
-use crate::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
-use crate::mdb::get_project_mdb;
-use crate::tables::{gen_create_project_mdb_json_sql, gen_create_project_mdb_sql};
-use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
+use crate::graph_db::pdms_arango::ArPool;
+use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::cache::mgr::*;
 use aios_core::cache::refno::*;
-use aios_core::consts::*;
-use aios_core::db_number::DbNumMgr;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::*;
-use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
-use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
-use aios_core::pdms_data::{PlinParam, PlinParamData, ScomInfo};
+use aios_core::pdms_data::PlinParamData;
 use aios_core::pdms_types::*;
-use aios_core::prim_geo;
-use aios_core::prim_geo::extrusion::Extrusion;
-use aios_core::prim_geo::facet::{Contour, Facet, Polygon};
-use aios_core::prim_geo::revolution::Revolution;
-use aios_core::prim_geo::spine::{Spine3D, SpineCurveType, SweepPath3D};
-use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge};
-use aios_core::prim_geo::wire::CurveType;
+use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::tool::db_tool::{db1_hash, GLOBAL_UDA_NAME_MAP};
 use aios_core::tool::math_tool;
-use aios_core::tool::math_tool::{quat_to_pdms_ori_str, to_pdms_vec_str};
+use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use anyhow::anyhow;
-use approx::{abs_diff_eq, abs_diff_ne};
+use approx::abs_diff_eq;
 use async_trait::async_trait;
-use bb8_arangodb::arangors_lite::{AqlQuery, Database};
-use bb8_arangodb::{ArangoConnectionManager, AuthenticationMethod};
+use bb8_arangodb::arangors_lite::AqlQuery;
 use bevy_transform::prelude::Transform;
-use config::{Config, ConfigError, Environment, File};
 use dashmap::mapref::one::Ref;
-use dashmap::{DashMap, DashSet};
-use futures::future::ok;
-use futures::stream::FuturesUnordered;
+use dashmap::DashMap;
 use futures::StreamExt;
-use glam::{quat, DMat4, EulerRot, Mat3, Mat4, Quat, Vec2, Vec3};
-use id_tree::{Node, NodeId};
+use glam::{Mat3, Quat, Vec3};
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use log::{error, info};
-use nalgebra::{Isometry3, Point3, Quaternion, RealField, UnitQuaternion, Vector3};
-use nom::combinator::map;
-use once_cell::sync::Lazy;
 use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
-use parry3d::math::{Isometry, Real, Vector};
-use parry3d::query::{Ray, RayCast};
 use redb::{ReadableTable, TableDefinition};
-use smol_str::SmolStr;
-use sqlx::pool::PoolOptions;
-use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
-use std::boxed::Box;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::default;
+use sqlx::{Executor, MySql, Pool, Row};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
-use std::env;
-use std::f32::EPSILON;
 use std::fmt::{Debug, Formatter};
-use std::mem::take;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, RwLock};
-
-use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use std::boxed::Box;
 use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
-use crate::consts::AQL_PDMS_ELES_COLLECTION;
-use tokio_stream::wrappers::UnboundedReceiverStream;
-// use heed::types::*;
-// use heed::byteorder::BE;
 
 lazy_static! {
     pub static ref CATAEXPRCONTEXT_MAP: DashMap<RefU64, CataExprContext> = {
@@ -182,6 +133,13 @@ impl PdmsDataInterface for AiosDBManager {
         };
     }
 
+    fn get_type_name(&self, refno: RefU64) -> String {
+        self.get_refno_basic(refno)
+            .map(|x| x.get_type().to_string())
+            .unwrap_or("unset".to_string())
+    }
+
+    ///从本地数据库获取属性
     fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
         for project in &self.db_option.included_projects {
             if let Ok(a) = self.get_attr_within_project(refno, project.as_str()) {
@@ -189,12 +147,6 @@ impl PdmsDataInterface for AiosDBManager {
             }
         }
         Err(anyhow::anyhow!("{refno}: not found att"))
-    }
-
-    fn get_type_name(&self, refno: RefU64) -> String {
-        self.get_refno_basic(refno)
-            .map(|x| x.get_type().to_string())
-            .unwrap_or("unset".to_string())
     }
 
     ///获得子节点的参考号集合
@@ -206,33 +158,6 @@ impl PdmsDataInterface for AiosDBManager {
         }
         Ok(Default::default())
         // Err(anyhow::anyhow!("{refno}: not found children"))
-    }
-
-    fn get_children_within_project(
-        &self,
-        refno: RefU64,
-        project: &str,
-    ) -> anyhow::Result<RefU64Vec> {
-        if let Some(db) = self.local_children_db_map.get(project) {
-            let k = refno.0.to_be_bytes();
-            if let Ok(Some(bytes)) = db.get(k.as_slice()) {
-                return RefU64Vec::from_bytes(bytes.as_ref());
-            }
-        }
-        Err(anyhow::anyhow!(format!(
-            "{refno} att not exist in {project}"
-        )))
-    }
-
-    /// 从本地数据库获得最全的数据
-    fn get_attr_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<AttrMap> {
-        if let Some(db) = self.local_attr_db_map.get(project) {
-            let k = refno.0.to_be_bytes();
-            if let Ok(Some(bytes)) = db.get(k.as_slice()) {
-                return AttrMap::from_rkvy_compress_bytes(bytes.as_ref());
-            }
-        }
-        Err(anyhow::anyhow!(format!("{refno} att not exist")))
     }
 
     fn get_mesh_from_localdb(&self, geo_hash: u64) -> anyhow::Result<PlantMesh> {
@@ -249,6 +174,33 @@ impl PdmsDataInterface for AiosDBManager {
             return Aabb::from_bytes(bytes.as_ref());
         }
         Err(anyhow::anyhow!(format!("{geo_hash} aabb not exist.")))
+    }
+
+    /// 从本地数据库获得最全的数据
+    fn get_attr_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<AttrMap> {
+        if let Some(db) = self.local_attr_db_map.get(project) {
+            let k = refno.0.to_be_bytes();
+            if let Ok(Some(bytes)) = db.get(k.as_slice()) {
+                return AttrMap::from_rkvy_compress_bytes(bytes.as_ref());
+            }
+        }
+        Err(anyhow::anyhow!(format!("{refno} att not exist")))
+    }
+
+    fn get_children_within_project(
+        &self,
+        refno: RefU64,
+        project: &str,
+    ) -> anyhow::Result<RefU64Vec> {
+        if let Some(db) = self.local_children_db_map.get(project) {
+            let k = refno.0.to_be_bytes();
+            if let Ok(Some(bytes)) = db.get(k.as_slice()) {
+                return RefU64Vec::from_bytes(bytes.as_ref());
+            }
+        }
+        Err(anyhow::anyhow!(format!(
+            "{refno} att not exist in {project}"
+        )))
     }
 
     /// 获得最全的数据
@@ -412,6 +364,16 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(node)
     }
 
+    ///获得当前的项目名称
+    fn get_cur_project(&self) -> &str{
+        self.db_option.project_name.as_str()
+    }
+
+    ///获得当前的项目名称
+    fn get_cur_mdb(&self) -> &str{
+        self.db_option.mdb_name.as_str()
+    }
+
     ///获得world节点
     async fn get_world(
         &self,
@@ -419,11 +381,15 @@ impl PdmsDataInterface for AiosDBManager {
         mdb_name: &str,
         module: &str,
     ) -> anyhow::Result<EleTreeNode> {
-        if let Some(project_pool) = self.project_map.get(project) {
-            let v = query_world("SAMPLE", "DESI", project_pool.value()).await?;
-            return Ok(v);
-        }
-        return Err(anyhow::anyhow!("World not found".to_string()));
+        let pool = self.project_map.get(project).ok_or(anyhow!("{project} not exist."))?;
+        query_world(mdb_name, module, pool.value()).await
+    }
+
+    ///获得world节点
+    async fn get_desi_world(
+        &self,
+    ) -> anyhow::Result<EleTreeNode> {
+        self.get_world(self.get_cur_project(), self.get_cur_mdb(), DESI).await
     }
 
     ///获得子节点集合
@@ -604,6 +570,35 @@ impl PdmsDataInterface for AiosDBManager {
         return Ok(result);
     }
 
+    async fn query_parent_refnos_has_neg_geos(
+        &self,
+        refnos: &[RefU64],
+    ) -> anyhow::Result<Vec<RefU64>> {
+        let refno_urls = refnos
+            .iter()
+            .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+            .collect::<Vec<_>>();
+        let aql = AqlQuery::new(
+            r#"
+            with pdms_edges, pdms_eles
+            for key in @keys
+                FOR v,e,p in 0..15 INBOUND key pdms_edges
+                    filter v.noun in @neg_geo_nouns
+                    filter LENGTH(p.vertices) >= 2
+                    let parent = p.vertices[-2]
+                    return distinct parent._key
+        "#,
+        )
+        .bind_var("keys", refno_urls)
+        .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        let refno_strs = self.get_arango_db().await?.aql_query::<String>(aql).await?;
+        let refnos = refno_strs
+            .iter()
+            .map(|x| RefU64::from_url_refno(x).unwrap())
+            .collect();
+        Ok(refnos)
+    }
+
     ///查询refno下是否有几何体
     async fn query_refnos_has_geos(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
@@ -630,35 +625,6 @@ impl PdmsDataInterface for AiosDBManager {
         let refnos = refno_strs
             .iter()
             .flatten()
-            .map(|x| RefU64::from_url_refno(x).unwrap())
-            .collect();
-        Ok(refnos)
-    }
-
-    async fn query_parent_refnos_has_neg_geos(
-        &self,
-        refnos: &[RefU64],
-    ) -> anyhow::Result<Vec<RefU64>> {
-        let refno_urls = refnos
-            .iter()
-            .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
-            .collect::<Vec<_>>();
-        let aql = AqlQuery::new(
-            r#"
-            with pdms_edges, pdms_eles
-            for key in @keys
-                FOR v,e,p in 0..15 INBOUND key pdms_edges
-                    filter v.noun in @neg_geo_nouns
-                    filter LENGTH(p.vertices) >= 2
-                    let parent = p.vertices[-2]
-                    return distinct parent._key
-        "#,
-        )
-        .bind_var("keys", refno_urls)
-        .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
-        let refno_strs = self.get_arango_db().await?.aql_query::<String>(aql).await?;
-        let refnos = refno_strs
-            .iter()
             .map(|x| RefU64::from_url_refno(x).unwrap())
             .collect();
         Ok(refnos)
@@ -950,7 +916,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///获得子节点集合的属性
-    async fn get_travel_children_attrs(
+    async fn get_deep_children_attrs(
         &self,
         refno: RefU64,
         nouns: &[&str],

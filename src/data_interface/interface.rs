@@ -76,7 +76,13 @@ pub trait PdmsDataInterface : Send + Sync{
 
     async fn get_owner_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>>;
 
+    fn get_cur_project(&self) -> &str;
+
+    fn get_cur_mdb(&self) -> &str;
+
     async fn get_world(&self, project: &str, mdb_name: &str, module: &str)  -> anyhow::Result<EleTreeNode>;
+
+    async fn get_desi_world(&self)  -> anyhow::Result<EleTreeNode>;
 
     async fn get_children_nodes(&self, refno: RefU64) -> anyhow::Result<Vec<EleTreeNode>>;
 
@@ -124,7 +130,7 @@ pub trait PdmsDataInterface : Send + Sync{
     async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>>;
 
     ///获取当前节点深度遍历后的所有子节点, 是否指定目标节点
-    async fn get_travel_children_attrs(&self, refno:RefU64, nouns: &[&str]) -> anyhow::Result<Vec<AttrMap>>;
+    async fn get_deep_children_attrs(&self, refno:RefU64, nouns: &[&str]) -> anyhow::Result<Vec<AttrMap>>;
 
 
     /*******  几何相关算法    ********/

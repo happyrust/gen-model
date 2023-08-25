@@ -275,7 +275,7 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_travel_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
+    let children = interface.get_deep_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
     for geo_am in children {
         if !geo_am.is_visible_by_level(None).unwrap_or(true) {
             continue;
@@ -360,9 +360,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         .query_foreign_refnos(&[owner_ref], &[&["SPRE", "CATR"]], &["SPRE", "CATR"], &[], 4)
         .await {
         if let Some(parent_cat_ref) = parent_cat_refs.pop() {
-            // dbg!(parent_cat_ref);
             if let Ok(parent_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(parent_cat_ref) {
-                // dbg!(&parent_cat_am);
                 let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
                 for i in 0..params.len() {
                     cur_context.insert(
@@ -429,12 +427,6 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     // dbg!(&scom_info.axis_params);
     let geometries = resolve_gms(des_refno, &scom_info.gm_params, &jusl_param, &cur_context, &axis_map, interface);
     let n_geometries = resolve_gms(des_refno, &scom_info.ngm_params, &jusl_param, &cur_context, &axis_map, interface);
-    // for geometry in &geometries {
-    //     if let CateGeoParam::Pyramid(l) = geometry {
-    //         dbg!(&l);
-    //     }
-    // }
-    // dbg!(&geometries);
     Ok(CateGeomsInfo {
         refno: cat_ref,
         geometries,
