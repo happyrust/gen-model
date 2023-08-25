@@ -76,7 +76,13 @@ pub trait PdmsDataInterface : Send + Sync{
 
     async fn get_owner_ele_node(&self, refno: RefU64) -> anyhow::Result<Option<EleTreeNode>>;
 
+    fn get_cur_project(&self) -> &str;
+
+    fn get_cur_mdb(&self) -> &str;
+
     async fn get_world(&self, project: &str, mdb_name: &str, module: &str)  -> anyhow::Result<EleTreeNode>;
+
+    async fn get_desi_world(&self)  -> anyhow::Result<EleTreeNode>;
 
     async fn get_children_nodes(&self, refno: RefU64) -> anyhow::Result<Vec<EleTreeNode>>;
 

@@ -95,10 +95,9 @@ impl AiosDBManager {
             &db_option.mdb_name,
             &db_option.module,
         )
-        .await?;
-        // if db_option.gen_spatial_tree
+            .await?;
         //加载空间树
-        {
+        if db_option.load_spatial_tree {
             mgr.compute_aabb_trees().await?;
         }
         Ok(mgr)
@@ -123,8 +122,8 @@ impl AiosDBManager {
                 ]
         "#,
             )
-            .bind_var("offset", offset)
-            .bind_var("batch_size", 5000);
+                .bind_var("offset", offset)
+                .bind_var("batch_size", 5000);
             offset += 5000;
             if let Ok(refno_aabbs) = database.aql_query::<(String, Aabb)>(aql).await {
                 if refno_aabbs.is_empty() {
@@ -264,7 +263,7 @@ impl AiosDBManager {
                 &room_panels,
                 &[GeoBasicType::Pos, GeoBasicType::Compound],
             )
-            .await?;
+                .await?;
             for (panel_refno, info) in &inst_data.inst_info_map {
                 let Some(inst_geos) = inst_data.get_inst_geos(info) else {
                     continue;
@@ -541,7 +540,7 @@ impl AiosDBManager {
                 &db_option.project_name.to_uppercase()
             ),
         )
-        .await?;
+            .await?;
         let ref0_projects = get_ref0_projects(&info_conn).await?;
         // dbg!(&ref0_projects);
         let projects = db_option.included_projects.clone();
@@ -671,41 +670,26 @@ impl AiosDBManager {
         let mdbs = query_types_refnos(&vec!["MDB"], project_pool, &[]).await?;
         dbg!(&mdbs);
         for mdb_refno in mdbs {
-            // let Ok(mdb_attr) = query_attr(mdb_refno, self, None).await else {
-            //     continue;
-            // };
-            // dbg!(&mdb_refno);
             let Ok(mdb_attr) = self.get_attr_from_localdb(mdb_refno) else {
                 continue;
             };
-            let mdb_name = mdb_attr.get_name().to_string();
-            // let Ok(mdb_name) = query_name(mdb_refno, &project_pool).await else {
-            //     continue;
-            // };
-            // dbg!(&mdb_name);
-            // dbg!(&mdb_attr);
+            let mdb_name = mdb_attr.get_name_string();
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 // dbg!(&dbs);
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
-                    if let Ok(att) = self
-                        .get_implicit_attr(*db_refno, Some(vec!["NUMBDB"]))
+                    let att = self.get_attr_from_localdb(*db_refno).unwrap_or_default();
+                    let Some(db_num) = att.get_i32("NUMBDB") else {
+                        continue;
+                    };
+                    if let Ok(Some(mut quick_info)) = self
+                        .query_quick_info_by_dbno(*db_refno, db_num, info_pool)
                         .await
                     {
-                        let Some(db_num) = att.get_i32("NUMBDB") else {
-                            continue;
-                        };
-                        // dbg!(&db_num);
-                        if let Ok(Some(mut quick_info)) = self
-                            .query_quick_info_by_dbno(*db_refno, db_num, info_pool)
-                            .await
-                        {
-                            // dbg!(&quick_info.db_type);
-                            quick_info.order_number = i as _;
-                            map.entry(quick_info.db_type.clone())
-                                .or_insert_with(Vec::new)
-                                .push(quick_info);
-                        }
+                        quick_info.order_number = i as _;
+                        map.entry(quick_info.db_type.clone())
+                            .or_insert_with(Vec::new)
+                            .push(quick_info);
                     }
                 }
                 mdb_map.entry(mdb_name).or_insert(map);
@@ -783,7 +767,7 @@ impl AiosDBManager {
             return document(pdms_eles, @id)
         ",
         )
-        .bind_var("id", refno_aql);
+            .bind_var("id", refno_aql);
         let mut r = arango_db
             .aql_query::<PdmsEleGraphNode>(aql)
             .await
@@ -817,13 +801,13 @@ async fn test_get_attr() -> anyhow::Result<()> {
 
 #[test]
 fn test_compute_distance() {
-    let x = Vec3::new(19373.929 ,-2923.338, 15286.0);
+    let x = Vec3::new(19373.929, -2923.338, 15286.0);
     let y = Vec3::new(19381.39, -2894.83, 15286.0);
     let arrive = x.distance(y);
-    let z = Vec3::new(19381.39,-2865.362, 15286.0);
+    let z = Vec3::new(19381.39, -2865.362, 15286.0);
     let leave = z.distance(y);
-    let inst_a = Vec3::new(28.508010864257812,7.4603271484375,0.0);
-    let inst_b = Vec3::new(0.0,0.0,0.0);
+    let inst_a = Vec3::new(28.508010864257812, 7.4603271484375, 0.0);
+    let inst_b = Vec3::new(0.0, 0.0, 0.0);
     let inst_dis = inst_a.distance(inst_b);
     dbg!(&inst_dis);
     dbg!(&arrive);
