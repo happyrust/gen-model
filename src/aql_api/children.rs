@@ -361,9 +361,7 @@ impl AiosDBManager {
         &self,
         param: &SearchAlongParam,
     ) -> anyhow::Result<SearchAlongResult> {
-        let arango_db = self.get_arango_db().await?;
-        search_refnos_along_path_arango(
-            &arango_db,
+        self.search_refnos_along_path(
             &param.refnos,
             param.fuzzy.iter().map(|x| x.as_str()),
             param.path_nouns.iter().map(|x| x.as_str()),
@@ -387,10 +385,15 @@ impl AiosDBManager {
         only_path_nodes: bool,
         include_path_nodes: bool,
     ) -> anyhow::Result<SearchAlongResult> {
+        let mut target_refnos = refnos.into_iter().cloned().collect::<Vec<_>>();
+        if target_refnos.is_empty() {
+            target_refnos = self.get_site_refnos().await?;
+        }
+        // dbg!(&target_refnos);
         let arango_db = self.get_arango_db().await?;
         search_refnos_along_path_arango(
             &arango_db,
-            refnos,
+            &target_refnos,
             fuzzy,
             path_nouns,
             children_nouns,
@@ -417,6 +420,7 @@ pub async fn search_refnos_along_path_arango(
         .into_iter()
         .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
         .collect::<Vec<_>>();
+
     let aql = AqlQuery::new(
         "\
     With @@pdms_eles,@@pdms_edges

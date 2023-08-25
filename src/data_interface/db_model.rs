@@ -785,6 +785,18 @@ impl AiosDBManager {
         }
         Ok(None)
     }
+
+    ///获得当前mdb下的site参考号
+    pub async fn get_site_refnos(
+        &self,
+    ) -> anyhow::Result<Vec<RefU64>> {
+        let world_refno = self.get_desi_world().await?.refno;
+        let r = self.get_cached_site_nodes(world_refno).await?
+            .unwrap_or_default().iter()
+            .map(|x| x.refno)
+            .collect();
+        Ok(r)
+    }
 }
 
 #[tokio::test]

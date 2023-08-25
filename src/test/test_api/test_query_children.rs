@@ -1,3 +1,4 @@
+use aios_core::pdms_types::RefU64;
 use crate::aql_api::children::SearchAlongParam;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::test::test_helper::{get_test_ams_db_manager, get_test_ams_db_manager_async};
@@ -6,14 +7,14 @@ use crate::test::test_helper::{get_test_ams_db_manager, get_test_ams_db_manager_
 #[tokio::test]
 async fn test_search_along_path() -> anyhow::Result<()> {
     let mgr = get_test_ams_db_manager_async().await;
-    let refno = "25688/4595".into();
+    let refno: RefU64 = "25688/4595".into();
     let param = SearchAlongParam {
-        refnos: vec![refno],
+        refnos: vec![],
         fuzzy: vec!["1AR".to_owned(), "WF".to_owned()],
         path_nouns: vec!["SITE".to_owned(), "ZONE".to_owned()],
         children_nouns: vec![],
         ancestor_nouns: vec![],
-        only_path_nodes: false,
+        only_path_nodes: true,
         include_path_nodes: true,
     };
     dbg!(serde_json::to_string(&param).unwrap());
