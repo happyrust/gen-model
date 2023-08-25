@@ -24,7 +24,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use bevy_transform::prelude::Transform;
 use glam::Vec3;
-use opencascade::adhoc::AdHocShape;
+// use opencascade::adhoc::AdHocShape;
 
 /// 将数据保存至图数据库
 pub async fn save_stp_data_to_arangodb(
