@@ -45,6 +45,7 @@ pub struct GetPipeHeatDissipationResponse {
     pub heat: f32,
 }
 
+/// 获取 pipe下的bran中，每个bran的散热量
 pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationRequest>, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<GetPipeHeatDissipationResponse>> {
     let database = aios_mgr.get_arango_db().await?;
     let request = requests
@@ -59,7 +60,7 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
         let Some(pipe_refno) = RefU64::from_url_refno(&pipe_ele.refno) else { continue; };
         let Ok(bran_refnos) = query_children_with_name_aql(&database, pipe_refno).await else { continue; };
         for (bran, bran_name) in bran_refnos {
-            let area = get_heat_dissipation_data(bran, &database, aios_mgr).await.unwrap_or(0.0);
+            let area = get_heat_dissipation_data(bran, &database, aios_mgr).await?;
             let heat = get_heat_dissipation_table(*temp, area, true) as f32;
             let room_code = query_room_code_from_owner(bran, &database).await?.unwrap_or("".to_string());
             result.push(GetPipeHeatDissipationResponse {
