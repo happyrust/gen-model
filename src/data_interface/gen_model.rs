@@ -209,7 +209,7 @@ pub async fn gen_prim_geos(
                             inst_key: refno.to_url_refno(),
                             refno,
                             insts: geo_insts,
-                            aabb: Some(geo_aabb),
+                            aabb: Some(ele_aabb),
                             type_name: attr.get_type().to_string(),
                             ptset_map: Default::default(),
                         },
@@ -288,14 +288,7 @@ pub async fn gen_loop_geos(
                 if cur_type == "PLOO" && let Some(sjus_adjust) = sjus_map_clone.get(&parent_refno) {
                     let offset = trans_origin.rotation.mul_vec3(sjus_adjust.value().0);
                     trans_origin.translation += offset;
-                    // dbg!(offset);
-                    // dbg!(trans_origin.translation);
                 }
-                // else if let Some(sjus_adjust) = sjus_map_clone.get(&grand_refno){
-                // let grand_trans = mgr.get_world_transform(grand_refno).await.unwrap_or_default().unwrap_or_default();
-                // trans_origin.translation += grand_trans.rotation * sjus_adjust.value().0;
-                // dbg!(trans_origin.translation);
-                // }
                 println!(
                     "正在处理loops类型的模型，索引：{}, 当前参考号：{}, 剩余: {}",
                     j,
@@ -332,7 +325,6 @@ pub async fn gen_loop_geos(
                     .filter(|&x| mgr.get_type_name(*x).as_str() == "PLOO")
                     .position(|x| *x == loop_refno)
                     .unwrap_or_default();
-                // dbg!(&sibling_refnos);
                 let mut geos_info = EleGeosInfo {
                     refno: parent_refno,
                     cata_hash: None,
@@ -352,7 +344,6 @@ pub async fn gen_loop_geos(
                 let mut geo_aabb = None;
                 let mut item_trans = Transform::IDENTITY;
                 let mut geo_param = PdmsGeoParam::Unknown;
-                // dbg!(&target_type);
                 match target_type {
                     "NREV" | "REVO" => {
                         let angle = parent_att.get_f32("ANGL").unwrap_or_default();
@@ -1880,25 +1871,25 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                                             neg_refnos.push(t_refno);
                                         }
                                         if is_neg {
-                                            geo_inst.owner_pos_refno = pos_refno;
-                                            //根据类型来考虑是否需要扩大负实体
-                                            let mut center: Vec3 = aabb.center().into();
-                                            let t_mat = Mat4::from_translation(center);
-                                            let mut s = 1.01;
-                                            let s_mat = if matches!(
-                                                geo_inst.geo_param,
-                                                PdmsGeoParam::PrimRevolution(_)
-                                            ) {
-                                                //如果是旋转体，xy方向都适当放大一点
-                                                if aabb.contains(&pos_aabb) {
-                                                    s = 1.03;
-                                                }
-                                                Mat4::from_scale(Vec3::new(1.0, s, s))
-                                            } else {
-                                                Mat4::from_scale(Vec3::new(1.0, 1.0, s))
-                                            };
-                                            let inv_t_mat = Mat4::from_translation(-center);
-                                            local_mat = local_mat * t_mat * s_mat * inv_t_mat;
+                                            // geo_inst.owner_pos_refno = pos_refno;
+                                            // //根据类型来考虑是否需要扩大负实体
+                                            // let mut center: Vec3 = aabb.center().into();
+                                            // let t_mat = Mat4::from_translation(center);
+                                            // let mut s = 1.01;
+                                            // let s_mat = if matches!(
+                                            //     geo_inst.geo_param,
+                                            //     PdmsGeoParam::PrimRevolution(_)
+                                            // ) {
+                                            //     //如果是旋转体，xy方向都适当放大一点
+                                            //     if aabb.contains(&pos_aabb) {
+                                            //         s = 1.03;
+                                            //     }
+                                            //     Mat4::from_scale(Vec3::new(1.0, s, s))
+                                            // } else {
+                                            //     Mat4::from_scale(Vec3::new(1.0, 1.0, s))
+                                            // };
+                                            // let inv_t_mat = Mat4::from_translation(-center);
+                                            // local_mat = local_mat * t_mat * s_mat * inv_t_mat;
                                         }
 
                                         #[cfg(debug_assertions)]

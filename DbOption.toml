@@ -2,9 +2,9 @@
 total_sync = false
 enable_log = false
 sync_graph_db = false
-sync_tidb = false
+sync_tidb = true
 sync_localdb = true
-incr_sync = false
+incr_sync = true
 replace_dbs = true
 
 #项目设置
@@ -62,10 +62,10 @@ only_rebuild_pdms_element = false
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
 #included_db_files = ["ams7334_0001", "ams7353_0001", "ams7741_0001", "ams7998_0001"]
-#included_db_files = ["acp7001_0001"]
+included_db_files = ["acp7001_0001"]
 #included_db_files = ["acp7002_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
-#  manual_db_nums = [7000]
+manual_db_nums = [7354]
 #manual_db_nums = [1112]  #, 8000
 plat_url = ""
 
@@ -76,6 +76,10 @@ puhua_database_password = ""
 
 #joint还有问题，方位对齐的问题
 #debug_root_refnos = ["25688/48687"]
+
+#debug_root_refnos = ["25688/8142"]
+#debug_root_refnos = ["24383/80211"]
+debug_root_refnos = ["23736/2"]
 
 #楼板FIT显示
 # debug_root_refnos = ["25688/72092", "25688/75909"]
@@ -130,7 +134,7 @@ puhua_database_password = ""
 #Cut 崩溃, 被offset影响
 #debug_root_refnos = ["24383/78369"]
 
-debug_root_refnos = ["23714/1108", "23714/1"]
+#debug_root_refnos = ["23714/1108", "23714/1"]
 
 
 #transform 有不合适的值，NAN
