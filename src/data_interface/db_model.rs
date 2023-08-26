@@ -641,7 +641,7 @@ impl AiosDBManager {
             .await?;
         for v in result {
             if let project = v.get::<String, _>(1) {
-                // dbg!(&project);
+                dbg!(&project);
                 let Some(project_pool) = self
                     .get_project_pool(&project) else { continue; };
                 if let Some(world_refno) = query_world_refno_by_dbno(db_num, &project_pool).await? {
@@ -682,6 +682,7 @@ impl AiosDBManager {
                     let Some(db_num) = att.get_i32("NUMBDB") else {
                         continue;
                     };
+                    dbg!(&db_num);
                     if let Ok(Some(mut quick_info)) = self
                         .query_quick_info_by_dbno(*db_refno, db_num, info_pool)
                         .await
