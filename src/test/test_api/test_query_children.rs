@@ -12,7 +12,7 @@ async fn test_search_along_path() -> anyhow::Result<()> {
         refnos: vec![refno],
         fuzzy: vec!["1AR".to_owned(), "WF".to_owned()],
         path_nouns: vec!["SITE".to_owned(), "ZONE".to_owned()],
-        children_nouns: vec!["".to_string()],
+        children_nouns: vec![],
         ancestor_nouns: vec!["ZONE".to_owned()],
         only_path_nodes: true,
         include_path_nodes: true,
