@@ -79,7 +79,7 @@ puhua_database_password = ""
 
 #debug_root_refnos = ["25688/8142"]
 #debug_root_refnos = ["24383/80211"]
-debug_root_refnos = ["23736/2"]
+debug_root_refnos = ["24383/68009"]
 
 #楼板FIT显示
 # debug_root_refnos = ["25688/72092", "25688/75909"]
