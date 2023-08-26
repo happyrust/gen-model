@@ -427,12 +427,11 @@ pub async fn search_refnos_along_path_arango(
     for id in @ids
         let path_len = @only_path_nodes ? LENGTH(@path_nouns) : 10
         FOR v,e,p in 0..path_len INBOUND id pdms_edges
-            prune (LENGTH(p.edges) < LENGTH(@fuzzy) ? !CONTAINS(v.name, @fuzzy[LENGTH(p.edges)]) : @only_path_nodes) or
+            prune (LENGTH(p.edges) < LENGTH(@fuzzy) ? !(CHAR_LENGTH(@fuzzy[LENGTH(p.edges)]) == 0 || CONTAINS(v.name, @fuzzy[LENGTH(p.edges)])) : @only_path_nodes) or
                 (LENGTH(p.edges) < LENGTH(@path_nouns) ? (v.noun != @path_nouns[LENGTH(p.edges)]) : @only_path_nodes)
 
-
             let beyond = LENGTH(p.edges) > LENGTH(@fuzzy)
-            filter beyond ? true : ( @include_path_nodes and CONTAINS(v.name, @fuzzy[LENGTH(p.edges)]))
+            filter beyond ? true : ( @include_path_nodes and (CHAR_LENGTH(@fuzzy[LENGTH(p.edges)]) == 0 || CONTAINS(v.name, @fuzzy[LENGTH(p.edges)])))
 
             filter LENGTH(@children_nouns) == 0  or (v.noun in @children_nouns)
             return [v._key, (for a in p.vertices filter LENGTH(@ancestor_nouns) !=0 and (a.noun in @ancestor_nouns) return a._key)]

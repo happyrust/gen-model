@@ -30,16 +30,40 @@ use std::str::FromStr;
 
 pub type IndexNamedAttMap = IndexMap<String, NamedAttrValue>;
 
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
+pub struct QueryAttsParam {
+    #[serde_as(as = "Vec<DisplayFromStr>")]
+    pub refnos: Vec<RefU64>,
+    #[serde(default)]
+    pub att_names: Vec<String>,
+    #[serde(default)]
+    pub noun_filter: Vec<String>,
+    #[serde(default)]
+    pub get_children: bool,
+}
+
 impl AiosDBManager {
+    /// 获取属性集合,每次请求只处理同一个类型的数据, 指定返回哪些属性名称的数据，如果为空，则为全部 by dpc
+    pub async fn get_named_attrs_by_param(
+        &self,
+        param: &QueryAttsParam,
+    ) -> anyhow::Result<Vec<IndexNamedAttMap>> {
+        self.query_named_attrs(
+            &param.refnos,
+            param.att_names.iter().map(|x| x.as_str()),
+            param.noun_filter.iter().map(|x| x.as_str()),
+            param.get_children,
+        ).await
+    }
 
     /// 获取属性集合,每次请求只处理同一个类型的数据, 指定返回哪些属性名称的数据，如果为空，则为全部 by dpc
-    ///
-    pub async fn get_named_attrs(
+    pub async fn query_named_attrs(
         &self,
-        refnos: impl IntoIterator<Item = &RefU64>,
-        att_names: impl IntoIterator<Item = &str>,
+        refnos: impl IntoIterator<Item=&RefU64>,
+        att_names: impl IntoIterator<Item=&str>,
+        noun_filter: impl IntoIterator<Item=&str>,
         get_children: bool,
-        noun_filter: impl IntoIterator<Item = &str>,
     ) -> anyhow::Result<Vec<IndexNamedAttMap>> {
         let att_names_vec = att_names.into_iter().collect::<Vec<&str>>();
         let mut contains_trans = att_names_vec.iter().any(|&x| x == "W_POS" || x == "W_ORI");
