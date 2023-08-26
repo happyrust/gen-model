@@ -15,6 +15,8 @@ use arangors_lite::AqlQuery;
 use itertools::Itertools;
 #[cfg(feature = "opencascade_rs")]
 use opencascade::primitives::*;
+#[cfg(feature = "opencascade_rs")]
+use opencascade::adhoc::AdHocShape;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -24,7 +26,7 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use bevy_transform::prelude::Transform;
 use glam::Vec3;
-use opencascade::adhoc::AdHocShape;
+
 
 /// 将数据保存至图数据库
 pub async fn save_stp_data_to_arangodb(
