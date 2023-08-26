@@ -12,9 +12,9 @@ async fn test_search_along_path() -> anyhow::Result<()> {
         refnos: vec![],
         fuzzy: vec!["1AR".to_owned(), "WF".to_owned()],
         path_nouns: vec!["SITE".to_owned(), "ZONE".to_owned()],
-        children_nouns: vec![],
-        ancestor_nouns: vec![],
-        only_path_nodes: true,
+        children_nouns: vec!["BRAN".to_string()],
+        ancestor_nouns: vec!["ZONE".to_owned()],
+        only_path_nodes: false,
         include_path_nodes: true,
     };
     dbg!(serde_json::to_string(&param).unwrap());

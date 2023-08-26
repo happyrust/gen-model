@@ -330,7 +330,11 @@ pub async fn query_ancestor_name_of_type_aql(
 pub struct SearchAlongParam {
     #[serde_as(as = "Vec<DisplayFromStr>")]
     pub refnos: Vec<RefU64>,
+    //需要匹配的名称
     pub fuzzy: Vec<String>,
+    //需要排除在外的名称匹配
+    // #[serde(default)]
+    // pub exclude: Vec<String>,
     pub path_nouns: Vec<String>,
     #[serde(default)]
     pub children_nouns: Vec<String>,
@@ -348,11 +352,7 @@ pub struct SearchAlongResult(pub Vec<RefnoAncestorsTuple>);
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
-pub struct RefnoAncestorsTuple(#[serde_as(as = "(DisplayFromStr, _)")] pub (RefU64, RefU64Vec));
-
-// #[serde_as]
-// #[derive(Serialize, Deserialize, Clone, Default, Debug)]
-// pub struct RefnoAncestorsTuple_(RefU64, RefU64Vec);
+pub struct RefnoAncestorsTuple(#[serde_as(as = "(DisplayFromStr, Vec<DisplayFromStr>)")] pub (RefU64, Vec<RefU64>));
 
 impl AiosDBManager {
     ///沿着路径搜索目标节点
