@@ -641,9 +641,9 @@ impl AiosDBManager {
             .await?;
         for v in result {
             if let project = v.get::<String, _>(1) {
-                let project_pool = self
-                    .get_project_pool(&project)
-                    .ok_or(anyhow::anyhow!("Unknown project pool"))?;
+                // dbg!(&project);
+                let Some(project_pool) = self
+                    .get_project_pool(&project) else { continue; };
                 if let Some(world_refno) = query_world_refno_by_dbno(db_num, &project_pool).await? {
                     let db_type = v.get::<String, _>(0);
                     return Ok(Some(DbQuickInfo {
