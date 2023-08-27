@@ -760,14 +760,14 @@ impl AiosDBManager {
     ///查询单个element
     pub async fn query_element(&self, refno: RefU64) -> anyhow::Result<Option<PdmsEleGraphNode>> {
         let arango_db = self.get_arango_db().await?;
-        let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let id = refno.format_url_name(AQL_PDMS_ELES_COLLECTION);
         let aql = AqlQuery::new(
             "\
             with pdms_eles
             return document(pdms_eles, @id)
         ",
         )
-            .bind_var("id", refno_aql);
+            .bind_var("id", id);
         let mut r = arango_db
             .aql_query::<PdmsEleGraphNode>(aql)
             .await

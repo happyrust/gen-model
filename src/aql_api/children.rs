@@ -51,6 +51,8 @@ pub async fn query_children_eles(
     Ok(results)
 }
 
+
+
 pub async fn query_children_order_aql(
     adb: &ArDatabase,
     refno: RefU64,
@@ -104,6 +106,7 @@ pub async fn query_children_refnos(
         "\
     With @@pdms_eles, @@pdms_edges
     for z in 1 inbound @id @@pdms_edges
+        sort z.order
         return  z._key ",
     )
     .bind_var("id", refno_aql)
@@ -389,7 +392,6 @@ impl AiosDBManager {
         if target_refnos.is_empty() {
             target_refnos = self.get_site_refnos().await?;
         }
-        dbg!(&target_refnos);
         let arango_db = self.get_arango_db().await?;
         search_refnos_along_path_arango(
             &arango_db,
@@ -434,7 +436,7 @@ pub async fn search_refnos_along_path_arango(
             filter beyond ? true : ( @include_path_nodes and CONTAINS(v.name, @fuzzy[LENGTH(p.edges)]))
 
             filter LENGTH(@children_nouns) == 0  or (v.noun in @children_nouns)
-
+            SORT LENGTH(p.edges), v.order
             return [v._key, (for a in p.vertices filter LENGTH(@ancestor_nouns) !=0 and (a.noun in @ancestor_nouns) return a._key)]
     ")
         .bind_var("ids", ids)
