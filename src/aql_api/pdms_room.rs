@@ -642,7 +642,6 @@ impl AiosDBManager {
             .map(|(refno, (p0, p1))| {
                 let room0 = self.get_owner(*p0);
                 let room1 = self.get_owner(*p1);
-
                 let room0_num = self
                     .room_info_map
                     .get(&room0)

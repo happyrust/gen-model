@@ -151,7 +151,8 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获得子节点的参考号集合
     fn get_children_from_localdb(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
-        for project in &self.db_option.included_projects {
+        for project in &self.db_option.included_projects
+        {
             if let Ok(a) = self.get_children_within_project(refno, project.as_str()) {
                 return Ok(a);
             }
