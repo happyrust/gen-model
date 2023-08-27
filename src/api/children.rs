@@ -8,12 +8,13 @@ use aios_core::helper::table::qualified_table_name;
 use aios_core::pdms_types::*;
 use aios_core::three_dimensional_review::VagueSearchCondition;
 use anyhow::anyhow;
+use arangors_lite::AqlQuery;
 use bb8_arangodb::arangors_lite::Database;
 use calamine::Error::De;
 use dashmap::DashSet;
 use nom::combinator::value;
 use sqlx::{Error, MySql, Pool, Row};
-use crate::consts::{PDMS_ELEMENTS_TABLE, PDMS_PROJECT_MDB_TABLE};
+use crate::consts::*;
 use crate::api::element::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};
@@ -219,7 +220,7 @@ pub async fn query_owner_type_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyh
     Ok(None)
 }
 
-impl AiosDBManager{
+impl AiosDBManager {
     pub fn get_ancestor_refno_of_type_data(&self, mut refno: RefU64, att_type: &str) -> anyhow::Result<RefU64> {
         let att_type = qualified_table_name(&att_type).to_lowercase();
         while let Some(basic) = self.get_refno_basic(refno) {
@@ -243,8 +244,36 @@ impl AiosDBManager{
         None
     }
 
+    ///按照顺序返回子节点的PdmsElement数据
+    pub async fn query_children_eles_order(
+        &self,
+        refno: RefU64,
+    ) -> anyhow::Result<Vec<PdmsElement>> {
+        let id = refno.format_url_name(AQL_PDMS_ELES_COLLECTION);
+        let aql = AqlQuery::new(
+            "\
+    WITH @@pdms_eles,@@pdms_edges
+    for v in 1 inbound @id @@pdms_edges
+        filter v!= null
+        sort v.order
+        let child = document(@@pdms_eles, v._key)
+         return {
+            '_key':child._key,
+            'owner':child.owner,
+            'name':child.name,
+            'noun':child.noun,
+            'order': child.order,
+            'children_count':length(for c in 1 inbound child._id pdms_edges
+                                return 1 ),
+        }
+    ")
+            .bind_var("id", id)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        let results: Vec<PdmsElement> = self.get_arango_db().await?.aql_query(aql).await?;
+        Ok(results)
+    }
 }
-
 
 
 pub async fn query_ancestor_of_type(mut refno: RefU64, att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
@@ -526,8 +555,8 @@ fn gen_vague_query_refnos_by_name_sql_user_set(name: &str,
         }
         // 第一个过滤条件 去掉连接符
         if idx == 0 {
-            filter_value = filter_value.replace("AND","");
-            filter_value = filter_value.replace("OR","");
+            filter_value = filter_value.replace("AND", "");
+            filter_value = filter_value.replace("OR", "");
         }
         // else {
         //     match condition {

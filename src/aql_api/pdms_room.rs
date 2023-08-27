@@ -710,7 +710,7 @@ impl AiosDBManager {
                     x.geo_param
                         .key_points()
                         .into_iter()
-                        .map(|v| x.transform.transform_point(v))
+                        .map(|v| x.transform.transform_point(*v))
                 })
                 .flatten()
                 .map(|x| info.world_transform.transform_point(x))
@@ -763,7 +763,7 @@ impl AiosDBManager {
                         x.geo_param
                             .key_points()
                             .into_iter()
-                            .map(|v| x.transform.transform_point(v))
+                            .map(|v| x.transform.transform_point(*v))
                     })
                     .flatten()
                     .map(|x| info.world_transform.transform_point(x))
@@ -841,7 +841,7 @@ impl AiosDBManager {
                     x.geo_param
                         .key_points()
                         .into_iter()
-                        .map(|v| x.transform.transform_point(v))
+                        .map(|v| x.transform.transform_point(*v))
                 })
                 .flatten()
                 .map(|x| info.world_transform.transform_point(x))
@@ -1011,7 +1011,7 @@ impl AiosDBManager {
                     x.geo_param
                         .key_points()
                         .into_iter()
-                        .map(|v| x.transform.transform_point(v))
+                        .map(|v| x.transform.transform_point(*v))
                 })
                 .flatten()
                 .map(|x| info.world_transform.transform_point(x))

@@ -1,6 +1,7 @@
 use aios_core::pdms_types::{AttrMap, PdmsElement, RefU64};
 use serde::{Serialize, Deserialize};
 
+pub mod attr_map;
 pub mod children;
 pub mod ssc_children;
 pub mod query_transform;

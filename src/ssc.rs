@@ -924,9 +924,9 @@ async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
             let refno = RefU64(name_hash);
             let owner = RefU64(owner);
             eles_results.push(PdmsEleGraphNode {
-                _key: refno.to_url_refno(),
+                refno,
                 noun: v.att_type.unwrap(),
-                version: 0,
+                order: 0,
                 name,
                 owner: owner.to_url_refno(),
                 dbnum: 0,
