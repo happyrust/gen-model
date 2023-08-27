@@ -255,7 +255,17 @@ impl AiosDBManager {
     WITH @@pdms_eles,@@pdms_edges
     for v in 1 inbound @id @@pdms_edges
         filter v!= null
-        return document(@@pdms_eles, v_key)
+        sort v.order
+        let child = document(@@pdms_eles, v._key)
+         return {
+            '_key':child._key,
+            'owner':child.owner,
+            'name':child.name,
+            'noun':child.noun,
+            'order': child.order,
+            'children_count':length(for c in 1 inbound child._id pdms_edges
+                                return 1 ),
+        }
     ")
             .bind_var("id", id)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
