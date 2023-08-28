@@ -46,7 +46,7 @@ pub async fn get_penetration_detail_by_refno(aios_mgr: &AiosDBManager, refno_vec
                         data.outer_room_num = value.1;
                     }
                 }
-                dbg!(&data);
+
                 hole_data_vec.data.push(data);
             }
         }
