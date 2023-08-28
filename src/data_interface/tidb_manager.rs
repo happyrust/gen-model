@@ -158,7 +158,6 @@ impl PdmsDataInterface for AiosDBManager {
             }
         }
         Ok(Default::default())
-        // Err(anyhow::anyhow!("{refno}: not found children"))
     }
 
     fn get_mesh_from_localdb(&self, geo_hash: u64) -> anyhow::Result<PlantMesh> {
