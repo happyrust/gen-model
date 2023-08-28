@@ -57,9 +57,9 @@ pub async fn get_plugging_data_detail(aios_mgr: &AiosDBManager, refnos: Vec<(Ref
             // if let Some(data) = attr.get_as_string("JGOBJNOTE") {
             //     materials = data.;
             // }
-            if attr.get_name().to_string().contains("LL") || attr.get_name().to_string().contains("EE") || attr.get_name().to_string().contains("KK") {
+            if attr.get_name_string().contains("LL") || attr.get_name_string().contains("EE") || attr.get_name_string().contains("KK") {
                 hole_data_vec.data.push(PluggingData {
-                    name: attr.get_name().to_string(),
+                    name: attr.get_name_string(),
                     size: desp,
                     refno: i.1.clone(),
                     materials,
@@ -75,7 +75,7 @@ pub async fn get_plugging_data_detail(aios_mgr: &AiosDBManager, refnos: Vec<(Ref
         let mut materials = "".to_string();
         //取name
         if let Ok(attr) = aios_mgr.get_attr(i.0.clone()).await {
-            name = attr.get_name().to_string();
+            name = attr.get_name_string();
             // if let Some(data) = attr.get_as_string("JGOBJNOTE") {
             //     materials = data;
             // }

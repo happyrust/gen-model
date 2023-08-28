@@ -641,7 +641,7 @@ async fn test_export_water_calculation_stp_08() -> anyhow::Result<()> {
 }
 
 
-//#[cfg(feature = "opencascade_rs")]
+
 #[tokio::test]
 //测试样例3(开门洞测试)
 async fn test_export_water_calculation_stp_3() -> anyhow::Result<()> {

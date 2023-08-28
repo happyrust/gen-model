@@ -597,12 +597,15 @@ async fn test_query_rvm_geo_instance_aql() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let refnos = vec![RefU64::from_refno_str("17496/118446").unwrap()];
+    for refno in refnos {
+        dbg!(&refno.to_refno_str());
+    }
     // let refnos = vec![RefU64::from_refno_str("24381/100681").unwrap()];
     // let mut refnos = query_children_order_aql(&database, bran_refno).await?24381/100677
     //     .into_iter().map(|refno| refno.refno).collect::<Vec<_>>();
     // refnos.push(bran_refno);
-    let result = create_refnos_rvm_data(refnos[0], &db_option, &database).await?;
-    let mut file = std::fs::File::create("test.rvm").unwrap();
-    file.write_all(&result).unwrap();
+    // let result = create_refnos_rvm_data(refnos[0], &db_option, &database).await?;
+    // let mut file = std::fs::File::create("test.rvm").unwrap();
+    // file.write_all(&result).unwrap();
     Ok(())
 }

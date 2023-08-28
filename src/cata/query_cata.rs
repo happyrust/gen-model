@@ -168,10 +168,8 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
 ) -> anyhow::Result<ScomInfo> {
     let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
     let attr_map = interface.get_attr_from_localdb(refno)?;
-    let type_noun = attr_map
-        .get_type_cloned()
-        .ok_or(anyhow::anyhow!(format!("{} 元件库属性不正确: {:?}", refno.to_refno_string(), &attr_map)))?;
-    let ptref_name = match type_noun.as_str() {
+    let type_noun = attr_map.get_type();
+    let ptref_name = match type_noun {
         "SPRF" => "PSTR",
         _ => "PTRE"
     };
@@ -185,7 +183,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
             }
         }
     }
-    let gmref_name = match type_noun.as_str() {
+    let gmref_name = match type_noun {
         "SPRF" => "GSTR",
         _ => "GMRE",
     };
@@ -275,12 +273,12 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_travel_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
+    let children = interface.get_deep_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
     for geo_am in children {
         if !geo_am.is_visible_by_level(None).unwrap_or(true) {
             continue;
         }
-        let has_children = geo_am.get_type_cloned().unwrap_or_default() == "SPRO"; //todo add other types
+        let has_children = geo_am.get_type() == "SPRO"; //todo add other types
         gms.push(
             query_gm_param(&geo_am, interface, has_children)
                 .await
@@ -360,9 +358,7 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
         .query_foreign_refnos(&[owner_ref], &[&["SPRE", "CATR"]], &["SPRE", "CATR"], &[], 4)
         .await {
         if let Some(parent_cat_ref) = parent_cat_refs.pop() {
-            // dbg!(parent_cat_ref);
             if let Ok(parent_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(parent_cat_ref) {
-                // dbg!(&parent_cat_am);
                 let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
                 for i in 0..params.len() {
                     cur_context.insert(
@@ -429,12 +425,6 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     // dbg!(&scom_info.axis_params);
     let geometries = resolve_gms(des_refno, &scom_info.gm_params, &jusl_param, &cur_context, &axis_map, interface);
     let n_geometries = resolve_gms(des_refno, &scom_info.ngm_params, &jusl_param, &cur_context, &axis_map, interface);
-    // for geometry in &geometries {
-    //     if let CateGeoParam::Pyramid(l) = geometry {
-    //         dbg!(&l);
-    //     }
-    // }
-    // dbg!(&geometries);
     Ok(CateGeomsInfo {
         refno: cat_ref,
         geometries,
@@ -611,7 +601,7 @@ pub async fn query_gm_param(
 
     Some(GmParam {
         refno: a.get_refno().unwrap_or_default(),
-        gm_type: a.get_type_cloned().unwrap_or_default(),
+        gm_type: a.get_type().to_owned(),
         prad: (a.get_as_string("PRAD").unwrap_or_default()),
         pang: (a.get_as_string("PANG").unwrap_or_default()),
         pwid: (a.get_as_string("PWID").unwrap_or_default()),

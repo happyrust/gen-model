@@ -78,6 +78,21 @@ puhua_database_password = ""
 #joint还有问题，方位对齐的问题
 #debug_root_refnos = ["25688/48687"]
 
+#debug_root_refnos = ["25688/8142"]
+#debug_root_refnos = ["24383/80211"]
+debug_root_refnos = ["24383/68009"]
+
+#楼板FIT显示
+# debug_root_refnos = ["25688/72092", "25688/75909"]
+
+#debug_root_refnos = ["24381/36612", "24381/40192", "24381/36945", "25688/71621", "24384/22441", "24384/3115", "24384/23184", "24384/24223"]
+#debug_root_refnos = ["24384/22447"]
+#debug_root_refnos = ["24381/36945"]
+#debug_root_refnos = ["17496/202345"]
+#debug_root_refnos = ["24381/42441"]
+#debug_root_refnos = ["24381/42463"]
+#debug_root_refnos = ["24381/37115"]
+#debug_root_refnos = ["24381/36563"]
 
 #管道不出来的情况，需要查一下原因, *以解决
 #debug_root_refnos = ["24381/57428"]

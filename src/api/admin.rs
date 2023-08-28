@@ -55,7 +55,7 @@ pub async fn sync_system_db(mgr: &AiosDBManager) -> anyhow::Result<()> {
                 team_name_map.get(&team_refno).unwrap().to_string()
             };
 
-            let db_name = db_attr.get_name().to_string();
+            let db_name = db_attr.get_name_string();
             let s_type = db_attr.get_str("STYP").unwrap_or("0");
             let mut names = db_name.split('/').collect::<Vec<_>>();
             if names.len() < 2 {

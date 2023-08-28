@@ -8,12 +8,13 @@ use aios_core::helper::table::qualified_table_name;
 use aios_core::pdms_types::*;
 use aios_core::three_dimensional_review::VagueSearchCondition;
 use anyhow::anyhow;
+use arangors_lite::AqlQuery;
 use bb8_arangodb::arangors_lite::Database;
 use calamine::Error::De;
 use dashmap::DashSet;
 use nom::combinator::value;
 use sqlx::{Error, MySql, Pool, Row};
-use crate::consts::{PDMS_ELEMENTS_TABLE, PDMS_PROJECT_MDB_TABLE};
+use crate::consts::*;
 use crate::api::element::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use serde::{Serialize, Deserialize};
@@ -137,14 +138,14 @@ pub async fn travel_children_with_type(refno: RefU64, att_type: String, pool: &P
 }
 
 
-/// 遍历该节点的所有子节点为指定refno的所有数据 返回 refno name owner
+/// 遍历该节点的所有子节点为指定refno返回 refno
 pub async fn travel_children_with_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
     let children = travel_children_eles(refno, pool).await?;
     Ok(children)
 }
 
-/// 查询指定type的children 的 id 、 name
-pub async fn query_children_id_name_with_type(refno: RefU64, att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
+/// 查询指定type的children 的 （ID，name）的集合
+pub async fn query_children_id_name_with_type(pool: &Pool<MySql>, refno: RefU64, att_type: &str) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = vec![];
     let sql = gen_query_children_id_name_with_type_sql(refno, att_type);
     let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
@@ -219,7 +220,7 @@ pub async fn query_owner_type_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyh
     Ok(None)
 }
 
-impl AiosDBManager{
+impl AiosDBManager {
     pub fn get_ancestor_refno_of_type_data(&self, mut refno: RefU64, att_type: &str) -> anyhow::Result<RefU64> {
         let att_type = qualified_table_name(&att_type).to_lowercase();
         while let Some(basic) = self.get_refno_basic(refno) {
@@ -243,8 +244,36 @@ impl AiosDBManager{
         None
     }
 
+    ///按照顺序返回子节点的PdmsElement数据
+    pub async fn query_children_eles_order(
+        &self,
+        refno: RefU64,
+    ) -> anyhow::Result<Vec<PdmsElement>> {
+        let id = refno.format_url_name(AQL_PDMS_ELES_COLLECTION);
+        let aql = AqlQuery::new(
+            "\
+    WITH @@pdms_eles,@@pdms_edges
+    for v in 1 inbound @id @@pdms_edges
+        filter v!= null
+        sort v.order
+        let child = document(@@pdms_eles, v._key)
+         return {
+            '_key':child._key,
+            'owner':child.owner,
+            'name':child.name,
+            'noun':child.noun,
+            'order': child.order,
+            'children_count':length(for c in 1 inbound child._id pdms_edges
+                                return 1 ),
+        }
+    ")
+            .bind_var("id", id)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        let results: Vec<PdmsElement> = self.get_arango_db().await?.aql_query(aql).await?;
+        Ok(results)
+    }
 }
-
 
 
 pub async fn query_ancestor_of_type(mut refno: RefU64, att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
@@ -401,32 +430,6 @@ pub async fn query_foreign_refnos_from_table(foreign_type: &str, table_name: &st
     Ok(result)
 }
 
-// 通过用户自定义过滤条件来进行模糊查询
-//
-// conditions: key -> 过滤的类型 (NAME,TYPE等)  value -> 0: 过滤的条件(And , Or , Not) 1: 过滤的值 (/100-B*等)
-// pub async fn vague_query_refnos_by_name_sql_user_set(
-//     conditions: &Vec<(String, (VagueSearchCondition, String))>,
-//     aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<(RefU64, String)>> {
-//     let mut result = Vec::new();
-//     // 只查询当前mdb的节点
-//     if let Some(pool) = aios_mgr.get_project_pool(&aios_mgr.db_option.project_name) {
-//         let mdb = aios_mgr.mdb_dbnums.clone().into_iter().collect::<Vec<_>>();
-//         // 暂时先过滤 name 和 type
-//         let sql = gen_vague_query_refnos_by_name_sql_user_set("hello", conditions, &mdb);
-//         let query_results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
-//         for query_result in query_results {
-//             let refno = query_result.try_get::<i64, _>("ID");
-//             if refno.is_err() { continue; }
-//             let refno = refno.unwrap();
-//             let name = query_result.try_get::<String, _>("NAME");
-//             if name.is_err() { continue; }
-//             let name = name.unwrap();
-//             result.push((RefU64(refno as u64), name));
-//         }
-//     }
-//     Ok(result)
-// }
-
 fn gen_query_names_from_refnos_with_type_sql(refnos: Vec<RefU64>, att_type: String) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT ID,NAME,OWNER FROM {PDMS_ELEMENTS_TABLE} WHERE TYPE = '{}' AND ID IN ( ", att_type));
@@ -552,8 +555,8 @@ fn gen_vague_query_refnos_by_name_sql_user_set(name: &str,
         }
         // 第一个过滤条件 去掉连接符
         if idx == 0 {
-            filter_value = filter_value.replace("AND","");
-            filter_value = filter_value.replace("OR","");
+            filter_value = filter_value.replace("AND", "");
+            filter_value = filter_value.replace("OR", "");
         }
         // else {
         //     match condition {

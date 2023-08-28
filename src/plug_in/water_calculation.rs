@@ -15,6 +15,8 @@ use arangors_lite::AqlQuery;
 use itertools::Itertools;
 #[cfg(feature = "opencascade_rs")]
 use opencascade::primitives::*;
+#[cfg(feature = "opencascade_rs")]
+use opencascade::adhoc::AdHocShape;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -22,6 +24,10 @@ use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
+use bevy_transform::prelude::Transform;
+use glam::Vec3;
+
+// use opencascade::adhoc::AdHocShape;
 
 /// 将数据保存至图数据库
 pub async fn save_stp_data_to_arangodb(
@@ -83,7 +89,8 @@ pub async fn export_stp(
 ) -> anyhow::Result<bool> {
     use std::collections::BTreeMap;
 
-    let all_plugged_refnos: HashSet<RefU64> = stp_packet.all_plugged_hole_refnos().collect();
+    let all_plugged_hole_refnos: HashSet<RefU64> = stp_packet.all_plugged_hole_refnos().collect();
+    let all_plugged_door_refnos: HashSet<RefU64> = stp_packet.all_plugged_door_refnos().collect();
     let export_refnos: Vec<RefU64> = stp_packet.export_refnos().cloned().collect();
     let shapes_data = query_insts_shape_data(
         &mgr.get_arango_db().await?,
@@ -102,32 +109,63 @@ pub async fn export_stp(
     let mut boolean_map: BTreeMap<RefU64, Vec<(RefU64, Shape)>> = BTreeMap::new();
     for (refno, geos_info) in &shapes_data.inst_info_map {
         //被封堵了的，相当于没有出现过，直接忽略
-        if all_plugged_refnos.contains(refno) {
+        if all_plugged_hole_refnos.contains(refno) {
             continue;
         }
+        let is_door = all_plugged_door_refnos.contains(refno);
         let Some(insts_data) = shapes_data.get_inst_geos_data(geos_info) else {
             continue;
         };
-        if let Some((shape, own_pos_refno)) = insts_data.gen_occ_shape(&geos_info.world_transform) {
+
+        let mut transform = geos_info.world_transform;
+        if let Some((shape, own_pos_refno)) = insts_data.gen_occ_shape(&transform) {
             if let Some(o) = own_pos_refno && o.is_valid(){
-                boolean_map.entry(o).or_default().push((*refno, shape));
+                //需要进行缩放处理，宽度为门的1/10，高度固定为100
+                if is_door {
+                    // transform =  Transform::from_scale(Vec3::new(1.0, 1.0, 0.3)) * transform;
+                    let mut box_shape = AdHocShape::make_box(100.0, 100.0, 100.0).0;
+                    box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
+                    boolean_map.entry(o).or_default().push((*refno, box_shape));
+                    //door 已经处理，不需要处理第二次
+                    continue;
+                }else{
+                    boolean_map.entry(o).or_default().push((*refno, shape));
+                }
             } else{
                 total_shapes_map.insert(*refno, shape);
             }
         }
-        let ngmr_shapes = insts_data.gen_ngmr_occ_shapes(&geos_info.world_transform);
-        for (o, shape) in ngmr_shapes {
-            boolean_map.entry(o).or_default().push((*refno, shape));
+
+
+        let mut ngmr_shapes = insts_data.gen_ngmr_occ_shapes(&transform);
+        for (mut o, mut shape) in  ngmr_shapes {
+            //需要进行缩放处理，宽度为门的1/10，高度固定为100
+            if is_door {
+                //2150 1000 700
+                let inst = &insts_data.insts[0];
+                let extents = insts_data.aabb.unwrap().extents();
+                // dbg!(extents);
+                // dbg!(inst.transform);
+                transform = Transform::from_translation(Vec3::new(0.0, 0.0, -extents.x/2.0))
+                    *  transform * inst.transform ;
+                // let mut box_shape = AdHocShape::make_box(extents.x as f64, extents.y as f64, extents.z as f64).0;
+                let mut box_shape = AdHocShape::make_box(100.0, extents.y as f64 / 10.0 , extents.z as f64).0;
+                box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
+                boolean_map.entry(o).or_default().push((*refno, box_shape));
+                break;
+            }else{
+                boolean_map.entry(o).or_default().push((*refno, shape));
+            }
         }
     }
     // boolean_map.values_mut().for_each(|x| {
     //     x.sort_by(|a, b| a.0.cmp(&b.0));
     // });
 
-    let refnos = boolean_map
-        .values()
-        .flat_map(|x| x.iter().map(|t| t.0))
-        .collect::<Vec<_>>();
+    // let refnos = boolean_map
+    //     .values()
+    //     .flat_map(|x| x.iter().map(|t| t.0))
+    //     .collect::<Vec<_>>();
     // dbg!(&refnos);
 
     total_shapes_map
@@ -135,7 +173,7 @@ pub async fn export_stp(
         .filter(|(k, _)| boolean_map.contains_key(k))
         .for_each(|(k, v)| {
             let neg_shapes = boolean_map.get(k).unwrap();
-            neg_shapes.into_iter().foreach(|t| {
+            neg_shapes.into_iter().for_each(|t| {
                 //对于负实体要统一做一个延伸处理，否则负实体会出现薄片
                 *v = v.subtract_shape(&t.1).0;
             });

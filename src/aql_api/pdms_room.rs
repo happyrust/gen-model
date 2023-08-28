@@ -235,9 +235,7 @@ pub async fn query_room_name_from_refnos_aql(
             'refno': v._key,
             'room_name': v.name
          }
-    ",
-    )
-        .bind_var("refnos", refnos)
+    ", ).bind_var("refnos", refnos)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
@@ -711,7 +709,7 @@ impl AiosDBManager {
                     x.geo_param
                         .key_points()
                         .into_iter()
-                        .map(|v| x.transform.transform_point(v))
+                        .map(|v| x.transform.transform_point(*v))
                 })
                 .flatten()
                 .map(|x| info.world_transform.transform_point(x))
@@ -764,7 +762,7 @@ impl AiosDBManager {
                         x.geo_param
                             .key_points()
                             .into_iter()
-                            .map(|v| x.transform.transform_point(v))
+                            .map(|v| x.transform.transform_point(*v))
                     })
                     .flatten()
                     .map(|x| info.world_transform.transform_point(x))
@@ -842,7 +840,7 @@ impl AiosDBManager {
                     x.geo_param
                         .key_points()
                         .into_iter()
-                        .map(|v| x.transform.transform_point(v))
+                        .map(|v| x.transform.transform_point(*v))
                 })
                 .flatten()
                 .map(|x| info.world_transform.transform_point(x))
@@ -1012,7 +1010,7 @@ impl AiosDBManager {
                     x.geo_param
                         .key_points()
                         .into_iter()
-                        .map(|v| x.transform.transform_point(v))
+                        .map(|v| x.transform.transform_point(*v))
                 })
                 .flatten()
                 .map(|x| info.world_transform.transform_point(x))
