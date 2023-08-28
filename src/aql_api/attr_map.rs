@@ -84,10 +84,11 @@ impl AiosDBManager {
             ).collect::<Vec<_>>()
         };
         for refno in target_refnos {
+            let mut attr_values = IndexNamedAttMap::new();
             let Ok(attr) = self.get_attr_from_localdb(refno) else {
+                result.push(attr_values);
                 continue;
             };
-            let mut attr_values = IndexNamedAttMap::new();
             let world_transform = if contains_trans {
                 self.get_world_transform(refno)
                     .await
