@@ -345,7 +345,7 @@ impl AiosDBManager {
     pub fn default_conn_str(&self) -> String {
         let d = &self.db_option;
         let user = d.user.as_str();
-        let pwd = d.password.as_str();
+        let pwd = urlencoding::encode(&d.password);
         let ip = d.ip.as_str();
         let port = d.port.as_str();
         format!("mysql://{user}:{pwd}@{ip}:{port}")
