@@ -168,10 +168,8 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
 ) -> anyhow::Result<ScomInfo> {
     let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
     let attr_map = interface.get_attr_from_localdb(refno)?;
-    let type_noun = attr_map
-        .get_type_cloned()
-        .ok_or(anyhow::anyhow!(format!("{} 元件库属性不正确: {:?}", refno.to_refno_string(), &attr_map)))?;
-    let ptref_name = match type_noun.as_str() {
+    let type_noun = attr_map.get_type();
+    let ptref_name = match type_noun {
         "SPRF" => "PSTR",
         _ => "PTRE"
     };
@@ -185,7 +183,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
             }
         }
     }
-    let gmref_name = match type_noun.as_str() {
+    let gmref_name = match type_noun {
         "SPRF" => "GSTR",
         _ => "GMRE",
     };
@@ -280,7 +278,7 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
         if !geo_am.is_visible_by_level(None).unwrap_or(true) {
             continue;
         }
-        let has_children = geo_am.get_type_cloned().unwrap_or_default() == "SPRO"; //todo add other types
+        let has_children = geo_am.get_type() == "SPRO"; //todo add other types
         gms.push(
             query_gm_param(&geo_am, interface, has_children)
                 .await
@@ -603,7 +601,7 @@ pub async fn query_gm_param(
 
     Some(GmParam {
         refno: a.get_refno().unwrap_or_default(),
-        gm_type: a.get_type_cloned().unwrap_or_default(),
+        gm_type: a.get_type().to_owned(),
         prad: (a.get_as_string("PRAD").unwrap_or_default()),
         pang: (a.get_as_string("PANG").unwrap_or_default()),
         pwid: (a.get_as_string("PWID").unwrap_or_default()),
