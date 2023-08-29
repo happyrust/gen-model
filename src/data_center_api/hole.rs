@@ -813,7 +813,7 @@ pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, dat
     // 替换数据
     for data in datas {
         let json = serde_json::to_value(&data)?;
-        match update_arangodb_doc(&data._key,json, AQL_HOLE_DATA_COLLECTION, &database).await {
+        match update_arangodb_doc(&data._key, json, AQL_HOLE_DATA_COLLECTION, &database).await {
             Ok(_) => {}
             Err(e) => {
                 return Ok(e.to_string());
@@ -881,13 +881,19 @@ async fn replace_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArD
 pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
     let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("
+    with @@pdms_eles,@@hole_edge,@@hole_data
     for key in @keys
-    for c in 1 outbound key hole_edge
+    for c in 1 outbound key @@hole_edge
         filter c != null
-        return unset(c , '_id','_rev')").bind_var("keys", keys);
+        return unset(c , '_id','_rev')")
+        .bind_var("keys", keys)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@hole_data", AQL_HOLE_DATA_COLLECTION)
+        .bind_var("@hole_edge", AQL_HOLE_EDGE_COLLECTION);
     let result = database.aql_query::<VirtualHoleGraphNode>(aql).await?;
     Ok(result)
 }
+
 
 pub async fn query_hole_data_by_keys_aql(keys: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
     let aql = AqlQuery::new("

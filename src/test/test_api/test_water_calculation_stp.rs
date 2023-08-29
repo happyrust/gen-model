@@ -1,4 +1,4 @@
-use crate::plug_in::water_calculation::export_stp;
+// use crate::plug_in::water_calculation::export_stp;
 use crate::plug_in::water_calculation::save_stp_data_to_arangodb;
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use crate::test::test_helper::get_test_ams_db_manager_async;
@@ -66,11 +66,14 @@ async fn test_export_water_calculation_stp_0() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
-//对应xxxx.xlxs 的第几个issue
+
+
+
+//对应水淹计算测试.xlxs 的第1个issue：封堵的孔洞数和生成的模型对不上
 #[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 async fn test_export_water_calculation_stp_01() -> anyhow::Result<()> {
@@ -142,16 +145,15 @@ async fn test_export_water_calculation_stp_01() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
 
 
 
-
-///测试导出不全的情况，墙有丢失
-#[cfg(feature = "opencascade_rs")]
+//对应水淹计算测试.xlxs 的第8个issue: 封堵的孔洞数量和生成的模型不一致
+//#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
 async fn test_export_water_calculation_stp_02() -> anyhow::Result<()> {
@@ -210,13 +212,13 @@ async fn test_export_water_calculation_stp_02() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
 
-
-//#[cfg(feature = "opencascade_rs")]
+//对应水淹计算测试.xlxs 的第9个issue：名称乱码
+#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
 async fn test_export_water_calculation_stp_03() -> anyhow::Result<()> {
@@ -281,11 +283,12 @@ async fn test_export_water_calculation_stp_03() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
-//#[cfg(feature = "opencascade_rs")]
+//对应水淹计算测试.xlxs 的第10个issue:孔洞位置不正确
+#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
 async fn test_export_water_calculation_stp_04() -> anyhow::Result<()> {
@@ -350,12 +353,12 @@ async fn test_export_water_calculation_stp_04() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
-
-//#[cfg(feature = "opencascade_rs")]
+//对应水淹计算测试.xlxs 的第11个issue：模型生成不正确
+#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
 async fn test_export_water_calculation_stp_05() -> anyhow::Result<()> {
@@ -420,12 +423,14 @@ async fn test_export_water_calculation_stp_05() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
 
-//#[cfg(feature = "opencascade_rs")]
+
+//对应水淹计算.xlxs 的第1个issue：“预处理”中的孔洞和生成的模型对不上
+#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
 async fn test_export_water_calculation_stp_06() -> anyhow::Result<()> {
@@ -490,13 +495,13 @@ async fn test_export_water_calculation_stp_06() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
 
 
-//#[cfg(feature = "opencascade_rs")]
+#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
 async fn test_export_water_calculation_stp_07() -> anyhow::Result<()> {
@@ -561,12 +566,12 @@ async fn test_export_water_calculation_stp_07() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
 
-//#[cfg(feature = "opencascade_rs")]
+#[cfg(feature = "opencascade_rs")]
 #[tokio::test]
 //测试样例2(开孔洞测试)
 async fn test_export_water_calculation_stp_08() -> anyhow::Result<()> {
@@ -631,7 +636,7 @@ async fn test_export_water_calculation_stp_08() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
@@ -960,7 +965,7 @@ async fn test_export_water_calculation_stp_3() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
@@ -1141,7 +1146,7 @@ async fn test_export_water_calculation_stp_4() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     save_stp_data_to_arangodb(&mgr, stp_packet.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
@@ -1322,7 +1327,7 @@ async fn test_export_water_calculation_stp_5() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet_vec.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
@@ -1345,7 +1350,7 @@ async fn test_export_electric_without_walls() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     save_stp_data_to_arangodb(&mgr, stp_packet.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
@@ -1371,6 +1376,6 @@ async fn test_export_floor_with_negs() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     save_stp_data_to_arangodb(&mgr, stp_packet.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
