@@ -679,7 +679,6 @@ impl AiosDBManager {
             .map(|(refno, (p0, p1))| {
                 let room0 = self.get_owner(*p0);
                 let room1 = self.get_owner(*p1);
-
                 let room0_num = self
                     .room_info_map
                     .get(&room0)
@@ -715,6 +714,7 @@ impl AiosDBManager {
                 .query_ele_own_room_panels(&children, Some(through_refno))
                 .await
             {
+                dbg!(&result);
                 for (k, mut v) in result {
                     let r1 = v.pop().unwrap_or_default();
                     let r0 = v.pop().unwrap_or_default();
@@ -791,6 +791,7 @@ impl AiosDBManager {
         let mut whole_key_points = vec![];
         let mut whole_aabb = Aabb::new_invalid();
         if is_as_whole {
+
             for (&refno, info) in &inst_data.inst_info_map {
                 let Some(inst_geos) = inst_data.get_inst_geos(info) else {
                     continue;
@@ -834,6 +835,7 @@ impl AiosDBManager {
             self.cache_plant_meshes(&geo_hashes, false).await?;
             let mut target_panels = vec![];
             //这里需要考虑顺序
+            dbg!(&final_key_points);
             for key_point in &final_key_points {
                 for &panel_info in &panel_infos {
                     let Ok(Some(room_panel_mesh)) =
@@ -857,6 +859,7 @@ impl AiosDBManager {
                     };
                     if contain_point {
                         target_panels.push(panel_info.refno);
+                        dbg!(&target_panels);
                         break;
                     }
                 }
@@ -905,6 +908,7 @@ impl AiosDBManager {
             }
             self.cache_plant_meshes(&geo_hashes, false).await?;
             let mut target_panels = vec![];
+
             for panel_info in panel_infos {
                 let Ok(Some(room_panel_mesh)) =
                     self.get_plant_mesh(panel_info.inst_geo.geo_hash).await
