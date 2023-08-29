@@ -40,6 +40,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+use pdms_io::watch::PdmsWatcher;
 use tokio::sync::RwLock;
 
 lazy_static! {
@@ -92,6 +93,8 @@ pub struct AiosDBManager {
     pub cache_module_numbdbs: BTreeSet<i32>,
 
     pub mdb_dbnums: BTreeSet<i32>,
+
+    pub watcher: PdmsWatcher,
 
     ///所有元素的tree
     pub rtree: Option<AccelerationTree>,

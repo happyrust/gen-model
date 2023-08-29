@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = [] #
+default = ["gen_model"] #
 truck = []
 viewer = []  #是否开启视图
 gen_model = ["aios_core/gen_model"]
@@ -44,6 +44,7 @@ parry3d = { path="../crates/parry/crates/parry3d", features = ["serde-serialize"
 
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path = "../crates/aios-core" }
+pdms_io = {path="../pdms-io"}
 bevy_transform = { path = "../crates/bevy/crates/bevy_transform"}
 
 #csg = { path = "../crates/csgrs/csg" }
@@ -73,6 +74,7 @@ rayon = "1.7.0"
 redb = "1.0.5"
 indexmap = "2.0.0"
 urlencoding = "2.1.3"
+notify = "6.1.1"
 #geo = "0.24.1"
 
 

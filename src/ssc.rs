@@ -928,7 +928,7 @@ async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
                 noun: v.att_type.unwrap(),
                 order: 0,
                 name,
-                owner: owner.to_url_refno(),
+                owner,
                 dbnum: 0,
                 cata_hash: None,
             });
