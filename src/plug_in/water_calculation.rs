@@ -1,3 +1,11 @@
+
+use aios_core::water_calculation::*;
+use opencascade::primitives::*;
+use opencascade::adhoc::AdHocShape;
+use bevy_transform::prelude::Transform;
+use glam::Vec3;
+// use opencascade::adhoc::AdHocShape;
+use parry3d::shape::Compound;
 use crate::api::attr::query_attr;
 use crate::api::children::travel_children_with_type;
 use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
@@ -13,10 +21,8 @@ use aios_core::water_calculation::FloodingStpToArangodb;
 use aios_core::water_calculation::*;
 use arangors_lite::AqlQuery;
 use itertools::Itertools;
-
+#[cfg(feature = "opencascade_rs")]
 use opencascade::primitives::*;
-
-use opencascade::adhoc::AdHocShape;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -24,11 +30,11 @@ use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use bevy_transform::prelude::Transform;
-use glam::Vec3;
 
-// use opencascade::adhoc::AdHocShape;
-use parry3d::shape::Compound;
+
+
+
+
 /// 将数据保存至图数据库
 pub async fn save_stp_data_to_arangodb(
     aios_mgr: &AiosDBManager,
