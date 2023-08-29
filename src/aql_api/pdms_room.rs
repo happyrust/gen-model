@@ -194,7 +194,7 @@ pub async fn query_room_name_from_refno_aql(
 
 /// 查询子节点属于哪个房间，只返回一个房间，不包含多个房间的情况
 pub async fn query_room_code_from_owner(owner_refno: RefU64,
-                                        database: &ArDatabase,) -> anyhow::Result<Option<String>> {
+                                        database: &ArDatabase, ) -> anyhow::Result<Option<String>> {
     let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", owner_refno.to_url_refno());
     let aql = AqlQuery::new("
     With @@pdms_eles,@@pdms_edges,@@room_edges,@@room_eles
@@ -206,7 +206,7 @@ pub async fn query_room_code_from_owner(owner_refno: RefU64,
             return r.name
     ").bind_var("id", refno)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
         .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
     let result = database.aql_query::<String>(aql).await?;
@@ -237,7 +237,7 @@ pub async fn query_room_name_from_refnos_aql(
          }
     ", ).bind_var("refnos", refnos)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
     let result = database.aql_query::<PdmsNodeBelongRoomName>(aql).await;
     match result {
@@ -266,7 +266,7 @@ pub async fn query_room_name_from_names_aql(
             'name': v.name,
             'room_name': r.name
          } ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-            .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+            .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
             .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
             .bind_var("names", names)
     } else {
@@ -281,7 +281,7 @@ pub async fn query_room_name_from_names_aql(
             'name': v.name,
             'room_name': r.name
          }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-            .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+            .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
             .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
             .bind_var("names", names)
             .bind_var("noun", noun)
@@ -293,7 +293,7 @@ pub async fn query_room_name_from_names_aql(
 /// 返回设备所在的房间号(不含贯穿件)
 pub async fn query_equi_room_name_from_names_aql(
     names: Vec<String>,
-    database: &ArDatabase
+    database: &ArDatabase,
 ) -> anyhow::Result<Vec<PdmsNameBelongRoomName>> {
     let names = names
         .into_iter()
@@ -319,8 +319,8 @@ pub async fn query_equi_room_name_from_names_aql(
              )
      return result ")
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION)
-        .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
         .bind_var("names", names);
     let result = database.aql_query::<Vec<PdmsNameBelongRoomName>>(aql).await?;
@@ -458,7 +458,7 @@ pub async fn query_room_refnos_aql(
         )
             .bind_var("key", key)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-            .bind_var("@pdms_edges",  AQL_PDMS_EDGES_COLLECTION)
+            .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
     } else {
         let filter_data = filter_major.unwrap().to_major_str();
         AqlQuery::new(
@@ -675,6 +675,7 @@ impl AiosDBManager {
                 .query_ele_own_room_panels(&children, Some(through_refno))
                 .await
             {
+                dbg!(&result);
                 for (k, mut v) in result {
                     let r1 = v.pop().unwrap_or_default();
                     let r0 = v.pop().unwrap_or_default();
@@ -751,6 +752,7 @@ impl AiosDBManager {
         let mut whole_key_points = vec![];
         let mut whole_aabb = Aabb::new_invalid();
         if is_as_whole {
+
             for (&refno, info) in &inst_data.inst_info_map {
                 let Some(inst_geos) = inst_data.get_inst_geos(info) else {
                     continue;
@@ -794,6 +796,7 @@ impl AiosDBManager {
             self.cache_plant_meshes(&geo_hashes, false).await?;
             let mut target_panels = vec![];
             //这里需要考虑顺序
+            dbg!(&final_key_points);
             for key_point in &final_key_points {
                 for &panel_info in &panel_infos {
                     let Ok(Some(room_panel_mesh)) =
@@ -817,6 +820,7 @@ impl AiosDBManager {
                     };
                     if contain_point {
                         target_panels.push(panel_info.refno);
+                        dbg!(&target_panels);
                         break;
                     }
                 }
@@ -865,6 +869,7 @@ impl AiosDBManager {
             }
             self.cache_plant_meshes(&geo_hashes, false).await?;
             let mut target_panels = vec![];
+
             for panel_info in panel_infos {
                 let Ok(Some(room_panel_mesh)) =
                     self.get_plant_mesh(panel_info.inst_geo.geo_hash).await
