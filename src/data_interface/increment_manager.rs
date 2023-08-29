@@ -5,7 +5,7 @@ use aios_core::cache::mgr::BytesTrait;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::consts::NAME_HASH;
 use aios_core::helper::qualified_table_name;
-use aios_core::pdms_types::{RefU64, RefU64Vec};
+use aios_core::pdms_types::{AttrVal, RefU64, RefU64Vec};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
@@ -27,7 +27,7 @@ use crate::graph_db::structs::{PdmsEleGraphEdgeWithKey, PdmsEleGraphNode};
 use std::sync::Arc;
 
 #[derive(PartialEq, Debug, Default, Clone, Copy)]
-pub enum EleOperation{
+pub enum EleOperation {
     #[default]
     None,
     Add,
@@ -36,22 +36,27 @@ pub enum EleOperation{
 }
 
 impl AiosDBManager {
-    pub fn cal_default_name(&self, refno: RefU64) -> anyhow::Result<String> {
+
+    ///默认的名称
+    pub fn default_name(&self, refno: RefU64) -> anyhow::Result<String>{
+        let mut attmap = self.get_attr_from_localdb(refno)?;
+        let owner = attmap.get_owner().unwrap();
+        let type_name = attmap.get_type();
+        let owner_children = self.get_children_attrs(owner).unwrap_or_default();
+        let idx = owner_children.iter().filter(|x| {
+            x.get_type() == type_name
+        }).position(|node| node.get_refno().unwrap_or_default() == refno).unwrap_or_default() + 1;
+        Ok(format!("{} {}", type_name, idx))
+    }
+
+    ///计算名称
+    pub fn cal_name(&self, refno: RefU64) -> anyhow::Result<(String, bool)> {
         let mut attmap = self.get_attr_from_localdb(refno)?;
         return if let Some(name) = attmap.get(&NAME_HASH) {
-            Ok(name.string_value())
+            Ok((name.string_value(), false))
         } else {
-            let owner = attmap.get_owner().unwrap();
-            let type_name = attmap.get_type();
-            let owner_children = self.get_children_attrs(owner).unwrap_or_default();
-            let idx = owner_children.iter().filter(|x| {
-                x.get_type() == type_name
-            }).position(|node| node.get_refno().unwrap_or_default() == refno).unwrap_or_default() + 1;
-            let default_name = format!("{} {}", type_name, idx);
-            attmap.insert(NAME_HASH, StringType(default_name.clone()));
-            let mut bytes = attmap.into_rkyv_compress_bytes();
-            self.get_cur_attmap_tree().unwrap().insert((*refno).to_be_bytes().as_slice(), &*bytes)?;
-            Ok(default_name)
+            let default_name = self.default_name(refno)?;
+            Ok((default_name, true))
         };
     }
 
@@ -89,33 +94,47 @@ impl AiosDBManager {
                             //执行的是父节点的操作
                             ele_op = EleOperation::Deleted;
                         });
-                }else{
+                } else {
                     ele_op = EleOperation::Add;
                 }
+                //test
+                // if ele_op == EleOperation::Deleted {
+                //     dbg!(&ele);
+                // }
+                type_eles_map.entry(ele.noun).or_insert(Vec::new()).push((ele.refno, dbno, attmap, ele.children));
 
-                let mut vec = ele.children.to_bytes()?;
-                children_db.insert((*ele.refno).to_be_bytes().as_slice(), &*vec)?;
-
-
-                if ele_op != EleOperation::Deleted {
-                    //保存到本地数据库
-                    let mut bytes = attmap.into_rkyv_compress_bytes();
-                    attmap_db.insert((*ele.refno).to_be_bytes().as_slice(), &*bytes)?;
-                    if ele_op == EleOperation::Add { total_add_len += 1;  } else{ total_modify_len += 1;}
-
-                    type_eles_map.entry(ele.noun).or_insert(Vec::new()).push((ele.refno, dbno, attmap, ele_op));
-                }else{
-                    total_delted_len += 1;
+                match ele_op {
+                    EleOperation::None => {}
+                    EleOperation::Add => { total_add_len += 1; }
+                    EleOperation::Modified => { total_modify_len += 1; }
+                    EleOperation::Deleted => { total_delted_len += 1; }
                 }
             }
         }
 
-        for (noun, eles) in type_eles_map {
-            for (refno, dbnum, ele, ele_op) in eles {
+
+        ///先更新一遍到本地数据库
+        for (noun, eles) in &type_eles_map {
+            for (refno, dbnum, ele,  children) in eles {
                 let Some(owner) = ele.get_owner() else {
                     continue;
                 };
+                let mut vec = children.to_bytes()?;
+                children_db.insert((**refno).to_be_bytes().as_slice(), &*vec)?;
 
+                let mut bytes = ele.into_rkyv_compress_bytes();
+                attmap_db.insert((**refno).to_be_bytes().as_slice(), &*bytes)?;
+            }
+        }
+
+
+        let mut updated_sets = HashSet::new();
+        for (mut noun, mut eles) in type_eles_map {
+            while let Some((refno, dbnum, mut ele,  _)) = eles.pop() {
+                updated_sets.insert(refno);
+                let Some(owner) = ele.get_owner() else {
+                    continue;
+                };
                 let type_name = ele.get_type();
                 let _ = CACHED_REFNO_BASIC_MAP.insert(refno, &CachedRefBasic {
                     owner,
@@ -124,7 +143,31 @@ impl AiosDBManager {
                 let owner_children = self.get_children_from_localdb(owner).unwrap_or_default();
                 let order = owner_children.iter().position(|x| *x == refno).unwrap_or_default() as u32;
                 let cata_hash = ele.cal_cata_hash().map(|x| x.to_string());
-                let name = self.cal_default_name(refno).unwrap();
+                //owner children need update all the name, if current name not set
+                let (name, is_default) = self.cal_name(refno).unwrap();
+                let next = order as usize + 1;
+                if is_default && next < owner_children.len(){
+                    let remind_siblings = &owner_children[next..];
+                    let mut tmp_default_name = name.clone();
+                    ele.insert(NAME_HASH, AttrVal::StringType(tmp_default_name.clone()));
+                    let mut bytes = ele.into_rkyv_compress_bytes();
+                    attmap_db.insert((*refno).to_be_bytes().as_slice(), &*bytes)?;
+                    for r in remind_siblings {
+                        //如果在缓存里，才加入到这个列表里, 需要刷新一下列表
+                        if CACHED_REFNO_BASIC_MAP.contains_key(r) {
+                            if let Ok(mut tmp_att) = self.get_attr_from_localdb(*r){
+                                if tmp_att.get_name_string() == tmp_default_name {
+                                    tmp_default_name = self.default_name(*r)?;
+                                    tmp_att.insert(NAME_HASH, AttrVal::StringType(tmp_default_name.clone()));
+                                    let mut bytes = tmp_att.into_rkyv_compress_bytes();
+                                    attmap_db.insert((**r).to_be_bytes().as_slice(), &*bytes)?;
+
+                                    eles.push((*r, dbnum, tmp_att, Default::default()));
+                                }
+                            }
+                        }
+                    }
+                }
                 let pdms_element = PdmsEleGraphNode {
                     refno,
                     owner,
@@ -153,7 +196,7 @@ impl AiosDBManager {
 
         //删除边
         for result in delete_keys.chunks(ARANGODB_SAVE_AMOUNT) {
-            dbg!(result);
+            // dbg!(result);
             remove_edges_arangodb(&database, result, AQL_PDMS_EDGES_COLLECTION).await;
         }
 
@@ -206,5 +249,4 @@ impl AiosDBManager {
 
         Ok(())
     }
-
 }
