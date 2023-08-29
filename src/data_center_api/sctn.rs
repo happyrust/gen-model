@@ -74,6 +74,7 @@ pub async fn get_dq_support_sctn_data(
     // 圆板类
     let children = children.iter().map(|child| child.refno).collect::<Vec<_>>();
     let fixings = query_dq_circular_plate(children, &database).await.unwrap_or(vec![]);
+    dbg!(&fixings.len());
     for fixing in fixings {
         let mut fixing_attrs = Vec::new();
         let spre_name = fixing.spre_name;
@@ -108,8 +109,8 @@ pub async fn get_dq_support_sctn_data(
                     &database,
                     fixing.refno,
                     vec!["STRU"],
-                )
-                    .await?;
+                ).await.unwrap_or(None);
+                dbg!(&stru);
                 if let Some(stru) = stru {
                     let desc = get_refno_desi_desc(stru.refno, &aios_mgr)
                         .await
