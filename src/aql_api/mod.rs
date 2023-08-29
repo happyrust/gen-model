@@ -34,6 +34,14 @@ pub struct PdmsRefnoNameAql {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
+pub struct PdmsSpreNameAql {
+    pub refno: String,
+    pub foreign_refno: String,
+    pub name: String,
+}
+
+
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PdmsRefnoTypeAql {
     pub refno: String,
     pub noun: String,

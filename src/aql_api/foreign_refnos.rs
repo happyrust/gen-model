@@ -2,6 +2,7 @@ use std::sync::Arc;
 use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use clap::builder::Str;
+use crate::aql_api::{PdmsRefnoNameAql, PdmsSpreNameAql};
 use crate::consts::{AQL_PDMS_ELES_COLLECTION, PDMS_ELEMENTS_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -66,6 +67,33 @@ pub async fn query_foreign_refno_aql(arango_database: &ArDatabase, refno: RefU64
         }
     }
     Ok(None)
+}
+
+/// 查询多个参考号的外键引用 返回他的参考号和 name
+pub async fn query_foreign_refnos_aql(arango_database: &ArDatabase, refnos: Vec<RefU64>, foreign_types: Vec<String>) -> anyhow::Result<Vec<PdmsSpreNameAql>> {
+    let ids = refnos.into_iter()
+        .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()))
+        .collect::<Vec<_>>();
+    if foreign_types.len() < 2 { return Ok(vec![]); }
+    let aql = AqlQuery::new("\
+    With @@pdms_eles, @@foreign_edges
+    for id in @ids
+    for v, e, p in 1..5 outbound id @@foreign_edges
+    filter p.edges[0].foreign_type == @foreign_type_first
+    filter e.foreign_type == @final_type
+    filter v != null
+    return {
+        'refno':p.vertices[0]._key,
+        'foreign_refno':v._key,
+        'name':v.name
+    }")
+        .bind_var("ids", ids)
+        .bind_var("foreign_type_first", foreign_types[0].clone())
+        .bind_var("final_type", foreign_types[foreign_types.len() - 1].clone())
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@foreign_edges", AQL_FOREIGN_EDGES_COLLECTION);
+    let results: Vec<PdmsSpreNameAql> = arango_database.aql_query(aql).await?;
+    Ok(results)
 }
 
 /// 查询外键对应的 name
