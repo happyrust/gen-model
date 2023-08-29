@@ -714,7 +714,7 @@ impl AiosDBManager {
                 .query_ele_own_room_panels(&children, Some(through_refno))
                 .await
             {
-                dbg!(&result);
+
                 for (k, mut v) in result {
                     let r1 = v.pop().unwrap_or_default();
                     let r0 = v.pop().unwrap_or_default();
@@ -799,6 +799,7 @@ impl AiosDBManager {
                 let key_points = inst_geos
                     .iter()
                     .map(|x| {
+                        // dbg!(x.geo_param.key_points());
                         x.geo_param
                             .key_points()
                             .into_iter()
@@ -807,6 +808,8 @@ impl AiosDBManager {
                     .flatten()
                     .map(|x| info.world_transform.transform_point(x))
                     .collect::<Vec<_>>();
+                // dbg!(refno);
+                // dbg!(&key_points);
                 whole_key_points.extend_from_slice(&key_points);
                 whole_aabb.merge(&info.aabb.unwrap());
             }
@@ -835,7 +838,6 @@ impl AiosDBManager {
             self.cache_plant_meshes(&geo_hashes, false).await?;
             let mut target_panels = vec![];
             //这里需要考虑顺序
-            dbg!(&final_key_points);
             for key_point in &final_key_points {
                 for &panel_info in &panel_infos {
                     let Ok(Some(room_panel_mesh)) =
@@ -859,7 +861,6 @@ impl AiosDBManager {
                     };
                     if contain_point {
                         target_panels.push(panel_info.refno);
-                        dbg!(&target_panels);
                         break;
                     }
                 }

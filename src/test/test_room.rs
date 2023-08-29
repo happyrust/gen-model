@@ -8,6 +8,7 @@ use aios_core::pdms_types::RefU64;
 use aios_core::pdms_types::UdaMajorType::T;
 use regex::Regex;
 use std::str::FromStr;
+use parry3d::utils::hashmap::HashMap;
 use crate::data_interface::interface::PdmsDataInterface;
 
 ///  测试获取有负实体的parent
@@ -24,10 +25,10 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
     Ok(())
 }
 
-// //15组贯穿件房间号测试样例
+// //15组贯穿件房间号测试样例，只算出了内房间的情况
 #[tokio::test]
 async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
-    //测试样例1
+    //测试样例1   内房间号：R610，外房间号：R661
     let mgr = get_test_ams_db_manager_async().await;
     let target_refno = "24383/83477".into();
     // let r = mgr.query_eles_keypts_and_aabb_as_whole(&[target_refno], true).await?;
@@ -40,14 +41,23 @@ async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
 }
 //
 //
-// #[tokio::test]
-// async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
-//     //测试样例2
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_84073").unwrap()).await;
-//     assert_eq!(room_number.unwrap(), Some(("R630".to_string(), "R663".to_string())));
-//     Ok(())
-// }
-//
+
+///测试房间号是否正确
+#[tokio::test]
+async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
+    //测试样例2
+    use std::collections::{HashMap, HashSet};
+    let mgr = get_test_ams_db_manager_async().await;
+    let target_refno = "24383/83477".into();
+    let room_number = mgr
+        .query_through_element_room_nums(&[target_refno])
+        .await?;
+    let mut map = HashMap::new();
+    map.insert(target_refno,("R610".to_string(),"R661".to_string()));
+    assert_eq!(room_number, map);
+    Ok(())
+}
+
 // #[tokio::test]
 // async fn test_query_through_element_rooms_3() -> anyhow::Result<()> {
 //     //测试样例3
