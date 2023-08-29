@@ -26,8 +26,9 @@ use std::hash::{Hash, Hasher};
 use std::io::Write;
 use bevy_transform::prelude::Transform;
 use glam::Vec3;
-
-
+use parry3d::shape::Shape;
+// use opencascade::adhoc::AdHocShape;
+use parry3d::shape::Compound;
 /// 将数据保存至图数据库
 pub async fn save_stp_data_to_arangodb(
     aios_mgr: &AiosDBManager,
@@ -64,131 +65,132 @@ pub async fn save_stp_data_to_arangodb(
     "Ok".to_string()
 }
 
-#[cfg(not(feature = "opencascade_rs"))]
+// #[cfg(not(feature = "opencascade_rs"))]
+// ///导出水淹计算stp
+// pub async fn export_stp(
+//     mgr: &AiosDBManager,
+//     stp_packet: ExportFloodingStpEvent,
+// ) -> anyhow::Result<bool> {
+//     let mut file = File::create(format!(
+//         "./assets/walter_steps/{}.stp",
+//         stp_packet.file_name.as_str()
+//     ))?;
+//     let mut test_str = "测试STP文件下载";
+//     file.write_all(test_str.as_bytes())?;
+//
+//     Ok(true)
+// }
+//
+//
+
+
 ///导出水淹计算stp
-pub async fn export_stp(
-    mgr: &AiosDBManager,
-    stp_packet: ExportFloodingStpEvent,
-) -> anyhow::Result<bool> {
-    let mut file = File::create(format!(
-        "./assets/walter_steps/{}.stp",
-        stp_packet.file_name.as_str()
-    ))?;
-    let mut test_str = "测试STP文件下载";
-    file.write_all(test_str.as_bytes())?;
-
-    Ok(true)
-}
-
-#[cfg(feature = "opencascade_rs")]
-///导出水淹计算stp
-pub async fn export_stp(
-    mgr: &AiosDBManager,
-    stp_packet: ExportFloodingStpEvent,
-) -> anyhow::Result<bool> {
-    use std::collections::BTreeMap;
-
-    let all_plugged_hole_refnos: HashSet<RefU64> = stp_packet.all_plugged_hole_refnos().collect();
-    let all_plugged_door_refnos: HashSet<RefU64> = stp_packet.all_plugged_door_refnos().collect();
-    let export_refnos: Vec<RefU64> = stp_packet.export_refnos().cloned().collect();
-    let shapes_data = query_insts_shape_data(
-        &mgr.get_arango_db().await?,
-        &export_refnos,
-        &[
-            GeoBasicType::Pos,
-            GeoBasicType::CateNeg,
-            GeoBasicType::Neg,
-            GeoBasicType::CateCrossNeg,
-        ],
-    )
-    .await?;
-
-    let mut total_shapes_map: HashMap<RefU64, Shape> = HashMap::default();
-    //one to many relationship
-    let mut boolean_map: BTreeMap<RefU64, Vec<(RefU64, Shape)>> = BTreeMap::new();
-    for (refno, geos_info) in &shapes_data.inst_info_map {
-        //被封堵了的，相当于没有出现过，直接忽略
-        if all_plugged_hole_refnos.contains(refno) {
-            continue;
-        }
-        let is_door = all_plugged_door_refnos.contains(refno);
-        let Some(insts_data) = shapes_data.get_inst_geos_data(geos_info) else {
-            continue;
-        };
-
-        let mut transform = geos_info.world_transform;
-        if let Some((shape, own_pos_refno)) = insts_data.gen_occ_shape(&transform) {
-            if let Some(o) = own_pos_refno && o.is_valid(){
-                //需要进行缩放处理，宽度为门的1/10，高度固定为100
-                if is_door {
-                    // transform =  Transform::from_scale(Vec3::new(1.0, 1.0, 0.3)) * transform;
-                    let mut box_shape = AdHocShape::make_box(100.0, 100.0, 100.0).0;
-                    box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
-                    boolean_map.entry(o).or_default().push((*refno, box_shape));
-                    //door 已经处理，不需要处理第二次
-                    continue;
-                }else{
-                    boolean_map.entry(o).or_default().push((*refno, shape));
-                }
-            } else{
-                total_shapes_map.insert(*refno, shape);
-            }
-        }
-
-
-        let mut ngmr_shapes = insts_data.gen_ngmr_occ_shapes(&transform);
-        for (mut o, mut shape) in  ngmr_shapes {
-            //需要进行缩放处理，宽度为门的1/10，高度固定为100
-            if is_door {
-                //2150 1000 700
-                let inst = &insts_data.insts[0];
-                let extents = insts_data.aabb.unwrap().extents();
-                // dbg!(extents);
-                // dbg!(inst.transform);
-                transform = Transform::from_translation(Vec3::new(0.0, 0.0, -extents.x/2.0))
-                    *  transform * inst.transform ;
-                // let mut box_shape = AdHocShape::make_box(extents.x as f64, extents.y as f64, extents.z as f64).0;
-                let mut box_shape = AdHocShape::make_box(100.0, extents.y as f64 / 10.0 , extents.z as f64).0;
-                box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
-                boolean_map.entry(o).or_default().push((*refno, box_shape));
-                break;
-            }else{
-                boolean_map.entry(o).or_default().push((*refno, shape));
-            }
-        }
-    }
-    // boolean_map.values_mut().for_each(|x| {
-    //     x.sort_by(|a, b| a.0.cmp(&b.0));
-    // });
-
-    // let refnos = boolean_map
-    //     .values()
-    //     .flat_map(|x| x.iter().map(|t| t.0))
-    //     .collect::<Vec<_>>();
-    // dbg!(&refnos);
-
-    total_shapes_map
-        .iter_mut()
-        .filter(|(k, _)| boolean_map.contains_key(k))
-        .for_each(|(k, v)| {
-            let neg_shapes = boolean_map.get(k).unwrap();
-            neg_shapes.into_iter().for_each(|t| {
-                //对于负实体要统一做一个延伸处理，否则负实体会出现薄片
-                *v = v.subtract_shape(&t.1).0;
-            });
-        });
-
-    let mut final_compound_shape = Compound::from_shapes(total_shapes_map.values());
-    fs::create_dir_all("./assets/water_steps")?;
-    final_compound_shape
-        .write_step(&format!(
-            "./assets/water_steps/{}.step",
-            &stp_packet.file_name
-        ))
-        .unwrap();
-
-    Ok(true)
-}
+// pub async fn export_stp(
+//     mgr: &AiosDBManager,
+//     stp_packet: ExportFloodingStpEvent,
+// ) -> anyhow::Result<bool> {
+//     use std::collections::BTreeMap;
+//     let all_plugged_hole_refnos: HashSet<RefU64> = stp_packet.all_plugged_hole_refnos().collect();
+//     let all_plugged_door_refnos: HashSet<RefU64> = stp_packet.all_plugged_door_refnos().collect();
+//     let export_refnos: Vec<RefU64> = stp_packet.export_refnos().cloned().collect();
+//     let shapes_data = query_insts_shape_data(
+//         &mgr.get_arango_db().await?,
+//         &export_refnos,
+//         &[
+//             GeoBasicType::Pos,
+//             GeoBasicType::CateNeg,
+//             GeoBasicType::Neg,
+//             GeoBasicType::CateCrossNeg,
+//         ],
+//     )
+//     .await?;
+//
+//     let mut total_shapes_map: HashMap<RefU64, Shape> = HashMap::default();
+//     //one to many relationship
+//     let mut boolean_map: BTreeMap<RefU64, Vec<(RefU64, Shape)>> = BTreeMap::new();
+//     for (refno, geos_info) in &shapes_data.inst_info_map {
+//         //被封堵了的，相当于没有出现过，直接忽略
+//         if all_plugged_hole_refnos.contains(refno) {
+//             continue;
+//         }
+//         let is_door = all_plugged_door_refnos.contains(refno);
+//         let Some(insts_data) = shapes_data.get_inst_geos_data(geos_info) else {
+//             continue;
+//         };
+//
+//         let mut transform = geos_info.world_transform;
+//         if let Some((shape, own_pos_refno)) = insts_data.gen_occ_shape(&transform) {
+//             if let Some(o) = own_pos_refno && o.is_valid(){
+//                 //需要进行缩放处理，宽度为门的1/10，高度固定为100
+//                 if is_door {
+//                     // transform =  Transform::from_scale(Vec3::new(1.0, 1.0, 0.3)) * transform;
+//                     let mut box_shape = AdHocShape::make_box(100.0, 100.0, 100.0).0;
+//                     box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
+//                     boolean_map.entry(o).or_default().push((*refno, box_shape));
+//                     //door 已经处理，不需要处理第二次
+//                     continue;
+//                 }else{
+//                     boolean_map.entry(o).or_default().push((*refno, shape));
+//                 }
+//             } else{
+//                 total_shapes_map.insert(*refno, shape);
+//             }
+//         }
+//
+//
+//         let mut ngmr_shapes = insts_data.gen_ngmr_occ_shapes(&transform);
+//         for (mut o, mut shape) in  ngmr_shapes {
+//             //需要进行缩放处理，宽度为门的1/10，高度固定为100
+//             if is_door {
+//                 //2150 1000 700
+//                 let inst = &insts_data.insts[0];
+//                 let extents = insts_data.aabb.unwrap().extents();
+//                 // dbg!(extents);
+//                 // dbg!(inst.transform);
+//                 transform = Transform::from_translation(Vec3::new(0.0, 0.0, -extents.x/2.0))
+//                     *  transform * inst.transform ;
+//                 // let mut box_shape = AdHocShape::make_box(extents.x as f64, extents.y as f64, extents.z as f64).0;
+//                 let mut box_shape = AdHocShape::make_box(100.0, extents.y as f64 / 10.0 , extents.z as f64).0;
+//                 box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
+//                 boolean_map.entry(o).or_default().push((*refno, box_shape));
+//                 break;
+//             }else{
+//                 boolean_map.entry(o).or_default().push((*refno, shape));
+//             }
+//         }
+//     }
+//     // boolean_map.values_mut().for_each(|x| {
+//     //     x.sort_by(|a, b| a.0.cmp(&b.0));
+//     // });
+//
+//     // let refnos = boolean_map
+//     //     .values()
+//     //     .flat_map(|x| x.iter().map(|t| t.0))
+//     //     .collect::<Vec<_>>();
+//     // dbg!(&refnos);
+//
+//     total_shapes_map
+//         .iter_mut()
+//         .filter(|(k, _)| boolean_map.contains_key(k))
+//         .for_each(|(k, v)| {
+//             let neg_shapes = boolean_map.get(k).unwrap();
+//             neg_shapes.into_iter().for_each(|t| {
+//                 //对于负实体要统一做一个延伸处理，否则负实体会出现薄片
+//                 *v = v.subtract_shape(&t.1).0;
+//             });
+//         });
+//
+//     let mut final_compound_shape = Compound::from_shapes(total_shapes_map.values());
+//     fs::create_dir_all("./assets/water_steps")?;
+//     final_compound_shape
+//         .write_step(&format!(
+//             "./assets/water_steps/{}.step",
+//             &stp_packet.file_name
+//         ))
+//         .unwrap();
+//
+//     Ok(true)
+// }
 
 ///查询数据库中是否已有当前名称的文件
 pub async fn query_water_calculation_data(

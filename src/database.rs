@@ -890,7 +890,7 @@ pub async fn sync_total_async_threaded(
                                             explicit_values_sql.push_str(
                                                 &gen_explicit_attr_value_sql(att.value()),
                                             );
-                                            let name = att.get_name()
+                                            let name = att.explicit_attmap.get_name_string()
                                             .replace(r#"'"#, r#"\'"#)
                                             .replace(r#"""#, r#"\""#);
                                             let order = get_order(
