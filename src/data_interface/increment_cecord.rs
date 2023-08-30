@@ -31,7 +31,6 @@ impl IncreaseDataTiDB {
             dbno_map.entry(data.numbdb).or_insert_with(Vec::new).push(data);
         }
         for (dbno, increment_data) in dbno_map {
-            dbg!(&dbno);
             let Ok(_r) = create_increment_table(dbno, pool).await else { continue; };
             let sql = gen_insert_increment_sql(dbno, increment_data, &session_name);
             let mut conn = pool.acquire().await?;
