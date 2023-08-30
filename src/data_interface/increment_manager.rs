@@ -213,7 +213,7 @@ impl AiosDBManager {
 
     pub async fn init_watcher(&self) -> anyhow::Result<()> {
         let mut params = IndexMap::new();
-        let mut latest_headers = IndexMap::new();
+        let mut latest_need_update_headers = IndexMap::new();
         for watch_dir in &self.watcher.watch_dirs {
             for entry in WalkDir::new(watch_dir).sort_by(|a, b| {
                 b.path()
@@ -234,8 +234,13 @@ impl AiosDBManager {
                         //未发生修改，直接跳过
                         if old.pdms_header.page_no == basic_info.pdms_header.page_no { continue; }
                         params.insert(path.to_path_buf(), (basic_info.pdms_header.db_num, old.pdms_header.page_no));
+                        //在old里有出现，但是版本号不一致，需要更新
+                        latest_need_update_headers.insert(path.to_path_buf(), basic_info);
+                    }else {
+                        //在old里面没有出现，需要更新进来
+                        self.watcher.headers.insert(path.to_path_buf(), basic_info);
                     }
-                    latest_headers.insert(path.to_path_buf(), basic_info);
+
                 }
             }
         }
@@ -243,7 +248,7 @@ impl AiosDBManager {
         match self.execute_incr_update(params).await {
             Ok(_) => {
                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
-                for (path, new_header) in latest_headers {
+                for (path, new_header) in latest_need_update_headers {
                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
                         //未发生修改，直接跳过
                         if old.pdms_header.page_no == new_header.pdms_header.page_no { continue; }
