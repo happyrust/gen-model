@@ -1,11 +1,9 @@
 
 use aios_core::water_calculation::*;
-use opencascade::primitives::*;
+#[cfg(feature = "opencascade_rs")]
 use opencascade::adhoc::AdHocShape;
 use bevy_transform::prelude::Transform;
 use glam::Vec3;
-// use opencascade::adhoc::AdHocShape;
-use parry3d::shape::Compound;
 use crate::api::attr::query_attr;
 use crate::api::children::travel_children_with_type;
 use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
@@ -89,7 +87,7 @@ pub async fn save_stp_data_to_arangodb(
 //
 //
 
-
+#[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
 pub async fn export_stp(
     mgr: &AiosDBManager,
