@@ -11,7 +11,7 @@ use std::time::Instant;
 use aios_core::create_attas_structs::{VirtualEmbedGraphNode, VirtualHoleGraphNode};
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{PdmsElement, RefU64, RefU64Vec};
-use aios_core::tool::db_tool::db1_hash;
+use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use anyhow::anyhow;
 use bb8_arangodb::{ArangoConnectionManager, AuthenticationMethod};
 use bb8_arangodb::arangors_lite::collection::CollectionType;
@@ -93,10 +93,9 @@ pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: 
     let mut results = Vec::new();
     let mut edges = Vec::new();
     for (refno, whole_attr) in total_attr_map.clone() {
-        let owner = whole_attr.implicit_attmap.get_owner();
-        if owner.is_none() { continue; }
-        let owner = owner.unwrap();
-        let owner_str = owner.to_url_refno();
+        let Some(owner) = whole_attr.implicit_attmap.get_owner() else{
+            continue;
+        };
         let name = cal_default_name(refno, &whole_attr, children_map);
         let noun = whole_attr.implicit_attmap.get_type();
         let order = get_order(
@@ -104,10 +103,10 @@ pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: 
             &whole_attr,
             &children_map,
         ) as u32;
-        let cata_hash = whole_attr.merge_implicit_explicit_into_attr().cal_cata_hash().map(|x| x.to_string());
+        let cata_hash = whole_attr.merge().cal_cata_hash().map(|x| x.to_string());
         let pdms_element = PdmsEleGraphNode {
             refno,
-            owner: owner_str.clone(),
+            owner,
             name,
             noun: noun.to_string(),
             order,
@@ -118,7 +117,7 @@ pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: 
         let pdms_edges = PdmsEleGraphEdgeWithKey {
             _key: key.to_string(),
             _from: format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()),
-            _to: format!("{}/{}", AQL_PDMS_ELES_COLLECTION, owner_str),
+            _to: format!("{}/{}", AQL_PDMS_ELES_COLLECTION, owner.to_url_refno()),
         };
         results.push(pdms_element);
         edges.push(pdms_edges);
@@ -384,6 +383,21 @@ pub async fn save_arangodb_with_db_option(database: &ArDatabase, json: Value, co
         AqlQuery::new(&aql_string)
             .bind_var("@collection", collection)
             .bind_var("elements", json);
+    let _result: Vec<()> = database.aql_query(aql).await?;
+    Ok(())
+}
+
+///删除edge数据库的数据
+pub async fn remove_edges_arangodb(database: &ArDatabase, keys: &[String], collection: &str) -> anyhow::Result<()> {
+    let mut aql_string = r#"
+      with @@collection
+      FOR k IN @keys
+        REMOVE { _key: k } IN @@collection
+  "#.to_string();
+    let aql =
+        AqlQuery::new(&aql_string)
+            .bind_var("@collection", collection)
+            .bind_var("keys", keys);
     let _result: Vec<()> = database.aql_query(aql).await?;
     Ok(())
 }

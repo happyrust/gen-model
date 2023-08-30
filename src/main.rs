@@ -206,9 +206,9 @@ async fn main() -> anyhow::Result<()> {
     }
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
-        Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
-    }
+    // if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
+    //     Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
+    // }
 
     // let refno = "24381/37118".into();
     // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
