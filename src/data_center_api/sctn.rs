@@ -74,7 +74,6 @@ pub async fn get_dq_support_sctn_data(
     // 圆板类
     let children = children.iter().map(|child| child.refno).collect::<Vec<_>>();
     let fixings = query_dq_circular_plate(children, &database).await.unwrap_or(vec![]);
-    dbg!(&fixings.len());
     for fixing in fixings {
         let mut fixing_attrs = Vec::new();
         let spre_name = fixing.spre_name;
@@ -457,6 +456,7 @@ struct EleNodeWithSpreName {
     pub refno: RefU64,
     pub noun: String,
     pub name: String,
+    #[serde_as(as = "DisplayFromStr")]
     pub owner: RefU64,
     pub spre_name: String,
 }
@@ -474,25 +474,26 @@ async fn query_dq_circular_plate(refnos: Vec<RefU64>, database: &ArDatabase) -> 
         filter node.noun == 'GENSEC'
         FOR z in 0..100 INBOUND node._id @@pdms_edges
         filter z.noun == 'FIXING'
+        filter z != null
         let foreign = (
         for v, e, p in 1..2 outbound z._id @@foreign_edges
             filter p.edges[0].foreign_type == 'SPRE'
             filter e.foreign_type == 'SPRE'
             return v.name
         )
-        filter foreign != null
+        filter foreign[0] != null
         return {
             'refno':z._key,
             'owner':z.owner,
             'name':z.name,
             'noun':z.noun,
-            'spre_name': foreign
+            'spre_name': foreign[0]
         }
       ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
         .bind_var("@foreign_edges", AQL_FOREIGN_EDGES_COLLECTION)
         .bind_var("id", id);
-    let result = database.aql_query::<EleNodeWithSpreName>(aql).await?;
+    let result = database.aql_query::<EleNodeWithSpreName>(aql).await.unwrap();
     Ok(result)
 }
 

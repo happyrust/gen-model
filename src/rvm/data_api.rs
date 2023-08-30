@@ -151,13 +151,13 @@ pub async fn create_refnos_rvm_data(select_refno: RefU64, db_option: &DbOption, 
         .map(|info| (info.refno, info))
         .collect::<HashMap<_, _>>();
     // 将extrusion单独提出来 , 该部分为 extrusion 中不为负实体得部分
-    let mut extrusion_geo_hashes: Vec<u64> = Vec::new();
+    let mut use_mesh_geo_hashes: Vec<u64> = Vec::new();
     for geo in refno_geo_infos.iter() {
         for rvm_inst in geo.rvm_inst_geo.iter() {
             match rvm_inst.geo_param {
-                PdmsGeoParam::PrimExtrusion(_) => {
+                PdmsGeoParam::PrimExtrusion(_) | PdmsGeoParam::PrimRevolution(_) | PdmsGeoParam::PrimLoft(_) | PdmsGeoParam::PrimPolyhedron(_) => {
                     let Ok(hash) = rvm_inst.geo_hash.parse() else { continue; };
-                    extrusion_geo_hashes.push(hash);
+                    use_mesh_geo_hashes.push(hash);
                     break;
                 }
                 _ => { continue; }
@@ -195,10 +195,10 @@ pub async fn create_refnos_rvm_data(select_refno: RefU64, db_option: &DbOption, 
         file_data.push(info_vec)
     }
     // 通过查找pdms_mesh找到extrusion的数据
-    let extrusion_mesh = if extrusion_geo_hashes.is_empty() {
+    let extrusion_mesh = if use_mesh_geo_hashes.is_empty() {
         PlantMeshesData::default()
     } else {
-        query_pdms_mesh_aql(database, extrusion_geo_hashes.iter()).await.unwrap_or_default()
+        query_pdms_mesh_aql(database, use_mesh_geo_hashes.iter()).await.unwrap_or_default()
     };
     // 不带负实体得元件
     for info in refno_geo_infos {
@@ -362,17 +362,16 @@ pub async fn query_rvm_tubi_instances_aql(refnos: Vec<RefU64>, database: &ArData
 }
 
 pub fn gen_prim_data_test(refno: RefU64, geo_instance: &RvmInstGeo, desi_transform: Transform,
-                          b_desi_cyli: bool, extrusion_mesh: &PlantMeshesData) -> Option<Vec<u8>> {
+                          b_desi_cyli: bool, mesh_data: &PlantMeshesData) -> Option<Vec<u8>> {
     let mut data = vec![];
     let geo_transform = geo_instance.transform;
     let mut transform =
         if geo_instance.is_tubi {
-            // geo_transform
             desi_transform
         } else {
             desi_transform * geo_transform
         };
-    let aabb = geo_instance.aabb.unwrap().scaled(&Vector::new(desi_transform.scale.x, desi_transform.scale.y, desi_transform.scale.z));
+    let aabb = geo_instance.aabb.unwrap().scaled(&transform.scale.into());
     if let Some(num) = geo_instance.geo_param.into_rvm_pri_num() {
         // tubi 不需要和desi进行变换
         let translation = {
@@ -395,18 +394,21 @@ pub fn gen_prim_data_test(refno: RefU64, geo_instance: &RvmInstGeo, desi_transfo
                                                       translation));
         data.append(&mut gen_desi_prim_aabb_data(aabb, /*geo_instance.transform,*/ &geo_instance.geo_param));
         let Ok(hash) = geo_instance.geo_hash.parse::<u64>() else { return None; };
-        if extrusion_mesh.meshes.contains_key(&hash) {
-            let Some(mesh) = extrusion_mesh.get_mesh(hash) else { return None; };
-            data.append(&mut gen_extrusion_data(transform, mesh.clone()));
+        //mesh 的单独处理，只变换相对坐标
+        if mesh_data.meshes.contains_key(&hash) {
+            let mesh = mesh_data.get_mesh(hash)?;
+            let trans = Transform::from_scale(transform.scale);
+            data.append(&mut gen_mesh_data(trans, mesh.clone()));
         } else {
-            let Some(mut geo) = geo_instance.geo_param.convert_rvm_pri_data() else { return None; };
+            let mut geo = geo_instance.geo_param.convert_rvm_pri_data()?;
             data.append(&mut geo);
         }
     }
     Some(data)
 }
 
-pub fn gen_extrusion_data(transform: Transform, mesh: PlantMesh) -> Vec<u8> {
+///
+pub fn gen_mesh_data(transform: Transform, mesh: PlantMesh) -> Vec<u8> {
     let mut data = Vec::new();
     data.append(&mut format!("     {} \r\n", mesh.vertices.len() / 3).into_bytes());
     let mut i = 0;
@@ -420,13 +422,6 @@ pub fn gen_extrusion_data(transform: Transform, mesh: PlantMesh) -> Vec<u8> {
         let normal_y = transform.transform_vec3(mesh.normals[i + 1]);
         let point_z = transform.transform_vec3(mesh.vertices[i + 2]);
         let normal_z = transform.transform_vec3(mesh.normals[i + 2]);
-
-        // let point_x = transform.scale * (mesh.vertices[i]);
-        // let normal_x = transform.scale * (mesh.normals[i]);
-        // let point_y = transform.scale * (mesh.vertices[i+1]);
-        // let normal_y = transform.scale * (mesh.normals[i+1]);
-        // let point_z = transform.scale * (mesh.vertices[i+2]);
-        // let normal_z = transform.scale * (mesh.normals[i+2]);
 
         data.append(&mut format!("     {:.2}       {:.2}       {:.2}\r\n", point_x.x, point_x.y, point_x.z).into_bytes());
         data.append(&mut format!("     {:.2}       {:.2}       {:.2}\r\n", normal_x.x, normal_x.y, normal_x.z).into_bytes());
