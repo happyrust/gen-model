@@ -132,7 +132,7 @@ impl RvmShapeTypeData {
 // }
 
 /// 生成 rvm 文件
-pub async fn create_refnos_rvm_data(select_refno: RefU64, db_option: &DbOption, database: &ArDatabase) -> anyhow::Result<Vec<u8>> {
+pub async fn create_refnos_rvm_data(select_refno: Vec<RefU64>, db_option: &DbOption, database: &ArDatabase) -> anyhow::Result<Vec<u8>> {
     let mut file_data = Vec::new();
     let head = create_head_data(db_option);
     file_data.push(head);
@@ -294,13 +294,14 @@ pub async fn query_single_rvm_geo_instance_aql(refnos: Vec<RefU64>, database: &A
     for id in @refnos
     for v,e in 0 inbound id @@pdms_edges
     let inst = document(@@pdms_inst_infos,v._key)
+    filter inst.geo_type not in ['CateCrossNeg','Neg']
     filter inst != null
         return {
             'refno': inst._key,
             'noun' : v.noun,
             'world_transform': inst.world_transform,
             'hash':inst.cata_hash == null ? inst._key : inst.cata_hash,
-            'geo_type': v.geo_type,
+            'geo_type': inst.geo_type,
         }
     )
     for hash in hashes
@@ -595,7 +596,7 @@ async fn test_query_rvm_geo_instance_aql() -> anyhow::Result<()> {
     // let refnos = vec![RefU64::from_refno_str("24381/100681").unwrap()];
     // let mut refnos = query_children_order_aql(&database, refnos[0]).await?
     //     .into_iter().map(|refno| refno.refno).collect::<Vec<_>>();
-    let result = create_refnos_rvm_data(refnos, &db_option, &database).await?;
+    let result = create_refnos_rvm_data(vec![refnos], &db_option, &database).await?;
     let mut file = std::fs::File::create("test.rvm").unwrap();
     file.write_all(&result).unwrap();
     Ok(())
