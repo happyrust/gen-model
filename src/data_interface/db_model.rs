@@ -122,7 +122,7 @@ impl AiosDBManager {
     ///初始化watcher
     pub async fn exec_watcher(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
         tokio::spawn(async move {
-            mgr.watcher.init_dbs_header().unwrap();
+            mgr.init_watcher().await.unwrap();
             mgr.async_watch().await.unwrap();
         });
         Ok(())
@@ -582,6 +582,7 @@ impl AiosDBManager {
 
         let db_paths = collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref()));
         dbg!(&db_paths);
+        let mut watcher = PdmsWatcher::load_from_json().unwrap_or(PdmsWatcher::new(db_paths));
 
         Ok(Self {
             project_map,
@@ -600,7 +601,7 @@ impl AiosDBManager {
             cached_world_transforms_map: Arc::new(Default::default()),
             cache_module_numbdbs: Default::default(),
             mdb_dbnums: Default::default(),
-            watcher: PdmsWatcher::new(db_paths),
+            watcher,
             rtree: None,
             room_panels_rtree: None,
             room_info_map: Default::default(),

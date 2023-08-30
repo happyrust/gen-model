@@ -25,6 +25,7 @@ use crate::defines::CACHED_REFNO_BASIC_MAP;
 use crate::graph_db::pdms_arango::{remove_edges_arangodb, save_arangodb_with_db_option};
 use crate::graph_db::structs::{PdmsEleGraphEdgeWithKey, PdmsEleGraphNode};
 use std::sync::Arc;
+use walkdir::WalkDir;
 
 #[derive(PartialEq, Debug, Default, Clone, Copy)]
 pub enum EleOperation {
@@ -36,9 +37,8 @@ pub enum EleOperation {
 }
 
 impl AiosDBManager {
-
     ///默认的名称
-    pub fn default_name(&self, refno: RefU64) -> anyhow::Result<String>{
+    pub fn default_name(&self, refno: RefU64) -> anyhow::Result<String> {
         let mut attmap = self.get_attr_from_localdb(refno)?;
         let owner = attmap.get_owner().unwrap();
         let type_name = attmap.get_type();
@@ -64,8 +64,9 @@ impl AiosDBManager {
     ///执行增量更新
     pub async fn execute_incr_update(
         &self,
-        increment_ranges_map: IndexMap<PathBuf, i32>,
+        increment_ranges_map: IndexMap<PathBuf, (i32, u32)>,
     ) -> anyhow::Result<bool> {
+        if increment_ranges_map.is_empty() {  return Ok(true); }
         let mut type_eles_map = HashMap::new();
         let mut delete_keys = vec![];
         let mut deleted_refnos_set = HashSet::new();
@@ -76,11 +77,11 @@ impl AiosDBManager {
         let mut total_add_len = 0;
         let mut total_modify_len = 0;
         let mut total_delted_len = 0;
-        for (path, dbno) in increment_ranges_map {
+        for (path, (dbno, last_pageno)) in increment_ranges_map {
             let mut io = PdmsIO::new(path, true);
             io.open()?;
-            let eles = io.collect_increment_eles()?;
-            // dbnum_eles_map.insert(dbno, eles);
+            // let
+            let eles = io.collect_increment_eles(Some(last_pageno))?;
             for ele in eles {
                 let attmap = ele.whole_attmap.merge();
                 let mut ele_op = EleOperation::Modified;
@@ -115,7 +116,7 @@ impl AiosDBManager {
 
         ///先更新一遍到本地数据库
         for (noun, eles) in &type_eles_map {
-            for (refno, dbnum, ele,  children) in eles {
+            for (refno, dbnum, ele, children) in eles {
                 let Some(owner) = ele.get_owner() else {
                     continue;
                 };
@@ -130,7 +131,7 @@ impl AiosDBManager {
 
         let mut updated_sets = HashSet::new();
         for (mut noun, mut eles) in type_eles_map {
-            while let Some((refno, dbnum, mut ele,  _)) = eles.pop() {
+            while let Some((refno, dbnum, mut ele, _)) = eles.pop() {
                 updated_sets.insert(refno);
                 let Some(owner) = ele.get_owner() else {
                     continue;
@@ -146,7 +147,7 @@ impl AiosDBManager {
                 //owner children need update all the name, if current name not set
                 let (name, is_default) = self.cal_name(refno).unwrap();
                 let next = order as usize + 1;
-                if is_default && next < owner_children.len(){
+                if is_default && next < owner_children.len() {
                     let remind_siblings = &owner_children[next..];
                     let mut tmp_default_name = name.clone();
                     ele.insert(NAME_HASH, AttrVal::StringType(tmp_default_name.clone()));
@@ -155,7 +156,7 @@ impl AiosDBManager {
                     for r in remind_siblings {
                         //如果在缓存里，才加入到这个列表里, 需要刷新一下列表
                         if CACHED_REFNO_BASIC_MAP.contains_key(r) {
-                            if let Ok(mut tmp_att) = self.get_attr_from_localdb(*r){
+                            if let Ok(mut tmp_att) = self.get_attr_from_localdb(*r) {
                                 if tmp_att.get_name_string() == tmp_default_name {
                                     tmp_default_name = self.default_name(*r)?;
                                     tmp_att.insert(NAME_HASH, AttrVal::StringType(tmp_default_name.clone()));
@@ -210,6 +211,58 @@ impl AiosDBManager {
         Ok(true)
     }
 
+    pub async fn init_watcher(&self) -> anyhow::Result<()> {
+        let mut params = IndexMap::new();
+        let mut latest_headers = IndexMap::new();
+        for watch_dir in &self.watcher.watch_dirs {
+            for entry in WalkDir::new(watch_dir).sort_by(|a, b| {
+                b.path()
+                    .metadata()
+                    .unwrap()
+                    .len()
+                    .cmp(&a.path().metadata().unwrap().len())
+            }) {
+                let dir_entry = entry.unwrap();
+                let path = dir_entry.path();
+                if path.is_dir() {
+                    continue;
+                }
+                let mut io = PdmsIO::new(path, true);
+                io.open()?;
+                if let Ok(basic_info) = io.get_page_basic_info() {
+                    if let Some(mut old) = self.watcher.headers.get_mut(&path.to_path_buf()) {
+                        //未发生修改，直接跳过
+                        if old.pdms_header.page_no == basic_info.pdms_header.page_no { continue; }
+                        params.insert(path.to_path_buf(), (basic_info.pdms_header.db_num, old.pdms_header.page_no));
+                    }
+                    latest_headers.insert(path.to_path_buf(), basic_info);
+                }
+            }
+        }
+        dbg!(params.len());
+        match self.execute_incr_update(params).await {
+            Ok(_) => {
+                //执行没问题了，再更新当前的版本记录，headers直接存本地json
+                for (path, new_header) in latest_headers {
+                    if let Some(mut old) = self.watcher.headers.get_mut(&path) {
+                        //未发生修改，直接跳过
+                        if old.pdms_header.page_no == new_header.pdms_header.page_no { continue; }
+                        *old.value_mut() = new_header;
+                    }
+                }
+                //now save the watch.json
+                self.watcher.save()?;
+                println!("执行启动后的自动增量完成。")
+            }
+            Err(e) => {
+                println!("Execute increment update error: {:?}", e);
+            }
+        }
+
+        anyhow::Ok(())
+    }
+
+    ///开始监测数据文件夹
     pub async fn async_watch(&self) -> notify::Result<()> {
         let (mut watcher, mut rx) = PdmsWatcher::async_watcher()?;
         self.watcher.watch_dirs.iter().for_each(|x| {
@@ -224,19 +277,28 @@ impl AiosDBManager {
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(event.paths) {
                         // dbg!(&new_headers);
                         let mut params = IndexMap::new();
-                        for (path, new_header) in new_headers {
-                            if let Some(mut old) = self.watcher.headers.get_mut(&path) {
+                        for (path, new_header) in &new_headers {
+                            if let Some(mut old) = self.watcher.headers.get_mut(path) {
                                 //未发生修改，直接跳过
                                 if old.pdms_header.page_no == new_header.pdms_header.page_no { continue; }
-                                // let range = (old.file_size..new_header.file_size);
-                                params.insert(path.clone(), new_header.pdms_header.db_num);
-                                // self.watcher.headers.insert(path, new_header);
-                                *old.value_mut() = new_header;
+                                params.insert(path.clone(), (new_header.pdms_header.db_num, old.pdms_header.page_no));
+                                // *old.value_mut() = new_header;
                             }
                         }
                         // dbg!(&params);
                         match self.execute_incr_update(params).await {
-                            Ok(_) => {}
+                            Ok(_) => {
+                                //执行没问题了，再更新当前的版本记录，headers直接存本地json
+                                for (path, new_header) in new_headers {
+                                    if let Some(mut old) = self.watcher.headers.get_mut(&path) {
+                                        //未发生修改，直接跳过
+                                        if old.pdms_header.page_no == new_header.pdms_header.page_no { continue; }
+                                        *old.value_mut() = new_header;
+                                    }
+                                }
+                                //now save the watch.json
+                                self.watcher.save();
+                            }
                             Err(e) => {
                                 println!("Execute increment update error: {:?}", e);
                             }
