@@ -25,8 +25,9 @@ use smol_str::SmolStr;
 use sqlx::pool::PoolOptions;
 use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
 use std::collections::{HashMap, HashSet};
-use std::default;
+use std::{default, fs};
 use std::mem::take;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use hex::encode;
@@ -59,6 +60,7 @@ use crate::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 use crate::graph_db::structs::PdmsEleGraphNode;
 use crate::tables::gen_create_project_mdb_sql;
 use nalgebra::Point3;
+use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
 
 pub const TUBI_TOL: f32 = 10.0f32;
@@ -82,6 +84,19 @@ static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> 
     m
 });
 
+
+///获得目录下下面的指定project 数据库文件（000结尾）
+#[inline]
+pub fn collect_db_dirs<'a, T: AsRef<Path>>(dir: T, projects: impl IntoIterator<Item=&'a str>) -> Vec<PathBuf> {
+    projects.into_iter().filter_map(|x| {
+        fs::read_dir(dir.as_ref().to_path_buf().join(x))
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.unwrap().path())
+            .find(|x| x.is_dir() && x.file_name().unwrap().to_str().unwrap().ends_with("000"))
+    }).collect()
+}
+
 impl AiosDBManager {
     /// 从默认配置文件初始化
     pub async fn init_form_config() -> anyhow::Result<Self> {
@@ -94,13 +109,30 @@ impl AiosDBManager {
             &db_option.project_name,
             &db_option.mdb_name,
             &db_option.module,
-        )
-            .await?;
+        ).await?;
+        //初始化watcher
+        // mgr.init_watcher().await?;
         //加载空间树
         if db_option.load_spatial_tree {
             mgr.compute_aabb_trees().await?;
         }
         Ok(mgr)
+    }
+
+    ///初始化watcher
+    pub async fn exec_watcher(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
+        tokio::spawn(async move {
+            mgr.init_watcher().await.unwrap();
+            mgr.async_watch().await.unwrap();
+        });
+        Ok(())
+    }
+
+
+    ///总的路径-> 查找到所有000文件夹的路径
+    #[inline]
+    pub fn collect_db_dirs(&self) -> Vec<PathBuf> {
+        collect_db_dirs(&self.db_option.project_path, self.projects.iter().map(|x| x.as_ref()))
     }
 
     pub async fn compute_aabb_trees(&mut self) -> anyhow::Result<bool> {
@@ -546,11 +578,11 @@ impl AiosDBManager {
         let projects = db_option.included_projects.clone();
         println!("正在创建图数据库连接");
         let arango_pool = connect_arangodb(&db_option).await?;
-        let db = arango_pool
-            .get()
-            .await?
-            .db(&db_option.arangodb_database)
-            .await?;
+
+
+        let db_paths = collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref()));
+        dbg!(&db_paths);
+        let mut watcher = PdmsWatcher::load_from_json().unwrap_or(PdmsWatcher::new(db_paths));
 
         Ok(Self {
             project_map,
@@ -569,6 +601,7 @@ impl AiosDBManager {
             cached_world_transforms_map: Arc::new(Default::default()),
             cache_module_numbdbs: Default::default(),
             mdb_dbnums: Default::default(),
+            watcher,
             rtree: None,
             room_panels_rtree: None,
             room_info_map: Default::default(),
@@ -595,6 +628,24 @@ impl AiosDBManager {
     #[inline]
     pub fn get_project_pool(&self, project: &str) -> Option<Pool<MySql>> {
         self.project_map.get(project).map(|x| x.value().clone())
+    }
+
+    /// 根据project获取连接池
+    #[inline]
+    pub fn get_cur_project_pool(&self) -> Option<Pool<MySql>> {
+        self.project_map.get(self.get_cur_project()).map(|x| x.value().clone())
+    }
+
+    /// 根据project获取连接池
+    #[inline]
+    pub fn get_cur_attmap_tree(&self) -> Option<sled::Tree> {
+        self.local_attr_db_map.get(self.get_cur_project()).map(|x| x.value().clone())
+    }
+
+    /// 根据project获取连接池
+    #[inline]
+    pub fn get_cur_children_tree(&self) -> Option<sled::Tree> {
+        self.local_children_db_map.get(self.get_cur_project()).map(|x| x.value().clone())
     }
 
     ///获得project 的db

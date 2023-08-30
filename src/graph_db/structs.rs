@@ -10,7 +10,8 @@ pub struct PdmsEleGraphNode {
     #[serde_as(as = "DisplayFromStr")]
     #[serde(rename = "_key")]
     pub refno: RefU64,
-    pub owner: String,
+    #[serde_as(as = "DisplayFromStr")]
+    pub owner: RefU64,
     pub name: String,
     pub noun: String,
     pub order: u32,
