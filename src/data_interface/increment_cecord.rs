@@ -49,7 +49,7 @@ impl IncreaseDataTiDB {
 }
 
 fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncreaseDataTiDB>, session_name: &str) -> String {
-    let mut sql = format!("INSERT INTO {dbno}_{INCREMENT_DATA}(ID,REFNO,REFNO_STR,OWNER, OPERATE, VERSION,TIME, CHILDREN,OLD_DATA,NEW_DATA,USER) VALUES");
+    let mut sql = format!("INSERT INTO {dbno}_{INCREMENT_DATA}(ID,REFNO,REFNO_STR,OWNER, OPERATE, VERSION,NUMBDB,TIME,CHILDREN,OLD_DATA,NEW_DATA,USER) VALUES");
     for increment_data in increment_datas {
         // uuid 作为图数据库和 tidb 连接的主键
         let id = Uuid::new_v4().to_string();
@@ -61,12 +61,13 @@ fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncreaseDataTiDB>, s
         let new_data = hex::encode(increment_data.new_attr.into_rkyv_compress_bytes());
         let children = hex::encode(bincode::serialize(&increment_data.children).unwrap_or(vec![]));
         let local: DateTime<Local> = Local::now();
+        let dbnum = increment_data.numbdb;
         let refno = increment_data.refno;
         let refno_str = refno.to_refno_string();
         let time = format!("{}-{}-{} {}:{}:{}", local.year(), local.month(), local.day(),
                            local.hour().to_string(), local.minute(), local.second());
-        sql.push_str(&format!("('{}',{},'{refno_str}',{owner},{},{},'{time}',0x{},0x{},0x{},'{}') ,"
-                              , id, refno, operate, increment_data.new_version, children, old_data, new_data, session_name));
+        sql.push_str(&format!("('{}',{},'{refno_str}',{owner},{},{},{dbnum},'{time}',0x{},0x{},0x{},'{}') ,"
+                              , id, refno.0, operate, increment_data.new_version, children, old_data, new_data, session_name));
     }
     sql.remove(sql.len() - 1);
     sql
@@ -103,7 +104,7 @@ fn gen_create_increment_table_sql(dbno: i32) -> String {
     sql.push_str(&format!("{} BLOB ,", "OLD_DATA"));
     sql.push_str(&format!("{} BLOB ,", "NEW_DATA"));
     sql.push_str(&format!("{} VARCHAR(50) ,", "TIME"));
-    sql.push_str(&format!("{} VARCHAR(100) ", "DESC"));
+    sql.push_str(&format!("{} VARCHAR(100) ", "DESCRIPTION"));
     sql.push_str(");");
     sql
 }

@@ -103,7 +103,7 @@ impl AiosDBManager {
         for (path, (dbno, last_pageno)) in increment_ranges_map {
             let mut io = PdmsIO::new(path, true);
             io.open()?;
-            let eles = io.collect_increment_eles(last_pageno)?;
+            let eles = io.collect_increment_eles(Some(last_pageno))?;
             for ele in eles {
                 let attmap = ele.whole_attmap.merge();
                 let mut ele_op = EleOperation::Modified;
@@ -284,7 +284,6 @@ impl AiosDBManager {
                 let mut io = PdmsIO::new(path, true);
                 io.open()?;
                 if let Ok(basic_info) = io.get_page_basic_info() {
-                    let mut last_pageno = None;
                     if let Some(mut old) = self.watcher.headers.get_mut(&path.to_path_buf()) {
                         //未发生修改，直接跳过
                         if old.pdms_header.page_no == basic_info.pdms_header.page_no { continue; }
@@ -335,17 +334,17 @@ impl AiosDBManager {
                 Ok(event) => {
                     println!("changed: {:?}", &event);
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(event.paths) {
-                        dbg!(&new_headers);
+                        // dbg!(&new_headers);
                         let mut params = IndexMap::new();
                         for (path, new_header) in &new_headers {
-                            let mut last_pageno = None;
                             if let Some(mut old) = self.watcher.headers.get_mut(path) {
                                 //未发生修改，直接跳过
                                 if old.pdms_header.page_no == new_header.pdms_header.page_no { continue; }
-                                last_pageno = Some(old.pdms_header.page_no);
+                                params.insert(path.clone(), (new_header.pdms_header.db_num, old.pdms_header.page_no));
+                                // *old.value_mut() = new_header;
                             }
-                            params.insert(path.clone(), (new_header.pdms_header.db_num, last_pageno));
                         }
+                        // dbg!(&params);
                         match self.execute_incr_update(params).await {
                             Ok(_) => {
                                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
