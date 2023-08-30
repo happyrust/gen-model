@@ -215,7 +215,7 @@ pub async fn query_water_calculation_data_total_aql(database: &ArDatabase) -> an
     let aql = AqlQuery::new("
     for c in @@collection
         return unset(c , '_id','_rev')").bind_var("@collection", AQL_WATER_CALCULATION_COLLECTION);
-    dbg!("*****");
+
     let result = database.aql_query::<FloodingStpToArangodb>(aql).await?;
     Ok(result)
 }
