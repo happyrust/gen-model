@@ -86,10 +86,9 @@ impl AiosDBManager {
     ///执行增量更新
     pub async fn execute_incr_update(
         &self,
-        increment_ranges_map: IndexMap<PathBuf, (i32, Option<u32>)>,
+        increment_ranges_map: IndexMap<PathBuf, (i32, u32)>,
     ) -> anyhow::Result<bool> {
-        dbg!(&increment_ranges_map.len());
-        if increment_ranges_map.is_empty() { return Ok(true); }
+        if increment_ranges_map.is_empty() {  return Ok(true); }
         let mut type_eles_map = HashMap::new();
         let mut delete_keys = vec![];
         let mut deleted_refnos_set = HashSet::new();
@@ -268,7 +267,7 @@ impl AiosDBManager {
 
     pub async fn init_watcher(&self) -> anyhow::Result<()> {
         let mut params = IndexMap::new();
-        let mut latest_headers = IndexMap::new();
+        let mut latest_need_update_headers = IndexMap::new();
         for watch_dir in &self.watcher.watch_dirs {
             for entry in WalkDir::new(watch_dir).sort_by(|a, b| {
                 b.path()
@@ -289,10 +288,14 @@ impl AiosDBManager {
                     if let Some(mut old) = self.watcher.headers.get_mut(&path.to_path_buf()) {
                         //未发生修改，直接跳过
                         if old.pdms_header.page_no == basic_info.pdms_header.page_no { continue; }
-                        last_pageno = Some(old.pdms_header.page_no);
+                        params.insert(path.to_path_buf(), (basic_info.pdms_header.db_num, old.pdms_header.page_no));
+                        //在old里有出现，但是版本号不一致，需要更新
+                        latest_need_update_headers.insert(path.to_path_buf(), basic_info);
+                    }else {
+                        //在old里面没有出现，需要更新进来
+                        self.watcher.headers.insert(path.to_path_buf(), basic_info);
                     }
-                    params.insert(path.to_path_buf(), (basic_info.pdms_header.db_num, last_pageno));
-                    latest_headers.insert(path.to_path_buf(), basic_info);
+
                 }
             }
         }
@@ -300,7 +303,7 @@ impl AiosDBManager {
         match self.execute_incr_update(params).await {
             Ok(_) => {
                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
-                for (path, new_header) in latest_headers {
+                for (path, new_header) in latest_need_update_headers {
                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
                         //未发生修改，直接跳过
                         if old.pdms_header.page_no == new_header.pdms_header.page_no { continue; }
