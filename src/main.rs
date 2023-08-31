@@ -324,6 +324,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, AQL_DATA_ELES_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_DESPARA_ELES_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_FOREIGN_EDGES_COLLECTION, Edge).await?;
+    create_arango_document(&database, AQL_PDMS_MDBS_EDGES_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_INSTANCE_EDGES_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_PARA_ELES_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_PDMS_EDGES_COLLECTION, Edge).await?;

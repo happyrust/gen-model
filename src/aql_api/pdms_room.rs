@@ -995,7 +995,6 @@ impl AiosDBManager {
         nearest: bool,
         filter_types: &[&str],
         own_filter_types: &[&str],
-        // check_fn: Fn(RefU64) -> bool,
     ) -> anyhow::Result<Vec<(RefU64, f32)>> {
         let children_refnos = self.get_children_from_localdb(refno)?;
         let mut result: Vec<(RefU64, f32)> = Vec::new();
@@ -1021,6 +1020,12 @@ impl AiosDBManager {
             }
         }
         Ok(result)
+    }
+
+    ///获取穿过的构件
+    /// filter 指定过滤的类型
+    pub async fn query_through_eles(&self, refno: RefU64, filter: &[&str]){
+
     }
 
     ///通过包围盒查询周围的构件

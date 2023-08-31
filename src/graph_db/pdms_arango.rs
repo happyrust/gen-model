@@ -30,7 +30,7 @@ use crate::consts::AQL_PDMS_EDGES_COLLECTION;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{DataDocument, ForeignEdges};
-use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphEdgeWithKey, PdmsEleGraphNode};
+use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleEdge, PdmsEleGraphNode};
 
 pub type ArDatabase = arangors_lite::Database;
 pub type ArPool = Pool<ArangoConnectionManager>;
@@ -96,6 +96,9 @@ pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: 
         let Some(owner) = whole_attr.implicit_attmap.get_owner() else{
             continue;
         };
+        // if refno == "24381/179346".into() {
+        //     dbg!(&whole_attr);
+        // }
         let name = cal_default_name(refno, &whole_attr, children_map);
         let noun = whole_attr.implicit_attmap.get_type();
         let order = get_order(
@@ -114,10 +117,12 @@ pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: 
             cata_hash
         };
         let key = refno.hash_with_another_refno(owner);
-        let pdms_edges = PdmsEleGraphEdgeWithKey {
-            _key: key.to_string(),
-            _from: format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()),
-            _to: format!("{}/{}", AQL_PDMS_ELES_COLLECTION, owner.to_url_refno()),
+        let pdms_edges = PdmsEleEdge {
+            key: key.to_string(),
+            refno,
+            owner,
+            order,
+            ..Default::default()
         };
         results.push(pdms_element);
         edges.push(pdms_edges);
@@ -160,10 +165,12 @@ pub async fn save_pdms_level_edges_in_sync(database: &ArDatabase, children_map: 
         for i in 1..children_map.len() {
             let from_refno = children_map[i].0;
             let to_refno = children_map[i - 1].0;
-            let edge = PdmsEleGraphEdgeWithKey {
-                _key: from_refno.hash_with_another_refno(to_refno).to_string(),
-                _from: format!("{}/{}", "pdms_eles", from_refno.to_url_refno()),
-                _to: format!("{}/{}", "pdms_eles", to_refno.to_url_refno()),
+            let edge = PdmsEleEdge {
+                key: from_refno.hash_with_another_refno(to_refno).to_string(),
+                refno: from_refno,
+                owner: to_refno,
+                order: i as _,
+                ..Default::default()
             };
             results.push(edge);
         }
@@ -322,13 +329,13 @@ pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::
                 // 分量保存
                 if spre_edges.len() > 1000 {
                     let json = serde_json::to_value(&take(&mut spre_edges))?;
-                    save_arangodb(json, mgr.clone(), edges_collection).await?;
+                    save_arangodb(mgr.clone(), json, edges_collection).await?;
                 }
             }
         }
     }
     let json = serde_json::to_value(&take(&mut spre_edges))?;
-    save_arangodb(json, mgr.clone(), edges_collection).await?;
+    save_arangodb(mgr.clone(), json, edges_collection).await?;
     Ok(())
 }
 
@@ -359,16 +366,15 @@ pub async fn save_dtse_value_to_arangodb(database: &ArDatabase, type_ele_map: &D
 }
 
 
-pub async fn save_arangodb(json: Value, mgr: Arc<AiosDBManager>, collection: &str) -> anyhow::Result<()> {
+pub async fn save_arangodb(mgr: Arc<AiosDBManager>, json: Value, collection: &str) -> anyhow::Result<()> {
     let database = mgr.get_arango_db().await?;
     let aql = AqlQuery::new(r#"
-    with @@collection
-    LET data = @elements
+        with @@collection
+        LET data = @elements
                     FOR d IN data
                         INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
         .bind_var("@collection", collection)
-        .bind_var("elements", json)
-        ;
+        .bind_var("elements", json);
     let _result: Vec<()> = database.aql_query(aql).await?;
     Ok(())
 }

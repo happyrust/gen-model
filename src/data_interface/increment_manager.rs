@@ -23,7 +23,7 @@ use pdms_io::io::PdmsIO;
 use crate::consts::*;
 use crate::defines::CACHED_REFNO_BASIC_MAP;
 use crate::graph_db::pdms_arango::{remove_edges_arangodb, save_arangodb_with_db_option};
-use crate::graph_db::structs::{PdmsEleGraphEdgeWithKey, PdmsEleGraphNode};
+use crate::graph_db::structs::{PdmsEleEdge, PdmsEleGraphNode};
 use std::sync::Arc;
 use walkdir::WalkDir;
 
@@ -179,10 +179,12 @@ impl AiosDBManager {
                     cata_hash,
                 };
                 let key = refno.hash_with_another_refno(owner);
-                let pdms_edge = PdmsEleGraphEdgeWithKey {
-                    _key: key.to_string(),
-                    _from: format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()),
-                    _to: format!("{}/{}", AQL_PDMS_ELES_COLLECTION, owner.to_url_refno()),
+                let pdms_edge = PdmsEleEdge {
+                    key: key.to_string(),
+                    refno,
+                    owner,
+                    order,
+                    ..Default::default()
                 };
                 pdms_elements.push(pdms_element);
                 edges.push(pdms_edge);

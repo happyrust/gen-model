@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::dbg;
 use aios_core::cache::refno::CachedRefBasic;
-use aios_core::pdms_types::{AiosStr, AttrMap, EleTreeNode, PdmsTree, RefU64, RefU64Vec};
+use aios_core::pdms_types::{AiosStr, AttrMap, EleTreeNode, PdmsElement, PdmsTree, RefU64, RefU64Vec};
 use aios_core::prim_geo::spine::Spine3D;
 use aios_core::shape::pdms_shape::PlantMesh;
 use smol_str::SmolStr;
@@ -80,9 +80,9 @@ pub trait PdmsDataInterface : Send + Sync{
 
     fn get_cur_mdb(&self) -> &str;
 
-    async fn get_world(&self, project: &str, mdb_name: &str, module: &str)  -> anyhow::Result<EleTreeNode>;
+    async fn get_world(&self, project: &str, mdb_name: &str, module: &str)  -> anyhow::Result<PdmsElement>;
 
-    async fn get_desi_world(&self)  -> anyhow::Result<EleTreeNode>;
+    async fn get_desi_world(&self)  -> anyhow::Result<PdmsElement>;
 
     async fn get_children_nodes(&self, refno: RefU64) -> anyhow::Result<Vec<EleTreeNode>>;
 
