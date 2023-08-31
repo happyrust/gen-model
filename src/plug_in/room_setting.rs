@@ -55,7 +55,7 @@ pub async fn query_room_site_table(pool: &Pool<MySql>) -> anyhow::Result<&'stati
         if query_results.len() > 0 {
             return Ok("true");
         } else {
-            dbg!("&&&&");
+
             return Ok("false");
         }
     }
@@ -77,6 +77,7 @@ pub async fn query_selected_room_site(pool: &Pool<MySql>) -> anyhow::Result<Vec<
         let refno = query_result.get::<String, _>("refno");
         let name = query_result.get::<String, _>("name");
         result.push((refno, name));
+        dbg!(&result);
     }
     Ok(result)
 }
