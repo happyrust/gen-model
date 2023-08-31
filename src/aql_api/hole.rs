@@ -139,12 +139,13 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
             let fill_percent = get_plugging_fill_percent().await;
             let plugging_volume = f64::PI * (diameter / 2.0) * (diameter / 2.0) * height * (1.0 - fill_percent);
             result.push(PluggingData {
+                own_refno: (),
                 refno: hole.refno,
                 name: element.name,
                 size: format!("{}", diameter),
                 room_1: "".to_string(),
                 room_2: "".to_string(),
-                height,
+                // height,
                 cable_area,
                 plugging_area,
                 plugging_volume,
