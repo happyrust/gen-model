@@ -77,7 +77,7 @@ pub async fn query_selected_room_site(pool: &Pool<MySql>) -> anyhow::Result<Vec<
         let refno = query_result.get::<String, _>("refno");
         let name = query_result.get::<String, _>("name");
         result.push((refno, name));
-        dbg!(&result);
+
     }
     Ok(result)
 }
