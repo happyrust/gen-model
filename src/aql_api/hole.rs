@@ -26,7 +26,7 @@ pub async fn get_plugging_material_datas(select_refno: Vec<RefU64>, database: &A
     // 查找他的instance
     let insts = query_hole_instance(&holes, &database).await?;
     let name_map = holes.into_iter().map(|refno| (refno.refno, refno)).collect::<HashMap<RefU64, PdmsElement>>();
-    compute_hole_instance_data(&database, insts, name_map).await
+    compute_hole_instance_data(&database, insts, name_map,select_refno).await
 }
 
 /// 获取需要计算的孔洞
@@ -89,6 +89,7 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
                                         database: &ArDatabase,
                                         hole_instance: Vec<HoleInstInfo>,
                                         name_map: HashMap<RefU64, PdmsElement>,
+                                        select_refno: RefU64
 ) -> anyhow::Result<Vec<PluggingData>> {
     // let database = &mgr.get_arango_db().await?;
     let mut result = Vec::new();
@@ -139,6 +140,7 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
             let fill_percent = get_plugging_fill_percent().await;
             let plugging_volume = f64::PI * (diameter / 2.0) * (diameter / 2.0) * height * (1.0 - fill_percent);
             result.push(PluggingData {
+                own_refno:select_refno,
                 refno: hole.refno,
                 name: element.name,
                 size: format!("{}", diameter),
@@ -170,6 +172,7 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
             let fill_percent = get_plugging_fill_percent().await;
             let plugging_volume = size_1 * size_2 * height * (1.0 - fill_percent);
             result.push(PluggingData {
+                own_refno: select_refno,
                 refno: hole.refno,
                 name: element.name,
                 size: format!("{:.2}X{:.2}", size_1, size_2),
@@ -180,6 +183,7 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
                 plugging_area,
                 plugging_volume,
                 materials: "".to_string(),
+                
             })
         }
     }
