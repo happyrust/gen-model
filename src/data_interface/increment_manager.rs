@@ -5,7 +5,7 @@ use aios_core::cache::mgr::BytesTrait;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::consts::NAME_HASH;
 use aios_core::helper::qualified_table_name;
-use aios_core::pdms_types::{AttrVal, RefU64, RefU64Vec};
+use aios_core::pdms_types::{AttrMap, AttrVal, RefU64, RefU64Vec};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
@@ -26,14 +26,36 @@ use crate::graph_db::pdms_arango::{remove_edges_arangodb, save_arangodb_with_db_
 use crate::graph_db::structs::{PdmsEleEdge, PdmsEleGraphNode};
 use std::sync::Arc;
 use walkdir::WalkDir;
+use serde::{Serialize, Deserialize};
+use crate::data_interface::increment_cecord::IncreaseDataTiDB;
 
-#[derive(PartialEq, Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
+pub struct IncrementInfo {
+    pub refno: RefU64,
+    pub db_no: i32,
+    pub attr: AttrMap,
+    pub children: RefU64Vec,
+    pub operation: EleOperation,
+}
+
+#[derive(PartialEq, Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub enum EleOperation {
     #[default]
     None,
     Add,
     Modified,
     Deleted,
+}
+
+impl EleOperation {
+    pub fn into_tidb_num(&self) -> u8 {
+        match &self {
+            EleOperation::None => { 0 }
+            EleOperation::Add => { 1 }
+            EleOperation::Modified => { 2 }
+            EleOperation::Deleted => { 3 }
+        }
+    }
 }
 
 impl AiosDBManager {
@@ -70,6 +92,7 @@ impl AiosDBManager {
         let mut type_eles_map = HashMap::new();
         let mut delete_keys = vec![];
         let mut deleted_refnos_set = HashSet::new();
+
         let attmap_db = self.get_cur_attmap_tree().unwrap();
         let children_db = self.get_cur_children_tree().unwrap();
         let mut pdms_elements = vec![];
@@ -80,7 +103,6 @@ impl AiosDBManager {
         for (path, (dbno, last_pageno)) in increment_ranges_map {
             let mut io = PdmsIO::new(path, true);
             io.open()?;
-            // let
             let eles = io.collect_increment_eles(Some(last_pageno))?;
             for ele in eles {
                 let attmap = ele.whole_attmap.merge();
@@ -98,11 +120,13 @@ impl AiosDBManager {
                 } else {
                     ele_op = EleOperation::Add;
                 }
-                //test
-                // if ele_op == EleOperation::Deleted {
-                //     dbg!(&ele);
-                // }
-                type_eles_map.entry(ele.noun).or_insert(Vec::new()).push((ele.refno, dbno, attmap, ele.children));
+                type_eles_map.entry(ele.noun).or_insert(Vec::new()).push(IncrementInfo {
+                    refno: ele.refno,
+                    db_no: dbno,
+                    attr: attmap,
+                    children: ele.children,
+                    operation: ele_op,
+                });
 
                 match ele_op {
                     EleOperation::None => {}
@@ -112,46 +136,66 @@ impl AiosDBManager {
                 }
             }
         }
-
-
+        // 将记录保存到tidb
+        let mut increment_data_record = Vec::new();
+        for (noun, eles) in &type_eles_map {
+            for ele in eles {
+                let Ok(old_attr) = self.get_attr(ele.refno).await else { continue; };
+                increment_data_record.push(IncreaseDataTiDB {
+                    refno: ele.refno,
+                    data_operate: ele.operation,
+                    numbdb: ele.db_no,
+                    children: ele.children.clone(),
+                    old_attr,
+                    new_attr: ele.attr.clone(),
+                    new_version: 0,
+                    old_version: 0,
+                });
+            }
+        }
+        // 暂时都保存到desi项目里面
+        if let Some(pool) = self.project_map.get(&self.db_option.project_name) {
+            let _ = IncreaseDataTiDB::save_increment_data(increment_data_record, "default".to_string(), pool.value()).await?;
+        }
         ///先更新一遍到本地数据库
         for (noun, eles) in &type_eles_map {
-            for (refno, dbnum, ele, children) in eles {
-                let Some(owner) = ele.get_owner() else {
+            for ele in eles {
+                let Some(owner) = ele.attr.get_owner() else {
                     continue;
                 };
-                let mut vec = children.to_bytes()?;
-                children_db.insert((**refno).to_be_bytes().as_slice(), &*vec)?;
+                let mut vec = ele.children.to_bytes()?;
+                children_db.insert((ele.refno).to_be_bytes().as_slice(), &*vec)?;
 
-                let mut bytes = ele.into_rkyv_compress_bytes();
-                attmap_db.insert((**refno).to_be_bytes().as_slice(), &*bytes)?;
+                let mut bytes = ele.attr.into_rkyv_compress_bytes();
+                attmap_db.insert((ele.refno).to_be_bytes().as_slice(), &*bytes)?;
             }
         }
 
 
         let mut updated_sets = HashSet::new();
         for (mut noun, mut eles) in type_eles_map {
-            while let Some((refno, dbnum, mut ele, _)) = eles.pop() {
-                updated_sets.insert(refno);
-                let Some(owner) = ele.get_owner() else {
+            while let Some(mut ele) = eles.pop() {
+                let refno = ele.refno;
+                updated_sets.insert(ele.refno);
+                let Some(owner) = ele.attr.get_owner() else {
                     continue;
                 };
-                let type_name = ele.get_type();
+                let type_name = ele.attr.get_type();
                 let _ = CACHED_REFNO_BASIC_MAP.insert(refno, &CachedRefBasic {
                     owner,
                     table: qualified_table_name(type_name),
                 });
                 let owner_children = self.get_children_from_localdb(owner).unwrap_or_default();
                 let order = owner_children.iter().position(|x| *x == refno).unwrap_or_default() as u32;
-                let cata_hash = ele.cal_cata_hash().map(|x| x.to_string());
+                let cata_hash = ele.attr.cal_cata_hash().map(|x| x.to_string());
                 //owner children need update all the name, if current name not set
                 let (name, is_default) = self.cal_name(refno).unwrap();
                 let next = order as usize + 1;
                 if is_default && next < owner_children.len() {
                     let remind_siblings = &owner_children[next..];
                     let mut tmp_default_name = name.clone();
-                    ele.insert(NAME_HASH, AttrVal::StringType(tmp_default_name.clone()));
-                    let mut bytes = ele.into_rkyv_compress_bytes();
+                    ele.attr.insert(NAME_HASH, AttrVal::StringType(tmp_default_name.clone()));
+                    let mut bytes = ele.attr.into_rkyv_compress_bytes();
                     attmap_db.insert((*refno).to_be_bytes().as_slice(), &*bytes)?;
                     for r in remind_siblings {
                         //如果在缓存里，才加入到这个列表里, 需要刷新一下列表
@@ -163,7 +207,14 @@ impl AiosDBManager {
                                     let mut bytes = tmp_att.into_rkyv_compress_bytes();
                                     attmap_db.insert((**r).to_be_bytes().as_slice(), &*bytes)?;
 
-                                    eles.push((*r, dbnum, tmp_att, Default::default()));
+                                    // eles.push((*r, dbnum, tmp_att, Default::default()));
+                                    eles.push(IncrementInfo {
+                                        refno: *r,
+                                        db_no: ele.db_no,
+                                        attr: tmp_att,
+                                        children: Default::default(),
+                                        operation: Default::default(),
+                                    });
                                 }
                             }
                         }
@@ -175,7 +226,7 @@ impl AiosDBManager {
                     name,
                     noun: db1_dehash(noun),
                     order,
-                    dbnum,
+                    dbnum: ele.db_no,
                     cata_hash,
                 };
                 let key = refno.hash_with_another_refno(owner);
@@ -209,6 +260,9 @@ impl AiosDBManager {
         }
 
         println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_delted_len}");
+
+        // 将记录保存到tidb
+
 
         Ok(true)
     }

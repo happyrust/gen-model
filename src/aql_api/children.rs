@@ -523,17 +523,19 @@ pub async fn query_travel_children_aql(
 /// 遍历该refno的所有子节点包含自己，并只返回参考号
 pub async fn query_travel_children_refnos_aql(
     arango_database: &ArDatabase,
-    refno: RefU64,
+    refno: Vec<RefU64>,
 ) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let ids = refno.into_iter()
+        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+        .collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "\
     With @@pdms_eles,@@pdms_edges
-    for c in 0..10 inbound @id @@pdms_edges
+    for id in @ids
+    for c in 0..10 inbound id @@pdms_edges
     return c._key
-    ",
-    )
-    .bind_var("id", refno_aql)
+    ", )
+    .bind_var("ids", ids)
     .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
     .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<String> = arango_database.aql_query(aql).await?;
