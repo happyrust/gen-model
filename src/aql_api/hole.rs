@@ -19,9 +19,10 @@ use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 
 /// 返回封堵材料统计插件数据
-pub async fn get_plugging_material_datas(select_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<PluggingData>> {
+pub async fn get_plugging_material_datas(select_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PluggingData>> {
     // 找到所有需要计算的孔洞
     let holes = query_hole_elements(select_refno, &database).await?;
+    dbg!(&holes.len());
     // 查找他的instance
     let insts = query_hole_instance(&holes, &database).await?;
     let name_map = holes.into_iter().map(|refno| (refno.refno, refno)).collect::<HashMap<RefU64, PdmsElement>>();
@@ -29,30 +30,11 @@ pub async fn get_plugging_material_datas(select_refno: RefU64, database: &ArData
 }
 
 /// 获取需要计算的孔洞
-pub async fn query_hole_elements(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
-    // let refnos = refnos.into_iter()
-    //     .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()))
-    //     .collect::<Vec<_>>();
-    let id = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
-    let aql = AqlQuery::new("
-    With @@pdms_eles,@@pdms_edges
-    //for id in @ids
-        for v,e in 0..5 inbound @id @@pdms_edges
-        filter v.noun in ['FITT','PFIT','JLDATU','CMFI','CMPF','NXTR']
-        // filter v.name like '%EE%' or v.name like '%KK%' or v.name like '%LL%'
-        return {
-            '_key':v._key,
-            'owner':v.owner,
-            'name':v.name,
-            'noun':v.noun,
-            'version':0,
-            'children_count':0,
-        }")
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
-        .bind_var("id", id);
+pub async fn query_hole_elements(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
+    // 根据指定规则获取实体孔洞
+    let aql = gen_query_pdms_hole_aql(refnos);
     let result = database.aql_query::<PdmsElement>(aql).await?;
-    if result.len() > 10000 { return Err(anyhow::anyhow!("超过最大查询数量!")); }
+    if result.len() > 100000 { return Err(anyhow::anyhow!("超过最大查询数量!")); }
     Ok(result)
 }
 
@@ -92,8 +74,7 @@ pub async fn query_hole_instance(holes: &Vec<PdmsElement>, database: &ArDatabase
         'refno': node,
         'inst': geo.insts
         }
-    ")
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+    ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
         .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION)
         .bind_var("@pdms_inst_geos", AQL_PDMS_INST_GEO_COLLECTION)
@@ -163,6 +144,7 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
                 size: format!("{}", diameter),
                 room_1: "".to_string(),
                 room_2: "".to_string(),
+                height,
                 cable_area,
                 plugging_area,
                 plugging_volume,
@@ -173,7 +155,7 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
         if hole_rect_inst.len() == 1 {
             let points = &hole_rect_inst[0].verts;
             let height = hole_rect_inst[0].height as f64;
-            let Some((size_1,size_2)) = compute_rectangle_data([points[0], points[1], points[2], points[3]]) else { continue; };
+            let Some((size_1, size_2)) = compute_rectangle_data([points[0], points[1], points[2], points[3]]) else { continue; };
             let size_1 = size_1 as f64;
             let size_2 = size_2 as f64;
             let element = if name_map.contains_key(&hole.refno) {
@@ -193,6 +175,7 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
                 size: format!("{:.2}X{:.2}", size_1, size_2),
                 room_1: "".to_string(),
                 room_2: "".to_string(),
+                height,
                 cable_area,
                 plugging_area,
                 plugging_volume,
@@ -223,17 +206,123 @@ pub fn compute_rectangle_data(points: [Vec3; 4]) -> Option<(f32, f32)> {
     Some((points[2].distance(points[0]), points[1].distance(points[0])))
 }
 
+/// 生成查询pdms实体孔洞的aql语句
+fn gen_query_pdms_hole_aql<'a>(refnos:Vec<RefU64>) -> AqlQuery<'a> {
+    let ids = refnos.into_iter()
+        .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()))
+        .collect::<Vec<_>>();
+    AqlQuery::new("
+    With @@pdms_eles,@@pdms_edges
+    for id in @ids
+    let gwall = (
+    for v in 0..5 inbound id @@pdms_edges
+        prune v.noun == 'GWALL'
+        filter v.noun == 'GWALL'
+        return v._id
+    )
+    let stwall = (
+        for v in 0..5 inbound id @@pdms_edges
+            prune v.noun == 'STWALL'
+            filter v.noun == 'STWALL'
+            return v._id
+    )
+    let wall = (
+        for v in 0..5 inbound id @@pdms_edges
+            prune v.noun == 'WALL'
+            filter v.noun == 'WALL'
+            return v._id
+    )
+    let pane = (
+        for v in 0..5 inbound id @@pdms_edges
+            prune v.noun == 'PANE'
+            filter v.noun == 'PANE'
+            return v._id
+    )
+    let floor = (
+        for v in 0..5 inbound id @@pdms_edges
+            prune v.noun == 'FLOOR'
+            filter v.noun == 'FLOOR'
+            return v._id
+    )
+    let gwall_children = (
+    for g in gwall
+       for v in 0..3 inbound g @@pdms_edges
+            filter v.noun in ['PFIT','NXTR']
+            return {
+                '_key':v._key,
+                'owner':v.owner,
+                'name':v.name,
+                'noun':v.noun,
+                'version':0,
+                'children_count':0,
+            } )
+    let stwall_children = (
+        for s in stwall
+        for v in 0..3 inbound s @@pdms_edges
+            filter v.noun in ['FITT','CMFI']
+            return {
+                '_key':v._key,
+                'owner':v.owner,
+                'name':v.name,
+                'noun':v.noun,
+                'version':0,
+                'children_count':0,
+            } )
+    let wall_children = (
+        for w in wall
+        for v in 0..3 inbound w @@pdms_edges
+            filter v.noun == ['JLDATU']
+            return {
+                '_key':v._key,
+                'owner':v.owner,
+                'name':v.name,
+                'noun':v.noun,
+                'version':0,
+                'children_count':0,
+            } )
+    let pane_children = (
+        for f in floor
+        for v in 0..3 inbound f @@pdms_edges
+            filter v.noun == ['NXTR']
+            return {
+                '_key':v._key,
+                'owner':v.owner,
+                'name':v.name,
+                'noun':v.noun,
+                'version':0,
+                'children_count':0,
+            } )
+    let floor_children = (
+        for f in floor
+        for v in 0..3 inbound f @@pdms_edges
+            filter v.noun == ['NXTR']
+            return {
+                '_key':v._key,
+                'owner':v.owner,
+                'name':v.name,
+                'noun':v.noun,
+                'version':0,
+                'children_count':0,
+        } )
+    let inter = INTERLEAVE(gwall_children,stwall_children,wall_children,floor_children)
+    for i in inter
+    return i")
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("ids", ids)
+}
+
 #[tokio::test]
 async fn test_query_hole_elements() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
         .build()?;
-    let mgr = get_test_ams_db_manager_async().await;
+    // let mgr = get_test_ams_db_manager_async().await;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let refno = RefU64::from_refno_str("17496/106258").unwrap();
-    let result = get_plugging_material_datas(refno, &database).await?;
+    let result = get_plugging_material_datas(vec![refno], &database).await?;
     dbg!(&result);
     Ok(())
 }
