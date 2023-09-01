@@ -55,7 +55,6 @@ pub async fn query_room_site_table(pool: &Pool<MySql>) -> anyhow::Result<&'stati
         if query_results.len() > 0 {
             return Ok("true");
         } else {
-            dbg!("&&&&");
             return Ok("false");
         }
     }
