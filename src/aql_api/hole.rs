@@ -139,6 +139,7 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
             let fill_percent = get_plugging_fill_percent().await;
             let plugging_volume = f64::PI * (diameter / 2.0) * (diameter / 2.0) * height * (1.0 - fill_percent);
             result.push(PluggingData {
+                own_refno: Default::default(),
                 refno: hole.refno,
                 name: element.name,
                 size: format!("{}", diameter),
@@ -170,6 +171,7 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
             let fill_percent = get_plugging_fill_percent().await;
             let plugging_volume = size_1 * size_2 * height * (1.0 - fill_percent);
             result.push(PluggingData {
+                own_refno: Default::default(),
                 refno: hole.refno,
                 name: element.name,
                 size: format!("{:.2}X{:.2}", size_1, size_2),
