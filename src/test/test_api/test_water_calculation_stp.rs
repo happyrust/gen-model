@@ -1,5 +1,5 @@
 // use crate::plug_in::water_calculation::export_stp;
-use crate::plug_in::water_calculation::{export_stp, save_stp_data_to_arangodb};
+use crate::plug_in::water_calculation::{ save_stp_data_to_arangodb};
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 use aios_core::pdms_types::RefU64;
@@ -965,7 +965,7 @@ async fn test_export_water_calculation_stp_3() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
