@@ -96,7 +96,7 @@ impl AiosDBManager {
                             let mut add = false;
 
                             if let Some(owner_ele) = self
-                                .query_element(RefU64::from_url_refno(&k.owner).unwrap())
+                                .query_element(k.owner)
                                 .await?
                             {
                                 if CATA_HAS_TUBI_GEO_NAMES.contains(&owner_ele.noun.as_str())
@@ -183,7 +183,7 @@ impl AiosDBManager {
                     let mut add = false;
 
                     if let Some(owner_ele) = self
-                        .query_element(RefU64::from_url_refno(&k.owner).unwrap())
+                        .query_element(k.owner)
                         .await?
                     {
                         if owner_ele.noun.as_str() == "BRAN" || owner_ele.noun.as_str() == "HANG" {

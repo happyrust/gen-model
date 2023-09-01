@@ -2,6 +2,7 @@ use crate::api::attr::*;
 use crate::api::element::*;
 use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
+use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 use crate::cata::resolve::CataExprContext;
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -34,13 +35,13 @@ use lazy_static::lazy_static;
 use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
 use redb::{ReadableTable, TableDefinition};
 use sqlx::{Executor, MySql, Pool, Row};
+use std::boxed::Box;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+use pdms_io::watch::PdmsWatcher;
 use tokio::sync::RwLock;
-use std::boxed::Box;
-use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 
 lazy_static! {
     pub static ref CATAEXPRCONTEXT_MAP: DashMap<RefU64, CataExprContext> = {
@@ -92,6 +93,8 @@ pub struct AiosDBManager {
     pub cache_module_numbdbs: BTreeSet<i32>,
 
     pub mdb_dbnums: BTreeSet<i32>,
+
+    pub watcher: PdmsWatcher,
 
     ///所有元素的tree
     pub rtree: Option<AccelerationTree>,
@@ -156,8 +159,8 @@ impl PdmsDataInterface for AiosDBManager {
                 return Ok(a);
             }
         }
-        Ok(Default::default())
-        // Err(anyhow::anyhow!("{refno}: not found children"))
+        // Ok(Default::default())
+        Err(anyhow::anyhow!(format!("{refno} does not exist")))
     }
 
     fn get_mesh_from_localdb(&self, geo_hash: u64) -> anyhow::Result<PlantMesh> {
@@ -365,12 +368,12 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///获得当前的项目名称
-    fn get_cur_project(&self) -> &str{
+    fn get_cur_project(&self) -> &str {
         self.db_option.project_name.as_str()
     }
 
     ///获得当前的项目名称
-    fn get_cur_mdb(&self) -> &str{
+    fn get_cur_mdb(&self) -> &str {
         self.db_option.mdb_name.as_str()
     }
 
@@ -381,15 +384,17 @@ impl PdmsDataInterface for AiosDBManager {
         mdb_name: &str,
         module: &str,
     ) -> anyhow::Result<EleTreeNode> {
-        let pool = self.project_map.get(project).ok_or(anyhow!("{project} not exist."))?;
+        let pool = self
+            .project_map
+            .get(project)
+            .ok_or(anyhow!("{project} not exist."))?;
         query_world(mdb_name, module, pool.value()).await
     }
 
     ///获得world节点
-    async fn get_desi_world(
-        &self,
-    ) -> anyhow::Result<EleTreeNode> {
-        self.get_world(self.get_cur_project(), self.get_cur_mdb(), DESI).await
+    async fn get_desi_world(&self) -> anyhow::Result<EleTreeNode> {
+        self.get_world(self.get_cur_project(), self.get_cur_mdb(), DESI)
+            .await
     }
 
     ///获得子节点集合
@@ -421,14 +426,6 @@ impl PdmsDataInterface for AiosDBManager {
     ///获得参考号下的子节点
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
         self.get_children_from_localdb(refno)
-        // let mut result = RefU64Vec::default();
-        // if let Some((_, project_pool)) = self.get_project_pool_by_refno(refno).await {
-        //     let children = query_children(refno, &project_pool).await?;
-        //     children.into_iter().for_each(|child| {
-        //         result.push(child.0);
-        //     });
-        // }
-        // Ok(result)
     }
 
     ///获得参考号的name

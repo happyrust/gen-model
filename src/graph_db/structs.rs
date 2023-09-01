@@ -7,11 +7,14 @@ use serde_with::DisplayFromStr;
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct PdmsEleGraphNode {
-    pub _key: String,
-    pub owner: String,
+    #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "_key")]
+    pub refno: RefU64,
+    #[serde_as(as = "DisplayFromStr")]
+    pub owner: RefU64,
     pub name: String,
     pub noun: String,
-    pub version: u32,
+    pub order: u32,
     pub dbnum: i32,
     #[serde(default)]
     pub cata_hash: Option<String>,

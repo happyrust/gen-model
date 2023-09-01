@@ -194,7 +194,7 @@ pub async fn query_room_name_from_refno_aql(
 
 /// 查询子节点属于哪个房间，只返回一个房间，不包含多个房间的情况
 pub async fn query_room_code_from_owner(owner_refno: RefU64,
-                                        database: &ArDatabase,) -> anyhow::Result<Option<String>> {
+                                        database: &ArDatabase, ) -> anyhow::Result<Option<String>> {
     let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", owner_refno.to_url_refno());
     let aql = AqlQuery::new("
     With @@pdms_eles,@@pdms_edges,@@room_edges,@@room_eles
@@ -206,7 +206,7 @@ pub async fn query_room_code_from_owner(owner_refno: RefU64,
             return r.name
     ").bind_var("id", refno)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
         .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
     let result = database.aql_query::<String>(aql).await?;
@@ -235,17 +235,54 @@ pub async fn query_room_name_from_refnos_aql(
             'refno': v._key,
             'room_name': v.name
          }
-    ",
-    )
-        .bind_var("refnos", refnos)
+    ", ).bind_var("refnos", refnos)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
     let result = database.aql_query::<PdmsNodeBelongRoomName>(aql).await;
     match result {
         Ok(data) => Ok(data),
         Err(_) => Ok(vec![]),
     }
+}
+
+/// 传入owner集合，返回children所在的房间号（只有一个）
+///
+/// 处理 equi bran 这种获取房间号的情况
+pub async fn query_room_name_from_owner_aql(
+    refnos: Vec<RefU64>,
+    database: &ArDatabase, ) -> anyhow::Result<Vec<PdmsNodeBelongRoomName>> {
+    let refnos = refnos
+        .into_iter()
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .collect::<Vec<_>>();
+    let aql = AqlQuery::new("
+    With @@pdms_eles,@@pdms_edges,@@room_eles,@@room_edges
+    for id in @refnos
+        let node = document(id)
+        let children = (
+        for e in 1..2 inbound id pdms_edges
+            return {
+                '_id':e._id,
+            } )
+        let result = (
+            for child in children
+            for r in 1 inbound child._id room_edges
+                filter r != null
+                limit 1
+                return {
+                    'refno': node._key,
+                    'room_name': r.name
+                }
+         )
+        return result ")
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+        .bind_var("refnos", refnos);
+    let result = database.aql_query::<Vec<PdmsNodeBelongRoomName>>(aql).await?;
+    Ok(result.into_iter().flatten().collect())
 }
 
 /// 根据name返回name对应的房间号
@@ -268,7 +305,7 @@ pub async fn query_room_name_from_names_aql(
             'name': v.name,
             'room_name': r.name
          } ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-            .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+            .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
             .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
             .bind_var("names", names)
     } else {
@@ -283,7 +320,7 @@ pub async fn query_room_name_from_names_aql(
             'name': v.name,
             'room_name': r.name
          }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-            .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+            .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
             .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
             .bind_var("names", names)
             .bind_var("noun", noun)
@@ -295,7 +332,7 @@ pub async fn query_room_name_from_names_aql(
 /// 返回设备所在的房间号(不含贯穿件)
 pub async fn query_equi_room_name_from_names_aql(
     names: Vec<String>,
-    database: &ArDatabase
+    database: &ArDatabase,
 ) -> anyhow::Result<Vec<PdmsNameBelongRoomName>> {
     let names = names
         .into_iter()
@@ -321,8 +358,8 @@ pub async fn query_equi_room_name_from_names_aql(
              )
      return result ")
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION)
-        .bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
         .bind_var("names", names);
     let result = database.aql_query::<Vec<PdmsNameBelongRoomName>>(aql).await?;
@@ -460,7 +497,7 @@ pub async fn query_room_refnos_aql(
         )
             .bind_var("key", key)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-            .bind_var("@pdms_edges",  AQL_PDMS_EDGES_COLLECTION)
+            .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
     } else {
         let filter_data = filter_major.unwrap().to_major_str();
         AqlQuery::new(
@@ -642,7 +679,6 @@ impl AiosDBManager {
             .map(|(refno, (p0, p1))| {
                 let room0 = self.get_owner(*p0);
                 let room1 = self.get_owner(*p1);
-
                 let room0_num = self
                     .room_info_map
                     .get(&room0)
@@ -678,6 +714,7 @@ impl AiosDBManager {
                 .query_ele_own_room_panels(&children, Some(through_refno))
                 .await
             {
+
                 for (k, mut v) in result {
                     let r1 = v.pop().unwrap_or_default();
                     let r0 = v.pop().unwrap_or_default();
@@ -711,7 +748,7 @@ impl AiosDBManager {
                     x.geo_param
                         .key_points()
                         .into_iter()
-                        .map(|v| x.transform.transform_point(v))
+                        .map(|v| x.transform.transform_point(*v))
                 })
                 .flatten()
                 .map(|x| info.world_transform.transform_point(x))
@@ -754,6 +791,7 @@ impl AiosDBManager {
         let mut whole_key_points = vec![];
         let mut whole_aabb = Aabb::new_invalid();
         if is_as_whole {
+
             for (&refno, info) in &inst_data.inst_info_map {
                 let Some(inst_geos) = inst_data.get_inst_geos(info) else {
                     continue;
@@ -761,14 +799,17 @@ impl AiosDBManager {
                 let key_points = inst_geos
                     .iter()
                     .map(|x| {
+                        // dbg!(x.geo_param.key_points());
                         x.geo_param
                             .key_points()
                             .into_iter()
-                            .map(|v| x.transform.transform_point(v))
+                            .map(|v| x.transform.transform_point(*v))
                     })
                     .flatten()
                     .map(|x| info.world_transform.transform_point(x))
                     .collect::<Vec<_>>();
+                // dbg!(refno);
+                // dbg!(&key_points);
                 whole_key_points.extend_from_slice(&key_points);
                 whole_aabb.merge(&info.aabb.unwrap());
             }
@@ -842,7 +883,7 @@ impl AiosDBManager {
                     x.geo_param
                         .key_points()
                         .into_iter()
-                        .map(|v| x.transform.transform_point(v))
+                        .map(|v| x.transform.transform_point(*v))
                 })
                 .flatten()
                 .map(|x| info.world_transform.transform_point(x))
@@ -868,6 +909,7 @@ impl AiosDBManager {
             }
             self.cache_plant_meshes(&geo_hashes, false).await?;
             let mut target_panels = vec![];
+
             for panel_info in panel_infos {
                 let Ok(Some(room_panel_mesh)) =
                     self.get_plant_mesh(panel_info.inst_geo.geo_hash).await
@@ -1012,7 +1054,7 @@ impl AiosDBManager {
                     x.geo_param
                         .key_points()
                         .into_iter()
-                        .map(|v| x.transform.transform_point(v))
+                        .map(|v| x.transform.transform_point(*v))
                 })
                 .flatten()
                 .map(|x| info.world_transform.transform_point(x))

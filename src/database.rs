@@ -48,7 +48,10 @@ use aios_core::pdms_data::ATTR_INFO_MAP;
 use parry3d::utils::hashmap::FxHasher32;
 use sled::transaction::ConflictableTransactionError;
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 use std::str::FromStr;
+use id_tree::Tree;
+use indexmap::IndexMap;
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -127,12 +130,14 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
     Ok(())
 }
 
-/// 同步pdms数据到数据
+/// 初始化同步pdms数据到数据
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
     let mut time = Instant::now();
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
     create_info_database(&default_conn_str, &db_option.project_name).await?;
+
+
     let pdms_info_pool = AiosDBManager::get_db_pool(
         &default_conn_str,
         &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name),
@@ -145,6 +150,19 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
         let mut table_time = Instant::now();
         let mut tables_sql = String::new();
+
+        let (att_map_tree, children_tree) = {
+            let db_path = format!("{}.db", &project);
+            let config = sled::Config::default()
+                .path(db_path)
+                .mode(sled::Mode::HighThroughput)
+                .cache_capacity(10_000_000_000)
+                .flush_every_ms(Some(1000));
+            let db = config.open()?;
+            let tree = db.open_tree("attr_map")?;
+            let children_tree = db.open_tree("children")?;
+            (tree, children_tree)
+        };
 
         let db_info = get_default_pdms_db_info();
         for (k, v) in db_info.noun_attr_info_map {
@@ -200,9 +218,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             project,
             project_pool.clone(),
             pdms_info_pool.clone(),
-        )
-        .await
-        {
+            att_map_tree.clone(),
+            children_tree.clone(),
+        ).await {
             Ok(_) => {
                 println!("同步数据成功。");
             }
@@ -210,7 +228,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 println!("{}", e.to_string());
             }
         }
-        // .expect("同步数据失败");
     }
     println!("创建表花费时间: {} ms", create_tables_elapse);
     println!(
@@ -507,13 +524,16 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
     table_vals_sql
 }
 
-///多线程同步数据
+
+///多线程同步数据，包括增量同步
 pub async fn sync_total_async_threaded(
     arango_pool: ArPool,
     db_option: &DbOption,
     project: &str,
     pool: Pool<MySql>,
     info_pool: Pool<MySql>,
+    attmap_tree: sled::Tree,
+    children_tree: sled::Tree,
 ) -> anyhow::Result<()> {
     let mut data_dir = Path::new(&db_option.project_path);
     let need_parsed_files = &db_option.included_db_files;
@@ -528,37 +548,24 @@ pub async fn sync_total_async_threaded(
     if !Path::new(&project_dir).exists() {
         return Err(anyhow::anyhow!("项目文件夹指定不正确"));
     }
-    let mut target_dir = fs::read_dir(&project_dir)
-        .unwrap()
-        .into_iter()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            entry.path()
-        })
-        .find(|x| x.file_name().unwrap().to_str().unwrap().ends_with("000"))
-        .unwrap();
 
-    let mut children_files = fs::read_dir(target_dir)?
-        .into_iter()
-        .map(|entry| {
-            let entry = entry.unwrap();
-            entry.path()
-        })
-        .collect::<Vec<PathBuf>>();
-
-    let (local_tree, children_tree) = if db_option.sync_localdb.unwrap_or(true) {
-        let db_path = format!("{}.db", &project);
-        let config = sled::Config::default()
-            .path(db_path)
-            .mode(sled::Mode::HighThroughput)
-            .cache_capacity(10_000_000_000)
-            .flush_every_ms(Some(1000));
-        let db = config.open()?;
-        let tree = db.open_tree("attr_map").ok();
-        let children_tree = db.open_tree("children").ok();
-        (tree, children_tree)
-    } else {
-        (None, None)
+    let mut children_files =  {
+        let target_dir = fs::read_dir(&project_dir)
+            .unwrap()
+            .into_iter()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                entry.path()
+            })
+            .find(|x| x.is_dir() && x.file_name().unwrap().to_str().unwrap().ends_with("000"))
+            .unwrap();
+        fs::read_dir(target_dir)?
+            .into_iter()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                entry.path()
+            })
+            .collect::<Vec<PathBuf>>()
     };
 
     let project = Arc::new(project.to_string());
@@ -578,7 +585,6 @@ pub async fn sync_total_async_threaded(
     const CHUNK_NUM: usize = 100_000;
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
-        let file_name_clone = Arc::new(file_name.clone());
         if file_name.ends_with("com") || file_name.ends_with("mis") {
             continue;
         }
@@ -601,6 +607,7 @@ pub async fn sync_total_async_threaded(
             .unwrap_or_default();
             dbg!(children_map.len());
             let all_refnos = children_map.keys().cloned().collect::<Vec<_>>();
+            dbg!(&all_refnos);
             let children_map_clone = Arc::new(children_map);
 
             if db_option.sync_graph_db.unwrap_or(true) {
@@ -612,7 +619,7 @@ pub async fn sync_total_async_threaded(
                 save_pdms_level_edges_in_sync(&database, &children_map_clone).await?;
             }
 
-            if let Some(children_tree) = children_tree.clone() {
+            if db_option.sync_localdb.unwrap_or(true) {
                 dbg!(children_map_clone.len());
                 for (k, v) in children_map_clone.as_ref() {
                     let children_refnos = RefU64Vec(v.iter().map(|x| x.0).collect::<Vec<_>>());
@@ -645,9 +652,7 @@ pub async fn sync_total_async_threaded(
                         "",
                         &chunk_refnos_clone,
                     )
-                })
-                .await
-                {
+                }).await {
                     println!("Processing {} chunk index: {chunk_index}", &file_name);
                     let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(
                         db_no,
@@ -704,9 +709,6 @@ pub async fn sync_total_async_threaded(
                     version_map.entry(file_name.clone()).or_insert(version);
                     set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
 
-                    // total_attr_map
-                    // default_name()
-                    // let keys = total_attr_map
                     total_attr_map.iter_mut().for_each(|mut x|{
                         let name = cal_default_name(*x.key(), x.value(), &children_map_clone);
                         x.value_mut().explicit_attmap.insert(NAME_HASH, AttrVal::StringType(name));
@@ -730,13 +732,11 @@ pub async fn sync_total_async_threaded(
                                 &total_attr_map_arc,
                                 &children_map_arc,
                                 db_no as i32,
-                            )
-                            .await?;
+                            ).await?;
 
                             save_foreign_refno_edges_in_sync(&database, foreign_refnos_map).await?;
                             // 单独保存plin
-                            save_plin_attr_arangodb(&database, &type_ele_map, &total_attr_map_arc)
-                                .await?;
+                            save_plin_attr_arangodb(&database, &type_ele_map, &total_attr_map_arc).await?;
                             // 将 para 和 des_para保存的图数据库中
                             save_paras_into_arangodb(&database, &total_attr_map_arc).await?;
                             // 将 dtse下的data部分数据保存到图数据库
@@ -744,27 +744,26 @@ pub async fn sync_total_async_threaded(
                                 &database,
                                 &type_ele_map,
                                 &total_attr_map_arc,
-                            )
-                            .await?;
+                            ).await?;
                         }
                         println!("图数据库保存完成");
                     }
 
-                    if let Some(tree) = local_tree.clone() {
+                    if db_option.sync_localdb.unwrap_or(true) {
                         for kv in total_attr_map_arc.as_ref() {
                             let mut vec = kv
                                 .value()
-                                .merge_implicit_explicit_into_attr()
+                                .merge()
                                 .into_rkyv_compress_bytes();
 
-                            tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
+                            attmap_tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
                         }
 
                         // let c = total_attr_map_arc.clone();
                         // let tree = db.open_tree("attr_map")?;
                         // tree.transaction::<_, _, ()>(|tx_db| {
                         //     for kv in c.as_ref() {
-                        //         let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                        //         let mut vec = kv.value().merge().into_bytes();
                         //         tx_db.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
                         //     }
                         //     Ok(())
@@ -794,7 +793,7 @@ pub async fn sync_total_async_threaded(
                     //     let mut wtxn = env.write_txn()?;
                     //     let db: Database<U64<BE>, heed::types::ByteSlice> = env.create_database(&mut wtxn, Some("att"))?;
                     //     for kv in total_attr_map_arc.as_ref() {
-                    //         let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                    //         let mut vec = kv.value().merge().into_bytes();
                     //         db.put(&mut wtxn, &**kv.key(), &*vec)?;
                     //     }
                     //     wtxn.commit()?;
@@ -812,7 +811,7 @@ pub async fn sync_total_async_threaded(
                     //     {
                     //         let mut table = write_txn.open_table(table)?;
                     //         for kv in total_attr_map_arc.as_ref() {
-                    //             let mut vec = kv.value().merge_implicit_explicit_into_attr().into_bytes();
+                    //             let mut vec = kv.value().merge().into_bytes();
                     //             table.insert(**kv.key(), &*vec)?;
                     //         }
                     //     }
@@ -1058,14 +1057,16 @@ pub async fn sync_total_async_threaded(
             }
         }
     }
-    // 重新执行有问题的sql
-    println!("正在重新插入有问题的sql语句, 共 {} 条", error_sql.len());
-    let mut conn = pool.acquire().await?;
-    for sql in error_sql.iter() {
-        let _ = conn.execute(sql.key().as_str()).await;
-        // if r.is_ok() {
-        //     error_sql.remove(sql.key());
-        // }
+    if !error_sql.is_empty() {
+        // 重新执行有问题的sql
+        println!("正在重新插入有问题的sql语句, 共 {} 条", error_sql.len());
+        let mut conn = pool.acquire().await?;
+        for sql in error_sql.iter() {
+            let _ = conn.execute(sql.key().as_str()).await;
+            // if r.is_ok() {
+            //     error_sql.remove(sql.key());
+            // }
+        }
     }
     Ok(())
 }
@@ -1132,7 +1133,7 @@ async fn save_plin_attr_arangodb(
             // 暂时只要 p_key 和 plaxis
             refno_attrs.push(PdmsPLINAttrAql {
                 _key: refno.to_url_refno(),
-                attr: whole_attr.unwrap().merge_implicit_explicit_into_attr(),
+                attr: whole_attr.unwrap().merge(),
             })
         }
         if refno_attrs.len() > 0 {

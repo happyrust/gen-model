@@ -206,9 +206,9 @@ async fn main() -> anyhow::Result<()> {
     }
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
-        Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
-    }
+    // if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
+    //     Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
+    // }
 
     // let refno = "24381/37118".into();
     // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
@@ -354,7 +354,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = ":STACbeam";
+    let noun = "TABITE";
     let hash = db1_hash(noun);
     dbg!(hash);
     // let hashes = [7146282];
@@ -412,6 +412,9 @@ fn test_log() {
 #[tokio::test]
 async fn test_db1_dehash() {
     let mgr = AiosDBManager::init_form_config().await.unwrap();
+    let refno = RefU64::from_refno_str("24383/91850").unwrap();
+    let children = mgr.get_children_within_project(refno,"AvevaMarineSample").unwrap();
+    dbg!(&children);
     let hash = db1_hash(":STACbeam");
     dbg!(&hash);
 }

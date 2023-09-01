@@ -230,7 +230,7 @@ pub async fn query_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: O
         if ref_basic.is_none() { return Ok(AttrMap::default()); }
         let ref_basic = ref_basic.unwrap();
         //need to use join
-        let mut attr = query_implicit_attr(refno, ref_basic.value(), &pool, column_names).await.unwrap();
+        let mut attr = query_implicit_attr(refno, ref_basic.value(), &pool, column_names).await?;
         let att_type = attr.get_type().to_string();
         let explicit_attr = query_explicit_attr(refno, &pool).await?;
         let ele = query_ele_node(refno, &pool).await?;
@@ -239,18 +239,7 @@ pub async fn query_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: O
         for (k, v) in explicit_attr.map {
             attr.entry(k).or_insert(v);
         }
-        // for pool in &aios_mgr.project_map {
-        //     // uda 赋值需要加上元件库
-        //     let mut uda_type = vec![db1_hash(&att_type) as i32];
-        //     // 如果是 pipe下的类型，需要赋上 Element Type 为 ALLP 的 uda
-        //     if b_bran {
-        //         uda_type.push(db1_hash("ALLP") as i32);
-        //     }
-        //     let uda_attr = query_uda_attr(uda_type, &pool).await?;
-        //     for (k, v) in uda_attr.map {
-        //         attr.entry(k).or_insert(v);
-        //     }
-        // }
+
         // 赋默认值
         if let Some(map) = ATTR_INFO_MAP.map.get(&(db1_hash(&ele.noun) as i32)) {
             for values in map.value() {

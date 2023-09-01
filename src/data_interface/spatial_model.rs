@@ -98,7 +98,7 @@ impl AiosDBManager {
                 continue;
             };
             let key_points = inst_geos.iter()
-                .map(|x| x.geo_param.key_points().into_iter().map(|v| x.transform.transform_point(v)))
+                .map(|x| x.geo_param.key_points().into_iter().map(|v| x.transform.transform_point(*v)))
                 .flatten()
                 .map(|x| info.world_transform.transform_point(x))
                 .collect::<Vec<_>>();

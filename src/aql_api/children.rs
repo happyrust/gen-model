@@ -51,6 +51,8 @@ pub async fn query_children_eles(
     Ok(results)
 }
 
+
+
 pub async fn query_children_order_aql(
     adb: &ArDatabase,
     refno: RefU64,
@@ -104,6 +106,7 @@ pub async fn query_children_refnos(
         "\
     With @@pdms_eles, @@pdms_edges
     for z in 1 inbound @id @@pdms_edges
+        sort z.order
         return  z._key ",
     )
     .bind_var("id", refno_aql)
@@ -330,7 +333,11 @@ pub async fn query_ancestor_name_of_type_aql(
 pub struct SearchAlongParam {
     #[serde_as(as = "Vec<DisplayFromStr>")]
     pub refnos: Vec<RefU64>,
+    //需要匹配的名称
     pub fuzzy: Vec<String>,
+    //需要排除在外的名称匹配
+    // #[serde(default)]
+    // pub exclude: Vec<String>,
     pub path_nouns: Vec<String>,
     #[serde(default)]
     pub children_nouns: Vec<String>,
@@ -348,11 +355,7 @@ pub struct SearchAlongResult(pub Vec<RefnoAncestorsTuple>);
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
-pub struct RefnoAncestorsTuple(#[serde_as(as = "(DisplayFromStr, _)")] pub (RefU64, RefU64Vec));
-
-// #[serde_as]
-// #[derive(Serialize, Deserialize, Clone, Default, Debug)]
-// pub struct RefnoAncestorsTuple_(RefU64, RefU64Vec);
+pub struct RefnoAncestorsTuple(#[serde_as(as = "(DisplayFromStr, Vec<DisplayFromStr>)")] pub (RefU64, Vec<RefU64>));
 
 impl AiosDBManager {
     ///沿着路径搜索目标节点
@@ -361,9 +364,7 @@ impl AiosDBManager {
         &self,
         param: &SearchAlongParam,
     ) -> anyhow::Result<SearchAlongResult> {
-        let arango_db = self.get_arango_db().await?;
-        search_refnos_along_path_arango(
-            &arango_db,
+        self.search_refnos_along_path(
             &param.refnos,
             param.fuzzy.iter().map(|x| x.as_str()),
             param.path_nouns.iter().map(|x| x.as_str()),
@@ -387,10 +388,14 @@ impl AiosDBManager {
         only_path_nodes: bool,
         include_path_nodes: bool,
     ) -> anyhow::Result<SearchAlongResult> {
+        let mut target_refnos = refnos.into_iter().cloned().collect::<Vec<_>>();
+        if target_refnos.is_empty() {
+            target_refnos = self.get_site_refnos().await?;
+        }
         let arango_db = self.get_arango_db().await?;
         search_refnos_along_path_arango(
             &arango_db,
-            refnos,
+            &target_refnos,
             fuzzy,
             path_nouns,
             children_nouns,
@@ -417,20 +422,21 @@ pub async fn search_refnos_along_path_arango(
         .into_iter()
         .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
         .collect::<Vec<_>>();
+
     let aql = AqlQuery::new(
         "\
     With @@pdms_eles,@@pdms_edges
     for id in @ids
         let path_len = @only_path_nodes ? LENGTH(@path_nouns) : 10
         FOR v,e,p in 0..path_len INBOUND id pdms_edges
-            prune (LENGTH(p.edges) < LENGTH(@fuzzy) ? !CONTAINS(v.name, @fuzzy[LENGTH(p.edges)]) : @only_path_nodes) or
+            prune (LENGTH(p.edges) < LENGTH(@fuzzy) ? !(CHAR_LENGTH(@fuzzy[LENGTH(p.edges)]) == 0 || CONTAINS(v.name, @fuzzy[LENGTH(p.edges)])) : @only_path_nodes) or
                 (LENGTH(p.edges) < LENGTH(@path_nouns) ? (v.noun != @path_nouns[LENGTH(p.edges)]) : @only_path_nodes)
 
-
-            let beyond = LENGTH(p.edges) > LENGTH(@fuzzy)
+            let beyond = LENGTH(p.edges) >= LENGTH(@fuzzy)
             filter beyond ? true : ( @include_path_nodes and CONTAINS(v.name, @fuzzy[LENGTH(p.edges)]))
 
             filter LENGTH(@children_nouns) == 0  or (v.noun in @children_nouns)
+            SORT LENGTH(p.edges), v.order
             return [v._key, (for a in p.vertices filter LENGTH(@ancestor_nouns) !=0 and (a.noun in @ancestor_nouns) return a._key)]
     ")
         .bind_var("ids", ids)
@@ -517,17 +523,19 @@ pub async fn query_travel_children_aql(
 /// 遍历该refno的所有子节点包含自己，并只返回参考号
 pub async fn query_travel_children_refnos_aql(
     arango_database: &ArDatabase,
-    refno: RefU64,
+    refno: Vec<RefU64>,
 ) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let ids = refno.into_iter()
+        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+        .collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "\
     With @@pdms_eles,@@pdms_edges
-    for c in 0..10 inbound @id @@pdms_edges
+    for id in @ids
+    for c in 0..10 inbound id @@pdms_edges
     return c._key
-    ",
-    )
-    .bind_var("id", refno_aql)
+    ", )
+    .bind_var("ids", ids)
     .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
     .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<String> = arango_database.aql_query(aql).await?;

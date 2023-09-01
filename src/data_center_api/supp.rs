@@ -16,7 +16,7 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
     if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos,
                                                                      vec!["STRU".to_string()]).await {
         let refnos = children.iter().map(|child| child.refno).collect::<Vec<RefU64>>();
-        let major_map = get_refnos_major_map(refnos, &database).await.unwrap_or_default();
+        // let major_map = get_refnos_major_map(refnos, &database).await.unwrap_or_default();
         for stru in children {
             let mut attr = Vec::new();
             let Ok(stru_attr) = aios_mgr.get_attr(stru.refno).await else { continue; };
@@ -113,11 +113,11 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
                 attribute_model_code: "ERECAB17".to_string(),
                 value: AttrValue::AttrString("NA".to_string()).into(),
             });
-            // let room_name = query_room_name_from_refno_aql(stru.refno, &database).await?.unwrap_or("".to_string());
-            // attr.push(DataCenterAttr {
-            //     attribute_model_code: "ROOM2".to_string(),
-            //     value: AttrValue::AttrString(room_name).into(),
-            // });
+            let room_name = query_room_name_from_refno_aql(stru.refno, &database).await?.unwrap_or("".to_string());
+            attr.push(DataCenterAttr {
+                attribute_model_code: "ROOM2".to_string(),
+                value: AttrValue::AttrString(room_name).into(),
+            });
             let zone_name = query_ancestor_name_of_type_aql(&database, stru.refno, "ZONE").await
                 .unwrap_or(None).unwrap_or("".to_string());
             let zone_code = if zone_name.contains("MSUP") {

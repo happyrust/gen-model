@@ -1,3 +1,9 @@
+
+use aios_core::water_calculation::*;
+#[cfg(feature = "opencascade_rs")]
+use opencascade::adhoc::AdHocShape;
+use bevy_transform::prelude::Transform;
+use glam::Vec3;
 use crate::api::attr::query_attr;
 use crate::api::children::travel_children_with_type;
 use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
@@ -15,8 +21,6 @@ use arangors_lite::AqlQuery;
 use itertools::Itertools;
 #[cfg(feature = "opencascade_rs")]
 use opencascade::primitives::*;
-#[cfg(feature = "opencascade_rs")]
-use opencascade::adhoc::AdHocShape;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -24,10 +28,10 @@ use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-use bevy_transform::prelude::Transform;
-use glam::Vec3;
 
-// use opencascade::adhoc::AdHocShape;
+
+
+
 
 /// 将数据保存至图数据库
 pub async fn save_stp_data_to_arangodb(
@@ -65,21 +69,23 @@ pub async fn save_stp_data_to_arangodb(
     "Ok".to_string()
 }
 
-#[cfg(not(feature = "opencascade_rs"))]
-///导出水淹计算stp
-pub async fn export_stp(
-    mgr: &AiosDBManager,
-    stp_packet: ExportFloodingStpEvent,
-) -> anyhow::Result<bool> {
-    let mut file = File::create(format!(
-        "./assets/walter_steps/{}.stp",
-        stp_packet.file_name.as_str()
-    ))?;
-    let mut test_str = "测试STP文件下载";
-    file.write_all(test_str.as_bytes())?;
-
-    Ok(true)
-}
+// #[cfg(not(feature = "opencascade_rs"))]
+// ///导出水淹计算stp
+// pub async fn export_stp(
+//     mgr: &AiosDBManager,
+//     stp_packet: ExportFloodingStpEvent,
+// ) -> anyhow::Result<bool> {
+//     let mut file = File::create(format!(
+//         "./assets/walter_steps/{}.stp",
+//         stp_packet.file_name.as_str()
+//     ))?;
+//     let mut test_str = "测试STP文件下载";
+//     file.write_all(test_str.as_bytes())?;
+//
+//     Ok(true)
+// }
+//
+//
 
 #[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
@@ -88,7 +94,6 @@ pub async fn export_stp(
     stp_packet: ExportFloodingStpEvent,
 ) -> anyhow::Result<bool> {
     use std::collections::BTreeMap;
-
     let all_plugged_hole_refnos: HashSet<RefU64> = stp_packet.all_plugged_hole_refnos().collect();
     let all_plugged_door_refnos: HashSet<RefU64> = stp_packet.all_plugged_door_refnos().collect();
     let export_refnos: Vec<RefU64> = stp_packet.export_refnos().cloned().collect();
@@ -210,7 +215,7 @@ pub async fn query_water_calculation_data_total_aql(database: &ArDatabase) -> an
     let aql = AqlQuery::new("
     for c in @@collection
         return unset(c , '_id','_rev')").bind_var("@collection", AQL_WATER_CALCULATION_COLLECTION);
-    dbg!("*****");
+
     let result = database.aql_query::<FloodingStpToArangodb>(aql).await?;
     Ok(result)
 }

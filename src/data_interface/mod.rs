@@ -8,5 +8,9 @@ pub mod mesh_manager;
 
 pub mod db_manager;
 
+pub mod increment_manager;
+
+pub mod increment_cecord;
+
 #[cfg(feature = "gen_model")]
 pub mod gen_model;
