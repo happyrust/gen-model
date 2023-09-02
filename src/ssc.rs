@@ -140,7 +140,6 @@ pub async fn async_total_ssc_data_refactor(mgr: &AiosDBManager) -> anyhow::Resul
     // 创建图数据库连接
     create_arango_document(&database, AQL_SSC_EDGE_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_SSC_ELES_COLLECTION, Document).await?;
-
     Ok(())
 }
 

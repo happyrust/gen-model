@@ -607,7 +607,7 @@ pub async fn sync_total_async_threaded(
             .unwrap_or_default();
             dbg!(children_map.len());
             let all_refnos = children_map.keys().cloned().collect::<Vec<_>>();
-            dbg!(&all_refnos);
+            dbg!(&all_refnos.len());
             let children_map_clone = Arc::new(children_map);
 
             if db_option.sync_graph_db.unwrap_or(true) {
