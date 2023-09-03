@@ -44,13 +44,12 @@ pub async fn query_children_eles(
                             return 1 ),
     }",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let results: Vec<PdmsElement> = arango_db.aql_query(aql).await.unwrap();
     Ok(results)
 }
-
 
 
 pub async fn query_children_order_aql(
@@ -88,10 +87,10 @@ pub async fn query_children_order_aql(
                                 return 1 ),
         }",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
-    .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION);
     let results: Vec<PdmsElement> = adb.aql_query(aql).await?;
     Ok(results)
 }
@@ -109,9 +108,9 @@ pub async fn query_children_refnos(
         sort z.order
         return  z._key ",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<String> = arango_database.aql_query(aql).await?;
     Ok(convert_refno_vec_from_vec_string(result))
 }
@@ -141,9 +140,9 @@ pub async fn query_children_with_name_aql(
         }
     ",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<PdmsRefnoNameAql> = arango_database.aql_query(aql).await?;
     for v in result {
         if let Some(refno) = RefU64::from_url_refno(&v.refno) {
@@ -169,9 +168,9 @@ pub async fn query_owner_with_type_aql(
             'noun':o.noun,
         }",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<PdmsRefnoTypeAql> = arango_database.aql_query(aql).await?;
     for v in result {
         if let Some(refno) = RefU64::from_url_refno(&v.refno) {
@@ -199,10 +198,10 @@ pub async fn query_ancestor_till_type_aql(
         PRUNE o.noun == @noun
         return o._key",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("noun", att_type)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("noun", att_type)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let mut result: Vec<String> = arango_database.aql_query(aql).await?;
     if result.len() == 0 {
         return Ok(None);
@@ -233,10 +232,10 @@ pub async fn query_ancestor_till_types_aql(
             'children_count':0,
         }",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("nouns", att_types)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("nouns", att_types)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result = arango_database.aql_query::<PdmsElement>(aql).await?;
     if result.is_empty() {
         return Ok(None);
@@ -270,10 +269,10 @@ pub async fn query_refnos_ancestor_till_types_aql(
             'children_count':0,
         }",
     )
-    .bind_var("ids", refnos)
-    .bind_var("nouns", att_types)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("ids", refnos)
+        .bind_var("nouns", att_types)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result = arango_database.aql_query::<PdmsElement>(aql).await?;
     Ok(result)
 }
@@ -291,10 +290,10 @@ pub async fn query_ancestor_with_name_till_type_aql(
         PRUNE o.noun == @noun
         return { refno:o._key, name:o.name }",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("noun", att_type)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("noun", att_type)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let mut result: Vec<PdmsRefnoNameAql> = arango_database.aql_query(aql).await?;
     if result.len() == 0 {
         return Ok(vec![]);
@@ -316,10 +315,10 @@ pub async fn query_ancestor_name_of_type_aql(
         Filter o.noun == @noun
         return o.name",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("noun", att_type)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("noun", att_type)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let mut result: Vec<String> = arango_database.aql_query(aql).await?;
     if result.is_empty() {
         return Ok(None);
@@ -343,6 +342,25 @@ pub async fn query_refnos_ancestor_with_name_till_type_aql(arango_database: &ArD
         }").bind_var("refnos", refno_aql)
         .bind_var("nouns", att_types);
     let result: Vec<PdmsOwnerNameAql> = arango_database.aql_query(aql).await?;
+    Ok(result)
+}
+
+/// 通过name查询参考号
+pub async fn query_refnos_from_names(names: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsRefnoNameAql>> {
+    let names = names
+        .into_iter()
+        .map(|name| if !name.starts_with("/") { format!("/{}", name) } else { name })
+        .collect::<Vec<_>>();
+    let aql = AqlQuery::new("\
+    with @@pdms_eles
+    for e in @@pdms_eles
+    filter e.name in @names
+    return {
+        'refno':e._key,
+        'name':e.name,
+    }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("names", names);
+    let result = database.aql_query::<PdmsRefnoNameAql>(aql).await?;
     Ok(result)
 }
 
@@ -392,18 +410,18 @@ impl AiosDBManager {
             param.only_path_nodes,
             param.include_path_nodes,
         )
-        .await
+            .await
     }
 
     ///沿着路径搜索目标节点
     #[inline]
     pub async fn search_refnos_along_path(
         &self,
-        refnos: impl IntoIterator<Item = &RefU64>,
-        fuzzy: impl IntoIterator<Item = &str>,
-        path_nouns: impl IntoIterator<Item = &str>,
-        children_nouns: impl IntoIterator<Item = &str>,
-        ancestor_nouns: impl IntoIterator<Item = &str>,
+        refnos: impl IntoIterator<Item=&RefU64>,
+        fuzzy: impl IntoIterator<Item=&str>,
+        path_nouns: impl IntoIterator<Item=&str>,
+        children_nouns: impl IntoIterator<Item=&str>,
+        ancestor_nouns: impl IntoIterator<Item=&str>,
         only_path_nodes: bool,
         include_path_nodes: bool,
     ) -> anyhow::Result<SearchAlongResult> {
@@ -422,18 +440,18 @@ impl AiosDBManager {
             only_path_nodes,
             include_path_nodes,
         )
-        .await
+            .await
     }
 }
 
 ///沿着路径搜索目标节点, 并且返回沿途的ancestor参考号（可选）
 pub async fn search_refnos_along_path_arango(
     database: &ArDatabase,
-    refnos: impl IntoIterator<Item = &RefU64>,
-    fuzzy: impl IntoIterator<Item = &str>,
-    path_nouns: impl IntoIterator<Item = &str>,
-    children_nouns: impl IntoIterator<Item = &str>,
-    ancestor_nouns: impl IntoIterator<Item = &str>,
+    refnos: impl IntoIterator<Item=&RefU64>,
+    fuzzy: impl IntoIterator<Item=&str>,
+    path_nouns: impl IntoIterator<Item=&str>,
+    children_nouns: impl IntoIterator<Item=&str>,
+    ancestor_nouns: impl IntoIterator<Item=&str>,
     only_path_nodes: bool,
     include_path_nodes: bool,
 ) -> anyhow::Result<SearchAlongResult> {
@@ -481,7 +499,7 @@ pub async fn search_refnos_along_path_arango(
 /// 遍历参考号下获取所有指定类型的子节点参考号
 pub async fn query_deep_children_refnos_fuzzy(
     database: &ArDatabase,
-    refnos: impl IntoIterator<Item = &RefU64>,
+    refnos: impl IntoIterator<Item=&RefU64>,
     nouns: &[&str],
 ) -> anyhow::Result<Vec<RefU64>> {
     let ids = refnos
@@ -498,10 +516,10 @@ pub async fn query_deep_children_refnos_fuzzy(
         return z._key
     ",
     )
-    .bind_var("ids", ids)
-    .bind_var("nouns", nouns)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("ids", ids)
+        .bind_var("nouns", nouns)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let results: Vec<RefU64> = database
         .aql_query::<String>(aql)
         .await?
@@ -532,9 +550,9 @@ pub async fn query_travel_children_aql(
     }
     ",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let results: Vec<PdmsElement> = arango_database.aql_query(aql).await.unwrap();
     Ok(results)
 }
@@ -554,9 +572,9 @@ pub async fn query_travel_children_refnos_aql(
     for c in 0..10 inbound id @@pdms_edges
     return c._key
     ", )
-    .bind_var("ids", ids)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("ids", ids)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<String> = arango_database.aql_query(aql).await?;
     let refnos = convert_refno_vec_from_vec_string(result);
     Ok(refnos)
@@ -579,9 +597,9 @@ pub async fn query_travel_children_with_out_leaf_aql(
     return c._key
     ",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<String> = arango_database.aql_query(aql).await?;
     let refnos = convert_refno_vec_from_vec_string(result);
     Ok(refnos)
@@ -615,11 +633,11 @@ FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
     }
     ",
         )
-        .bind_var("skip_exist", skip_exist)
-        .bind_var("id", refno_aql)
-        .bind_var("nouns", att_types)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+            .bind_var("skip_exist", skip_exist)
+            .bind_var("id", refno_aql)
+            .bind_var("nouns", att_types)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
     } else {
         AqlQuery::new(
             "\
@@ -637,11 +655,11 @@ FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
     }
     ",
         )
-        .bind_var("skip_exist", skip_exist)
-        .bind_var("id", refno_aql)
-        .bind_var("nouns", att_types)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+            .bind_var("skip_exist", skip_exist)
+            .bind_var("id", refno_aql)
+            .bind_var("nouns", att_types)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
     };
     // dbg!(&aql);
     let r: Vec<CataHashRefnoKV> = arango_database.aql_query(aql).await?;
@@ -668,10 +686,10 @@ pub async fn query_travel_children_with_types_aql(
     Filter parent.noun in @nouns
     return v",
         )
-        .bind_var("id", refno_aql)
-        .bind_var("nouns", att_types)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+            .bind_var("id", refno_aql)
+            .bind_var("nouns", att_types)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
     } else {
         AqlQuery::new(
             "\
@@ -680,10 +698,10 @@ pub async fn query_travel_children_with_types_aql(
     Filter v.noun in @nouns
     return v",
         )
-        .bind_var("id", refno_aql)
-        .bind_var("nouns", att_types)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+            .bind_var("id", refno_aql)
+            .bind_var("nouns", att_types)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
     };
     // dbg!(&aql);
     let result: Vec<PdmsElement> = arango_database.aql_query(aql).await?;
@@ -725,10 +743,10 @@ pub async fn query_travel_children_with_type_aql(
         'children_count':0,
     }",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("noun", att_type)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("noun", att_type)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<PdmsElement> = arango_database.aql_query(aql).await?;
     for v in result {
         r.push(EleTreeNode {
@@ -768,10 +786,10 @@ pub async fn query_refnos_travel_children_with_type_aql(
         })
     return UNIQUE(eles)",
     )
-    .bind_var("id", refno_aql)
-    .bind_var("noun", att_type)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("id", refno_aql)
+        .bind_var("noun", att_type)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<Vec<PdmsElement>> = arango_database.aql_query(aql).await?;
     let result = result.into_iter().flatten().collect::<Vec<_>>();
     for v in result {
@@ -804,11 +822,11 @@ pub async fn query_refno_from_site_zone_name(
                     Filter z.noun == @noun
                     RETURN z._key",
         )
-        .bind_var("site_name", site_name)
-        .bind_var("zone_name", zone_name)
-        .bind_var("noun", att_type)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+            .bind_var("site_name", site_name)
+            .bind_var("zone_name", zone_name)
+            .bind_var("noun", att_type)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
         let result: Vec<String> = arango_database.aql_query(aql).await?;
         Ok(convert_refno_vec_from_vec_string(result))
     } else {
@@ -821,10 +839,10 @@ pub async fn query_refno_from_site_zone_name(
                     FILTER c.noun == @noun
                     RETURN c._key",
         )
-        .bind_var("site_name", site_name)
-        .bind_var("noun", att_type)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+            .bind_var("site_name", site_name)
+            .bind_var("noun", att_type)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
         let result: Vec<String> = arango_database.aql_query(aql).await?;
         Ok(convert_refno_vec_from_vec_string(result))
     };
@@ -843,9 +861,9 @@ pub async fn query_sibl_level_refnos(
         for v in 1..1000 inbound @id sibl_edges
             return v._key",
     )
-    .bind_var("id", refno_url.clone())
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION);
+        .bind_var("id", refno_url.clone())
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION);
     let result: Vec<String> = database.aql_query(aql_in).await.unwrap_or(Vec::new());
     if result.is_empty() {
         return Ok(vec![]);
@@ -858,9 +876,9 @@ pub async fn query_sibl_level_refnos(
         for v in 1..1000 outbound @id @@sibl_edges
             return v._key",
     )
-    .bind_var("id", refno_url)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION);
+        .bind_var("id", refno_url)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION);
     let result: Vec<String> = database.aql_query(aql_out).await?;
     let mut out_refnos = convert_refno_vec_from_vec_string(result);
     out_refnos.push(refno);
@@ -883,9 +901,9 @@ pub async fn query_pre_or_next_node(
             return v._key
     ",
         )
-        .bind_var("key", refno_url)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION)
+            .bind_var("key", refno_url)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION)
     } else {
         AqlQuery::new(
             "\
@@ -894,9 +912,9 @@ pub async fn query_pre_or_next_node(
             return v._key
     ",
         )
-        .bind_var("key", refno_url)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION)
+            .bind_var("key", refno_url)
+            .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+            .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION)
     };
     let aql_result = database.aql_query::<String>(aql).await;
     // 如果为该层第一个或者最后一个 则返回 None
@@ -937,11 +955,11 @@ pub async fn query_travel_children_filter_negative_sibl_nodes(
                 } )
         return UNIQUE(sibls)",
     )
-    .bind_var("key", refno_url)
-    .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
-    .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION);
+        .bind_var("key", refno_url)
+        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@sibl_edges", AQL_SIBL_EDGES_COLLECTION);
     let results = database.aql_query::<Vec<PdmsElement>>(aql).await?;
     let mut negative_map = HashMap::new();
     for result in results {
@@ -972,10 +990,10 @@ pub async fn filter_negative_sibl_from_refnos(
         return refno
     ",
     )
-    .bind_var("keys", keys)
-    .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("keys", keys)
+        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec())
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result = database.aql_query::<String>(aql).await?;
     Ok(result
         .into_iter()
@@ -1122,9 +1140,9 @@ pub async fn query_refnos_belong_major(
         'major':v.major,
     }",
     )
-    .bind_var("ids", ids)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("ids", ids)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result = database.aql_query::<PdmsElementWithMajor>(aql).await?;
     let mut majors = HashMap::new();
     // 查询到该参考号分别在zone和site下属于哪个专业，并将这两个专业代码合并到一个结构体下
@@ -1182,10 +1200,10 @@ pub async fn query_refnos_belong_level_aql(
             'att_type':element.noun
         }",
     )
-    .bind_var("refnos", refnos)
-    .bind_var("noun", att_type)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("refnos", refnos)
+        .bind_var("noun", att_type)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result = database.aql_query::<VagueSearchExportAqlData>(aql).await?;
     Ok(result)
 }
@@ -1224,6 +1242,20 @@ async fn test_vague_query_refnos_user_set_aql() -> anyhow::Result<()> {
         ],
     };
     let result = vague_query_refnos_user_set_aql(request, &database).await?;
+    dbg!(&result);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_refnos_from_names() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+    let names = vec!["/MAIJIAN-NEW-VARY-NGMS".to_string()];
+    let result = query_refnos_from_names(names,&database).await?;
     dbg!(&result);
     Ok(())
 }
