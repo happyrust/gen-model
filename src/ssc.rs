@@ -21,7 +21,7 @@ use crate::api::children::*;
 use crate::api::element::*;
 use crate::api::project_mdb::query_db_nums_of_mdb;
 use crate::api::ssc_data::*;
-use crate::aql_api::children::{query_ancestor_till_type_aql, query_travel_children_aql};
+use crate::aql_api::children::{query_ancestor_till_type_aql, query_refnos_ancestor_with_name_till_type_aql, query_travel_children_aql};
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
@@ -31,7 +31,12 @@ use crate::tables;
 use aios_core::aql_types::AqlEdge;
 use arangors_lite::collection::CollectionType::*;
 use arangors_lite::collection::CollectionType::Document;
+use nom::character::complete::u32;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
+use serde_with::serde_as;
+use serde_with::DisplayFromStr;
+use crate::aql_api::pdms_room::{query_all_room_aql, query_room_refno_from_room_refno_aql, query_rooms_refnos_aql};
+use crate::aql_api::PdmsOwnerNameAql;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SiteExcelData {
@@ -250,7 +255,7 @@ pub fn get_room_level_from_excel_refactor() -> anyhow::Result<SscMajorCodeExcel>
     let mut workbook: Xlsx<_> = open_workbook("resource/专业分类.xlsx")?;
     dbg!("加载专业分类.xlsx 成功");
     let range = workbook.worksheet_range("Sheet2")
-        .ok_or(anyhow::anyhow!("Cannot find 'Sheet1'"))??;
+        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
     dbg!("打开Sheet2成功");
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
@@ -275,7 +280,7 @@ pub fn get_room_level_from_excel_refactor() -> anyhow::Result<SscMajorCodeExcel>
                 });
                 pdms_zone_name_map.clear();
 
-                level.push((site_chinese_name, zones.clone()));
+                level.push((site_code, zones.clone()));
                 zones.clear();
             }
             b_first = false;
@@ -292,9 +297,9 @@ pub fn get_room_level_from_excel_refactor() -> anyhow::Result<SscMajorCodeExcel>
                 name_map.insert(read_zone_code.clone(), read_zone_name.clone());
                 // 存放 pdms的site下 zone name 对应的 专业代码
                 if v.zone_pdms_name.is_some() {
-                    pdms_zone_name_map.entry(v.zone_pdms_name.unwrap()).or_insert(read_zone_code);
+                    pdms_zone_name_map.entry(v.zone_pdms_name.unwrap()).or_insert(read_zone_code.clone());
                 }
-                zones.push(read_zone_name);
+                zones.push(read_zone_code);
             }
         }
     }
@@ -304,7 +309,6 @@ pub fn get_room_level_from_excel_refactor() -> anyhow::Result<SscMajorCodeExcel>
         pdms_name_code_map: pdms_ssc_major_codes,
     })
 }
-
 /// 解析 excel 表单 ，找到每一层下面所有的房间号 返回所有的安装厂房下对应的层位，层位下对应的房间
 pub fn parse_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i32, Vec<String>>>> {
     let mut r = HashMap::new();
@@ -331,6 +335,127 @@ pub fn parse_room_info_from_excel() -> anyhow::Result<HashMap<String, BTreeMap<i
     Ok(r)
 }
 
+/// 解析 excel 表单 ，找到每一层下面所有的房间号,并按树结构保存到图数据库中
+pub async fn get_room_info_from_excel_refactor(database: &ArDatabase) -> anyhow::Result<()> {
+    // 获取 pdms site 和 zone 对应的专业代码
+    let pdms_level = get_room_level_from_excel_refactor()?;
+    let mut r = HashMap::new();
+    let mut workbook: Xlsx<_> = open_workbook("resource/ssc_room.xlsx")?;
+    let range = workbook.worksheet_range("Sheet1")
+        .ok_or(anyhow!("Cannot find 'Sheet1'"))??;
+
+    let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
+    while let Some(result) = iter.next() {
+        let v: RoomExcelData = result?;
+        let Some(room_code) = v.room_code else { continue; };
+        let Some(install_level) = v.install_level else { continue; };
+        let Some(workshop) = v.plant else { continue; };
+        r.entry(workshop).or_insert_with(BTreeMap::new).
+            entry(install_level.parse().unwrap_or(1)).or_insert_with(Vec::new).push(room_code);
+    }
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    for (idx, (workshop, level_map)) in r.into_iter().enumerate() {
+        // 解决厂房的排列
+        let name_hash = convert_str_to_hash(&workshop);
+        let owner = if workshop.starts_with("1") {
+            convert_str_to_hash("一号机组")
+        } else if workshop.starts_with("2") {
+            convert_str_to_hash("二号机组")
+        } else {
+            convert_str_to_hash("双机组共用")
+        };
+        let refno = RefU64(name_hash);
+        let owner = RefU64(owner);
+        nodes.push(PdmsEleGraphNode {
+            refno,
+            owner,
+            name: workshop.to_string(),
+            noun: "SSC".to_string(),
+            dbnum: 0,
+            order: idx as u32,
+            cata_hash: None,
+        });
+        edges.push(AqlEdge::new(refno, owner, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
+        for (idx, (level, rooms)) in level_map.into_iter().enumerate() {
+            // 解决厂房下的层位
+            let level_name_hash = convert_str_to_hash(format!("{}{}", &workshop, level).as_str());
+            let Some(level_name) = match_level_name(level) else { continue; };
+            let refno = RefU64(level_name_hash);
+            let owner = RefU64(name_hash);
+            let node = PdmsEleGraphNode {
+                refno,
+                owner,
+                name: level_name.to_string(),
+                noun: "SSC".to_string(),
+                dbnum: 0,
+                order: idx as u32,
+                cata_hash: None,
+            };
+            nodes.push(node);
+            edges.push(AqlEdge::new(refno, owner, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
+            for (idx, room) in rooms.into_iter().enumerate() {
+                let room_name_hash = convert_str_to_hash(&room);
+                let refno = RefU64(room_name_hash);
+                let owner = RefU64(level_name_hash);
+                edges.push(AqlEdge::new(refno, owner, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
+                nodes.push(PdmsEleGraphNode {
+                    refno,
+                    owner,
+                    name: room.to_string(),
+                    noun: "SSC".to_string(),
+                    dbnum: 0,
+                    order: idx as u32,
+                    cata_hash: None,
+                });
+                // 解决房间下的专业层级
+                // 专业层级
+                for (idx, (site, zones)) in pdms_level.level.iter().enumerate() {
+                    let site_level_name_hash = convert_str_to_hash(format!("{}{}", room, site).as_str());
+                    let Some(site_name) = pdms_level.name_map.get(site) else { continue; };
+                    let refno = RefU64(site_level_name_hash);
+                    let owner = RefU64(room_name_hash);
+                    edges.push(AqlEdge::new(refno, owner, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
+                    nodes.push(PdmsEleGraphNode {
+                        refno,
+                        owner,
+                        name: site_name.to_string(),
+                        noun: "SSC".to_string(),
+                        dbnum: 0,
+                        order: idx as u32,
+                        cata_hash: None,
+                    });
+                    // 专业下具体细分
+                    for (idx, zone) in zones.iter().enumerate() {
+                        let zone_level_name_hash = convert_str_to_hash(format!("{}{}", room, zone).as_str());
+                        let refno = RefU64(zone_level_name_hash);
+                        let owner = RefU64(site_level_name_hash);
+                        let Some(zone_name) = pdms_level.name_map.get(zone) else { continue; };
+                        edges.push(AqlEdge::new(refno, owner, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
+                        nodes.push(PdmsEleGraphNode {
+                            refno,
+                            owner,
+                            name: zone_name.to_string(),
+                            noun: "SSC".to_string(),
+                            dbnum: 0,
+                            order: idx as u32,
+                            cata_hash: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for nodes in nodes.chunks(ARANGODB_SAVE_AMOUNT) {
+        let eles_value = serde_json::to_value(nodes)?;
+        save_arangodb_doc(eles_value, AQL_SSC_ELES_COLLECTION, database, false).await?;
+    }
+    for edges in edges.chunks(ARANGODB_SAVE_AMOUNT) {
+        let edge_value = serde_json::to_value(edges)?;
+        save_arangodb_doc(edge_value, AQL_SSC_EDGE_COLLECTION, database, false).await?;
+    }
+    Ok(())
+}
 
 pub fn get_rooms_from_excel() -> anyhow::Result<Vec<String>> {
     let mut r = vec![];
@@ -571,6 +696,155 @@ pub async fn insert_ssc_room_node(mut room_data: HashMap<RefU64, SscEleNode>, zo
     }
     insert_sql_vec.push(insert_sql.clone());
     Ok(insert_sql_vec)
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PdmsNodeMajor {
+    #[serde_as(as = "DisplayFromStr")]
+    pub refno: RefU64,
+    pub noun: String,
+    pub name: String,
+    #[serde_as(as = "DisplayFromStr")]
+    pub zone_refno: RefU64,
+    pub zone_name: String,
+    pub major: Option<String>,
+}
+
+/// 返回参考号集合所属的zone以及专业代码
+pub async fn query_refnos_belong_zones(refnos: Vec<RefU64>, database: &Database) -> anyhow::Result<Vec<PdmsNodeMajor>> {
+    let refnos = refnos.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
+    let aql = AqlQuery::new("
+    for refno in @refnos
+        let node = document(@@pdms_eles,refno)
+        for v in 0..10 outbound node._id pdms_edges
+            filter v.noun == 'ZONE'
+            return {
+                'refno':node._key,
+                'name':node.name,
+                'noun':node.noun,
+                'zone_refno':v._key,
+                'zone_name':v.name,
+                'major':v.major
+       }").bind_var("refnos", refnos)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION);
+    let result = database.aql_query::<PdmsNodeMajor>(aql).await?;
+    Ok(result)
+}
+
+/// 保存房间下的元件
+pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Result<()> {
+    // 找到图数据库中所有的房间
+    let rooms = query_all_room_aql(database).await?;
+    let owner_types = vec!["BRAN".to_string(), "STRU".to_string(), "REST".to_string(), "EQUI".to_string()];
+    let zone_type = vec!["PIPESU", "RACKSU", "INSTSU", "WATRSU"]; // 特殊处理得zone专业代码
+    for room in rooms {
+        // 依次查询每个房间下所有的节点
+        let nodes = query_room_refno_from_room_refno_aql(room.refno, database).await?;
+        // 查询房间下所有节点所属的zone的专业号和所在 bran stru rest equi 的参考号和name
+        let zone_major_infos = query_refnos_belong_zones(nodes.clone(), database).await?;
+        let owners = query_refnos_ancestor_with_name_till_type_aql(database, nodes,
+                                                                   owner_types.clone()).await?;
+        let owners = owners.into_iter().map(|x| (x.refno, x)).collect::<HashMap<RefU64, PdmsOwnerNameAql>>();
+        // 根据不同zone的分类规则来划分节点所在位置
+        let mut ssc_nodes = Vec::new();
+        let mut ssc_edges = Vec::new();
+        for (idx, info) in zone_major_infos.into_iter().enumerate() {
+            let Some(owner) = owners.get(&info.refno) else { continue; };
+            if info.major.is_none() { continue; };
+            let major = info.major.unwrap();
+            // 节点的上一级
+            let room_name = format!("1{}", room.room_name); // 默认都是一号机组
+            if !zone_type.contains(&major.to_string().as_str()) {
+                let owner_owner_hash = convert_str_to_hash(format!("{}{}", room_name, major).as_str());
+                let owner_name_hash = convert_str_to_hash(format!("{}{}", room_name, owner.owner_name).as_str());
+                let refno = RefU64(owner_name_hash);
+                let owner_refno = RefU64(owner_owner_hash);
+                ssc_nodes.push(PdmsEleGraphNode {
+                    refno,
+                    owner: owner_refno,
+                    name: owner.owner_name.to_string(),
+                    noun: owner.owner_noun.to_string(),
+                    dbnum: 0,
+                    order: idx as u32,
+                    cata_hash: None,
+                });
+                ssc_edges.push(AqlEdge::new(refno, owner_refno, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
+                // 存放元件
+                let refno = info.refno;
+                let owner = RefU64(owner_name_hash);
+                ssc_nodes.push(PdmsEleGraphNode {
+                    refno,
+                    owner: owner,
+                    name: info.name.to_string(),
+                    noun: info.noun.to_string(),
+                    order: idx as u32,
+                    dbnum: 0,
+                    cata_hash: None,
+                });
+                ssc_edges.push(AqlEdge::new(refno, owner, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
+            } else {
+                // 该分类需要将owner拆分成两个层级
+                let owner_owner_hash = convert_str_to_hash(format!("{}{}", room_name, major).as_str());
+                let owner_name_split = owner.owner_name.split("/").collect::<Vec<_>>();
+                let owner_name_split = owner_name_split.get(1).unwrap_or(&"").to_string();
+                let refno = RefU64(convert_str_to_hash(format!("{}{}", room_name, owner_name_split).as_str()));
+                let owner_refno = RefU64(owner_owner_hash);
+                ssc_nodes.push(PdmsEleGraphNode {
+                    refno,
+                    owner: owner_refno,
+                    name: owner_name_split.to_string(),
+                    noun: "SSC".to_string(),
+                    order: idx as u32,
+                    dbnum: 0,
+                    cata_hash: None,
+                });
+                ssc_edges.push(AqlEdge::new(refno, owner_refno, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
+                // owner下两个固定层级
+                let owner_refno = refno;
+                let refno = RefU64(convert_str_to_hash(format!("{}{}{}", room_name, owner_name_split, "STRU").as_str()));
+                ssc_nodes.push(PdmsEleGraphNode {
+                    refno,
+                    owner: owner_refno,
+                    name: "STRU".to_string(),
+                    noun: "STRU".to_string(),
+                    dbnum: 0,
+                    order: idx as u32,
+                    cata_hash: None,
+                });
+                ssc_edges.push(AqlEdge::new(refno, owner_refno, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
+                let refno = RefU64(convert_str_to_hash(format!("{}{}{}", room_name, owner_name_split, "REST").as_str()));
+                ssc_nodes.push(PdmsEleGraphNode {
+                    refno,
+                    owner: owner_refno,
+                    name: "REST".to_string(),
+                    noun: "REST".to_string(),
+                    dbnum: 0,
+                    order: idx as u32,
+                    cata_hash: None,
+                });
+                ssc_edges.push(AqlEdge::new(refno, owner_refno, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
+                // 将房间下元件放到这两个固定层级下面
+                let refno = info.refno;
+                let owner_refno = RefU64(convert_str_to_hash(format!("{}{}{}", room_name, owner_name_split, owner.owner_noun).as_str()));
+                ssc_nodes.push(PdmsEleGraphNode {
+                    refno,
+                    owner: owner_refno,
+                    name: info.name.to_string(),
+                    noun: info.noun.to_string(),
+                    dbnum: 0,
+                    order: idx as u32,
+                    cata_hash: None,
+                });
+                ssc_edges.push(AqlEdge::new(refno, owner_refno, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
+            }
+        }
+        let eles_value = serde_json::to_value(&ssc_nodes)?;
+        save_arangodb_doc(eles_value, AQL_SSC_ELES_COLLECTION, database, false).await?;
+        let edge_value = serde_json::to_value(&ssc_edges)?;
+        save_arangodb_doc(edge_value, AQL_SSC_EDGE_COLLECTION, database, false).await?;
+    }
+    Ok(())
 }
 
 /// 设置 ssc 的固定节点
@@ -913,7 +1187,7 @@ async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
         .ok_or(anyhow::anyhow!("Cannot find 'Sheet1'"))??;
 
     let mut iter = RangeDeserializerBuilder::new().from_range(&range)?;
-
+    let mut idx = 0;
     while let Some(result) = iter.next() {
         let v: SscLevelExcel = result?;
         if v.is_valid() {
@@ -925,7 +1199,7 @@ async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
             eles_results.push(PdmsEleGraphNode {
                 refno,
                 noun: v.att_type.unwrap(),
-                order: 0,
+                order: idx,
                 name,
                 owner,
                 dbnum: 0,
@@ -936,7 +1210,8 @@ async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
                 _key: refno.hash_with_another_refno(owner).to_string(),
                 _from: format!("{}/{}", AQL_SSC_ELES_COLLECTION, refno.to_url_refno()),
                 _to: format!("{}/{}", AQL_SSC_ELES_COLLECTION, owner.to_url_refno()),
-            })
+            });
+            idx += 1;
         }
     }
     let eles_value = serde_json::to_value(&eles_results)?;
@@ -964,6 +1239,21 @@ fn gen_replace_room_refno_sql(room_name: &str, refno: RefU64, old_refno: RefU64)
     sql
 }
 
+fn match_level_name(level: i32) -> Option<String> {
+    match level {
+        1 => Some("1层(-6.70m)".to_string()),
+        2 => Some("2层(-3.30m)".to_string()),
+        3 => Some("3层(0.00m)".to_string()),
+        4 => Some("4层(+3.60m)".to_string()),
+        5 => Some("5层(+7.5m)".to_string()),
+        6 => Some("6层(+13.50m)".to_string()),
+        7 => Some("7层(+16.50m)".to_string()),
+        8 => Some("8层(+22.00m及以上)".to_string()),
+        9 => Some("9层(内穹顶)".to_string()),
+        _ => None,
+    }
+}
+
 #[tokio::test]
 async fn test_save_ssc_level_excel() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
@@ -973,9 +1263,11 @@ async fn test_save_ssc_level_excel() -> anyhow::Result<()> {
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
-    let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
+    // let pool = AiosDBManager::get_db_pool(&url, "AvevaMarineSample").await?;
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let _ = save_ssc_level_excel(&database).await?;
+    let _result = get_room_info_from_excel_refactor(&database).await.unwrap();
+    let _result = insert_ssc_room_node_refactor(&database).await.unwrap();
     Ok(())
 }
 
@@ -986,10 +1278,33 @@ fn test_parse_room_info_from_excel() -> anyhow::Result<()> {
     Ok(())
 }
 
+
+#[tokio::test]
+async fn test_get_room_info_from_excel_refactor() {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build().unwrap();
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await.unwrap();
+    let result = get_room_info_from_excel_refactor(&database).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_insert_ssc_room_node_refactor() {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build().unwrap();
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await.unwrap();
+    let result = insert_ssc_room_node_refactor(&database).await.unwrap();
+}
+
 #[test]
 fn test_get_room_level_from_excel_refactor() {
     let result = get_room_level_from_excel_refactor().unwrap();
-    // dbg!(&result.level);
+    dbg!(&result.level);
     // dbg!(&result.name_map.len());
-    dbg!(&result.pdms_name_code_map);
+    // dbg!(&result.pdms_name_code_map);
 }

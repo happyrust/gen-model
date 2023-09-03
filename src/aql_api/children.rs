@@ -327,6 +327,25 @@ pub async fn query_ancestor_name_of_type_aql(
     Ok(Some(result.remove(0)))
 }
 
+/// 获取多个节点向上遍历到指定类型的参考号和name
+pub async fn query_refnos_ancestor_with_name_till_type_aql(arango_database: &ArDatabase, refnos: Vec<RefU64>, att_types: Vec<String>) -> anyhow::Result<Vec<PdmsOwnerNameAql>> {
+    let refno_aql = refnos.into_iter().map(|refno| refno.to_url_refno()).collect::<Vec<_>>();
+    let aql = AqlQuery::new("
+    for refno in @refnos
+    for v in 0..10 outbound concat('pdms_eles/',refno) pdms_edges
+        filter v!= null
+        filter v.noun in @nouns
+        return {
+            'refno':refno,
+            'owner':v._key,
+            'owner_noun':v.noun,
+            'owner_name':v.name
+        }").bind_var("refnos", refno_aql)
+        .bind_var("nouns", att_types);
+    let result: Vec<PdmsOwnerNameAql> = arango_database.aql_query(aql).await?;
+    Ok(result)
+}
+
 ///搜索沿着路径查询目标节点
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]

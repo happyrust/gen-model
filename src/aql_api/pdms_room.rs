@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool, Row};
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
+use serde_with::serde_as;
+use serde_with::DisplayFromStr;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RoomData {
@@ -515,8 +517,6 @@ pub async fn query_room_refnos_aql(
             .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
     };
     let result: Vec<String> = database.aql_query(aql).await?;
-    dbg!("****");
-    dbg!(&result);
     Ok(convert_refno_vec_from_vec_string(result))
 }
 
@@ -535,8 +535,7 @@ pub async fn query_rooms_refnos_aql(
             'refno': v._key,
             'room_name': room.name,
          }
-    ",
-    )
+    ", )
         .bind_var("rooms", rooms)
         .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
@@ -560,6 +559,21 @@ pub async fn query_rooms_refnos_aql(
         }
         Err(e) => Ok(vec![]),
     }
+}
+
+/// 通过房间参考号返回该房间下的所有节点
+pub async fn query_room_refno_from_room_refno_aql(room_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
+    let id = format!("{}/{}", AQL_ROOM_ELES_COLLECTION, room_refno.to_url_refno());
+    let aql = AqlQuery::new("
+    With @@room_eles, @@room_edges
+    for v in 1 outbound @id @@room_edges
+        return v._key    ")
+        .bind_var("id", id)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
+    let result = database.aql_query::<String>(aql).await?;
+    let refnos = convert_refno_vec_from_vec_string(result);
+    Ok(refnos)
 }
 
 /// 查找房间下的所有元件的 pdms_element
@@ -714,7 +728,6 @@ impl AiosDBManager {
                 .query_ele_own_room_panels(&children, Some(through_refno))
                 .await
             {
-
                 for (k, mut v) in result {
                     let r1 = v.pop().unwrap_or_default();
                     let r0 = v.pop().unwrap_or_default();
@@ -791,7 +804,6 @@ impl AiosDBManager {
         let mut whole_key_points = vec![];
         let mut whole_aabb = Aabb::new_invalid();
         if is_as_whole {
-
             for (&refno, info) in &inst_data.inst_info_map {
                 let Some(inst_geos) = inst_data.get_inst_geos(info) else {
                     continue;
@@ -1137,4 +1149,24 @@ impl AiosDBManager {
     // pub fn query_nearest_intersection_ele_pos(&self) -> Option<Aabb> {
     //     None
     // }
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RoomNode {
+    #[serde_as(as = "DisplayFromStr")]
+    pub refno: RefU64,
+    pub room_name: String,
+}
+
+/// 获取所有计算完成的房间
+pub async fn query_all_room_aql(database: &ArDatabase) -> anyhow::Result<Vec<RoomNode>> {
+    let aql = AqlQuery::new("\
+        for v in @@room_eles
+        return {
+            'refno':v._key,
+            'room_name': v.name
+        }").bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
+    let result = database.aql_query::<RoomNode>(aql).await?;
+    Ok(result)
 }

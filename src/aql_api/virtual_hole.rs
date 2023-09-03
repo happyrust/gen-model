@@ -12,37 +12,37 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 
 pub async fn get_plugging_hole_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<PluggingHoleData>> {
     let mut data = Vec::new();
-    let database = aios_mgr.get_arango_db().await?;
-    for refno in refnos {
-        let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(refno).await else { continue; };
-        let Ok(hole_name) = query_name(refno, &pool).await else { continue; };
-        // 获取孔洞的尺寸
-        let Some(hole_size) = get_virtual_hole_size(refno, aios_mgr).await? else { continue; };
-        let hole_area = get_virtual_hole_area(&hole_size);
-        let hole_volume = get_virtual_hole_volume(&hole_size);
-        // 获取孔洞两边的房间号
-        let Ok(Some(hole_rooms)) = query_node_connect_rooms(refno, &database).await else { continue; };
-        // 从图为获取电缆面见
-        let cable_area = get_cable_area(refno).await?.unwrap_or(0.0);
-        // 封堵面积
-        let plugging_area = hole_area - cable_area;
-        if plugging_area < 0.0 { return Err(anyhow::anyhow!("电缆面积大于孔洞面积，请排查错误")); };
-        // 填充率
-        let Some(fill_percent) = get_cable_fill_percent().await? else { continue; };
-        // 封堵体积
-        let plugging_volume = hole_volume * (1.0 - fill_percent);
-        let plugging_material = get_hole_blockage_method(refno, 0.0, aios_mgr).await?.unwrap_or_default();
-        data.push(PluggingHoleData {
-            hole_refno: refno,
-            hole_name,
-            hole_size,
-            hole_rooms,
-            cable_area,
-            plugging_area,
-            plugging_volume,
-            plugging_material: plugging_material.method,
-        });
-    }
+    // let database = aios_mgr.get_arango_db().await?;
+    // for refno in refnos {
+    //     let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(refno).await else { continue; };
+    //     let Ok(hole_name) = query_name(refno, &pool).await else { continue; };
+    //     // 获取孔洞的尺寸
+    //     let Some(hole_size) = get_virtual_hole_size(refno, aios_mgr).await? else { continue; };
+    //     let hole_area = get_virtual_hole_area(&hole_size);
+    //     let hole_volume = get_virtual_hole_volume(&hole_size);
+    //     // 获取孔洞两边的房间号
+    //     let Ok(Some(hole_rooms)) = query_node_connect_rooms(refno, &database).await else { continue; };
+    //     // 从图为获取电缆面见
+    //     let cable_area = get_cable_area(refno).await?.unwrap_or(0.0);
+    //     // 封堵面积
+    //     let plugging_area = hole_area - cable_area;
+    //     if plugging_area < 0.0 { return Err(anyhow::anyhow!("电缆面积大于孔洞面积，请排查错误")); };
+    //     // 填充率
+    //     let Some(fill_percent) = get_cable_fill_percent().await? else { continue; };
+    //     // 封堵体积
+    //     let plugging_volume = hole_volume * (1.0 - fill_percent);
+    //     let plugging_material = get_hole_blockage_method(refno, 0.0, aios_mgr).await?.unwrap_or_default();
+    //     data.push(PluggingHoleData {
+    //         hole_refno: refno,
+    //         hole_name,
+    //         hole_size,
+    //         hole_rooms,
+    //         cable_area,
+    //         plugging_area,
+    //         plugging_volume,
+    //         plugging_material: plugging_material.method,
+    //     });
+    // }
     Ok(data)
 }
 
