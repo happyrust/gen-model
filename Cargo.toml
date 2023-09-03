@@ -5,7 +5,7 @@ edition = "2021"
 
 [features]
 #default = ["opencascade_rs"] #
-default = []
+default = ["gen_model"]
 truck = []
 viewer = []  #是否开启视图
 gen_model = ["aios_core/gen_model"]
@@ -42,6 +42,7 @@ chrono = "0.4.22"
 #geo = { path = "../crates/geo/geo" }
 nalgebra = { path="../crates/nalgebra", features = ["serde", "rkyv", "glam023"] }
 parry3d = { path="../crates/parry/crates/parry3d", features = ["serde-serialize", "rkyv"] }
+parry2d = { path="../crates/parry/crates/parry2d", features = ["serde-serialize", "rkyv", "rkyv-serialize"] }
 
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path = "../crates/aios-core" }

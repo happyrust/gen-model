@@ -1,5 +1,5 @@
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
-use aios_core::pdms_types::RefU64;
+use aios_core::pdms_types::{GeoBasicType, RefU64};
 use parry3d::utils::hashmap::HashMap;
 use regex::Regex;
 use crate::api::room_code::query_room_code;
@@ -135,7 +135,7 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
             let split_desc = desc.clone().split("-").map(|desc| desc.to_string()).collect::<Vec<_>>();
             // 计算所属房间顶底标高
             let support_type = if desc.starts_with("S2") && desc.contains("FLOOR") { "支架".to_string() } else { "吊架".to_string() };
-            let panel = aios_mgr.query_own_room_panel_elevations(stru.refno).await.unwrap_or_default();
+            let panel = aios_mgr.query_own_room_panel_elevations(stru.refno, None).await.unwrap_or_default();
             if !panel.is_empty() {
                 for (_panel, (min, max)) in panel {
                     if support_type == "支架".to_string() {

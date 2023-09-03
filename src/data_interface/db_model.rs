@@ -234,19 +234,17 @@ impl AiosDBManager {
                     let mut outer_refnos = vec![];
                     //需要批量去获取数据
 
-                    for (refno, world_point) in &withing_room_items {
+                    for (refno, aabb) in &withing_room_items {
                         //检查目标的坐标点不在它自身包围盒的情况，这种就需要用相交的算法去计算
                         //check 是否包含在房间内
                         let contain_point = match collider_mesh.cast_local_ray_and_get_normal(
-                            &Ray::new(Point3::from_slice(world_point), Vector::new(0.0, 0.0, 1.0)),
+                            &Ray::new(aabb.center(), Vector::new(0.0, 0.0, 1.0)),
                             100000.0,
                             false,
                         ) {
                             Some(intersection) => collider_mesh.is_backface(intersection.feature),
                             None => false,
                         };
-                        // dbg!(contain_point);
-                        // dbg!(outer_refnos.len());
                         if !contain_point {
                             outer_refnos.push(*refno);
                         }
@@ -293,7 +291,7 @@ impl AiosDBManager {
             let inst_data = query_insts_shape_data(
                 &database,
                 &room_panels,
-                &[GeoBasicType::Pos, GeoBasicType::Compound],
+                Some(&[GeoBasicType::Pos, GeoBasicType::Compound]),
             )
                 .await?;
             for (panel_refno, info) in &inst_data.inst_info_map {

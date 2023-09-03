@@ -189,9 +189,11 @@ pub async fn save_instance_to_graph_db(
 pub async fn query_insts_shape_data(
     database: &ArDatabase,
     refnos: impl IntoIterator<Item = &RefU64>,
-    filter: &[GeoBasicType],
+    geo_type_filter: Option<&[GeoBasicType]>,
 ) -> anyhow::Result<ShapeInstancesData> {
+    let filter = geo_type_filter.unwrap_or(&[GeoBasicType::Compound, GeoBasicType::Pos]);
     let new_refnos = refnos.into_iter().cloned().collect::<Vec<_>>();
+    if new_refnos.is_empty() { return Ok(Default::default()); }
     let refno_strs = new_refnos
         .iter()
         .map(|x| x.to_url_refno())

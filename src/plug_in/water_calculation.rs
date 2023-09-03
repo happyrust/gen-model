@@ -147,13 +147,13 @@ pub async fn export_stp(
             //需要进行缩放处理，宽度为门的1/10，高度固定为100
             if is_door {
                 //2150 1000 700
+                dbg!("处理门: {d}");
                 let inst = &insts_data.insts[0];
                 let extents = insts_data.aabb.unwrap().extents();
                 // dbg!(extents);
                 // dbg!(inst.transform);
-                transform = Transform::from_translation(Vec3::new(0.0, 0.0, -extents.x/2.0))
-                    *  transform * inst.transform ;
-                // let mut box_shape = AdHocShape::make_box(extents.x as f64, extents.y as f64, extents.z as f64).0;
+                // transform = Transform::from_translation(Vec3::new(0.0, 0.0, -extents.x/2.0)) *  transform * inst.transform ;
+                transform.translation += transform.rotation * Vec3::new(0.0, 0.0, -extents.x/2.0);
                 let mut box_shape = AdHocShape::make_box(100.0, extents.y as f64 / 10.0 , extents.z as f64).0;
                 box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
                 boolean_map.entry(o).or_default().push((*refno, box_shape));
@@ -163,15 +163,6 @@ pub async fn export_stp(
             }
         }
     }
-    // boolean_map.values_mut().for_each(|x| {
-    //     x.sort_by(|a, b| a.0.cmp(&b.0));
-    // });
-
-    // let refnos = boolean_map
-    //     .values()
-    //     .flat_map(|x| x.iter().map(|t| t.0))
-    //     .collect::<Vec<_>>();
-    // dbg!(&refnos);
 
     total_shapes_map
         .iter_mut()
