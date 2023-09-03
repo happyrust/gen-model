@@ -22,7 +22,6 @@ use crate::test::test_helper::get_test_ams_db_manager_async;
 pub async fn get_plugging_material_datas(select_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PluggingData>> {
     // 找到所有需要计算的孔洞
     let holes = query_hole_elements(select_refno, &database).await?;
-    dbg!(&holes.len());
     // 查找他的instance
     let insts = query_hole_instance(&holes, &database).await?;
     let name_map = holes.into_iter().map(|refno| (refno.refno, refno)).collect::<HashMap<RefU64, PdmsElement>>();

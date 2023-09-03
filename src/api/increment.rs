@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
-use aios_core::pdms_types::{AttrMap, IncrementDataSql, RefU64, WholeAttMap};
+use aios_core::pdms_types::{AttrMap, EleOperation, IncrementDataSql, RefU64, WholeAttMap};
 use sqlx::{Error, MySql, Pool, Row};
 use aios_core::pdms_data::{NewDataOperate};
 use chrono::DateTime;
@@ -19,13 +19,13 @@ pub async fn query_latest_data(version: u32, pool: &Pool<MySql>) -> anyhow::Resu
             let operate = val.get::<i32, _>("OPERATE");
             let version = val.get::<i32, _>("VERSION") as u32;
             let user = val.get::<String, _>("USER");
-            let old_data: WholeAttMap = bincode::deserialize(&val.get::<Vec<u8>, _>("OLD_DATA"))?;
-            let new_data: WholeAttMap = bincode::deserialize(&val.get::<Vec<u8>, _>("NEW_DATA"))?;
+            let old_data = AttrMap::from_rkvy_compress_bytes(&val.get::<Vec<u8>, _>("OLD_DATA"))?;
+            let new_data = AttrMap::from_rkvy_compress_bytes(&val.get::<Vec<u8>, _>("NEW_DATA"))?;
             let time = val.get::<String, _>("TIME");
             result.push(IncrementDataSql {
                 id,
                 refno,
-                operate: NewDataOperate::from(operate),
+                operate: EleOperation::from(operate),
                 version,
                 user,
                 old_data,
@@ -36,6 +36,7 @@ pub async fn query_latest_data(version: u32, pool: &Pool<MySql>) -> anyhow::Resu
     }
     Ok(result)
 }
+
 
 fn gen_query_latest_data_sql(version: u32) -> String {
     let mut sql = String::new();
