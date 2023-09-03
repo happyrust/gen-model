@@ -42,6 +42,7 @@ use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use pdms_io::watch::PdmsWatcher;
 use tokio::sync::RwLock;
+use crate::graph_db::structs::PdmsEleGraphNode;
 
 lazy_static! {
     pub static ref CATAEXPRCONTEXT_MAP: DashMap<RefU64, CataExprContext> = {
@@ -383,16 +384,22 @@ impl PdmsDataInterface for AiosDBManager {
         project: &str,
         mdb_name: &str,
         module: &str,
-    ) -> anyhow::Result<EleTreeNode> {
-        let pool = self
-            .project_map
-            .get(project)
-            .ok_or(anyhow!("{project} not exist."))?;
-        query_world(mdb_name, module, pool.value()).await
+    ) -> anyhow::Result<PdmsElement> {
+        //这里还需要将project的信息利用起来
+        let string = format!("v.mdb_name==\"/{}\" and v.db_type==\"{}\"", mdb_name, module);
+        dbg!(&string);
+        let mut ele_nodes = self.query_ele_edges_by_expression(&string).await?;
+        dbg!(&ele_nodes);
+        //从mdb 开始往下找，找到world
+        if let Some(node) = ele_nodes.pop()  {
+            let mut children = self.query_children_eles_order(node.owner, &[], &[module]).await?;
+            return children.pop().ok_or( anyhow!("World not exist"));
+        }
+        Ok(Default::default())
     }
 
     ///获得world节点
-    async fn get_desi_world(&self) -> anyhow::Result<EleTreeNode> {
+    async fn get_desi_world(&self) -> anyhow::Result<PdmsElement> {
         self.get_world(self.get_cur_project(), self.get_cur_mdb(), DESI)
             .await
     }

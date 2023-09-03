@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = [] #
+#default = ["opencascade_rs"] #
+default = ["gen_model"]
 truck = []
 viewer = []  #是否开启视图
-#gen_model = ["aios_core/gen_model"]
-#opencascade_rs = ["aios_core/opencascade_rs", "dep:opencascade"]
+gen_model = ["aios_core/gen_model"]
+opencascade_rs = ["aios_core/opencascade_rs", "dep:opencascade"]
 
 [dependencies]
 config = "0.13.1"
@@ -41,11 +42,12 @@ chrono = "0.4.22"
 #geo = { path = "../crates/geo/geo" }
 nalgebra = { path="../crates/nalgebra", features = ["serde", "rkyv", "glam023"] }
 parry3d = { path="../crates/parry/crates/parry3d", features = ["serde-serialize", "rkyv"] }
+parry2d = { path="../crates/parry/crates/parry2d", features = ["serde-serialize", "rkyv", "rkyv-serialize"] }
 
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path = "../crates/aios-core" }
 bevy_transform = { path = "../crates/bevy/crates/bevy_transform"}
-pdms_io = {path = "../pdms-io-8-30"}
+
 #csg = { path = "../crates/csgrs/csg" }
 arangors_lite = { path = "../crates/arangors-lite"}
 #heed = {path = "../crates/heed/heed"}
@@ -66,7 +68,7 @@ debug_print = "1.0.0"
 
 
 #造型功能，先在database测试
-#opencascade = { path = "../crates/opencascade-rs/crates/opencascade", optional = true}
+opencascade = { path = "../crates/opencascade-rs/crates/opencascade", optional = true}
 serde_with = "3.0.0"
 tokio-stream = "0.1.14"
 rayon = "1.7.0"
@@ -76,6 +78,7 @@ urlencoding = "2.1.3"
 notify = "6.1.1"
 walkdir = "2.3.3"
 #geo = "0.24.1"
+pdms_io = { path = "../pdms-io" }
 
 
 [build-dependencies]

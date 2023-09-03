@@ -607,7 +607,6 @@ pub async fn sync_total_async_threaded(
             .unwrap_or_default();
             dbg!(children_map.len());
             let all_refnos = children_map.keys().cloned().collect::<Vec<_>>();
-            dbg!(&all_refnos.len());
             let children_map_clone = Arc::new(children_map);
 
             if db_option.sync_graph_db.unwrap_or(true) {
@@ -720,7 +719,8 @@ pub async fn sync_total_async_threaded(
                     let mut type_handles = vec![];
                     // 将部分数据保存到图数据库
                     if db_option.sync_graph_db.unwrap_or(true) {
-                        if db_type == "CATA" || db_type == "DESI" {
+                        //if db_type == "CATA" || db_type == "DESI"
+                        {
                             let database = arango_pool
                                 .get()
                                 .await?
@@ -751,11 +751,11 @@ pub async fn sync_total_async_threaded(
 
                     if db_option.sync_localdb.unwrap_or(true) {
                         for kv in total_attr_map_arc.as_ref() {
-                            let mut vec = kv
-                                .value()
-                                .merge()
-                                .into_rkyv_compress_bytes();
-
+                            let att = kv.value().merge();
+                            if *kv.key() == "=17496/196611".into() {
+                                dbg!(&att);
+                            }
+                            let mut vec = att.into_rkyv_compress_bytes();
                             attmap_tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
                         }
 

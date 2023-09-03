@@ -680,13 +680,35 @@ pub async fn query_refno_belong_rooms(
     Ok(r)
 }
 
+
+#[derive(Debug, Clone)]
+pub struct SpatialQueryResult{
+    pub refno: RefU64,
+    pub bbox: Aabb,
+    pub bbox_dist: f32,
+    pub intersection: Option<bool>,
+    pub through: Option<bool>,
+}
+
+#[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
+pub enum IntersectMethod{
+    #[default]
+    None,
+    BBoxCheck,
+    EndPtsCheck,
+    MeshCheck,
+}
+
+
 impl AiosDBManager {
     /// 返回贯穿件穿过的两个房间号
     pub async fn query_through_element_room_nums(
         &self,
         refnos: &[RefU64],
+        geo_type_filter: Option<&[GeoBasicType]>,
     ) -> anyhow::Result<HashMap<RefU64, (String, String)>> {
-        let mut own_panels_map = self.query_through_element_room_panels(refnos).await?;
+        let filter = geo_type_filter.unwrap_or(&[GeoBasicType::Pos]);
+        let mut own_panels_map = self.query_through_element_room_panels(refnos, Some(filter)).await?;
         Ok(own_panels_map
             .iter()
             .map(|(refno, (p0, p1))| {
@@ -711,20 +733,24 @@ impl AiosDBManager {
     pub async fn query_through_element_room_panels(
         &self,
         refnos: &[RefU64],
+        geo_type_filter: Option<&[GeoBasicType]>,
     ) -> anyhow::Result<HashMap<RefU64, (RefU64, RefU64)>> {
         let through_children_map: HashMap<RefU64, Vec<RefU64>> = refnos
             .into_iter()
             .map(|x| {
                 (
                     *x,
-                    (self.get_children_from_localdb(*x).unwrap_or_default()).0,
+                    {
+                        let children = self.get_children_from_localdb(*x).unwrap_or_default();
+                        if children.is_empty()  { vec![*x] } else { children.0 }
+                    }
                 )
             })
             .collect();
         let mut res_map = HashMap::new();
         for (through_refno, children) in through_children_map {
             if let Ok(mut result) = self
-                .query_ele_own_room_panels(&children, Some(through_refno))
+                .query_ele_own_room_panels(&children, Some(through_refno), geo_type_filter)
                 .await
             {
                 for (k, mut v) in result {
@@ -744,7 +770,7 @@ impl AiosDBManager {
         is_end_pt: bool,
     ) -> anyhow::Result<Option<(Vec<Vec3>, Aabb)>> {
         let database = self.get_arango_db().await?;
-        let inst_data = query_insts_shape_data(&database, refnos, &[GeoBasicType::Pos]).await?;
+        let inst_data = query_insts_shape_data(&database, refnos, None).await?;
         if inst_data.inst_info_map.is_empty() {
             return Ok(None);
         }
@@ -787,14 +813,16 @@ impl AiosDBManager {
         &self,
         refnos: &[RefU64],
         as_whole_to: Option<RefU64>,
+        geo_type_filter: Option<&[GeoBasicType]>,
     ) -> anyhow::Result<HashMap<RefU64, Vec<RefU64>>> {
+        let filter = geo_type_filter.unwrap_or(&[GeoBasicType::Pos]);
         let room_panels_tree = self
             .room_panels_rtree
             .as_ref()
             .ok_or(anyhow::anyhow!("房间空间树未生成。"))?;
         //先用包围盒去查询和哪些房间的aabb相交
         let database = self.get_arango_db().await?;
-        let inst_data = query_insts_shape_data(&database, refnos, &[GeoBasicType::Pos]).await?;
+        let inst_data = query_insts_shape_data(&database, refnos, Some(filter)).await?;
         let is_as_whole = as_whole_to.is_some();
         if inst_data.inst_info_map.is_empty() {
             return Ok(Default::default());
@@ -849,6 +877,7 @@ impl AiosDBManager {
             self.cache_plant_meshes(&geo_hashes, false).await?;
             let mut target_panels = vec![];
             //这里需要考虑顺序
+            dbg!(&final_key_points);
             for key_point in &final_key_points {
                 for &panel_info in &panel_infos {
                     let Ok(Some(room_panel_mesh)) =
@@ -959,9 +988,10 @@ impl AiosDBManager {
     pub async fn query_own_room_panel_elevations(
         &self,
         refno: RefU64,
+        geo_type_filter: Option<&[GeoBasicType]>,
     ) -> anyhow::Result<HashMap<RefU64, (f32, f32)>> {
         let mut elevs_map = HashMap::new();
-        let mut panels_map = self.query_ele_own_room_panels(&[refno], None).await?;
+        let mut panels_map = self.query_ele_own_room_panels(&[refno], None, geo_type_filter).await?;
         if let Some(panels) = panels_map.remove(&refno) {
             for panel in panels {
                 if let Some((geo_hash, t)) = self
@@ -987,11 +1017,11 @@ impl AiosDBManager {
         own_filter_types: &[&str],
     ) -> anyhow::Result<Vec<RefU64>> {
         let around = self
-            .query_around_eles_within_radius(refno, is_aabb, offset, nearest, &[], own_filter_types)
+            .query_around_eles_within_radius(refno, is_aabb, offset, nearest, &[], own_filter_types, IntersectMethod::None)
             .await?;
         let result = around
             .iter()
-            .map(|x| self.get_owner(x.0))
+            .map(|x| self.get_owner(x.refno))
             .unique()
             .collect::<Vec<_>>();
         Ok(result)
@@ -1006,10 +1036,10 @@ impl AiosDBManager {
         nearest: bool,
         filter_types: &[&str],
         own_filter_types: &[&str],
-        // check_fn: Fn(RefU64) -> bool,
-    ) -> anyhow::Result<Vec<(RefU64, f32)>> {
-        let children_refnos = self.get_children_from_localdb(refno)?;
-        let mut result: Vec<(RefU64, f32)> = Vec::new();
+        intersect_method: IntersectMethod,
+    ) -> anyhow::Result<Vec<SpatialQueryResult>> {
+        let mut children_refnos = self.get_children_from_localdb(refno)?;
+        let mut result: Vec<SpatialQueryResult> = Vec::new();
         for r in children_refnos {
             let around = self
                 .query_around_eles_within_radius(
@@ -1019,22 +1049,44 @@ impl AiosDBManager {
                     nearest,
                     filter_types,
                     own_filter_types,
+                    intersect_method,
                 )
                 .await
                 .unwrap_or_default();
-            for (k, v) in around {
+            for a in around {
                 //如果距离比较短，直接跳过
-                if let Some(value) = result.iter_mut().find(|(r, f)| *r == k) {
-                    value.1 = value.1.min(v);
+                if let Some(value) = result.iter_mut().find(|s| s.refno == a.refno) {
+                    value.bbox_dist = a.bbox_dist.min(value.bbox_dist);
                     continue;
                 }
-                result.push((k, v));
+                result.push(a);
             }
         }
         Ok(result)
     }
 
+    ///获取穿过的构件
+    /// filter 指定过滤的类型
+    pub async fn query_intersection_eles(&self, refno: RefU64, use_children: bool, filter: &[&str], through: bool) -> anyhow::Result<Vec<(RefU64, bool)>>{
+        let mut result = vec![];
+        let (pts, bbox) = self.query_eles_keypts_and_aabb_as_whole(&[refno], true).await?.ok_or(anyhow!("计算关键点出错。"))?;
+
+        let near_walls = if use_children {
+            self
+                .query_children_around_eles_within_radius(refno, true, None, false, filter, &[], IntersectMethod::EndPtsCheck)
+                .await?
+        }else{
+            self
+                .query_around_eles_within_radius(refno, true, None, false, filter, &[], IntersectMethod::EndPtsCheck)
+                .await?
+        };
+
+
+        Ok(result)
+    }
+
     ///通过包围盒查询周围的构件
+    /// own_filter_types 过滤父节点的类型
     pub async fn query_around_eles_within_radius(
         &self,
         refno: RefU64,
@@ -1043,13 +1095,14 @@ impl AiosDBManager {
         nearest: bool,
         filter_types: &[&str],
         own_filter_types: &[&str],
-    ) -> anyhow::Result<Vec<(RefU64, f32)>> {
+        intersect_method: IntersectMethod,
+    ) -> anyhow::Result<Vec<SpatialQueryResult>> {
         let rtree = self
             .rtree
             .as_ref()
             .ok_or(anyhow::anyhow!("空间树未生成。"))?;
         let database = self.get_arango_db().await?;
-        let inst_data = query_insts_shape_data(&database, &[refno], &[GeoBasicType::Pos]).await?;
+        let inst_data = query_insts_shape_data(&database, &[refno], None).await?;
         if inst_data.inst_info_map.is_empty() {
             return Ok(Default::default());
         }
@@ -1073,6 +1126,7 @@ impl AiosDBManager {
             whole_key_points.extend_from_slice(&key_points);
             whole_aabb.merge(&info.aabb.unwrap());
         }
+        let pos: Vec3 = whole_aabb.center().into();
         if let Some(s) = offset {
             if s > 0.0 {
                 whole_aabb.loosen(s);
@@ -1080,7 +1134,6 @@ impl AiosDBManager {
                 whole_aabb.tighten(s);
             }
         }
-        // dbg!(&whole_aabb);
         let mut intersects = if is_aabb {
             rtree
                 .locate_intersecting_bounds(&whole_aabb)
@@ -1093,6 +1146,13 @@ impl AiosDBManager {
                     own_filter_types.is_empty()
                         || own_filter_types
                         .contains(&self.get_type_name(self.get_owner(x.0)).as_str())
+                })
+                .map(|(refno, bbox)| SpatialQueryResult{
+                    refno,
+                    bbox,
+                    bbox_dist: pos.distance((bbox.center()).into()),
+                    intersection: None,
+                    through: None,
                 })
                 .collect::<Vec<_>>()
         } else {
@@ -1111,43 +1171,112 @@ impl AiosDBManager {
                         || own_filter_types
                         .contains(&self.get_type_name(self.get_owner(x.0)).as_str())
                 })
+                .map(|(refno, bbox)| SpatialQueryResult{
+                    refno,
+                    bbox,
+                    bbox_dist: pos.distance((bbox.center()).into()),
+                    intersection: None,
+                    through: None,
+                })
                 .collect::<Vec<_>>()
         };
 
         // dbg!(&intersects);
-        let pos: Vec3 = whole_aabb.center().into();
-        let mut result = vec![];
+        //是否检查真正相交，如果取了最近，又检查相交？
+        if intersect_method != IntersectMethod::None {
+            let checked_refnos = intersects.iter().map(|x| x.refno).collect::<Vec<_>>();
+
+            let check_insts_data = query_insts_shape_data(&database, &checked_refnos, None).await?;
+            for (&check_refno, info) in &check_insts_data.inst_info_map {
+                let Some(inst_geos) = check_insts_data.get_inst_geos(info) else {
+                    continue;
+                };
+                for inst_geo in inst_geos {
+                    let Ok(Some(need_check_mesh)) =
+                        self.get_plant_mesh(inst_geo.geo_hash).await
+                        else {
+                            continue;
+                        };
+                    let t = info.world_transform * inst_geo.transform;
+                    let collider_mesh = need_check_mesh.get_tri_mesh(t.compute_matrix());
+
+                    match intersect_method {
+                        IntersectMethod::EndPtsCheck => {
+                            whole_key_points.sort_by(|a, b| a.length().partial_cmp(&b.length()).unwrap());
+                            let pt0 = whole_key_points.first().cloned().unwrap();
+                            let pt1 = whole_key_points.first().cloned().unwrap();
+                            let dir = (pt1 - pt0).normalize_or_zero();
+                            let mut pt0_inside = false;
+                            let mut pt1_inside = false;
+                            let mut intersected = false;
+                            match collider_mesh.cast_local_ray_and_get_normal(
+                                &Ray::new(
+                                    Point3::from_slice(&pt0.to_array()),
+                                    dir.into(),
+                                ),
+                                100000.0,
+                                false,
+                            ) {
+                                Some(intersection) => {
+                                    pt0_inside = collider_mesh.is_backface(intersection.feature);
+                                    intersected = true;
+                                },
+                                None => {},
+                            };
+
+                            match collider_mesh.cast_local_ray_and_get_normal(
+                                &Ray::new(
+                                    Point3::from_slice(&pt1.to_array()),
+                                    (-dir).into(),
+                                ),
+                                100000.0,
+                                false,
+                            ) {
+                                Some(intersection) => {
+                                    pt1_inside = collider_mesh.is_backface(intersection.feature);
+                                    intersected = true;
+                                },
+                                None => {},
+                            };
+
+
+                        }
+                        _ => {}
+                    }
+                    //mesh 和 mesh之间的快速检查
+                }
+            }
+
+        }
+
+
+
         //超过连个值的时候，需要做比较
         let mut compute = false;
         if nearest {
             if intersects.len() >= 2 {
-                let nearest_ele = intersects
-                    .iter()
-                    .min_by(|&(_, p0), &(_, p1)| {
-                        pos.distance((*p0).into())
-                            .partial_cmp(&pos.distance((*p1).into()))
-                            .unwrap()
-                    })
-                    .unwrap();
-                // dbg!(nearest_ele);
-                result.push((nearest_ele.0, pos.distance((nearest_ele.1).into())));
-                compute = true;
+                let nearest_res = {
+                    intersects
+                        .iter()
+                        .min_by(|&p0, &p1| {
+                            p0.bbox_dist.partial_cmp(&p1.bbox_dist).unwrap()
+                        })
+                        .cloned()
+                        .unwrap()
+                };
+                intersects.clear();
+                intersects.push(SpatialQueryResult{
+                    refno: nearest_res.refno,
+                    bbox: nearest_res.bbox,
+                    bbox_dist: pos.distance((nearest_res.bbox.center()).into()),
+                    intersection: nearest_res.intersection,
+                    through: nearest_res.through,
+                });
             }
         }
-
-        if !compute {
-            result = intersects
-                .into_iter()
-                .map(|(r, v)| (r, pos.distance(v.into())))
-                .collect();
-        }
-        Ok(result)
+        Ok(intersects)
     }
 
-    //返回构件列表里，与最近的相交包围盒，相交的最多的构件
-    // pub fn query_nearest_intersection_ele_pos(&self) -> Option<Aabb> {
-    //     None
-    // }
 }
 
 #[serde_as]

@@ -248,14 +248,17 @@ impl AiosDBManager {
     pub async fn query_children_eles_order(
         &self,
         refno: RefU64,
+        filter: &[&str],
+        db_types: &[&str],
     ) -> anyhow::Result<Vec<PdmsElement>> {
         let id = refno.format_url_name(AQL_PDMS_ELES_COLLECTION);
+        //如果传进来的是world，
         let aql = AqlQuery::new(
             "\
-    WITH @@pdms_eles,@@pdms_edges
-    for v in 1 inbound @id @@pdms_edges
-        filter v!= null
-        sort v.order
+    WITH @@pdms_eles, @@pdms_edges, @@pdms_mdbs
+    for v, e in 1 inbound @id @@pdms_edges
+        filter v!= null && (length(@filter) == 0 or v.noun in @filter) && (e.db_type == null or length(@db_types) == 0 or e.db_type in @db_types)
+        sort e.order
         let child = document(@@pdms_eles, v._key)
          return {
             '_key':child._key,
@@ -268,9 +271,13 @@ impl AiosDBManager {
         }
     ")
             .bind_var("id", id)
+            .bind_var("filter", filter)
+            .bind_var("db_types", db_types)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-            .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+            .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+            .bind_var("@pdms_mdbs", AQL_PDMS_MDBS_EDGES_COLLECTION);
         let results: Vec<PdmsElement> = self.get_arango_db().await?.aql_query(aql).await?;
+        // dbg!(&results);
         Ok(results)
     }
 }

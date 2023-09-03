@@ -4,8 +4,10 @@ use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::consts::*;
 use aios_core::helper::table::qualified_table_name;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam::{PrimExtrusion, PrimRevolution};
 use aios_core::pdms_data::ATTR_INFO_MAP;
-use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, NounHash, RefI32Tuple, RefU64, RefU64Vec, UdaMajorType};
+use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, GeoBasicType, NounHash, RefI32Tuple, RefU64, RefU64Vec, UdaMajorType};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use anyhow::anyhow;
@@ -13,6 +15,7 @@ use sqlx::{Error, MySql, Pool, pool, Row};
 use smol_str::SmolStr;
 use dashmap::DashMap;
 use glam::{Quat, Vec3};
+use indexmap::IndexMap;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use sqlx::Executor;
@@ -22,6 +25,66 @@ use crate::api::element::{query_ele_node, query_owner_from_id, query_pdms_elemen
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
+
+
+impl AiosDBManager{
+
+    ///获得集几何体的宽度
+    pub async fn get_geo_width(&self, refnos: &[RefU64]) -> anyhow::Result<IndexMap<RefU64, f32>>{
+
+        let geos_info_data = query_insts_shape_data(&self.get_arango_db().await?, refnos,  Some(&[GeoBasicType::Pos])).await?;
+        //FLOOR WALL STALL PANEL
+        let mut res_map = IndexMap::new();
+        for refno in refnos {
+            let Some(geos_info) = geos_info_data.get_info(refno) else{
+                continue;
+            };
+            let Some(geo_insts) = geos_info_data.get_inst_geos(geos_info) else{
+                continue;
+            };
+            // let pos_geos = geo_insts.iter().filter(|x| x.geo_type == GeoBasicType::Pos ).collect::<Vec<_>>();
+            if geo_insts.len() != 1 { continue;  }
+            let geo_inst = &geo_insts[0];
+            let type_name = self.get_type_name(*refno);
+
+             match &geo_inst.geo_param {
+                PrimRevolution(r) => {
+                    use parry2d::bounding_volume::Aabb;
+                    let pts = r.verts
+                        .iter()
+                        .map(|x| nalgebra::Point2::from(nalgebra::Vector2::from(x.truncate())))
+                        .collect::<Vec<_>>();
+                    let profile_aabb = Aabb::from_points(&pts);
+                    let width = profile_aabb.extents().y as f32;
+                    res_map.insert(*refno, width);
+                }
+                PrimExtrusion(e) => {
+                    match type_name.as_str() {
+                        "FLOOR" | "PANEL" => {
+                            res_map.insert(*refno, e.height);
+                        }
+                        _ =>{
+                            use parry2d::bounding_volume::Aabb;
+                            let pts = e.verts
+                                .iter()
+                                .map(|x| nalgebra::Point2::from(nalgebra::Vector2::from(x.truncate())))
+                                .collect::<Vec<_>>();
+                            let profile_aabb = Aabb::from_points(&pts);
+                            let width = profile_aabb.extents().y as f32;
+                            res_map.insert(*refno, width);
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+        }
+
+        Ok(res_map)
+    }
+
+}
 
 /// 指定从特定的表查询数据，根据owner查询
 pub async fn query_implicit_attrs_by_owner(owner: RefU64, type_name: &str, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>> {
