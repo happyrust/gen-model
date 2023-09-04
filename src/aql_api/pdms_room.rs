@@ -343,7 +343,6 @@ pub async fn query_equi_room_name_from_names_aql(
     let v = document(id)
     filter v != null
     filter v.noun == 'EQUI'
-    filter v.name in @names
             let children = (
             for e in 1..2 inbound v._id pdms_edges
                 return e._id )
@@ -682,7 +681,7 @@ pub async fn query_refno_belong_rooms(
 
 
 #[derive(Debug, Clone)]
-pub struct SpatialQueryResult{
+pub struct SpatialQueryResult {
     pub refno: RefU64,
     pub bbox: Aabb,
     pub bbox_dist: f32,
@@ -691,7 +690,7 @@ pub struct SpatialQueryResult{
 }
 
 #[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
-pub enum IntersectMethod{
+pub enum IntersectMethod {
     #[default]
     None,
     BBoxCheck,
@@ -742,7 +741,7 @@ impl AiosDBManager {
                     *x,
                     {
                         let children = self.get_children_from_localdb(*x).unwrap_or_default();
-                        if children.is_empty()  { vec![*x] } else { children.0 }
+                        if children.is_empty() { vec![*x] } else { children.0 }
                     }
                 )
             })
@@ -1067,7 +1066,7 @@ impl AiosDBManager {
 
     ///获取穿过的构件
     /// filter 指定过滤的类型
-    pub async fn query_intersection_eles(&self, refno: RefU64, use_children: bool, filter: &[&str], through: bool) -> anyhow::Result<Vec<(RefU64, bool)>>{
+    pub async fn query_intersection_eles(&self, refno: RefU64, use_children: bool, filter: &[&str], through: bool) -> anyhow::Result<Vec<(RefU64, bool)>> {
         let mut result = vec![];
         let (pts, bbox) = self.query_eles_keypts_and_aabb_as_whole(&[refno], true).await?.ok_or(anyhow!("计算关键点出错。"))?;
 
@@ -1075,7 +1074,7 @@ impl AiosDBManager {
             self
                 .query_children_around_eles_within_radius(refno, true, None, false, filter, &[], IntersectMethod::EndPtsCheck)
                 .await?
-        }else{
+        } else {
             self
                 .query_around_eles_within_radius(refno, true, None, false, filter, &[], IntersectMethod::EndPtsCheck)
                 .await?
@@ -1147,7 +1146,7 @@ impl AiosDBManager {
                         || own_filter_types
                         .contains(&self.get_type_name(self.get_owner(x.0)).as_str())
                 })
-                .map(|(refno, bbox)| SpatialQueryResult{
+                .map(|(refno, bbox)| SpatialQueryResult {
                     refno,
                     bbox,
                     bbox_dist: pos.distance((bbox.center()).into()),
@@ -1171,7 +1170,7 @@ impl AiosDBManager {
                         || own_filter_types
                         .contains(&self.get_type_name(self.get_owner(x.0)).as_str())
                 })
-                .map(|(refno, bbox)| SpatialQueryResult{
+                .map(|(refno, bbox)| SpatialQueryResult {
                     refno,
                     bbox,
                     bbox_dist: pos.distance((bbox.center()).into()),
@@ -1220,8 +1219,8 @@ impl AiosDBManager {
                                 Some(intersection) => {
                                     pt0_inside = collider_mesh.is_backface(intersection.feature);
                                     intersected = true;
-                                },
-                                None => {},
+                                }
+                                None => {}
                             };
 
                             match collider_mesh.cast_local_ray_and_get_normal(
@@ -1235,20 +1234,16 @@ impl AiosDBManager {
                                 Some(intersection) => {
                                     pt1_inside = collider_mesh.is_backface(intersection.feature);
                                     intersected = true;
-                                },
-                                None => {},
+                                }
+                                None => {}
                             };
-
-
                         }
                         _ => {}
                     }
                     //mesh 和 mesh之间的快速检查
                 }
             }
-
         }
-
 
 
         //超过连个值的时候，需要做比较
@@ -1265,7 +1260,7 @@ impl AiosDBManager {
                         .unwrap()
                 };
                 intersects.clear();
-                intersects.push(SpatialQueryResult{
+                intersects.push(SpatialQueryResult {
                     refno: nearest_res.refno,
                     bbox: nearest_res.bbox,
                     bbox_dist: pos.distance((nearest_res.bbox.center()).into()),
@@ -1276,7 +1271,6 @@ impl AiosDBManager {
         }
         Ok(intersects)
     }
-
 }
 
 #[serde_as]

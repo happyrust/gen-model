@@ -29,7 +29,7 @@ pub struct PdmsPLINAttrAql {
     pub attr: AttrMap,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default,Clone, Serialize, Deserialize)]
 pub struct PdmsRefnoNameAql {
     pub refno: String,
     pub name: String,
