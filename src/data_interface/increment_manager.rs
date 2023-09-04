@@ -5,7 +5,7 @@ use aios_core::cache::mgr::BytesTrait;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::consts::NAME_HASH;
 use aios_core::helper::qualified_table_name;
-use aios_core::pdms_types::{AttrMap, AttrVal, RefU64, RefU64Vec};
+use aios_core::pdms_types::{AttrMap, AttrVal, EleOperation, RefU64, RefU64Vec};
 use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
@@ -23,7 +23,7 @@ use pdms_io::io::PdmsIO;
 use crate::consts::*;
 use crate::defines::CACHED_REFNO_BASIC_MAP;
 use crate::graph_db::pdms_arango::{remove_edges_arangodb, save_arangodb_with_db_option};
-use crate::graph_db::structs::{PdmsEleGraphEdgeWithKey, PdmsEleGraphNode};
+use crate::graph_db::structs::{PdmsEleEdge, PdmsEleGraphNode};
 use std::sync::Arc;
 use walkdir::WalkDir;
 use serde::{Serialize, Deserialize};
@@ -38,25 +38,6 @@ pub struct IncrementInfo {
     pub operation: EleOperation,
 }
 
-#[derive(PartialEq, Debug, Default, Clone, Copy, Serialize, Deserialize)]
-pub enum EleOperation {
-    #[default]
-    None,
-    Add,
-    Modified,
-    Deleted,
-}
-
-impl EleOperation {
-    pub fn into_tidb_num(&self) -> u8 {
-        match &self {
-            EleOperation::None => { 0 }
-            EleOperation::Add => { 1 }
-            EleOperation::Modified => { 2 }
-            EleOperation::Deleted => { 3 }
-        }
-    }
-}
 
 impl AiosDBManager {
     ///默认的名称
@@ -88,9 +69,10 @@ impl AiosDBManager {
         &self,
         increment_ranges_map: IndexMap<PathBuf, (i32, u32)>,
     ) -> anyhow::Result<bool> {
-        if increment_ranges_map.is_empty() {  return Ok(true); }
+        if increment_ranges_map.is_empty() { return Ok(true); }
         let mut type_eles_map = HashMap::new();
         let mut delete_keys = vec![];
+        let mut delete_maps:HashMap<RefU64,IncrementInfo> = HashMap::new();
         let mut deleted_refnos_set = HashSet::new();
 
         let attmap_db = self.get_cur_attmap_tree().unwrap();
@@ -107,6 +89,7 @@ impl AiosDBManager {
             for ele in eles {
                 let attmap = ele.whole_attmap.merge();
                 let mut ele_op = EleOperation::Modified;
+                // 删除只是owner的children变化了，但是需要记录删除的节点
                 if let Ok(old_refnos) = self.get_children_from_localdb(ele.refno) {
                     old_refnos.iter()
                         .filter(|x| !ele.children.contains(*x))
@@ -116,6 +99,14 @@ impl AiosDBManager {
                             deleted_refnos_set.insert(*x);
                             //执行的是父节点的操作
                             ele_op = EleOperation::Deleted;
+                            dbg!(*x);
+                            delete_maps.entry(*x).or_insert(IncrementInfo {
+                                refno: *x,
+                                db_no: dbno,
+                                attr: Default::default(),
+                                children: Default::default(),
+                                operation: EleOperation::Deleted,
+                            });
                         });
                 } else {
                     ele_op = EleOperation::Add;
@@ -140,18 +131,50 @@ impl AiosDBManager {
         let mut increment_data_record = Vec::new();
         for (noun, eles) in &type_eles_map {
             for ele in eles {
-                let Ok(old_attr) = self.get_attr(ele.refno).await else { continue; };
-                increment_data_record.push(IncreaseDataTiDB {
-                    refno: ele.refno,
-                    data_operate: ele.operation,
-                    numbdb: ele.db_no,
-                    children: ele.children.clone(),
-                    old_attr,
-                    new_attr: ele.attr.clone(),
-                    new_version: 0,
-                    old_version: 0,
-                });
+                match ele.operation {
+                    EleOperation::None => { continue; }
+                    EleOperation::Add => {
+                        increment_data_record.push(IncreaseDataTiDB {
+                            refno: ele.refno,
+                            data_operate: ele.operation,
+                            numbdb: ele.db_no,
+                            children: Default::default(),
+                            old_attr: Default::default(),
+                            new_attr: ele.attr.clone(),
+                            new_version: 0,
+                            old_version: 0,
+                        });
+                    }
+                    EleOperation::Modified => {
+                        let Ok(old_attr) = self.get_attr(ele.refno).await else { continue; };
+                        increment_data_record.push(IncreaseDataTiDB {
+                            refno: ele.refno,
+                            data_operate: ele.operation,
+                            numbdb: ele.db_no,
+                            children: ele.children.clone(),
+                            old_attr,
+                            new_attr: ele.attr.clone(),
+                            new_version: 0,
+                            old_version: 0,
+                        });
+                    }
+                    EleOperation::Deleted => { continue; }
+                }
             }
+        }
+        // 删除做单独处理
+        for (refno, map) in delete_maps {
+            let Ok(old_attr) = self.get_attr(refno).await else { continue; };
+            increment_data_record.push(IncreaseDataTiDB {
+                refno: map.refno,
+                data_operate: map.operation,
+                numbdb: map.db_no,
+                children: map.children.clone(),
+                old_attr,
+                new_attr: map.attr,
+                new_version: 0,
+                old_version: 0,
+            });
         }
         // 暂时都保存到desi项目里面
         if let Some(pool) = self.project_map.get(&self.db_option.project_name) {
@@ -230,10 +253,12 @@ impl AiosDBManager {
                     cata_hash,
                 };
                 let key = refno.hash_with_another_refno(owner);
-                let pdms_edge = PdmsEleGraphEdgeWithKey {
-                    _key: key.to_string(),
-                    _from: format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()),
-                    _to: format!("{}/{}", AQL_PDMS_ELES_COLLECTION, owner.to_url_refno()),
+                let pdms_edge = PdmsEleEdge {
+                    key: key.to_string(),
+                    refno,
+                    owner,
+                    order,
+                    ..Default::default()
                 };
                 pdms_elements.push(pdms_element);
                 edges.push(pdms_edge);
@@ -258,8 +283,6 @@ impl AiosDBManager {
         }
 
         println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_delted_len}");
-
-        // 将记录保存到tidb
 
 
         Ok(true)
@@ -290,15 +313,13 @@ impl AiosDBManager {
                         params.insert(path.to_path_buf(), (basic_info.pdms_header.db_num, old.pdms_header.page_no));
                         //在old里有出现，但是版本号不一致，需要更新
                         latest_need_update_headers.insert(path.to_path_buf(), basic_info);
-                    }else {
+                    } else {
                         //在old里面没有出现，需要更新进来
                         self.watcher.headers.insert(path.to_path_buf(), basic_info);
                     }
-
                 }
             }
         }
-        dbg!(params.len());
         match self.execute_incr_update(params).await {
             Ok(_) => {
                 //执行没问题了，再更新当前的版本记录，headers直接存本地json

@@ -1,12 +1,13 @@
 use std::collections::HashMap;
+use std::env;
 use aios_core::pdms_data::NewDataOperate;
-use aios_core::pdms_types::{AttrMap, RefU64, RefU64Vec};
+use aios_core::pdms_types::{AttrMap, EleOperation, RefU64, RefU64Vec};
 use chrono::{Datelike, DateTime, Local, Timelike};
 use parse_pdms_db::parse::WholeAttMap;
-use sqlx::{Executor, MySql, Pool};
+use sqlx::{Executor, MySql, Pool, Row};
 use sqlx::types::Uuid;
 use serde::{Serialize, Deserialize};
-use crate::data_interface::increment_manager::EleOperation;
+use crate::data_interface::tidb_manager::AiosDBManager;
 
 pub const INCREMENT_DATA: &'static str = "INCREMENT_DATA";
 
@@ -53,7 +54,8 @@ fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncreaseDataTiDB>, s
         // uuid 作为图数据库和 tidb 连接的主键
         let id = Uuid::new_v4().to_string();
         let operate = increment_data.data_operate.into_tidb_num();
-        let owner = increment_data.new_attr.get_owner();
+        let mut owner = increment_data.new_attr.get_owner();
+        if owner.is_none() { owner = increment_data.old_attr.get_owner() }
         if owner.is_none() { continue; }
         let owner = owner.unwrap().0;
         let old_data = hex::encode(increment_data.old_attr.into_rkyv_compress_bytes());
@@ -70,6 +72,30 @@ fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncreaseDataTiDB>, s
     }
     sql.remove(sql.len() - 1);
     sql
+}
+
+/// 通过uuid查询该条增删记录
+pub async fn query_key_data(key: &str, numbdb: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<IncreaseDataTiDB>> {
+    let sql = gen_query_key_data_sql(key, numbdb);
+    let val = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    // let id = val.get::<String, _>("ID");
+    let refno = RefU64(val.get::<i64, _>("REFNO") as u64);
+    let operate = val.get::<i32, _>("OPERATE");
+    let numb_db = val.get::<i32, _>("NUMBDB");
+    let children: RefU64Vec = bincode::deserialize(&val.get::<Vec<u8>, _>("CHILDREN")).unwrap_or_default();
+    let old_data = AttrMap::from_rkvy_compress_bytes(&val.get::<Vec<u8>, _>("OLD_DATA"))?;
+    let new_data = AttrMap::from_rkvy_compress_bytes(&val.get::<Vec<u8>, _>("NEW_DATA"))?;
+    let time = val.get::<String, _>("TIME");
+    Ok(Some(IncreaseDataTiDB {
+        refno,
+        data_operate: EleOperation::from(operate),
+        numbdb: numb_db,
+        children,
+        old_attr: old_data,
+        new_attr: new_data,
+        new_version: 0,
+        old_version: 0,
+    }))
 }
 
 /// 创建对应的增量记录表
@@ -108,3 +134,19 @@ fn gen_create_increment_table_sql(dbno: i32) -> String {
     sql
 }
 
+fn gen_query_key_data_sql(key: &str, numbdb: i32) -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT * FROM {}_{INCREMENT_DATA} WHERE ID = '{}'", numbdb, key));
+    sql
+}
+
+#[tokio::test]
+async fn test_increment_record() -> anyhow::Result<()> {
+    let _ = dotenv::dotenv();
+    let url = env::var("DATABASE_URL")?;
+    let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
+    let key = "d92e74ae-1c96-42d6-9674-0b57f9dd0e5f";
+    let result = query_key_data(key, 7997,&pool).await?;
+    dbg!(&result);
+    Ok(())
+}

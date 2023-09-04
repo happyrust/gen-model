@@ -37,6 +37,10 @@ pub const UNSET_NOUN: u32 = 28933118;
 
 /// 批量块数量
 pub const BATCH_CHUNKS_CNT: usize = 50;
+
+///mdb下的数据关联关系
+pub const AQL_PDMS_MDBS_EDGES_COLLECTION: &'static str = "pdms_mdbs";
+
 /// pdms 的基本 element数据
 pub const AQL_PDMS_ELES_COLLECTION: &'static str = "pdms_eles";
 /// pdms 的 mesh数据

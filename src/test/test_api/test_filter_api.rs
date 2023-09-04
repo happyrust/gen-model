@@ -33,7 +33,7 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
     println!("here");
     let shape_insts = query_insts_shape_data(&database,
                                              &[RefU64::from_two_nums(17496, 161711)],
-                                                &[GeoBasicType::Pos, GeoBasicType::Compound]).await?;
+                                                Some(&[GeoBasicType::Pos, GeoBasicType::Compound])).await?;
     dbg!(&shape_insts.inst_geos_map);
     let geo_hashs = shape_insts.get_geo_hashs().iter().map(|x| *x).collect::<Vec<_>>();
     if let Ok(meshes_data) = query_pdms_mesh_aql(&database, geo_hashs.iter()).await {

@@ -1,5 +1,7 @@
 use aios_core::pdms_types::{AttrMap, PdmsElement, RefU64};
 use serde::{Serialize, Deserialize};
+use serde_with::serde_as;
+use serde_with::DisplayFromStr;
 
 pub mod attr_map;
 pub mod children;
@@ -27,10 +29,21 @@ pub struct PdmsPLINAttrAql {
     pub attr: AttrMap,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default,Clone, Serialize, Deserialize)]
 pub struct PdmsRefnoNameAql {
     pub refno: String,
     pub name: String,
+}
+
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct PdmsOwnerNameAql {
+    #[serde_as(as = "DisplayFromStr")]
+    pub refno: RefU64,
+    #[serde_as(as = "DisplayFromStr")]
+    pub owner: RefU64,
+    pub owner_noun: String,
+    pub owner_name: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

@@ -37,7 +37,7 @@ pub async fn get_penetration_detail_by_refno(aios_mgr: &AiosDBManager, refno_vec
                     }
                 }
                 //获得房间号
-                let rooms_number = aios_mgr.query_through_element_room_nums(&[i.0.clone()]).await;
+                let rooms_number = aios_mgr.query_through_element_room_nums(&[i.0.clone()], None).await;
                 if let Ok(rooms_number) = rooms_number {
                     for (key, value) in rooms_number {
                         //获得内房间号

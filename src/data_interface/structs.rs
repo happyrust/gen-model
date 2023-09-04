@@ -1,16 +1,13 @@
-use std::cell::Ref;
-use std::collections::{BTreeMap, HashMap};
-use std::default;
+use std::collections::BTreeMap;
+use std::str::FromStr;
 use aios_core::parsed_data::CateAxisParam;
 use aios_core::pdms_types::RefU64;
-use serde::{de, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_with::{DisplayFromStr, serde_as};
-use derive_more::{Deref, DerefMut};
 use dashmap::DashMap;
 use aios_core::prim_geo::category::CateBrepShape;
 
 pub type AIOSAxisMap = BTreeMap<i32, CateAxisParam>;
-
 
 ///有负实体的集合信息, 返回tuple
 #[serde_as]
@@ -26,13 +23,7 @@ pub struct RefnoHasNegPosInfoTuple(
     pub Vec<RefU64>,
 );
 
-// #[derive(Debug, Serialize, Deserialize, Default)]
-// pub struct RefnoHasNegPosInfo {
-//     #[serde(deserialize_with = "de_refno_from_vec_str")]
-//     pub children: Vec<RefU64>,
-//     pub nouns: Vec<String>,
-//     pub cur_noun: String,
-// }
+
 
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Default)]

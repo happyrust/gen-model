@@ -90,7 +90,7 @@ impl AiosDBManager {
     pub async fn get_along_end_key_points(&self, refno: RefU64) -> Option<(Vec3, Vec3)> {
         let database = self.get_arango_db().await.ok()?;
         //排除了负实体
-        let inst_data = query_insts_shape_data(&database, &[refno], &[GeoBasicType::Pos]).await.ok()?;
+        let inst_data = query_insts_shape_data(&database, &[refno], Some(&[GeoBasicType::Pos])).await.ok()?;
         if inst_data.inst_info_map.is_empty() { return None; }
         let mut whole_key_points = vec![];
         for (&refno, info) in &inst_data.inst_info_map {

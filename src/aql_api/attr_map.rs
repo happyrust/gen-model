@@ -27,6 +27,7 @@ use serde_with::{serde_as, DisplayFromStr};
 use sqlx::{MySql, Pool};
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use crate::graph_db::structs::{PdmsEleEdge, PdmsEleGraphNode, PdmsMdbEdge};
 
 pub type IndexNamedAttMap = IndexMap<String, NamedAttrValue>;
 
@@ -124,4 +125,87 @@ impl AiosDBManager {
 
         Ok(result)
     }
+
+
+    ///通过指定的过滤条件来查询
+    pub async fn query_ele_nodes_by_expression(&self, expression: &str) -> anyhow::Result<Vec<PdmsEleGraphNode>> {
+        let aql_string = format!(r#"
+            with pdms_eles
+            for v in pdms_eles
+                filter {}
+                sort v.order
+                return distinct v
+        "#, expression);
+        let aql =
+            AqlQuery::new(aql_string.as_str());
+
+        let result = self.get_arango_db().await?
+            .aql_query::<PdmsEleGraphNode>(aql).await?;
+        Ok(result)
+    }
+
+    ///通过指定的过滤条件来查询
+    pub async fn query_ele_edges_by_expression(&self, expression: &str) -> anyhow::Result<Vec<PdmsEleEdge>> {
+        let aql_string = format!(r#"
+            with pdms_edges
+            for v in pdms_edges
+                filter {}
+                sort v.order
+                return distinct v
+        "#, expression);
+        let aql =
+            AqlQuery::new(aql_string.as_str());
+
+        let result = self.get_arango_db().await?
+            .aql_query::<PdmsEleEdge>(aql).await?;
+        Ok(result)
+    }
+
+    ///通过指定的过滤条件来查询
+    pub async fn query_mdb_by_expression(&self, expression: &str) -> anyhow::Result<Vec<PdmsMdbEdge>> {
+        let aql_string = format!(r#"
+            with pdms_mdbs
+            for v in pdms_mdbs
+                filter {}
+                sort v.order
+                return distinct v
+        "#, expression);
+        dbg!(&aql_string);
+        let aql =
+            AqlQuery::new(aql_string.as_str());
+
+        let result = self.get_arango_db().await?
+            .aql_query::<PdmsMdbEdge>(aql).await?;
+        Ok(result)
+    }
+
+
+
+
+
+    // pub async fn query_world_element(&self, expression: &str) -> anyhow::Result<PdmsElement> {
+        // let aql_string = format!(r#"
+        //     with pdms_mdbs, pdms_eles
+        //     for v,e,p in pdms_mdbs
+        //         filter {}
+        //         let doc = document(pdms_eles, v._key)
+        //         return
+        //         { '_key':child._key,
+        //     'owner':child.owner,
+        //     'name':child.name,
+        //     'noun':child.noun,
+        //     'order': child.order,
+        //     'children_count':length(for c in 1 inbound child._id pdms_edges
+        //                         return 1 )}
+        //
+        //
+        // "#, expression);
+        // let aql =
+        //     AqlQuery::new(aql_string.as_str());
+        //
+        // let result = self.get_arango_db().await?
+        //     .aql_query::<PdmsMdbEdge>(aql).await?;
+        // Ok(result)
+    // }
+
 }
