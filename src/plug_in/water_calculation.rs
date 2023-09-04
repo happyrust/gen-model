@@ -151,8 +151,11 @@ pub async fn export_stp(
                 let extents = insts_data.aabb.unwrap().extents();
                 // dbg!(extents);
                 // dbg!(inst.transform);
-                transform = Transform::from_translation(Vec3::new(0.0, 0.0, -extents.x/2.0))
+                transform = Transform::from_translation(Vec3::new(0.0, 0.0, -extents.x / 2.0))
                     *  transform * inst.transform ;
+
+
+
                 // let mut box_shape = AdHocShape::make_box(extents.x as f64, extents.y as f64, extents.z as f64).0;
                 let mut box_shape = AdHocShape::make_box(100.0, extents.y as f64 / 10.0 , extents.z as f64).0;
                 box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
