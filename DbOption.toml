@@ -32,22 +32,22 @@ gen_model_batch_size = 100
 arangodb_database = "ams"
 multi_threads = true
 only_sync_sys = false
-arangodb_url = "http://192.168.31.179:8529"
+arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
 arangodb_user = "root"
 arangodb_password = ""
 
 #tidb 配置
-ip = "192.168.31.179"
+ip = "127.0.0.1"
 user = "root"
 password = ""
-#port = "3306"
-port = "4000"
+port = "3306"
+#port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
 #服务器启动配置
-server_release_ip = "192.168.31.179:9099"
+server_release_ip = "127.0.0.1:9099"
 
 
 #调试选项
