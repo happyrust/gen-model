@@ -41,7 +41,7 @@ chrono = "0.4.22"
 #geo = { path = "../crates/geo/geo" }
 nalgebra = { path="../crates/nalgebra", features = ["serde", "rkyv", "glam023"] }
 parry3d = { path="../crates/parry/crates/parry3d", features = ["serde-serialize", "rkyv"] }
-
+parry2d = { path="../crates/parry/crates/parry2d"}
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path = "../crates/aios-core" }
 bevy_transform = { path = "../crates/bevy/crates/bevy_transform"}
