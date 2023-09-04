@@ -2,9 +2,9 @@ use aios_core::data_center::{SendHoleData, SendHoleDataToArango};
 use aios_core::create_attas_structs::VirtualHoleGraphNodeQuery;
 use aios_core::create_attas_structs::VirtualEmbedGraphNode;
 use aios_core::create_attas_structs::VirtualHoleGraphNode;
-use arangors_lite::AqlQuery;
 use crate::graph_db::pdms_arango::{ArDatabase, connect_arangodb};
 use aios_core::create_attas_structs::VirtualEmbedGraphNodeQuery;
+use bb8_arangodb::arangors_lite::AqlQuery;
 
 pub async fn query_virtual_hole_data(database: &ArDatabase, key_value: &str) -> anyhow::Result<Option<Vec<SendHoleData>>> {
     let aql = AqlQuery::new("let v = document('virtual_hole',@_key)\

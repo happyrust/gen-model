@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool, Row};
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
+use serde_with::serde_as;
+use serde_with::DisplayFromStr;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RoomData {
@@ -331,18 +333,16 @@ pub async fn query_room_name_from_names_aql(
 
 /// 返回设备所在的房间号(不含贯穿件)
 pub async fn query_equi_room_name_from_names_aql(
-    names: Vec<String>,
+    refnos: Vec<RefU64>,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<PdmsNameBelongRoomName>> {
-    let names = names
-        .into_iter()
-        .map(|name| if name.starts_with("/") { name } else { format!("/{}", name) })
-        .collect::<Vec<String>>();
+    let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, refnos);
     let aql = AqlQuery::new("
     With @@pdms_eles,@@pdms_edges,@@room_eles,@@room_edges
-    for v in pdms_eles
+    for id in @ids
+    let v = document(id)
+    filter v != null
     filter v.noun == 'EQUI'
-    filter v.name in @names
             let children = (
             for e in 1..2 inbound v._id pdms_edges
                 return e._id )
@@ -361,7 +361,7 @@ pub async fn query_equi_room_name_from_names_aql(
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
         .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
-        .bind_var("names", names);
+        .bind_var("ids", ids);
     let result = database.aql_query::<Vec<PdmsNameBelongRoomName>>(aql).await?;
     Ok(result.into_iter().flatten().collect())
 }
@@ -515,8 +515,6 @@ pub async fn query_room_refnos_aql(
             .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
     };
     let result: Vec<String> = database.aql_query(aql).await?;
-    dbg!("****");
-    dbg!(&result);
     Ok(convert_refno_vec_from_vec_string(result))
 }
 
@@ -535,8 +533,7 @@ pub async fn query_rooms_refnos_aql(
             'refno': v._key,
             'room_name': room.name,
          }
-    ",
-    )
+    ", )
         .bind_var("rooms", rooms)
         .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
@@ -560,6 +557,21 @@ pub async fn query_rooms_refnos_aql(
         }
         Err(e) => Ok(vec![]),
     }
+}
+
+/// 通过房间参考号返回该房间下的所有节点
+pub async fn query_room_refno_from_room_refno_aql(room_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
+    let id = format!("{}/{}", AQL_ROOM_ELES_COLLECTION, room_refno.to_url_refno());
+    let aql = AqlQuery::new("
+    With @@room_eles, @@room_edges
+    for v in 1 outbound @id @@room_edges
+        return v._key    ")
+        .bind_var("id", id)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
+    let result = database.aql_query::<String>(aql).await?;
+    let refnos = convert_refno_vec_from_vec_string(result);
+    Ok(refnos)
 }
 
 /// 查找房间下的所有元件的 pdms_element
@@ -669,7 +681,7 @@ pub async fn query_refno_belong_rooms(
 
 
 #[derive(Debug, Clone)]
-pub struct SpatialQueryResult{
+pub struct SpatialQueryResult {
     pub refno: RefU64,
     pub bbox: Aabb,
     pub bbox_dist: f32,
@@ -678,7 +690,7 @@ pub struct SpatialQueryResult{
 }
 
 #[derive(Default, Debug, Clone, Copy, Eq, PartialEq)]
-pub enum IntersectMethod{
+pub enum IntersectMethod {
     #[default]
     None,
     BBoxCheck,
@@ -729,7 +741,7 @@ impl AiosDBManager {
                     *x,
                     {
                         let children = self.get_children_from_localdb(*x).unwrap_or_default();
-                        if children.is_empty()  { vec![*x] } else { children.0 }
+                        if children.is_empty() { vec![*x] } else { children.0 }
                     }
                 )
             })
@@ -740,7 +752,6 @@ impl AiosDBManager {
                 .query_ele_own_room_panels(&children, Some(through_refno), geo_type_filter)
                 .await
             {
-
                 for (k, mut v) in result {
                     let r1 = v.pop().unwrap_or_default();
                     let r0 = v.pop().unwrap_or_default();
@@ -1055,7 +1066,7 @@ impl AiosDBManager {
 
     ///获取穿过的构件
     /// filter 指定过滤的类型
-    pub async fn query_intersection_eles(&self, refno: RefU64, use_children: bool, filter: &[&str], through: bool) -> anyhow::Result<Vec<(RefU64, bool)>>{
+    pub async fn query_intersection_eles(&self, refno: RefU64, use_children: bool, filter: &[&str], through: bool) -> anyhow::Result<Vec<(RefU64, bool)>> {
         let mut result = vec![];
         let (pts, bbox) = self.query_eles_keypts_and_aabb_as_whole(&[refno], true).await?.ok_or(anyhow!("计算关键点出错。"))?;
 
@@ -1063,7 +1074,7 @@ impl AiosDBManager {
             self
                 .query_children_around_eles_within_radius(refno, true, None, false, filter, &[], IntersectMethod::EndPtsCheck)
                 .await?
-        }else{
+        } else {
             self
                 .query_around_eles_within_radius(refno, true, None, false, filter, &[], IntersectMethod::EndPtsCheck)
                 .await?
@@ -1135,7 +1146,7 @@ impl AiosDBManager {
                         || own_filter_types
                         .contains(&self.get_type_name(self.get_owner(x.0)).as_str())
                 })
-                .map(|(refno, bbox)| SpatialQueryResult{
+                .map(|(refno, bbox)| SpatialQueryResult {
                     refno,
                     bbox,
                     bbox_dist: pos.distance((bbox.center()).into()),
@@ -1159,7 +1170,7 @@ impl AiosDBManager {
                         || own_filter_types
                         .contains(&self.get_type_name(self.get_owner(x.0)).as_str())
                 })
-                .map(|(refno, bbox)| SpatialQueryResult{
+                .map(|(refno, bbox)| SpatialQueryResult {
                     refno,
                     bbox,
                     bbox_dist: pos.distance((bbox.center()).into()),
@@ -1208,8 +1219,8 @@ impl AiosDBManager {
                                 Some(intersection) => {
                                     pt0_inside = collider_mesh.is_backface(intersection.feature);
                                     intersected = true;
-                                },
-                                None => {},
+                                }
+                                None => {}
                             };
 
                             match collider_mesh.cast_local_ray_and_get_normal(
@@ -1223,20 +1234,16 @@ impl AiosDBManager {
                                 Some(intersection) => {
                                     pt1_inside = collider_mesh.is_backface(intersection.feature);
                                     intersected = true;
-                                },
-                                None => {},
+                                }
+                                None => {}
                             };
-
-
                         }
                         _ => {}
                     }
                     //mesh 和 mesh之间的快速检查
                 }
             }
-
         }
-
 
 
         //超过连个值的时候，需要做比较
@@ -1253,7 +1260,7 @@ impl AiosDBManager {
                         .unwrap()
                 };
                 intersects.clear();
-                intersects.push(SpatialQueryResult{
+                intersects.push(SpatialQueryResult {
                     refno: nearest_res.refno,
                     bbox: nearest_res.bbox,
                     bbox_dist: pos.distance((nearest_res.bbox.center()).into()),
@@ -1264,5 +1271,24 @@ impl AiosDBManager {
         }
         Ok(intersects)
     }
+}
 
+#[serde_as]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct RoomNode {
+    #[serde_as(as = "DisplayFromStr")]
+    pub refno: RefU64,
+    pub room_name: String,
+}
+
+/// 获取所有计算完成的房间
+pub async fn query_all_room_aql(database: &ArDatabase) -> anyhow::Result<Vec<RoomNode>> {
+    let aql = AqlQuery::new("\
+        for v in @@room_eles
+        return {
+            'refno':v._key,
+            'room_name': v.name
+        }").bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
+    let result = database.aql_query::<RoomNode>(aql).await?;
+    Ok(result)
 }

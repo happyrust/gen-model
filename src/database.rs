@@ -68,8 +68,8 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-    .execute(&mut pool)
-    .await?;
+        .execute(&mut pool)
+        .await?;
     Ok(())
 }
 
@@ -81,9 +81,9 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
             "CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};",
             project_name
         )
-        .as_str(),
+            .as_str(),
     )
-    .await?;
+        .await?;
 
     //todo 改成一对多的实现
     let mut pool =
@@ -142,7 +142,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         &default_conn_str,
         &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name),
     )
-    .await?;
+        .await?;
     let mut create_tables_elapse = 0;
     dbg!("执行多线程解析");
     for project in &db_option.included_projects {
@@ -247,8 +247,7 @@ pub async fn execute_sql(conn: &mut PoolConnection<MySql>, sql: &str) -> bool {
             match &e {
                 Error::Database(error) => {
                     //index already exist
-                    if error.code() == Some(Cow::from("42000")) {
-                    } else {
+                    if error.code() == Some(Cow::from("42000")) {} else {
                         dbg!(sql);
                     }
                 }
@@ -383,7 +382,24 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
         for noun_hash in column_hashes {
             //如果没有这个属性，需要用unset顶上
             //if noun_hash != &(UNSET_NOUN)
-            if let Some(v) = i_att.get(noun_hash) {
+            if type_name == "UDA" && noun_hash == &db1_hash("UDNA") {
+                let uda = if i_att.contains_attr_name("UDNA") {
+                    // if let Some(uda) = i_att.get_str("UDNA") {
+                    let uda = i_att.get_str("UDNA").unwrap();
+                    if uda.is_empty() {
+                        if let Some(dyudna) = att.explicit_attmap.get_str("DYUDNA") {
+                            dyudna.to_string()
+                        } else {
+                            uda.to_string()
+                        }
+                    } else {
+                        uda.to_string()
+                    }
+                } else { "".to_string() };
+                table_vals_sql.push_str(&format!("'{}',", uda.to_string()));
+            } else if i_att.contains_attr_hash(*noun_hash) {
+                let v = i_att.get(noun_hash).unwrap();
+                // if let Some(v) = i_att.get(noun_hash) {
                 match v {
                     AttrVal::InvalidType => {}
                     AttrVal::IntegerType(d) => {
@@ -447,9 +463,9 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                     AttrVal::StringHashType(_) => {}
                 }
             } else {
-                if let Some(info) = info_map.get(&(*noun_hash as i32)) {
-                    // todo 和上面的 math 合并为一个
-
+                // 如果udna没值，可能是在dyudna中
+                if info_map.contains_key(&(*noun_hash as i32)) {
+                    let info = info_map.get(&(*noun_hash as i32)).unwrap();
                     match &info.default_val {
                         AttrVal::InvalidType => {}
                         AttrVal::IntegerType(d) => {
@@ -549,7 +565,7 @@ pub async fn sync_total_async_threaded(
         return Err(anyhow::anyhow!("项目文件夹指定不正确"));
     }
 
-    let mut children_files =  {
+    let mut children_files = {
         let target_dir = fs::read_dir(&project_dir)
             .unwrap()
             .into_iter()
@@ -604,7 +620,7 @@ pub async fn sync_total_async_threaded(
                 project_name.clone().as_str(),
                 "",
             )
-            .unwrap_or_default();
+                .unwrap_or_default();
             dbg!(children_map.len());
             let all_refnos = children_map.keys().cloned().collect::<Vec<_>>();
             let children_map_clone = Arc::new(children_map);
@@ -622,9 +638,6 @@ pub async fn sync_total_async_threaded(
                 dbg!(children_map_clone.len());
                 for (k, v) in children_map_clone.as_ref() {
                     let children_refnos = RefU64Vec(v.iter().map(|x| x.0).collect::<Vec<_>>());
-                    if *k == "=17496/196611".into() {
-                        dbg!(&children_refnos);
-                    }
                     let mut vec = children_refnos.to_bytes()?;
                     children_tree.insert((**k).to_be_bytes().as_slice(), &*vec)?;
                 }
@@ -636,16 +649,16 @@ pub async fn sync_total_async_threaded(
                 let chunk_refnos_clone = chunk_refnos.to_vec();
                 let project_name_clone = project_name.clone();
                 if let Ok(Ok(PdmsDbData {
-                    total_attr_map,
-                    type_ele_map,
-                    refno_info_map,
-                    db_type,
-                    db_no,
-                    version,
-                    room_code_map,
-                    foreign_refnos_map,
-                    ..
-                })) = tokio::task::spawn_blocking(move || {
+                                 total_attr_map,
+                                 type_ele_map,
+                                 refno_info_map,
+                                 db_type,
+                                 db_no,
+                                 version,
+                                 room_code_map,
+                                 foreign_refnos_map,
+                                 ..
+                             })) = tokio::task::spawn_blocking(move || {
                     parse_file_with_chunk(
                         &path_clone,
                         &None,
@@ -711,7 +724,7 @@ pub async fn sync_total_async_threaded(
                     version_map.entry(file_name.clone()).or_insert(version);
                     set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
 
-                    total_attr_map.iter_mut().for_each(|mut x|{
+                    total_attr_map.iter_mut().for_each(|mut x| {
                         let name = cal_default_name(*x.key(), x.value(), &children_map_clone);
                         x.value_mut().explicit_attmap.insert(NAME_HASH, AttrVal::StringType(name));
                     });
@@ -894,8 +907,8 @@ pub async fn sync_total_async_threaded(
                                                 &gen_explicit_attr_value_sql(att.value()),
                                             );
                                             let name = att.explicit_attmap.get_name_string()
-                                            .replace(r#"'"#, r#"\'"#)
-                                            .replace(r#"""#, r#"\""#);
+                                                .replace(r#"'"#, r#"\'"#)
+                                                .replace(r#"""#, r#"\""#);
                                             let order = get_order(
                                                 refno,
                                                 att.value(),
@@ -1096,10 +1109,11 @@ fn set_uda_attr(
                 continue;
             }
             let ukey = ukey.unwrap();
-            // let mut udna = uda_implicit_att.get_str("UDNA");
-            // if udna == Some("") {
-            //     udna = uda_explicit_att.get_str("DYUDNA");
-            // }
+            // 若udna中没有值，则可能在显式属性的dyudna中
+            let mut udna = uda_implicit_att.get_str("UDNA");
+            if udna == Some("") {
+                udna = uda_explicit_att.get_str("DYUDNA");
+            }
             let elel = uda_explicit_att.get_i32_vec("ELEL");
             let default = uda_explicit_att.get_val("DFLT");
             if elel.is_none() || default.is_none() {
@@ -1186,6 +1200,7 @@ async fn save_paras_into_arangodb(
     }
     Ok(())
 }
+
 
 #[tokio::test]
 async fn test_threads() {

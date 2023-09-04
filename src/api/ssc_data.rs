@@ -340,13 +340,6 @@ pub async fn update_ssc_type(names: Vec<String>, pool: &Pool<MySql>) -> anyhow::
     Ok(())
 }
 
-/// 获取某个房间下的所有参考号
-pub async fn query_room_refnos_aql(room_name: &str, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
-    let aql = AqlQuery::new("return document('room_eles',@room_name)")
-        .bind_var("room_name", room_name);
-    let result: Vec<String> = database.aql_query(aql).await?;
-    Ok(convert_refno_vec_from_vec_string(result))
-}
 
 fn gen_query_ssc_children_count_sql(refno: RefU64) -> String {
     let mut sql = String::new();
