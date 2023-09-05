@@ -44,7 +44,7 @@ impl AiosDBManager{
                 continue;
             };
             // let pos_geos = geo_insts.iter().filter(|x| x.geo_type == GeoBasicType::Pos ).collect::<Vec<_>>();
-            if geo_insts.len() != 1 { continue;  }
+            if geo_insts.is_empty() { continue;  }
             let geo_inst = &geo_insts[0];
             let type_name = self.get_type_name(*refno);
 
