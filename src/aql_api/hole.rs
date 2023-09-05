@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
+use aios_core::create_attas_structs::VirtualHoleGraphNode;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::{PrimExtrusion, PrimSCylinder};
@@ -13,6 +14,7 @@ use glam::Vec3;
 use crate::aql_api::children::*;
 use crate::aql_api::pdms_room::*;
 use crate::consts::*;
+use crate::data_center_api::hole::{query_entity_hole_data, query_hole_data_aql};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
@@ -20,12 +22,14 @@ use crate::test::test_helper::get_test_ams_db_manager_async;
 
 /// 返回封堵材料统计插件数据
 pub async fn get_plugging_material_datas(select_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PluggingData>> {
-    // 找到所有需要计算的孔洞
-    let holes = query_hole_elements(select_refno, &database).await?;
-    // 查找他的instance
-    let insts = query_hole_instance(&holes, &database).await?;
-    let name_map = holes.into_iter().map(|refno| (refno.refno, refno)).collect::<HashMap<RefU64, PdmsElement>>();
-    compute_hole_instance_data(&database, insts, name_map).await
+    // 找到所有的墙/板
+    let wall_types = vec!["STWALL".to_string(), "GWALL".to_string(), "WALL".to_string(), "PANEL".to_string(), "FLOOR".to_string()];
+    let walls = query_refnos_travel_children_with_type_aql(&database, &select_refno, wall_types).await?;
+    let wall_refnos = walls.into_iter().map(|x| x.refno).collect::<Vec<RefU64>>();
+    // 从虚拟孔洞中取数据
+    let holes = query_entity_hole_data(wall_refnos, database).await?;
+    // let name_map = holes.into_iter().map(|refno| (refno.refno, refno)).collect::<HashMap<RefU64, PdmsElement>>();
+    compute_hole_instance_data_from_virtual(&database, holes).await
 }
 
 /// 获取需要计算的孔洞
@@ -177,12 +181,68 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
                 room_1: "".to_string(),
                 room_2: "".to_string(),
                 height,
-                cable_area,
+                cable_area: 0.0,
                 plugging_area,
                 plugging_volume,
                 materials: "".to_string(),
-                
+
             })
+        }
+    }
+    Ok(result)
+}
+
+/// 通过虚拟孔洞数据计算封堵数据
+pub async fn compute_hole_instance_data_from_virtual(database: &ArDatabase, instances: Vec<VirtualHoleGraphNode>) -> anyhow::Result<Vec<PluggingData>> {
+    let mut result = Vec::new();
+    for instance in instances {
+        match instance.shape.as_str() {
+            "CIR" => {
+                let radius = (instance.size_width - instance.subs_thickness) as f64;
+                let height = (instance.size_throw_wall + instance.extent_length1 + instance.extent_length1) as f64;
+                let cable_area = get_cable_area(&instance.item_ref).await;
+                let plugging_area = std::f64::consts::PI * radius * radius - cable_area;
+                let plugging_volume = plugging_area * height;
+                let plug_type = instance.plug_type;
+                let plugging_material = match_plugging_material(&plug_type, 0.0, height as f64).unwrap_or(("".to_string(), 0.0));
+                result.push(PluggingData {
+                    own_refno: Default::default(),
+                    refno: Default::default(),
+                    name: instance.item_ref,
+                    size: radius.to_string(),
+                    room_1: "".to_string(),
+                    room_2: "".to_string(),
+                    height: height as f64,
+                    cable_area,
+                    plugging_area,
+                    plugging_volume,
+                    materials: plugging_material.0,
+                });
+            }
+            "RECT" => {
+                let length = instance.size_width as f64;
+                let width = instance.size_height as f64;
+                let height = instance.size_throw_wall as f64;
+                let cable_area = get_cable_area(&instance.item_ref).await;
+                let plugging_area = length * width - cable_area;
+                let plugging_volume = plugging_area * height;
+                let plug_type = instance.plug_type;
+                let plugging_material = match_plugging_material(&plug_type, 0.0, height as f64).unwrap_or(("".to_string(), 0.0));
+                result.push(PluggingData {
+                    own_refno: Default::default(),
+                    refno: Default::default(),
+                    name: instance.item_ref,
+                    size: format!("{}X{}", length, width),
+                    room_1: "".to_string(),
+                    room_2: "".to_string(),
+                    height: height as f64,
+                    cable_area,
+                    plugging_area,
+                    plugging_volume,
+                    materials: plugging_material.0,
+                });
+            }
+            _ => { continue; }
         }
     }
     Ok(result)
@@ -209,7 +269,7 @@ pub fn compute_rectangle_data(points: [Vec3; 4]) -> Option<(f32, f32)> {
 }
 
 /// 生成查询pdms实体孔洞的aql语句
-fn gen_query_pdms_hole_aql<'a>(refnos:Vec<RefU64>) -> AqlQuery<'a> {
+fn gen_query_pdms_hole_aql<'a>(refnos: Vec<RefU64>) -> AqlQuery<'a> {
     let ids = refnos.into_iter()
         .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()))
         .collect::<Vec<_>>();
@@ -314,6 +374,28 @@ fn gen_query_pdms_hole_aql<'a>(refnos:Vec<RefU64>) -> AqlQuery<'a> {
         .bind_var("ids", ids)
 }
 
+/// 通过封堵方式和水淹高度来计算
+///
+/// flood_height : 水淹高度
+///
+/// wall_height 墙的厚度
+///
+/// 返回封堵方式以及封堵厚度
+fn match_plugging_material(plugging_type: &str, flood_height: f64, wall_height: f64) -> Option<(String, f64)> {
+    match plugging_type.trim() {
+        "AFW" => {
+            Some(("低密硅酮封堵".to_string(), wall_height))
+        }
+        "AFWB" => {
+            Some(("⾼密硅酮封堵".to_string(), wall_height))
+        }
+        "MCT+AFW" => {
+            Some(("低密硅酮材料".to_string(), wall_height))
+        }
+        _ => { None }
+    }
+}
+
 #[tokio::test]
 async fn test_query_hole_elements() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
@@ -323,7 +405,7 @@ async fn test_query_hole_elements() -> anyhow::Result<()> {
     // let mgr = get_test_ams_db_manager_async().await;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refno = RefU64::from_refno_str("17496/106258").unwrap();
+    let refno = RefU64::from_refno_str("17496/108516").unwrap();
     let result = get_plugging_material_datas(vec![refno], &database).await?;
     dbg!(&result);
     Ok(())

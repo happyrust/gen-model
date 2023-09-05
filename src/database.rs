@@ -381,7 +381,6 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
     if let Some(info_map) = ATTR_INFO_MAP.get(&(db1_hash(type_name) as i32)) {
         for noun_hash in column_hashes {
             //如果没有这个属性，需要用unset顶上
-            //if noun_hash != &(UNSET_NOUN)
             if type_name == "UDA" && noun_hash == &db1_hash("UDNA") {
                 let uda = if i_att.contains_attr_name("UDNA") {
                     let uda = i_att.get_str("UDNA").unwrap();

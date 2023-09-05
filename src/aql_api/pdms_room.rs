@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool, Row};
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
+use log::kv::ToValue;
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
 
@@ -1291,4 +1292,11 @@ pub async fn query_all_room_aql(database: &ArDatabase) -> anyhow::Result<Vec<Roo
         }").bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
     let result = database.aql_query::<RoomNode>(aql).await?;
     Ok(result)
+}
+
+/// 从uda属性中获取房间号
+pub async fn get_room_code_from_attr(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<String> {
+    let attr = aios_mgr.get_attr(refno).await?;
+    let room_name = attr.get_str(":SCRoomNo").unwrap_or("").to_string();
+    Ok(room_name)
 }
