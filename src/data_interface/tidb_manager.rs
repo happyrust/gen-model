@@ -387,9 +387,7 @@ impl PdmsDataInterface for AiosDBManager {
     ) -> anyhow::Result<PdmsElement> {
         //这里还需要将project的信息利用起来
         let string = format!("v.mdb_name==\"/{}\" and v.db_type==\"{}\"", mdb_name, module);
-        dbg!(&string);
         let mut ele_nodes = self.query_ele_edges_by_expression(&string).await?;
-        dbg!(&ele_nodes);
         //从mdb 开始往下找，找到world
         if let Some(node) = ele_nodes.pop()  {
             let mut children = self.query_children_eles_order(node.owner, &[], &[module]).await?;
