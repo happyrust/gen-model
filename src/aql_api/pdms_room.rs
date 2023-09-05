@@ -15,7 +15,6 @@ use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use aios_core::pdms_types::*;
 use aios_core::pdms_types::{PdmsElement, RefU64, UdaMajorType};
-use anyhow::{anyhow, Ok};
 use bb8_arangodb::arangors_lite::AqlQuery;
 use bevy_transform::prelude::Transform;
 use glam::Vec3;
@@ -367,14 +366,6 @@ pub async fn query_equi_room_name_from_names_aql(
     Ok(result.into_iter().flatten().collect())
 }
 
-/// 获取节点连接的两边的房间
-///
-pub async fn query_node_connect_rooms(
-    refno: RefU64,
-    database: &ArDatabase,
-) -> anyhow::Result<Option<(String, String)>> {
-    todo!()
-}
 
 impl AiosDBManager {
     pub async fn query_room_eles_of_ele(
@@ -820,7 +811,7 @@ impl AiosDBManager {
         let mut room_pannels = vec![];
         for pt in pts {
             let contain_room_panels = room_panels_tree
-                .query_within_distance(*p, 0.0)
+                .query_within_distance(*pt, 0.0)
                 .map(|x| x.0)
                 .collect::<Vec<_>>();
             if contain_room_panels.is_empty() { 
@@ -1112,7 +1103,8 @@ impl AiosDBManager {
     /// filter 指定过滤的类型
     pub async fn query_intersection_eles(&self, refno: RefU64, use_children: bool, filter: &[&str], through: bool) -> anyhow::Result<Vec<(RefU64, bool)>> {
         let mut result = vec![];
-        let (pts, bbox) = self.query_eles_keypts_and_aabb_as_whole(&[refno], true).await?.ok_or(anyhow!("计算关键点出错。"))?;
+        let (pts, bbox) = self.query_eles_keypts_and_aabb_as_whole(&[refno], true).await?.ok_or(
+            anyhow::anyhow!("计算关键点出错。"))?;
 
         let near_walls = if use_children {
             self
