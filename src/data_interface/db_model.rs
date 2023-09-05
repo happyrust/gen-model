@@ -857,7 +857,6 @@ impl AiosDBManager {
                     };
                     //将site 和 第一个的 world 连在一起，而不是连world
                     for site_refno in site_refnos.into_iter(){
-                        // if mdb_data.db_type.as_str() == "DESI"
                         {
                             let edge = PdmsEleEdge {
                                 key: site_refno.hash_with_another_refno(root_world.refno).to_string(),

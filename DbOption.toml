@@ -1,5 +1,5 @@
 #同步文件配置false
-total_sync = true
+total_sync = false
 enable_log = false
 sync_graph_db = true
 sync_tidb = true
@@ -10,8 +10,6 @@ replace_dbs = true
 #项目设置
 project_path = "D:/AVEVA/Projects/E3D2.1" 
 included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
-#included_projects = ["SCB", "ZDJ"]  #"AvevaPlantSample",
-#included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
 
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
@@ -22,8 +20,8 @@ gen_model = true
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树
-gen_spatial_tree = false
-load_spatial_tree = false
+gen_spatial_tree = true
+load_spatial_tree = true
 save_spatial_tree_to_db = true
 gen_model_batch_size = 100
 
@@ -53,8 +51,8 @@ server_release_ip = "192.168.31.179:9099"
 #调试选项
 replace_mesh = true
 save_model_mesh_to_graph_db = true
-need_sync_refno_basic = true  #是否重新生成 refno_basic 缓存
-reset_mdb_project =  true     #是否重新生成 mdb 缓存
+need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
+reset_mdb_project =  false     #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
@@ -63,11 +61,11 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
 #included_db_files = ["ams7334_0001", "ams7353_0001", "ams7741_0001", "ams7998_0001"]
 #included_db_files = ["ams7997_0001"]
-#included_db_files = ["amssys", "ams1112_0001", "ams7997_0001"]
+included_db_files = ["ams7997_0001"]
 #included_db_files = ["acp7002_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 #manual_db_nums = [7354]
-#manual_db_nums = [7997]  #, 8000
+manual_db_nums = [7997]  #, 8000
 plat_url = ""
 
 #puhua
@@ -79,8 +77,8 @@ puhua_database_password = ""
 #debug_root_refnos = ["25688/48687"]
 
 #debug_root_refnos = ["17496/178935"]
-#debug_root_refnos = ["24383/80211"]
-debug_root_refnos = ["24381/180972"]
+debug_root_refnos = ["24381/35795"]
+#debug_root_refnos = ["17496/118542", " 24381/35931", "24381/35902"]
 
 #楼板FIT显示
 # debug_root_refnos = ["25688/72092", "25688/75909"]
@@ -337,9 +335,9 @@ debug_root_refnos = ["24381/180972"]
 #debug_root_refnos = ["17496/172226"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
-#room_root_refnos = ["24381/34110"]
+room_root_refnos = ["24381/35795"]
 #room_root_refnos = ["24381/35342", "24381/35795", "24381/36068"]
-room_root_refnos = ["24381/36068"]
+#room_root_refnos = ["24381/36068"]
 
 #room_root_refnos = ["24381/35622"]
 #24381_105593\

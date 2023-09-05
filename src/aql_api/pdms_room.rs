@@ -15,7 +15,7 @@ use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use aios_core::pdms_types::*;
 use aios_core::pdms_types::{PdmsElement, RefU64, UdaMajorType};
-use anyhow::anyhow;
+use anyhow::{anyhow, Ok};
 use bb8_arangodb::arangors_lite::AqlQuery;
 use bevy_transform::prelude::Transform;
 use glam::Vec3;
@@ -793,6 +793,49 @@ impl AiosDBManager {
         }
 
         return Ok(Some((whole_key_points, whole_aabb)));
+    }
+
+
+     /// 返回点所在的房间，如果点对应的房间没有，这跳过
+     pub async fn query_pts_own_room_panels(
+        &self,
+        pts: &[Vec3],
+    ) -> anyhow::Result<Vec<RefU64>> {
+        let room_panels_tree = self
+            .room_panels_rtree
+            .as_ref()
+            .ok_or(anyhow::anyhow!("房间空间树未生成。"))?;
+        let mut room_pannels = vec![];
+        for pt in pts {
+            let contain_room_panels = room_panels_tree
+                .query_within_distance(*p, 0.0)
+                .map(|x| x.0)
+                .collect::<Vec<_>>();
+            if contain_room_panels.is_empty() { 
+                room_pannels.push(RefU64::default());
+                continue;
+            }else{
+                room_pannels.push(contain_room_panels[0]);
+            }
+            //不需要检查是否在里面
+            // let contain_point = match collider_mesh.cast_local_ray_and_get_normal(
+            //     &Ray::new(
+            //         Point3::from_slice(&pt.to_array()),
+            //         Vector::new(0.0, 0.0, 1.0),
+            //     ),
+            //     100000.0,
+            //     false,
+            // ) {
+            //     Some(intersection) => collider_mesh.is_backface(intersection.feature),
+            //     None => false,
+            // };
+            // if contain_point {
+            //     target_panels.push(panel_info.refno);
+            //     break;
+            // }
+        }
+
+        Ok(room_pannels)
     }
 
 
