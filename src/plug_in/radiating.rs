@@ -18,7 +18,7 @@ use crate::api::element::query_id_from_name;
 use crate::api::room_code::query_room_code;
 use crate::aql_api::dtse_attr::query_ipara_from_bran;
 use crate::aql_api::pdms_element::query_id_from_names_aql;
-use crate::aql_api::pdms_room::{query_room_code_from_owner, query_room_name_from_refno_aql};
+use crate::aql_api::pdms_room::{get_room_code_from_attr, query_room_code_from_owner, query_room_name_from_refno_aql};
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct HeatDissipationData {
@@ -62,7 +62,12 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
         for (bran, bran_name) in bran_refnos {
             let area = get_heat_dissipation_data(bran, &database, aios_mgr).await?;
             let heat = get_heat_dissipation_table(*temp, area, true) as f32;
-            let room_code = query_room_code_from_owner(bran, &database).await?.unwrap_or("".to_string());
+            let room_code = query_room_code_from_owner(bran, &database).await?;
+            let room_code = if room_code.is_some() {
+                room_code.unwrap()
+            } else {
+                get_room_code_from_attr(bran, &aios_mgr).await.unwrap_or("".to_string())
+            };
             result.push(GetPipeHeatDissipationResponse {
                 pipe: if pipe_ele.name.starts_with("/") { pipe_ele.name[1..].to_string() } else { pipe_ele.name.clone() },
                 temp: *temp,
@@ -83,7 +88,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
     let mut bore_size = Vec::new();
     let tubis = query_tubi_from_bran(bran_refno, database).await?;
     // 查询保温层厚度
-    let iparas = query_ipara_from_bran(bran_refno,aios_mgr).await?;
+    let iparas = query_ipara_from_bran(bran_refno, aios_mgr).await?;
     let ipara = *iparas.get(0).unwrap_or(&0.0) as f32;
     for tubi in &tubis {
         // 只考虑工艺管道
