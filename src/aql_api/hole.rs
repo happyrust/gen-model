@@ -198,7 +198,8 @@ pub async fn compute_hole_instance_data_from_virtual(database: &ArDatabase, inst
     for instance in instances {
         match instance.shape.as_str() {
             "CIR" => {
-                let radius = (instance.size_width - instance.subs_thickness) as f64;
+                let cir_radius = instance.size_width / 2.0;
+                let radius = (cir_radius - instance.subs_thickness) as f64;
                 let height = (instance.size_throw_wall + instance.extent_length1 + instance.extent_length1) as f64;
                 let cable_area = get_cable_area(&instance.item_ref).await;
                 let plugging_area = std::f64::consts::PI * radius * radius - cable_area;
@@ -209,7 +210,7 @@ pub async fn compute_hole_instance_data_from_virtual(database: &ArDatabase, inst
                     own_refno: Default::default(),
                     refno: Default::default(),
                     name: instance.item_ref,
-                    size: radius.to_string(),
+                    size: (radius * 2.0).to_string(),
                     room_1: "".to_string(),
                     room_2: "".to_string(),
                     height: height as f64,
