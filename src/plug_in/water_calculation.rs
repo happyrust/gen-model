@@ -100,12 +100,12 @@ pub async fn export_stp(
     let shapes_data = query_insts_shape_data(
         &mgr.get_arango_db().await?,
         &export_refnos,
-        &[
+        Some(&[
             GeoBasicType::Pos,
             GeoBasicType::CateNeg,
             GeoBasicType::Neg,
             GeoBasicType::CateCrossNeg,
-        ],
+        ]),
     )
     .await?;
 

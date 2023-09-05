@@ -610,7 +610,7 @@ pub async fn sync_total_async_threaded(
             let project_name = project.as_str().to_string();
             let mut children_map = parse_file_children_map(
                 &path,
-                &None,
+                None,
                 &file_name,
                 project_name.clone().as_str(),
                 "",
