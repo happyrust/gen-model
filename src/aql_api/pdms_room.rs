@@ -28,9 +28,11 @@ use serde::{Deserialize, Serialize};
 use sqlx::{MySql, Pool, Row};
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
+use aios_core::options::DbOption;
 use log::kv::ToValue;
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RoomData {
@@ -333,7 +335,7 @@ pub async fn query_room_name_from_names_aql(
 }
 
 /// 返回设备所在的房间号(不含贯穿件)
-pub async fn query_equi_room_name_from_names_aql(
+pub async fn query_equi_room_name_from_refnos_aql(
     refnos: Vec<RefU64>,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<PdmsNameBelongRoomName>> {
@@ -353,6 +355,7 @@ pub async fn query_equi_room_name_from_names_aql(
                     filter r != null
                     limit 1
                     return {
+                        'refno': v._key,
                         'name': v.name,
                         'room_name': r.name
                     }
@@ -1299,4 +1302,34 @@ pub async fn get_room_code_from_attr(refno: RefU64, aios_mgr: &AiosDBManager) ->
     let attr = aios_mgr.get_attr(refno).await?;
     let room_name = attr.get_str(":SCRoomNo").unwrap_or("").to_string();
     Ok(room_name)
+}
+
+/// 通过房间号查询房间得包围盒
+pub async fn query_room_aabb_from_room_code(room_names:Vec<String>, database:&ArDatabase) -> anyhow::Result<Vec<RoomElement>> {
+    let aql = AqlQuery::new("\
+    With @@room_eles
+    for room in room_eles
+    filter room.name in @room_names
+    return {
+        '_key': room._key,
+        'name': room.name,
+        'aabb': room.aabb,
+        'panels': [],
+    }").bind_var("@room_eles",AQL_ROOM_ELES_COLLECTION)
+        .bind_var("room_names",room_names);
+    let result = database.aql_query::<RoomElement>(aql).await?;
+    Ok(result)
+}
+
+#[tokio::test]
+async fn test_get_room_aabb_from_room_code() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+    let result = get_room_aabb_from_room_code(vec!["R531".to_string()],&database).await?;
+    dbg!(&result);
+    Ok(())
 }
