@@ -53,7 +53,6 @@ pub struct PdmsSpreNameAql {
     pub name: String,
 }
 
-
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PdmsRefnoTypeAql {
     pub refno: String,

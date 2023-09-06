@@ -189,10 +189,11 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     };
     let mut gm_params = vec![];
     if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
+        dbg!(gmse_refno);
         if let Ok(gmse_am) = interface.get_attr_from_localdb(gmse_refno) {
             gm_params = query_gm_params(&gmse_am, Some(interface)).await?;
         }
-    }
+    }  
     // dbg!(&gm_params);
 
     let mut ngm_params = vec![];
@@ -273,11 +274,24 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_deep_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
+    let mut children = vec![];
+    for c in interface.get_children_attrs(refno)? {
+        if TOTAL_CATA_GEO_NOUN_NAMES.contains(&c.get_type()) {
+            children.push(c.clone());
+        }else{
+            for cc in interface.get_children_attrs(c.get_refno().unwrap_or_default())?{
+                if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type()) {
+                    children.push(cc.clone());
+                }
+            }
+        }
+    }
+    // let children = interface.get_deep_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
     for geo_am in children {
         if !geo_am.is_visible_by_level(None).unwrap_or(true) {
             continue;
         }
+        // dbg!(&geo_am);
         let has_children = geo_am.get_type() == "SPRO"; //todo add other types
         gms.push(
             query_gm_param(&geo_am, interface, has_children)

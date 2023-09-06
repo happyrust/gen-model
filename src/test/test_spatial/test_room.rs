@@ -6,6 +6,7 @@ use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 use aios_core::pdms_types::RefU64;
 use aios_core::pdms_types::UdaMajorType::T;
+use glam::Vec3;
 use regex::Regex;
 use std::str::FromStr;
 use parry3d::utils::hashmap::HashMap;
@@ -31,7 +32,6 @@ async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
     //测试样例1   内房间号：R610，外房间号：R661
     let mgr = get_test_ams_db_manager_async().await;
     let target_refno = "24383/83477".into();
-    // let r = mgr.query_eles_keypts_and_aabb_as_whole(&[target_refno], true).await?;
 
     let room_number_map = mgr
         .query_through_element_room_nums(&[target_refno], None)
@@ -40,10 +40,22 @@ async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
     Ok(())
 }
 
+///测试查询点所在的房间
+#[tokio::test]
+async fn test_query_rooms_pts() -> anyhow::Result<()> {
+    let mgr = get_test_ams_db_manager_async().await;
+    let pts = vec![Vec3::new(10271.33, -140.43, 14275.37)];
+
+    let room_nums = mgr
+        .query_pts_own_room_number(&pts)
+        .await?;
+    dbg!(room_nums);
+    Ok(())
+}
+
 
 #[tokio::test]
 async fn test_query_through_element_rooms_sbfi() -> anyhow::Result<()> {
-    //测试样例1   内房间号：R610，外房间号：R661
     let mgr = get_test_ams_db_manager_async().await;
     let target_refno = "17496/143434".into();
 
@@ -54,8 +66,6 @@ async fn test_query_through_element_rooms_sbfi() -> anyhow::Result<()> {
     Ok(())
 }
 
-//
-//
 
 ///测试房间号是否正确
 #[tokio::test]
@@ -68,7 +78,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
         .query_through_element_room_nums(&[target_refno], None)
         .await?;
     let mut map = HashMap::new();
-    map.insert(target_refno,("R610".to_string(),"R661".to_string()));
+    map.insert(target_refno, ("R610".to_string(), "R661".to_string()));
     assert_eq!(room_number, map);
     Ok(())
 }
