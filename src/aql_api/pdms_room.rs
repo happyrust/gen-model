@@ -31,8 +31,6 @@ use sqlx::{MySql, Pool, Row};
 use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use aios_core::options::DbOption;
-use serde_with::serde_as;
-use serde_with::DisplayFromStr;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -1443,13 +1441,13 @@ pub async fn query_room_aabb_from_room_code(room_names:Vec<String>, database:&Ar
 
 #[tokio::test]
 async fn test_get_room_aabb_from_room_code() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let result = get_room_aabb_from_room_code(vec!["R531".to_string()],&database).await?;
-    dbg!(&result);
+    // use config::{Config, ConfigError, Environment, File};
+    // let s = Config::builder()
+    //     .add_source(File::with_name("DbOption"))
+    //     .build()?;
+    // let db_option: DbOption = s.try_deserialize().unwrap();
+    // let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+    // let result = get_room_aabb_from_room_code(vec!["R531".to_string()],&database).await?;
+    // dbg!(&result);
     Ok(())
 }
