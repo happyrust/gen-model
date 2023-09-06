@@ -489,13 +489,19 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             }
             "SCON" | "NSCO" => {
                 // 圆锥
-                CateGeoParam::Cone(CateConeParam {
+                CateGeoParam::Cone(CateSnoutParam { 
                     refno: gmse.refno,
-                    axis: (gmse.paxises[0].clone()),
-                    dist_to_btm: gmse.distances[0],
-                    diameter: gmse.diameters[0],
+                    // axis: (gmse.paxises[0].clone()),
+                    dist_to_btm: 0.0,
+                    // diameter: gmse.diameters[0],
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
+                    pa: gmse.paxises[0].clone(),
+                    pb: None,
+                    dist_to_top: gmse.distances[0],
+                    btm_diameter: 0.0,
+                    top_diameter: gmse.diameters[0],
+                    offset: 0.0,
                 })
             }
             "SCTO" | "NSCT" => {
@@ -509,15 +515,6 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            // "SDIS" => {
-            // Some(CateGeoParam::Disc(CateDiscParam {
-            //     axis: (gmse.paxises[0].clone()),
-            //     dist_to_btm: gmse.distances[0],
-            //     diameter: gmse.diameters[0],
-            //     centre_line_flag: gmse.centre_line_flag,
-            //     tube_flag: gmse.tube_flag,
-            // }))
-            // }
             "SDSH" | "NSDS" => {
                 CateGeoParam::Dish(CateDishParam {
                     refno: gmse.refno,
