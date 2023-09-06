@@ -813,9 +813,7 @@ impl AiosDBManager {
         let string = format!("v.dbnum in [{}] and v.noun== 'WORL'", vec_str);
 
         let mut pdms_edges = vec![];
-        dbg!(&string);
         if let Ok(mut ele_nodes) = self.query_ele_nodes_by_expression(&string).await {
-            dbg!(&ele_nodes);
             if ele_nodes.is_empty() { return Ok(()); }
             let database = self.get_arango_db().await?;
 
@@ -830,8 +828,6 @@ impl AiosDBManager {
                 //将mdb的关系也放入edges
                 if let Some(mdb_data) = mdb_edges_map.get(&root_dbnum){
                     let mdb_name = mdb_names_map.get(&mdb_refno).unwrap();
-                    dbg!(&mdb_name);
-                    dbg!(&root_world.refno);
                     let edge = PdmsEleEdge {
                         key: root_world.refno.hash_with_another_refno(mdb_refno).to_string(),
                         refno: root_world.refno,
