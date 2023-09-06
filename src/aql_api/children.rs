@@ -347,7 +347,7 @@ pub async fn query_refnos_ancestor_with_name_till_type_aql(arango_database: &ArD
 
 /// 通过name查询参考号
 pub async fn query_refnos_from_names(names: Vec<String>, database: &ArDatabase, filter_types: Option<Vec<String>>)
-                                     -> anyhow::Result<Vec<PdmsRefnoNameAql>> {
+                                     -> anyhow::Result<Vec<PdmsElement>> {
     let names = names
         .into_iter()
         .map(|name| if !name.starts_with("/") { format!("/{}", name) } else { name })
@@ -358,15 +358,19 @@ pub async fn query_refnos_from_names(names: Vec<String>, database: &ArDatabase, 
     //filter e.noun in @filter_nouns
     filter e.name in @names
     return {
-        'refno':e._key,
+        '_key':e._key,
+        'owner':e.owner,
         'name':e.name,
+        'noun':e.noun,
+        'version':0,
+        'children_count':0,
     }".to_string();
     if filter_types.is_some() {
         aql_str = aql_str.replace("//", "");
     }
     let aql = AqlQuery::new(aql_str.as_str()).bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("names", names).bind_var("filter_nouns", filter_types.unwrap_or(vec![]));
-    let result = database.aql_query::<PdmsRefnoNameAql>(aql).await?;
+    let result = database.aql_query::<PdmsElement>(aql).await?;
     Ok(result)
 }
 
@@ -1261,7 +1265,7 @@ async fn test_query_refnos_from_names() -> anyhow::Result<()> {
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let names = vec!["/MAIJIAN-NEW-VARY-NGMS".to_string()];
-    let result = query_refnos_from_names(names, &database,None).await?;
+    let result = query_refnos_from_names(names, &database, None).await?;
     dbg!(&result);
     Ok(())
 }
