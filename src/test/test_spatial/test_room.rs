@@ -32,7 +32,6 @@ async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
     //测试样例1   内房间号：R610，外房间号：R661
     let mgr = get_test_ams_db_manager_async().await;
     let target_refno = "24383/83477".into();
-    // let r = mgr.query_eles_keypts_and_aabb_as_whole(&[target_refno], true).await?;
 
     let room_number_map = mgr
         .query_through_element_room_nums(&[target_refno], None)
