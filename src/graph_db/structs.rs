@@ -15,6 +15,7 @@ pub struct PdmsEleGraphNode {
     pub owner: RefU64,
     pub name: String,
     pub noun: String,
+    #[serde(default)]
     pub order: u32,
     pub dbnum: i32,
     #[serde(default)]
