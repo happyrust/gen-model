@@ -4,10 +4,11 @@ use aios_core::data_center::{DataCenterProject, SendHoleData};
 use aios_core::options::DbOption;
 use arangors_lite::AqlQuery;
 use bitvec::macros::internal::funty::Fundamental;
+use serde::{Serialize,Deserialize};
 
 use crate::api::virtual_hole::query_hole_detail_data_by_code;
 use crate::api::virtual_hole::query_embed_detail_data_by_code;
-use crate::consts::{AQL_EMBED_DATA_COLLECTION, AQL_HOLE_DATA_COLLECTION};
+use crate::consts::{AQL_EMBED_DATA_COLLECTION, AQL_HOLE_DATA_COLLECTION, AQL_VIRTUAL_HOLE_COLLECTION};
 use crate::data_center_api::embed::create_embed_data_aql;
 use crate::data_center_api::hole::gen_hole_datacenter_instance_aql;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -17,11 +18,11 @@ use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 pub async fn get_audit_data(aios_mgr: &AiosDBManager, data: &mut SendHoleData) {
     let mut agree = false;
     //获取project_code
-    data.form_data.project_code =aios_mgr.db_option.project_code.to_string();
+    data.form_data.project_code = aios_mgr.db_option.project_code.to_string();
 
     // //如果设定人全部同意(流程结束)发送元数据包
     //操作人与审定人对比，
-    let sz_name =data.form_data.sz_name.split('/').next().unwrap_or_default().to_string();
+    let sz_name = data.form_data.sz_name.split('/').next().unwrap_or_default().to_string();
     if data.form_data.human_code == sz_name {
         agree = true;
         for i in &data.form_data.model_body {
@@ -81,10 +82,12 @@ pub async fn get_audit_data(aios_mgr: &AiosDBManager, data: &mut SendHoleData) {
                 match i.version {
                     //若为空，则将version置为A
                     ' ' => {
-                        update_virtual_hole_data_version_aql(&database, i._key, 'A').await; }
+                        update_virtual_hole_data_version_aql(&database, i._key, 'A').await;
+                    }
                     //若为A-Y,则version+1
                     'A'..='Y' => {
-                        update_virtual_hole_data_version_aql(&database, i._key, (i.version as u8 + 1) as char).await; }
+                        update_virtual_hole_data_version_aql(&database, i._key, (i.version as u8 + 1) as char).await;
+                    }
                     _ => {}
                 }
             }
@@ -111,7 +114,7 @@ pub async fn update_virtual_hole_data_version_aql(
     version: char,
 ) {
     let aql = format!("With {AQL_HOLE_DATA_COLLECTION} update {{'_key':'{}' , 'Version':'{}'}} in {}", key, version.to_string(), AQL_HOLE_DATA_COLLECTION);
-    let result = database.aql_query::<VirtualHoleGraphNodeQuery>(AqlQuery::new(aql.as_str())).await.unwrap();
+    let _ = database.aql_query::<VirtualHoleGraphNodeQuery>(AqlQuery::new(aql.as_str())).await;
 }
 
 ///更新虚拟埋件版本
@@ -121,7 +124,68 @@ pub async fn update_virtual_embed_data_version_aql(
     version: char,
 ) {
     let aql = format!("With {AQL_EMBED_DATA_COLLECTION} update {{'_key':'{}' , 'Version':'{}'}} in {}", key, version.to_string(), AQL_EMBED_DATA_COLLECTION);
-    let result = database.aql_query::<VirtualEmbedGraphNodeQuery>(AqlQuery::new(aql.as_str())).await.unwrap();
+    let _ = database.aql_query::<VirtualEmbedGraphNodeQuery>(AqlQuery::new(aql.as_str())).await;
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct VirtualHoleKey {
+    pub is_hole: bool,
+    pub key: String,
+}
+
+/// 通过虚拟孔洞提资流程的key，查询本次提资中用到了哪些孔洞埋件的key
+async fn query_virtual_hole_detail_key(document_key: &str, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleKey>> {
+    let aql = AqlQuery::new("\
+    With @@virtual_hole
+    let data = document(@@virtual_hole,@key)
+    for d in data.formdata.Detail
+    return {
+        'is_hole':d.is_hole,
+        'key':d.key,
+    }").bind_var("@virtual_hole", AQL_VIRTUAL_HOLE_COLLECTION)
+        .bind_var("key", document_key);
+    let result = database.aql_query::<VirtualHoleKey>(aql).await?;
+    Ok(result)
+}
+
+/// 更新孔洞或者埋件校审状态
+///
+/// is_hole  true : 孔洞  false ： 埋件
+async fn update_hole_embed_js_status(keys: Vec<String>, status: &str, is_hole: bool, database: &ArDatabase) -> anyhow::Result<()> {
+    let collection = if is_hole { AQL_HOLE_DATA_COLLECTION } else { AQL_EMBED_DATA_COLLECTION };
+    let aql = AqlQuery::new("\
+    with @@hole_data
+    for key in @keys
+    update {'_key':key , 'JSStatus':@status} in @@hole_data
+    ").bind_var("@hole_data", collection)
+        .bind_var("keys", keys)
+        .bind_var("status", status);
+    let _ = database.aql_query::<String>(aql).await?;
+    Ok(())
+}
+
+/// 根据提资表单，更新虚拟孔洞埋件中的校审状态
+pub async fn update_virtual_hole_status(document_key: &str, status: &str, database: &ArDatabase) -> anyhow::Result<String> {
+    let keys = query_virtual_hole_detail_key(document_key, database).await?;
+    if keys.is_empty() { return Ok("单据不存在".to_string()); }
+    // 孔洞
+    let hole_keys = keys.iter()
+        .filter(|k| k.is_hole)
+        .map(|x| x.key.clone())
+        .collect::<Vec<String>>();
+    // 埋件
+    let embed_keys = keys.into_iter()
+        .filter(|k| !k.is_hole)
+        .map(|x| x.key)
+        .collect::<Vec<String>>();
+    // 分别更新状态
+    if !hole_keys.is_empty() {
+        update_hole_embed_js_status(hole_keys, status, true, database).await?;
+    }
+    if !embed_keys.is_empty() {
+        update_hole_embed_js_status(embed_keys, status, false, database).await?;
+    }
+    Ok("完成赋值".to_string())
 }
 
 

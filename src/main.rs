@@ -353,6 +353,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, AQL_WATER_CALCULATION_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_HOLE_EDGE_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_EMBED_EDGE_COLLECTION, Edge).await?;
+
     Ok(())
 }
 
