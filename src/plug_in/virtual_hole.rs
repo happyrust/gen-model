@@ -4,7 +4,7 @@ use aios_core::data_center::{DataCenterProject, SendHoleData};
 use aios_core::options::DbOption;
 use arangors_lite::AqlQuery;
 use bitvec::macros::internal::funty::Fundamental;
-use serde::{Serialize,Deserialize};
+use serde::{Serialize, Deserialize};
 
 use crate::api::virtual_hole::query_hole_detail_data_by_code;
 use crate::api::virtual_hole::query_embed_detail_data_by_code;
@@ -166,7 +166,7 @@ async fn update_hole_embed_js_status(keys: Vec<String>, status: &str, is_hole: b
 
 /// 根据提资表单，更新虚拟孔洞埋件中的校审状态
 pub async fn update_virtual_hole_status(document_key: &str, status: &str, database: &ArDatabase) -> anyhow::Result<String> {
-    let keys = query_virtual_hole_detail_key(document_key, database).await?;
+    let Ok(keys) = query_virtual_hole_detail_key(document_key, database).await else { return Ok("单据不存在".to_string()); };
     if keys.is_empty() { return Ok("单据不存在".to_string()); }
     // 孔洞
     let hole_keys = keys.iter()
