@@ -50,14 +50,14 @@ pub fn resolve_desi_comp<T: PdmsDataInterface>(
         );
         return Ok(Default::default());
     }
-    dbg!(scom_ref);
+    // dbg!(scom_ref);
     let scom_info = interface.get_or_create_scom_info(scom_ref)?;
-    dbg!(&scom_info.gm_params);
+    // dbg!(&scom_info.ngm_params);
     // dbg!(&scom_info.axis_params);
     let mut context = interface.get_or_create_cata_context(desi_refno, desi_axis_map)?;
     
     let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(interface), Some(context));
-    dbg!(&geom_info.as_ref().unwrap().geometries);
+    // dbg!(&geom_info.as_ref().unwrap().n_geometries);
     if geom_info.is_err() {
         error!("{:?}", geom_info.as_ref().err());
         error!("{:?}", desi_att.to_string_hashmap());
@@ -350,10 +350,9 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
 pub fn query_gm_param(
     a: &AttrMap,
     interface: &dyn PdmsDataInterface,
-    has_children: bool,
+    is_spro: bool,
 ) -> Option<GmParam> {
     let mut paxises = a.get_attr_strings_without_default(&["PAXI", "PAAX", "PBAX", "PCAX"]);
-    dbg!(&paxises);
     if let Some(val) = a.get_val("PTS") {
         match val {
             IntArrayType(v) => {
@@ -389,7 +388,7 @@ pub fn query_gm_param(
             }
         }
     } else {
-        if has_children {
+        if is_spro {
             for a in interface.get_children_attrs(refno).ok().unwrap_or_default() {
                 verts.push([
                     (a.get_as_string("PX").unwrap_or_default()),

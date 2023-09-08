@@ -274,6 +274,8 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
         .map(|exp| eval_str_to_f32(&exp, context, interface))
         .collect::<anyhow::Result<_>>()?;
 
+    // dbg!(&xyz);
+
     let mut paxises: Vec<Option<CateAxisParam>> = Vec::new();
     for axis_str in gm.paxises.iter() {
         let mut axis = axis_str.trim();

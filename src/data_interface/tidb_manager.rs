@@ -1162,15 +1162,13 @@ impl PdmsDataInterface for AiosDBManager {
                 }
             }
         }
-        dbg!(&children);
         // let children = interface.get_deep_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
         for geo_am in children {
             if !geo_am.is_visible_by_level(None).unwrap_or(true) {
                 continue;
             }
-            // dbg!(&geo_am);
-            let has_children = geo_am.get_type() == "SPRO"; //todo add other types
-            gms.push(query_gm_param(&geo_am, self, has_children).unwrap_or_default());
+            let is_spro = geo_am.get_type() == "SPRO"; //todo add other types
+            gms.push(query_gm_param(&geo_am, self, is_spro).unwrap_or_default());
         }
         Ok(gms)
     }
@@ -1204,8 +1202,6 @@ impl PdmsDataInterface for AiosDBManager {
             if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
                 gm_params = self.query_gm_params(gmse_refno)?;
             }
-            // dbg!(&gm_params);
-
             let mut ngm_params = vec![];
             //-ve， 和design发生左右的负实体
             if let Some(gmse_refno) = attr_map.get_foreign_refno("NGMR") {
