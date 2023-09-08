@@ -210,11 +210,14 @@ async fn main() -> anyhow::Result<()> {
     //     Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
     // }
 
-    // let refno = "24381/37118".into();
+    // let refno = "15192/358995".into();
     // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
     // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
     // dbg!(quat_to_pdms_ori_str(&transform.rotation));
     // dbg!(transform);
+
+    // let refno = "15192/358994".into();
+    // dbg!(mgr.get_children_from_localdb(refno).unwrap_or_default());
 
     #[cfg(feature = "gen_model")]
     if db_option.gen_model {
@@ -350,6 +353,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, AQL_WATER_CALCULATION_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_HOLE_EDGE_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_EMBED_EDGE_COLLECTION, Edge).await?;
+
     Ok(())
 }
 

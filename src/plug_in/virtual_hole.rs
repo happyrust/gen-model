@@ -4,10 +4,11 @@ use aios_core::data_center::{DataCenterProject, SendHoleData};
 use aios_core::options::DbOption;
 use arangors_lite::AqlQuery;
 use bitvec::macros::internal::funty::Fundamental;
+use serde::{Serialize, Deserialize};
 
 use crate::api::virtual_hole::query_hole_detail_data_by_code;
 use crate::api::virtual_hole::query_embed_detail_data_by_code;
-use crate::consts::{AQL_EMBED_DATA_COLLECTION, AQL_HOLE_DATA_COLLECTION};
+use crate::consts::{AQL_EMBED_DATA_COLLECTION, AQL_HOLE_DATA_COLLECTION, AQL_VIRTUAL_HOLE_COLLECTION};
 use crate::data_center_api::embed::create_embed_data_aql;
 use crate::data_center_api::hole::gen_hole_datacenter_instance_aql;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -131,6 +132,68 @@ pub async fn update_virtual_embed_data_version_aql(
     let aql = format!("With {AQL_EMBED_DATA_COLLECTION} update {{'_key':'{}' , 'Version':'{}'}} in {}", key, version.to_string(), AQL_EMBED_DATA_COLLECTION);
     let reuslt = database.aql_query::<VirtualEmbedGraphNodeQuery>(AqlQuery::new(aql.as_str())).await?;
     return Ok(Some(reuslt));
+    let _ = database.aql_query::<VirtualEmbedGraphNodeQuery>(AqlQuery::new(aql.as_str())).await;
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct VirtualHoleKey {
+    pub is_hole: bool,
+    pub key: String,
+}
+
+/// 通过虚拟孔洞提资流程的key，查询本次提资中用到了哪些孔洞埋件的key
+async fn query_virtual_hole_detail_key(document_key: &str, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleKey>> {
+    let aql = AqlQuery::new("\
+    With @@virtual_hole
+    let data = document(@@virtual_hole,@key)
+    for d in data.formdata.Detail
+    return {
+        'is_hole':d.is_hole,
+        'key':d.key,
+    }").bind_var("@virtual_hole", AQL_VIRTUAL_HOLE_COLLECTION)
+        .bind_var("key", document_key);
+    let result = database.aql_query::<VirtualHoleKey>(aql).await?;
+    Ok(result)
+}
+
+/// 更新孔洞或者埋件校审状态
+///
+/// is_hole  true : 孔洞  false ： 埋件
+async fn update_hole_embed_js_status(keys: Vec<String>, status: &str, is_hole: bool, database: &ArDatabase) -> anyhow::Result<()> {
+    let collection = if is_hole { AQL_HOLE_DATA_COLLECTION } else { AQL_EMBED_DATA_COLLECTION };
+    let aql = AqlQuery::new("\
+    with @@hole_data
+    for key in @keys
+    update {'_key':key , 'JSStatus':@status} in @@hole_data
+    ").bind_var("@hole_data", collection)
+        .bind_var("keys", keys)
+        .bind_var("status", status);
+    let _ = database.aql_query::<String>(aql).await?;
+    Ok(())
+}
+
+/// 根据提资表单，更新虚拟孔洞埋件中的校审状态
+pub async fn update_virtual_hole_status(document_key: &str, status: &str, database: &ArDatabase) -> anyhow::Result<String> {
+    let Ok(keys) = query_virtual_hole_detail_key(document_key, database).await else { return Ok("单据不存在".to_string()); };
+    if keys.is_empty() { return Ok("单据不存在".to_string()); }
+    // 孔洞
+    let hole_keys = keys.iter()
+        .filter(|k| k.is_hole)
+        .map(|x| x.key.clone())
+        .collect::<Vec<String>>();
+    // 埋件
+    let embed_keys = keys.into_iter()
+        .filter(|k| !k.is_hole)
+        .map(|x| x.key)
+        .collect::<Vec<String>>();
+    // 分别更新状态
+    if !hole_keys.is_empty() {
+        update_hole_embed_js_status(hole_keys, status, true, database).await?;
+    }
+    if !embed_keys.is_empty() {
+        update_hole_embed_js_status(embed_keys, status, false, database).await?;
+    }
+    Ok("完成赋值".to_string())
 }
 
 

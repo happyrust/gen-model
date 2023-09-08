@@ -6,7 +6,6 @@ use crate::api::element::{get_order, query_name};
 use crate::api::ssc_data::get_ancestor_till_type;
 use crate::aql_api::children::{query_ancestor_till_types_aql, query_children_order_aql};
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
-use crate::aql_api::pdms_room::query_node_connect_rooms;
 use crate::data_center_api::data_api::get_refno_desp;
 use crate::data_interface::tidb_manager::AiosDBManager;
 

@@ -140,7 +140,7 @@ impl AiosDBManager {
             AqlQuery::new(aql_string.as_str());
 
         let result = self.get_arango_db().await?
-            .aql_query::<PdmsEleGraphNode>(aql).await?;
+            .aql_query::<PdmsEleGraphNode>(aql).await.unwrap();
         Ok(result)
     }
 

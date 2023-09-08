@@ -2,6 +2,7 @@ use crate::api::project_mdb::query_db_nums_of_mdb;
 use crate::aql_api::children::query_children_order_aql;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn::geo::create_profile_geos;
+use crate::consts::*;
 use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -12,7 +13,6 @@ use crate::graph_db::pdms_inst_arango::*;
 use crate::graph_db::pdms_mesh_arango::{save_mesh_to_arango_db, save_mesh_to_local_db};
 #[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
-use crate::consts::*;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::{BoxImplied, TubeImplied};
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
@@ -107,7 +107,6 @@ pub async fn gen_prim_geos(
                     } else {
                         GeoBasicType::Pos
                     },
-
                 };
                 let mut geo_param = PdmsGeoParam::Unknown;
                 //需要限制负实体的大小，太大，导致负运算失败
@@ -338,7 +337,6 @@ pub async fn gen_loop_geos(
                     } else {
                         GeoBasicType::Pos
                     },
-
                 };
                 let mut geo_hash = 0;
                 let mut geo_aabb = None;
@@ -388,8 +386,10 @@ pub async fn gen_loop_geos(
                         let loop_attr = mgr.get_attr_from_localdb(loop_refno).unwrap_or_default();
                         //不是第一个loop，需要取第一个的loop的height
                         let mut height = if cur_sibling_index > 0 {
-                            mgr.get_attr_from_localdb(sibling_refnos[0]).unwrap_or_default()
-                                .get_f32("HEIG").unwrap_or_default()
+                            mgr.get_attr_from_localdb(sibling_refnos[0])
+                                .unwrap_or_default()
+                                .get_f32("HEIG")
+                                .unwrap_or_default()
                         } else {
                             loop_attr
                                 .get_f32("HEIG")
@@ -401,9 +401,11 @@ pub async fn gen_loop_geos(
                         }
                         if loop_attr.get_type() == "NXTR" {
                             if let Some(parent_inst) = shape_insts_data
-                                .get_inst_info(loop_attr.get_owner().unwrap_or_default()) {
+                                .get_inst_info(loop_attr.get_owner().unwrap_or_default())
+                            {
                                 if let Some(h) =
-                                    parent_inst.aabb.map(|x| x.bounding_sphere().radius * 2.0) {
+                                    parent_inst.aabb.map(|x| x.bounding_sphere().radius * 2.0)
+                                {
                                     height = height.min(h);
                                     // dbg!(height);
                                     println!("Height 太长，裁剪为: {}", height);
@@ -456,9 +458,7 @@ pub async fn gen_loop_geos(
                     visible,
                     is_tubi: false,
                     geo_param: geo_param.clone(),
-                    geo_type: if parent_att.is_neg()
-                        || cur_sibling_index >= 1
-                    {
+                    geo_type: if parent_att.is_neg() || cur_sibling_index >= 1 {
                         GeoBasicType::Neg
                     } else {
                         GeoBasicType::Pos
@@ -516,15 +516,15 @@ pub async fn gen_cata_single_geoms(
     let geoms_info = resolve_desi_comp(Some(mgr.as_ref()), design_refno, None, scom_info_map, None)
         .await
         .unwrap_or_default();
-    if type_name == "SCTN" || type_name == "STWALL" ||
-        type_name == "GENSEC" || type_name == "WALL" {
+    if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL"{
         create_profile_geos(
             design_refno,
             &desi_att,
             &geoms_info,
             &brep_shape_map,
             mgr.as_ref(),
-        ).await?;
+        )
+        .await?;
         return Ok(geoms_info.refno);
     } else {
         let CateGeomsInfo {
@@ -577,8 +577,6 @@ fn cal_sjus_value(sjus: &str, height: f32) -> f32 {
     };
     off_z
 }
-
-
 
 /// 生成元件库的branch型几何体
 pub async fn gen_cata_geos(
@@ -664,17 +662,18 @@ pub async fn gen_cata_geos(
                             &refno_ptset_map,
                             &scom_info_map,
                         )
-                            .await
-                            else {
-                                continue;
-                            };
+                        .await
+                        else {
+                            continue;
+                        };
                         let mut is_reuse_unit = false;
                         ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
                         for (ele_refno, shapes) in brep_shapes_map {
-                            let Ok(Some(mut origin_trans)) = mgr_clone.get_world_transform(ele_refno).await
-                                else {
-                                    continue;
-                                };
+                            let Ok(Some(mut origin_trans)) =
+                                mgr_clone.get_world_transform(ele_refno).await
+                            else {
+                                continue;
+                            };
 
                             let Ok(ele_att) = mgr_clone.get_attr_from_localdb(ele_refno) else {
                                 continue;
@@ -685,12 +684,17 @@ pub async fn gen_cata_geos(
                                 if let Some(sjus_adjust) = sjus_map_clone.get(&parent) {
                                     let height = sjus_adjust.value().1;
                                     let off_z = cal_sjus_value(sjus, height);
-                                    let parent_trans = mgr_clone.get_world_transform(parent).await.unwrap_or_default().unwrap_or_default();
+                                    let parent_trans = mgr_clone
+                                        .get_world_transform(parent)
+                                        .await
+                                        .unwrap_or_default()
+                                        .unwrap_or_default();
 
                                     origin_trans.translation.z = parent_trans.translation.z;
                                     // origin_trans.translation = origin_trans.translation + parent_trans.rotation.mul_vec3(sjus_adjust.value().0)
                                     //     + origin_trans.rotation.mul_vec3(Vec3::new(0.0, 0.0, off_z));
-                                    origin_trans.translation = origin_trans.translation + sjus_adjust.value().0
+                                    origin_trans.translation = origin_trans.translation
+                                        + sjus_adjust.value().0
                                         + Vec3::new(0.0, 0.0, off_z);
                                 }
                             }
@@ -798,7 +802,7 @@ pub async fn gen_cata_geos(
                                         rotation: rot,
                                         scale,
                                     }
-                                        .compute_matrix();
+                                    .compute_matrix();
                                     let Some(aabb) = cached_mesh_mgr.get_aabb(geo_hash) else {
                                         continue;
                                     };
@@ -1022,7 +1026,9 @@ pub async fn gen_cata_geos(
                             "正在处理同类元件库的模型当前参考号：{}",
                             ele_refno.to_refno_string(),
                         );
-                        let Ok(Some(mut origin_trans)) = mgr_clone.get_world_transform(ele_refno).await else {
+                        let Ok(Some(mut origin_trans)) =
+                            mgr_clone.get_world_transform(ele_refno).await
+                        else {
                             continue;
                         };
 
@@ -1043,8 +1049,8 @@ pub async fn gen_cata_geos(
                                 let height = sjus_adjust.value().1;
                                 let off_z = cal_sjus_value(sjus, height);
                                 // let parent_trans = mgr_clone.get_world_transform(parent).await.unwrap_or_default().unwrap_or_default();
-                                origin_trans.translation +=  sjus_adjust.value().0 +
-                                    origin_trans.rotation * Vec3::new(0.0, 0.0, off_z);
+                                origin_trans.translation += sjus_adjust.value().0
+                                    + origin_trans.rotation * Vec3::new(0.0, 0.0, off_z);
                             }
                         }
 
@@ -1082,16 +1088,7 @@ pub async fn gen_cata_geos(
                             //更新为ngmr类型
                             n_geos_info.update_to_ngmr(None);
                             let geo_hash = n_geos_info.get_inst_key_u64();
-                            //将ngmr的mesh加载到内存，方便后续处理负实体
-                            // if let Ok(aabb) = mgr_clone.get_mesh_aabb_from_localdb(geo_hash) {
-                            //     if let Ok(mesh) = mgr_clone.get_mesh_from_localdb(geo_hash) {
-                            //         cached_mesh_mgr.insert(geo_hash, PlantGeoData {
-                            //             geo_hash,
-                            //             mesh: Some(mesh),
-                            //             aabb: Some(aabb),
-                            //         });
-                            //     }
-                            // }
+                            //todo 将ngmr的mesh加载到内存，方便后续处理负实体
                             shape_insts_data.insert_ngmr_info(ele_refno, n_geos_info);
                         }
                     }
@@ -1161,12 +1158,12 @@ pub async fn gen_cata_geos(
             &scom_info_map,
             None,
         )
-            .await?;
-        // dbg!(&tubi_size);
-        let tubi_geo_hash = if matches!(tubi_size, TubiSize::BoreSize(_)) {
-            TUBI_GEO_HASH
-        } else {
+        .await?;
+        dbg!(&tubi_size);
+        let mut tubi_geo_hash =  if matches!(tubi_size, TubiSize::BoxSize(_)) {
             BOXI_GEO_HASH
+        } else {
+            TUBI_GEO_HASH
         };
 
         let mut href_type = "".to_string();
@@ -1343,7 +1340,12 @@ pub async fn gen_cata_geos(
                     &scom_info_map,
                     Some(axis_map),
                 )
-                    .await?;
+                .await?;
+                tubi_geo_hash = if matches!(current_tubing.tubi_size, TubiSize::BoxSize(_)) {
+                    BOXI_GEO_HASH
+                } else {
+                    TUBI_GEO_HASH
+                };
                 current_tubing.start_pt = l_pos;
                 current_tubing.desire_leave_dir = l_dir;
                 current_tubing.leave_ref_dir = if l_ref_dir.is_normalized() {
@@ -1638,8 +1640,8 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         Arc::new(branch_refnos_map),
                         sjus_map_clone,
                     )
-                        .await
-                        .unwrap();
+                    .await
+                    .unwrap();
                 });
                 has_run_cata = true;
                 handles.push(handle);
@@ -1660,8 +1662,8 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         Arc::new(Default::default()),
                         sjus_map_clone,
                     )
-                        .await
-                        .unwrap();
+                    .await
+                    .unwrap();
                 });
                 has_run_cata = true;
                 handles.push(handle);
@@ -1682,8 +1684,8 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         Arc::new(Default::default()),
                         sjus_map_clone,
                     )
-                        .await
-                        .unwrap();
+                    .await
+                    .unwrap();
                 });
                 has_run_cata = true;
                 handles.push(handle);
@@ -1723,8 +1725,8 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         &target_loop_refnos,
                         sjus_map_clone,
                     )
-                        .await
-                        .unwrap();
+                    .await
+                    .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
             }
@@ -1745,8 +1747,8 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         target_prim_refnos.as_slice(),
                         sjus_map_clone,
                     )
-                        .await
-                        .unwrap();
+                    .await
+                    .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
             }
@@ -1788,9 +1790,9 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             println!("正在处理: {} 下的负实体", comp_refno);
 
                             let Ok(children_refnos) = mgr.get_children_from_localdb(comp_refno)
-                                else {
-                                    return;
-                                };
+                            else {
+                                return;
+                            };
                             let mut neg_refnos = vec![];
                             children_refnos.iter().for_each(|x| {
                                 for c in &origin_neg_refnos {
@@ -1816,9 +1818,9 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             // dbg!(&pos_refnos);
                             let Some(w_trans) =
                                 trans_map.get(&comp_refno).map(|x| x.value().clone())
-                                else {
-                                    return;
-                                };
+                            else {
+                                return;
+                            };
                             // dbg!(w_trans);
                             let mut total_refnos = vec![comp_refno];
                             total_refnos.extend_from_slice(&neg_refnos);
@@ -1843,20 +1845,20 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                                     continue;
                                 };
                                 let Some(inst_geos) = inst_data.get_inst_geos_data_mut(&geos_info)
-                                    else {
-                                        continue;
-                                    };
+                                else {
+                                    continue;
+                                };
                                 let mut pos_aabb = Aabb::new_invalid();
                                 let pos_refno = pos_refnos[0];
                                 for geo_inst in &mut inst_geos.insts {
                                     let Some(mesh) = mesh_mgr_clone.get_mesh(geo_inst.geo_hash)
-                                        else {
-                                            continue;
-                                        };
+                                    else {
+                                        continue;
+                                    };
                                     let Some(aabb) = mesh_mgr_clone.get_aabb(geo_inst.geo_hash)
-                                        else {
-                                            continue;
-                                        };
+                                    else {
+                                        continue;
+                                    };
                                     let geo_mat = geos_info.world_transform;
                                     let ele_mat = inverse_mat * geo_mat.compute_matrix();
                                     let mut local_mat =
@@ -2038,9 +2040,9 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             continue;
                         };
                         let Some(geos_data) = shape_insts_data.get_inst_geos_data(parent_geos_info)
-                            else {
-                                continue;
-                            };
+                        else {
+                            continue;
+                        };
                         boolean_ngmr_map
                             .entry(parent)
                             .or_insert_with(|| Vec::new())
@@ -2072,14 +2074,14 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                     let Some(parent_geos_info) = shape_insts_data
                         .get_compound_info(parent)
                         .or(shape_insts_data.get_inst_info(parent))
-                        else {
-                            continue;
-                        };
+                    else {
+                        continue;
+                    };
                     let Some(parent_geos_data) =
                         shape_insts_data.get_inst_geos_data(parent_geos_info)
-                        else {
-                            continue;
-                        };
+                    else {
+                        continue;
+                    };
                     if parent_geos_data.insts.is_empty() {
                         continue;
                     }
@@ -2200,8 +2202,6 @@ async fn query_tubi_size(
 ) -> anyhow::Result<TubiSize> {
     // if let Ok(tubi_att) = mgr.get_attr_from_localdb(tubi_ref)
     {
-        // dbg!(&tubi_att);
-        // let tubi_cat_ref = tubi_att.get_foreign_refno("CATR").unwrap_or_default();
         //只是为了获得外径而已
         let tubi_geoms_info = resolve_desi_comp(
             Some(mgr),
@@ -2210,18 +2210,19 @@ async fn query_tubi_size(
             &scom_info_map,
             axis_map,
         )
-            .await
-            .unwrap_or_default();
-        let mut has_tube_geom = false;
+        .await
+        .unwrap_or_default();
         for geom in &tubi_geoms_info.geometries {
-            if let TubeImplied(d) = geom {
-                return Ok(TubiSize::BoreSize(d.diameter));
-            } else if let BoxImplied(d) = geom {
+            if let BoxImplied(d) = geom {
                 return Ok(TubiSize::BoxSize((d.width, d.height)));
+            } else if let TubeImplied(d) = geom {
+                return Ok(TubiSize::BoreSize(d.diameter));
+            }else{
+                // default_tube_geom = true;
             }
         }
-
-        if !has_tube_geom {
+        // use default
+        {
             if let Ok(cat_att) = mgr.get_attr_from_localdb(tubi_cat_ref) {
                 let params = cat_att.get_f64_vec("PARA").unwrap_or_default();
                 if params.len() >= 2 {
