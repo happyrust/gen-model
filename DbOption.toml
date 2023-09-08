@@ -8,7 +8,7 @@ incr_sync = false
 replace_dbs = true
 
 #项目设置
-project_path = "D:/AVEVA/Projects/E3D2.1" 
+project_path = "D:/new/AVEVA/Plant/Projects12.1.SP4"
 included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
 #included_projects = ["SCB", "ZDJ"]  #"AvevaPlantSample",
 #included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
@@ -22,8 +22,8 @@ gen_model = true
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树
-gen_spatial_tree = false
-load_spatial_tree = false
+gen_spatial_tree = true
+load_spatial_tree = true
 save_spatial_tree_to_db = true
 gen_model_batch_size = 100
 
@@ -80,7 +80,7 @@ puhua_database_password = ""
 
 #debug_root_refnos = ["17496/178935"]
 #debug_root_refnos = ["24383/80211"]
-debug_root_refnos = ["24381/180972"]
+#debug_root_refnos = ["24381/180972"]
 
 #楼板FIT显示
 # debug_root_refnos = ["25688/72092", "25688/75909"]

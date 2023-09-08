@@ -17,11 +17,11 @@ use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 pub async fn get_audit_data(aios_mgr: &AiosDBManager, data: &mut SendHoleData) {
     let mut agree = false;
     //获取project_code
-    data.form_data.project_code =aios_mgr.db_option.project_code.to_string();
+    data.form_data.project_code = aios_mgr.db_option.project_code.to_string();
 
     // //如果设定人全部同意(流程结束)发送元数据包
     //操作人与审定人对比，
-    let sz_name =data.form_data.sz_name.split('/').next().unwrap_or_default().to_string();
+    let sz_name = data.form_data.sz_name.split('/').next().unwrap_or_default().to_string();
     if data.form_data.human_code == sz_name {
         agree = true;
         for i in &data.form_data.model_body {
@@ -81,10 +81,13 @@ pub async fn get_audit_data(aios_mgr: &AiosDBManager, data: &mut SendHoleData) {
                 match i.version {
                     //若为空，则将version置为A
                     ' ' => {
-                        update_virtual_hole_data_version_aql(&database, i._key, 'A').await; }
+                        if let Ok(Some(_)) = update_virtual_hole_data_version_aql(&database, i._key, 'A').await{}
+
+                    }
                     //若为A-Y,则version+1
                     'A'..='Y' => {
-                        update_virtual_hole_data_version_aql(&database, i._key, (i.version as u8 + 1) as char).await; }
+                        if let Ok(Some(_)) = update_virtual_hole_data_version_aql(&database, i._key, (i.version as u8 + 1) as char).await{}
+                    }
                     _ => {}
                 }
             }
@@ -93,9 +96,13 @@ pub async fn get_audit_data(aios_mgr: &AiosDBManager, data: &mut SendHoleData) {
             for i in update_embeds_version {
                 match i.version {
                     //若为空，则将version置为A
-                    ' ' => { update_virtual_embed_data_version_aql(&database, i._key, 'A').await; }
+                    ' ' => {
+                        if let Ok(Some(_)) = update_virtual_embed_data_version_aql(&database, i._key, 'A').await {}
+                    }
                     //若为A-Y,则version+1
-                    'A'..='Y' => { update_virtual_embed_data_version_aql(&database, i._key, (i.version as u8 + 1) as char).await; }
+                    'A'..='Y' => {
+                        if let Ok(Some(_)) = update_virtual_embed_data_version_aql(&database, i._key, (i.version as u8 + 1) as char).await {}
+                    }
                     _ => {}
                 }
             }
@@ -109,9 +116,10 @@ pub async fn update_virtual_hole_data_version_aql(
     database: &ArDatabase,
     key: String,
     version: char,
-) {
+) -> anyhow::Result<Option<Vec<VirtualHoleGraphNodeQuery>>> {
     let aql = format!("With {AQL_HOLE_DATA_COLLECTION} update {{'_key':'{}' , 'Version':'{}'}} in {}", key, version.to_string(), AQL_HOLE_DATA_COLLECTION);
-    let result = database.aql_query::<VirtualHoleGraphNodeQuery>(AqlQuery::new(aql.as_str())).await.unwrap();
+    let result = database.aql_query::<VirtualHoleGraphNodeQuery>(AqlQuery::new(aql.as_str())).await?;
+    return Ok(Some(result));
 }
 
 ///更新虚拟埋件版本
@@ -119,9 +127,10 @@ pub async fn update_virtual_embed_data_version_aql(
     database: &ArDatabase,
     key: String,
     version: char,
-) {
+) -> anyhow::Result<Option<Vec<VirtualEmbedGraphNodeQuery>>> {
     let aql = format!("With {AQL_EMBED_DATA_COLLECTION} update {{'_key':'{}' , 'Version':'{}'}} in {}", key, version.to_string(), AQL_EMBED_DATA_COLLECTION);
-    let result = database.aql_query::<VirtualEmbedGraphNodeQuery>(AqlQuery::new(aql.as_str())).await.unwrap();
+    let reuslt = database.aql_query::<VirtualEmbedGraphNodeQuery>(AqlQuery::new(aql.as_str())).await?;
+    return Ok(Some(reuslt));
 }
 
 
@@ -133,6 +142,6 @@ async fn test_update_virtual_hole_data_version_aql() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    update_virtual_hole_data_version_aql(&database, "bca176a3-a8cf-4e1f-b21e-50ac7f56ab5d12".to_string(), 'D').await;
+    if let Ok(Some(_)) = update_virtual_hole_data_version_aql(&database, "bca176a3-a8cf-4e1f-b21e-50ac7f56ab5d12".to_string(), 'D').await{}
     Ok(())
 }
