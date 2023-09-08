@@ -26,7 +26,7 @@ pub struct ProfileGeosPoints {
     pub points: Vec<(Vec3, Vec3, Vec3)>,
 }
 
-pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
+pub fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                                                        att: &AttrMap,
                                                        geom_info: &CateGeomsInfo,
                                                        brep_shapes_map: &CateBrepShapeMap,
@@ -40,7 +40,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
     let mut drne = att.get_vec3("DRNE").unwrap_or_default().normalize();
     let parent_refno = att.get_owner().unwrap();
     let mut spine_paths = if type_name == "GENSEC" || type_name == "WALL" {
-        let children_refs = interface.get_children_refs(refno).await?;
+        let children_refs = interface.get_children_from_localdb(refno)?;
         let mut paths = vec![];
         for x in children_refs.iter() {
 
@@ -48,15 +48,15 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
             if type_name != "SPINE" {
                 continue;
             }
-            let spine_att = interface.get_attr(*x).await?;
+            let spine_att = interface.get_attr_from_localdb(*x)?;
             drns = spine_att.get_vec3("DRNS").unwrap_or_default();
             drne = spine_att.get_vec3("DRNE").unwrap_or_default();
-            let ch_refs = interface.get_children_refs(*x).await?;
+            let ch_refs = interface.get_children_from_localdb(*x)?;
             if (ch_refs.len() - 1) % 2 == 0 {
                 for i in 0..(ch_refs.len() - 1) / 2 {
-                    let att1: AttrMap = interface.get_attr(ch_refs[2 * i]).await?;
-                    let att2 = interface.get_attr(ch_refs[2 * i + 1]).await?;
-                    let att3 = interface.get_attr(ch_refs[2 * i + 2]).await?;
+                    let att1: AttrMap = interface.get_attr_from_localdb(ch_refs[2 * i])?;
+                    let att2 = interface.get_attr_from_localdb(ch_refs[2 * i + 1])?;
+                    let att3 = interface.get_attr_from_localdb(ch_refs[2 * i + 2])?;
                     let pt0 = att1.get_position().unwrap_or_default();
                     let pt1 = att3.get_position().unwrap_or_default();
                     let mid_pt = att2.get_position().unwrap_or_default();
@@ -78,8 +78,8 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                     });
                 }
             } else if ch_refs.len() == 2 {
-                let att1: AttrMap = interface.get_attr(ch_refs[0]).await?;
-                let att2 = interface.get_attr(ch_refs[1]).await?;
+                let att1: AttrMap = interface.get_attr_from_localdb(ch_refs[0])?;
+                let att2 = interface.get_attr_from_localdb(ch_refs[1])?;
                 let pt0 = att1.get_position().unwrap_or_default();
                 let pt1 = att2.get_position().unwrap_or_default();
                 if att1.get_type() == "POINSP" && att2.get_type() == "POINSP" {
@@ -98,12 +98,10 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
 
     // let drne = Vec3::X;
     if drns.is_normalized() && drne.is_normalized() {
-        let parent_rot = interface.get_world_transform(parent_refno).await.unwrap_or_default().unwrap_or_default().rotation;
-        let current_rot = interface.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default().rotation;
+        let parent_rot = interface.get_world_transform(parent_refno).unwrap_or_default().unwrap_or_default().rotation;
+        let current_rot = interface.get_world_transform(refno).unwrap_or_default().unwrap_or_default().rotation;
         let new_rot =  current_rot.inverse() * parent_rot;
-        // dbg!(quat_to_pdms_ori_str(&new_rot));
 
-        // println!("refno: {}, 原始drns: {:?}, drne: {:?}", refno, to_pdms_vec_str(&drns), to_pdms_vec_str(&drne));
         let mut tmp_drns = (new_rot.mul_vec3(drns)).normalize();
         let mut tmp_drne = (new_rot.mul_vec3(drne)).normalize();
         ///处理随意设置方向的情况，保证一致性
@@ -150,7 +148,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                         }),
                         lmirror: att.get_bool("LMIRR").unwrap_or_default(),
                     };
-                    // dbg!(&solid);
+                    
                     brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
                         refno,
                         brep_shape: Box::new(solid),

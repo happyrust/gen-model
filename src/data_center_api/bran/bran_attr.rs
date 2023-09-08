@@ -257,7 +257,7 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
 
                 let mut attr = Vec::new();
 
-                let world_transform = aios_mgr.get_world_transform(child.refno).await?.unwrap_or_default();
+                let world_transform = aios_mgr.get_world_transform(child.refno)?.unwrap_or_default();
                 attr.push(DataCenterAttr {
                     attribute_model_code: "PART4".to_string(),
                     value: AttrValue::AttrVec3(world_transform.translation).into(),

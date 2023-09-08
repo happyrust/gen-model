@@ -60,7 +60,7 @@ pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option
         let item_code = match_item_code(&item_code);
         // 获取 atta name 的 最后一位
         let mark = atta_name.split_off(atta_name.len() - 1);
-        let elevation = mgr.get_world_transform(atta_refno).await?;
+        let elevation = mgr.get_world_transform(atta_refno)?;
         if elevation.is_none() { continue; }
         let elevation = elevation.unwrap().translation.z as i32;
         pipe_datas.push(HangerPipeData {

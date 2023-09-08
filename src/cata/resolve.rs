@@ -10,6 +10,7 @@ use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
 use bb8_arangodb::arangors_lite::Database;
+use dashmap::DashMap;
 use glam::{Vec2, Vec3};
 use crate::aql_api::dtse_attr::query_dtse_ppro_from_catr_refno;
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
@@ -19,20 +20,24 @@ use crate::cata::resolve_helper::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
+use once_cell::sync::Lazy;
+
+pub static CATA_CONTEXT_MAP: Lazy<DashMap<RefU64, CataContext>> = Lazy::new(DashMap::new);
+pub static SCOM_INFO_MAP: Lazy<DashMap<RefU64, ScomInfo>> = Lazy::new(DashMap::new);
 
 
 /// 求解axis的数值
 pub fn resolve_axis_params<T: PdmsDataInterface>(
     refno: RefU64,
     scom: &ScomInfo,
-    context: &BTreeMap<String, String>,
-    interface: Option<&T>,
+    context: &CataContext,
+    interface: &T,
 ) -> BTreeMap<i32, CateAxisParam> {
     let mut map = BTreeMap::new();
     // dbg!(&scom.axis_params);
     for i in 0..scom.axis_params.len() {
         // dbg!(&scom.axis_params[i]);
-        match resolve_axis_param(&scom.axis_params[i], scom, context, interface) {
+        match resolve_axis_param(&scom.axis_params[i], scom, context, Some(interface)) {
             Ok(axis) => {
                 // dbg!(&axis);
                 map.insert(scom.axis_param_numbers[i], axis);
@@ -50,7 +55,7 @@ pub fn resolve_gms<T: PdmsDataInterface>(
     des_refno: RefU64,
     gmse_raw_paras: &[GmParam],
     jusl_param: &Option<PlinParam>,
-    context: &BTreeMap<String, String>,
+    context: &CataContext,
     axis_params: &BTreeMap<i32, CateAxisParam>,
     interface: Option<&T>,
 ) -> Vec<CateGeoParam> {
@@ -84,7 +89,7 @@ pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
     des_refno: RefU64,
     gm_param: &GmParam,
     jusl_param: &Option<PlinParam>,
-    context: &BTreeMap<String, String>,
+    context: &CataContext,
     axis_params: &BTreeMap<i32, CateAxisParam>,
     interface: Option<&T>,
 ) -> anyhow::Result<CateGeoParam> {
@@ -103,103 +108,103 @@ pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
 }
 
 /// 元件库表达式相关的参数
-#[derive(Debug, Default, Clone)]
-pub struct CataExprContext {
-    pub params: Vec<f64>,
-    pub dtse_expr_map: HashMap<String, String>,
-    pub dtse_default_map: HashMap<String, String>,
-    // pub context: HashMap<String, String>,
+#[derive(Debug, Default, Clone, Deref, DerefMut)]
+pub struct CataContext {
+    pub context: BTreeMap<String, String>,
 }
 
-impl CataExprContext {
-    pub async fn create(des_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Self>> {
-        let catr_refno = query_foreign_refno_aql(&database, des_refno, &["SPRE", "CATR"]).await?;
-        if catr_refno.is_none() { return Ok(None); }
-        let catr_refno = catr_refno.unwrap();
-        let params = query_para_value(catr_refno, &database).await?;
-        if params.is_none() { return Ok(None); }
-        let dtse_map = query_dtse_ppro_from_catr_refno(catr_refno, &database).await?;
-        if dtse_map.is_none() { return Ok(None); }
-        let mut dtse_expr_map = HashMap::new();
-        let mut dtse_default_map = HashMap::new();
-        for (k, v) in dtse_map.unwrap().into_iter() {
-            dtse_expr_map.entry(k.clone()).or_insert(v.ppro);
-            dtse_default_map.entry(k).or_insert(v.dpro);
-        }
-        Ok(Some(Self {
-            params: params.unwrap(),
-            dtse_expr_map,
-            dtse_default_map,
-        }))
-    }
-    //需要获取design的数据
-    pub async fn build(&self, mgr: &AiosDBManager, des_refno: RefU64) -> BTreeMap<String, String> {
-        let mut context: BTreeMap<String, String> = Default::default();
-        if let Ok(attr_map) = mgr.get_attr(des_refno).await {
-            let mut desp = attr_map.get_f64_vec("DESP").unwrap_or_default();
-            for i in 0..desp.len() {
-                context.insert(
-                    format!("DESI{}", i + 1).into(),
-                    desp[i].to_string().into(),
-                );
-                context.insert(
-                    format!("DDES{}", i + 1).into(),
-                    desp[i].to_string().into(),
-                );
-                context.insert(
-                    format!("DESP{}", i + 1).into(),
-                    desp[i].to_string().into(),
-                );
-            }
-            let height: String = attr_map.get_as_string("HEIG").unwrap_or("0.0".into()).into();
-            context.insert(DDHEIGHT_STR.into(), height.clone());
-            context.insert("HEIG".into(), height);
-            let angle: String = attr_map.get_as_string("ANGL").unwrap_or("0.0".into()).into();
-            context.insert(DDANGLE_STR.into(), angle.clone());
-            context.insert("ANGL".into(), angle);
-            let radi: String = attr_map.get_as_string("RADI").unwrap_or("0.0".into()).into();
-            context.insert(DDRADIUS_STR.into(), radi.clone());
-            context.insert("RADI".into(), radi);
-        } else {
-            //默认值
-            context
-                .entry(DDHEIGHT_STR.into())
-                .or_insert("0.0".into());
-            context
-                .entry(DDRADIUS_STR.into())
-                .or_insert("0.0".into());
-            context
-                .entry(DDANGLE_STR.into())
-                .or_insert("0.0".into());
-        }
+// impl CataExprContext {
 
-        //获取DTSE的expression
-        // process_dtse_params(&scom_info.attr_map, interface, &mut cur_context).await;
+//     //todo 逐步剥离对arango的依赖
+//     pub async fn create(des_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Self>> {
+//         let catr_refno = query_foreign_refno_aql(&database, des_refno, &["SPRE", "CATR"]).await?;
+//         if catr_refno.is_none() { return Ok(None); }
+//         let catr_refno = catr_refno.unwrap();
+//         //todo 重新计算para的值
+//         let params = query_para_value(catr_refno, &database).await?;
+//         if params.is_none() { return Ok(None); }
+//         let dtse_map = query_dtse_ppro_from_catr_refno(catr_refno, &database).await?;
+//         if dtse_map.is_none() { return Ok(None); }
+//         let mut dtse_expr_map = HashMap::new();
+//         let mut dtse_default_map = HashMap::new();
+//         for (k, v) in dtse_map.unwrap().into_iter() {
+//             dtse_expr_map.entry(k.clone()).or_insert(v.ppro);
+//             dtse_default_map.entry(k).or_insert(v.dpro);
+//         }
+//         Ok(Some(Self {
+//             params: params.unwrap(),
+//             dtse_expr_map,
+//             dtse_default_map,
+//         }))
+//     }
+//     //需要获取design的数据
+//     pub async fn build(&self, mgr: &AiosDBManager, des_refno: RefU64) -> BTreeMap<String, String> {
+//         let mut context: BTreeMap<String, String> = Default::default();
+//         if let Ok(attr_map) = mgr.get_attr(des_refno).await {
+//             let mut desp = attr_map.get_f64_vec("DESP").unwrap_or_default();
+//             for i in 0..desp.len() {
+//                 context.insert(
+//                     format!("DESI{}", i + 1).into(),
+//                     desp[i].to_string().into(),
+//                 );
+//                 context.insert(
+//                     format!("DDES{}", i + 1).into(),
+//                     desp[i].to_string().into(),
+//                 );
+//                 context.insert(
+//                     format!("DESP{}", i + 1).into(),
+//                     desp[i].to_string().into(),
+//                 );
+//             }
+//             let height: String = attr_map.get_as_string("HEIG").unwrap_or("0.0".into()).into();
+//             context.insert(DDHEIGHT_STR.into(), height.clone());
+//             context.insert("HEIG".into(), height);
+//             let angle: String = attr_map.get_as_string("ANGL").unwrap_or("0.0".into()).into();
+//             context.insert(DDANGLE_STR.into(), angle.clone());
+//             context.insert("ANGL".into(), angle);
+//             let radi: String = attr_map.get_as_string("RADI").unwrap_or("0.0".into()).into();
+//             context.insert(DDRADIUS_STR.into(), radi.clone());
+//             context.insert("RADI".into(), radi);
+//         } else {
+//             //默认值
+//             context
+//                 .entry(DDHEIGHT_STR.into())
+//                 .or_insert("0.0".into());
+//             context
+//                 .entry(DDRADIUS_STR.into())
+//                 .or_insert("0.0".into());
+//             context
+//                 .entry(DDANGLE_STR.into())
+//                 .or_insert("0.0".into());
+//         }
 
-        //保温层厚度
-        context.insert("IPARA0".into(), "0".into());
-        context.insert("IPARA".into(), "0".into());
+//         //获取DTSE的expression
+//         // process_dtse_params(&scom_info.attr_map, interface, &mut cur_context).await;
 
-        // let parent_cat_ref = interface
+//         //保温层厚度
+//         context.insert("IPARA0".into(), "0".into());
+//         context.insert("IPARA".into(), "0".into());
 
-        for i in 0..self.params.len() {
-            //todo OPAR需要去有catalog的父节点里去找
-            // context.insert(format!("OPAR{}", i + 1).into(), self.params[i].to_string().into());
-            // context.insert(format!("APAR{}", i + 1).into(), self.params[i].to_string().into());
-            // context.insert(format!("CPAR{}", i + 1).into(), self.params[i].to_string().into());
-            context.insert(format!("PARA{}", i + 1).into(), self.params[i].to_string().into());
-            // context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
-            // context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
-        }
-        context
-    }
-}
+//         // let parent_cat_ref = interface
+
+//         for i in 0..self.params.len() {
+//             //todo OPAR需要去有catalog的父节点里去找
+//             // context.insert(format!("OPAR{}", i + 1).into(), self.params[i].to_string().into());
+//             // context.insert(format!("APAR{}", i + 1).into(), self.params[i].to_string().into());
+//             // context.insert(format!("CPAR{}", i + 1).into(), self.params[i].to_string().into());
+//             context.insert(format!("PARA{}", i + 1).into(), self.params[i].to_string().into());
+//             // context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
+//             // context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
+//         }
+//         context
+//     }
+// }
 
 
 pub fn resolve_gmse_params<T: PdmsDataInterface>(
     gm: &GmParam,
     jusl_param: &Option<PlinParam>,
-    context: &BTreeMap<String, String>,
+    context: &CataContext,
     axis_param_map: &BTreeMap<i32, CateAxisParam>,
     interface: Option<&T>,
 ) -> anyhow::Result<GmseParamData> {
@@ -352,7 +357,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
 pub fn resolve_axis_param<T: PdmsDataInterface>(
     axis_param: &AxisParam,
     scom: &ScomInfo,
-    context: &BTreeMap<String, String>,
+    context: &CataContext,
     interface: Option<&T>,
 ) -> anyhow::Result<CateAxisParam> {
     let key: String = axis_param.pconnect.replace("\n", "").replace(" ", "").into();
