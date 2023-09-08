@@ -44,7 +44,7 @@ async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_query_rooms_pts() -> anyhow::Result<()> {
     let mgr = get_test_ams_db_manager_async().await;
-    let pts = vec![Vec3::new(-10000.0f32, -12546.0, 9800.0)];
+    let pts = vec![Vec3::new(10271.33, -140.43, 14275.37)];
 
     let room_nums = mgr
         .query_pts_own_room_number(&pts)
@@ -52,7 +52,6 @@ async fn test_query_rooms_pts() -> anyhow::Result<()> {
     dbg!(room_nums);
     Ok(())
 }
-
 
 
 #[tokio::test]
@@ -68,7 +67,6 @@ async fn test_query_through_element_rooms_sbfi() -> anyhow::Result<()> {
 }
 
 
-
 ///测试房间号是否正确
 #[tokio::test]
 async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
@@ -80,7 +78,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
         .query_through_element_room_nums(&[target_refno], None)
         .await?;
     let mut map = HashMap::new();
-    map.insert(target_refno,("R610".to_string(),"R661".to_string()));
+    map.insert(target_refno, ("R610".to_string(), "R661".to_string()));
     assert_eq!(room_number, map);
     Ok(())
 }

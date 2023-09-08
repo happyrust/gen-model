@@ -769,7 +769,6 @@ impl AiosDBManager {
         info_pool: &Pool<MySql>,
     ) -> anyhow::Result<()> {
         //直接保存到图数据库，不要放在tidb里了
-
         let mdbs = self.query_ele_nodes_by_expression(r#"v.noun == "MDB""#).await.unwrap();
         //直接在这里把mdb的信息加进去，创建这个节点
         let mut mdb_edges_map = IndexMap::new();
@@ -781,19 +780,15 @@ impl AiosDBManager {
             let Ok(mdb_attr) = self.get_attr_from_localdb(mdb_refno) else {
                 continue;
             };
-            // dbg!(&mdb_attr);
             let name = mdb_attr.get_name_string();
-            // dbg!(&name);
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 for (i, db_refno) in dbs.into_iter().enumerate() {
                     let att = self.get_attr_from_localdb(db_refno).unwrap_or_default();
-                    // dbg!(&att);
                     let Some(db_num) = att.get_i32("NUMBDB") else {
                         continue;
                     };
                     let stype = att.get_i32("STYP").unwrap_or_default();
                     let db_type = Self::match_stype(stype);
-                    // dbg!(&db_type);
                     let key = mdb_refno.hash_with_another_refno(db_refno).to_string();
                     let mdb_edge = PdmsMdbEdge {
                         key,
@@ -815,7 +810,7 @@ impl AiosDBManager {
         dbg!(&mdb_names_map);
 
         let vec_str = mdb_edges_map.values().map(|x| x.db_num).join(",");
-        let string = format!("v.dbnum in [{}] and v.noun==\"WORL\"", vec_str);
+        let string = format!("v.dbnum in [{}] and v.noun== 'WORL'", vec_str);
 
         let mut pdms_edges = vec![];
         if let Ok(mut ele_nodes) = self.query_ele_nodes_by_expression(&string).await {
@@ -833,7 +828,6 @@ impl AiosDBManager {
                 //将mdb的关系也放入edges
                 if let Some(mdb_data) = mdb_edges_map.get(&root_dbnum){
                     let mdb_name = mdb_names_map.get(&mdb_refno).unwrap();
-                    dbg!(&mdb_name);
                     let edge = PdmsEleEdge {
                         key: root_world.refno.hash_with_another_refno(mdb_refno).to_string(),
                         refno: root_world.refno,
