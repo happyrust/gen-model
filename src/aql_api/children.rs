@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use sqlx::{MySql, Pool};
 use std::collections::{HashMap, HashSet};
+use std::process::id;
 use std::str::FromStr;
 
 pub async fn query_children_eles(
@@ -368,8 +369,10 @@ pub async fn query_refnos_from_names(names: Vec<String>, database: &ArDatabase, 
     if filter_types.is_some() {
         aql_str = aql_str.replace("//", "");
     }
-    let aql = AqlQuery::new(aql_str.as_str()).bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("names", names).bind_var("filter_nouns", filter_types.unwrap_or(vec![]));
+    let aql = AqlQuery::new(aql_str.as_str())
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("names", names)
+        .bind_var("filter_nouns", filter_types.unwrap_or(vec![]));
     let result = database.aql_query::<PdmsElement>(aql).await?;
     Ok(result)
 }
@@ -1215,6 +1218,28 @@ pub async fn query_refnos_belong_level_aql(
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result = database.aql_query::<VagueSearchExportAqlData>(aql).await?;
+    Ok(result)
+}
+
+/// 选择的参考号以下的节点中，通过 name 查找其参考号
+pub async fn query_refno_from_names_under_select_refno(select_refnos: Vec<RefU64>, names: Vec<String>, database: &ArDatabase)
+                                                       -> anyhow::Result<Vec<PdmsRefnoNameAql>> {
+    let ids = RefU64::to_arangodb_ids(AQL_PDMS_ELES_COLLECTION, select_refnos);
+    let aql = AqlQuery::new("\
+    With @@pdms_eles,@@pdms_edges
+    for id in @ids
+    for v in 0..20 inbound id @@pdms_edges
+        filter v != null
+        filter v.name in @names
+        return {
+            'refno': v._key,
+            'name': v.name,
+        }
+    ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("ids", ids)
+        .bind_var("names", names);
+    let result = database.aql_query::<PdmsRefnoNameAql>(aql).await?;
     Ok(result)
 }
 

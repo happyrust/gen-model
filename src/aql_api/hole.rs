@@ -4,7 +4,7 @@ use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::{PrimExtrusion, PrimSCylinder};
 use aios_core::pdms_types::{GeoBasicType, PdmsElement, RefU64};
-use aios_core::pdms_types::GeoBasicType::CateNeg;
+use aios_core::pdms_types::GeoBasicType::*;
 use aios_core::plugging_material::PluggingData;
 use aios_core::virtual_hole::HoleInstInfo;
 use anyhow::anyhow;
@@ -21,15 +21,26 @@ use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 
 /// 返回封堵材料统计插件数据
-pub async fn get_plugging_material_datas(select_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PluggingData>> {
+pub async fn get_plugging_material_datas(select_refno: Vec<RefU64>, database: &ArDatabase, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<PluggingData>> {
     // 找到所有的墙/板
     let wall_types = vec!["STWALL".to_string(), "GWALL".to_string(), "WALL".to_string(), "PANEL".to_string(), "FLOOR".to_string()];
     let walls = query_refnos_travel_children_with_type_aql(&database, &select_refno, wall_types).await?;
     let wall_refnos = walls.into_iter().map(|x| x.refno).collect::<Vec<RefU64>>();
     // 从虚拟孔洞中取数据
     let holes = query_entity_hole_data(wall_refnos, database).await?;
-    // let name_map = holes.into_iter().map(|refno| (refno.refno, refno)).collect::<HashMap<RefU64, PdmsElement>>();
-    compute_hole_instance_data_from_virtual(&database, holes).await
+    let hole_names = holes.iter().map(|h| format!("/{}", h.item_ref)).collect::<Vec<String>>();
+    // 通过实体孔洞的name找到refno
+    let hole_name_refnos = query_refno_from_names_under_select_refno(select_refno, hole_names, database).await?;
+    let hole_refno_map = hole_name_refnos.clone().into_iter()
+        .filter(|x| RefU64::from_url_refno(&x.refno).is_some())
+        .map(|x| (x.name, RefU64::from_url_refno(&x.refno).unwrap()))
+        .collect::<HashMap<String, RefU64>>();
+    // 计算孔洞两边的房间
+    let hole_refnos = hole_name_refnos.into_iter()
+        .filter_map(|h| RefU64::from_url_refno(&h.refno))
+        .collect::<Vec<_>>();
+    let room_map = aios_mgr.query_through_element_room_nums(&hole_refnos, Some(&vec![Neg, CateNeg, CateCrossNeg])).await?;
+    compute_hole_instance_data_from_virtual(&database, holes, hole_refno_map, room_map).await
 }
 
 /// 获取需要计算的孔洞
@@ -193,9 +204,14 @@ pub async fn compute_hole_instance_data(/*mgr: &AiosDBManager,*/
 }
 
 /// 通过虚拟孔洞数据计算封堵数据
-pub async fn compute_hole_instance_data_from_virtual(database: &ArDatabase, instances: Vec<VirtualHoleGraphNode>) -> anyhow::Result<Vec<PluggingData>> {
+pub async fn compute_hole_instance_data_from_virtual(database: &ArDatabase,
+                                                     instances: Vec<VirtualHoleGraphNode>,
+                                                     hole_refno_name_map: HashMap<String, RefU64>,
+                                                     room_map: HashMap<RefU64, (String, String)>) -> anyhow::Result<Vec<PluggingData>> {
     let mut result = Vec::new();
     for instance in instances {
+        let Some(refno) = hole_refno_name_map.get(&format!("/{}", instance.item_ref)) else { continue; };
+        let room = room_map.get(refno).unwrap_or(&("".to_string(), "".to_string())).clone();
         match instance.shape.as_str() {
             "CIR" => {
                 let cir_radius = instance.size_width / 2.0;
@@ -211,8 +227,8 @@ pub async fn compute_hole_instance_data_from_virtual(database: &ArDatabase, inst
                     refno: Default::default(),
                     name: instance.item_ref,
                     size: (radius * 2.0).to_string(),
-                    room_1: "".to_string(),
-                    room_2: "".to_string(),
+                    room_1: room.0,
+                    room_2: room.1,
                     height: height as f64,
                     cable_area,
                     plugging_area,
@@ -234,8 +250,8 @@ pub async fn compute_hole_instance_data_from_virtual(database: &ArDatabase, inst
                     refno: Default::default(),
                     name: instance.item_ref,
                     size: format!("{}X{}", length, width),
-                    room_1: "".to_string(),
-                    room_2: "".to_string(),
+                    room_1: room.0,
+                    room_2: room.1,
                     height: height as f64,
                     cable_area,
                     plugging_area,

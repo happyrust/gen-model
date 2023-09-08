@@ -1030,7 +1030,6 @@ impl AiosDBManager {
             self.cache_plant_meshes(&geo_hashes, false).await?;
             let mut target_panels = vec![];
             //这里需要考虑顺序
-            dbg!(&final_key_points);
             for key_point in &final_key_points {
                 for &panel_info in &panel_infos {
                     let Ok(Some(room_panel_mesh)) =
