@@ -39,8 +39,8 @@ pub async fn query_cylinder_transform(mgr: &AiosDBManager, refno: RefU64) -> any
             let height = attr.get_val("HEIG").unwrap().double_value().unwrap_or(0.0) as f32;
             let ori = attr.get_val("ORI").unwrap().vec3_value().unwrap_or([0.0, 0.0, 0.0]);
             // 获取 cyli的世界坐标
-            if mgr.get_world_transform(child_refno).await?.is_none() { continue; }
-            let world_transform = mgr.get_world_transform(child_refno).await?.unwrap();
+            if mgr.get_world_transform(child_refno)?.is_none() { continue; }
+            let world_transform = mgr.get_world_transform(child_refno)?.unwrap();
             // 将中心坐标转化为cyli上下两个点的坐标
             let pos_up = world_transform.transform_point(Vec3::new(0.0, 0.0, height / 2.0_f32));
             let pos_down = world_transform.transform_point(Vec3::new(0.0, 0.0, -height / 2.0_f32));

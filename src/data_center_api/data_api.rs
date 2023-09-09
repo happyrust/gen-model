@@ -57,7 +57,7 @@ pub async fn get_inst_data_from_inst_major(
     }
     let refnos = query_travel_children_with_type_aql(&database, refno, "INST").await?;
     for ele in refnos {
-        let pos = mgr.get_world_transform(ele.refno).await?;
+        let pos = mgr.get_world_transform(ele.refno)?;
         if pos.is_none() {
             continue;
         }
@@ -125,7 +125,6 @@ pub(crate) async fn get_bran_itema_attr(
     result.push(item_5);
     let world_position = aios_mgr
         .get_world_transform(refno.refno)
-        .await
         .unwrap_or(None)
         .unwrap_or_default();
     let item_5 = DataCenterAttr {
@@ -270,7 +269,7 @@ pub async fn get_equi_data_from_electric_major(
     }
     let refnos = query_travel_children_with_type_aql(&database, refno, "EQUI").await?;
     for ele in refnos {
-        let pos = mgr.get_world_transform(ele.refno).await?;
+        let pos = mgr.get_world_transform(ele.refno)?;
         if pos.is_none() {
             continue;
         }
@@ -479,16 +478,16 @@ pub(crate) async fn get_refno_world_poss_pose(
             // 默认只有两个点
             let poss_point = points[0].refno;
             let pose_point = points[1].refno;
-            let Ok(Some(poss)) = aios_mgr.get_world_transform(poss_point).await else {
+            let Ok(Some(poss)) = aios_mgr.get_world_transform(poss_point) else {
                 return Ok(None);
             };
-            let Ok(Some(pose)) = aios_mgr.get_world_transform(pose_point).await else {
+            let Ok(Some(pose)) = aios_mgr.get_world_transform(pose_point) else {
                 return Ok(None);
             };
             Ok(Some((poss.translation, pose.translation)))
         }
         _ => {
-            let Some(world_transform) = aios_mgr.get_world_transform(refno).await? else {
+            let Some(world_transform) = aios_mgr.get_world_transform(refno)? else {
                 return Ok(None);
             };
             let attr = aios_mgr.get_attr(refno).await?;

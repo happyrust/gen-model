@@ -19,6 +19,8 @@ use crate::cata::resolve::resolve_axis_param;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::aql_api::children::query_pre_or_next_node;
 
+use super::resolve::CataContext;
+
 #[test]
 fn test_exp() {
     let input_exp = "PARAM 1 2 TIMES SUM PARAM 1 IPARAM 1";
@@ -71,13 +73,13 @@ fn test_expression_regex() {
 }
 
 pub fn eval_str_to_f32<T: PdmsDataInterface>(input_expr: impl AsRef<str>,
-                                             context: &BTreeMap<String, String>, interface: Option<&T>) -> anyhow::Result<f32> {
+                                             context: &CataContext, interface: Option<&T>) -> anyhow::Result<f32> {
     let input_expr = input_expr.as_ref().trim().to_uppercase();
     eval_str_to_f64(&input_expr, context, interface, true).map(|x| x as f32)
 }
 
 pub fn eval_str_to_f32_or_default<T: PdmsDataInterface>(input_expr: impl AsRef<str>,
-                                             context: &BTreeMap<String, String>, interface: Option<&T>) -> f32 {
+                                             context: &CataContext, interface: Option<&T>) -> f32 {
     eval_str_to_f32(input_expr, context, interface).unwrap_or(0.0)
 }
 
@@ -109,7 +111,7 @@ pub const INTERNAL_PDMS_EXPRESS: [&'static str; 22] = [
 
 ///评估表达式的值
 pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
-                                             context: &BTreeMap<String, String>,
+                                             context: &CataContext,
                                              interface: Option<&T>,
                                              replace_err_by_zero: bool) -> anyhow::Result<f64> {
     if input_expr.is_empty() || input_expr == "UNSET" {
@@ -168,15 +170,8 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     let re = Regex::new(r"(:?[A-Z_]+[0-9]*)(\s*\[?\s*(([1-9]\d*\.?\d*)|(0\.\d*[1-9]))\s*\]?)?").unwrap();
     // 将NEXT PREV 的值统一换成参考号，然后 context_params 要存储 参考号对应的 attr，要是它这个值没有求解，
     // 相当于要递归去求值
-    // if new_exp.contains("HXYS") {
-    //     dbg!(&context);
-    //     dbg!(&new_exp);
-    // }
     let rpro_re = Regex::new(r"(RPRO)\s+([a-zA-Z0-9]+)").unwrap();
     if new_exp.contains("RPRO") {
-        // if new_exp.contains("RPRO PH") {
-        //     dbg!(&new_exp);
-        // }
         new_exp = rpro_re.replace_all(&new_exp, |caps: &Captures| {
             let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
             let default_key: String = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
@@ -187,7 +182,6 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                 context.get(&default_key).map(|x| x.to_string()).unwrap_or("0".to_string())
             }
         }).trim().to_string();
-        // dbg!(&new_exp);
     }
 
     let mut new_exp = new_exp.replace("DESIGN PARAM", "DESP").replace("DESIGN PARA", "DESP");;
@@ -411,20 +405,20 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "LPYR" | "NPYR" => {
+            "LPYR" | "NLPY" => {
                 CateGeoParam::Pyramid(CatePyramidParam {
                     refno: gmse.refno,
                     pa: (gmse.paxises[0].clone()),
                     pb: (gmse.paxises[1].clone()),
                     pc: (gmse.paxises[2].clone()),
-                    x_bottom: gmse.xyz[0],
-                    y_bottom: gmse.xyz[1],
-                    x_top: gmse.xyz[2],
-                    y_top: gmse.xyz[3],
+                    x_bottom: gmse.xyz[3],
+                    y_bottom: gmse.xyz[4],
+                    x_top: gmse.xyz[5],
+                    y_top: gmse.xyz[6],
                     dist_to_btm: gmse.distances[1],
                     dist_to_top: gmse.distances[2],
-                    x_offset: gmse.xyz[4],
-                    y_offset: gmse.xyz[5],
+                    x_offset: gmse.xyz[7],
+                    y_offset: gmse.xyz[8],
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
                 })
@@ -608,7 +602,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
 
 pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
                                                  scom: &ScomInfo,
-                                                 context: &BTreeMap<String, String>,
+                                                 context: &CataContext,
                                                  interface: Option<&T>) -> anyhow::Result<(Vec3, Vec3, Vec3)> {
     let mut dir_str = axis.direction.trim();
     let mut ref_dir_str = axis.ref_direction.trim();
@@ -655,7 +649,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
 }
 
 //Y is N and Z is U
-pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(ori_str: &str, context: &BTreeMap<String, String>, interface: Option<&T>) -> anyhow::Result<Quat> {
+pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(ori_str: &str, context: &CataContext, interface: Option<&T>) -> anyhow::Result<Quat> {
     let dir_strs = ori_str.split(" and ").collect::<Vec<_>>();
     // dbg!(&dir_strs);
     if dir_strs.len() < 2 {
@@ -706,7 +700,7 @@ pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(ori_str: &str, context: &BTre
     Ok(Quat::from_mat3(&mat))
 }
 
-pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &BTreeMap<String, String>, interface: Option<&T>) -> anyhow::Result<Vec3> {
+pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &CataContext, interface: Option<&T>) -> anyhow::Result<Vec3> {
     let dir_str = pdir.to_uppercase().replace("AXIS", "");
     let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();
     let mut new_dir_str = dir_str.clone();
