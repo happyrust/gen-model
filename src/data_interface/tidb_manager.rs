@@ -3,22 +3,32 @@ use crate::api::element::*;
 use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
 use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
-use crate::cata::resolve::CataExprContext;
+use crate::cata::consts::*;
+use crate::cata::query_cata::query_axis_params;
+use crate::cata::query_cata::query_gm_param;
+use crate::cata::resolve::CataContext;
+use crate::cata::resolve::{CATA_CONTEXT_MAP, SCOM_INFO_MAP};
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
 use crate::graph_db::pdms_arango::ArPool;
+use crate::graph_db::structs::PdmsEleGraphNode;
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::cache::mgr::*;
 use aios_core::cache::refno::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::*;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
+use aios_core::parsed_data::CateAxisParam;
+use aios_core::pdms_data::GmParam;
+use aios_core::pdms_data::PlinParam;
 use aios_core::pdms_data::PlinParamData;
+use aios_core::pdms_data::ScomInfo;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
 use aios_core::shape::pdms_shape::PlantMesh;
+use aios_core::tool::db_tool::db1_dehash;
 use aios_core::tool::math_tool;
 use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use anyhow::anyhow;
@@ -33,23 +43,17 @@ use glam::{Mat3, Quat, Vec3};
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
+use pdms_io::watch::PdmsWatcher;
 use redb::{ReadableTable, TableDefinition};
 use sqlx::{Executor, MySql, Pool, Row};
 use std::boxed::Box;
+use std::cell::OnceCell;
+use std::collections::BTreeMap;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use pdms_io::watch::PdmsWatcher;
 use tokio::sync::RwLock;
-use crate::graph_db::structs::PdmsEleGraphNode;
-
-lazy_static! {
-    pub static ref CATAEXPRCONTEXT_MAP: DashMap<RefU64, CataExprContext> = {
-        let mut s = DashMap::new();
-        s
-    };
-}
 
 // #[derive(Debug)]
 pub struct AiosDBManager {
@@ -386,12 +390,17 @@ impl PdmsDataInterface for AiosDBManager {
         module: &str,
     ) -> anyhow::Result<PdmsElement> {
         //这里还需要将project的信息利用起来
-        let string = format!("v.mdb_name==\"/{}\" and v.db_type==\"{}\"", mdb_name, module);
+        let string = format!(
+            "v.mdb_name==\"/{}\" and v.db_type==\"{}\"",
+            mdb_name, module
+        );
         let mut ele_nodes = self.query_ele_edges_by_expression(&string).await?;
         //从mdb 开始往下找，找到world
-        if let Some(node) = ele_nodes.pop()  {
-            let mut children = self.query_children_eles_order(node.owner, &[], &[module]).await?;
-            return children.pop().ok_or( anyhow!("World not exist"));
+        if let Some(node) = ele_nodes.pop() {
+            let mut children = self
+                .query_children_eles_order(node.owner, &[], &[module])
+                .await?;
+            return children.pop().ok_or(anyhow!("World not exist"));
         }
         Ok(Default::default())
     }
@@ -695,8 +704,9 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(ancestors)
     }
 
+    //make a sync function, no need to be async
     ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
-    async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
+    fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
         let mut ancestors = VecDeque::new();
         let mut rotation = Quat::IDENTITY;
         let mut translation = Vec3::ZERO;
@@ -719,11 +729,6 @@ impl PdmsDataInterface for AiosDBManager {
             let att = self.get_attr_from_localdb(refno)?;
             let mut pos = att.get_position().unwrap_or_default();
             let mut quat = Quat::IDENTITY;
-            if let Some(jusl) = att.get_str("JUSL") {
-                if let Some(param) = self.query_pline(refno, jusl).await? {
-                    pos -= param.pt;
-                }
-            }
             //土建特殊情况的一些处理
             if att.contains_attr_name("ZDIS") {
                 let zdist = att.get_f32("ZDIS").unwrap_or_default();
@@ -798,21 +803,53 @@ impl PdmsDataInterface for AiosDBManager {
             }
             //固定方位，不会怎旋转方向，但是会移动
             let mut fixed_posl_ori = att.get_type() == "ENDATU";
+            
+            //对于有CUTB的情况，需要直接对齐过去, 不需要在这里计算
+            let c_ref = att.get_foreign_refno("CREF").unwrap_or_default();
+            let mut has_cut_back = false;
+            let mut cut_dir = Vec3::Y;
+            if att.contains_attr_name("CUTB"){
+                has_cut_back = true;
+                cut_dir = att.get_vec3("CUTP").unwrap_or(cut_dir);
+                let cut_len = att.get_f32("CUTB").unwrap_or_default();
+                // dbg!(quat_to_pdms_ori_str(&c_t.rotation));
+                if c_ref.is_valid() && let Ok(c_att) = self.get_attr_from_localdb(c_ref) &&
+                    let Some(poss) = c_att.get_poss() &&
+                    let Some(pose) = c_att.get_pose(){
+                    
+                    let c_t = self.get_world_transform(c_ref)?.unwrap_or_default();
+                    let w_poss = c_t.translation;
+                    let axis = (pose - poss);
+                    let len = axis.length();
+                    let w_pose = w_poss + c_t.rotation * Vec3::Z * len;
+                    // dbg!((w_poss, w_pose, translation));
+                    let dist_s = translation.distance(w_poss);
+                    let dist_e = translation.distance(w_pose);
+                    //取离node最近的点
+                    if dist_s < dist_e {
+                        translation = w_poss - cut_dir * cut_len;
+                    }else{
+                        translation = w_pose - cut_dir * cut_len;
+                    }
+                }
+            }
             //如果有posl
             if att.contains_attr_name("POSL") {
-                let pos_line = att.get_str("POSL").unwrap_or_default();
+                let pos_line = att.get_str_or_default("POSL");
+                let delta_vec = att.get_vec3("DELP").unwrap_or_default();
                 // dbg!(pos_line);
                 //plin里的位置偏移
                 let mut plin_pos = Vec3::ZERO;
+                let mut own_plin_pos = Vec3::ZERO;
                 let mut pline_plax = Vec3::X;
-
-                let delta_vec = att.get_vec3("DELP").unwrap_or_default();
+                let mut new_quat = Quat::IDENTITY;
                 let mut plin_owner = att.get_owner().unwrap();
-
-                // POSL 的处理, 获得父节点的形集
-                let mut plin_param = None;
+                // POSL 的处理, 获得父节点的形集, 自身的形集处理，已经在profile里处理过
+                let mut cur_plin_param = None;
+                let mut own_plin_param = None;
+                let mut target_own_att = AttrMap::default();
                 const HAS_PLIN_TYPES: [&str; 4] = ["SCTN", "GENSEC", "WALL", "STWALL"];
-                while plin_param.is_none() {
+                while cur_plin_param.is_none() {
                     let Some(t) = self.get_refno_basic(plin_owner) else {
                         break;
                     };
@@ -822,17 +859,27 @@ impl PdmsDataInterface for AiosDBManager {
                         plin_owner = t.get_owner();
                         continue;
                     }
-                    plin_param = self.query_pline(plin_owner, pos_line).await?;
-                    if plin_param.is_some() {
+                    // dbg!(plin_owner);
+                    // dbg!(pos_line);
+                    target_own_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
+                    let own_pos_line = target_own_att.get_str_or_default("JUSL");
+                    // dbg!(own_pos_line);
+                    cur_plin_param = self.query_pline(plin_owner, pos_line)?;
+                    own_plin_param = self.query_pline(plin_owner, own_pos_line)?;
+                    if cur_plin_param.is_some() {
                         break;
                     }
                     plin_owner = t.get_owner();
                 }
-                let target_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
-                let is_lmirror = target_att.get_bool("LMIRR").unwrap_or_default();
-                if let Some(param) = plin_param {
+                let is_lmirror = target_own_att.get_bool("LMIRR").unwrap_or_default();
+                if let Some(param) = cur_plin_param {
                     plin_pos = param.pt;
                     pline_plax = param.plax;
+                    // dbg!(&param);
+                }
+                if let Some(own_param) = own_plin_param {
+                    plin_pos -= own_param.pt;
+                    // dbg!(&own_param);
                 }
                 let mut y_axis = if att.contains_attr_name("YDIR") {
                     att.get_vec3("YDIR").unwrap_or_default()
@@ -852,31 +899,38 @@ impl PdmsDataInterface for AiosDBManager {
                     dbg!(quat_to_pdms_ori_str(&posl_quat));
                     dbg!(quat_to_pdms_ori_str(&quat));
                 }
-                let new_quat = posl_quat * quat;
+                new_quat = posl_quat * quat;
                 #[cfg(debug_assertions)]
                 {
                     dbg!(quat_to_pdms_ori_str(&new_quat));
                     dbg!(translation);
                     dbg!(quat_to_pdms_ori_str(&rotation));
                 }
-                //对于有CUTB的情况，需要直接对齐过去, 不需要在这里计算
-                let c_ref = att.get_foreign_refno("CREF").unwrap_or_default();
-                if att.contains_attr_name("CUTB") && c_ref.is_valid() && let Some(c_t) = self.get_world_transform(c_ref).await? {
-                    let cut_dir = att.get_vec3("CUTP").unwrap_or_default();
-                    let cut_len = att.get_f32("CUTB").unwrap_or_default();
-                    translation = c_t.translation - cut_dir * cut_len;
-                } else {
-                    translation = translation
-                        + rotation * (pos + plin_pos)
-                        + rotation * new_quat * delta_vec;
-                }
+                
 
+                translation +=
+                        rotation * (pos + plin_pos) + rotation * new_quat * delta_vec;
+                
                 #[cfg(debug_assertions)]
                 {
                     dbg!(translation);
                     dbg!(quat_to_pdms_ori_str(&rotation));
                 }
+                //没有POSL时，需要使用cutback的方向
                 rotation = rotation * new_quat;
+                if pos_line == "unset" && has_cut_back{
+                    dbg!(has_cut_back);
+                    //need to perpendicular to the Y axis
+                    let mat3 = Mat3::from_quat(rotation);
+                    let y_axis = mat3.y_axis;
+                    let ref_axis = cut_dir;
+                    dbg!(cut_dir);
+                    let x_axis = y_axis.cross(ref_axis).normalize();
+                    let z_axis = x_axis.cross(y_axis).normalize();
+                    let new_mat = Mat3::from_cols(x_axis, y_axis, z_axis);
+                    dbg!(new_mat);
+                    rotation = Quat::from_mat3(&new_mat);
+                }
                 #[cfg(debug_assertions)]
                 dbg!(quat_to_pdms_ori_str(&rotation));
             } else {
@@ -941,8 +995,7 @@ impl PdmsDataInterface for AiosDBManager {
     ) -> anyhow::Result<Vec<RefU64>> {
         let db = &self.get_arango_db().await?;
         let world_pos = self
-            .get_world_transform(refno)
-            .await?
+            .get_world_transform(refno)?
             .unwrap_or_default()
             .translation;
         self.get_refnos_within_bound_radius_by_pos(world_pos, distance)
@@ -1036,5 +1089,325 @@ impl PdmsDataInterface for AiosDBManager {
         }
 
         Ok(paths)
+    }
+
+    ///获得外键的属性
+    #[inline]
+    fn get_foreign_refno(&self, refno: RefU64, foreign: &str) -> Option<RefU64> {
+        let att = self.get_attr_from_localdb(refno).ok()?;
+        att.get_foreign_refno(foreign)
+    }
+
+    ///获得外键的属性
+    #[inline]
+    fn get_foreign_attrmap(&self, refno: RefU64, foreign: &str) -> Option<AttrMap> {
+        self.get_foreign_refno(refno, foreign)
+            .map(|x| self.get_attr_from_localdb(x).ok())
+            .flatten()
+    }
+
+    ///获得元件库的spre参考号
+    #[inline]
+    fn get_spre_ref(&self, refno: RefU64) -> Option<RefU64> {
+        self.get_foreign_refno(refno, "SPRE")
+    }
+
+    //todo need some test for this function
+    ///获得元件库的catr参考号
+    #[inline]
+    fn get_cat_ref(&self, refno: RefU64) -> Option<RefU64> {
+        let cat_ref = self
+            .get_foreign_attrmap(refno, "SPRE")
+            .map(|x| x.get_foreign_refno("CATR").or(x.get_refno()))
+            .flatten();
+        if cat_ref.is_some() {
+            return cat_ref;
+        }
+        let self_cat_ref = self
+            .get_foreign_attrmap(refno, "CATR")
+            .map(|x| {
+                let c_refno = x.get_refno().unwrap_or_default();
+                match x.get_type() {
+                    "TABITE" => self
+                        .get_foreign_attrmap(c_refno, "PRTREF")
+                        .map(|x| x.get_foreign_refno("CATR").unwrap_or_default()),
+                    "SPCO" => self.get_foreign_refno(c_refno, "CATR"),
+                    _ => Some(c_refno),
+                }
+            })
+            .flatten();
+        self_cat_ref
+    }
+
+    ///获得元件库的catr属性数据
+    #[inline]
+    fn get_cat_attmap(&self, refno: RefU64) -> Option<AttrMap> {
+        self.get_cat_ref(refno)
+            .map(|x| self.get_attr_from_localdb(x).ok())
+            .flatten()
+    }
+
+    ///收集几何参数
+    fn query_gm_params(&self, refno: RefU64) -> anyhow::Result<Vec<GmParam>> {
+        let mut gms = vec![];
+        let mut children = vec![];
+        for c in self.get_children_attrs(refno)? {
+            if TOTAL_CATA_GEO_NOUN_NAMES.contains(&c.get_type()) {
+                children.push(c.clone());
+            } 
+            //有可能嵌套负实体
+            for cc in self.get_children_attrs(c.get_refno().unwrap_or_default())? {
+                if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type()) {
+                    children.push(cc.clone());
+                }
+            }
+        }
+        // let children = interface.get_deep_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
+        for geo_am in children {
+            if !geo_am.is_visible_by_level(None).unwrap_or(true) {
+                continue;
+            }
+            let is_spro = geo_am.get_type() == "SPRO"; //todo add other types
+            gms.push(query_gm_param(&geo_am, self, is_spro).unwrap_or_default());
+        }
+        Ok(gms)
+    }
+
+    ///收集SCOM的信息
+    fn get_or_create_scom_info(&self, cata_refno: RefU64) -> anyhow::Result<ScomInfo> {
+        let scom_info = if let Some(info) = SCOM_INFO_MAP.get(&cata_refno) {
+            info.value().clone()
+        } else {
+            let attr_map = self.get_attr_from_localdb(cata_refno)?;
+            let type_noun = attr_map.get_type();
+            let ptref_name = match type_noun {
+                "SPRF" => "PSTR",
+                _ => "PTRE",
+            };
+            let mut axis_params = vec![];
+            let mut axis_param_numbers = vec![];
+            if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
+                if let Ok(ptre_am) = self.get_attr_from_localdb(ptre_refno) {
+                    if let Ok(axis_param_map) = query_axis_params(&ptre_am, Some(self)) {
+                        axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
+                        axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
+                    }
+                }
+            }
+            let gmref_name = match type_noun {
+                "SPRF" => "GSTR",
+                _ => "GMRE",
+            };
+            let mut gm_params = vec![];
+            if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
+                gm_params = self.query_gm_params(gmse_refno)?;
+            }
+            let mut ngm_params = vec![];
+            //-ve， 和design发生左右的负实体
+            if let Some(gmse_refno) = attr_map.get_foreign_refno("NGMR") {
+                ngm_params = self.query_gm_params(gmse_refno)?;
+            }
+
+            let mut plin_map = HashMap::new();
+            if let Some(pstr_refno) = attr_map.get_foreign_refno("PSTR") {
+                let pstr_am = self.get_children_attrs(pstr_refno)?;
+                for a in pstr_am {
+                    if let Some(k) = a.get_as_string("PKEY") {
+                        plin_map.insert(
+                            k,
+                            PlinParam {
+                                vxy: [
+                                    a.get_as_string("PX").unwrap_or("0".to_string()),
+                                    a.get_as_string("PY").unwrap_or("0".to_string()),
+                                ],
+                                dxy: [
+                                    a.get_as_string("DX").unwrap_or("0".to_string()),
+                                    a.get_as_string("DY").unwrap_or("0".to_string()),
+                                ],
+                                plax: a.get_as_string("PLAX").unwrap_or("unset".to_string()),
+                            },
+                        );
+                    }
+                }
+            }
+            ScomInfo {
+                gtype: attr_map.get_as_string("GTYP").unwrap_or("unset".into()),
+                dtse_params: vec![],
+                gm_params,
+                ngm_params,
+                axis_params,
+                params: attr_map
+                    .get_as_string("PARA")
+                    .unwrap_or_default()
+                    .replace("\n", " ")
+                    .replace("  ", " ")
+                    .into(),
+                axis_param_numbers,
+                attr_map,
+                plin_map,
+            }
+        };
+        Ok(scom_info)
+    }
+
+    ///创建desi参考号的元件库计算上下文
+    fn get_or_create_cata_context(
+        &self,
+        desi_refno: RefU64,
+        extra_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
+    ) -> anyhow::Result<CataContext> {
+        let cata_context = if let Some(cata) = CATA_CONTEXT_MAP.get(&desi_refno) {
+            cata.value().clone()
+        } else {
+            let desi_att = self.get_attr_from_localdb(desi_refno)?;
+            let mut context = CataContext::default();
+            if let Some(v) = desi_att.get_as_string("JUSL") {
+                context.insert("JUSL".into(), v.into());
+            }
+            context.insert("DESI_REFNO".into(), desi_refno.to_refno_str());
+            let mut desp = desi_att.get_f64_vec("DESP").unwrap_or_default();
+            for i in 0..desp.len() {
+                context.insert(format!("DESI{}", i + 1).into(), desp[i].to_string().into());
+                context.insert(format!("DDES{}", i + 1).into(), desp[i].to_string().into());
+                context.insert(format!("DESP{}", i + 1).into(), desp[i].to_string().into());
+            }
+            let height = desi_att.get_as_string("HEIG").unwrap_or("0.0".into());
+            context.insert(DDHEIGHT_STR.into(), (height.clone()));
+            let angle = desi_att.get_as_string("ANGL").unwrap_or("0.0".into());
+            context.insert(DDANGLE_STR.into(), (angle.clone()));
+            let radi = desi_att.get_as_string("RADI").unwrap_or("0.0".into());
+            context.insert(DDRADIUS_STR.into(), (radi.clone()));
+
+            //将attrmap里，是double的UDA属性，放入context
+            for (k, v) in desi_att.iter() {
+                let str = db1_dehash(*k);
+                let n = if str.starts_with(":") {
+                    if str.len() < 5 {
+                        str.to_uppercase()
+                    } else {
+                        str[0..5].to_uppercase()
+                    }
+                } else {
+                    str.to_uppercase()
+                };
+                match v {
+                    AttrVal::DoubleType(d) => {
+                        context.insert(n, d.to_string());
+                    }
+                    AttrVal::DoubleArrayType(ds) => {
+                        for (i, d) in ds.into_iter().enumerate() {
+                            // dbg!(format!("{}{}", &n, i+1));
+                            context.insert(format!("{}{}", &n, i + 1), d.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            //添加 LEAWID、 LEAHEI、ARRWID、ARRHEI的值
+            if let Some(axis_map) = extra_axis_map {
+                if desi_att.contains_attr_name("LEAV") {
+                    let arrive = desi_att.get_i32("ARRI").unwrap_or_default();
+                    let leave = desi_att.get_i32("LEAV").unwrap_or_default();
+
+                    if axis_map.contains_key(&arrive) {
+                        let v = axis_map.get(&arrive).unwrap();
+                        context.insert("ARRWID".into(), v.pwidth.to_string());
+                        context.insert("ARRHEI".into(), v.pheight.to_string());
+                    }
+
+                    if axis_map.contains_key(&leave) {
+                        let v = axis_map.get(&leave).unwrap();
+                        context.insert("LEAWID".into(), v.pwidth.to_string());
+                        context.insert("LEAHEI".into(), v.pheight.to_string());
+                    }
+                }
+            }
+            //todo 保温层厚度参数
+
+            context.insert("RS_DES_REFNO".into(), desi_refno.to_refno_str());
+            //添加cata的信息
+            if let Some(cata_attmap) = self.get_cat_attmap(desi_refno) {
+                context.insert(
+                    "RS_SCOM_REFNO".into(),
+                    cata_attmap.get_refno().unwrap().to_refno_str(),
+                );
+                let params = cata_attmap.get_f64_vec("PARA").unwrap_or_default();
+                for i in 0..params.len() {
+                    context.insert(
+                        format!("CPAR{}", i + 1).into(),
+                        params[i].to_string().into(),
+                    );
+                    context.insert(
+                        format!("PARA{}", i + 1).into(),
+                        params[i].to_string().into(),
+                    );
+                    context.insert(
+                        format!("PARAM{}", i + 1).into(),
+                        params[i].to_string().into(),
+                    );
+                    context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
+                }
+                let mut owner_ref = desi_att.get_owner().unwrap_or_default();
+                let mut owner_att = self.get_attr_from_localdb(owner_ref).unwrap_or_default();
+                while !owner_att.contains_attr_name("GTYP") {
+                    if owner_att.get_refno().is_none() || owner_att.get_type() == "ZONE" {
+                        break;
+                    }
+                    owner_ref = owner_att.get_owner().unwrap_or_default();
+                    owner_att = self.get_attr_from_localdb(owner_ref).unwrap_or_default();
+                }
+
+                //dtse 的信息处理
+                let dtre_refno: RefU64 = cata_attmap.get_foreign_refno("DTRE").unwrap_or_default();
+                let children = self.get_children_attrs(dtre_refno).unwrap_or_default();
+                for child in children {
+                    if let Some(k) = child.get_as_string("DKEY") {
+                        let key = format!("RPRO_{}", &k);
+                        let exp = child.get_as_string("PPRO").unwrap_or_default();
+                        let default_key = format!("{}_default_expr", key);
+                        let default_expr = child.get_as_string("DPRO").unwrap_or_default();
+                        context.insert(key, exp);
+                        context.insert(default_key.into(), default_expr);
+                    }
+                }
+
+                let desp = owner_att.get_f64_vec("DESP").unwrap_or_default();
+                for i in 0..desp.len() {
+                    context.insert(format!("ODES{}", i + 1).into(), desp[i].to_string().into());
+                }
+                //找到owner 参考号，再找到它的元件库params
+                if let Some(parent_cat_am) = self.get_cat_attmap(owner_ref) {
+                    let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
+                    for i in 0..params.len() {
+                        context.insert(
+                            format!("OPAR{}", i + 1).into(),
+                            params[i].to_string().into(),
+                        );
+                    }
+                }
+
+                if let Some(c_att) = self.get_foreign_attrmap(desi_refno, "CREF") {
+                    let desp = c_att.get_f64_vec("DESP").unwrap_or_default();
+                    for i in 0..desp.len() {
+                        context.insert(format!("ADES{}", i + 1).into(), desp[i].to_string().into());
+                    }
+                    let c_refno = c_att.get_refno().unwrap_or_default();
+
+                    if let Some(link_cat_am) = self.get_cat_attmap(c_refno) {
+                        let params = link_cat_am.get_f64_vec("PARA").unwrap_or_default();
+                        for i in 0..params.len() {
+                            context.insert(
+                                format!("APAR{}", i + 1).into(),
+                                params[i].to_string().into(),
+                            );
+                        }
+                    }
+                }
+            }
+
+            context
+        };
+        Ok(cata_context)
     }
 }

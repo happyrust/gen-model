@@ -33,6 +33,7 @@ use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::spatial_tree::recompute_spatial_tree;
 use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
 use aios_database::tables::*;
+use anyhow::Ok;
 use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
 use bevy_transform::prelude::Transform;
 use chrono::{Datelike, Timelike};
@@ -137,22 +138,22 @@ fn test_sbfi() -> anyhow::Result<()> {
     dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
 
     // let refno = RefU64::from_two_nums(17496, 116749);
-    // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
     // dbg!(quat_to_pdms_ori_str(&transform.rotation));
     // dbg!(transform);
     //
     // let refno = RefU64::from_two_nums(17496, 137937);
-    // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
     // dbg!(quat_to_pdms_ori_str(&transform.rotation));
     // dbg!(transform);
     //
     // let refno = RefU64::from_two_nums(17496, 137938);
-    // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
     // dbg!(quat_to_pdms_ori_str(&transform.rotation));
     // dbg!(transform);
     //
     // let refno = RefU64::from_two_nums(17496, 137936);
-    // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
     // dbg!(quat_to_pdms_ori_str(&transform.rotation));
     // dbg!(transform);
 
@@ -210,9 +211,28 @@ async fn main() -> anyhow::Result<()> {
     //     Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
     // }
 
-    // let refno = "15192/358995".into();
-    // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-    // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
+    // let refno = "23738/1001".into();
+    // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
+    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
+    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+    // dbg!(transform);
+    // let refno = "23738/595".into();
+    // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
+    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
+    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+    // dbg!(transform);
+
+    // let refno = "23736/69".into();
+    // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
+    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
+    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
+    // dbg!(transform);
+
+    // return Ok(());
+
+    // let refno = "23713/6104".into();
+    // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
+    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
     // dbg!(quat_to_pdms_ori_str(&transform.rotation));
     // dbg!(transform);
 
@@ -223,70 +243,6 @@ async fn main() -> anyhow::Result<()> {
     if db_option.gen_model {
         println!("正在生成模型");
         let mut time = Instant::now();
-        //
-        // let refno = "24384/25802".into();
-        // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        // let refno = RefU64::from_two_nums(24384, 25804);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(24384, 25805);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(24384, 25801);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(24384, 25802);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-
-        // let refno = RefU64::from_two_nums(25688, 7972);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-
-        // let refno = RefU64::from_two_nums(23708, 1234);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(23708, 26027);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-
-        //
-        // let refno = RefU64::from_two_nums(17496, 195550);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(17496, 173130);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(17496, 173131);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-        //
-        // let refno = RefU64::from_two_nums(17496, 156942);
-        // let transform = mgr.get_world_transform(refno).await?.unwrap_or_default();
-        // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-        // dbg!(transform);
-
-        // let branch_refnos = query_deep_children_refnos_fuzzy(&database, &[refno], &CATA_HAS_TUBI_GEO_NAMES).await?;
-        // dbg!(branch_refnos);
 
         gen_geos_data(mgr.clone()).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
@@ -353,6 +309,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, AQL_WATER_CALCULATION_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_HOLE_EDGE_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_EMBED_EDGE_COLLECTION, Edge).await?;
+
     Ok(())
 }
 

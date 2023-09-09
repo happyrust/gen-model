@@ -73,15 +73,11 @@ pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &ArDataba
 
 impl AiosDBManager {
     ///查询形集PLIN的值，todo 需要做缓存优化
-    pub async fn query_pline(&self, refno: RefU64, jusl: &str) -> anyhow::Result<Option<PlinParamData>> {
+    pub fn query_pline(&self, refno: RefU64, jusl: &str) -> anyhow::Result<Option<PlinParamData>> {
 
         if self.plin_params_map.contains_key(&refno) {
             return Ok(self.plin_params_map.get(&refno).unwrap().get(jusl).map(|x| x.value().clone()));
         }
-
-        // let database = self.get_arango_db().await?;
-        // let psref = self.query_foreign_refnos(&[refno], &[&["SPRE", "CATR"]],
-        //                                     &["PSTR", "PTSS"], &[], 4).await?.pop().unwrap_or_default();
         let att = self.get_attr_from_localdb(refno)?;
         let spre_att = self.get_attr_from_localdb(att.get_foreign_refno("SPRE").unwrap_or_default()).unwrap_or_default();
         let cat_att = self.get_attr_from_localdb(spre_att.get_foreign_refno("CATR").unwrap_or_default()).unwrap_or_default();
@@ -91,7 +87,7 @@ impl AiosDBManager {
         // dbg!(&c_refnos);
         let mut result = None;
         for c_refno in c_refnos {
-            let a = self.get_attr(c_refno).await?;
+            let a = self.get_attr_from_localdb(c_refno)?;
             let Some(p_key) = a.get_as_string("PKEY") else {
                 continue;
             };
@@ -106,10 +102,10 @@ impl AiosDBManager {
                 ],
                 plax: a.get_as_string("PLAX").unwrap_or("unset".to_string()),
             };
-            let x = self.resolve_expression_to_f32(&param.vxy[0], refno).await?;
-            let y = self.resolve_expression_to_f32(&param.vxy[1], refno).await?;
-            let dx = self.resolve_expression_to_f32(&param.dxy[0], refno).await?;
-            let dy = self.resolve_expression_to_f32(&param.dxy[1], refno).await?;
+            let x = self.resolve_expression_to_f32(&param.vxy[0], refno)?;
+            let y = self.resolve_expression_to_f32(&param.vxy[1], refno)?;
+            let dx = self.resolve_expression_to_f32(&param.dxy[0], refno)?;
+            let dy = self.resolve_expression_to_f32(&param.dxy[1], refno)?;
             let plax = parse_expr_to_dir(&param.plax).unwrap_or(Vec3::Z).normalize();
             let plin_data = PlinParamData{
                 pt: Vec3::new(x, y, 0.0) + Vec3::new(dx, dy, 0.0) * plax,
