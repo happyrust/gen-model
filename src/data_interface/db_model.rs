@@ -813,6 +813,8 @@ impl AiosDBManager {
         let string = format!("v.dbnum in [{}] and v.noun== 'WORL'", vec_str);
 
         let mut pdms_edges = vec![];
+        dbg!(&string);
+        dbg!("hello");
         if let Ok(mut ele_nodes) = self.query_ele_nodes_by_expression(&string).await {
             if ele_nodes.is_empty() { return Ok(()); }
             let database = self.get_arango_db().await?;
@@ -820,6 +822,7 @@ impl AiosDBManager {
             for (k, (mdb_refno, dbnums)) in mdb_dbnums_map.into_iter().enumerate() {
                 if dbnums.is_empty() { continue; }
                 let root_dbnum = dbnums[0];
+                dbg!(root_dbnum);
                 if !mdb_edges_map.contains_key(&root_dbnum) { continue; }
                 let Some(root_world) = ele_nodes.iter().find(|x| x.dbnum == root_dbnum) else{
                     continue
