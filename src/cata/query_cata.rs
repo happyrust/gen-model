@@ -1,159 +1,63 @@
 use crate::cata::resolve::{resolve_axis_params, resolve_gms};
 use crate::data_interface::interface::PdmsDataInterface;
 // use crate::defines::CACHED_SCOM_INFO_MAP;
+use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
+use aios_core::data_center::AttrValue;
+use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
 use aios_core::pdms_types::AttrVal::IntArrayType;
-use aios_core::pdms_types::{AttrMap, AttrVal, RefU64, TOTAL_CATA_GEO_NOUN_NAMES, TOTAL_GEO_NOUN_NAMES};
+use aios_core::pdms_types::{
+    AttrMap, AttrVal, RefU64, TOTAL_CATA_GEO_NOUN_NAMES, TOTAL_GEO_NOUN_NAMES,
+};
+use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
 use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
+use glam::Vec3;
 use log::{error, info};
 use sled::pin;
 use std::collections::{BTreeMap, HashMap};
-use aios_core::data_center::AttrValue;
-use aios_core::parsed_data::geo_params_data::CateGeoParam;
-use aios_core::tool::db_tool::db1_dehash;
-use glam::Vec3;
 use tokio::sync::RwLock;
-use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
 
+use super::resolve::CataContext;
 
 ///求解design component
-pub async fn resolve_desi_comp<T: PdmsDataInterface>(
+pub fn resolve_desi_comp<T: PdmsDataInterface>(
     interface: Option<&T>,
-    refno: RefU64,
-    mut scom_ref: Option<RefU64>,
-    scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
+    desi_refno: RefU64,
+    mut scom_ref_option: Option<RefU64>,
+    // scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
     //传入额外的参数进来，用于解析轴线参数
     desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
 ) -> anyhow::Result<CateGeomsInfo> {
     let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
-    let desi_att = interface.get_attr_from_localdb(refno)?;
+    let desi_att = interface.get_attr_from_localdb(desi_refno)?;
     //todo 改到使用图数据库去查找
-    if scom_ref.is_none() {
-        if let Some(spre_ref) = desi_att.get_foreign_refno("SPRE") {
-            // dbg!(spre_ref);
-            let spre = interface.get_attr_from_localdb(spre_ref).unwrap_or_default();
-            // dbg!(&spre);
-            if spre.contains_attr_name("CATR") {
-                scom_ref = spre.get_foreign_refno("CATR");
-            } else {
-                // SFIT 的 scom 和 spre 是同一个
-                scom_ref = Some(spre_ref);
-            }
-        } else {
-            if let Some(catref) = desi_att.get_foreign_refno("CATR") {
-                let c_att = interface.get_attr_from_localdb(catref).unwrap_or_default();
-                if c_att.get_type() == "TABITE" {
-                    let tmp_ref = c_att.get_foreign_refno("PRTREF").unwrap_or_default();
-                    let t_att = interface.get_attr_from_localdb(tmp_ref)?;
-                    scom_ref = t_att.get_foreign_refno("CATR");
-                } else if c_att.get_type() == "SPCO" {
-                    scom_ref = c_att.get_foreign_refno("CATR");
-                } else {
-                    scom_ref = Some(catref);
-                }
-            }
-        }
+    if scom_ref_option.is_none() {
+        scom_ref_option = interface.get_cat_ref(desi_refno);
     }
     // dbg!(scom_ref);
-    let scom_ref = scom_ref.ok_or(anyhow::anyhow!(format!(
+    let scom_ref = scom_ref_option.ok_or(anyhow::anyhow!(format!(
         "SCOM not exist in element: {}",
-        refno.to_refno_str()
+        desi_refno.to_refno_str()
     )))?;
     if !scom_ref.is_valid() {
-        println!("{} 的CAT引用不存在，为 {}", refno.to_refno_str(), scom_ref.to_refno_str());
+        println!(
+            "{} 的CAT引用不存在，为 {}",
+            desi_refno.to_refno_str(),
+            scom_ref.to_refno_str()
+        );
         return Ok(Default::default());
     }
-    //缓存备用
-    if !scom_info_map.read().await.contains_key(&scom_ref) {
-        match query_scom_info(scom_ref, Some(interface)).await {
-            Ok(scom_info) => {
-                if refno.get_1() == 161704  {
-
-                }
-                scom_info_map.write().await.insert(scom_ref, scom_info);
-            }
-            Err(e) => {
-                let error_info = format!("Design的元件：{} 使用的元件库: {} 解析出错 {}",
-                                         refno.to_refno_string(), scom_ref.to_refno_string(), e.to_string());
-                println!("{}", &error_info);
-                return Err(anyhow::anyhow!(error_info));
-            }
-        }
-    }
-    let scom_read = scom_info_map.read().await;
-    let scom_info = scom_read.get(&scom_ref).unwrap();
-    // dbg!(&scom_info.gm_params);
+    // dbg!(scom_ref);
+    let scom_info = interface.get_or_create_scom_info(scom_ref)?;
+    // dbg!(&scom_info.ngm_params);
     // dbg!(&scom_info.axis_params);
-    let mut context: BTreeMap<String, String> = BTreeMap::new();
-    if let Some(v) = desi_att.get_as_string("JUSL") {
-        context.insert("JUSL".into(), v.into());
-    }
-    context.insert("DESI_REFNO".into(), refno.to_refno_str());
-    let mut desp = desi_att.get_f64_vec("DESP").unwrap_or_default();
-    for i in 0..desp.len() {
-        context.insert(format!("DESI{}", i + 1).into(), desp[i].to_string().into());
-        context.insert(format!("DDES{}", i + 1).into(), desp[i].to_string().into());
-        context.insert(format!("DESP{}", i + 1).into(), desp[i].to_string().into());
-    }
-    let height = desi_att.get_as_string("HEIG").unwrap_or("0.0".into());
-    context.insert(DDHEIGHT_STR.into(), (height.clone()));
-    let angle = desi_att.get_as_string("ANGL").unwrap_or("0.0".into());
-    context.insert(DDANGLE_STR.into(), (angle.clone()));
-    let radi = desi_att.get_as_string("RADI").unwrap_or("0.0".into());
-    context.insert(DDRADIUS_STR.into(), (radi.clone()));
-
-    //将attrmap里，是double的UDA属性，放入context
-    for (k, v) in desi_att.iter() {
-        let str = db1_dehash(*k);
-        let n = if str.starts_with(":") {
-            if str.len() < 5 {
-                str.to_uppercase()
-            }else{
-                str[0..5].to_uppercase()
-            }
-        }else{
-            str.to_uppercase()
-        };
-        match v {
-            AttrVal::DoubleType(d) => {
-                context.insert(n, d.to_string());
-            }
-            AttrVal::DoubleArrayType(ds) => {
-                for (i, d) in ds.into_iter().enumerate() {
-                    // dbg!(format!("{}{}", &n, i+1));
-                    context.insert(format!("{}{}", &n, i+1), d.to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    //添加 LEAWID、 LEAHEI、ARRWID、ARRHEI的值
-    if let Some(axis_map) = desi_axis_map {
-        if desi_att.contains_attr_name("LEAV") {
-            let arrive = desi_att.get_i32("ARRI").unwrap_or_default();
-            let leave = desi_att.get_i32("LEAV").unwrap_or_default();
-
-            if axis_map.contains_key(&arrive) {
-                let v = axis_map.get(&arrive).unwrap();
-                context.insert("ARRWID".into(), v.pwidth.to_string());
-                context.insert("ARRHEI".into(), v.pheight.to_string());
-            }
-
-            if axis_map.contains_key(&leave) {
-                let v = axis_map.get(&leave).unwrap();
-                context.insert("LEAWID".into(), v.pwidth.to_string());
-                context.insert("LEAHEI".into(), v.pheight.to_string());
-            }
-        }
-    }
-
-
-    let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(interface), Some(context)).await;
-    // dbg!(&geom_info);
+    let mut context = interface.get_or_create_cata_context(desi_refno, desi_axis_map)?;
+    
+    let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(interface), Some(context));
+    // dbg!(&geom_info.as_ref().unwrap().n_geometries);
     if geom_info.is_err() {
         error!("{:?}", geom_info.as_ref().err());
         error!("{:?}", desi_att.to_string_hashmap());
@@ -162,7 +66,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
 }
 
 ///整合SCOM对应的临时数据
-pub async fn query_scom_info<T: PdmsDataInterface>(
+pub fn query_scom_info<T: PdmsDataInterface>(
     refno: RefU64,
     interface: Option<&T>,
 ) -> anyhow::Result<ScomInfo> {
@@ -171,13 +75,13 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     let type_noun = attr_map.get_type();
     let ptref_name = match type_noun {
         "SPRF" => "PSTR",
-        _ => "PTRE"
+        _ => "PTRE",
     };
     let mut axis_params = vec![];
     let mut axis_param_numbers = vec![];
     if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
         if let Ok(ptre_am) = interface.get_attr_from_localdb(ptre_refno) {
-            if let Ok(axis_param_map) = query_axis_params(&ptre_am, Some(interface)).await {
+            if let Ok(axis_param_map) = query_axis_params(&ptre_am, Some(interface)) {
                 axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
                 axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
             }
@@ -191,19 +95,18 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
     if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
         dbg!(gmse_refno);
         if let Ok(gmse_am) = interface.get_attr_from_localdb(gmse_refno) {
-            gm_params = query_gm_params(&gmse_am, Some(interface)).await?;
+            gm_params = query_gm_params(&gmse_am, Some(interface))?;
         }
-    }  
+    }
     // dbg!(&gm_params);
 
     let mut ngm_params = vec![];
     //-ve， 和design发生左右的负实体
     if let Some(gmse_refno) = attr_map.get_foreign_refno("NGMR") {
         if let Ok(gmse_am) = interface.get_attr_from_localdb(gmse_refno) {
-            ngm_params = query_gm_params(&gmse_am, Some(interface)).await?;
+            ngm_params = query_gm_params(&gmse_am, Some(interface))?;
         }
     }
-
 
     let mut plin_map = HashMap::new();
     if let Some(pstr_refno) = attr_map.get_foreign_refno("PSTR") {
@@ -247,7 +150,7 @@ pub async fn query_scom_info<T: PdmsDataInterface>(
 }
 
 ///查询 Axis 参数
-pub async fn query_axis_params<T: PdmsDataInterface>(
+pub fn query_axis_params<T: PdmsDataInterface>(
     attr_map: &AttrMap,
     interface: Option<&T>,
 ) -> anyhow::Result<BTreeMap<i32, AxisParam>> {
@@ -267,7 +170,7 @@ pub async fn query_axis_params<T: PdmsDataInterface>(
 }
 
 ///查询gmse的参数
-pub async fn query_gm_params<T: PdmsDataInterface>(
+pub fn query_gm_params<T: PdmsDataInterface>(
     attr_map: &AttrMap,
     interface: Option<&T>,
 ) -> anyhow::Result<Vec<GmParam>> {
@@ -278,8 +181,8 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     for c in interface.get_children_attrs(refno)? {
         if TOTAL_CATA_GEO_NOUN_NAMES.contains(&c.get_type()) {
             children.push(c.clone());
-        }else{
-            for cc in interface.get_children_attrs(c.get_refno().unwrap_or_default())?{
+        } else {
+            for cc in interface.get_children_attrs(c.get_refno().unwrap_or_default())? {
                 if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type()) {
                     children.push(cc.clone());
                 }
@@ -293,133 +196,22 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
         }
         // dbg!(&geo_am);
         let has_children = geo_am.get_type() == "SPRO"; //todo add other types
-        gms.push(
-            query_gm_param(&geo_am, interface, has_children)
-                .await
-                .unwrap_or_default(),
-        );
+        gms.push(query_gm_param(&geo_am, interface, has_children).unwrap_or_default());
     }
     Ok(gms)
 }
 
 ///对元件库的SCOM Element进行求值计算
-pub async fn resolve_cata_comp<T: PdmsDataInterface>(
+pub fn resolve_cata_comp<T: PdmsDataInterface>(
     des_att: &AttrMap,
     scom_info: &ScomInfo,
     interface: Option<&T>,
-    context: Option<BTreeMap<String, String>>,
+    context: Option<CataContext>,
 ) -> anyhow::Result<CateGeomsInfo> {
+    let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
     let des_refno = des_att.get_refno().unwrap_or_default();
     let mut cur_context = context.unwrap_or_default();
-    //默认值
-    cur_context
-        .entry(DDHEIGHT_STR.into())
-        .or_insert("0.0".into());
-    cur_context
-        .entry(DDRADIUS_STR.into())
-        .or_insert("0.0".into());
-    cur_context
-        .entry(DDANGLE_STR.into())
-        .or_insert("0.0".into());
-
     let cat_ref = scom_info.attr_map.get_refno().unwrap_or_default();
-    //获取DTSE的expression
-    process_dtse_params(&scom_info.attr_map, interface, &mut cur_context).await;
-
-    cur_context.insert("RS_DES_REFNO".into(), des_refno.to_refno_str());
-    cur_context.insert("RS_SCOM_REFNO".into(), scom_info.attr_map.get_refno().unwrap().to_refno_str());
-
-    //保温层厚度
-    //PARA
-    let params = scom_info.attr_map.get_f64_vec("PARA").unwrap_or_default();
-    //OPAR的信息收集
-    let int = interface.as_ref().unwrap();
-    // dbg!(&params);
-    for i in 0..params.len() {
-        cur_context.insert(
-            format!("CPAR{}", i + 1).into(),
-            params[i].to_string().into(),
-        );
-        cur_context.insert(
-            format!("PARA{}", i + 1).into(),
-            params[i].to_string().into(),
-        );
-        cur_context.insert(
-            format!("PARAM{}", i + 1).into(),
-            params[i].to_string().into(),
-        );
-        cur_context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
-    }
-
-    let mut owner_att = int.get_attr_from_localdb(des_att.get_owner().unwrap_or_default()).unwrap_or_default();
-    while !owner_att.contains_attr_name("DESP") {
-        if owner_att.get_refno().is_none() || owner_att.get_type() == "ZONE" {
-            break;
-        }
-        owner_att = int.get_attr_from_localdb(owner_att.get_owner().unwrap_or_default()).unwrap_or_default();
-    }
-    let desp = owner_att.get_f64_vec("DESP").unwrap_or_default();
-    for i in 0..desp.len() {
-        cur_context.insert(
-            format!("ODES{}", i + 1).into(),
-            desp[i].to_string().into(),
-        );
-    }
-
-    let owner_ref = owner_att.get_refno().unwrap_or_default();
-    // dbg!(owner_ref);
-    if let Ok(mut parent_cat_refs) = int
-        .query_foreign_refnos(&[owner_ref], &[&["SPRE", "CATR"]], &["SPRE", "CATR"], &[], 4)
-        .await {
-        if let Some(parent_cat_ref) = parent_cat_refs.pop() {
-            if let Ok(parent_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(parent_cat_ref) {
-                let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
-                for i in 0..params.len() {
-                    cur_context.insert(
-                        format!("OPAR{}", i + 1).into(),
-                        params[i].to_string().into(),
-                    );
-                }
-            }
-        }
-    }
-
-    let mut c_att = int.get_attr_from_localdb(des_att.get_foreign_refno("CREF").unwrap_or_default()).unwrap_or_default();
-    while !c_att.contains_attr_name("DESP") || c_att.get_type() == "ZONE"{
-        if c_att.get_refno().is_none() {
-            break;
-        }
-        c_att = int.get_attr_from_localdb(c_att.get_foreign_refno("CREF").unwrap_or_default()).unwrap_or_default();
-    }
-
-    let desp = c_att.get_f64_vec("DESP").unwrap_or_default();
-    for i in 0..desp.len() {
-        cur_context.insert(
-            format!("ADES{}", i + 1).into(),
-            desp[i].to_string().into(),
-        );
-    }
-
-
-    let c_refno = c_att.get_refno().unwrap_or_default();
-    if let Ok(link_cat_refs) = int
-        .query_foreign_refnos(&[c_refno], &[&["SPRE", "CATR"]], &["SPRE", "CATR"], &[], 4)
-        .await {
-        // dbg!(&link_cat_refs);
-        if !link_cat_refs.is_empty() {
-            let link_cat_ref = link_cat_refs[0];
-            if let Ok(link_cat_am) = interface.as_ref().unwrap().get_attr_from_localdb(link_cat_ref) {
-                // dbg!(&link_cat_am);
-                let params = link_cat_am.get_f64_vec("PARA").unwrap_or_default();
-                for i in 0..params.len() {
-                    cur_context.insert(
-                        format!("APAR{}", i + 1).into(),
-                        params[i].to_string().into(),
-                    );
-                }
-            }
-        }
-    }
 
     let axis_map = resolve_axis_params(des_refno, scom_info, &cur_context, interface);
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
@@ -433,12 +225,22 @@ pub async fn resolve_cata_comp<T: PdmsDataInterface>(
     } else {
         None
     };
-
-    //说明: 需要传递 interface, 因为可能需要取属性值
-    // dbg!(&scom_info.gm_params);
-    // dbg!(&scom_info.axis_params);
-    let geometries = resolve_gms(des_refno, &scom_info.gm_params, &jusl_param, &cur_context, &axis_map, interface);
-    let n_geometries = resolve_gms(des_refno, &scom_info.ngm_params, &jusl_param, &cur_context, &axis_map, interface);
+    let geometries = resolve_gms(
+        des_refno,
+        &scom_info.gm_params,
+        &jusl_param,
+        &cur_context,
+        &axis_map,
+        Some(interface),
+    );
+    let n_geometries = resolve_gms(
+        des_refno,
+        &scom_info.ngm_params,
+        &jusl_param,
+        &cur_context,
+        &axis_map,
+        Some(interface),
+    );
     Ok(CateGeomsInfo {
         refno: cat_ref,
         geometries,
@@ -545,10 +347,10 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
 }
 
 ///获得gmse的params
-pub async fn query_gm_param(
+pub fn query_gm_param(
     a: &AttrMap,
     interface: &dyn PdmsDataInterface,
-    has_children: bool,
+    is_spro: bool,
 ) -> Option<GmParam> {
     let mut paxises = a.get_attr_strings_without_default(&["PAXI", "PAAX", "PBAX", "PCAX"]);
     if let Some(val) = a.get_val("PTS") {
@@ -586,8 +388,8 @@ pub async fn query_gm_param(
             }
         }
     } else {
-        if has_children {
-            for a in interface.get_children_attrs(refno).ok()? {
+        if is_spro {
+            for a in interface.get_children_attrs(refno).ok().unwrap_or_default() {
                 verts.push([
                     (a.get_as_string("PX").unwrap_or_default()),
                     (a.get_as_string("PY").unwrap_or_default()),
@@ -625,7 +427,7 @@ pub async fn query_gm_param(
         phei: (a.get_as_string("PHEI").unwrap_or_default()),
         offset: (a.get_as_string("POFF").unwrap_or_default()),
         box_lengths: a.get_attr_strings(&["PXLE", "PYLE", "PZLE"]),
-        xyz: a.get_attr_strings_without_default(&[
+        xyz: a.get_attr_strings(&[
             "PX", "PY", "PZ", "PBBT", "PCBT", "PBTP", "PCTP", "PBOF", "PCOF",
         ]),
         verts,
@@ -639,24 +441,3 @@ pub async fn query_gm_param(
     })
 }
 
-///获得dtse的参数信息
-pub async fn process_dtse_params<T: PdmsDataInterface>(
-    attr_map: &AttrMap,
-    interface: Option<&T>,
-    context: &mut BTreeMap<String, String>,
-) -> Option<bool> {
-    let interface = interface?;
-    let dtre_refno = attr_map.get_foreign_refno("DTRE")?;
-    let children = interface
-        .get_children_attrs(dtre_refno)
-        .ok()?;
-    for child in children {
-        let key = (format!("RPRO_{}", child.get_as_string("DKEY")?));
-        let exp = (child.get_as_string("PPRO")?);
-        let default_key = format!("{}_default_expr", key);
-        let default_expr = (child.get_as_string("DPRO")?);
-        context.insert(key, exp);
-        context.insert(default_key.into(), default_expr);
-    }
-    Some(true)
-}

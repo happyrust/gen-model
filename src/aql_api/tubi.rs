@@ -181,7 +181,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArD
 //         if i.att_type == "ELBO" || i.att_type == "BEND" {
 //             let refno: Vec<&str> = i._to.split("/").collect();
 //             let refno = refno[1];
-//             let result = mgr.as_ref().unwrap().get_world_transform(RefU64::from_url_refno(refno).unwrap()).await.unwrap().unwrap().clone();
+//             let result = mgr.as_ref().unwrap().get_world_transform(RefU64::from_url_refno(refno).unwrap()).unwrap().unwrap().clone();
 //             pos_vec.push(result.translation);
 //         }
 //     }

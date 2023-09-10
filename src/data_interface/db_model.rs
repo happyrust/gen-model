@@ -45,14 +45,14 @@ use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
 use crate::aql_api::pdms_mesh::{query_all_geo_hashs, query_pdms_mesh_aql};
 use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 use crate::cata::query_cata::resolve_desi_comp;
-use crate::cata::resolve::CataExprContext;
+use crate::cata::resolve::{CataContext, CATA_CONTEXT_MAP, SCOM_INFO_MAP};
 use crate::cata::resolve_helper::eval_str_to_f32;
 use crate::consts::*;
 use crate::consts::PDMS_DBNO_INFOS_TABLE;
 use crate::consts::{FUZZY_QUERT, GLOBAL_DATABASE, PDMS_INFO_DB, PUHUA_MATERIAL_DATABASE};
 use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::{AiosDBManager, CATAEXPRCONTEXT_MAP};
+use crate::data_interface::tidb_manager::{AiosDBManager};
 use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_PLIN_MAP, CACHED_REFNO_BASIC_MAP};
 use crate::graph_db::pdms_arango::{connect_arangodb, ArDatabase, save_arangodb_with_db_option};
 use crate::graph_db::pdms_inst_arango::{query_insts_shape_data, save_instance_to_graph_db};
@@ -490,7 +490,7 @@ impl AiosDBManager {
         // 将 mdb对应的 module 下的所有 numbdb保存下来
         let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
         for r in results {
-            self.cache_module_numbdbs.insert(r);
+        self.cache_module_numbdbs.insert(r);
         }
         Ok(())
     }
@@ -893,25 +893,15 @@ impl AiosDBManager {
         PdmsGenericType::UNKOWN
     }
 
+
     /// 通用的解析表达式的方法, 解析desi参考号下的 表达式值
     /// 如果 desi_refno 为空，代表design的数据不需要参与计算
-    pub async fn resolve_expression_to_f32(
+    pub fn resolve_expression_to_f32(
         &self,
         expr: &str,
         desi_refno: RefU64,
     ) -> anyhow::Result<f32> {
-        let database = self.get_arango_db().await?;
-        let cata_context = if let Some(cata) = CATAEXPRCONTEXT_MAP.get(&desi_refno) {
-            cata.value().clone()
-        } else {
-            let cata = CataExprContext::create(desi_refno, &database)
-                .await
-                .unwrap_or_default()
-                .unwrap_or_default();
-            CATAEXPRCONTEXT_MAP.insert(desi_refno, cata.clone());
-            cata
-        };
-        let context = cata_context.build(self, desi_refno).await;
+        let context = self.get_or_create_cata_context(desi_refno, None)?;
         eval_str_to_f32(expr, &context, Some(self))
     }
 

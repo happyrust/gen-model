@@ -13,7 +13,7 @@ pub async fn get_penetration_detail_by_refno(aios_mgr: &AiosDBManager, refno_vec
             //找到name中包含“ZZZ”的元素
             if attr.get_name_string().contains("ZZZ") {
                 let mut data = PenetrationData::default();
-                if let Ok(Some(translation)) = aios_mgr.get_world_transform(i.0.clone()).await {
+                if let Ok(Some(translation)) = aios_mgr.get_world_transform(i.0.clone()) {
                     //获得位置
                     data.position = translation.translation;
                 }

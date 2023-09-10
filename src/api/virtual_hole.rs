@@ -16,7 +16,6 @@ pub async fn query_virtual_hole_data(database: &ArDatabase, key_value: &str) -> 
 }
 
 pub async fn query_virtual_hole_audit_data_by_name(database: &ArDatabase, name: &str) -> anyhow::Result<Option<Vec<SendHoleDataToArango>>> {
-
     let aql = AqlQuery::new("with virtual_hole
                                                 FOR u IN @@collection
                                                 FILTER u.formdata.HumanCode==@name
@@ -26,6 +25,16 @@ pub async fn query_virtual_hole_audit_data_by_name(database: &ArDatabase, name: 
     let data_vec: Vec<SendHoleDataToArango> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }
+
+pub async fn query_all_virtual_hole_audit_data(database: &ArDatabase) -> anyhow::Result<Option<Vec<SendHoleDataToArango>>> {
+    let aql = AqlQuery::new("with virtual_hole
+                                                FOR u IN @@collection
+                                                return unset(u , '_id','_rev')")
+        .bind_var("@collection", "virtual_hole");
+    let data_vec: Vec<SendHoleDataToArango> = database.aql_query(aql).await?;
+    return Ok(Some((data_vec)));
+}
+
 
 pub async fn query_hole_detail_data_by_code(database: &ArDatabase, key: &str) -> anyhow::Result<Option<Vec<VirtualHoleGraphNodeQuery>>> {
     let aql = AqlQuery::new("with hole_data let v = document('hole_data',@_key)\

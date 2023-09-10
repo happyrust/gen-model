@@ -544,12 +544,27 @@ pub async fn query_embed_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@embed_edge", AQL_EMBED_EDGE_COLLECTION)
         .bind_var("@embed_data", AQL_EMBED_DATA_COLLECTION);
-        ;
+    ;
     let result = database.aql_query::<VirtualEmbedGraphNodeQuery>(aql).await?;
     Ok(result)
 }
 
-
+///查询现在可进行提资的埋件
+pub async fn query_available_embed_data(rely_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualEmbedGraphNodeQuery>> {
+    let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
+    let aql = AqlQuery::new("\
+    with @@pdms_eles,@@embed_edge,@@embed_data
+    for key in @keys
+        for c in 1 outbound key @@embed_edge
+            filter c != null && c.HoleWork=='CONFIRM' && c.JSStatus==''
+            return unset(c , '_id','_rev')").bind_var("keys", keys)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@embed_edge", AQL_EMBED_EDGE_COLLECTION)
+        .bind_var("@embed_data", AQL_EMBED_DATA_COLLECTION);
+    ;
+    let result = database.aql_query::<VirtualEmbedGraphNodeQuery>(aql).await?;
+    Ok(result)
+}
 
 
 pub async fn get_embed_data_total_aql(database: &ArDatabase) -> anyhow::Result<Vec<VirtualEmbedGraphNodeQuery>> {
