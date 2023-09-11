@@ -39,7 +39,7 @@ pub async fn get_plugging_material_datas(select_refno: Vec<RefU64>, database: &A
     let hole_refnos = hole_name_refnos.into_iter()
         .filter_map(|h| RefU64::from_url_refno(&h.refno))
         .collect::<Vec<_>>();
-    let room_map = aios_mgr.query_through_element_room_nums(&hole_refnos, Some(&vec![Neg, CateNeg, CateCrossNeg])).await?;
+    let room_map = aios_mgr.query_through_element_room_nums(&hole_refnos, Some(&vec![Neg, CateNeg, CateCrossNeg])).await.unwrap_or_default();
     compute_hole_instance_data_from_virtual(&database, holes, hole_refno_map, room_map).await
 }
 
