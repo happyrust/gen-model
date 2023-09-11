@@ -309,20 +309,21 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, AQL_WATER_CALCULATION_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_HOLE_EDGE_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_EMBED_EDGE_COLLECTION, Edge).await?;
+    create_arango_document(&database, AQL_VIRTUAL_HOLE_COLLECTION, Document).await?;
     Ok(())
 }
 
 #[test]
 fn get_noun_hash() {
-    // let noun = "TABITE";
-    // let hash = db1_hash(noun);
-    // dbg!(hash);
-    let hashes = [0x156078A];
-    for hash in hashes {
-        let str = db1_dehash(hash);
-        dbg!(&hash);
-        dbg!(str);
-    }
+    let noun = "ANCI";
+    let hash = db1_hash(noun);
+    dbg!(hash);
+    // let hashes = [0x156078A];
+    // for hash in hashes {
+    //     let str = db1_dehash(hash);
+    //     dbg!(&hash);
+    //     dbg!(str);
+    // }
 }
 
 #[test]
@@ -373,7 +374,7 @@ fn test_log() {
 async fn test_db1_dehash() {
     let mgr = AiosDBManager::init_form_config().await.unwrap();
     let refno = RefU64::from_refno_str("24383/91850").unwrap();
-    let children = mgr.get_children_within_project(refno,"AvevaMarineSample").unwrap();
+    let children = mgr.get_children_within_project(refno, "AvevaMarineSample").unwrap();
     dbg!(&children);
     let hash = db1_hash(":STACbeam");
     dbg!(&hash);
