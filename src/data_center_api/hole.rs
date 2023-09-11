@@ -915,14 +915,15 @@ pub async fn query_available_hole_data_aql(rely_refno: Vec<RefU64>, database: &A
 
 
 /// 查询虚拟孔洞数据中已经转为实体的孔洞数据
-pub async fn query_entity_hole_data(rely_refnos: Vec<RefU64>,database:&ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
+pub async fn query_entity_hole_data(rely_refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
     let keys = rely_refnos.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
     let aql = AqlQuery::new("
     with @@pdms_eles,@@hole_edge,@@hole_data
     for key in @keys
     for c in 1 outbound key @@hole_edge
         filter c != null
-        // filter c.HoleWork == 'REAL'
+        filter c.HoleWork == 'REAL'
+        filter c.ItemREF like '%EE%' || c.ItemREF like '%KK%' || c.ItemREF like '%LL%'
         return unset(c , '_id','_rev')")
         .bind_var("keys", keys)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
