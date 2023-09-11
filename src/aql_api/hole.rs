@@ -11,6 +11,7 @@ use anyhow::anyhow;
 use arangors_lite::AqlQuery;
 use bitvec::macros::internal::funty::Floating;
 use glam::Vec3;
+use crate::api::virtual_hole::query_hole_data_status_by_key;
 use crate::aql_api::children::*;
 use crate::aql_api::pdms_room::*;
 use crate::consts::*;
@@ -414,7 +415,7 @@ fn match_plugging_material(plugging_type: &str, flood_height: f64, wall_height: 
 }
 
 #[tokio::test]
-async fn test_query_hole_elements() -> anyhow::Result<()> {
+async fn test_query_hole_data_status_by_key() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))

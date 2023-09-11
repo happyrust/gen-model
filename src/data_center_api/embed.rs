@@ -556,7 +556,7 @@ pub async fn query_available_embed_data(rely_refno: Vec<RefU64>, database: &ArDa
     with @@pdms_eles,@@embed_edge,@@embed_data
     for key in @keys
         for c in 1 outbound key @@embed_edge
-            filter c != null && c.HoleWork=='CONFIRM' && c.JSStatus==''
+            filter c != null && c.Work=='CONFIRM'
             return unset(c , '_id','_rev')").bind_var("keys", keys)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@embed_edge", AQL_EMBED_EDGE_COLLECTION)
