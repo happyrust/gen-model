@@ -1,4 +1,4 @@
-use crate::api::attr::query_attr;
+use crate::api::attr::{query_attr, query_uda_ukey};
 use crate::aql_api::*;
 use crate::consts::{
     AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_SIBL_EDGES_COLLECTION,
@@ -25,6 +25,8 @@ use sqlx::{MySql, Pool};
 use std::collections::{HashMap, HashSet};
 use std::process::id;
 use std::str::FromStr;
+use aios_core::tool::db_tool::{db1_dehash, db1_dehash_const, db1_hash, db1_hash_const};
+use crate::data_interface::interface::PdmsDataInterface;
 
 pub async fn query_children_eles(
     arango_db: &ArDatabase,
@@ -1243,6 +1245,32 @@ pub async fn query_refno_from_names_under_select_refno(select_refnos: Vec<RefU64
     Ok(result)
 }
 
+/// 查找选中节点以下的uda type,
+///
+/// base_type ： uda type 基于的基础类型 例如: ZONE 等
+pub async fn get_uda_type_refnos_from_select_refnos(select_refnos: Vec<RefU64>,
+                                                    uda_type: &str,
+                                                    base_type: &str,
+                                                    aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<PdmsElement>> {
+    let mut result = Vec::new();
+    let database = aios_mgr.get_arango_db().await?;
+    // 因为typex是解析时已经dehash过了,不是对应的udna，
+    // 传入得uda_type是udna，需要统一转为 db1_dehash_const 的值
+    let uda_type_ukey = db1_hash(format!(":{}", uda_type).as_str());
+    let uda_type_db_dehash = db1_dehash_const(uda_type_ukey);
+    // 先查找到所有的 base_type ， 再通过 typex 进行过滤
+    let type_refnos = query_refnos_travel_children_with_type_aql(&database,
+                                                                 &select_refnos, vec![base_type.to_string()]).await?;
+    for refno in type_refnos {
+        let Ok(attr) = aios_mgr.get_attr(refno.refno).await else { continue; };
+        let typex = attr.get_typex().to_string();
+        if uda_type_db_dehash == typex {
+            result.push(refno.into());
+        }
+    }
+    Ok(result)
+}
+
 #[tokio::test]
 async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Result<()> {
     // use config::{Config, ConfigError, Environment, File};
@@ -1292,5 +1320,14 @@ async fn test_query_refnos_from_names() -> anyhow::Result<()> {
     let names = vec!["/MAIJIAN-NEW-VARY-NGMS".to_string()];
     let result = query_refnos_from_names(names, &database, None).await?;
     dbg!(&result);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_get_uda_type_refnos_from_select_refnos() -> anyhow::Result<()> {
+    let aios_mgr = AiosDBManager::init_form_config().await?;
+    let select_refnos = vec![RefU64::from_url_refno("9304_2").unwrap()];
+    let refnos = get_uda_type_refnos_from_select_refnos(select_refnos, "STDMODELITEM", "ZONE", &aios_mgr).await?;
+    dbg!(&refnos);
     Ok(())
 }

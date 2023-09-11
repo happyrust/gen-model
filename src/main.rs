@@ -31,9 +31,8 @@ use aios_database::graph_db::pdms_inst_arango::*;
 use aios_database::graph_db::pdms_mesh_arango::save_mesh_to_arango_db;
 use aios_database::graph_db::ssc_arango::set_arangodb_all_ssc_nodes;
 use aios_database::spatial_tree::recompute_spatial_tree;
-use aios_database::ssc::{async_total_ssc_data, get_rooms_from_excel};
+use aios_database::ssc::{async_total_ssc_data, get_room_info_from_excel_refactor, get_rooms_from_excel, insert_ssc_room_node_refactor, save_ssc_level_excel};
 use aios_database::tables::*;
-use anyhow::Ok;
 use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
 use bevy_transform::prelude::Transform;
 use chrono::{Datelike, Timelike};
@@ -249,12 +248,16 @@ async fn main() -> anyhow::Result<()> {
     }
 
     ///生成ssc 树
+    /// 需要 resource 下文档 ssc_level.xlsx  ssc_room.xlsx 专业分类.xlsx
     if db_option.rebuild_ssc_tree {
         println!("正在同步SSC");
-        if let Some(project_db) = mgr.project_map.get(&mgr.db_option.project_name) {
+        if let Ok(database) = mgr.get_arango_db().await {
             // 保存ssc
-            async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
-            set_arangodb_all_ssc_nodes(project_db.value(), &mgr.get_arango_db().await?).await?;
+            // async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
+            // set_arangodb_all_ssc_nodes(project_db.value(), &mgr.get_arango_db().await?).await?;
+            let _ = save_ssc_level_excel(&database).await?;
+            let _result = get_room_info_from_excel_refactor(&database).await.unwrap();
+            let _result = insert_ssc_room_node_refactor(&database).await.unwrap();
         }
         println!("SSC同步完成");
     }
@@ -315,15 +318,15 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "ANCI";
+    let noun = ":E=2X";
     let hash = db1_hash(noun);
     dbg!(hash);
-    // let hashes = [0x156078A];
-    // for hash in hashes {
-    //     let str = db1_dehash(hash);
-    //     dbg!(&hash);
-    //     dbg!(str);
-    // }
+    let hashes = [738251934];
+    for hash in hashes {
+        let str = db1_dehash(hash);
+        dbg!(&hash);
+        dbg!(str);
+    }
 }
 
 #[test]

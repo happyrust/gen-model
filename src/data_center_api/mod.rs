@@ -9,6 +9,4 @@ pub mod embed;
 pub mod equi;
 pub mod valv;
 pub mod inst;
-pub mod supp;
-pub mod sctn;
-pub mod stru;
+pub mod electric_major;

@@ -419,11 +419,11 @@ async fn test_query_hole_elements() -> anyhow::Result<()> {
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
         .build()?;
-    // let mgr = get_test_ams_db_manager_async().await;
+    let mgr = get_test_ams_db_manager_async().await;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let refno = RefU64::from_refno_str("17496/108516").unwrap();
-    let result = get_plugging_material_datas(vec![refno], &database).await?;
+    let result = get_plugging_material_datas(vec![refno], &database,&mgr).await?;
     dbg!(&result);
     Ok(())
 }

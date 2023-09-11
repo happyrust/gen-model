@@ -5,15 +5,19 @@ use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
 use aios_core::tiny_expr::expr_eval::interp;
 use regex::Regex;
 use std::collections::BTreeMap;
+use crate::cata::resolve::CataContext;
 
 ///测试带小数的表达式, gitee:
 #[test]
 fn test_parse_param_with_point_digit() {
     let input_exp = "( ( ( -  DESI[1.1]/2 ) - DESI[0.2] ) )";
-    let mut context = BTreeMap::new();
+    let mut context: BTreeMap<String, String> = BTreeMap::new();
     context.insert("DESI1".into(), "30.0".into());
     context.insert("DESI0".into(), "40.0".into());
-    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &context, None, true);
+    let cata_context = CataContext {
+        context,
+    };
+    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &cata_context, None, true);
     dbg!(&r);
     assert_eq!(r.unwrap(), -55.0);
 }
@@ -21,9 +25,12 @@ fn test_parse_param_with_point_digit() {
 #[test]
 fn test_parse_design_param() {
     let input_exp = "-0.5 TIMES  DESIGN PARAM 1";
-    let mut context = BTreeMap::new();
+    let mut context: BTreeMap<String, String> = BTreeMap::new();
     context.insert("DESI1".into(), "30.0".into());
-    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &context, None, true);
+    let cata_context = CataContext {
+        context,
+    };
+    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &cata_context, None, true);
     dbg!(&r);
     assert_eq!(r.unwrap(), -15.0);
 }
@@ -33,10 +40,13 @@ fn test_parse_design_param() {
 fn test_parse_param_with_of_operator() {
     let input_exp = "LBOR OF PREV";
     let input_exp = "LBOR OF 24381/88991";
-    let mut context = BTreeMap::new();
+    let mut context: BTreeMap<String, String> = BTreeMap::new();
     let interface = get_test_ams_db_manager();
+    let cata_context = CataContext {
+        context,
+    };
     // 是提前准备，还是在使用的时候去获取
-    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &context, Some(&interface), true);
+    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &cata_context, Some(&interface), true);
     dbg!(&r);
     assert_eq!(r.unwrap(), 850.0);
 }
@@ -46,18 +56,21 @@ fn parse_3_axis() {
     //
     // let str = "X ( 45 )  Y ( 35 ) Z";
     //-X (DESIGN PARAM 14 ) -Y
-    let mut context = BTreeMap::new();
+    let mut context: BTreeMap<String, String> = BTreeMap::new();
     context.insert("DESI14".into(), "30.0".into());
     context.insert("DESI13".into(), "30.0".into());
     context.insert("DDANGLE".into(), "45.0".into());
     context.insert("PARAM 2".into(), "30.0".into());
     context.insert("RPRO_CPAR".into(), "DESIGN PARAM 14".into());
+    let cata_context = CataContext {
+        context,
+    };
     let str = "X ( RPRO_CPAR )  Y ( DESIGN PARAM 13 ) Z";
     // let str = "X ( DESIGN PARAM 14 )  Y ";
     let str = "X (60.0)  Y ";
     let str = "X ( 45 )  Y ( 35 ) Z";
     let str = "TANF PARAM 2 DDANGLE";
-    let r = eval_str_to_f64::<AiosDBManager>(str, &context, None, true);
+    let r = eval_str_to_f64::<AiosDBManager>(str, &cata_context, None, true);
     dbg!(r);
 }
 
@@ -107,8 +120,11 @@ fn test_rpro() {
 #[test]
 fn test_math_exp() {
     let expr = "MAX ( ( ( - 31 ) + 60 ), 29.2 )";
-    let context = BTreeMap::new();
-    dbg!(eval_str_to_f64::<AiosDBManager>(expr, &context, None, true))
+    let mut context: BTreeMap<String, String> = BTreeMap::new();
+    let cata_context = CataContext {
+        context,
+    };
+    dbg!(eval_str_to_f64::<AiosDBManager>(expr, &cata_context, None, true))
         .expect("TODO: panic message");
 }
 
