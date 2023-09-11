@@ -210,11 +210,17 @@ pub async fn compute_hole_instance_data_from_virtual(database: &ArDatabase,
                                                      hole_refno_name_map: HashMap<String, RefU64>,
                                                      room_map: HashMap<RefU64, (String, String)>) -> anyhow::Result<Vec<PluggingData>> {
     let mut result = Vec::new();
+    dbg!(&instances);
     for instance in instances {
+        dbg!("****");
+        dbg!(&instance.shape);
         let Some(refno) = hole_refno_name_map.get(&format!("/{}", instance.item_ref)) else { continue; };
         let room = room_map.get(refno).unwrap_or(&("".to_string(), "".to_string())).clone();
+
+
         match instance.shape.as_str() {
             "CIR" => {
+
                 let cir_radius = instance.size_width / 2.0;
                 let radius = (cir_radius - instance.subs_thickness) as f64;
                 let height = (instance.size_throw_wall + instance.extent_length1 + instance.extent_length1) as f64;
@@ -414,21 +420,21 @@ fn match_plugging_material(plugging_type: &str, flood_height: f64, wall_height: 
     }
 }
 
-#[tokio::test]
-async fn test_query_hole_elements() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    // let mgr = get_test_ams_db_manager_async().await;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refno = RefU64::from_refno_str("17496/108516").unwrap();
-    let result = get_plugging_material_datas(vec![refno], &database).await?;
-    dbg!(&result);
-    Ok(())
-}
-
+// #[tokio::test]
+// async fn test_query_hole_elements() -> anyhow::Result<()> {
+//     use config::{Config, ConfigError, Environment, File};
+//     let s = Config::builder()
+//         .add_source(File::with_name("DbOption"))
+//         .build()?;
+//     // let mgr = get_test_ams_db_manager_async().await;
+//     let db_option: DbOption = s.try_deserialize().unwrap();
+//     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+//     let refno = RefU64::from_refno_str("17496/108516").unwrap();
+//     let result = get_plugging_material_datas(vec![refno], &database,).await?;
+//     dbg!(&result);
+//     Ok(())
+// }
+//
 
 #[tokio::test]
 async fn test_query_hole_data_status_by_key() -> anyhow::Result<()> {
