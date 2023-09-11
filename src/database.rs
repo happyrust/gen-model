@@ -165,7 +165,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         };
 
         let db_info = get_default_pdms_db_info();
-        for (k, v) in db_info.noun_attr_info_map {
+        for (k, v) in db_info.noun_attr_info_map.clone() {
             let mut attr_map = BTreeMap::new();
             let type_name = db1_dehash(k as u32);
             if type_name.is_empty() {
@@ -592,7 +592,7 @@ pub async fn sync_total_async_threaded(
     let mut version_map = HashMap::new();
     let only_update_dbinfo = db_option.only_update_dbinfo;
     let only_sync_sys = db_option.only_sync_sys;
-    const CHUNK_NUM: usize = 100_000;
+    let chunk_size  = db_option.sync_chunk_size as usize;
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
         if file_name.ends_with("com") || file_name.ends_with("mis") {
@@ -637,7 +637,7 @@ pub async fn sync_total_async_threaded(
                 }
             }
 
-            for (chunk_index, chunk_refnos) in all_refnos.chunks(CHUNK_NUM).enumerate() {
+            for (chunk_index, chunk_refnos) in all_refnos.chunks(chunk_size).enumerate() {
                 let path_clone = path.clone();
                 let file_name_clone = file_name.clone();
                 let chunk_refnos_clone = chunk_refnos.to_vec();
@@ -762,9 +762,6 @@ pub async fn sync_total_async_threaded(
                     if db_option.sync_localdb.unwrap_or(true) {
                         for kv in total_attr_map_arc.as_ref() {
                             let att = kv.value().merge();
-                            if *kv.key() == "=17496/196611".into() {
-                                dbg!(&att);
-                            }
                             let mut vec = att.into_rkyv_compress_bytes();
                             attmap_tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
                         }

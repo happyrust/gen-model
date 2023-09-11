@@ -52,7 +52,7 @@ pub fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     // dbg!(scom_ref);
     let scom_info = interface.get_or_create_scom_info(scom_ref)?;
-    // dbg!(&scom_info.ngm_params);
+    // dbg!(&scom_info.gm_params);
     // dbg!(&scom_info.axis_params);
     let mut context = interface.get_or_create_cata_context(desi_refno, desi_axis_map)?;
     
@@ -65,89 +65,6 @@ pub fn resolve_desi_comp<T: PdmsDataInterface>(
     geom_info
 }
 
-///整合SCOM对应的临时数据
-pub fn query_scom_info<T: PdmsDataInterface>(
-    refno: RefU64,
-    interface: Option<&T>,
-) -> anyhow::Result<ScomInfo> {
-    let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
-    let attr_map = interface.get_attr_from_localdb(refno)?;
-    let type_noun = attr_map.get_type();
-    let ptref_name = match type_noun {
-        "SPRF" => "PSTR",
-        _ => "PTRE",
-    };
-    let mut axis_params = vec![];
-    let mut axis_param_numbers = vec![];
-    if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
-        if let Ok(ptre_am) = interface.get_attr_from_localdb(ptre_refno) {
-            if let Ok(axis_param_map) = query_axis_params(&ptre_am, Some(interface)) {
-                axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
-                axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
-            }
-        }
-    }
-    let gmref_name = match type_noun {
-        "SPRF" => "GSTR",
-        _ => "GMRE",
-    };
-    let mut gm_params = vec![];
-    if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
-        dbg!(gmse_refno);
-        if let Ok(gmse_am) = interface.get_attr_from_localdb(gmse_refno) {
-            gm_params = query_gm_params(&gmse_am, Some(interface))?;
-        }
-    }
-    // dbg!(&gm_params);
-
-    let mut ngm_params = vec![];
-    //-ve， 和design发生左右的负实体
-    if let Some(gmse_refno) = attr_map.get_foreign_refno("NGMR") {
-        if let Ok(gmse_am) = interface.get_attr_from_localdb(gmse_refno) {
-            ngm_params = query_gm_params(&gmse_am, Some(interface))?;
-        }
-    }
-
-    let mut plin_map = HashMap::new();
-    if let Some(pstr_refno) = attr_map.get_foreign_refno("PSTR") {
-        let pstr_am = interface.get_children_attrs(pstr_refno)?;
-        for a in pstr_am {
-            if let Some(k) = a.get_as_string("PKEY") {
-                plin_map.insert(
-                    k,
-                    PlinParam {
-                        vxy: [
-                            a.get_as_string("PX").unwrap_or("0".to_string()),
-                            a.get_as_string("PY").unwrap_or("0".to_string()),
-                        ],
-                        dxy: [
-                            a.get_as_string("DX").unwrap_or("0".to_string()),
-                            a.get_as_string("DY").unwrap_or("0".to_string()),
-                        ],
-                        plax: a.get_as_string("PLAX").unwrap_or("unset".to_string()),
-                    },
-                );
-            }
-        }
-    }
-    // dbg!(&plin_map);
-    Ok(ScomInfo {
-        gtype: attr_map.get_as_string("GTYP").unwrap_or("unset".into()),
-        dtse_params: vec![],
-        gm_params,
-        ngm_params,
-        axis_params,
-        params: attr_map
-            .get_as_string("PARA")
-            .unwrap_or_default()
-            .replace("\n", " ")
-            .replace("  ", " ")
-            .into(),
-        axis_param_numbers,
-        attr_map,
-        plin_map,
-    })
-}
 
 ///查询 Axis 参数
 pub fn query_axis_params<T: PdmsDataInterface>(
@@ -189,14 +106,13 @@ pub fn query_gm_params<T: PdmsDataInterface>(
             }
         }
     }
-    // let children = interface.get_deep_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
     for geo_am in children {
         if !geo_am.is_visible_by_level(None).unwrap_or(true) {
             continue;
         }
-        // dbg!(&geo_am);
-        let has_children = geo_am.get_type() == "SPRO"; //todo add other types
-        gms.push(query_gm_param(&geo_am, interface, has_children).unwrap_or_default());
+        dbg!(&geo_am);
+        let is_spro = geo_am.get_type() == "SPRO"; //todo add other types
+        gms.push(query_gm_param(&geo_am, interface, is_spro).unwrap_or_default());
     }
     Ok(gms)
 }
@@ -388,7 +304,8 @@ pub fn query_gm_param(
             }
         }
     } else {
-        if is_spro {
+        let cur_type = interface.get_type_name(refno);
+        if is_spro && cur_type.as_str() == "SPRO" {
             for a in interface.get_children_attrs(refno).ok().unwrap_or_default() {
                 verts.push([
                     (a.get_as_string("PX").unwrap_or_default()),
@@ -426,7 +343,7 @@ pub fn query_gm_param(
         shears: a.get_attr_strings(&["PXTS", "PYTS", "PXBS", "PYBS"]),
         phei: (a.get_as_string("PHEI").unwrap_or_default()),
         offset: (a.get_as_string("POFF").unwrap_or_default()),
-        box_lengths: a.get_attr_strings(&["PXLE", "PYLE", "PZLE"]),
+        lengths: a.get_attr_strings(&["PXLE", "PYLE", "PZLE"]),
         xyz: a.get_attr_strings(&[
             "PX", "PY", "PZ", "PBBT", "PCBT", "PBTP", "PCTP", "PBOF", "PCOF",
         ]),

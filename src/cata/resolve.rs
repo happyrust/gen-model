@@ -260,11 +260,11 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
         .try_fold::<_, _, anyhow::Result<_>>(vec![], |mut acc, exp| {
             let f0 = eval_str_to_f32(&exp[0], context, interface)? as f32;
             let f1 = eval_str_to_f32(&exp[1], context, interface)? as f32;
-            acc.push([f0, f1]);
+            acc.push(Vec2::new(f0, f1));
             Ok(acc)
         })?;
 
-    let box_lengths = gm.box_lengths
+    let lengths = gm.lengths
         .iter()
         .map(|exp| eval_str_to_f32(&exp, context, interface))
         .collect::<anyhow::Result<_>>()?;
@@ -273,8 +273,6 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
         .iter()
         .map(|exp| eval_str_to_f32(&exp, context, interface))
         .collect::<anyhow::Result<_>>()?;
-
-    // dbg!(&xyz);
 
     let mut paxises: Vec<Option<CateAxisParam>> = Vec::new();
     for axis_str in gm.paxises.iter() {
@@ -315,11 +313,11 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
             paxises.push(Some(axis));
         }
     }
-    let mut plin_verts = Vec2::ZERO;
+    let mut plin_pos = Vec2::ZERO;
     let mut plin_plax = Vec3::X;
     if let Some(jusl) = jusl_param {
         //直接把 jusl_dxy加上
-        plin_verts = Vec2::new(eval_str_to_f32(&jusl.vxy[0], context, interface)?,
+        plin_pos = Vec2::new(eval_str_to_f32(&jusl.vxy[0], context, interface)?,
                                eval_str_to_f32(&jusl.vxy[1], context, interface)?)
             + Vec2::new(eval_str_to_f32(&jusl.dxy[0], context, interface)?,
                         eval_str_to_f32(&jusl.dxy[1], context, interface)?);
@@ -335,7 +333,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
         height,
         pwid,
         prad,
-        plin_pos: plin_verts,
+        plin_pos,
         frads,
         pang,
         diameters,
@@ -347,7 +345,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
         dxy,
         drad,
         dwid,
-        box_lengths,
+        lengths,
         xyz,
         paxises,
         centre_line_flag: gm.centre_line_flag,

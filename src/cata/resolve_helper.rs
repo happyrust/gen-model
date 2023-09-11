@@ -355,8 +355,18 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             }
             "SPRO" => {   //structural profile
                 CateGeoParam::Profile(CateProfileParam::SPRO(SProfileData {
-                    verts: gmse.verts.clone(),
+                    verts: gmse.verts.iter().map(|x| x.truncate()).collect(),
                     frads: gmse.frads.clone(),
+                    normal_axis: gmse.paxises[0].as_ref().map(|x| x.dir).unwrap_or(Vec3::Z),
+                    plin_pos: gmse.plin_pos,
+                    plin_axis: gmse.plin_plax,
+                }))
+            }
+            "SREC" => {   //structural profile
+                CateGeoParam::Profile(CateProfileParam::SREC(SRectData {
+                    center: Vec2::new(gmse.xyz[0],gmse.xyz[1]),
+                    size: Vec2::new(gmse.lengths[0], gmse.lengths[1]),
+                    dxy: gmse.dxy[0],
                     normal_axis: gmse.paxises[0].as_ref().map(|x| x.dir).unwrap_or(Vec3::Z),
                     plin_pos: gmse.plin_pos,
                     plin_axis: gmse.plin_plax,
@@ -365,8 +375,8 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             "BOXI" => {
                 CateGeoParam::BoxImplied(CateBoxImpliedParam {
                     axis: None,
-                    width: gmse.box_lengths[2],
-                    height: gmse.box_lengths[0],
+                    width: gmse.lengths[2],
+                    height: gmse.lengths[0],
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
                 })
@@ -461,13 +471,13 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 }
             }
             "SBOX" | "NSBO" => {
-                if gmse.box_lengths.len() >= 3 && gmse.xyz.len() >= 3 {
+                if gmse.lengths.len() >= 3 && gmse.xyz.len() >= 3 {
                     CateGeoParam::Box(CateBoxParam {
                         refno: gmse.refno,
                         size: Vec3::new(
-                            gmse.box_lengths[0],
-                            gmse.box_lengths[1],
-                            gmse.box_lengths[2],
+                            gmse.lengths[0],
+                            gmse.lengths[1],
+                            gmse.lengths[2],
                         ),
                         offset: Vec3::new(
                             gmse.xyz[0],

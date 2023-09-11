@@ -11,6 +11,7 @@ use bitflags::bitflags;
 use dashmap::DashMap;
 
 bitflags! {
+    #[derive(Copy, Clone, Eq, PartialEq)]
     pub struct GeoEnum: i32 {
         const PRIM = 0x1 << 1;
         const LOOP_AND_PLOO = 0x1 << 2;

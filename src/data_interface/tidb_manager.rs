@@ -157,6 +157,13 @@ impl PdmsDataInterface for AiosDBManager {
         Err(anyhow::anyhow!("{refno}: not found att"))
     }
 
+    fn get_full_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
+        let mut att_map = self.get_attr_from_localdb(refno)?;
+        aios_core::get_default_pdms_db_info().fill_default_values(&mut att_map);
+
+        Ok(att_map)
+    }
+
     ///获得子节点的参考号集合
     fn get_children_from_localdb(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
         for project in &self.db_option.included_projects {
@@ -253,7 +260,7 @@ impl PdmsDataInterface for AiosDBManager {
             t_types,
             depth,
         )
-        .await;
+            .await;
         t_refnos
     }
 
@@ -519,8 +526,8 @@ impl PdmsDataInterface for AiosDBManager {
         return UNIQUE(negatives)
         ",
         )
-        .bind_var("key", refno_url)
-        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+            .bind_var("key", refno_url)
+            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self
             .get_arango_db()
             .await?
@@ -600,8 +607,8 @@ impl PdmsDataInterface for AiosDBManager {
                     return distinct parent._key
         "#,
         )
-        .bind_var("keys", refno_urls)
-        .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+            .bind_var("keys", refno_urls)
+            .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self.get_arango_db().await?.aql_query::<String>(aql).await?;
         let refnos = refno_strs
             .iter()
@@ -626,8 +633,8 @@ impl PdmsDataInterface for AiosDBManager {
             return UNIQUE(refnos)
         "#,
         )
-        .bind_var("key", refno_url)
-        .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
+            .bind_var("key", refno_url)
+            .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
         let refno_strs = self
             .get_arango_db()
             .await?
@@ -661,8 +668,8 @@ impl PdmsDataInterface for AiosDBManager {
                 ]
         "#,
         )
-        .bind_var("key", refno_url)
-        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+            .bind_var("key", refno_url)
+            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let result: HashMap<RefU64, Vec<RefU64>> = self
             .get_arango_db()
             .await?
@@ -803,20 +810,19 @@ impl PdmsDataInterface for AiosDBManager {
             }
             //固定方位，不会怎旋转方向，但是会移动
             let mut fixed_posl_ori = att.get_type() == "ENDATU";
-            
+
             //对于有CUTB的情况，需要直接对齐过去, 不需要在这里计算
             let c_ref = att.get_foreign_refno("CREF").unwrap_or_default();
             let mut has_cut_back = false;
             let mut cut_dir = Vec3::Y;
-            if att.contains_attr_name("CUTB"){
+            if att.contains_attr_name("CUTB") {
                 has_cut_back = true;
                 cut_dir = att.get_vec3("CUTP").unwrap_or(cut_dir);
                 let cut_len = att.get_f32("CUTB").unwrap_or_default();
                 // dbg!(quat_to_pdms_ori_str(&c_t.rotation));
                 if c_ref.is_valid() && let Ok(c_att) = self.get_attr_from_localdb(c_ref) &&
                     let Some(poss) = c_att.get_poss() &&
-                    let Some(pose) = c_att.get_pose(){
-                    
+                    let Some(pose) = c_att.get_pose() {
                     let c_t = self.get_world_transform(c_ref)?.unwrap_or_default();
                     let w_poss = c_t.translation;
                     let axis = (pose - poss);
@@ -828,7 +834,7 @@ impl PdmsDataInterface for AiosDBManager {
                     //取离node最近的点
                     if dist_s < dist_e {
                         translation = w_poss - cut_dir * cut_len;
-                    }else{
+                    } else {
                         translation = w_pose - cut_dir * cut_len;
                     }
                 }
@@ -906,11 +912,11 @@ impl PdmsDataInterface for AiosDBManager {
                     dbg!(translation);
                     dbg!(quat_to_pdms_ori_str(&rotation));
                 }
-                
+
 
                 translation +=
-                        rotation * (pos + plin_pos) + rotation * new_quat * delta_vec;
-                
+                    rotation * (pos + plin_pos) + rotation * new_quat * delta_vec;
+
                 #[cfg(debug_assertions)]
                 {
                     dbg!(translation);
@@ -918,7 +924,7 @@ impl PdmsDataInterface for AiosDBManager {
                 }
                 //没有POSL时，需要使用cutback的方向
                 rotation = rotation * new_quat;
-                if pos_line == "unset" && has_cut_back{
+                if pos_line == "unset" && has_cut_back {
                     dbg!(has_cut_back);
                     //need to perpendicular to the Y axis
                     let mat3 = Mat3::from_quat(rotation);
@@ -1154,7 +1160,7 @@ impl PdmsDataInterface for AiosDBManager {
         for c in self.get_children_attrs(refno)? {
             if TOTAL_CATA_GEO_NOUN_NAMES.contains(&c.get_type()) {
                 children.push(c.clone());
-            } 
+            }
             //有可能嵌套负实体
             for cc in self.get_children_attrs(c.get_refno().unwrap_or_default())? {
                 if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type()) {
