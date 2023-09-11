@@ -210,10 +210,7 @@ pub async fn compute_hole_instance_data_from_virtual(database: &ArDatabase,
                                                      hole_refno_name_map: HashMap<String, RefU64>,
                                                      room_map: HashMap<RefU64, (String, String)>) -> anyhow::Result<Vec<PluggingData>> {
     let mut result = Vec::new();
-    dbg!(&instances);
     for instance in instances {
-        dbg!("****");
-        dbg!(&instance.shape);
         let Some(refno) = hole_refno_name_map.get(&format!("/{}", instance.item_ref)) else { continue; };
         let room = room_map.get(refno).unwrap_or(&("".to_string(), "".to_string())).clone();
 
