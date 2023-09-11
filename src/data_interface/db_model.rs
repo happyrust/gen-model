@@ -35,7 +35,7 @@ use indexmap::IndexMap;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use itertools::Itertools;
-use crate::api::attr::{query_attr, query_uda_ukey_udna_all};
+use crate::api::attr::{query_attr, query_uda_ukey_udet_all, query_uda_ukey_udna_all};
 use crate::api::children::*;
 use crate::api::element::*;
 use crate::api::project_mdb::{gen_insert_project_mdb_sql, query_db_nums_of_mdb};
@@ -612,6 +612,13 @@ impl AiosDBManager {
     pub async fn init_uda_map(&self) -> anyhow::Result<()> {
         for pool in &self.project_map {
             if let Ok(uda_map) = query_uda_ukey_udna_all(pool.value()).await {
+                for (ukey, udna) in uda_map {
+                    let udna = format!(":{}", udna);
+                    GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna.clone());
+                    GLOBAL_UDA_UKEY_MAP.entry(udna).or_insert(ukey);
+                }
+            }
+            if let Ok(uda_map) = query_uda_ukey_udet_all(pool.value()).await {
                 for (ukey, udna) in uda_map {
                     let udna = format!(":{}", udna);
                     GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna.clone());
