@@ -11,6 +11,7 @@ use anyhow::anyhow;
 use arangors_lite::AqlQuery;
 use bitvec::macros::internal::funty::Floating;
 use glam::Vec3;
+use crate::api::virtual_hole::query_hole_data_status_by_key;
 use crate::aql_api::children::*;
 use crate::aql_api::pdms_room::*;
 use crate::consts::*;
@@ -411,6 +412,25 @@ async fn test_query_hole_elements() -> anyhow::Result<()> {
     dbg!(&result);
     Ok(())
 }
+
+
+#[tokio::test]
+async fn test_query_hole_data_status_by_key() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    // let mgr = get_test_ams_db_manager_async().await;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+    if let Ok(Some(result)) = query_hole_data_status_by_key(&database, "bca176a3-a8cf-4e1f-b21e-50ac7f56ab5d13").await{
+        dbg!(&result);
+    }
+
+
+    Ok(())
+}
+
 
 #[test]
 fn test_fn() {
