@@ -1178,7 +1178,7 @@ impl SscLevelExcel {
 }
 
 /// 将 ssc_level.xlsx  ssc 固定节点保存到图数据库中
-async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
+pub async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
     let mut eles_results = Vec::new();
     let mut edge_results = Vec::new();
 

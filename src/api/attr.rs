@@ -482,6 +482,19 @@ pub async fn query_uda_ukey_udna_all(pool: &Pool<MySql>) -> anyhow::Result<HashM
     Ok(result)
 }
 
+/// 查找所有的自定义类型的udna以及ukey
+pub async fn query_uda_ukey_udet_all(pool: &Pool<MySql>) -> anyhow::Result<HashMap<u32, String>> {
+    let mut result = HashMap::new();
+    let sql = gen_query_udet_name_sql();
+    let query_results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    for query_result in query_results {
+        let u_key = query_result.get::<i32, _>("UKEY");
+        let u_name = query_result.get::<String, _>("UDNA");
+        result.entry(u_key as u32).or_insert(u_name);
+    }
+    Ok(result)
+}
+
 /// 查找某个uda对应的ukey
 pub async fn query_uda_ukey(uda: &str, pool: &Pool<MySql>) -> anyhow::Result<i32> {
     let sql = gen_query_uda_ukey_sql(uda);
@@ -549,6 +562,12 @@ fn gen_query_numbdbs_by_mdb_sql(dbs: RefU64Vec) -> String {
 fn gen_query_uda_name_sql() -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT UKEY,UDNA FROM {PDMS_UDA_TABLE} WHERE UDNA != ''"));
+    sql
+}
+
+fn gen_query_udet_name_sql() -> String {
+    let mut sql = String::new();
+    sql.push_str(&format!("SELECT UKEY,UDNA FROM {PDMS_UDET_TABLE} WHERE UDNA != ''"));
     sql
 }
 

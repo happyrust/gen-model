@@ -609,6 +609,8 @@ pub(crate) fn take_off_name_first_char(name: &str) -> String {
     if name.starts_with("/") { name[1..].to_string() } else { name.to_string() }
 }
 
+
+
 #[tokio::test]
 async fn test_get_inst_data_from_inst_major() -> anyhow::Result<()> {
     let mgr = AiosDBManager::init_form_config().await?;
@@ -627,10 +629,5 @@ async fn test_get_dq_material_code() -> anyhow::Result<()> {
     let material_map = get_dq_material_code(&spre_name, &stander_num, &fileds, &aios_mgr).await?;
     dbg!(&material_map);
 
-    Ok(())
-}
-
-#[tokio::test]
-async fn attr_export_to_excel() -> anyhow::Result<()> {
     Ok(())
 }

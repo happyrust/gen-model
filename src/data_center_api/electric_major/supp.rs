@@ -15,7 +15,7 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
     let database = aios_mgr.get_arango_db().await?;
     if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos,
                                                                      vec!["STRU".to_string()]).await {
-        let refnos = children.iter().map(|child| child.refno).collect::<Vec<RefU64>>();
+        // let refnos = children.iter().map(|child| child.refno).collect::<Vec<RefU64>>();
         // let major_map = get_refnos_major_map(refnos, &database).await.unwrap_or_default();
         for stru in children {
             let mut attr = Vec::new();
@@ -219,11 +219,16 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
     })
 }
 
+/// 仪表管道支吊架类
+pub async fn query_dq_erecad_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
+    Ok(DataCenterProject::default())
+}
+
 /// 判断字段串是否包含 S1到 S17的任意一种
 fn contains_s1_to_s17(input: &str) -> bool {
     let regex_str = r"S(1[0-7]|0?[1-9])[^0-9]+";
     let regex = Regex::new(regex_str).unwrap();
-   regex.is_match(input)
+    regex.is_match(input)
 }
 
 #[test]

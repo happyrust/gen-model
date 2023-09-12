@@ -9,6 +9,7 @@ use aios_core::pdms_types::UdaMajorType::T;
 use glam::Vec3;
 use regex::Regex;
 use std::str::FromStr;
+use aios_core::pdms_types::GeoBasicType::*;
 use parry3d::utils::hashmap::HashMap;
 use crate::data_interface::interface::PdmsDataInterface;
 
@@ -39,6 +40,33 @@ async fn test_query_through_element_rooms_1() -> anyhow::Result<()> {
     dbg!(room_number_map);
     Ok(())
 }
+
+#[tokio::test]
+async fn test_query_through_element_rooms_3() -> anyhow::Result<()> {
+    //测试样例1   内房间号：R610，外房间号：R661
+    let mgr = get_test_ams_db_manager_async().await;
+    let target_refno = "17496/156874".into();
+
+    let room_number_map = mgr
+        .query_through_element_room_nums(&[target_refno], Some(&vec![Neg, CateNeg,CateCrossNeg]))
+        .await?;
+    dbg!(room_number_map);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_through_element_rooms_4() -> anyhow::Result<()> {
+    //测试样例1   内房间号：R610，外房间号：R661
+    let mgr = get_test_ams_db_manager_async().await;
+    let target_refno = "17496/145284".into();
+
+    let room_number_map = mgr
+        .query_through_element_room_nums(&[target_refno], Some(&vec![Neg, CateNeg,CateCrossNeg]))
+        .await?;
+    dbg!(room_number_map);
+    Ok(())
+}
+
 
 ///测试查询点所在的房间
 #[tokio::test]
