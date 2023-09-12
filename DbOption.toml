@@ -1,11 +1,12 @@
 #同步文件配置false
-total_sync = true
+total_sync = false
 enable_log = false
 sync_graph_db = true
-sync_tidb = true
+sync_tidb = false
 sync_localdb = true
 incr_sync = false
 replace_dbs = true
+sync_chunk_size = 100_0000
 
 #项目设置
 project_path = "D:/AVEVA/Projects/E3D2.1" 
@@ -93,7 +94,9 @@ puhua_database_password = ""
 
 #打洞的问题，需要重构一下own pos refnos
 #debug_root_refnos = ["23713/6093"]
-debug_root_refnos = ["17496/255827"]
+debug_root_refnos = ["24383/73928"]
+#debug_root_refnos = ["25688/4595", ]
+#debug_root_refnos = ["23713/6104"]
 # debug_root_refnos = ["25688/7954", "17496/202345", "9304/2", ]
 #debug_root_refnos = ["23738/595"]
 #debug_root_refnos = ["17496/118542", " 24381/35931", "24381/35902"]

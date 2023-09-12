@@ -69,23 +69,23 @@ pub async fn save_stp_data_to_arangodb(
     "Ok".to_string()
 }
 
-// #[cfg(not(feature = "opencascade_rs"))]
-// ///导出水淹计算stp
-// pub async fn export_stp(
-//     mgr: &AiosDBManager,
-//     stp_packet: ExportFloodingStpEvent,
-// ) -> anyhow::Result<bool> {
-//     let mut file = File::create(format!(
-//         "./assets/walter_steps/{}.stp",
-//         stp_packet.file_name.as_str()
-//     ))?;
-//     let mut test_str = "测试STP文件下载";
-//     file.write_all(test_str.as_bytes())?;
-//
-//     Ok(true)
-// }
-//
-//
+#[cfg(not(feature = "opencascade_rs"))]
+///导出水淹计算stp
+pub async fn export_stp(
+    mgr: &AiosDBManager,
+    stp_packet: ExportFloodingStpEvent,
+) -> anyhow::Result<bool> {
+    let mut file = File::create(format!(
+        "./assets/walter_steps/{}.stp",
+        stp_packet.file_name.as_str()
+    ))?;
+    let mut test_str = "测试STP文件下载";
+    file.write_all(test_str.as_bytes())?;
+
+    Ok(true)
+}
+
+
 
 #[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
@@ -100,12 +100,12 @@ pub async fn export_stp(
     let shapes_data = query_insts_shape_data(
         &mgr.get_arango_db().await?,
         &export_refnos,
-        &[
+        Some(&[
             GeoBasicType::Pos,
             GeoBasicType::CateNeg,
             GeoBasicType::Neg,
             GeoBasicType::CateCrossNeg,
-        ],
+        ]),
     )
     .await?;
 
@@ -123,18 +123,23 @@ pub async fn export_stp(
         };
 
         let mut transform = geos_info.world_transform;
-        if let Some((shape, own_pos_refno)) = insts_data.gen_occ_shape(&transform) {
-            if let Some(o) = own_pos_refno && o.is_valid(){
+        if let Some((shape, own_pos_refnos)) = insts_data.gen_occ_shape(&transform) {
+            if !own_pos_refnos.is_empty(){
                 //需要进行缩放处理，宽度为门的1/10，高度固定为100
-                if is_door {
-                    // transform =  Transform::from_scale(Vec3::new(1.0, 1.0, 0.3)) * transform;
-                    let mut box_shape = AdHocShape::make_box(100.0, 100.0, 100.0).0;
-                    box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
-                    boolean_map.entry(o).or_default().push((*refno, box_shape));
-                    //door 已经处理，不需要处理第二次
-                    continue;
-                }else{
-                    boolean_map.entry(o).or_default().push((*refno, shape));
+                for o in own_pos_refnos {
+                    if !o.is_valid() {
+                        continue;
+                    }
+                    if is_door {
+                        // transform =  Transform::from_scale(Vec3::new(1.0, 1.0, 0.3)) * transform;
+                        let mut box_shape = AdHocShape::make_box(100.0, 100.0, 100.0).0;
+                        box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
+                        boolean_map.entry(o).or_default().push((*refno, box_shape));
+                        //door 已经处理，不需要处理第二次
+                        continue;
+                    }else{
+                        boolean_map.entry(o).or_default().push((*refno, shape));
+                    }
                 }
             } else{
                 total_shapes_map.insert(*refno, shape);
@@ -150,10 +155,8 @@ pub async fn export_stp(
                 dbg!("处理门: {d}");
                 let inst = &insts_data.insts[0];
                 let extents = insts_data.aabb.unwrap().extents();
-                // dbg!(extents);
-                // dbg!(inst.transform);
-                // transform = Transform::from_translation(Vec3::new(0.0, 0.0, -extents.x/2.0)) *  transform * inst.transform ;
-                transform.translation += transform.rotation * Vec3::new(0.0, 0.0, -extents.x/2.0);
+
+                transform = Transform::from_translation(Vec3::new(0.0, 0.0, -extents.x/2.0)) *  transform * inst.transform ;
                 let mut box_shape = AdHocShape::make_box(100.0, extents.y as f64 / 10.0 , extents.z as f64).0;
                 box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
                 boolean_map.entry(o).or_default().push((*refno, box_shape));

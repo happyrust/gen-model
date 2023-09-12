@@ -592,7 +592,7 @@ pub async fn sync_total_async_threaded(
     let mut version_map = HashMap::new();
     let only_update_dbinfo = db_option.only_update_dbinfo;
     let only_sync_sys = db_option.only_sync_sys;
-    let chunk_size  = db_option.sync_chunk_size as usize;
+    let chunk_size  = db_option.sync_chunk_size.unwrap_or(10_0000) as usize;
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
         if file_name.ends_with("com") || file_name.ends_with("mis") {

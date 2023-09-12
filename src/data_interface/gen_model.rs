@@ -35,7 +35,7 @@ use nalgebra::Point3;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::Isometry;
 use rayon::iter::ParallelIterator;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::mem::take;
 use std::sync::Arc;
@@ -182,7 +182,7 @@ pub async fn gen_prim_geos(
                 let inst_geo = EleInstGeo {
                     geo_hash,
                     refno,
-                    owner_pos_refno: Default::default(),
+                    owner_pos_refnos: Default::default(),
                     pts: Default::default(),
                     aabb: Some(geo_aabb),
                     transform: *tr,
@@ -451,7 +451,7 @@ pub async fn gen_loop_geos(
                 let geom_inst = EleInstGeo {
                     geo_hash,
                     refno: parent_refno,
-                    owner_pos_refno: Default::default(),
+                    owner_pos_refnos: Default::default(),
                     pts: Default::default(),
                     aabb: Some(geo_aabb),
                     transform: tr,
@@ -515,7 +515,7 @@ pub fn gen_cata_single_geoms(
     let desi_att = mgr.get_attr_from_localdb(design_refno)?;
     let geoms_info =
         resolve_desi_comp(Some(mgr.as_ref()), design_refno, None, None).unwrap_or_default();
-    if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL"{
+    if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" {
         create_profile_geos(
             design_refno,
             &desi_att,
@@ -531,6 +531,7 @@ pub fn gen_cata_single_geoms(
             n_geometries,
             axis_map,
         } = geoms_info;
+        // dbg!(&geometries);
         for (i, geom) in geometries.into_iter().enumerate() {
             if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
                 brep_shape_map
@@ -666,9 +667,9 @@ pub async fn gen_cata_geos(
                         for (ele_refno, shapes) in brep_shapes_map {
                             let Ok(Some(mut origin_trans)) =
                                 mgr_clone.get_world_transform(ele_refno)
-                            else {
-                                continue;
-                            };
+                                else {
+                                    continue;
+                                };
 
                             let Ok(ele_att) = mgr_clone.get_attr_from_localdb(ele_refno) else {
                                 continue;
@@ -794,7 +795,7 @@ pub async fn gen_cata_geos(
                                         rotation: rot,
                                         scale,
                                     }
-                                    .compute_matrix();
+                                        .compute_matrix();
                                     let Some(aabb) = cached_mesh_mgr.get_aabb(geo_hash) else {
                                         continue;
                                     };
@@ -850,10 +851,10 @@ pub async fn gen_cata_geos(
                                     } else {
                                         GeoBasicType::Pos
                                     },
-                                    owner_pos_refno: neg_own_pos_map
+                                    owner_pos_refnos: neg_own_pos_map
                                         .get(&refno)
                                         .cloned()
-                                        .unwrap_or_default(),
+                                        .map(|x| [x].into()).unwrap_or_default(),
                                 };
                                 if is_ngmr {
                                     ngmr_geo_insts.push(geom_inst.clone());
@@ -966,7 +967,7 @@ pub async fn gen_cata_geos(
                                         let compound_geom_inst = EleInstGeo {
                                             geo_hash,
                                             refno: k,
-                                            owner_pos_refno: Default::default(),
+                                            owner_pos_refnos: Default::default(),
                                             pts: vec![],
                                             aabb,
                                             transform: Transform::IDENTITY,
@@ -1020,9 +1021,9 @@ pub async fn gen_cata_geos(
                             ele_refno.to_refno_string(),
                         );
                         let Ok(Some(mut origin_trans)) = mgr_clone.get_world_transform(ele_refno)
-                        else {
-                            continue;
-                        };
+                            else {
+                                continue;
+                            };
 
                         let Some(ref_basic) = mgr_clone.get_refno_basic(ele_refno) else {
                             continue;
@@ -1152,7 +1153,7 @@ pub async fn gen_cata_geos(
             // &scom_info_map,
             None,
         )
-        .await?;
+            .await?;
         dbg!(&tubi_size);
         let mut tubi_geo_hash = if matches!(tubi_size, TubiSize::BoxSize(_)) {
             BOXI_GEO_HASH
@@ -1334,7 +1335,7 @@ pub async fn gen_cata_geos(
                     // &scom_info_map,
                     Some(axis_map),
                 )
-                .await?;
+                    .await?;
                 tubi_geo_hash = if matches!(current_tubing.tubi_size, TubiSize::BoxSize(_)) {
                     BOXI_GEO_HASH
                 } else {
@@ -1435,19 +1436,19 @@ use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
 
-#[derive(Debug, Default, IntoPrimitive, Eq, PartialEq, TryFromPrimitive)]
+#[derive(Debug, Default, IntoPrimitive, Eq, PartialEq, TryFromPrimitive, Copy, Clone)]
 #[repr(i32)]
 pub enum NgmrRemovedType {
     #[default]
     AsDefault = -1,
     Nothing = 0,
-    Attached,
-    Owner,
-    Item,
+    Attached = 1,
+    Owner = 2,
+    Item = 3,
     // All,
-    AttachedAndOwner,
-    AttachedAndItem,
-    OwnerAndItem,
+    AttachedAndOwner = 4,
+    AttachedAndItem = 5,
+    OwnerAndItem = 6,
 }
 
 ///生成几何体数据
@@ -1489,7 +1490,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                 insts: vec![EleInstGeo {
                     geo_hash: TUBI_GEO_HASH,
                     refno: Default::default(),
-                    owner_pos_refno: Default::default(),
+                    owner_pos_refnos: Default::default(),
                     geo_param: PdmsGeoParam::PrimSCylinder(SCylinder::default()),
                     pts: vec![],
                     aabb: Some(unit_cyli_aabb),
@@ -1511,7 +1512,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                 insts: vec![EleInstGeo {
                     geo_hash: BOXI_GEO_HASH,
                     refno: Default::default(),
-                    owner_pos_refno: Default::default(),
+                    owner_pos_refnos: Default::default(),
                     geo_param: PdmsGeoParam::PrimBox(SBox::default()),
                     pts: vec![],
                     aabb: Some(unit_box_aabb),
@@ -1653,8 +1654,8 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         Arc::new(branch_refnos_map),
                         sjus_map_clone,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 has_run_cata = true;
                 handles.push(handle);
@@ -1674,8 +1675,8 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         Arc::new(Default::default()),
                         sjus_map_clone,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 has_run_cata = true;
                 handles.push(handle);
@@ -1695,8 +1696,8 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         Arc::new(Default::default()),
                         sjus_map_clone,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 has_run_cata = true;
                 handles.push(handle);
@@ -1736,8 +1737,8 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         &target_loop_refnos,
                         sjus_map_clone,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
             }
@@ -1758,8 +1759,8 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         target_prim_refnos.as_slice(),
                         sjus_map_clone,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
             }
@@ -1800,9 +1801,9 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             println!("正在处理: {} 下的负实体", comp_refno);
 
                             let Ok(children_refnos) = mgr.get_children_from_localdb(comp_refno)
-                            else {
-                                return;
-                            };
+                                else {
+                                    return;
+                                };
                             let mut neg_refnos = vec![];
                             children_refnos.iter().for_each(|x| {
                                 for c in &origin_neg_refnos {
@@ -1828,9 +1829,9 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             // dbg!(&pos_refnos);
                             let Some(w_trans) =
                                 trans_map.get(&comp_refno).map(|x| x.value().clone())
-                            else {
-                                return;
-                            };
+                                else {
+                                    return;
+                                };
                             // dbg!(w_trans);
                             let mut total_refnos = vec![comp_refno];
                             total_refnos.extend_from_slice(&neg_refnos);
@@ -1855,20 +1856,20 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                                     continue;
                                 };
                                 let Some(inst_geos) = inst_data.get_inst_geos_data_mut(&geos_info)
-                                else {
-                                    continue;
-                                };
+                                    else {
+                                        continue;
+                                    };
                                 let mut pos_aabb = Aabb::new_invalid();
                                 let pos_refno = pos_refnos[0];
                                 for geo_inst in &mut inst_geos.insts {
                                     let Some(mesh) = mesh_mgr_clone.get_mesh(geo_inst.geo_hash)
-                                    else {
-                                        continue;
-                                    };
+                                        else {
+                                            continue;
+                                        };
                                     let Some(aabb) = mesh_mgr_clone.get_aabb(geo_inst.geo_hash)
-                                    else {
-                                        continue;
-                                    };
+                                        else {
+                                            continue;
+                                        };
                                     let geo_mat = geos_info.world_transform;
                                     let ele_mat = inverse_mat * geo_mat.compute_matrix();
                                     let mut local_mat =
@@ -1885,7 +1886,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                                             neg_refnos.push(t_refno);
                                         }
                                         if is_neg {
-                                            geo_inst.owner_pos_refno = pos_refno;
+                                            geo_inst.owner_pos_refnos = [pos_refno].into();
                                             //根据类型来考虑是否需要扩大负实体
                                             let mut center: Vec3 = aabb.center().into();
                                             let t_mat = Mat4::from_translation(center);
@@ -1958,7 +1959,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             let geom_inst = EleInstGeo {
                                 geo_hash,
                                 refno: comp_refno,
-                                owner_pos_refno: Default::default(),
+                                owner_pos_refnos: Default::default(),
                                 pts: vec![],
                                 aabb: None,
                                 transform: Transform::IDENTITY,
@@ -2036,85 +2037,152 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
             let mut shape_insts_data = instance_mgr.write().await;
             let mut mesh_mgr = mgr.cached_mesh_mgr.write().await;
             //处理有NGMR的情况，首选需要过滤出来
-            println!("处理ngmr的负实体。");
+            println!("开始处理ngmr的负实体。");
+            // shape_insts_data.ngmr_inst_info_map.clear();
             if !shape_insts_data.ngmr_inst_info_map.is_empty() {
                 let mut boolean_ngmr_map = HashMap::new();
                 ///查找是否是某些参考号的子节点
-                for (&refno, geos_info) in &shape_insts_data.ngmr_inst_info_map {
-                    let Some(geos_data) = shape_insts_data.get_inst_geos_data(geos_info) else {
+                for (refno, geos_info) in shape_insts_data.ngmr_inst_info_map.clone() {
+                    let Some(geos_data) = shape_insts_data.get_inst_geos_data_mut(&geos_info) else {
                         continue;
                     };
-                    //todo 解析出来 Napp
-                    // for g in &geos_data.insts {
-                    //     let ngmr_geo_refno = g.refno;
-                    //     let geo_att = mgr
-                    //         .get_attr_from_localdb(ngmr_geo_refno)
-                    //         .unwrap_or_default();
-                    //     dbg!(&geo_att);
-                    //     let removed_type =
-                    //         NgmrRemovedType::try_from(geo_att.get_i32("Napp").unwrap_or(-1))
-                    //             .unwrap_or_default();
-                    //     dbg!(removed_type);
-                    // }
-                    // dbg!(refno);
-                    // let att = mgr.get_attr_from_localdb(refno).unwrap_or_default();
-                    // if let Some(c_ref) = att.get_foreign_refno("CREF") {
-                    //     // dbg!(c_ref);
-                    //     boolean_ngmr_map
-                    //         .entry(c_ref)
-                    //         .or_insert_with(|| Vec::new())
-                    //         .push(refno);
-                    // } else
-                    
-                    if let Some(parent) = mgr.get_ancestor_refno_till_type(
-                        refno,
-                        TOTAL_CONTAIN_NGMR_GEO_NAEMS.as_slice(),
-                    ) {
-                        boolean_ngmr_map
-                            .entry(parent)
-                            .or_insert_with(|| Vec::new())
-                            .push(refno);
-                    }
-                }
-
-                println!("开始处理ngmr的负实体模型");
-                for (parent, refnos) in boolean_ngmr_map {
-                    // dbg!(parent);
-                    //更新ngmr的owner
-                    for ngmr_ele_refno in refnos.clone() {
-                        // dbg!(ngmr_ele_refno);
-                        if let Some(inst_geos_data) =
-                            shape_insts_data.get_inst_geos_data_mut_by_refno(ngmr_ele_refno)
-                        {
-                            for ele in inst_geos_data.insts.iter_mut() {
-                                if ele.geo_type == GeoBasicType::CateCrossNeg {
-                                    ele.owner_pos_refno = parent;
-                                    ele.refno = ngmr_ele_refno;
+                    let att = mgr.get_attr_from_localdb(refno).unwrap_or_default();
+                    let c_ref = att.get_foreign_refno("CREF");
+                    // dbg!(c_ref);
+                    let o_ref = mgr.traverse_ancestor(refno, |r| {
+                        r != refno
+                            && mgr.get_attr_from_localdb(r).unwrap_or_default().contains_attr_name("GTYP")
+                    });
+                    // dbg!(o_ref);
+                    for g in &mut geos_data.insts {
+                        let ngmr_geo_refno = g.refno;
+                        let geo_att = mgr
+                            .get_attr_from_localdb(ngmr_geo_refno)
+                            .unwrap_or_default();
+                        // dbg!(&geo_att);
+                        let geo_refno = g.refno;
+                        let removed_type =
+                            NgmrRemovedType::try_from(geo_att.get_i32("NAPP").unwrap_or(-1))
+                                .unwrap_or_default();
+                        // dbg!(removed_type);
+                        match removed_type {
+                            NgmrRemovedType::AsDefault => {}
+                            NgmrRemovedType::Nothing => {}
+                            NgmrRemovedType::Attached => {
+                                if let Some(x) = c_ref {
+                                    g.owner_pos_refnos.insert(x);
+                                    boolean_ngmr_map
+                                        .entry(x)
+                                        .or_insert_with(|| BTreeMap::new())
+                                        .entry(refno)
+                                        .or_insert_with(|| BTreeSet::new())
+                                        .insert(geo_refno);
                                 }
+                            }
+                            NgmrRemovedType::Owner => {
+                                if let Some(x) = o_ref {
+                                    g.owner_pos_refnos.insert(x);
+                                    boolean_ngmr_map
+                                        .entry(x)
+                                        .or_insert_with(|| BTreeMap::new())
+                                        .entry(refno)
+                                        .or_insert_with(|| BTreeSet::new())
+                                        .insert(geo_refno);
+                                }
+                            }
+                            NgmrRemovedType::Item => {
+                                g.owner_pos_refnos.insert(refno);
+                                boolean_ngmr_map
+                                    .entry(refno)
+                                    .or_insert_with(|| BTreeMap::new())
+                                    .entry(refno)
+                                    .or_insert_with(|| BTreeSet::new())
+                                    .insert(geo_refno);
+                            }
+                            NgmrRemovedType::AttachedAndOwner => {
+                                if let Some(x) = c_ref {
+                                    g.owner_pos_refnos.insert(x);
+                                    boolean_ngmr_map
+                                        .entry(x)
+                                        .or_insert_with(|| BTreeMap::new())
+                                        .entry(refno)
+                                        .or_insert_with(|| BTreeSet::new())
+                                        .insert(geo_refno);
+                                }
+                                if let Some(x) = o_ref {
+                                    g.owner_pos_refnos.insert(x);
+                                    boolean_ngmr_map
+                                        .entry(x)
+                                        .or_insert_with(|| BTreeMap::new())
+                                        .entry(refno)
+                                        .or_insert_with(|| BTreeSet::new())
+                                        .insert(geo_refno);
+                                }
+                            }
+                            NgmrRemovedType::AttachedAndItem => {
+                                if let Some(x) = c_ref {
+                                    g.owner_pos_refnos.insert(x);
+                                    boolean_ngmr_map
+                                        .entry(x)
+                                        .or_insert_with(|| BTreeMap::new())
+                                        .entry(refno)
+                                        .or_insert_with(|| BTreeSet::new())
+                                        .insert(geo_refno);
+                                }
+                                g.owner_pos_refnos.insert(refno);
+                                boolean_ngmr_map
+                                    .entry(refno)
+                                    .or_insert_with(|| BTreeMap::new())
+                                    .entry(refno)
+                                    .or_insert_with(|| BTreeSet::new())
+                                    .insert(geo_refno);
+                            }
+                            NgmrRemovedType::OwnerAndItem => {
+                                if let Some(x) = o_ref {
+                                    g.owner_pos_refnos.insert(x);
+                                    boolean_ngmr_map
+                                        .entry(x)
+                                        .or_insert_with(|| BTreeMap::new())
+                                        .entry(refno)
+                                        .or_insert_with(|| BTreeSet::new())
+                                        .insert(geo_refno);
+                                }
+                                g.owner_pos_refnos.insert(refno);
+                                boolean_ngmr_map
+                                    .entry(refno)
+                                    .or_insert_with(|| BTreeMap::new())
+                                    .entry(refno)
+                                    .or_insert_with(|| BTreeSet::new())
+                                    .insert(geo_refno);
                             }
                         }
                     }
+                    dbg!(&boolean_ngmr_map);
+                }
 
+                println!("开始处理ngmr的负实体模型");
+                for (parent, ngmr_map) in boolean_ngmr_map {
+                    dbg!(parent);
                     //这里优先取compound的数据参与计算，如果没有再使用原生的info数据
-                    let Some(parent_geos_info) = shape_insts_data
-                        .get_compound_info(parent)
-                        .or(shape_insts_data.get_inst_info(parent))
-                    else {
+                    let Some(parent_geos_info) = shape_insts_data.get_final_inst_info(parent)else {
                         continue;
                     };
                     let Some(parent_geos_data) =
                         shape_insts_data.get_inst_geos_data(parent_geos_info)
-                    else {
-                        continue;
-                    };
+                        else {
+                            continue;
+                        };
                     if parent_geos_data.insts.is_empty() {
                         continue;
                     }
-                    let mut p_inst = parent_geos_data.insts[0].clone();
                     let parent_matrix_inverse =
                         parent_geos_info.world_transform.compute_matrix().inverse();
                     let mut pos_monifolds = vec![];
                     for p_inst in parent_geos_data.insts.clone() {
+                        //过滤掉ngmr的类型，否则会有重复
+                        if p_inst.geo_type != GeoBasicType::Pos && p_inst.geo_type != GeoBasicType::Compound{
+                            continue;
+                        }
                         let Some(parent_mesh) = mesh_mgr.get_mesh(p_inst.geo_hash) else {
                             continue;
                         };
@@ -2127,16 +2195,22 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                     #[cfg(debug_assertions)]
                     dbg!(parent_manifold.num_tri());
                     let mut neg_ms = vec![];
-                    for refno in refnos {
+                    for (refno, geo_refnos) in ngmr_map {
                         let Some(geos_info) = shape_insts_data.get_ngmr_info(&refno) else {
                             continue;
                         };
                         let Some(geos_data) = shape_insts_data.get_inst_geos_data(geos_info) else {
                             continue;
                         };
+
                         let relative_mat =
                             parent_matrix_inverse * geos_info.world_transform.compute_matrix();
+                        // dbg!(&geo_refnos);
                         for g in &geos_data.insts {
+                            if !geo_refnos.contains(&g.refno) {
+                                dbg!(g.refno);
+                                continue;
+                            }
                             let local_mat = relative_mat * g.transform.compute_matrix();
                             let Some(mesh) = mesh_mgr.get_mesh(g.geo_hash) else {
                                 continue;
@@ -2160,19 +2234,30 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                     //如果和ngmr发生相减后， 没有复用了
                     // new_geos_info.cata_hash = Some(parent.to_url_refno());
                     new_geos_info.update_to_compound(Some(parent.to_url_refno().as_str()));
-                    let geo_hash = new_geos_info.get_inst_key_u64();
-                    p_inst.geo_hash = geo_hash;
-                    p_inst.transform = Transform::IDENTITY;
                     let mut mesh: PlantMesh = (final_manifold.clone()).into();
+                    let geo_hash = new_geos_info.get_inst_key_u64();
+                    let new_inst = EleInstGeo {
+                        geo_hash,
+                        refno: parent,
+                        owner_pos_refnos: Default::default(),
+                        geo_param: PdmsGeoParam::CompoundShape,
+                        pts: vec![],
+                        aabb: mesh.cal_aabb(),
+                        transform: Transform::IDENTITY,
+                        visible: true,
+                        is_tubi: false,
+                        geo_type: GeoBasicType::Compound,
+                    };
+
                     for f in neg_ms {
                         // #[cfg(target_os = "macos"|| target_os = "linux")]
                         // f.destroy();
                     }
                     // final_manifold.destroy();
                     let mut new_geos_data = parent_geos_data.clone();
-                    new_geos_data.insts = vec![p_inst];
+                    new_geos_data.insts = vec![new_inst];
                     new_geos_data.inst_key = geo_hash.to_string();
-                    // new_geos_data.aabb = d.aabb;
+                    // dbg!(&new_geos_data);
 
                     mesh_mgr.insert(
                         geo_hash,
@@ -2226,8 +2311,8 @@ async fn query_tubi_size(
             // &scom_info_map,
             axis_map,
         )
-        // .await
-        .unwrap_or_default();
+            // .await
+            .unwrap_or_default();
         for geom in &tubi_geoms_info.geometries {
             if let BoxImplied(d) = geom {
                 return Ok(TubiSize::BoxSize((d.width, d.height)));

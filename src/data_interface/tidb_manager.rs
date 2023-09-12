@@ -1338,6 +1338,7 @@ impl PdmsDataInterface for AiosDBManager {
                     "RS_SCOM_REFNO".into(),
                     cata_attmap.get_refno().unwrap().to_refno_str(),
                 );
+                // dbg!(&cata_attmap);
                 let params = cata_attmap.get_f64_vec("PARA").unwrap_or_default();
                 for i in 0..params.len() {
                     context.insert(
@@ -1400,8 +1401,8 @@ impl PdmsDataInterface for AiosDBManager {
                     }
                     let c_refno = c_att.get_refno().unwrap_or_default();
 
-                    if let Some(link_cat_am) = self.get_cat_attmap(c_refno) {
-                        let params = link_cat_am.get_f64_vec("PARA").unwrap_or_default();
+                    if let Some(attach_cat_am) = self.get_cat_attmap(c_refno) {
+                        let params = attach_cat_am.get_f64_vec("PARA").unwrap_or_default();
                         for i in 0..params.len() {
                             context.insert(
                                 format!("APAR{}", i + 1).into(),

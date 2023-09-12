@@ -532,6 +532,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 })
             }
             "SEXT" | "NSEX" => {
+                // dbg!(gmse);
                 CateGeoParam::Extrusion(CateExtrusionParam {
                     refno: gmse.refno,
                     pa: (gmse.paxises[0].clone()),
