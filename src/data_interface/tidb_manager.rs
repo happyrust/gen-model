@@ -859,8 +859,8 @@ impl PdmsDataInterface for AiosDBManager {
                     let Some(t) = self.get_refno_basic(plin_owner) else {
                         break;
                     };
-                    #[cfg(debug_assertions)]
-                    dbg!(t.get_type());
+                    // #[cfg(debug_assertions)]
+                    // dbg!(t.get_type());
                     if !HAS_PLIN_TYPES.contains(&t.get_type()) {
                         plin_owner = t.get_owner();
                         continue;
@@ -900,18 +900,18 @@ impl PdmsDataInterface for AiosDBManager {
                 } else {
                     Quat::from_mat3(&Mat3::from_cols(x_axis, y_axis, z_axis))
                 };
-                #[cfg(debug_assertions)]
-                {
-                    dbg!(quat_to_pdms_ori_str(&posl_quat));
-                    dbg!(quat_to_pdms_ori_str(&quat));
-                }
+                // #[cfg(debug_assertions)]
+                // {
+                //     dbg!(quat_to_pdms_ori_str(&posl_quat));
+                //     dbg!(quat_to_pdms_ori_str(&quat));
+                // }
                 new_quat = posl_quat * quat;
-                #[cfg(debug_assertions)]
-                {
-                    dbg!(quat_to_pdms_ori_str(&new_quat));
-                    dbg!(translation);
-                    dbg!(quat_to_pdms_ori_str(&rotation));
-                }
+                // #[cfg(debug_assertions)]
+                // {
+                //     dbg!(quat_to_pdms_ori_str(&new_quat));
+                //     dbg!(translation);
+                //     dbg!(quat_to_pdms_ori_str(&rotation));
+                // }
 
 
                 translation +=
@@ -925,20 +925,20 @@ impl PdmsDataInterface for AiosDBManager {
                 //没有POSL时，需要使用cutback的方向
                 rotation = rotation * new_quat;
                 if pos_line == "unset" && has_cut_back {
-                    dbg!(has_cut_back);
+                    // dbg!(has_cut_back);
                     //need to perpendicular to the Y axis
                     let mat3 = Mat3::from_quat(rotation);
                     let y_axis = mat3.y_axis;
                     let ref_axis = cut_dir;
-                    dbg!(cut_dir);
+                    // dbg!(cut_dir);
                     let x_axis = y_axis.cross(ref_axis).normalize();
                     let z_axis = x_axis.cross(y_axis).normalize();
                     let new_mat = Mat3::from_cols(x_axis, y_axis, z_axis);
-                    dbg!(new_mat);
+                    // dbg!(new_mat);
                     rotation = Quat::from_mat3(&new_mat);
                 }
-                #[cfg(debug_assertions)]
-                dbg!(quat_to_pdms_ori_str(&rotation));
+                // #[cfg(debug_assertions)]
+                // dbg!(quat_to_pdms_ori_str(&rotation));
             } else {
                 translation = translation + rotation * pos;
                 rotation = rotation * quat;
