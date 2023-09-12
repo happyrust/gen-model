@@ -2157,12 +2157,12 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             }
                         }
                     }
-                    dbg!(&boolean_ngmr_map);
+                    // dbg!(&boolean_ngmr_map);
                 }
 
                 println!("开始处理ngmr的负实体模型");
                 for (parent, ngmr_map) in boolean_ngmr_map {
-                    dbg!(parent);
+                    // dbg!(parent);
                     //这里优先取compound的数据参与计算，如果没有再使用原生的info数据
                     let Some(parent_geos_info) = shape_insts_data.get_final_inst_info(parent)else {
                         continue;
