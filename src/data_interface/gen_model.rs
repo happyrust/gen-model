@@ -503,7 +503,6 @@ pub fn gen_cata_single_geoms(
     design_refno: RefU64,
     brep_shape_map: &CateBrepShapeMap,
     refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
-    // scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
 ) -> anyhow::Result<RefU64> {
     let cur_ele = mgr
         .get_refno_basic(design_refno)
@@ -532,8 +531,7 @@ pub fn gen_cata_single_geoms(
             n_geometries,
             axis_map,
         } = geoms_info;
-        // dbg!(&geometries);
-        for (i, geom) in geometries.into_iter().enumerate() {
+        for geom in geometries{
             if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
                 brep_shape_map
                     .entry(design_refno)
@@ -541,7 +539,7 @@ pub fn gen_cata_single_geoms(
                     .push(cate_shape);
             }
         }
-        for (i, geom) in n_geometries.into_iter().enumerate() {
+        for geom in n_geometries{
             if let Some(mut cate_shape) = convert_to_brep_shapes(&geom) {
                 cate_shape.is_ngmr = true;
                 brep_shape_map
@@ -663,7 +661,6 @@ pub async fn gen_cata_geos(
                         ) else {
                             continue;
                         };
-                        let mut is_reuse_unit = false;
                         ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
                         for (ele_refno, shapes) in brep_shapes_map {
                             let Ok(Some(mut origin_trans)) =
@@ -1152,7 +1149,6 @@ pub async fn gen_cata_geos(
             branch_refno,
             tubi_cat_ref,
             is_hang,
-            // &scom_info_map,
             None,
         )
             .await?;
@@ -1573,8 +1569,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
         let mut bran_comp_eles = vec![];
         for refno in &target_cata_refnos {
             let att = mgr.get_attr_from_localdb(*refno).unwrap_or_default();
-
-            // let children = query_children_order_aql(&adb, *refno).await?;
             //必须按照顺序
             let children = mgr.query_children_eles_order(*refno, &[], &[]).await?;
             if children.is_empty() && !CATA_HAS_TUBI_GEO_NAMES.contains(&att.get_type()) {
