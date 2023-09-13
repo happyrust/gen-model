@@ -351,6 +351,26 @@ pub async fn query_refnos_ancestor_with_name_till_type_aql(arango_database: &ArD
     Ok(result)
 }
 
+/// 查询多个refno对应的owner的name,refno，type
+pub async fn query_refnos_owner_with_name_till_type_aql(arango_database: &ArDatabase, refnos: Vec<RefU64>) -> anyhow::Result<Vec<PdmsOwnerNameAql>> {
+    let refno_aql = refnos.into_iter().map(|refno| refno.to_url_refno()).collect::<Vec<_>>();
+    let aql = AqlQuery::new("
+    With @@pdms_eles,@@pdms_edges
+    for refno in @refnos
+    for v in 1 outbound concat('pdms_eles/',refno) @@pdms_edges
+        filter v!= null
+        return {
+            'refno':refno,
+            'owner':v._key,
+            'owner_noun':v.noun,
+            'owner_name':v.name
+        }").bind_var("refnos", refno_aql)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+    let result: Vec<PdmsOwnerNameAql> = arango_database.aql_query(aql).await?;
+    Ok(result)
+}
+
 /// 通过name查询参考号
 pub async fn query_refnos_from_names(names: Vec<String>, database: &ArDatabase, filter_types: Option<Vec<String>>)
                                      -> anyhow::Result<Vec<PdmsElement>> {

@@ -581,7 +581,6 @@ fn cal_sjus_value(sjus: &str, height: f32) -> f32 {
 pub async fn gen_cata_geos(
     mgr: Arc<AiosDBManager>,
     main_instance_mgr: Arc<RwLock<ShapeInstancesData>>,
-    // scom_info_map: Arc<RwLock<HashMap<RefU64, ScomInfo>>>,
     target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
     //branch 下按顺序的清单
     branch_map: Arc<DashMap<RefU64, Vec<PdmsElement>>>,

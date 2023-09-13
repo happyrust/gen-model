@@ -16,7 +16,6 @@ use aios_core::pdms_types::ser_refno_as_str;
 use aios_core::pdms_types::de_refno_from_key_str;
 use crate::api::element::query_id_from_name;
 use crate::api::room_code::query_room_code;
-use crate::aql_api::dtse_attr::query_ipara_from_bran;
 use crate::aql_api::pdms_element::query_id_from_names_aql;
 use crate::aql_api::pdms_room::{get_room_code_from_attr, query_room_code_from_owner, query_room_name_from_refno_aql};
 
@@ -88,7 +87,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
     let mut bore_size = Vec::new();
     let tubis = query_tubi_from_bran(bran_refno, database).await?;
     // 查询保温层厚度
-    let iparas = query_ipara_from_bran(bran_refno, aios_mgr).await?;
+    let iparas = aios_mgr.query_ipara_from_bran(bran_refno).await?;
     let ipara = *iparas.get(0).unwrap_or(&0.0) as f32;
     for tubi in &tubis {
         // 只考虑工艺管道

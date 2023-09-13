@@ -30,7 +30,7 @@ post(get_room_code_aql)
 todo
 
 11.一直向上查找仪控管道href连接最后一个的bran,然后返回bran的owner pipe的name (可以和10合并)
-todo
+post(get_traverse_foreign_name)
 
 12.获取指定向上层级的name，例如 elbo -> zone.name
 todo
