@@ -8,7 +8,7 @@ query_around_owner_within_radius(stru.refno, true, None, true, &["BRAN"])
 todo
 
 4.获取所属专业(SITE)和专业代码(ZONE)
-get_refnos_major_map
+post(get_refnos_belong_major)
 
 5.查询自定义类型(:SUPP)的name，找到该类型下所有的atta,若atta的name中包含该自定义类型的name，即返回owner(BRAN)的name
 

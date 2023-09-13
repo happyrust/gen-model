@@ -345,8 +345,8 @@ pub async fn query_refnos_ancestor_with_name_till_type_aql(arango_database: &ArD
             'owner_name':v.name
         }").bind_var("refnos", refno_aql)
         .bind_var("nouns", att_types)
-        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<PdmsOwnerNameAql> = arango_database.aql_query(aql).await?;
     Ok(result)
 }
@@ -532,9 +532,7 @@ pub async fn query_deep_children_refnos_fuzzy(
         filter z._key != null
         filter z.noun in @nouns
         return z._key
-    ",
-    )
-        .bind_var("ids", ids)
+    ", ).bind_var("ids", ids)
         .bind_var("nouns", nouns)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
@@ -565,10 +563,7 @@ pub async fn query_travel_children_aql(
         'noun':z.noun,
         'version':0,
         'children_count':0,
-    }
-    ",
-    )
-        .bind_var("id", refno_aql)
+    }", ).bind_var("id", refno_aql)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let results: Vec<PdmsElement> = arango_database.aql_query(aql).await.unwrap();
@@ -589,8 +584,7 @@ pub async fn query_travel_children_refnos_aql(
     for id in @ids
     for c in 0..10 inbound id @@pdms_edges
     return c._key
-    ", )
-        .bind_var("ids", ids)
+    ", ).bind_var("ids", ids)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<String> = arango_database.aql_query(aql).await?;
@@ -613,9 +607,7 @@ pub async fn query_travel_children_with_out_leaf_aql(
             return 1
         ) != 0
     return c._key
-    ",
-    )
-        .bind_var("id", refno_aql)
+    ", ).bind_var("id", refno_aql)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<String> = arango_database.aql_query(aql).await?;
@@ -649,9 +641,7 @@ FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
         exist_geo: exist,
         group_refnos: g[*].v._key,
     }
-    ",
-        )
-            .bind_var("skip_exist", skip_exist)
+    ", ).bind_var("skip_exist", skip_exist)
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
