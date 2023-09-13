@@ -34,7 +34,7 @@ pub fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
     let geoms = &geom_info.geometries;
     if geoms.len() == 0 { return Ok(false); }
     let type_name = att.get_type();
-    let mut plane_normal = Vec3::Z;
+    let mut plax = Vec3::Z;
     let mut extrude_dir = Vec3::Z;
     let mut drns = att.get_vec3("DRNS").unwrap_or_default().normalize();
     let mut drne = att.get_vec3("DRNE").unwrap_or_default().normalize();
@@ -126,19 +126,14 @@ pub fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
             //还原成相对坐标系下的拉升方向
             for (i, geom) in geoms.iter().enumerate() {
                 if let CateGeoParam::Profile(profile) = geom {
-                    if let CateProfileParam::SPRO(spro) = profile {
-                        plane_normal = spro.normal_axis.normalize();
-                    }
-                    if let CateProfileParam::SANN(s) = profile {
-                        plane_normal = s.paxis.as_ref().map(|x| x.dir).unwrap_or(Vec3::Y);
-                    }
+                    plax = profile.get_plax();
                     let bangle = att.get_f32("BANG").unwrap_or_default();
                     let solid = SweepSolid {
                         profile: profile.clone(),
                         drns: drns.normalize_or_zero(),
                         drne: drne.normalize_or_zero(),
                         bangle,
-                        plane_normal,
+                        plax,
                         extrude_dir,
                         height,
                         path: SweepPath3D::Line(Line3D {
@@ -166,12 +161,7 @@ pub fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         for spine in spine_paths {
             for (i, geom) in geoms.iter().enumerate() {
                 if let CateGeoParam::Profile(profile) = geom {
-                    if let CateProfileParam::SPRO(spro) = profile {
-                        plane_normal = spro.normal_axis.normalize();
-                    }
-                    if let CateProfileParam::SANN(s) = profile {
-                        plane_normal = s.paxis.as_ref().map(|x| x.dir).unwrap_or(Vec3::Y);
-                    }
+                    plax = profile.get_plax();
                     let (paths, transform) = spine.generate_paths();
                     let bangle = att.get_f32("BANG").unwrap_or_default();
                     for path in paths {
@@ -180,7 +170,7 @@ pub fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                             drns: drns.normalize_or_zero(),
                             drne: drne.normalize_or_zero(),
                             bangle,
-                            plane_normal,
+                            plax,
                             extrude_dir,
                             height: 0.0,
                             path,
