@@ -266,13 +266,10 @@ impl AiosDBManager {
         if foreigns.is_empty() { return None; }
         while let Ok(att) = self.get_attr_from_localdb(refno)  {
             let key = foreigns.get(0).unwrap_or(foreigns.last().unwrap());
-            dbg!(&refno);
-            dbg!(&self.get_type_name(refno));
             if func(refno) {
-                target = Some(refno);
-            } else {
                 break;
             }
+            target = Some(refno);
             if let Some(r) = att.get_foreign_refno(key){
                 refno = r;
             }
