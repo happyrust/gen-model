@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use sqlx::{MySql, Pool};
 use std::collections::{HashMap, HashSet};
+use std::process::id;
 use std::str::FromStr;
 use crate::graph_db::structs::{PdmsEleEdge, PdmsEleGraphNode, PdmsMdbEdge};
 
@@ -169,7 +170,6 @@ impl AiosDBManager {
                 sort v.order
                 return distinct v
         "#, expression);
-        dbg!(&aql_string);
         let aql =
             AqlQuery::new(aql_string.as_str());
 
@@ -179,32 +179,44 @@ impl AiosDBManager {
     }
 
 
-
-
-
     // pub async fn query_world_element(&self, expression: &str) -> anyhow::Result<PdmsElement> {
-        // let aql_string = format!(r#"
-        //     with pdms_mdbs, pdms_eles
-        //     for v,e,p in pdms_mdbs
-        //         filter {}
-        //         let doc = document(pdms_eles, v._key)
-        //         return
-        //         { '_key':child._key,
-        //     'owner':child.owner,
-        //     'name':child.name,
-        //     'noun':child.noun,
-        //     'order': child.order,
-        //     'children_count':length(for c in 1 inbound child._id pdms_edges
-        //                         return 1 )}
-        //
-        //
-        // "#, expression);
-        // let aql =
-        //     AqlQuery::new(aql_string.as_str());
-        //
-        // let result = self.get_arango_db().await?
-        //     .aql_query::<PdmsMdbEdge>(aql).await?;
-        // Ok(result)
+    // let aql_string = format!(r#"
+    //     with pdms_mdbs, pdms_eles
+    //     for v,e,p in pdms_mdbs
+    //         filter {}
+    //         let doc = document(pdms_eles, v._key)
+    //         return
+    //         { '_key':child._key,
+    //     'owner':child.owner,
+    //     'name':child.name,
+    //     'noun':child.noun,
+    //     'order': child.order,
+    //     'children_count':length(for c in 1 inbound child._id pdms_edges
+    //                         return 1 )}
+    //
+    //
+    // "#, expression);
+    // let aql =
+    //     AqlQuery::new(aql_string.as_str());
+    //
+    // let result = self.get_arango_db().await?
+    //     .aql_query::<PdmsMdbEdge>(aql).await?;
+    // Ok(result)
     // }
+}
 
+/// 通过 refnos 查询 对应的 name
+pub async fn query_names_from_refnos_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsRefnoNameAql>> {
+    let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, refnos);
+    let aql = AqlQuery::new("
+    with @@pdms_eles
+    for id in @ids
+    let ele = document(id)
+    return {
+        'refno': ele._key,
+        'name': ele.name,
+    }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("ids", ids);
+    let result = database.aql_query::<PdmsRefnoNameAql>(aql).await?;
+    Ok(result)
 }
