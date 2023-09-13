@@ -1,5 +1,5 @@
 #同步文件配置false
-total_sync = false
+total_sync = true
 enable_log = false
 sync_graph_db = true
 sync_tidb = false
@@ -62,11 +62,11 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
 #included_db_files = ["ams7334_0001", "ams7353_0001", "ams7741_0001", "ams7998_0001"]
 #included_db_files = ["ams7997_0001"]
-included_db_files = ["ams1112_0001", "acp7320_0001"]
+#included_db_files = ["ams1112_0001", "ams7329_0001", "acp7001_0001"]
 #included_db_files = ["acp7002_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 #manual_db_nums = [7354]
-manual_db_nums = [1112]  #, 8000
+#manual_db_nums = [1112]  #, 8000
 plat_url = ""
 
 #puhua
@@ -93,8 +93,8 @@ puhua_database_password = ""
 # debug_root_refnos = ["23734/3041"]
 
 #打洞的问题，需要重构一下own pos refnos
-#debug_root_refnos = ["23713/6093"]
-debug_root_refnos = ["24383/73928"]
+#debug_root_refnos = ["17496/254419"]
+#debug_root_refnos = ["24383/73928"]
 #debug_root_refnos = ["25688/4595", ]
 #debug_root_refnos = ["23713/6104"]
 # debug_root_refnos = ["25688/7954", "17496/202345", "9304/2", ]
