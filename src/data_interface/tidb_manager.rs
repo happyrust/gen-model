@@ -54,6 +54,7 @@ use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
 
 // #[derive(Debug)]
 pub struct AiosDBManager {
@@ -396,20 +397,28 @@ impl PdmsDataInterface for AiosDBManager {
         mdb_name: &str,
         module: &str,
     ) -> anyhow::Result<PdmsElement> {
-        //这里还需要将project的信息利用起来
-        let string = format!(
-            "v.mdb_name==\"/{}\" and v.db_type==\"{}\"",
-            mdb_name, module
-        );
-        let mut ele_nodes = self.query_ele_edges_by_expression(&string).await?;
-        //从mdb 开始往下找，找到world
-        if let Some(node) = ele_nodes.pop() {
-            let mut children = self
-                .query_children_eles_order(node.owner, &[], &[module])
-                .await?;
-            return children.pop().ok_or(anyhow!("World not exist"));
+        //todo 这里还需要将project的信息利用起来
+        let hash_name = format!("{project}_{mdb_name}_{module}");
+        if GLOBAL_MDB_WORLD_MAP.contains_key(&hash_name) {
+            Ok(GLOBAL_MDB_WORLD_MAP.get(&hash_name).unwrap().clone())
+        }else{
+            let string = format!(
+                "v.mdb_name==\"/{}\" and v.db_type==\"{}\"",
+                mdb_name, module
+            );
+            let mut ele_nodes = self.query_ele_edges_by_expression(&string).await?;
+            //从mdb 开始往下找，找到world
+            if let Some(node) = ele_nodes.pop() {
+                let mut children = self
+                    .query_children_eles_order(node.owner, &[], &[module])
+                    .await?;
+                if let Some(ele) = children.pop() {
+                    GLOBAL_MDB_WORLD_MAP.insert(hash_name, ele.clone());
+                    return Ok(ele);
+                }
+            }
+            Err(anyhow!("World not exist"))
         }
-        Ok(Default::default())
     }
 
     ///获得world节点
