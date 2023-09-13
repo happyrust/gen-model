@@ -1264,6 +1264,32 @@ pub async fn get_uda_type_refnos_from_select_refnos(select_refnos: Vec<RefU64>,
     Ok(result)
 }
 
+/// 查询该节点下某个类型节点的name，包含选中节点的name,并返回该节点
+pub async fn query_refnos_contains_select_name(select_refnos: Vec<RefU64>, att_type: &str, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
+    let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, select_refnos);
+    let aql = AqlQuery::new("
+    with @@pdms_eles,@@pdms_edges
+    for id in @ids
+    let ele = document(id)
+    let ele_name = SUBSTRING(ele.name,1) // 去掉name前面的 '/'
+    for v in 0..5 inbound id pdms_edges
+    filter v.noun == @noun
+    filter CONTAINS(v.name,ele_name )
+    return {
+            '_key':v._key,
+            'owner':v.owner,
+            'name':v.name,
+            'noun':v.noun,
+            'version':0,
+            'children_count':0,
+        }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("ids", ids)
+        .bind_var("noun", att_type);
+    let result = database.aql_query::<PdmsElement>(aql).await?;
+    Ok(result)
+}
+
 #[tokio::test]
 async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Result<()> {
     // use config::{Config, ConfigError, Environment, File};
