@@ -232,6 +232,7 @@ impl AiosDBManager {
         Err(anyhow::anyhow!("not exist"))
     }
 
+    ///过滤父节点
     pub fn get_ancestor_refno_till_type(&self, mut refno: RefU64, att_types: &[&str]) -> Option<RefU64> {
         let types = att_types.iter().map(|&x| qualified_table_name(x).to_uppercase()).collect::<Vec<_>>();
         let types = types.iter().map(|x| x.as_str()).collect::<Vec<_>>();
@@ -242,6 +243,19 @@ impl AiosDBManager {
             refno = basic.get_owner();
         }
         None
+    }
+
+
+    pub fn traverse_ancestor(&self, mut refno: RefU64, func: impl Fn(RefU64) -> bool) -> Option<RefU64> {
+        let mut target = None;
+        while let Some(basic) = self.get_refno_basic(refno) {
+            if func(refno) {
+                target = Some(refno);
+                break;
+            }
+            refno = basic.get_owner();
+        }
+        target
     }
 
     ///按照顺序返回子节点的PdmsElement数据

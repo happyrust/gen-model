@@ -39,6 +39,8 @@ pub trait PdmsDataInterface: Send + Sync {
     ///从本地获取属性数据
     fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
 
+    fn get_full_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
+
     ///从本地获取children
     fn get_children_from_localdb(&self, refno: RefU64) -> anyhow::Result<RefU64Vec>;
 

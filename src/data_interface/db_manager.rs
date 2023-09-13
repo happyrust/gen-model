@@ -11,6 +11,7 @@ use bitflags::bitflags;
 use dashmap::DashMap;
 
 bitflags! {
+    #[derive(Copy, Clone, Eq, PartialEq)]
     pub struct GeoEnum: i32 {
         const PRIM = 0x1 << 1;
         const LOOP_AND_PLOO = 0x1 << 2;
@@ -90,7 +91,7 @@ impl AiosDBManager {
                     let Ok(name) = self.get_name(root_refno).await else {
                         continue;
                     };
-                    let is_leaf = self.get_children_refs(root_refno).await?.len() == 0;
+                    let is_leaf = self.get_children_refs(root_refno).await.unwrap_or_default().len() == 0;
                     if is_leaf {
                         if let Some(k) = self.query_element(root_refno).await? {
                             let mut add = false;
@@ -176,7 +177,7 @@ impl AiosDBManager {
             let Ok(name) = self.get_name(root_refno).await else {
                 continue;
             };
-            let is_leaf = self.get_children_refs(root_refno).await?.len() == 0;
+            let is_leaf = self.get_children_refs(root_refno).await.unwrap_or_default().len() == 0;
             let mut check_parent = is_parent;
             if is_leaf {
                 if let Some(k) = self.query_element(root_refno).await? {

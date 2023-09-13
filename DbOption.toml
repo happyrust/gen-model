@@ -1,17 +1,16 @@
 #同步文件配置false
-total_sync = true
+total_sync = false
 enable_log = false
 sync_graph_db = true
-sync_tidb = true
+sync_tidb = false
 sync_localdb = true
 incr_sync = false
 replace_dbs = true
+sync_chunk_size = 100_0000
 
 #项目设置
-project_path = "D:/new/AVEVA/Plant/Projects12.1.SP4"
+project_path = "D:/AVEVA/Projects/E3D2.1" 
 included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
-#included_projects = ["SCB", "ZDJ"]  #"AvevaPlantSample",
-#included_projects = ["AvevaMarineSample"]  #"AvevaPlantSample",
 
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
@@ -22,8 +21,8 @@ gen_model = true
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树
-gen_spatial_tree = true
-load_spatial_tree = true
+gen_spatial_tree = false
+load_spatial_tree = false
 save_spatial_tree_to_db = true
 gen_model_batch_size = 100
 
@@ -32,29 +31,29 @@ gen_model_batch_size = 100
 arangodb_database = "ams"
 multi_threads = true
 only_sync_sys = false
-arangodb_url = "http://127.0.0.1:8529"
+arangodb_url = "http://192.168.31.179:8529"
 rebuild_ssc_tree = false
 arangodb_user = "root"
 arangodb_password = ""
 
 #tidb 配置
-ip = "127.0.0.1"
+ip = "192.168.31.179"
 user = "root"
 password = ""
-port = "3306"
-#port = "4000"
+#port = "3306"
+port = "4000"
 sql_threads_number = 50
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
 #服务器启动配置
-server_release_ip = "127.0.0.1:9099"
+server_release_ip = "192.168.31.179:9099"
 
 
 #调试选项
 replace_mesh = true
 save_model_mesh_to_graph_db = true
-need_sync_refno_basic = true  #是否重新生成 refno_basic 缓存
-reset_mdb_project =  true     #是否重新生成 mdb 缓存
+need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
+reset_mdb_project =  false     #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
@@ -63,11 +62,11 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
 #included_db_files = ["ams7334_0001", "ams7353_0001", "ams7741_0001", "ams7998_0001"]
 #included_db_files = ["ams7997_0001"]
-#included_db_files = ["amssys", "ams1112_0001", "ams7997_0001"]
+included_db_files = ["ams1112_0001", "acp7320_0001"]
 #included_db_files = ["acp7002_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 #manual_db_nums = [7354]
-#manual_db_nums = [7997]  #, 8000
+manual_db_nums = [1112]  #, 8000
 plat_url = ""
 
 #puhua
@@ -78,9 +77,29 @@ puhua_database_password = ""
 #joint还有问题，方位对齐的问题
 #debug_root_refnos = ["25688/48687"]
 
-#debug_root_refnos = ["17496/178935"]
-#debug_root_refnos = ["24383/80211"]
-#debug_root_refnos = ["24381/180972"]
+
+#ngmr的孔洞问题，需要调整组织，own_pos_refnos 要设为多个
+#debug_root_refnos =["23713/6102"]
+
+# debug_root_refnos =["24383/87588"]
+#电动阀门的问题
+# debug_root_refnos =["24383/66748"]
+# todo JUSL还是有问题，没有弄得太清楚，如果有SNODE的情况，对齐方式会有所不同
+# debug_root_refnos =["23736/64"]
+
+# debug_root_refnos =["23740/498", "17496/170985", "23734/3039"]
+
+
+# debug_root_refnos = ["23734/3041"]
+
+#打洞的问题，需要重构一下own pos refnos
+#debug_root_refnos = ["23713/6093"]
+debug_root_refnos = ["24383/73928"]
+#debug_root_refnos = ["25688/4595", ]
+#debug_root_refnos = ["23713/6104"]
+# debug_root_refnos = ["25688/7954", "17496/202345", "9304/2", ]
+#debug_root_refnos = ["23738/595"]
+#debug_root_refnos = ["17496/118542", " 24381/35931", "24381/35902"]
 
 #楼板FIT显示
 # debug_root_refnos = ["25688/72092", "25688/75909"]
@@ -337,9 +356,9 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/172226"]
 
 #指定哪些根节点下面是房间，以FRMW为一个整体
-#room_root_refnos = ["24381/34110"]
+room_root_refnos = ["24381/35795"]
 #room_root_refnos = ["24381/35342", "24381/35795", "24381/36068"]
-room_root_refnos = ["24381/36068"]
+#room_root_refnos = ["24381/36068"]
 
 #room_root_refnos = ["24381/35622"]
 #24381_105593\

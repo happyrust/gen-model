@@ -286,7 +286,7 @@ pub fn find_data_in_origin_file(input: &[u8], buf: &[u8]) -> Option<OldDataPage>
 }
 
 /// 将修改的值写入到 DataPage中
-pub fn convert_new_data_page(mut page: OldDataPage, data: ModifyNewData, pdms_database_info: PdmsDatabaseInfo, latest_page_no: u32) -> Option<Vec<u8>> {
+pub fn convert_new_data_page(mut page: OldDataPage, data: ModifyNewData, pdms_database_info: &PdmsDatabaseInfo, latest_page_no: u32) -> Option<Vec<u8>> {
     let mut new_data = vec![];
     let attr_type = data.get_type_hash_u32();
     let noun = data.get_noun_hash_u32();
@@ -498,7 +498,6 @@ pub enum GlobalPage {
 impl ModifyData {
     pub fn convert_new_modify_data(self) -> Option<Vec<u8>> {
         // 读取info文件
-        let info = get_default_pdms_db_info();
         // 获得最新的session_page_num
         let latest_session_page_num = parse_to_u32(&self.old_file[40..44]);
         // 获得最新的page_num
@@ -514,7 +513,6 @@ impl ModifyData {
             attr_type: self.attr_type.clone(),
             noun_type: self.noun_type.clone(),
             data: self.data.clone(),
-            info_map: info,
         };
         let data_page = data_page.convert_new_data_page_modify(&self.old_file);
         if data_page.is_none() { return None; }

@@ -47,7 +47,7 @@ impl AiosDBManager {
 
     ///获得变换后的mesh
     pub async fn get_transformed_plant_mesh(&self, geo_hash: u64, t: &Transform) -> anyhow::Result<Option<PlantMesh>> {
-        self.get_plant_mesh(geo_hash).await.map(|x| x.map(|x| x.transform_by(&t.compute_matrix())))
+        self.get_plant_mesh(geo_hash).await.map(|x| x.map(|x| x.transform_by(&t.compute_matrix().as_dmat4())))
     }
 
     ///获得变换后的mesh的标高

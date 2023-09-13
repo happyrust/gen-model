@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{Read, Write};
+use aios_core::get_default_pdms_db_info;
 use aios_core::pdms_types::{AttrVal, PdmsDatabaseInfo, RefU64};
 use aios_core::pdms_types::AttrVal::{BoolType, DoubleArrayType};
 use aios_core::tool::db_tool::db1_hash;
@@ -13,8 +14,6 @@ pub struct DataPageModify {
     pub attr_type: String,
     pub noun_type: String,
     pub data: AttrVal,
-    // pdms all_attr_info.json文件中的值
-    pub info_map: PdmsDatabaseInfo,
 }
 
 impl DataPageModify {
@@ -29,7 +28,7 @@ impl DataPageModify {
             noun_type: self.noun_type,
             data: self.data,
         };
-        convert_new_data_page(latest_data_page, modify_data_page, self.info_map, self.last_page_no)
+        convert_new_data_page(latest_data_page, modify_data_page, get_default_pdms_db_info(), self.last_page_no)
     }
 }
 
