@@ -65,6 +65,9 @@ use rayon::prelude::*;
 
 pub const TUBI_TOL: f32 = 10.0f32;
 
+// project + mdb + module
+pub static GLOBAL_MDB_WORLD_MAP: Lazy<DashMap<String, PdmsElement>> = Lazy::new(DashMap::new);
+
 static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> = Lazy::new(|| {
     let mut m = HashMap::new();
     m.insert("EQUI", PdmsGenericType::EQUI);

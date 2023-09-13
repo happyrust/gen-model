@@ -1,4 +1,3 @@
-
 use aios_core::water_calculation::*;
 #[cfg(feature = "opencascade_rs")]
 use opencascade::adhoc::AdHocShape;
@@ -28,9 +27,7 @@ use std::fs;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::Write;
-
-
-
+use std::rc::Rc;
 
 
 /// 将数据保存至图数据库
@@ -53,8 +50,8 @@ pub async fn save_stp_data_to_arangodb(
                 &database,
                 true,
             )
-            .await
-            .unwrap();
+                .await
+                .unwrap();
         } else {
             let _ = save_arangodb_doc(
                 send_value,
@@ -62,8 +59,8 @@ pub async fn save_stp_data_to_arangodb(
                 &database,
                 false,
             )
-            .await
-            .unwrap();
+                .await
+                .unwrap();
         }
     }
     "Ok".to_string()
@@ -86,7 +83,6 @@ pub async fn export_stp(
 }
 
 
-
 #[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp
 pub async fn export_stp(
@@ -106,12 +102,11 @@ pub async fn export_stp(
             GeoBasicType::Neg,
             GeoBasicType::CateCrossNeg,
         ]),
-    )
-    .await?;
+    ).await?;
 
     let mut total_shapes_map: HashMap<RefU64, Shape> = HashMap::default();
     //one to many relationship
-    let mut boolean_map: BTreeMap<RefU64, Vec<(RefU64, Shape)>> = BTreeMap::new();
+    let mut boolean_map: BTreeMap<RefU64, Vec<(RefU64, Rc<Shape>)>> = BTreeMap::new();
     for (refno, geos_info) in &shapes_data.inst_info_map {
         //被封堵了的，相当于没有出现过，直接忽略
         if all_plugged_hole_refnos.contains(refno) {
@@ -124,31 +119,32 @@ pub async fn export_stp(
 
         let mut transform = geos_info.world_transform;
         if let Some((shape, own_pos_refnos)) = insts_data.gen_occ_shape(&transform) {
-            if !own_pos_refnos.is_empty(){
-                //需要进行缩放处理，宽度为门的1/10，高度固定为100
+            if !own_pos_refnos.is_empty() {
+                let t_shape = if is_door {
+                    let mut box_shape = AdHocShape::make_box(100.0, 100.0, 100.0).0;
+                    box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
+                    Rc::new(box_shape)
+                } else {
+                    Rc::new(shape)
+                };
                 for o in own_pos_refnos {
                     if !o.is_valid() {
                         continue;
                     }
-                    if is_door {
-                        // transform =  Transform::from_scale(Vec3::new(1.0, 1.0, 0.3)) * transform;
-                        let mut box_shape = AdHocShape::make_box(100.0, 100.0, 100.0).0;
-                        box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
-                        boolean_map.entry(o).or_default().push((*refno, box_shape));
-                        //door 已经处理，不需要处理第二次
-                        continue;
-                    }else{
-                        boolean_map.entry(o).or_default().push((*refno, shape));
-                    }
+                    boolean_map.entry(o).or_default().push((*refno, t_shape.clone()));
                 }
-            } else{
+                if is_door {
+                    //door 已经处理，不需要处理第二次
+                    continue;
+                }
+            } else {
                 total_shapes_map.insert(*refno, shape);
             }
         }
 
 
         let mut ngmr_shapes = insts_data.gen_ngmr_occ_shapes(&transform);
-        for (mut o, mut shape) in  ngmr_shapes {
+        for (mut refnos, mut shape) in ngmr_shapes {
             //需要进行缩放处理，宽度为门的1/10，高度固定为100
             if is_door {
                 //2150 1000 700
@@ -156,13 +152,19 @@ pub async fn export_stp(
                 let inst = &insts_data.insts[0];
                 let extents = insts_data.aabb.unwrap().extents();
 
-                transform = Transform::from_translation(Vec3::new(0.0, 0.0, -extents.x/2.0)) *  transform * inst.transform ;
-                let mut box_shape = AdHocShape::make_box(100.0, extents.y as f64 / 10.0 , extents.z as f64).0;
+                transform = Transform::from_translation(Vec3::new(0.0, 0.0, -extents.x / 2.0)) * transform * inst.transform;
+                let mut box_shape = AdHocShape::make_box(100.0, extents.y as f64 / 10.0, extents.z as f64).0;
                 box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
-                boolean_map.entry(o).or_default().push((*refno, box_shape));
+                let t_shape = Rc::new(box_shape);
+                refnos.into_iter().for_each(|o|{
+                    boolean_map.entry(o).or_default().push((*refno, t_shape.clone()));
+                });
                 break;
-            }else{
-                boolean_map.entry(o).or_default().push((*refno, shape));
+            } else {
+                let t_shape = Rc::new(shape);
+                refnos.into_iter().for_each(|o|{
+                    boolean_map.entry(o).or_default().push((*refno, t_shape.clone()));
+                });
             }
         }
     }
@@ -199,7 +201,7 @@ pub async fn query_water_calculation_data(
         "let v = document('water_calculation',@_key)\
         return unset(v , '_id','_rev') ",
     )
-    .bind_var("_key", key_value);
+        .bind_var("_key", key_value);
     let data_vec: Vec<FloodingStpToArangodb> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }
