@@ -824,7 +824,8 @@ impl PdmsDataInterface for AiosDBManager {
             let c_ref = att.get_foreign_refno("CREF").unwrap_or_default();
             let mut has_cut_back = false;
             let mut cut_dir = Vec3::Y;
-            if att.contains_attr_name("CUTB") {
+            //如果posl有，就不起用CUTB，相当于CUTB是一个手动对齐
+            if att.get_str("POSL").is_none() && att.contains_attr_name("CUTB") {
                 has_cut_back = true;
                 cut_dir = att.get_vec3("CUTP").unwrap_or(cut_dir);
                 let cut_len = att.get_f32("CUTB").unwrap_or_default();
