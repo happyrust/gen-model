@@ -36,6 +36,10 @@ pub trait PdmsDataInterface: Send + Sync {
     ///获得参考号类型
     fn get_type_name(&self, refno: RefU64) -> String;
 
+    fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64>;
+
+    fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64>;
+
     ///从本地获取属性数据
     fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
 

@@ -148,6 +148,30 @@ impl PdmsDataInterface for AiosDBManager {
             .unwrap_or("unset".to_string())
     }
 
+    ///获得下一个构件的参考号
+    fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64>{
+        let owner = self.get_owner(refno);
+        let children_refnos = self.get_children_from_localdb(owner)?;
+        let pos = children_refnos.iter().position(|x| *x == refno).unwrap_or_default();
+        if pos == children_refnos.len() - 1 {
+            self.get_next(owner)
+        }else{
+            Ok(children_refnos[pos + 1])
+        }
+    }
+
+    ///获得上一个构件的参考号
+    fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64>{
+        let owner = self.get_owner(refno);
+        let children_refnos = self.get_children_from_localdb(owner)?;
+        let pos = children_refnos.iter().position(|x| *x == refno).unwrap_or_default();
+        if pos == 0 {
+            Ok(owner)
+        }else{
+            Ok(children_refnos[pos - 1])
+        }
+    }
+
     ///从本地数据库获取属性
     fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
         for project in &self.db_option.included_projects {
@@ -1332,21 +1356,23 @@ impl PdmsDataInterface for AiosDBManager {
                         let v = axis_map.get(&arrive).unwrap();
                         context.insert("ARRWID".into(), v.pwidth.to_string());
                         context.insert("ARRHEI".into(), v.pheight.to_string());
+                        context.insert("ABOR".into(), v.pbore.to_string());
                     }
 
                     if axis_map.contains_key(&leave) {
                         let v = axis_map.get(&leave).unwrap();
                         context.insert("LEAWID".into(), v.pwidth.to_string());
                         context.insert("LEAHEI".into(), v.pheight.to_string());
+                        context.insert("LBOR".into(), v.pbore.to_string());
                     }
                 }
             }
             //todo 保温层厚度参数
-            let iparams = self.query_ipara_from_ele(desi_refno).unwrap_or_default();
-            for i in 0..iparams.len() {
-                context.insert(format!("IPAR{}", i + 1).into(), iparams[i].to_string().into());
-                context.insert(format!("IPARM{}", i + 1).into(), iparams[i].to_string().into());
-            }
+            // let iparams = self.query_ipara_from_ele(desi_refno).unwrap_or_default();
+            // for i in 0..iparams.len() {
+            //     context.insert(format!("IPAR{}", i + 1).into(), iparams[i].to_string().into());
+            //     context.insert(format!("IPARM{}", i + 1).into(), iparams[i].to_string().into());
+            // }
 
             context.insert("RS_DES_REFNO".into(), desi_refno.to_refno_str());
             //添加cata的信息
