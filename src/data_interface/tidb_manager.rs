@@ -54,6 +54,7 @@ use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
 
 // #[derive(Debug)]
 pub struct AiosDBManager {
@@ -396,20 +397,28 @@ impl PdmsDataInterface for AiosDBManager {
         mdb_name: &str,
         module: &str,
     ) -> anyhow::Result<PdmsElement> {
-        //这里还需要将project的信息利用起来
-        let string = format!(
-            "v.mdb_name==\"/{}\" and v.db_type==\"{}\"",
-            mdb_name, module
-        );
-        let mut ele_nodes = self.query_ele_edges_by_expression(&string).await?;
-        //从mdb 开始往下找，找到world
-        if let Some(node) = ele_nodes.pop() {
-            let mut children = self
-                .query_children_eles_order(node.owner, &[], &[module])
-                .await?;
-            return children.pop().ok_or(anyhow!("World not exist"));
+        //todo 这里还需要将project的信息利用起来
+        let hash_name = format!("{project}_{mdb_name}_{module}");
+        if GLOBAL_MDB_WORLD_MAP.contains_key(&hash_name) {
+            Ok(GLOBAL_MDB_WORLD_MAP.get(&hash_name).unwrap().clone())
+        } else {
+            let string = format!(
+                "v.mdb_name==\"/{}\" and v.db_type==\"{}\"",
+                mdb_name, module
+            );
+            let mut ele_nodes = self.query_ele_edges_by_expression(&string).await?;
+            //从mdb 开始往下找，找到world
+            if let Some(node) = ele_nodes.pop() {
+                let mut children = self
+                    .query_children_eles_order(node.owner, &[], &[module])
+                    .await?;
+                if let Some(ele) = children.pop() {
+                    GLOBAL_MDB_WORLD_MAP.insert(hash_name, ele.clone());
+                    return Ok(ele);
+                }
+            }
+            Err(anyhow!("World not exist"))
         }
-        Ok(Default::default())
     }
 
     ///获得world节点
@@ -815,7 +824,8 @@ impl PdmsDataInterface for AiosDBManager {
             let c_ref = att.get_foreign_refno("CREF").unwrap_or_default();
             let mut has_cut_back = false;
             let mut cut_dir = Vec3::Y;
-            if att.contains_attr_name("CUTB") {
+            //如果posl有，就不起用CUTB，相当于CUTB是一个手动对齐
+            if att.get_str("POSL").is_none() && att.contains_attr_name("CUTB") {
                 has_cut_back = true;
                 cut_dir = att.get_vec3("CUTP").unwrap_or(cut_dir);
                 let cut_len = att.get_f32("CUTB").unwrap_or_default();
@@ -1277,6 +1287,8 @@ impl PdmsDataInterface for AiosDBManager {
                 context.insert(format!("DDES{}", i + 1).into(), desp[i].to_string().into());
                 context.insert(format!("DESP{}", i + 1).into(), desp[i].to_string().into());
             }
+
+
             let height = desi_att.get_as_string("HEIG").unwrap_or("0.0".into());
             context.insert(DDHEIGHT_STR.into(), (height.clone()));
             let angle = desi_att.get_as_string("ANGL").unwrap_or("0.0".into());
@@ -1330,6 +1342,11 @@ impl PdmsDataInterface for AiosDBManager {
                 }
             }
             //todo 保温层厚度参数
+            let iparams = self.query_ipara_from_ele(desi_refno).unwrap_or_default();
+            for i in 0..iparams.len() {
+                context.insert(format!("IPAR{}", i + 1).into(), iparams[i].to_string().into());
+                context.insert(format!("IPARM{}", i + 1).into(), iparams[i].to_string().into());
+            }
 
             context.insert("RS_DES_REFNO".into(), desi_refno.to_refno_str());
             //添加cata的信息

@@ -715,9 +715,10 @@ pub struct PdmsNodeMajor {
 pub async fn query_refnos_belong_zones(refnos: Vec<RefU64>, database: &Database) -> anyhow::Result<Vec<PdmsNodeMajor>> {
     let refnos = refnos.into_iter().map(|x| x.to_url_refno()).collect::<Vec<_>>();
     let aql = AqlQuery::new("
+    With @@pdms_eles,@@pdms_edges
     for refno in @refnos
         let node = document(@@pdms_eles,refno)
-        for v in 0..10 outbound node._id pdms_edges
+        for v in 0..10 outbound node._id @@pdms_edges
             filter v.noun == 'ZONE'
             return {
                 'refno':node._key,
@@ -727,7 +728,8 @@ pub async fn query_refnos_belong_zones(refnos: Vec<RefU64>, database: &Database)
                 'zone_name':v.name,
                 'major':v.major
        }").bind_var("refnos", refnos)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION);
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges",AQL_PDMS_EDGES_COLLECTION);
     let result = database.aql_query::<PdmsNodeMajor>(aql).await?;
     Ok(result)
 }
@@ -735,16 +737,17 @@ pub async fn query_refnos_belong_zones(refnos: Vec<RefU64>, database: &Database)
 /// 保存房间下的元件
 pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Result<()> {
     // 找到图数据库中所有的房间
-    let rooms = query_all_room_aql(database).await?;
+    let rooms = query_all_room_aql(database).await.unwrap();
     let owner_types = vec!["BRAN".to_string(), "STRU".to_string(), "REST".to_string(), "EQUI".to_string()];
     let zone_type = vec!["PIPESU", "RACKSU", "INSTSU", "WATRSU"]; // 特殊处理得zone专业代码
     for room in rooms {
+        dbg!(&room.room_name);
         // 依次查询每个房间下所有的节点
-        let nodes = query_room_refno_from_room_refno_aql(room.refno, database).await?;
+        let nodes = query_room_refno_from_room_refno_aql(room.refno, database).await.unwrap();
         // 查询房间下所有节点所属的zone的专业号和所在 bran stru rest equi 的参考号和name
-        let zone_major_infos = query_refnos_belong_zones(nodes.clone(), database).await?;
+        let zone_major_infos = query_refnos_belong_zones(nodes.clone(), database).await.unwrap();
         let owners = query_refnos_ancestor_with_name_till_type_aql(database, nodes,
-                                                                   owner_types.clone()).await?;
+                                                                   owner_types.clone()).await.unwrap();
         let owners = owners.into_iter().map(|x| (x.refno, x)).collect::<HashMap<RefU64, PdmsOwnerNameAql>>();
         // 根据不同zone的分类规则来划分节点所在位置
         let mut ssc_nodes = Vec::new();
@@ -1129,8 +1132,9 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>,
             filter_aql.push_str(&format!("filter v.name like {}\r\n", contains_key[0].site_name));
         }
         // 每一个 site 和下面的 zone 的更新 pdms_eles 语句
-        let update_site_aql = format!("With {AQL_PDMS_ELES_COLLECTION}\
+        let update_site_aql = format!("With {AQL_PDMS_ELES_COLLECTION}
         update {{'_key':'{}' , 'major': '{}'}} in {}", site_refno.to_url_refno(), contains_key[0].site_code, AQL_PDMS_ELES_COLLECTION);
+        dbg!(&update_site_aql);
         update_aqls.push(update_site_aql);
         for (zone_name, zone_code) in &contains_key[0].zone_map {
             if zone_name == "%ELSE" {

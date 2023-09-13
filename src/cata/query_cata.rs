@@ -27,7 +27,6 @@ pub fn resolve_desi_comp<T: PdmsDataInterface>(
     interface: Option<&T>,
     desi_refno: RefU64,
     mut scom_ref_option: Option<RefU64>,
-    // scom_info_map: &RwLock<HashMap<RefU64, ScomInfo>>,
     //传入额外的参数进来，用于解析轴线参数
     desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
 ) -> anyhow::Result<CateGeomsInfo> {
@@ -37,7 +36,6 @@ pub fn resolve_desi_comp<T: PdmsDataInterface>(
     if scom_ref_option.is_none() {
         scom_ref_option = interface.get_cat_ref(desi_refno);
     }
-    // dbg!(scom_ref);
     let scom_ref = scom_ref_option.ok_or(anyhow::anyhow!(format!(
         "SCOM not exist in element: {}",
         desi_refno.to_refno_str()

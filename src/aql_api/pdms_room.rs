@@ -652,13 +652,15 @@ pub async fn query_room_refno_from_room_refno_aql(
     let id = format!("{}/{}", AQL_ROOM_ELES_COLLECTION, room_refno.to_url_refno());
     let aql = AqlQuery::new(
         "
-    With @@room_eles, @@room_edges
+    With @@room_eles, @@room_edges,@@pdms_eles
     for v in 1 outbound @id @@room_edges
+        filter v != null
         return v._key    ",
     )
         .bind_var("id", id)
         .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
-        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION);
     let result = database.aql_query::<String>(aql).await?;
     let refnos = convert_refno_vec_from_vec_string(result);
     Ok(refnos)
@@ -1461,13 +1463,13 @@ pub struct RoomNode {
 pub async fn query_all_room_aql(database: &ArDatabase) -> anyhow::Result<Vec<RoomNode>> {
     let aql = AqlQuery::new(
         "\
+        with @@room_eles
         for v in @@room_eles
         return {
             'refno':v._key,
             'room_name': v.name
         }",
-    )
-        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
+    ).bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
     let result = database.aql_query::<RoomNode>(aql).await?;
     Ok(result)
 }
