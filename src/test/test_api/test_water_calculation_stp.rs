@@ -1,5 +1,5 @@
-// use crate::plug_in::water_calculation::export_stp;
-use crate::plug_in::water_calculation::{export_stp, save_stp_data_to_arangodb};
+use crate::plug_in::water_calculation::export_stp;
+use crate::plug_in::water_calculation::{ save_stp_data_to_arangodb};
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 use aios_core::pdms_types::RefU64;
@@ -34,7 +34,7 @@ async fn test_export_water_calculation_stp_0() -> anyhow::Result<()> {
                 name: "FITT 4".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: true,
+                is_plugged: false,
             },
             FloodingHole {
                 refno: RefU64::from_str("17496/114643").unwrap(),
@@ -55,7 +55,7 @@ async fn test_export_water_calculation_stp_0() -> anyhow::Result<()> {
                 name: "/1RS05CC0610T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: true,
+                is_plugged: false,
             },
         ],
     );
@@ -66,7 +66,7 @@ async fn test_export_water_calculation_stp_0() -> anyhow::Result<()> {
     //测试将数据保存至图数据库
     // save_stp_data_to_arangodb(&mgr, stp_packet.clone()).await;
     //孔洞封堵
-    // export_stp(&mgr, stp_packet).await?;
+    export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
@@ -647,7 +647,7 @@ async fn test_export_water_calculation_stp_08() -> anyhow::Result<()> {
 async fn test_export_water_calculation_stp_3() -> anyhow::Result<()> {
     let mut stp_packet = ExportFloodingStpEvent::default();
     //文件名
-    stp_packet.file_name = "只封堵一个门洞".to_string();
+    stp_packet.file_name = "门洞测试1".to_string();
     //保存事件
     stp_packet.save_time = "2023-08-07 20:39:16.867354400 +08:00".to_string();
     //导出模型列表
@@ -940,21 +940,21 @@ async fn test_export_water_calculation_stp_3() -> anyhow::Result<()> {
                 name: "FITT 40".to_string(),
                 is_door: true,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/8186").unwrap(),
                 name: "FITT 41".to_string(),
                 is_door: true,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/8187").unwrap(),
                 name: "FITT 42".to_string(),
                 is_door: true,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
         ],
     );
@@ -975,7 +975,7 @@ async fn test_export_water_calculation_stp_3() -> anyhow::Result<()> {
 async fn test_export_water_calculation_stp_4() -> anyhow::Result<()> {
     let mut stp_packet = ExportFloodingStpEvent::default();
     //文件名
-    stp_packet.file_name = "封所有门洞".to_string();
+    stp_packet.file_name = "门洞测试2".to_string();
     //保存事件
     stp_packet.save_time = "2023-08-07 20:39:16.867354400 +08:00".to_string();
     //导出模型列表
@@ -995,158 +995,158 @@ async fn test_export_water_calculation_stp_4() -> anyhow::Result<()> {
                 name: "/1AR04VV0005K".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19686").unwrap(),
                 name: "/1AR04TT3504K".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19687").unwrap(),
                 name: "/1AR04KK1019T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19688").unwrap(),
                 name: "/1AR04KK1020T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19689").unwrap(),
                 name: "/1AR04LL0021T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/8151").unwrap(),
                 name: "/1AR01EE0019T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19690").unwrap(),
                 name: "/1AR04LL0022T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19691").unwrap(),
                 name: "/1AR04LL0023T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19692").unwrap(),
                 name: "/1AR04LL0024T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19693").unwrap(),
                 name: "/1AR04LL0026T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19694").unwrap(),
                 name: "/1AR04LL0025T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19695").unwrap(),
                 name: "/1AR04EE0085T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19696").unwrap(),
                 name: "/1AR04EE0086T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19697").unwrap(),
                 name: "/1AR04EE0087T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19698").unwrap(),
                 name: "/1AR04EE0109T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19699").unwrap(),
                 name: "/1AR04EE0110T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19700").unwrap(),
                 name: "/1AR04EE0111T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19701").unwrap(),
                 name: "/1AR04KK0043T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/8164").unwrap(),
                 name: "/1AR01EE0044T".to_string(),
                 is_door: false,
                 is_selected: false,
-                is_plugged: false,
+                is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19702").unwrap(),
                 name: "FITT 18".to_string(),
-                is_door: true,
+                is_door: false,
                 is_selected: false,
                 is_plugged: true,
             },
             FloodingHole {
                 refno: RefU64::from_str("25688/19703").unwrap(),
                 name: "FITT 19".to_string(),
-                is_door: true,
+                is_door: false,
                 is_selected: false,
-                is_plugged: true,
+                is_plugged: false,
             },
         ],
     );
     stp_packet.walls_map = walls_map;
 
-
+    dbg!(&stp_packet);
     let mgr = get_test_ams_db_manager_async().await;
     //测试将数据保存至图数据库
-    // save_stp_data_to_arangodb(&mgr, stp_packet.clone()).await;
+    save_stp_data_to_arangodb(&mgr, stp_packet.clone()).await;
     //孔洞封堵
-    export_stp(&mgr, stp_packet).await?;
+    // export_stp(&mgr, stp_packet).await?;
     Ok(())
 }
 
