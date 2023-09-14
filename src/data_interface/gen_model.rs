@@ -513,8 +513,7 @@ pub fn gen_cata_single_geoms(
         return Ok(RefU64::default());
     }
     let desi_att = mgr.get_attr_from_localdb(design_refno)?;
-    let geoms_info =
-        resolve_desi_comp(Some(mgr.as_ref()), design_refno, None, None).unwrap_or_default();
+    let geoms_info = mgr.resolve_desi_comp(design_refno, None, None).unwrap_or_default();
     if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" {
         create_profile_geos(
             design_refno,

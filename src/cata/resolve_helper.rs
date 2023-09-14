@@ -120,7 +120,6 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     //处理引用的情况 OF 的情况, 如果需要获取 att value，还是需要用数据库去获取值
     let mut new_exp = input_expr.replace("ATTRIB", "");
     if input_expr.contains(" OF ") {
-        // // dbg!(&input_expr);
         let re = Regex::new(r"([A-Z\s]+) OF (PREV|NEXT|\d+/\d+)").unwrap();
         let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
         for caps in re.captures_iter(&input_expr) {
@@ -135,19 +134,58 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                     "NEXT" => interface.get_next(refno)?,
                     refno_str => RefU64::from_str(refno_str).map_err(|_| anyhow!("wrong refno in of expr"))?
                 };
-            let att = interface.get_attr_from_localdb(target_refno)?;
+            let target_att = interface.get_attr_from_localdb(target_refno)?;
+
             dbg!(&target_refno);
-            if let Some(value) = att.get_as_string(c1) {
+            if let Some(value) = target_att.get_as_string(c1) {
                 new_exp = new_exp.replace(s, value.as_str());
-            } else if let Some(v) = context.get(c1) {
-                new_exp = new_exp.replace(s, v.as_str());
-                dbg!(&new_exp);
-            } else{
-                // match c1 {
-                //     _ => {
-                //         return Err(anyhow!("wrong  of expression"));
-                //     }
-                // }
+            } else {
+                match c1 {
+                    // "ABOR" | "ARRWID" | "ARRHEI" => {
+                    //     let axis_map = interface.resolve_axis_params(target_refno)?;
+                    //     let index = target_att.get_i32("LEAV").unwrap_or_default();
+                    //     if axis_map.contains_key(&index) {
+                    //         let v = axis_map.get(&index).unwrap();
+                    //         if c1 == "ARRWID" {
+                    //             new_exp = new_exp.replace(s, v.pwidth.to_string().as_str());
+                    //         }else if c1 == "ARRHEI"{
+                    //             new_exp = new_exp.replace(s, v.pheight.to_string().as_str());
+                    //         }else if c1 == "ABOR"{
+                    //             new_exp = new_exp.replace(s, v.pbore.to_string().as_str());
+                    //         }
+                    //         dbg!(&new_exp);
+                    //     }
+                    // }
+                    "LBOR" | "LEAWID" | "LEAHEI"=> {
+                        let axis_map = interface.resolve_axis_params(target_refno, None)?;
+                        dbg!(&target_att);
+                        let index = target_att.get_i32("LEAV").unwrap_or_default();
+                        let res = if index == 0 {
+                            target_att.get_f32("HBOR").unwrap_or_default()
+                        } else if axis_map.contains_key(&index) {
+                            let v = axis_map.get(&index).unwrap();
+                            if c1 == "LEAWID" {
+                                v.pwidth
+                            }else if c1 == "LEAHEI"{
+                                v.pheight
+                            }else if c1 == "LBOR"{
+                                v.pbore
+                            }else{
+                                return Err(anyhow!("not support attribute of `OF` expression."));
+                            }
+                        }else{
+                            return Err(anyhow!("not support attribute of `OF` expression."));
+                        };
+                        dbg!(res);
+                        new_exp = new_exp.replace(s, res.to_string().as_str());
+                    }
+                    _ => {
+                        // else if let Some(v) = context.get(c1) {
+                        //     new_exp = new_exp.replace(s, v.as_str());
+                        //     dbg!(&new_exp);
+                        // }else
+                    }
+                }
             }
             //     //是不是需要求解的属性, 比如 LBORE
             //     let value = match c1 {

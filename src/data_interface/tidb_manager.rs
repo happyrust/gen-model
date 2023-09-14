@@ -4,12 +4,11 @@ use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
 use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 use crate::cata::consts::*;
-use crate::cata::query_cata::query_axis_params;
+use crate::cata::query_cata::{query_axis_params, resolve_cata_comp};
 use crate::cata::query_cata::query_gm_param;
-use crate::cata::resolve::CataContext;
+use crate::cata::resolve::{CataContext, resolve_axis_param};
 use crate::cata::resolve::{CATA_CONTEXT_MAP, SCOM_INFO_MAP};
 use crate::consts::*;
-use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
 use crate::graph_db::pdms_arango::ArPool;
@@ -20,7 +19,7 @@ use aios_core::cache::refno::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::*;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
-use aios_core::parsed_data::CateAxisParam;
+use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::GmParam;
 use aios_core::pdms_data::PlinParam;
 use aios_core::pdms_data::PlinParamData;
@@ -53,8 +52,10 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+use log::error;
 use tokio::sync::RwLock;
 use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
+use crate::data_interface::interface::PdmsDataInterface;
 
 // #[derive(Debug)]
 pub struct AiosDBManager {
@@ -1202,7 +1203,7 @@ impl PdmsDataInterface for AiosDBManager {
                 }
             }
         }
-        // let children = interface.get_deep_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
+        // let children = self.get_deep_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
         for geo_am in children {
             if !geo_am.is_visible_by_level(None).unwrap_or(true) {
                 continue;
@@ -1460,4 +1461,70 @@ impl PdmsDataInterface for AiosDBManager {
         };
         Ok(cata_context)
     }
+
+    ///求解design component
+    fn resolve_desi_comp(
+        &self,
+        desi_refno: RefU64,
+        mut scom_ref_option: Option<RefU64>,
+        //传入额外的参数进来，用于解析轴线参数
+        desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
+    ) -> anyhow::Result<CateGeomsInfo> {
+        let desi_att = self.get_attr_from_localdb(desi_refno)?;
+        //todo 改到使用图数据库去查找
+        if scom_ref_option.is_none() {
+            scom_ref_option = self.get_cat_ref(desi_refno);
+        }
+        let scom_ref = scom_ref_option.ok_or(anyhow::anyhow!(format!(
+        "SCOM not exist in element: {}",
+        desi_refno.to_refno_str()
+    )))?;
+        if !scom_ref.is_valid() {
+            println!(
+                "{} 的CAT引用不存在，为 {}",
+                desi_refno.to_refno_str(),
+                scom_ref.to_refno_str()
+            );
+            return Ok(Default::default());
+        }
+        // dbg!(scom_ref);
+        let scom_info = self.get_or_create_scom_info(scom_ref)?;
+        // dbg!(&scom_info.gm_params);
+        // dbg!(&scom_info.axis_params);
+        let mut context = self.get_or_create_cata_context(desi_refno, desi_axis_map)?;
+
+        let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(self), Some(context));
+        // dbg!(&geom_info.as_ref().unwrap().n_geometries);
+        if geom_info.is_err() {
+            error!("{:?}", geom_info.as_ref().err());
+            error!("{:?}", desi_att.to_string_hashmap());
+        }
+        geom_info
+    }
+
+    /// 求解axis的数值
+    fn resolve_axis_params(
+        &self,
+        refno: RefU64,
+        context: Option<CataContext>,
+    ) -> anyhow::Result<BTreeMap<i32, CateAxisParam>> {
+        let mut map = BTreeMap::new();
+        let scom_refno = self.get_cat_ref(refno).unwrap_or_default();
+        let scom = self.get_or_create_scom_info(scom_refno)?;
+        let context =  context.unwrap_or(self.get_or_create_cata_context(refno, None)?);
+        for i in 0..scom.axis_params.len() {
+            dbg!(&scom.axis_params[i]);
+            match resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self)) {
+                Ok(axis) => {
+                    map.insert(scom.axis_param_numbers[i], axis);
+                }
+                Err(e) => {
+                    println!("{} resolve_axis_params 出错： {:?}", refno, &e);
+                }
+            }
+        }
+        Ok(map)
+    }
+
+
 }
