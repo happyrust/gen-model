@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::{mem, panic};
+use std::str::FromStr;
 use std::sync::Arc;
 use aios_core::parsed_data::*;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
@@ -79,7 +80,7 @@ pub fn eval_str_to_f32<T: PdmsDataInterface>(input_expr: impl AsRef<str>,
 }
 
 pub fn eval_str_to_f32_or_default<T: PdmsDataInterface>(input_expr: impl AsRef<str>,
-                                             context: &CataContext, interface: Option<&T>) -> f32 {
+                                                        context: &CataContext, interface: Option<&T>) -> f32 {
     eval_str_to_f32(input_expr, context, interface).unwrap_or(0.0)
 }
 
@@ -108,7 +109,6 @@ pub const INTERNAL_PDMS_EXPRESS: [&'static str; 22] = [
 ];
 
 
-
 ///评估表达式的值
 pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                                              context: &CataContext,
@@ -117,52 +117,89 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     if input_expr.is_empty() || input_expr == "UNSET" {
         return Ok(0.0);
     }
-    //处理简单情况
-    // if let Ok(val) = interp(&input_expr.to_lowercase()) {
-    //     return Ok(f64_round_3(val).into());
-    // }
     //处理引用的情况 OF 的情况, 如果需要获取 att value，还是需要用数据库去获取值
     let mut new_exp = input_expr.replace("ATTRIB", "");
     if input_expr.contains(" OF ") {
-        // // dbg!(&input_expr);
         let re = Regex::new(r"([A-Z\s]+) OF (PREV|NEXT|\d+/\d+)").unwrap();
-        // let interface = Arc::new(interface.ok_or(anyhow::anyhow!("unknown interface"))?);
+        let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
         for caps in re.captures_iter(&input_expr) {
             let s = &caps[0];
             let c1 = caps.get(1).map_or("", |m| m.as_str());
             let c2 = caps.get(2).map_or("", |m| m.as_str());
-        //     // let ref_att =
-        //     //     match c2 {
-        //     //         // "PREV" => interface.get_prev_att()
-        //     //         // "NEXT" => interface.get_next_att()
-        //     //         "PREV" | "NEXT" => {
-        //     //             let refno_str = context.get("RS_DES_REFNO").unwrap().as_str();
-        //     //             let refno = RefU64::from_refno_str(refno_str);
-        //     //             // let att = futures::executor::block_on(
-        //     //             //     interface.get_attr(RefU64::from_refno_str(refno_str).unwrap())
-        //     //             // ).unwrap_or_default();
-        //     //             att
-        //     //             // query_pre_or_next_node()
-        //     //         }
-        //     //         //
-        //     //         refno_str => futures::executor::block_on(
-        //     //             interface.get_attr(RefU64::from_refno_str(refno_str).unwrap())
-        //     //         ).unwrap_or_default()
-        //     //     };
-        //     // dbg!(&ref_att);
-        //     //是不是需要求解的属性, 比如 LBORE
-        //     let value = match c1 {
-        //         // "LBORE" => {
-        //         //     //PRE
-        //         //     //判断 cat_ref 是否是同一个
-        //         //     // let cat_ref =
-        //         // }
-        //         _ => {
-        //             // ref_att.get_as_string(c1).unwrap_or("DESP[1]".to_string())
-        //             "DESP[1]".to_string()
-        //         }
-        //     };
-            new_exp = new_exp.replace(s, c1);
+            let refno_str = context.get("RS_DES_REFNO").unwrap().as_str();
+            let refno = RefU64::from_refno_str(refno_str)?;
+            let target_refno =
+                match c2 {
+                    "PREV" => interface.get_prev(refno)?,
+                    "NEXT" => interface.get_next(refno)?,
+                    refno_str => RefU64::from_str(refno_str).map_err(|_| anyhow!("wrong refno in of expr"))?
+                };
+            let target_att = interface.get_attr_from_localdb(target_refno)?;
+
+            dbg!(&target_refno);
+            if let Some(value) = target_att.get_as_string(c1) {
+                new_exp = new_exp.replace(s, value.as_str());
+            } else {
+                match c1 {
+                    // "ABOR" | "ARRWID" | "ARRHEI" => {
+                    //     let axis_map = interface.resolve_axis_params(target_refno)?;
+                    //     let index = target_att.get_i32("LEAV").unwrap_or_default();
+                    //     if axis_map.contains_key(&index) {
+                    //         let v = axis_map.get(&index).unwrap();
+                    //         if c1 == "ARRWID" {
+                    //             new_exp = new_exp.replace(s, v.pwidth.to_string().as_str());
+                    //         }else if c1 == "ARRHEI"{
+                    //             new_exp = new_exp.replace(s, v.pheight.to_string().as_str());
+                    //         }else if c1 == "ABOR"{
+                    //             new_exp = new_exp.replace(s, v.pbore.to_string().as_str());
+                    //         }
+                    //         dbg!(&new_exp);
+                    //     }
+                    // }
+                    "LBOR" | "LEAWID" | "LEAHEI"=> {
+                        let axis_map = interface.resolve_axis_params(target_refno, None)?;
+                        dbg!(&target_att);
+                        let index = target_att.get_i32("LEAV").unwrap_or_default();
+                        let res = if index == 0 {
+                            target_att.get_f32("HBOR").unwrap_or_default()
+                        } else if axis_map.contains_key(&index) {
+                            let v = axis_map.get(&index).unwrap();
+                            if c1 == "LEAWID" {
+                                v.pwidth
+                            }else if c1 == "LEAHEI"{
+                                v.pheight
+                            }else if c1 == "LBOR"{
+                                v.pbore
+                            }else{
+                                return Err(anyhow!("not support attribute of `OF` expression."));
+                            }
+                        }else{
+                            return Err(anyhow!("not support attribute of `OF` expression."));
+                        };
+                        dbg!(res);
+                        new_exp = new_exp.replace(s, res.to_string().as_str());
+                    }
+                    _ => {
+                        // else if let Some(v) = context.get(c1) {
+                        //     new_exp = new_exp.replace(s, v.as_str());
+                        //     dbg!(&new_exp);
+                        // }else
+                    }
+                }
+            }
+            //     //是不是需要求解的属性, 比如 LBORE
+            //     let value = match c1 {
+            //         // "LBORE" => {
+            //         //     //PRE
+            //         //     //判断 cat_ref 是否是同一个
+            //         //     // let cat_ref =
+            //         // }
+            //         _ => {
+            //             // ref_att.get_as_string(c1).unwrap_or("DESP[1]".to_string())
+            //             "DESP[1]".to_string()
+            //         }
+            //     };
+
         }
     }
 
@@ -184,7 +221,8 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         }).trim().to_string();
     }
 
-    let mut new_exp = new_exp.replace("DESIGN PARAM", "DESP").replace("DESIGN PARA", "DESP");;
+    let mut new_exp = new_exp.replace("DESIGN PARAM", "DESP").replace("DESIGN PARA", "DESP");
+    ;
     let mut result_exp = new_exp.clone();
     //默认两次
     let mut found_replaced = false;
@@ -364,7 +402,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             }
             "SREC" => {   //structural profile
                 CateGeoParam::Profile(CateProfileParam::SREC(SRectData {
-                    center: Vec2::new(gmse.xyz[0],gmse.xyz[1]),
+                    center: Vec2::new(gmse.xyz[0], gmse.xyz[1]),
                     size: Vec2::new(gmse.lengths[0], gmse.lengths[1]),
                     dxy: gmse.dxy[0],
                     normal_axis: gmse.paxises[0].as_ref().map(|x| x.dir).unwrap_or(Vec3::Z),
@@ -493,7 +531,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             }
             "SCON" | "NSCO" => {
                 // 圆锥
-                CateGeoParam::Cone(CateSnoutParam { 
+                CateGeoParam::Cone(CateSnoutParam {
                     refno: gmse.refno,
                     // axis: (gmse.paxises[0].clone()),
                     dist_to_btm: 0.0,
@@ -630,8 +668,8 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
                 let mut axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
                 let flag = if is_neg { -1.0 } else { 1.0 };
                 dir = flag * mem::take(&mut axis.dir);
-                pos = flag *  mem::take(&mut axis.pt);
-            }else{
+                pos = flag * mem::take(&mut axis.pt);
+            } else {
                 return Err(anyhow::anyhow!("未找到点索引: {}", pnt_indx));
             }
         }
@@ -647,7 +685,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
                 let mut axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
                 let flag = if is_neg { -1.0 } else { 1.0 };
                 ref_dir = flag * mem::take(&mut axis.dir);
-            }else{
+            } else {
                 return Err(anyhow::anyhow!("未找到点索引: {}", pnt_indx));
             }
         }

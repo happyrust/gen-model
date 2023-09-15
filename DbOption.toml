@@ -89,7 +89,8 @@ puhua_database_password = ""
 # debug_root_refnos =["23740/498", "17496/170985", "23734/3039"]
 
 
-debug_root_refnos = ["23713/3494"]
+#debug_root_refnos = ["24383/71771", "23716/628"]
+debug_root_refnos = ["24381/46972"]
 
 #打洞的问题，需要重构一下own pos refnos
 #debug_root_refnos = ["23713/6093"]

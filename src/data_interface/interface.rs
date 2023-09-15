@@ -1,7 +1,7 @@
 use crate::cata::resolve::CataContext;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use aios_core::cache::refno::CachedRefBasic;
-use aios_core::parsed_data::CateAxisParam;
+use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{ScomInfo, GmParam};
 use aios_core::pdms_types::{
     AiosStr, AttrMap, EleTreeNode, PdmsElement, PdmsTree, RefU64, RefU64Vec,
@@ -35,6 +35,10 @@ pub trait PdmsDataInterface: Send + Sync {
 
     ///获得参考号类型
     fn get_type_name(&self, refno: RefU64) -> String;
+
+    fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64>;
+
+    fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64>;
 
     ///从本地获取属性数据
     fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
@@ -223,4 +227,19 @@ pub trait PdmsDataInterface: Send + Sync {
     fn get_or_create_scom_info(&self, cata_refno: RefU64) -> anyhow::Result<ScomInfo>;
 
     fn get_or_create_cata_context(&self, desi_refno: RefU64, extra_axis_map: Option<&BTreeMap<i32, CateAxisParam>>) -> anyhow::Result<CataContext>;
+
+    fn resolve_desi_comp(
+        &self,
+        desi_refno: RefU64,
+        scom_ref_option: Option<RefU64>,
+        //传入额外的参数进来，用于解析轴线参数
+        desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
+    ) -> anyhow::Result<CateGeomsInfo>;
+
+    fn resolve_axis_params(
+        &self,
+        refno: RefU64,
+        context: Option<CataContext>,
+    ) -> anyhow::Result<BTreeMap<i32, CateAxisParam>>;
+
 }
