@@ -1,3 +1,4 @@
+use std::io::Write;
 use crate::api::element::query_children;
 use crate::aql_api::children::{
     query_ancestor_till_type_aql, query_ancestor_till_types_aql, query_children_eles,
@@ -109,7 +110,6 @@ pub async fn get_dq_support_sctn_data(
                     fixing.refno,
                     vec!["STRU"],
                 ).await.unwrap_or(None);
-                dbg!(&stru);
                 if let Some(stru) = stru {
                     let desc = get_refno_desi_desc(stru.refno, &aios_mgr)
                         .await
@@ -548,4 +548,15 @@ async fn test_query_around_owner_within_radius() {
         .await
         .unwrap();
     dbg!(&result);
+}
+
+#[tokio::test]
+async fn test_get_dq_support_sctn_data() -> anyhow::Result<()> {
+    let aios_mgr = AiosDBManager::init_form_config().await?;
+    let refnos = vec![RefU64::from_refno_str("24383/86099").unwrap()];
+    let result = get_dq_support_sctn_data(refnos, &aios_mgr).await?;
+    let mut file = std::fs::File::create("data_center_test/PARTDA_PARTDB_PARTDK.json")?;
+    let json = serde_json::to_vec(&result)?;
+    file.write_all(&json)?;
+    Ok(())
 }
