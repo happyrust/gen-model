@@ -158,7 +158,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                     // }
                     "LBOR" | "LEAWID" | "LEAHEI"=> {
                         let axis_map = interface.resolve_axis_params(target_refno, None)?;
-                        dbg!(&target_att);
+                        // dbg!(&target_att);
                         let index = target_att.get_i32("LEAV").unwrap_or_default();
                         let res = if index == 0 {
                             target_att.get_f32("HBOR").unwrap_or_default()
@@ -171,12 +171,12 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                             }else if c1 == "LBOR"{
                                 v.pbore
                             }else{
-                                return Err(anyhow!("not support attribute of `OF` expression."));
+                                return Err(anyhow!("{input_expr} not support."));
                             }
                         }else{
-                            return Err(anyhow!("not support attribute of `OF` expression."));
+                            return Err(anyhow!("{input_expr} not support."));
                         };
-                        dbg!(res);
+                        // dbg!(res);
                         new_exp = new_exp.replace(s, res.to_string().as_str());
                     }
                     _ => {
@@ -187,19 +187,6 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                     }
                 }
             }
-            //     //是不是需要求解的属性, 比如 LBORE
-            //     let value = match c1 {
-            //         // "LBORE" => {
-            //         //     //PRE
-            //         //     //判断 cat_ref 是否是同一个
-            //         //     // let cat_ref =
-            //         // }
-            //         _ => {
-            //             // ref_att.get_as_string(c1).unwrap_or("DESP[1]".to_string())
-            //             "DESP[1]".to_string()
-            //         }
-            //     };
-
         }
     }
 
@@ -364,9 +351,12 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             return if let Ok(mut stack) = Stack::init(&result_string) {
                 stack.eval().ok_or(anyhow::anyhow!(format!("后缀表达式求解失败 {}", &input_expr)))
             } else {
-                // println!("输入表达式 : {}", &input_expr);
+                println!("输入表达式 : {}", &input_expr);
                 // dbg!(&context);
                 // println!("计算后表达式 : {}", &result_string);
+                // let refno_str = context.get("RS_CATR_REFNO").unwrap().as_str();
+                // let refno = RefU64::from_refno_str(refno_str)?;
+                // dbg!(interface.unwrap().get_attr_from_localdb(refno).unwrap());
                 Err(anyhow::anyhow!(format!("求解失败 {}", &input_expr)))
             };
         }
