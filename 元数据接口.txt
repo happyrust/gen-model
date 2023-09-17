@@ -14,10 +14,10 @@ post(get_refnos_belong_major)
 post(get_inst_number_enso)
 
 6.获取HPOS，TPOS或POSS，POSE的世界坐标
-todo
+post(get_poss_pose_world_pos)
 
 7.获取元件库的attr(refno->catr.attr)
-todo
+post(get_catr_attr)
 
 8.根据物项编码和字段获取对应的数据
 todo
@@ -33,13 +33,13 @@ todo
 post(get_traverse_foreign_name)
 
 12.获取指定向上层级的name，例如 elbo -> zone.name
-todo
+post(travel_owner_name)
 
 13.获取arrive和leave点的对应数据，例如 pheight ， pwidth pbor
-todo
+post(get_refnos_arrive_leave_info_enso)
 
 14.获取children中某个类型的属性
 todo
 
 15.找到arrive和leave点的世界坐标
-todo
+post(get_refnos_arrive_leave_info_enso)

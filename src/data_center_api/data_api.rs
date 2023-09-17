@@ -1,6 +1,6 @@
 use aios_core::data_center::AttrValue::{AttrFloat, AttrString, AttrVec3};
 use aios_core::data_center::DataCenterAttr;
-use aios_core::pdms_types::{AttrMap, PdmsElement, RefU64};
+use aios_core::pdms_types::{AttrMap, AttrVal, NamedAttrValue, PdmsElement, RefU64};
 use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -22,6 +22,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use sqlx::{Executor, Row};
+use crate::aql_api::attr_map::query_refnos_point_map_aql;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct InstPositionData {
@@ -462,8 +463,8 @@ pub(crate) async fn get_dq_material_code(
     Ok(map)
 }
 
-/// 获取该节点的世界坐标下的poss和pose
-pub(crate) async fn get_refno_world_poss_pose(
+/// 获取该节点的世界坐标下的poss和pose, bran 返回 hpos , tpos 的世界坐标
+pub async fn get_refno_world_poss_pose(
     refno: RefU64,
     att_type: &str,
     database: &ArDatabase,
@@ -486,6 +487,15 @@ pub(crate) async fn get_refno_world_poss_pose(
             };
             Ok(Some((poss.translation, pose.translation)))
         }
+        "BRAN" => {
+            let bran_attr = aios_mgr.get_attr(refno).await?;
+            let Ok(Some(branch_transform)) = aios_mgr.get_world_transform(refno) else {
+                return Ok(None);
+            };
+            let hpos_wrt = branch_transform.transform_point(bran_attr.get_vec3("HPOS").unwrap());
+            let tpos_wrt = branch_transform.transform_point(bran_attr.get_vec3("TPOS").unwrap());
+            Ok(Some((hpos_wrt, tpos_wrt)))
+        }
         _ => {
             let Some(world_transform) = aios_mgr.get_world_transform(refno)? else {
                 return Ok(None);
@@ -502,6 +512,58 @@ pub(crate) async fn get_refno_world_poss_pose(
             Ok(Some((world_poss, world_pose)))
         }
     }
+}
+
+/// 获取多个参考号的 arrive leave 点的信息或世界坐标
+///
+/// b_request_w_pos 是否请求世界坐标
+pub async fn get_refnos_arrive_leave_info(refnos: Vec<RefU64>, b_request_w_pos: bool, aios_mgr: &AiosDBManager) -> anyhow::Result<HashMap<RefU64, HashMap<String, NamedAttrValue>>> {
+    let database = aios_mgr.get_arango_db().await?;
+    let points = query_refnos_point_map_aql(refnos, &database).await?;
+    let mut map = HashMap::new();
+    for point in points {
+        // 找到arrive 和 leave 对应的点集信息
+        let Ok(attr) = aios_mgr.get_attr(point.refno).await else { continue; };
+        let Some(AttrVal::IntegerType(arrive)) = attr.get_val("ARRI") else { continue; };
+        let Some(AttrVal::IntegerType(leave)) = attr.get_val("LEAV") else { continue; };
+        let Some(arrive_point) = point.ptset_map.get(arrive) else { continue; };
+        let Some(leave_point) = point.ptset_map.get(leave) else { continue; };
+        // 查询世界坐标
+        if b_request_w_pos {
+            let w_pos = aios_mgr.get_world_transform(point.refno)?.unwrap_or_default();
+            // 根据世界坐标变换
+            let arrive_transform = w_pos.transform_point(arrive_point.pt);
+            let leave_transform = w_pos.transform_point(leave_point.pt);
+            // 放入结果
+            map.entry(point.refno).or_insert_with(HashMap::new)
+                .entry("ARRIVE_W_POS".to_string()).or_insert(NamedAttrValue::F32VecType(
+                vec![arrive_transform.x, arrive_transform.y, arrive_transform.z]
+            ));
+
+            map.entry(point.refno).or_insert_with(HashMap::new)
+                .entry("LEAVE_W_POS".to_string()).or_insert(NamedAttrValue::F32VecType(
+                vec![leave_transform.x, leave_transform.y, leave_transform.z]
+            ));
+        }
+        // 如果在 HashMap 中找不到指定的 `point.refno` 键，则插入一个新的 HashMap，并返回对它的可变引用。
+        // 如果已存在，则返回对现有 HashMap 的可变引用。
+        map.entry(point.refno).or_insert_with(HashMap::new)
+            .entry("ARRIVE_PHEIGTH".to_string()).or_insert(NamedAttrValue::F32Type(arrive_point.pheight));
+        // 在上述获取的 HashMap 中，如果找不到 "ARRIVE_PHEIGTH" 键，则插入一个新的键值对，
+        // 键是 "ARRIVE_PHEIGTH"，值是 `arrive_point.pheight` 的 F32Type 包装。
+        // 如果已存在，则不执行插入操作。
+        map.entry(point.refno).or_insert_with(HashMap::new)
+            .entry("LEAVE_PHEIGTH".to_string()).or_insert(NamedAttrValue::F32Type(leave_point.pheight));
+        map.entry(point.refno).or_insert_with(HashMap::new)
+            .entry("ARRIVE_PWIDTH".to_string()).or_insert(NamedAttrValue::F32Type(arrive_point.pwidth));
+        map.entry(point.refno).or_insert_with(HashMap::new)
+            .entry("LEAVE_PWIDTH".to_string()).or_insert(NamedAttrValue::F32Type(leave_point.pwidth));
+        map.entry(point.refno).or_insert_with(HashMap::new)
+            .entry("ARRIVE_PBORE".to_string()).or_insert(NamedAttrValue::F32Type(arrive_point.pbore));
+        map.entry(point.refno).or_insert_with(HashMap::new)
+            .entry("LEAVE_PBORE".to_string()).or_insert(NamedAttrValue::F32Type(leave_point.pbore));
+    }
+    Ok(map)
 }
 
 /// 返回pspec属性对应的中文名
@@ -608,7 +670,6 @@ pub async fn get_refnos_major_map(refnos: Vec<RefU64>, database: &ArDatabase) ->
 pub(crate) fn take_off_name_first_char(name: &str) -> String {
     if name.starts_with("/") { name[1..].to_string() } else { name.to_string() }
 }
-
 
 
 #[tokio::test]

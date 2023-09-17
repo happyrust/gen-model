@@ -1310,6 +1310,44 @@ pub async fn query_refnos_contains_select_name(select_refnos: Vec<RefU64>, att_t
     Ok(result)
 }
 
+/// 查询选中节点下 某些类型的节点的数据，且经过了某些类型
+///
+/// through_types ： 经过的类型
+///
+/// final_types： 最终收集的某些类型的 pdms_element 信息
+pub async fn query_type_refnos_through_types(select_refnos: Vec<RefU64>, through_types: Vec<String>,
+                                             final_types: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
+    let ids = RefU64::to_arangodb_ids(AQL_PDMS_ELES_COLLECTION, select_refnos);
+    let aql = AqlQuery::new("
+    with @@pdms_eles,@@pdms_edges
+    for id in @ids
+    let owners = (
+    for v in 0..5 inbound id pdms_edges
+        filter v != null
+        filter v.noun in @through_types
+        return v
+    )
+    for owner in owners
+        for o in 0..10 inbound owner._id pdms_edges
+        filter o != null
+        filter o.noun in @final_types
+        return {
+            '_key':o._key,
+            'owner':owner._key,
+            'name':o.name,
+            'noun':o.noun,
+            'version':0,
+            'children_count':0,
+        }
+    ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("ids", ids)
+        .bind_var("through_types", through_types)
+        .bind_var("final_types", final_types);
+    let result = database.aql_query::<PdmsElement>(aql).await?;
+    Ok(result)
+}
+
 #[tokio::test]
 async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Result<()> {
     // use config::{Config, ConfigError, Environment, File};
