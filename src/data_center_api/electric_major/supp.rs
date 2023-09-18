@@ -1,3 +1,4 @@
+use std::io::Write;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::{GeoBasicType, RefU64};
 use parry3d::utils::hashmap::HashMap;
@@ -113,6 +114,10 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
                 attribute_model_code: "ERECAB17".to_string(),
                 value: AttrValue::AttrString("NA".to_string()).into(),
             });
+            attr.push(DataCenterAttr {
+                attribute_model_code: "ERECAB18".to_string(),
+                value: AttrValue::AttrString("".to_string()).into(),
+            });
             let room_name = query_room_name_from_refno_aql(stru.refno, &database).await?.unwrap_or("".to_string());
             attr.push(DataCenterAttr {
                 attribute_model_code: "ROOM2".to_string(),
@@ -127,6 +132,12 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
             } else {
                 "".to_string()
             };
+            // S2，判断STRU>DESC是否包含floor来分辨吊架还是支架，吊架取方钢的高点，支架取方钢低点。S1找圆板中心点取Z轴最高的点算
+            attr.push(DataCenterAttr {
+                attribute_model_code: "ERECAB22".to_string(),
+                value: AttrValue::AttrString("".to_string()).into(),
+            });
+            // 判断 MSUP：全焊透，LSUP：角焊
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB24".to_string(),
                 value: AttrValue::AttrString(zone_code).into(),
@@ -188,20 +199,21 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
                 attribute_model_code: "ERECAB46".to_string(),
                 value: AttrValue::AttrInt(gensec_count).into(),
             });
-
-            // attr.push(DataCenterAttr {
-            //     attribute_model_code: "STUCC14".to_string(),
-            //     value: AttrValue::AttrString("Q355B".to_string()).into(),
-            // });
+            // STRU>DESC中不包含S1-S17就不是典型支架
+            attr.push(DataCenterAttr {
+                attribute_model_code: "ERECAB47".to_string(),
+                value: AttrValue::AttrString("".to_string()).into(),
+            });
+            // 设计阶段
             let file_code = stru_attr.get_str(":3D_SJJD").unwrap_or("");
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB48".to_string(),
                 value: AttrValue::AttrString(file_code.to_string()).into(),
             });
-            attr.push(DataCenterAttr {
-                attribute_model_code: "ERECAB49".to_string(),
-                value: AttrValue::AttrFloatArray(vec![0.0, 0.0]).into(),
-            });
+            // attr.push(DataCenterAttr {
+            //     attribute_model_code: "ERECAB49".to_string(),
+            //     value: AttrValue::AttrFloatArray(vec![0.0, 0.0]).into(),
+            // });
             result.push(DataCenterInstance {
                 object_model_code: "ERECAB".to_string(),
                 project_code: aios_mgr.db_option.project_code.to_string(),
@@ -235,4 +247,15 @@ fn contains_s1_to_s17(input: &str) -> bool {
 fn test_contains_s1_to_s17() {
     let input = "S17-";
     dbg!(contains_s1_to_s17(input));
+}
+
+#[tokio::test]
+async fn test_get_dq_support_data() -> anyhow::Result<()> {
+    let aios_mgr = AiosDBManager::init_form_config().await?;
+    let refnos = vec![RefU64::from_refno_str("24383/86099").unwrap()];
+    let result = get_dq_support_data(refnos, &aios_mgr).await?;
+    let mut file = std::fs::File::create("data_center_test/ERECAB.json")?;
+    let json = serde_json::to_vec(&result)?;
+    file.write_all(&json)?;
+    Ok(())
 }

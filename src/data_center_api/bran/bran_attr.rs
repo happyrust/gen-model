@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
+use std::vec;
 use aios_core::data_center::AttrValue::{AttrIntArray, AttrMap, AttrString};
 use aios_core::data_center::{AttrValue, CableWeight, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::RefU64;
@@ -198,10 +199,21 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 attribute_model_code: "ERECB1".to_string(),
                 value: AttrValue::AttrString(bran.name.clone()).into(),
             });
-
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB2".to_string(),
+                value: AttrValue::AttrString("".to_string()).into(),
+            });
             erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB3".to_string(),
                 value: AttrValue::AttrString(room_name.clone()).into(),
+            });
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB4".to_string(),
+                value: AttrValue::AttrString("".to_string()).into(),
+            });
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB21".to_string(),
+                value: AttrValue::AttrString(format!("{}mm{}", tray_width, kind)).into(),
             });
             erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB25".to_string(),
@@ -210,10 +222,6 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
             erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB27".to_string(),
                 value: AttrValue::AttrBool(b_wheel).into(),
-            });
-            erecb_attr.push(DataCenterAttr {
-                attribute_model_code: "ERECB21".to_string(),
-                value: AttrValue::AttrString(format!("{}mm{}", tray_width, kind)).into(),
             });
             erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB31".to_string(),
@@ -416,7 +424,7 @@ pub async fn query_gy_bran_data_datacenter(select_refno: RefU64, aios_mgr: &Aios
             }
         }
         // tubi
-        let mut tubi_instances = get_data_center_tubi_attr(bran.refno,&bran.name,&database,aios_mgr).await;
+        let mut tubi_instances = get_data_center_tubi_attr(bran.refno, &bran.name, &database, aios_mgr).await;
         instances.append(&mut tubi_instances);
     }
     Ok(DataCenterProject {
@@ -431,8 +439,19 @@ pub async fn query_gy_bran_data_datacenter(select_refno: RefU64, aios_mgr: &Aios
 async fn test_query_gy_bran_data_datacenter() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let tee_refno = RefU64::from_refno_str("24383/66761").unwrap();
-    let result = query_gy_bran_data_datacenter(tee_refno,&aios_mgr).await?;
+    let result = query_gy_bran_data_datacenter(tee_refno, &aios_mgr).await?;
     let mut file = std::fs::File::create("bran.json")?;
+    let json = serde_json::to_vec(&result)?;
+    file.write_all(&json)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_dq_bran_data_datacenter() -> anyhow::Result<()> {
+    let aios_mgr = AiosDBManager::init_form_config().await?;
+    let bran_refno = vec![RefU64::from_refno_str("24383/93519").unwrap()];
+    let result = get_dq_bran_data(&bran_refno, &aios_mgr).await?;
+    let mut file = std::fs::File::create("data_center_test/dq_bran.json")?;
     let json = serde_json::to_vec(&result)?;
     file.write_all(&json)?;
     Ok(())

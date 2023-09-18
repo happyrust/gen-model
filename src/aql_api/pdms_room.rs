@@ -652,13 +652,15 @@ pub async fn query_room_refno_from_room_refno_aql(
     let id = format!("{}/{}", AQL_ROOM_ELES_COLLECTION, room_refno.to_url_refno());
     let aql = AqlQuery::new(
         "
-    With @@room_eles, @@room_edges
+    With @@room_eles, @@room_edges,@@pdms_eles
     for v in 1 outbound @id @@room_edges
+        filter v != null
         return v._key    ",
     )
         .bind_var("id", id)
         .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
-        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION);
     let result = database.aql_query::<String>(aql).await?;
     let refnos = convert_refno_vec_from_vec_string(result);
     Ok(refnos)
@@ -1461,13 +1463,13 @@ pub struct RoomNode {
 pub async fn query_all_room_aql(database: &ArDatabase) -> anyhow::Result<Vec<RoomNode>> {
     let aql = AqlQuery::new(
         "\
+        with @@room_eles
         for v in @@room_eles
         return {
             'refno':v._key,
             'room_name': v.name
         }",
-    )
-        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
+    ).bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
     let result = database.aql_query::<RoomNode>(aql).await?;
     Ok(result)
 }
@@ -1499,6 +1501,40 @@ pub async fn query_room_aabb_from_room_code(room_names: Vec<String>, database: &
     Ok(result)
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BranThroughRooms {
+    pub key: String,
+    pub rooms: Vec<String>,
+}
+
+/// 查询bran穿过了哪几个房间
+pub async fn query_bran_through_rooms_aql(bran_refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<HashMap<RefU64, Vec<String>>> {
+    let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, bran_refnos);
+    let aql = AqlQuery::new("
+    with @@pdms_eles,@@pdms_edges,@@room_eles,@@room_edges
+    for id in @ids
+    let names = (
+    for v in 1 inbound id @@pdms_edges
+        let name = (
+        for r in 1 inbound v._id @@room_edges return r.name)
+            filter length(name)!=0
+            return distinct name )
+    return {
+        id: id,
+        room_names: flatten(names)
+    }").bind_var("ids", ids)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
+    let result = database.aql_query::<BranThroughRooms>(aql).await?;
+    let mut map = HashMap::new();
+    for r in result {
+        let Some(refno) = RefU64::from_arangodb_refno_str(&r.key) else { continue; };
+        map.entry(refno).or_insert(r.rooms);
+    }
+    Ok(map)
+}
 
 #[tokio::test]
 async fn test_get_room_aabb_from_room_code() -> anyhow::Result<()> {

@@ -513,8 +513,7 @@ pub fn gen_cata_single_geoms(
         return Ok(RefU64::default());
     }
     let desi_att = mgr.get_attr_from_localdb(design_refno)?;
-    let geoms_info =
-        resolve_desi_comp(Some(mgr.as_ref()), design_refno, None, None).unwrap_or_default();
+    let geoms_info = mgr.resolve_desi_comp(design_refno, None, None).unwrap_or_default();
     if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" {
         create_profile_geos(
             design_refno,
@@ -581,7 +580,6 @@ fn cal_sjus_value(sjus: &str, height: f32) -> f32 {
 pub async fn gen_cata_geos(
     mgr: Arc<AiosDBManager>,
     main_instance_mgr: Arc<RwLock<ShapeInstancesData>>,
-    // scom_info_map: Arc<RwLock<HashMap<RefU64, ScomInfo>>>,
     target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
     //branch 下按顺序的清单
     branch_map: Arc<DashMap<RefU64, Vec<PdmsElement>>>,
@@ -1143,7 +1141,6 @@ pub async fn gen_cata_geos(
         let h_ref = branch_att
             .get_foreign_refno(if is_hang { "HREF" } else { "HSTU" })
             .unwrap_or_default();
-        // dbg!(h_ref);
 
         let bran_name = branch_att.get_name_string();
         let tubi_att = mgr.get_attr_from_localdb(h_ref).unwrap_or_default();
@@ -1154,8 +1151,7 @@ pub async fn gen_cata_geos(
             tubi_cat_ref,
             is_hang,
             None,
-        )
-            .await?;
+        )?;
         dbg!(&tubi_size);
         let mut tubi_geo_hash = if matches!(tubi_size, TubiSize::BoxSize(_)) {
             BOXI_GEO_HASH
@@ -1336,8 +1332,7 @@ pub async fn gen_cata_geos(
                     is_hang,
                     // &scom_info_map,
                     Some(axis_map),
-                )
-                    .await?;
+                )?;
                 tubi_geo_hash = if matches!(current_tubing.tubi_size, TubiSize::BoxSize(_)) {
                     BOXI_GEO_HASH
                 } else {
@@ -2329,33 +2324,27 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
     Ok(true)
 }
 
-async fn query_tubi_size(
+pub fn query_tubi_size(
     mgr: &AiosDBManager,
     refno: RefU64,
     tubi_cat_ref: RefU64,
     is_hang: bool,
-    // scom_info_map: &Arc<RwLock<HashMap<RefU64, ScomInfo>>>,
     axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
 ) -> anyhow::Result<TubiSize> {
-    // if let Ok(tubi_att) = mgr.get_attr_from_localdb(tubi_ref)
     {
         //只是为了获得外径而已
         let tubi_geoms_info = resolve_desi_comp(
             Some(mgr),
             refno,
             Some(tubi_cat_ref),
-            // &scom_info_map,
             axis_map,
         )
-            // .await
             .unwrap_or_default();
         for geom in &tubi_geoms_info.geometries {
             if let BoxImplied(d) = geom {
                 return Ok(TubiSize::BoxSize((d.width, d.height)));
             } else if let TubeImplied(d) = geom {
                 return Ok(TubiSize::BoreSize(d.diameter));
-            } else {
-                // default_tube_geom = true;
             }
         }
         // use default

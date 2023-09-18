@@ -16,9 +16,8 @@ use aios_core::pdms_types::ser_refno_as_str;
 use aios_core::pdms_types::de_refno_from_key_str;
 use crate::api::element::query_id_from_name;
 use crate::api::room_code::query_room_code;
-use crate::aql_api::dtse_attr::query_ipara_from_bran;
 use crate::aql_api::pdms_element::query_id_from_names_aql;
-use crate::aql_api::pdms_room::{get_room_code_from_attr, query_room_code_from_owner, query_room_name_from_refno_aql};
+use crate::aql_api::pdms_room::{get_room_code_from_attr, query_bran_through_rooms_aql, query_room_code_from_owner, query_room_name_from_refno_aql};
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct HeatDissipationData {
@@ -59,20 +58,23 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
         let Some(temp) = request.get(&pipe_ele.name) else { continue; };
         let Some(pipe_refno) = RefU64::from_url_refno(&pipe_ele.refno) else { continue; };
         let Ok(bran_refnos) = query_children_with_name_aql(&database, pipe_refno).await else { continue; };
+        // 一次查询 pipe下所有bran穿过的房间
+        let bran = bran_refnos.iter().map(|r| r.0).collect::<Vec<RefU64>>();
+        let Ok(room_map) = query_bran_through_rooms_aql(bran, &database).await else { continue; };
         for (bran, bran_name) in bran_refnos {
             let area = get_heat_dissipation_data(bran, &database, aios_mgr).await?;
             let heat = get_heat_dissipation_table(*temp, area, true) as f32;
-            let room_code = query_room_code_from_owner(bran, &database).await?;
+            let room_code = room_map.get(&bran);
             let room_code = if room_code.is_some() {
-                room_code.unwrap()
+                room_code.unwrap().clone()
             } else {
-                get_room_code_from_attr(bran, &aios_mgr).await.unwrap_or("".to_string())
+                vec![get_room_code_from_attr(bran, &aios_mgr).await.unwrap_or("".to_string())]
             };
             result.push(GetPipeHeatDissipationResponse {
                 pipe: if pipe_ele.name.starts_with("/") { pipe_ele.name[1..].to_string() } else { pipe_ele.name.clone() },
                 temp: *temp,
                 bran: if bran_name.starts_with("/") { bran_name[1..].to_string() } else { bran_name },
-                room: room_code,
+                room: serde_json::to_string(&room_code).unwrap_or("[]".to_string()),
                 heat,
             });
         }
@@ -88,7 +90,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
     let mut bore_size = Vec::new();
     let tubis = query_tubi_from_bran(bran_refno, database).await?;
     // 查询保温层厚度
-    let iparas = query_ipara_from_bran(bran_refno, aios_mgr).await?;
+    let iparas = aios_mgr.query_ipara_from_bran(bran_refno).await?;
     let ipara = *iparas.get(0).unwrap_or(&0.0) as f32;
     for tubi in &tubis {
         // 只考虑工艺管道
@@ -203,6 +205,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
     Ok(area)
 }
 
+/// 查询bran下面所有元件的点集(除去atta)
 async fn query_bran_point_map(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<InstPointMap>> {
     let id = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, bran_refno.to_url_refno());
     let aql = AqlQuery::new("

@@ -1,8 +1,6 @@
 use crate::api::attr::query_attr;
 use crate::aql_api::*;
-use crate::consts::{
-    AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_SIBL_EDGES_COLLECTION,
-};
+use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_GEO_COLLECTION, AQL_PDMS_INST_INFO_COLLECTION, AQL_SIBL_EDGES_COLLECTION};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -26,7 +24,9 @@ use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
 use sqlx::{MySql, Pool};
 use std::collections::{HashMap, HashSet};
+use std::process::id;
 use std::str::FromStr;
+use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
 use crate::graph_db::structs::{PdmsEleEdge, PdmsEleGraphNode, PdmsMdbEdge};
 
 pub type IndexNamedAttMap = IndexMap<String, NamedAttrValue>;
@@ -169,7 +169,6 @@ impl AiosDBManager {
                 sort v.order
                 return distinct v
         "#, expression);
-        dbg!(&aql_string);
         let aql =
             AqlQuery::new(aql_string.as_str());
 
@@ -179,32 +178,69 @@ impl AiosDBManager {
     }
 
 
-
-
-
     // pub async fn query_world_element(&self, expression: &str) -> anyhow::Result<PdmsElement> {
-        // let aql_string = format!(r#"
-        //     with pdms_mdbs, pdms_eles
-        //     for v,e,p in pdms_mdbs
-        //         filter {}
-        //         let doc = document(pdms_eles, v._key)
-        //         return
-        //         { '_key':child._key,
-        //     'owner':child.owner,
-        //     'name':child.name,
-        //     'noun':child.noun,
-        //     'order': child.order,
-        //     'children_count':length(for c in 1 inbound child._id pdms_edges
-        //                         return 1 )}
-        //
-        //
-        // "#, expression);
-        // let aql =
-        //     AqlQuery::new(aql_string.as_str());
-        //
-        // let result = self.get_arango_db().await?
-        //     .aql_query::<PdmsMdbEdge>(aql).await?;
-        // Ok(result)
+    // let aql_string = format!(r#"
+    //     with pdms_mdbs, pdms_eles
+    //     for v,e,p in pdms_mdbs
+    //         filter {}
+    //         let doc = document(pdms_eles, v._key)
+    //         return
+    //         { '_key':child._key,
+    //     'owner':child.owner,
+    //     'name':child.name,
+    //     'noun':child.noun,
+    //     'order': child.order,
+    //     'children_count':length(for c in 1 inbound child._id pdms_edges
+    //                         return 1 )}
+    //
+    //
+    // "#, expression);
+    // let aql =
+    //     AqlQuery::new(aql_string.as_str());
+    //
+    // let result = self.get_arango_db().await?
+    //     .aql_query::<PdmsMdbEdge>(aql).await?;
+    // Ok(result)
     // }
+}
 
+/// 通过 refnos 查询 对应的 name
+pub async fn query_names_from_refnos_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsRefnoNameAql>> {
+    let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, refnos);
+    let aql = AqlQuery::new("
+    with @@pdms_eles
+    for id in @ids
+    let ele = document(id)
+    return {
+        'refno': ele._key,
+        'name': ele.name,
+    }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("ids", ids);
+    let result = database.aql_query::<PdmsRefnoNameAql>(aql).await?;
+    Ok(result)
+}
+
+/// 查询多个参考号的点集
+pub async fn query_refnos_point_map_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<InstPointMap>> {
+    let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, refnos);
+    let aql = AqlQuery::new("
+    with @@pdms_eles,@@pdms_edges,@@pdms_inst_infos,@@pdms_inst_geos
+    for id in @ids
+        let v = document(id)
+        filter v != null
+        let cata_hash = document(@@pdms_inst_infos,v._key)
+        let hash = cata_hash.cata_hash == null ? cata_hash._key : cata_hash.cata_hash
+        let geo = document(@@pdms_inst_geos,hash)
+        filter geo != null
+        return {
+            'refno': v._key,
+            'att_type': v.noun,
+            'ptset_map': geo.ptset_map
+        }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION)
+        .bind_var("@pdms_inst_geos", AQL_PDMS_INST_GEO_COLLECTION)
+        .bind_var("ids", ids);
+    let result = database.aql_query::<InstPointMap>(aql).await?;
+    Ok(result)
 }

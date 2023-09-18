@@ -13,6 +13,7 @@ use bb8_arangodb::arangors_lite::Database;
 use calamine::Error::De;
 use dashmap::DashSet;
 use nom::combinator::value;
+use parry2d::simba::scalar::SupersetOf;
 use sqlx::{Error, MySql, Pool, Row};
 use crate::consts::*;
 use crate::api::element::*;
@@ -254,6 +255,25 @@ impl AiosDBManager {
                 break;
             }
             refno = basic.get_owner();
+        }
+        target
+    }
+
+
+    pub fn traverse_foreign(&self, mut refno: RefU64, foreigns: &[&str], func: impl Fn(RefU64) -> bool) -> Option<RefU64> {
+        let mut target = None;
+        let mut index: usize = 0;
+        if foreigns.is_empty() { return None; }
+        while let Ok(att) = self.get_attr_from_localdb(refno)  {
+            let key = foreigns.get(0).unwrap_or(foreigns.last().unwrap());
+            if func(refno) {
+                break;
+            }
+            target = Some(refno);
+            if let Some(r) = att.get_foreign_refno(key){
+                refno = r;
+            }
+            index += 1;
         }
         target
     }

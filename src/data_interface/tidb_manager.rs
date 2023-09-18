@@ -4,12 +4,11 @@ use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
 use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 use crate::cata::consts::*;
-use crate::cata::query_cata::query_axis_params;
+use crate::cata::query_cata::{query_axis_params, resolve_cata_comp};
 use crate::cata::query_cata::query_gm_param;
-use crate::cata::resolve::CataContext;
+use crate::cata::resolve::{CataContext, resolve_axis_param};
 use crate::cata::resolve::{CATA_CONTEXT_MAP, SCOM_INFO_MAP};
 use crate::consts::*;
-use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
 use crate::graph_db::pdms_arango::ArPool;
@@ -20,7 +19,7 @@ use aios_core::cache::refno::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::*;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
-use aios_core::parsed_data::CateAxisParam;
+use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::GmParam;
 use aios_core::pdms_data::PlinParam;
 use aios_core::pdms_data::PlinParamData;
@@ -28,7 +27,7 @@ use aios_core::pdms_data::ScomInfo;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::tool::db_tool::db1_dehash;
+use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::tool::math_tool;
 use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use anyhow::anyhow;
@@ -53,8 +52,12 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+use aios_core::consts::WORD_HASH;
+use aios_core::pdms_types::AttrVal::DoubleArrayType;
+use log::error;
 use tokio::sync::RwLock;
 use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
+use crate::data_interface::interface::PdmsDataInterface;
 
 // #[derive(Debug)]
 pub struct AiosDBManager {
@@ -148,6 +151,30 @@ impl PdmsDataInterface for AiosDBManager {
             .unwrap_or("unset".to_string())
     }
 
+    ///获得下一个构件的参考号
+    fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64>{
+        let owner = self.get_owner(refno);
+        let children_refnos = self.get_children_from_localdb(owner)?;
+        let pos = children_refnos.iter().position(|x| *x == refno).unwrap_or_default();
+        if pos == children_refnos.len() - 1 {
+            self.get_next(owner)
+        }else{
+            Ok(children_refnos[pos + 1])
+        }
+    }
+
+    ///获得上一个构件的参考号
+    fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64>{
+        let owner = self.get_owner(refno);
+        let children_refnos = self.get_children_from_localdb(owner)?;
+        let pos = children_refnos.iter().position(|x| *x == refno).unwrap_or_default();
+        if pos == 0 {
+            Ok(owner)
+        }else{
+            Ok(children_refnos[pos - 1])
+        }
+    }
+
     ///从本地数据库获取属性
     fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
         for project in &self.db_option.included_projects {
@@ -197,7 +224,15 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(db) = self.local_attr_db_map.get(project) {
             let k = refno.0.to_be_bytes();
             if let Ok(Some(bytes)) = db.get(k.as_slice()) {
-                return AttrMap::from_rkvy_compress_bytes(bytes.as_ref());
+                let mut att_map = AttrMap::from_rkvy_compress_bytes(bytes.as_ref())?;
+                if let Some(desp) = att_map.get_f64_vec("DESP") {
+                    let unpars = att_map.get_i32_vec("UNIPAR").unwrap_or_default();
+                    let ddesp = desp.iter()
+                        .zip(unpars).map(|(x, f)| if f == WORD_HASH as i32 { 0.0 } else { *x } )
+                        .collect::<Vec<f64>>();
+                    att_map.insert(db1_hash("DDES"), DoubleArrayType(ddesp));
+                }
+                return Ok(att_map);
             }
         }
         Err(anyhow::anyhow!(format!("{refno} att not exist")))
@@ -401,7 +436,7 @@ impl PdmsDataInterface for AiosDBManager {
         let hash_name = format!("{project}_{mdb_name}_{module}");
         if GLOBAL_MDB_WORLD_MAP.contains_key(&hash_name) {
             Ok(GLOBAL_MDB_WORLD_MAP.get(&hash_name).unwrap().clone())
-        }else{
+        } else {
             let string = format!(
                 "v.mdb_name==\"/{}\" and v.db_type==\"{}\"",
                 mdb_name, module
@@ -824,7 +859,8 @@ impl PdmsDataInterface for AiosDBManager {
             let c_ref = att.get_foreign_refno("CREF").unwrap_or_default();
             let mut has_cut_back = false;
             let mut cut_dir = Vec3::Y;
-            if att.contains_attr_name("CUTB") {
+            //如果posl有，就不起用CUTB，相当于CUTB是一个手动对齐
+            if att.get_str("POSL").is_none() && att.contains_attr_name("CUTB") {
                 has_cut_back = true;
                 cut_dir = att.get_vec3("CUTP").unwrap_or(cut_dir);
                 let cut_len = att.get_f32("CUTB").unwrap_or_default();
@@ -1177,7 +1213,7 @@ impl PdmsDataInterface for AiosDBManager {
                 }
             }
         }
-        // let children = interface.get_deep_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
+        // let children = self.get_deep_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
         for geo_am in children {
             if !geo_am.is_visible_by_level(None).unwrap_or(true) {
                 continue;
@@ -1283,9 +1319,15 @@ impl PdmsDataInterface for AiosDBManager {
             let mut desp = desi_att.get_f64_vec("DESP").unwrap_or_default();
             for i in 0..desp.len() {
                 context.insert(format!("DESI{}", i + 1).into(), desp[i].to_string().into());
-                context.insert(format!("DDES{}", i + 1).into(), desp[i].to_string().into());
                 context.insert(format!("DESP{}", i + 1).into(), desp[i].to_string().into());
             }
+            let mut desp = desi_att.get_f64_vec("DDES").unwrap_or_default();
+            for i in 0..desp.len() {
+                context.insert(format!("DDES{}", i + 1).into(), desp[i].to_string().into());
+            }
+
+
+
             let height = desi_att.get_as_string("HEIG").unwrap_or("0.0".into());
             context.insert(DDHEIGHT_STR.into(), (height.clone()));
             let angle = desi_att.get_as_string("ANGL").unwrap_or("0.0".into());
@@ -1329,22 +1371,29 @@ impl PdmsDataInterface for AiosDBManager {
                         let v = axis_map.get(&arrive).unwrap();
                         context.insert("ARRWID".into(), v.pwidth.to_string());
                         context.insert("ARRHEI".into(), v.pheight.to_string());
+                        context.insert("ABOR".into(), v.pbore.to_string());
                     }
 
                     if axis_map.contains_key(&leave) {
                         let v = axis_map.get(&leave).unwrap();
                         context.insert("LEAWID".into(), v.pwidth.to_string());
                         context.insert("LEAHEI".into(), v.pheight.to_string());
+                        context.insert("LBOR".into(), v.pbore.to_string());
                     }
                 }
             }
             //todo 保温层厚度参数
+            // let iparams = self.query_ipara_from_ele(desi_refno).unwrap_or_default();
+            // for i in 0..iparams.len() {
+            //     context.insert(format!("IPAR{}", i + 1).into(), iparams[i].to_string().into());
+            //     context.insert(format!("IPARM{}", i + 1).into(), iparams[i].to_string().into());
+            // }
 
             context.insert("RS_DES_REFNO".into(), desi_refno.to_refno_str());
             //添加cata的信息
             if let Some(cata_attmap) = self.get_cat_attmap(desi_refno) {
                 context.insert(
-                    "RS_SCOM_REFNO".into(),
+                    "RS_CATR_REFNO".into(),
                     cata_attmap.get_refno().unwrap().to_refno_str(),
                 );
                 // dbg!(&cata_attmap);
@@ -1426,4 +1475,71 @@ impl PdmsDataInterface for AiosDBManager {
         };
         Ok(cata_context)
     }
+
+    ///求解design component
+    fn resolve_desi_comp(
+        &self,
+        desi_refno: RefU64,
+        mut scom_ref_option: Option<RefU64>,
+        //传入额外的参数进来，用于解析轴线参数
+        desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
+    ) -> anyhow::Result<CateGeomsInfo> {
+        let desi_att = self.get_attr_from_localdb(desi_refno)?;
+        //todo 改到使用图数据库去查找
+        if scom_ref_option.is_none() {
+            scom_ref_option = self.get_cat_ref(desi_refno);
+        }
+        let scom_ref = scom_ref_option.ok_or(anyhow::anyhow!(format!(
+        "SCOM not exist in element: {}",
+        desi_refno.to_refno_str()
+    )))?;
+        if !scom_ref.is_valid() {
+            println!(
+                "{} 的CAT引用不存在，为 {}",
+                desi_refno.to_refno_str(),
+                scom_ref.to_refno_str()
+            );
+            return Ok(Default::default());
+        }
+        // dbg!(scom_ref);
+        let scom_info = self.get_or_create_scom_info(scom_ref)?;
+        // dbg!(&scom_info.gm_params);
+        // dbg!(&scom_info.axis_params);
+        let mut context = self.get_or_create_cata_context(desi_refno, desi_axis_map)?;
+
+        let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(self), Some(context));
+        // dbg!(&geom_info.as_ref().unwrap().n_geometries);
+        if geom_info.is_err() {
+            error!("{:?}", geom_info.as_ref().err());
+            error!("{:?}", desi_att.to_string_hashmap());
+        }
+        geom_info
+    }
+
+    /// 求解axis的数值
+    fn resolve_axis_params(
+        &self,
+        refno: RefU64,
+        context: Option<CataContext>,
+    ) -> anyhow::Result<BTreeMap<i32, CateAxisParam>> {
+        let mut map = BTreeMap::new();
+        let scom_refno = self.get_cat_ref(refno).unwrap_or_default();
+        if !scom_refno.is_valid() { return Ok(Default::default()); }
+        let scom = self.get_or_create_scom_info(scom_refno)?;
+        let context =  context.unwrap_or(self.get_or_create_cata_context(refno, None)?);
+        for i in 0..scom.axis_params.len() {
+            dbg!(&scom.axis_params[i]);
+            match resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self)) {
+                Ok(axis) => {
+                    map.insert(scom.axis_param_numbers[i], axis);
+                }
+                Err(e) => {
+                    println!("{} resolve_axis_params 出错： {:?}", refno, &e);
+                }
+            }
+        }
+        Ok(map)
+    }
+
+
 }
