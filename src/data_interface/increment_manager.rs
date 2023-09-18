@@ -349,7 +349,6 @@ impl AiosDBManager {
             watcher.watch(x.as_path(), RecursiveMode::NonRecursive);
         });
 
-
         while let Some(res) = rx.next().await {
             match res {
                 Ok(event) => {

@@ -613,7 +613,9 @@ impl AiosDBManager {
 
     /// 初始化 uda_map
     pub async fn init_uda_map(&self) -> anyhow::Result<()> {
-        for pool in &self.project_map {
+        // 按照 include 顺序存放uda，排除uda冲突的情况
+        for project in &self.db_option.included_projects {
+            let Some(pool) = &self.project_map.get(project) else { continue; };
             if let Ok(uda_map) = query_uda_ukey_udna_all(pool.value()).await {
                 for (ukey, udna) in uda_map {
                     let udna = format!(":{}", udna);
