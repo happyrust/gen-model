@@ -27,7 +27,7 @@ use aios_core::pdms_data::ScomInfo;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::tool::db_tool::db1_dehash;
+use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::tool::math_tool;
 use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use anyhow::anyhow;
@@ -52,6 +52,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+use aios_core::consts::WORD_HASH;
+use aios_core::pdms_types::AttrVal::DoubleArrayType;
 use log::error;
 use tokio::sync::RwLock;
 use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
@@ -222,7 +224,15 @@ impl PdmsDataInterface for AiosDBManager {
         if let Some(db) = self.local_attr_db_map.get(project) {
             let k = refno.0.to_be_bytes();
             if let Ok(Some(bytes)) = db.get(k.as_slice()) {
-                return AttrMap::from_rkvy_compress_bytes(bytes.as_ref());
+                let mut att_map = AttrMap::from_rkvy_compress_bytes(bytes.as_ref())?;
+                if let Some(desp) = att_map.get_f64_vec("DESP") {
+                    let unpars = att_map.get_i32_vec("UNIPAR").unwrap_or_default();
+                    let ddesp = desp.iter()
+                        .zip(unpars).map(|(x, f)| if f == WORD_HASH as i32 { 0.0 } else { *x } )
+                        .collect::<Vec<f64>>();
+                    att_map.insert(db1_hash("DDES"), DoubleArrayType(ddesp));
+                }
+                return Ok(att_map);
             }
         }
         Err(anyhow::anyhow!(format!("{refno} att not exist")))
@@ -1309,9 +1319,13 @@ impl PdmsDataInterface for AiosDBManager {
             let mut desp = desi_att.get_f64_vec("DESP").unwrap_or_default();
             for i in 0..desp.len() {
                 context.insert(format!("DESI{}", i + 1).into(), desp[i].to_string().into());
-                context.insert(format!("DDES{}", i + 1).into(), desp[i].to_string().into());
                 context.insert(format!("DESP{}", i + 1).into(), desp[i].to_string().into());
             }
+            let mut desp = desi_att.get_f64_vec("DDES").unwrap_or_default();
+            for i in 0..desp.len() {
+                context.insert(format!("DDES{}", i + 1).into(), desp[i].to_string().into());
+            }
+
 
 
             let height = desi_att.get_as_string("HEIG").unwrap_or("0.0".into());
@@ -1379,7 +1393,7 @@ impl PdmsDataInterface for AiosDBManager {
             //添加cata的信息
             if let Some(cata_attmap) = self.get_cat_attmap(desi_refno) {
                 context.insert(
-                    "RS_SCOM_REFNO".into(),
+                    "RS_CATR_REFNO".into(),
                     cata_attmap.get_refno().unwrap().to_refno_str(),
                 );
                 // dbg!(&cata_attmap);
@@ -1510,6 +1524,7 @@ impl PdmsDataInterface for AiosDBManager {
     ) -> anyhow::Result<BTreeMap<i32, CateAxisParam>> {
         let mut map = BTreeMap::new();
         let scom_refno = self.get_cat_ref(refno).unwrap_or_default();
+        if !scom_refno.is_valid() { return Ok(Default::default()); }
         let scom = self.get_or_create_scom_info(scom_refno)?;
         let context =  context.unwrap_or(self.get_or_create_cata_context(refno, None)?);
         for i in 0..scom.axis_params.len() {

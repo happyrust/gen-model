@@ -210,8 +210,16 @@ async fn main() -> anyhow::Result<()> {
     //     Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
     // }
 
-    // let refno = "=23713/3498".into();
-    // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
+    // let refno = "24381/46973".into();
+    // let hash = db1_hash(":HXYsize");
+    // dbg!(hash);
+    // dbg!(db1_dehash(623723));
+    // dbg!(db1_dehash(640481));
+    // let attr = mgr.get_attr_from_localdb(refno).unwrap_or_default();
+    // // dbg!(attr.map.get(&hash));
+    // // dbg!(&attr.map);
+    // dbg!(&attr);
+    // return Ok(());
     // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
     // dbg!(quat_to_pdms_ori_str(&transform.rotation));
     // dbg!(transform);

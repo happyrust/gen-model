@@ -620,6 +620,9 @@ impl AiosDBManager {
                 for (ukey, udna) in uda_map {
                     let udna = format!(":{}", udna);
                     GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna.clone());
+                    // if udna == ":HXYsize".to_string() {
+                    //     dbg!(&ukey);
+                    // }
                     GLOBAL_UDA_UKEY_MAP.entry(udna).or_insert(ukey);
                 }
             }
