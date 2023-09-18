@@ -152,25 +152,25 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///获得下一个构件的参考号
-    fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64>{
+    fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64> {
         let owner = self.get_owner(refno);
         let children_refnos = self.get_children_from_localdb(owner)?;
         let pos = children_refnos.iter().position(|x| *x == refno).unwrap_or_default();
         if pos == children_refnos.len() - 1 {
             self.get_next(owner)
-        }else{
+        } else {
             Ok(children_refnos[pos + 1])
         }
     }
 
     ///获得上一个构件的参考号
-    fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64>{
+    fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64> {
         let owner = self.get_owner(refno);
         let children_refnos = self.get_children_from_localdb(owner)?;
         let pos = children_refnos.iter().position(|x| *x == refno).unwrap_or_default();
         if pos == 0 {
             Ok(owner)
-        }else{
+        } else {
             Ok(children_refnos[pos - 1])
         }
     }
@@ -188,8 +188,13 @@ impl PdmsDataInterface for AiosDBManager {
     fn get_full_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
         let mut att_map = self.get_attr_from_localdb(refno)?;
         aios_core::get_default_pdms_db_info().fill_default_values(&mut att_map);
-
         Ok(att_map)
+    }
+
+    /// 获取attrmap并转为 NamedAttrMapii
+    fn get_named_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<NamedAttrMap> {
+        let att_map = self.get_attr_from_localdb(refno)?;
+        Ok(att_map.into())
     }
 
     ///获得子节点的参考号集合
@@ -228,7 +233,7 @@ impl PdmsDataInterface for AiosDBManager {
                 if let Some(desp) = att_map.get_f64_vec("DESP") {
                     let unpars = att_map.get_i32_vec("UNIPAR").unwrap_or_default();
                     let ddesp = desp.iter()
-                        .zip(unpars).map(|(x, f)| if f == WORD_HASH as i32 { 0.0 } else { *x } )
+                        .zip(unpars).map(|(x, f)| if f == WORD_HASH as i32 { 0.0 } else { *x })
                         .collect::<Vec<f64>>();
                     att_map.insert(db1_hash("DDES"), DoubleArrayType(ddesp));
                 }
@@ -1327,7 +1332,6 @@ impl PdmsDataInterface for AiosDBManager {
             }
 
 
-
             let height = desi_att.get_as_string("HEIG").unwrap_or("0.0".into());
             context.insert(DDHEIGHT_STR.into(), (height.clone()));
             let angle = desi_att.get_as_string("ANGL").unwrap_or("0.0".into());
@@ -1526,7 +1530,7 @@ impl PdmsDataInterface for AiosDBManager {
         let scom_refno = self.get_cat_ref(refno).unwrap_or_default();
         if !scom_refno.is_valid() { return Ok(Default::default()); }
         let scom = self.get_or_create_scom_info(scom_refno)?;
-        let context =  context.unwrap_or(self.get_or_create_cata_context(refno, None)?);
+        let context = context.unwrap_or(self.get_or_create_cata_context(refno, None)?);
         for i in 0..scom.axis_params.len() {
             dbg!(&scom.axis_params[i]);
             match resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self)) {
@@ -1540,6 +1544,4 @@ impl PdmsDataInterface for AiosDBManager {
         }
         Ok(map)
     }
-
-
 }

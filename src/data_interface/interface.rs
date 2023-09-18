@@ -3,9 +3,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{ScomInfo, GmParam};
-use aios_core::pdms_types::{
-    AiosStr, AttrMap, EleTreeNode, PdmsElement, PdmsTree, RefU64, RefU64Vec,
-};
+use aios_core::pdms_types::{AiosStr, AttrMap, EleTreeNode, NamedAttrMap, PdmsElement, PdmsTree, RefU64, RefU64Vec};
 use aios_core::prim_geo::spine::Spine3D;
 use aios_core::shape::pdms_shape::PlantMesh;
 use async_trait::async_trait;
@@ -44,6 +42,9 @@ pub trait PdmsDataInterface: Send + Sync {
     fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
 
     fn get_full_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
+
+    /// 获取attrmap转换为NamedAttrMap
+    fn get_named_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<NamedAttrMap>;
 
     ///从本地获取children
     fn get_children_from_localdb(&self, refno: RefU64) -> anyhow::Result<RefU64Vec>;
