@@ -554,7 +554,7 @@ async fn test_query_around_owner_within_radius() {
 async fn test_get_dq_support_sctn_data() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let refnos = vec![RefU64::from_refno_str("24383/86099").unwrap()];
-    let result = get_dq_support_sctn_data(refnos, &aios_mgr).await?;
+    let result = get_dq_support_sctn_data(refnos, &aios_mgr,vec![]).await?;
     let mut file = std::fs::File::create("data_center_test/PARTDA_PARTDB_PARTDK.json")?;
     let json = serde_json::to_vec(&result)?;
     file.write_all(&json)?;

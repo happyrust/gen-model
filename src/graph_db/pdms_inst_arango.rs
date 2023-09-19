@@ -188,7 +188,7 @@ pub async fn save_instance_to_graph_db(
 /// 默认直接优先取负实体的数据
 pub async fn query_insts_shape_data(
     database: &ArDatabase,
-    refnos: impl IntoIterator<Item = &RefU64>,
+    refnos: impl IntoIterator<Item=&RefU64>,
     geo_type_filter: Option<&[GeoBasicType]>,
 ) -> anyhow::Result<ShapeInstancesData> {
     let filter = geo_type_filter.unwrap_or(&[GeoBasicType::Compound, GeoBasicType::Pos]);
@@ -212,10 +212,10 @@ pub async fn query_insts_shape_data(
                     return distinct d
             "#,
     )
-    .bind_var("refnos", refno_strs.clone())
-    .bind_var("include_compound", include_compound)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
+        .bind_var("refnos", refno_strs.clone())
+        .bind_var("include_compound", include_compound)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     let mut inst_info_map = HashMap::new();
     //过滤不需要的geo inst，比如排除neg的等等
@@ -248,8 +248,8 @@ pub async fn query_insts_shape_data(
                 }
             "#,
     )
-    .bind_var("inst_keys", inst_keys)
-    .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
+        .bind_var("inst_keys", inst_keys)
+        .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
     let inst_geos: Vec<EleInstGeosData> = database.aql_query(aql).await.unwrap();
     for g in inst_geos {
         inst_geos_map.insert(g.inst_key.clone(), g);
@@ -273,8 +273,8 @@ pub async fn query_insts_shape_data(
                 return f
             "#,
     )
-    .bind_var("refnos", all_refnos)
-    .bind_var("@pdms_inst_tubis", AQL_PDMS_INST_TUBI_COLLECTION);
+        .bind_var("refnos", all_refnos)
+        .bind_var("@pdms_inst_tubis", AQL_PDMS_INST_TUBI_COLLECTION);
     let inst_tubi: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     for g in inst_tubi {
         inst_tubi_map.insert(g.refno, g);
@@ -305,10 +305,10 @@ pub async fn query_instance_level_with_refno_in_arangodb(
         let f = document(@@collection,c._key)
         return f._key",
     )
-    .bind_var("refno", refno_aql)
-    .bind_var("@collection", pdms_inst_infos)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+        .bind_var("refno", refno_aql)
+        .bind_var("@collection", pdms_inst_infos)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<String> = database.aql_query(aql).await.unwrap();
     if result.is_empty() {
         return Ok(vec![]);
@@ -330,9 +330,9 @@ pub async fn query_instance_level_with_ssc_refno_in_arangodb(
         // Filter document(@collection,c._key) != null
         return c._key",
     )
-    .bind_var("refno", refno_aql)
-    .bind_var("@ssc_eles", AQL_SSC_ELES_COLLECTION)
-    .bind_var("@ssc_edges", AQL_SSC_EDGE_COLLECTION);
+        .bind_var("refno", refno_aql)
+        .bind_var("@ssc_eles", AQL_SSC_ELES_COLLECTION)
+        .bind_var("@ssc_edges", AQL_SSC_EDGE_COLLECTION);
     // .bind_var("collection", pdms_inst_infos);
     let result: Vec<String> = database.aql_query(aql).await?;
     if result.is_empty() {
@@ -359,8 +359,8 @@ pub async fn query_rvm_instance_data_from_refno_aql(
         'world_transform':r.world_transform
     }",
     )
-    .bind_var("key", refno_aql)
-    .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
+        .bind_var("key", refno_aql)
+        .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
     let result = database.aql_query::<RvmGeoInfo>(aql).await;
     if result.is_err() {
         return Ok(None);
@@ -370,6 +370,30 @@ pub async fn query_rvm_instance_data_from_refno_aql(
         return Ok(None);
     }
     Ok(Some(result.remove(0)))
+}
+
+pub async fn query_rvm_instance_data_from_owner_aql(
+    refno: RefU64,
+    database: &ArDatabase,
+) -> anyhow::Result<Vec<RvmGeoInfo>> {
+    let refno_aql = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
+    let aql = AqlQuery::new(
+        "
+    With @@pdms_inst_infos,@@pdms_eles,@@pdms_edges
+    for v in 1 inbound @key @@pdms_edges
+    let r = document(@@pdms_inst_infos,v._key)
+    filter r != null
+    return {
+        '_key':r._key,
+        'aabb':r.aabb,
+        'data':[],
+        'world_transform':r.world_transform
+    }", ).bind_var("key", refno_aql)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
+    let result = database.aql_query::<RvmGeoInfo>(aql).await?;
+    Ok(result)
 }
 
 pub async fn query_compound_inst_hashes_aql(
@@ -389,11 +413,11 @@ pub async fn query_compound_inst_hashes_aql(
     return compound_inst
     ",
     )
-    .bind_var("ids", ids)
-    .bind_var(
-        "@pdms_compound_inst_infos",
-        AQL_PDMS_COMPOUND_INST_INFO_COLLECTION,
-    );
+        .bind_var("ids", ids)
+        .bind_var(
+            "@pdms_compound_inst_infos",
+            AQL_PDMS_COMPOUND_INST_INFO_COLLECTION,
+        );
     let result = database.aql_query::<EleGeosInfo>(aql).await?;
     Ok(result)
 }

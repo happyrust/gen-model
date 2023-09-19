@@ -191,7 +191,7 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(att_map)
     }
 
-    /// 获取attrmap并转为 NamedAttrMapii
+    /// 获取attrmap并转为 NamedAttrMap
     fn get_named_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<NamedAttrMap> {
         let att_map = self.get_attr_from_localdb(refno)?;
         Ok(att_map.into())
