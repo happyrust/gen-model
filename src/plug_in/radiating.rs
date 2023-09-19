@@ -17,7 +17,7 @@ use aios_core::pdms_types::de_refno_from_key_str;
 use crate::api::element::query_id_from_name;
 use crate::api::room_code::query_room_code;
 use crate::aql_api::pdms_element::query_id_from_names_aql;
-use crate::aql_api::pdms_room::{get_room_code_from_attr, query_bran_through_rooms_aql, query_room_code_from_owner, query_room_name_from_refno_aql};
+use crate::aql_api::pdms_room::{get_room_code_from_attr, query_bran_through_rooms_aql, query_room_code_from_owner, query_room_codes_from_owners, query_room_name_from_refno_aql};
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct HeatDissipationData {
@@ -60,7 +60,12 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
         let Ok(bran_refnos) = query_children_with_name_aql(&database, pipe_refno).await else { continue; };
         // 一次查询 pipe下所有bran穿过的房间
         let bran = bran_refnos.iter().map(|r| r.0).collect::<Vec<RefU64>>();
-        let Ok(room_map) = query_bran_through_rooms_aql(bran, &database).await else { continue; };
+        let Ok(room_map) = query_room_codes_from_owners(bran, &database).await else { continue; };
+        let room_map = room_map.into_iter()
+            .filter(|x| RefU64::from_url_refno(&x.refno).is_some())
+            .map(|x| (RefU64::from_url_refno(&x.refno).unwrap(), x.name))
+            .collect::<HashMap<RefU64, String>>();
+        // 计算每个bran的散热量
         for (bran, bran_name) in bran_refnos {
             let area = get_heat_dissipation_data(bran, &database, aios_mgr).await?;
             let heat = get_heat_dissipation_table(*temp, area, true) as f32;
@@ -68,13 +73,13 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
             let room_code = if room_code.is_some() {
                 room_code.unwrap().clone()
             } else {
-                vec![get_room_code_from_attr(bran, &aios_mgr).await.unwrap_or("".to_string())]
+                get_room_code_from_attr(bran, &aios_mgr).await.unwrap_or("".to_string())
             };
             result.push(GetPipeHeatDissipationResponse {
                 pipe: if pipe_ele.name.starts_with("/") { pipe_ele.name[1..].to_string() } else { pipe_ele.name.clone() },
                 temp: *temp,
                 bran: if bran_name.starts_with("/") { bran_name[1..].to_string() } else { bran_name },
-                room: serde_json::to_string(&room_code).unwrap_or("[]".to_string()),
+                room: serde_json::to_string(&room_code).unwrap_or("".to_string()),
                 heat,
             });
         }
