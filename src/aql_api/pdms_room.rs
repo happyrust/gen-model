@@ -890,8 +890,8 @@ impl AiosDBManager {
         if is_end_pt {
             whole_key_points.sort_by(|a, b| a.length().partial_cmp(&b.length()).unwrap());
             let end_key_points = vec![
-                whole_key_points.first().cloned().unwrap(),
-                whole_key_points.last().cloned().unwrap(),
+                whole_key_points.first().cloned().unwrap_or_default(),
+                whole_key_points.last().cloned().unwrap_or_default(),
             ];
             return Ok(Some((end_key_points, whole_aabb)));
         }
