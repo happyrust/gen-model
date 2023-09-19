@@ -52,6 +52,7 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
         .map(|r| (format!("/{}", r.pipe), r.temp))
         .collect::<HashMap<String, f32>>();
     let names = request.keys().map(|name| name.clone()).collect::<Vec<_>>();
+    // 通过pipe name 查询到pipe的所有参考后
     let pipe_refnos = query_id_from_names_aql(names, Some("PIPE"), &database).await?;
     let mut result = Vec::new();
     for pipe_ele in pipe_refnos {
@@ -79,7 +80,7 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
                 pipe: if pipe_ele.name.starts_with("/") { pipe_ele.name[1..].to_string() } else { pipe_ele.name.clone() },
                 temp: *temp,
                 bran: if bran_name.starts_with("/") { bran_name[1..].to_string() } else { bran_name },
-                room: serde_json::to_string(&room_code).unwrap_or("".to_string()),
+                room: room_code,
                 heat,
             });
         }
