@@ -137,7 +137,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
     create_info_database(&default_conn_str, &db_option.project_name).await?;
 
-
     let pdms_info_pool = AiosDBManager::get_db_pool(
         &default_conn_str,
         &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name),
@@ -381,7 +380,7 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
     if let Some(info_map) = ATTR_INFO_MAP.get(&(db1_hash(type_name) as i32)) {
         for noun_hash in column_hashes {
             //如果没有这个属性，需要用unset顶上
-            if ( type_name == "UDA" || type_name == "UDET" ) && noun_hash == &db1_hash("UDNA") {
+            if (type_name == "UDA" || type_name == "UDET") && noun_hash == &db1_hash("UDNA") {
                 let uda = if i_att.contains_attr_name("UDNA") {
                     let uda = i_att.get_str("UDNA").unwrap();
                     if uda.is_empty() {
@@ -577,6 +576,9 @@ pub async fn sync_total_async_threaded(
             })
             .collect::<Vec<PathBuf>>()
     };
+    // 先解析一遍uda
+    dbg!("解析uda文件");
+    let _ = parse_uda_file(project, children_files.clone(),&need_parsed_files).await;
 
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
@@ -592,7 +594,7 @@ pub async fn sync_total_async_threaded(
     let mut version_map = HashMap::new();
     let only_update_dbinfo = db_option.only_update_dbinfo;
     let only_sync_sys = db_option.only_sync_sys;
-    let chunk_size  = db_option.sync_chunk_size.unwrap_or(10_0000) as usize;
+    let chunk_size = db_option.sync_chunk_size.unwrap_or(10_0000) as usize;
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
         if file_name.ends_with("com") || file_name.ends_with("mis") {
