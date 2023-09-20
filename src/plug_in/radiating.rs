@@ -79,7 +79,7 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
                 pipe: if pipe_ele.name.starts_with("/") { pipe_ele.name[1..].to_string() } else { pipe_ele.name.clone() },
                 temp: *temp,
                 bran: if bran_name.starts_with("/") { bran_name[1..].to_string() } else { bran_name },
-                room: serde_json::to_string(&room_code).unwrap_or("".to_string()),
+                room: room_code,
                 heat,
             });
         }
@@ -201,7 +201,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
             }
         }
     }
-    // dbg!(&length_map);
+    dbg!(&length_map);
     // 计算整个bran的面积
     let mut area = 0.0;
     for length_data in length_map {

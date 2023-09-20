@@ -74,9 +74,11 @@ puhua_database_ip = ""
 puhua_database_user = ""
 puhua_database_password = ""
 
+debug_root_refnos = ["17496/170578"]
+
 #joint还有问题，方位对齐的问题
 #debug_root_refnos = ["25688/48687"]
-debug_root_refnos = ["17496/254041","17496/248848","17496/266201"]
+# debug_root_refnos = ["17496/254041","17496/248848","17496/266201"]
 
 
 #ngmr的孔洞问题，需要调整组织，own_pos_refnos 要设为多个
