@@ -1308,10 +1308,6 @@ pub async fn gen_cata_geos(
                 let l_dir = world_trans.transform_vec3(dir).normalize_or_zero();
                 let l_ref_dir = world_trans.transform_vec3(ref_dir).normalize_or_zero();
                 let l_pos = world_trans.transform_point(axis_map[&leave].pt);
-                // let lstube_cat_ref = refno_lstube_map
-                //     .get(&refno)
-                //     .map(|x| *x.value())
-                //     .unwrap_or_default();
                 let att_map = mgr.get_attr_from_localdb(refno).unwrap_or_default();
                 let lstube_ref = att_map.get_foreign_refno("LSTU").unwrap_or_default();
                 let lstube_cat_ref = mgr
@@ -1319,18 +1315,12 @@ pub async fn gen_cata_geos(
                     .unwrap_or_default()
                     .get_foreign_refno("CATR")
                     .unwrap_or_default();
-                // let bore = lstube_bores_map
-                //     .get(&lstube)
-                //     .map(|x| *x.value())
-                //     .unwrap_or_default();
-                // current_tubing.tubi_size = TubiSize::BoreSize(bore);
-                // dbg!((refno, lstube_cat_ref));
+
                 current_tubing.tubi_size = query_tubi_size(
                     &mgr,
                     refno,
                     lstube_cat_ref,
                     is_hang,
-                    // &scom_info_map,
                     Some(axis_map),
                 )?;
                 tubi_geo_hash = if matches!(current_tubing.tubi_size, TubiSize::BoxSize(_)) {
@@ -1399,7 +1389,6 @@ pub async fn gen_cata_geos(
                 }
             }
         }
-        // dbg!(&inst_tubi_map);
     }
 
     if !inst_tubi_map.is_empty() {
@@ -1415,7 +1404,6 @@ pub async fn gen_cata_geos(
         .into_iter()
         .map(|x| x.1)
         .collect::<Vec<_>>();
-    // dbg!(&tubi_result.len());
     if !tubi_result.is_empty() {
         let conn = mgr.get_arango_db().await?;
         let json = serde_json::to_value(tubi_result).unwrap_or_default();
@@ -1563,8 +1551,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
         println!("使用管道或者支吊架元件库数量: {}", target_cata_refnos.len());
         //查询出branch 和 branch 下的子节点
         let mut branch_refnos_map = DashMap::new();
-        let mut refno_lstube_map = DashMap::new();
-        let mut lstube_bores_map = DashMap::new();
         let mut bran_comp_eles = vec![];
         for refno in &target_cata_refnos {
             let att = mgr.get_attr_from_localdb(*refno).unwrap_or_default();
@@ -1577,31 +1563,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
             //求出元件对应的outside bore
             branch_refnos_map.insert(*refno, children);
         }
-
-        let lstube_refnos = mgr
-            .query_foreign_refnos(&bran_comp_eles, &[&["LSRO", "LSTU"]], &["CATR"], &[], 2)
-            .await?;
-        for c in 0..bran_comp_eles.len() {
-            refno_lstube_map.insert(bran_comp_eles[c], lstube_refnos[c]);
-        }
-        let lstube_set = lstube_refnos
-            .into_iter()
-            .collect::<HashSet<_>>()
-            .into_iter();
-        for l in lstube_set {
-            let Ok(att) = mgr.get_attr_from_localdb(l) else {
-                continue;
-            };
-            let params = att.get_f64_vec("PARA").unwrap_or_default();
-            let gtype = att.get_as_string("GTYP").unwrap_or_default();
-            if params.len() >= 2 {
-                // let type_name = db1_dehash(params[2] as u32);
-                // dbg!(type_name);
-                let bore = params[if gtype.as_str() == "TUBE" { 1 } else { 0 }] as f32;
-                lstube_bores_map.insert(l, bore);
-            }
-        }
-        // dbg!(&lstube_bores_map);
         let target_bran_reuse_cata_map = mgr
             .get_gen_model_map_by_cata_hash(
                 GeoEnum::CATA_BRAN_AND_HANGER_REUSE,
@@ -1644,7 +1605,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                     gen_cata_geos(
                         mgr_clone,
                         instance_mgr_clone,
-                        // scom_info_map_clone,
                         Arc::new(target_bran_reuse_cata_map),
                         Arc::new(branch_refnos_map),
                         sjus_map_clone,
@@ -1837,8 +1797,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             let mut neg_refnos = vec![];
                             let mut found_non_manifold = false;
 
-                            let mut use_csg = total_refnos.len() < 20;
-                            use_csg = false;
                             for (index, t_refno) in total_refnos.into_iter().enumerate() {
                                 let geos_info_tmp = {
                                     inst_data
@@ -1928,7 +1886,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             let geo_hash = *comp_refno;
                             #[cfg(debug_assertions)]
                             dbg!(batch_manifolds.len());
-                            use_csg = false;
                             // ----- 基本体的负实体运算  ----- //
                             let mut plant_geo_data = {
                                 if batch_manifolds.len() < 2 {
@@ -2031,9 +1988,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
             let mut shape_insts_data = instance_mgr.write().await;
             let mut mesh_mgr = mgr.cached_mesh_mgr.write().await;
             //处理有NGMR的情况，首选需要过滤出来
-            println!("开始处理ngmr的负实体。");
-            // shape_insts_data.ngmr_inst_info_map.clear();
-            dbg!(shape_insts_data.ngmr_inst_info_map.len());
+            println!("开始处理ngmr的负实体, 总数: {}", shape_insts_data.ngmr_inst_info_map.len());
             if !shape_insts_data.ngmr_inst_info_map.is_empty() {
                 let mut boolean_ngmr_map = HashMap::new();
                 ///查找是否是某些参考号的子节点
@@ -2168,8 +2123,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             }
                         }
                     }
-
-                    // dbg!(&shape_insts_data.inst_geos_map);
 
                     #[cfg(debug_assertions)]
                     {

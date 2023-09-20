@@ -99,9 +99,7 @@ pub struct AiosDBManager {
 
     pub cached_world_transforms_map: Arc<DashMap<RefU64, bevy_transform::prelude::Transform>>,
 
-    pub cache_module_numbdbs: BTreeSet<i32>,
-
-    pub mdb_dbnums: BTreeSet<i32>,
+    // pub mdb_dbnums: BTreeSet<i32>,
 
     pub watcher: PdmsWatcher,
 
@@ -136,7 +134,6 @@ impl PdmsDataInterface for AiosDBManager {
             let k = PDMS_ATT_MAP_CACHE.get(&refno).unwrap();
             Ok(k.value().clone())
         } else {
-            // let attr = query_attr(refno, self, None).await?;
             let attr = self.get_attr_from_localdb(refno)?;
             PDMS_ATT_MAP_CACHE
                 .insert(refno, &attr)
@@ -1532,7 +1529,7 @@ impl PdmsDataInterface for AiosDBManager {
         let scom = self.get_or_create_scom_info(scom_refno)?;
         let context = context.unwrap_or(self.get_or_create_cata_context(refno, None)?);
         for i in 0..scom.axis_params.len() {
-            dbg!(&scom.axis_params[i]);
+            // dbg!(&scom.axis_params[i]);
             match resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self)) {
                 Ok(axis) => {
                     map.insert(scom.axis_param_numbers[i], axis);

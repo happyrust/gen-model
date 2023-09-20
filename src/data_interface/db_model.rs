@@ -456,7 +456,6 @@ impl AiosDBManager {
             .ok_or(anyhow::anyhow!("Unknown project pool"))?;
         println!("正在初始化mdb: {mdb}");
         let mut conn = project_pool.acquire().await?;
-        let time = Instant::now();
         let need_sync_refno_basic = self.db_option.need_sync_refno_basic;
         if need_sync_refno_basic {
             for project in &self.db_option.included_projects {
@@ -465,8 +464,6 @@ impl AiosDBManager {
                 }
             }
         }
-        // 将对应mdb module 下所有的 numbdb 存下来
-        //创建table, 如果已经存在，可以忽略
         if self.db_option.reset_mdb_project.unwrap_or(false) {
             let create_sql = gen_create_project_mdb_sql();
             let _ = conn.execute(create_sql.as_str()).await;
@@ -475,9 +472,8 @@ impl AiosDBManager {
                 .insert_project_mdb(&project_pool, &self.info_pool)
                 .await;
         }
-        cache_mdb_site_map(mdb, module, &project_pool).await;
-        self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
-        let database = self.get_arango_db().await?;
+        // cache_mdb_site_map(mdb, module, &project_pool).await;
+        // self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
         if need_sync_refno_basic {
             CACHED_REFNO_BASIC_MAP
                 .save_to_file(stringify!(CACHED_REFNO_BASIC_MAP))
@@ -490,11 +486,6 @@ impl AiosDBManager {
         }
         println!("加载 CACHED_REFNO_BASIC_MAP 成功");
 
-        // 将 mdb对应的 module 下的所有 numbdb保存下来
-        let results = cache_mdb_module_numbdbs(mdb, module, &project_pool).await?;
-        for r in results {
-        self.cache_module_numbdbs.insert(r);
-        }
         Ok(())
     }
 
@@ -600,8 +591,7 @@ impl AiosDBManager {
             cached_mesh_mgr: Arc::new(Default::default()),
             arango_pool,
             cached_world_transforms_map: Arc::new(Default::default()),
-            cache_module_numbdbs: Default::default(),
-            mdb_dbnums: Default::default(),
+            // mdb_dbnums: Default::default(),
             watcher,
             rtree: None,
             room_panels_rtree: None,
@@ -620,9 +610,6 @@ impl AiosDBManager {
                 for (ukey, udna) in uda_map {
                     let udna = format!(":{}", udna);
                     GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna.clone());
-                    // if udna == ":HXYsize".to_string() {
-                    //     dbg!(&ukey);
-                    // }
                     GLOBAL_UDA_UKEY_MAP.entry(udna).or_insert(ukey);
                 }
             }
@@ -674,12 +661,12 @@ impl AiosDBManager {
             } else {
                 for project in &self.db_option.included_projects {
                     if let Some(pool) = self.get_project_pool(project) {
-                        if check_exist_refno(refno, &pool, &self.mdb_dbnums)
-                            .await
-                            .ok()?
-                        {
+                        // if check_exist_refno(refno, &pool, &self.mdb_dbnums)
+                        //     .await
+                        //     .ok()?
+                        // {
                             return Some((project.clone(), pool.clone()));
-                        }
+                        // }
                     }
                 }
             }
@@ -836,12 +823,12 @@ impl AiosDBManager {
                 if dbnums.is_empty() { continue; }
                 let root_dbnum = dbnums[0];
                 if !mdb_edges_map.contains_key(&root_dbnum) { continue; }
-                let Some(root_world) = ele_nodes.iter().find(|x| x.dbnum == root_dbnum) else{
-                    continue
+                let Some(root_world) = ele_nodes.iter().find(|x| x.dbnum == root_dbnum) else {
+                    continue;
                 };
 
                 //将mdb的关系也放入edges
-                if let Some(mdb_data) = mdb_edges_map.get(&root_dbnum){
+                if let Some(mdb_data) = mdb_edges_map.get(&root_dbnum) {
                     let mdb_name = mdb_names_map.get(&mdb_refno).unwrap();
                     let edge = PdmsEleEdge {
                         key: root_world.refno.hash_with_another_refno(mdb_refno).to_string(),
@@ -856,7 +843,7 @@ impl AiosDBManager {
                 // let children = self.get_children_from_localdb(root_world.refno).unwrap_or_default();
                 let mut order = 0;
                 for dbnum in dbnums {
-                    let Some(world) = ele_nodes.iter().find(|x| x.dbnum == dbnum) else{
+                    let Some(world) = ele_nodes.iter().find(|x| x.dbnum == dbnum) else {
                         continue;
                     };
                     mdb_edges_map.entry(dbnum).and_modify(|x| x.world_refno = world.refno);
@@ -865,7 +852,7 @@ impl AiosDBManager {
                         continue;
                     };
                     //将site 和 第一个的 world 连在一起，而不是连world
-                    for site_refno in site_refnos.into_iter(){
+                    for site_refno in site_refnos.into_iter() {
                         {
                             let edge = PdmsEleEdge {
                                 key: site_refno.hash_with_another_refno(root_world.refno).to_string(),

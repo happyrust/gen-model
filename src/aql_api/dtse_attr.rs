@@ -85,7 +85,7 @@ impl AiosDBManager{
         let bran_attr = self.get_full_attr_from_localdb(bran_refno)?;
         let temp = bran_attr.get_f32("TEMP").unwrap_or(-100000.0);
         let h_bore = bran_attr.get_f32("HBOR").unwrap_or(0.0);
-        let Some(ispec) = bran_attr.get_refu64("ISPE") else { return Ok(vec![0.0]); };
+        let Some(ispec) = bran_attr.get_refu64("ISPE") else { return Ok(vec![]); };
         if *ispec == 0 { return Ok(vec![0.0]); };
         // 找到ispec下所有的 bore 范围，并将其分类
         let bore_node = query_travel_children_with_types_aql(&database, ispec, &vec!["SPCO"], false).await?;
@@ -97,17 +97,17 @@ impl AiosDBManager{
         // 根据温度节点和外径节点查询到具体的范围数值
         // ispec_vec : 0 : 温度范围 , 1 : 外径范围以及引用的catr
         let mut ispec_vec = Vec::new();
-        for (temp, bore_vec) in bore_map {
-            let Ok(temp_attr) = self.get_attr(temp).await else { continue; };
+        for (t_ref, bore_vec) in bore_map {
+            let Ok(temp_attr) = self.get_full_attr_from_localdb(t_ref) else { continue; };
             let Some(temp_answer) = temp_attr.get_f32("ANSW") else { continue; };
             let Some(temp_max_answer) = temp_attr.get_f32("MAXA") else { continue; };
             let mut bore_value_vec = Vec::new();
             for bore in bore_vec {
-                let Ok(bore_attr) = self.get_attr(bore.refno).await else { continue; };
+                let Ok(bore_attr) = self.get_full_attr_from_localdb(bore.refno) else { continue; };
                 let Some(bore_answer) = bore_attr.get_f32("ANSW") else { continue; };
                 let Some(bore_max_answer) = bore_attr.get_f32("MAXA") else { continue; };
                 let Some(catr_refno) = bore_attr.get_refu64("CATR") else { continue; };
-                if *catr_refno == 0 { continue; };
+                if !catr_refno.is_valid() { continue; };
                 bore_value_vec.push((bore_answer, bore_max_answer, catr_refno));
             }
             ispec_vec.push(((temp_answer, temp_max_answer), bore_value_vec));
@@ -117,15 +117,15 @@ impl AiosDBManager{
             if temp >= ispec.0.0 && temp <= ispec.0.1 {
                 for bore in &ispec.1 {
                     if h_bore >= bore.0 && h_bore <= bore.1 {
-                        let Ok(catr_attr) = self.get_attr(bore.2).await else { break; };
-                        let Some(para) = catr_attr.get_f64_vec("PARA") else { return Ok(vec![0.0]); };
+                        let Ok(catr_attr) = self.get_attr_from_localdb(bore.2) else { break; };
+                        let Some(para) = catr_attr.get_f64_vec("PARA") else { return Ok(vec![]); };
                         return Ok(para);
                     }
                 }
                 break;
             }
         }
-        Ok(vec![0.0])
+        Ok(vec![])
     }
 }
 
