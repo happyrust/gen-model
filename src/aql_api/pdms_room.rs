@@ -1,6 +1,6 @@
 use crate::api::attr::get_site_major_from_uda;
 use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_deep_children_refnos_fuzzy};
-use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsRefnoNameAql};
+use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsRefnoNameAql, PdmsRoomNameAql};
 use crate::aql_api::pdms_mesh::{query_all_geo_hashs, query_pdms_mesh_aql, query_refnos_meshes_aql};
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::PDMS_ELEMENTS_TABLE;
@@ -245,10 +245,11 @@ pub async fn query_room_code_from_owner(
     }
 }
 
+/// 查询children某个节点数据哪个参考号，并返回是否为反应堆厂房(RS)
 pub async fn query_room_codes_from_owners(
     owner_refno: Vec<RefU64>,
     database: &ArDatabase,
-) -> anyhow::Result<Vec<PdmsRefnoNameAql>> {
+) -> anyhow::Result<Vec<PdmsRoomNameAql>> {
     let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, owner_refno);
     let aql = AqlQuery::new(
         "
@@ -259,9 +260,16 @@ pub async fn query_room_codes_from_owners(
     for r in 1 inbound v._id @@room_edges
             filter r != null
             limit 1
+            let b_rs = (
+                for o in 0..5 outbound CONCAT('pdms_eles/',r._key) pdms_edges
+                filter o != null
+                filter o.noun == 'SITE'
+                return CONTAINS(o.name,'RS')
+            )
             return {
-                'refno': v.owner,
-                'name': r.name
+                'refno': v._key,
+                'room_name': r.name,
+                'b_rs':b_rs[0]
             }
     ", )
         .bind_var("ids", ids)
@@ -269,7 +277,7 @@ pub async fn query_room_codes_from_owners(
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
         .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
-    let result = database.aql_query::<PdmsRefnoNameAql>(aql).await?;
+    let result = database.aql_query::<PdmsRoomNameAql>(aql).await?;
     Ok(result)
 }
 

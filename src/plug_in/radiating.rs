@@ -1,11 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
 use aios_core::pdms_types::{AttrVal, RefU64};
 use aios_core::prim_geo::tubing::TubiSize;
 use arangors_lite::AqlQuery;
 use bitvec::macros::internal::funty::Floating;
 use glam::Vec3;
-use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_children_refnos, query_children_with_name_aql};
+use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_children_refnos, query_children_with_name_aql, query_room_belong_site_name};
 use crate::aql_api::tubi::query_tubi_from_bran;
 use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_GEO_COLLECTION, AQL_PDMS_INST_INFO_COLLECTION};
 use crate::data_interface::interface::PdmsDataInterface;
@@ -14,10 +14,12 @@ use crate::graph_db::pdms_arango::ArDatabase;
 use serde::{Serialize, Deserialize};
 use aios_core::pdms_types::ser_refno_as_str;
 use aios_core::pdms_types::de_refno_from_key_str;
+use nom::Parser;
 use crate::api::element::query_id_from_name;
 use crate::api::room_code::query_room_code;
 use crate::aql_api::pdms_element::query_id_from_names_aql;
 use crate::aql_api::pdms_room::{get_room_code_from_attr, query_bran_through_rooms_aql, query_room_code_from_owner, query_room_codes_from_owners, query_room_name_from_refno_aql};
+use crate::aql_api::PdmsRoomNameAql;
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct HeatDissipationData {
@@ -64,23 +66,54 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
         let Ok(room_map) = query_room_codes_from_owners(bran, &database).await else { continue; };
         let room_map = room_map.into_iter()
             .filter(|x| RefU64::from_url_refno(&x.refno).is_some())
-            .map(|x| (RefU64::from_url_refno(&x.refno).unwrap(), x.name))
-            .collect::<HashMap<RefU64, String>>();
+            .map(|x| (RefU64::from_url_refno(&x.refno).unwrap(), x))
+            .collect::<HashMap<RefU64, PdmsRoomNameAql>>();
+        // 查询不到房间号的，通过uda来查询,并判断他是否为反应堆厂房
+        let mut uda_room_map = HashMap::new();
+        let without_room_bran_refnos = bran_refnos.clone().into_iter().filter(|x| room_map.contains_key(&x.0)).collect::<Vec<_>>();
+        for refno in without_room_bran_refnos {
+            let Ok(room_name) = get_room_code_from_attr(refno.0, &aios_mgr).await else { continue; };
+            if room_name.is_empty() { continue; };
+            uda_room_map.entry(refno.0).or_insert(room_name);
+        }
+        let uda_room_refnos = uda_room_map.values().map(|x| x.to_string()).collect::<HashSet<String>>()
+            .into_iter().collect::<Vec<String>>();
+        // 找到房间号在哪个site下面
+        let uda_room_site_map = query_room_belong_site_name(uda_room_refnos, &database).await?;
+        let uda_room_site_map = uda_room_site_map.into_iter()
+            .map(|x| (x.name, x.owner_name))
+            .collect::<HashMap<String, String>>();
         // 计算每个bran的散热量
         for (bran, bran_name) in bran_refnos {
-            let area = get_heat_dissipation_data(bran, &database, aios_mgr).await?;
-            let heat = get_heat_dissipation_table(*temp, area, true) as f32;
             let room_code = room_map.get(&bran);
             let room_code = if room_code.is_some() {
                 room_code.unwrap().clone()
             } else {
-                get_room_code_from_attr(bran, &aios_mgr).await.unwrap_or("".to_string())
+                if let Some(room) = uda_room_map.get(&bran) {
+                    if let Some(site) = uda_room_site_map.get(room) {
+                        PdmsRoomNameAql {
+                            refno: bran.to_url_refno(),
+                            room_name: room.to_string(),
+                            b_rs: site.contains("RS"),
+                        }
+                    } else {
+                        PdmsRoomNameAql {
+                            refno: bran.to_url_refno(),
+                            room_name: room.to_string(),
+                            b_rs: false,
+                        }
+                    }
+                } else {
+                    PdmsRoomNameAql::default()
+                }
             };
+            let area = get_heat_dissipation_data(bran, &database, aios_mgr).await?;
+            let heat = get_heat_dissipation_table(*temp, area, room_code.b_rs) as f32;
             result.push(GetPipeHeatDissipationResponse {
                 pipe: if pipe_ele.name.starts_with("/") { pipe_ele.name[1..].to_string() } else { pipe_ele.name.clone() },
                 temp: *temp,
                 bran: if bran_name.starts_with("/") { bran_name[1..].to_string() } else { bran_name },
-                room: room_code,
+                room: room_code.room_name,
                 heat,
             });
         }
@@ -106,7 +139,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
                 length_map.push(HeatDissipationData {
                     refno: from_refno,
                     att_type: "TUBI".to_string(),
-                    bore: *data + ipara,
+                    bore: *data / 2.0 + ipara,
                     length: tubi.start_pt.distance(tubi.end_pt),
                 });
                 if !bore_size.contains(data) {
@@ -202,7 +235,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
             }
         }
     }
-    // dbg!(&length_map);
+    dbg!(&length_map);
     // 计算整个bran的面积
     let mut area = 0.0;
     for length_data in length_map {
@@ -253,6 +286,10 @@ fn get_heat_dissipation_table(heat: f32, area: f32, b_reactor: bool) -> f64 {
         }
     }
     0.0
+}
+
+fn get_outside_diameter_from_bore(bore: f32) -> Option<f32> {
+    None
 }
 
 #[tokio::test]
