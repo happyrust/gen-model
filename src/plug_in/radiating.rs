@@ -1,4 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
+use aios_core::get_uda_info;
+use aios_core::options::DbOption;
 use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
 use aios_core::pdms_types::{AttrVal, RefU64};
 use aios_core::prim_geo::tubing::TubiSize;
@@ -14,7 +17,9 @@ use crate::graph_db::pdms_arango::ArDatabase;
 use serde::{Serialize, Deserialize};
 use aios_core::pdms_types::ser_refno_as_str;
 use aios_core::pdms_types::de_refno_from_key_str;
+use dashmap::DashMap;
 use nom::Parser;
+use once_cell::sync::OnceCell;
 use crate::api::element::query_id_from_name;
 use crate::api::room_code::query_room_code;
 use crate::aql_api::pdms_element::query_id_from_names_aql;
@@ -139,7 +144,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
                 length_map.push(HeatDissipationData {
                     refno: from_refno,
                     att_type: "TUBI".to_string(),
-                    bore: *data / 2.0 + ipara,
+                    bore: *data + ipara,
                     length: tubi.start_pt.distance(tubi.end_pt),
                 });
                 if !bore_size.contains(data) {
@@ -159,7 +164,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
         if element.noun.as_str() == "ATTA" { continue; };
         let Some(point) = points.get(&element.refno) else { continue; };
         match point.att_type.as_str() {
-            "ELBO" | "VALV" => {
+            "ELBO" | "BEND" | "VALV" => {
                 let Ok(attr) = aios_mgr.get_attr(point.refno).await else { continue; };
                 let Some(AttrVal::IntegerType(arrive)) = attr.get_val("ARRI") else { continue; };
                 let Some(AttrVal::IntegerType(leave)) = attr.get_val("LEAV") else { continue; };
@@ -188,7 +193,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
                 let first_length = first_point.pt.distance(Vec3::ZERO);
                 let second_length = second_point.pt.distance(Vec3::ZERO);
                 let third_length = third_point.pt.distance(Vec3::ZERO);
-                let bore = if bore_size.is_empty() && bore_idx >= bore_size.len() { first_point.pbore } else { bore_size[bore_idx] };
+                let bore = if bore_size.is_empty() || bore_idx >= bore_size.len() { first_point.pbore } else { bore_size[bore_idx] };
                 let length = first_length + second_length + third_length;
                 length_map.push(HeatDissipationData {
                     refno: point.refno,
@@ -238,9 +243,12 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
     dbg!(&length_map);
     // 计算整个bran的面积
     let mut area = 0.0;
+    let mut total_length = 0.0;
     for length_data in length_map {
+        total_length += length_data.length;
         area += length_data.bore * f32::PI * length_data.length
     }
+    dbg!(&total_length);
     Ok(area)
 }
 
@@ -299,4 +307,10 @@ async fn test_get_heat_dissipation_data() -> anyhow::Result<()> {
     let bran_refno = RefU64::from_refno_str("24383/66521").unwrap();
     get_heat_dissipation_data(bran_refno, &database, &aios_mgr).await?;
     Ok(())
+}
+
+#[test]
+fn test_() {
+    let result = get_uda_info().clone();
+    dbg!(&result.0);
 }

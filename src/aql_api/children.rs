@@ -1369,18 +1369,17 @@ pub async fn query_room_belong_site_name(rooms: Vec<String>, database: &ArDataba
     Ok(result)
 }
 
-#[tokio::test]
-async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Result<()> {
-    // use config::{Config, ConfigError, Environment, File};
-    // let s = Config::builder()
-    //     .add_source(File::with_name("DbOption"))
-    //     .build()?;
-    // let db_option: DbOption = s.try_deserialize().unwrap();
-    // let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    // let refno = RefU64::from_refno_str("17496/79566").unwrap();
-    // let result = query_travel_children_filter_negative_sibl_nodes(refno, &database).await?;
-    // dbg!(&result);
-    Ok(())
+/// 将字符串 符号都转为 ，
+fn replace_symbols(input: &str) -> String {
+    let mut result = String::new();
+    for c in input.chars() {
+        if c.is_alphanumeric() {
+            result.push(c);
+        } else {
+            result.push(',');
+        }
+    }
+    result
 }
 
 #[tokio::test]

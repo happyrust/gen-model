@@ -298,8 +298,7 @@ pub async fn query_room_codes_from_owner(
                 'refno': v._key,
                 'name': r.name
             }
-    ", )
-        .bind_var("id", refno)
+    ", ).bind_var("id", refno)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
@@ -487,21 +486,20 @@ pub async fn query_equi_room_name_from_refnos_aql(
     for id in @ids
     let v = document(id)
     filter v != null
-    filter v.noun == 'EQUI'
-            let children = (
-            for e in 1..2 inbound v._id pdms_edges
+    let children = (
+        for e in 0..2 inbound v._id pdms_edges
                 return e._id )
-            let result = (
-                for child in children
-                for r in 1 inbound child room_edges
-                    filter r != null
-                    limit 1
-                    return {
-                        'refno': v._key,
-                        'name': v.name,
-                        'room_name': r.name
-                    }
-             )
+        let result = (
+            for child in children
+            for r in 1 inbound child room_edges
+                filter r != null
+                limit 1
+                return {
+                    'refno': v._key,
+                    'name': v.name,
+                    'room_name': r.name
+                }
+         )
      return result ",
     )
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
