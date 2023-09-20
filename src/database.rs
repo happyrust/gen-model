@@ -16,7 +16,7 @@ use aios_core::pdms_types::AttrVal::StringType;
 use aios_core::pdms_types::{
     AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, PlantMeshesData, RefU64, RefU64Vec,
 };
-use aios_core::tool::db_tool::{convert_to_hash, db1_dehash, db1_hash};
+use aios_core::tool::db_tool::{convert_to_hash, db1_dehash, db1_hash, GLOBAL_UDA_NAME_MAP};
 use aios_core::tool::float_tool::f64_round_3;
 use anyhow::anyhow;
 use dashmap::{DashMap, DashSet};
@@ -579,7 +579,7 @@ pub async fn sync_total_async_threaded(
     // 先解析一遍uda
     dbg!("解析uda文件");
     let _ = parse_uda_file(project, children_files.clone(),&need_parsed_files).await;
-
+    // 正式解析
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
     let mut error_sql = Arc::new(DashSet::new());

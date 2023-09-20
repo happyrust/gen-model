@@ -1,8 +1,6 @@
 use crate::api::attr::{query_attr, query_uda_ukey};
 use crate::aql_api::*;
-use crate::consts::{
-    AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_SIBL_EDGES_COLLECTION,
-};
+use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_ROOM_ELES_COLLECTION, AQL_SIBL_EDGES_COLLECTION};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
@@ -1348,18 +1346,40 @@ pub async fn query_type_refnos_through_types(select_refnos: Vec<RefU64>, through
     Ok(result)
 }
 
-#[tokio::test]
-async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Result<()> {
-    // use config::{Config, ConfigError, Environment, File};
-    // let s = Config::builder()
-    //     .add_source(File::with_name("DbOption"))
-    //     .build()?;
-    // let db_option: DbOption = s.try_deserialize().unwrap();
-    // let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    // let refno = RefU64::from_refno_str("17496/79566").unwrap();
-    // let result = query_travel_children_filter_negative_sibl_nodes(refno, &database).await?;
-    // dbg!(&result);
-    Ok(())
+/// 通过房间名查询房间所属的site
+pub async fn query_room_belong_site_name(rooms: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsOwnerNameAql>> {
+    let aql = AqlQuery::new("
+    With @@pdms_eles,@@pdms_edges,@@room_eles
+    for r in @@room_eles
+    filter r.name in @rooms
+    for v in 1..5 outbound concat('pdms_eles/',r._key) pdms_edges
+        filter v != null
+        filter v.noun == 'SITE'
+        return {
+            refno: r._key,
+            name:r.name,
+            owner: v._key ,
+            owner_noun: v.noun,
+            owner_name: v.name
+        }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
+        .bind_var("rooms", rooms);
+    let result = database.aql_query::<PdmsOwnerNameAql>(aql).await?;
+    Ok(result)
+}
+
+/// 将字符串 符号都转为 ，
+fn replace_symbols(input: &str) -> String {
+    let mut result = String::new();
+    for c in input.chars() {
+        if c.is_alphanumeric() {
+            result.push(c);
+        } else {
+            result.push(',');
+        }
+    }
+    result
 }
 
 #[tokio::test]
