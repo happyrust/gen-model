@@ -113,7 +113,7 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
                 }
             };
             let area = get_heat_dissipation_data(bran, &database, aios_mgr).await?;
-            let heat = get_heat_dissipation_table(*temp, area, room_code.b_rs) as f32;
+            let heat = get_heat_dissipation_table(*temp, area, room_code.b_rs) as f32 / 1000.0;
             result.push(GetPipeHeatDissipationResponse {
                 pipe: if pipe_ele.name.starts_with("/") { pipe_ele.name[1..].to_string() } else { pipe_ele.name.clone() },
                 temp: *temp,
