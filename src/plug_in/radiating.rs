@@ -8,7 +8,7 @@ use aios_core::prim_geo::tubing::TubiSize;
 use arangors_lite::AqlQuery;
 use bitvec::macros::internal::funty::Floating;
 use glam::Vec3;
-use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_children_refnos, query_children_with_name_aql, query_room_belong_site_name};
+use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_children_refnos, query_children_with_name_aql, query_refnos_from_names_fulltext, query_room_belong_site_name};
 use crate::aql_api::tubi::query_tubi_from_bran;
 use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_GEO_COLLECTION, AQL_PDMS_INST_INFO_COLLECTION};
 use crate::data_interface::interface::PdmsDataInterface;
@@ -60,12 +60,12 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
         .collect::<HashMap<String, f32>>();
     let names = request.keys().map(|name| name.clone()).collect::<Vec<_>>();
     // 通过pipe name 查询到pipe的所有参考后
-    let pipe_refnos = query_id_from_names_aql(names, Some("PIPE"), &database).await?;
+    //let pipe_refnos = query_id_from_names_aql(names, Some("PIPE"), &database).await?;
+    let pipe_refnos = query_refnos_from_names_fulltext(names, &database).await?;
     let mut result = Vec::new();
-    for pipe_ele in pipe_refnos {
+    for (_name, pipe_ele) in pipe_refnos {
         let Some(temp) = request.get(&pipe_ele.name) else { continue; };
-        let Some(pipe_refno) = RefU64::from_url_refno(&pipe_ele.refno) else { continue; };
-        let Ok(bran_refnos) = query_children_with_name_aql(&database, pipe_refno).await else { continue; };
+        let Ok(bran_refnos) = query_children_with_name_aql(&database, pipe_ele.refno).await else { continue; };
         // 一次查询 pipe下所有bran穿过的房间
         let bran = bran_refnos.iter().map(|r| r.0).collect::<Vec<RefU64>>();
         let Ok(room_map) = query_room_codes_from_owners(bran, &database).await else { continue; };
@@ -240,7 +240,6 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
             }
         }
     }
-    dbg!(&length_map);
     // 计算整个bran的面积
     let mut area = 0.0;
     let mut total_length = 0.0;
@@ -248,7 +247,6 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
         total_length += length_data.length;
         area += length_data.bore * f32::PI * length_data.length
     }
-    dbg!(&total_length);
     Ok(area)
 }
 

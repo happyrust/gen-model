@@ -442,20 +442,28 @@ impl PdmsDataInterface for AiosDBManager {
         if GLOBAL_MDB_WORLD_MAP.contains_key(&hash_name) {
             Ok(GLOBAL_MDB_WORLD_MAP.get(&hash_name).unwrap().clone())
         } else {
-            let string = format!(
-                "v.mdb_name==\"/{}\" and v.db_type==\"{}\"",
-                mdb_name, module
-            );
-            let mut ele_nodes = self.query_ele_edges_by_expression(&string).await?;
-            //从mdb 开始往下找，找到world
-            if let Some(node) = ele_nodes.pop() {
-                let mut children = self
-                    .query_children_eles_order(node.owner, &[], &[module])
-                    .await?;
-                if let Some(ele) = children.pop() {
-                    GLOBAL_MDB_WORLD_MAP.insert(hash_name, ele.clone());
-                    return Ok(ele);
-                }
+            // let string = format!(
+            //     "v.mdb_name==\"/{}\" and v.db_type==\"{}\"",
+            //     mdb_name, module
+            // );
+            // let mut ele_nodes = self.query_ele_edges_by_expression(&string).await?;
+            // //从mdb 开始往下找，找到world
+            // if let Some(node) = ele_nodes.pop() {
+            //     let mut children = self
+            //         .query_children_eles_order(node.owner, &[], &[module])
+            //         .await?;
+            //     if let Some(ele) = children.pop() {
+            //         GLOBAL_MDB_WORLD_MAP.insert(hash_name, ele.clone());
+            //         return Ok(ele);
+            //     }
+            // }
+
+            // 通过 fulltext在数据库中查询
+            let database = self.get_arango_db().await?;
+            let ele = query_mdb_world_fulltext(mdb_name,module,&database).await?;
+            if let Some(ele) = ele {
+                GLOBAL_MDB_WORLD_MAP.insert(hash_name, ele.clone());
+                return Ok(ele);
             }
             Err(anyhow!("World not exist"))
         }
