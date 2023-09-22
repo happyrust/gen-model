@@ -4,11 +4,13 @@ use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
 use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 use crate::cata::consts::*;
-use crate::cata::query_cata::{query_axis_params, resolve_cata_comp};
 use crate::cata::query_cata::query_gm_param;
-use crate::cata::resolve::{CataContext, resolve_axis_param};
+use crate::cata::query_cata::{query_axis_params, resolve_cata_comp};
+use crate::cata::resolve::{resolve_axis_param, CataContext};
 use crate::cata::resolve::{CATA_CONTEXT_MAP, SCOM_INFO_MAP};
 use crate::consts::*;
+use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
+use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
 use crate::graph_db::pdms_arango::ArPool;
@@ -16,6 +18,7 @@ use crate::graph_db::structs::PdmsEleGraphNode;
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::cache::mgr::*;
 use aios_core::cache::refno::*;
+use aios_core::consts::{HAS_PLIN_TYPES, WORD_HASH};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::*;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
@@ -24,6 +27,7 @@ use aios_core::pdms_data::GmParam;
 use aios_core::pdms_data::PlinParam;
 use aios_core::pdms_data::PlinParamData;
 use aios_core::pdms_data::ScomInfo;
+use aios_core::pdms_types::AttrVal::DoubleArrayType;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
 use aios_core::shape::pdms_shape::PlantMesh;
@@ -41,6 +45,7 @@ use futures::StreamExt;
 use glam::{Mat3, Quat, Vec3};
 use itertools::Itertools;
 use lazy_static::lazy_static;
+use log::error;
 use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
 use pdms_io::watch::PdmsWatcher;
 use redb::{ReadableTable, TableDefinition};
@@ -52,12 +57,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use aios_core::consts::WORD_HASH;
-use aios_core::pdms_types::AttrVal::DoubleArrayType;
-use log::error;
 use tokio::sync::RwLock;
-use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
-use crate::data_interface::interface::PdmsDataInterface;
 
 // #[derive(Debug)]
 pub struct AiosDBManager {
@@ -100,7 +100,6 @@ pub struct AiosDBManager {
     pub cached_world_transforms_map: Arc<DashMap<RefU64, bevy_transform::prelude::Transform>>,
 
     // pub mdb_dbnums: BTreeSet<i32>,
-
     pub watcher: PdmsWatcher,
 
     ///所有元素的tree
@@ -152,7 +151,10 @@ impl PdmsDataInterface for AiosDBManager {
     fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64> {
         let owner = self.get_owner(refno);
         let children_refnos = self.get_children_from_localdb(owner)?;
-        let pos = children_refnos.iter().position(|x| *x == refno).unwrap_or_default();
+        let pos = children_refnos
+            .iter()
+            .position(|x| *x == refno)
+            .unwrap_or_default();
         if pos == children_refnos.len() - 1 {
             self.get_next(owner)
         } else {
@@ -164,7 +166,10 @@ impl PdmsDataInterface for AiosDBManager {
     fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64> {
         let owner = self.get_owner(refno);
         let children_refnos = self.get_children_from_localdb(owner)?;
-        let pos = children_refnos.iter().position(|x| *x == refno).unwrap_or_default();
+        let pos = children_refnos
+            .iter()
+            .position(|x| *x == refno)
+            .unwrap_or_default();
         if pos == 0 {
             Ok(owner)
         } else {
@@ -229,8 +234,10 @@ impl PdmsDataInterface for AiosDBManager {
                 let mut att_map = AttrMap::from_rkvy_compress_bytes(bytes.as_ref())?;
                 if let Some(desp) = att_map.get_f64_vec("DESP") {
                     let unpars = att_map.get_i32_vec("UNIPAR").unwrap_or_default();
-                    let ddesp = desp.iter()
-                        .zip(unpars).map(|(x, f)| if f == WORD_HASH as i32 { 0.0 } else { *x })
+                    let ddesp = desp
+                        .iter()
+                        .zip(unpars)
+                        .map(|(x, f)| if f == WORD_HASH as i32 { 0.0 } else { *x })
                         .collect::<Vec<f64>>();
                     att_map.insert(db1_hash("DDES"), DoubleArrayType(ddesp));
                 }
@@ -298,7 +305,7 @@ impl PdmsDataInterface for AiosDBManager {
             t_types,
             depth,
         )
-            .await;
+        .await;
         t_refnos
     }
 
@@ -572,8 +579,8 @@ impl PdmsDataInterface for AiosDBManager {
         return UNIQUE(negatives)
         ",
         )
-            .bind_var("key", refno_url)
-            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        .bind_var("key", refno_url)
+        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self
             .get_arango_db()
             .await?
@@ -653,8 +660,8 @@ impl PdmsDataInterface for AiosDBManager {
                     return distinct parent._key
         "#,
         )
-            .bind_var("keys", refno_urls)
-            .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        .bind_var("keys", refno_urls)
+        .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self.get_arango_db().await?.aql_query::<String>(aql).await?;
         let refnos = refno_strs
             .iter()
@@ -679,8 +686,8 @@ impl PdmsDataInterface for AiosDBManager {
             return UNIQUE(refnos)
         "#,
         )
-            .bind_var("key", refno_url)
-            .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
+        .bind_var("key", refno_url)
+        .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
         let refno_strs = self
             .get_arango_db()
             .await?
@@ -714,8 +721,8 @@ impl PdmsDataInterface for AiosDBManager {
                 ]
         "#,
         )
-            .bind_var("key", refno_url)
-            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        .bind_var("key", refno_url)
+        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let result: HashMap<RefU64, Vec<RefU64>> = self
             .get_arango_db()
             .await?
@@ -901,7 +908,6 @@ impl PdmsDataInterface for AiosDBManager {
                 let mut cur_plin_param = None;
                 let mut own_plin_param = None;
                 let mut target_own_att = AttrMap::default();
-                const HAS_PLIN_TYPES: [&str; 4] = ["SCTN", "GENSEC", "WALL", "STWALL"];
                 while cur_plin_param.is_none() {
                     let Some(t) = self.get_refno_basic(plin_owner) else {
                         break;
@@ -960,9 +966,7 @@ impl PdmsDataInterface for AiosDBManager {
                 //     dbg!(quat_to_pdms_ori_str(&rotation));
                 // }
 
-
-                translation +=
-                    rotation * (pos + plin_pos) + rotation * new_quat * delta_vec;
+                translation += rotation * (pos + plin_pos) + rotation * new_quat * delta_vec;
 
                 #[cfg(debug_assertions)]
                 {
@@ -1328,7 +1332,6 @@ impl PdmsDataInterface for AiosDBManager {
                 context.insert(format!("DDES{}", i + 1).into(), desp[i].to_string().into());
             }
 
-
             let height = desi_att.get_as_string("HEIG").unwrap_or("0.0".into());
             context.insert(DDHEIGHT_STR.into(), (height.clone()));
             let angle = desi_att.get_as_string("ANGL").unwrap_or("0.0".into());
@@ -1491,9 +1494,9 @@ impl PdmsDataInterface for AiosDBManager {
             scom_ref_option = self.get_cat_ref(desi_refno);
         }
         let scom_ref = scom_ref_option.ok_or(anyhow::anyhow!(format!(
-        "SCOM not exist in element: {}",
-        desi_refno.to_refno_str()
-    )))?;
+            "SCOM not exist in element: {}",
+            desi_refno.to_refno_str()
+        )))?;
         if !scom_ref.is_valid() {
             println!(
                 "{} 的CAT引用不存在，为 {}",
@@ -1504,7 +1507,7 @@ impl PdmsDataInterface for AiosDBManager {
         }
         // dbg!(scom_ref);
         let scom_info = self.get_or_create_scom_info(scom_ref)?;
-        // dbg!(&scom_info.gm_params);
+        // dbg!(&scom_info);
         // dbg!(&scom_info.axis_params);
         let mut context = self.get_or_create_cata_context(desi_refno, desi_axis_map)?;
 
@@ -1525,7 +1528,9 @@ impl PdmsDataInterface for AiosDBManager {
     ) -> anyhow::Result<BTreeMap<i32, CateAxisParam>> {
         let mut map = BTreeMap::new();
         let scom_refno = self.get_cat_ref(refno).unwrap_or_default();
-        if !scom_refno.is_valid() { return Ok(Default::default()); }
+        if !scom_refno.is_valid() {
+            return Ok(Default::default());
+        }
         let scom = self.get_or_create_scom_info(scom_refno)?;
         let context = context.unwrap_or(self.get_or_create_cata_context(refno, None)?);
         for i in 0..scom.axis_params.len() {
