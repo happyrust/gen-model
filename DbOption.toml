@@ -74,7 +74,7 @@ puhua_database_ip = ""
 puhua_database_user = ""
 puhua_database_password = ""
 
-debug_root_refnos = ["17496/170578"]
+debug_root_refnos = ["17496/105740"]
 
 #joint还有问题，方位对齐的问题
 #debug_root_refnos = ["25688/48687"]

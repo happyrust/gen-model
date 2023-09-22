@@ -46,45 +46,46 @@ pub struct GetPipeHeatDissipationResponse {
 
 /// 获取 pipe下的bran中，每个bran的散热量
 pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationRequest>, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<GetPipeHeatDissipationResponse>> {
-    let database = aios_mgr.get_arango_db().await?;
-    let request = requests
-        .into_iter()
-        .map(|r| (format!("/{}", r.pipe), r.temp))
-        .collect::<HashMap<String, f32>>();
-    let names = request.keys().map(|name| name.clone()).collect::<Vec<_>>();
-    let pipe_refnos = query_id_from_names_aql(names, Some("PIPE"), &database).await?;
-    let mut result = Vec::new();
-    for pipe_ele in pipe_refnos {
-        let Some(temp) = request.get(&pipe_ele.name) else { continue; };
-        let Some(pipe_refno) = RefU64::from_url_refno(&pipe_ele.refno) else { continue; };
-        let Ok(bran_refnos) = query_children_with_name_aql(&database, pipe_refno).await else { continue; };
-        // 一次查询 pipe下所有bran穿过的房间
-        let bran = bran_refnos.iter().map(|r| r.0).collect::<Vec<RefU64>>();
-        let Ok(room_map) = query_room_codes_from_owners(bran, &database).await else { continue; };
-        let room_map = room_map.into_iter()
-            .filter(|x| RefU64::from_url_refno(&x.refno).is_some())
-            .map(|x| (RefU64::from_url_refno(&x.refno).unwrap(), x.name))
-            .collect::<HashMap<RefU64, String>>();
-        // 计算每个bran的散热量
-        for (bran, bran_name) in bran_refnos {
-            let area = get_heat_dissipation_data(bran, &database, aios_mgr).await?;
-            let heat = get_heat_dissipation_table(*temp, area, true) as f32;
-            let room_code = room_map.get(&bran);
-            let room_code = if room_code.is_some() {
-                room_code.unwrap().clone()
-            } else {
-                get_room_code_from_attr(bran, &aios_mgr).await.unwrap_or("".to_string())
-            };
-            result.push(GetPipeHeatDissipationResponse {
-                pipe: if pipe_ele.name.starts_with("/") { pipe_ele.name[1..].to_string() } else { pipe_ele.name.clone() },
-                temp: *temp,
-                bran: if bran_name.starts_with("/") { bran_name[1..].to_string() } else { bran_name },
-                room: room_code,
-                heat,
-            });
-        }
-    }
-    Ok(result)
+    // let database = aios_mgr.get_arango_db().await?;
+    // let request = requests
+    //     .into_iter()
+    //     .map(|r| (format!("/{}", r.pipe), r.temp))
+    //     .collect::<HashMap<String, f32>>();
+    // let names = request.keys().map(|name| name.clone()).collect::<Vec<_>>();
+    // let pipe_refnos = query_id_from_names_aql(names, Some("PIPE"), &database).await?;
+    // let mut result = Vec::new();
+    // for pipe_ele in pipe_refnos {
+    //     let Some(temp) = request.get(&pipe_ele.name) else { continue; };
+    //     let Some(pipe_refno) = RefU64::from_url_refno(&pipe_ele.refno) else { continue; };
+    //     let Ok(bran_refnos) = query_children_with_name_aql(&database, pipe_refno).await else { continue; };
+    //     // 一次查询 pipe下所有bran穿过的房间
+    //     let bran = bran_refnos.iter().map(|r| r.0).collect::<Vec<RefU64>>();
+    //     let Ok(room_map) = query_room_codes_from_owners(bran, &database).await else { continue; };
+    //     let room_map = room_map.into_iter()
+    //         .filter(|x| RefU64::from_url_refno(&x.refno).is_some())
+    //         .map(|x| (RefU64::from_url_refno(&x.refno).unwrap(), x.name))
+    //         .collect::<HashMap<RefU64, String>>();
+    //     // 计算每个bran的散热量
+    //     for (bran, bran_name) in bran_refnos {
+    //         let area = get_heat_dissipation_data(bran, &database, aios_mgr).await?;
+    //         let heat = get_heat_dissipation_table(*temp, area, true) as f32;
+    //         let room_code = room_map.get(&bran);
+    //         let room_code = if room_code.is_some() {
+    //             room_code.unwrap().clone()
+    //         } else {
+    //             get_room_code_from_attr(bran, &aios_mgr).await.unwrap_or("".to_string())
+    //         };
+    //         result.push(GetPipeHeatDissipationResponse {
+    //             pipe: if pipe_ele.name.starts_with("/") { pipe_ele.name[1..].to_string() } else { pipe_ele.name.clone() },
+    //             temp: *temp,
+    //             bran: if bran_name.starts_with("/") { bran_name[1..].to_string() } else { bran_name },
+    //             room: room_code,
+    //             heat,
+    //         });
+    //     }
+    // }
+    // Ok(result)
+    Ok(vec![])
 }
 
 /// 返回整个bran的散热面积
