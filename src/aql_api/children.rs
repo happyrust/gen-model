@@ -1,8 +1,6 @@
 use crate::api::attr::{query_attr, query_uda_ukey};
 use crate::aql_api::*;
-use crate::consts::{
-    AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_SIBL_EDGES_COLLECTION,
-};
+use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_ROOM_ELES_COLLECTION, AQL_SIBL_EDGES_COLLECTION};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
@@ -400,6 +398,104 @@ pub async fn query_refnos_from_names(names: Vec<String>, database: &ArDatabase, 
         .bind_var("filter_nouns", filter_types.unwrap_or(vec![]));
     let result = database.aql_query::<PdmsElement>(aql).await?;
     Ok(result)
+}
+
+/// 通过name集合返回对应的参考号
+///
+/// 使用 fulltext 索引方式
+pub async fn query_refnos_from_names_fulltext(names: Vec<String>, database: &ArDatabase) -> anyhow::Result<DashMap<String, PdmsElement>> {
+    // 去掉 name 开头的 /
+    let full_text_names = names.iter().map(|name| {
+        let name = if name.starts_with("/") { name[1..].to_string() } else { name.to_string() };
+        replace_symbols(&name)
+    }).collect::<Vec<String>>();
+    // 通过name 模糊查询对应的参考号等信息
+    let aql = AqlQuery::new("
+    with @@pdms_eles
+    for name in @names
+        for e in fulltext(@@pdms_eles,'name',name)
+            return {
+            '_key':e._key,
+            'owner':e.owner,
+            'name':e.name,
+            'noun':e.noun,
+            'version':0,
+            'children_count':0,
+        }
+    ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("names", full_text_names);
+    let result = database.aql_query::<PdmsElement>(aql).await?;
+    // 通过传入值与数据库模糊查询返回值对比，匹配需要的值
+    let mut map = DashMap::new();
+    // 数据库中取值的 name 都是带有 /, 传参names与其统一
+    let names = names.into_iter()
+        .map(|name| if name.starts_with("/") { name } else { format!("/{}", name) })
+        .collect::<Vec<String>>();
+    for r in result {
+        for name in &names {
+            if &r.name == name {
+                map.entry(name.to_string()).or_insert(r);
+                break;
+            }
+        }
+    }
+    Ok(map)
+}
+
+/// 查找对应mdb的 word 节点
+///
+/// module ： DESI，CATA等
+pub async fn query_mdb_world_fulltext(mdb: &str, module: &str, database: &ArDatabase) -> anyhow::Result<Option<PdmsElement>> {
+    let mdb_name = replace_symbols(mdb);
+    // 将 mdb_name存在返回的name中，方便判断是否为请求的mdb_name，word的name都是 /*
+    let aql = AqlQuery::new("
+    with @@pdms_eles,@@pdms_edges
+    for e in fulltext(@@pdms_edges,'mdb_name',@mdb)
+        filter e.db_type == @module
+        let ele = document(e._from)
+        filter ele != null
+        return {
+            '_key':ele._key,
+            'owner':ele.owner,
+            'name':e.mdb_name,
+            'noun':ele.noun,
+            'version':0,
+            'children_count':1,
+        }
+    ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("mdb", mdb_name)
+        .bind_var("module", module);
+    let result = database.aql_query::<PdmsElement>(aql).await?;
+    // 判断从数据库中返回的值中，哪个是需要的
+    let mdb = format!("/{}", mdb);
+    for r in result {
+        if r.name == mdb {
+            // 将word的name还原回去
+            return Ok(Some(PdmsElement {
+                refno: r.refno,
+                owner: r.owner,
+                name: "/*".to_string(),
+                noun: r.noun,
+                version: r.version,
+                children_count: r.children_count,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// 将字符串 符号都转为 ，
+fn replace_symbols(input: &str) -> String {
+    let mut result = String::new();
+    for c in input.chars() {
+        if c.is_alphanumeric() {
+            result.push(c);
+        } else {
+            result.push(',');
+        }
+    }
+    result
 }
 
 ///搜索沿着路径查询目标节点
@@ -1348,19 +1444,29 @@ pub async fn query_type_refnos_through_types(select_refnos: Vec<RefU64>, through
     Ok(result)
 }
 
-#[tokio::test]
-async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Result<()> {
-    // use config::{Config, ConfigError, Environment, File};
-    // let s = Config::builder()
-    //     .add_source(File::with_name("DbOption"))
-    //     .build()?;
-    // let db_option: DbOption = s.try_deserialize().unwrap();
-    // let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    // let refno = RefU64::from_refno_str("17496/79566").unwrap();
-    // let result = query_travel_children_filter_negative_sibl_nodes(refno, &database).await?;
-    // dbg!(&result);
-    Ok(())
+/// 通过房间名查询房间所属的site
+pub async fn query_room_belong_site_name(rooms: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsOwnerNameAql>> {
+    let aql = AqlQuery::new("
+    With @@pdms_eles,@@pdms_edges,@@room_eles
+    for r in @@room_eles
+    filter r.name in @rooms
+    for v in 1..5 outbound concat('pdms_eles/',r._key) pdms_edges
+        filter v != null
+        filter v.noun == 'SITE'
+        return {
+            refno: r._key,
+            name:r.name,
+            owner: v._key ,
+            owner_noun: v.noun,
+            owner_name: v.name
+        }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
+        .bind_var("rooms", rooms);
+    let result = database.aql_query::<PdmsOwnerNameAql>(aql).await?;
+    Ok(result)
 }
+
 
 #[tokio::test]
 async fn test_vague_query_refnos_user_set_aql() -> anyhow::Result<()> {
@@ -1406,5 +1512,19 @@ async fn test_get_uda_type_refnos_from_select_refnos() -> anyhow::Result<()> {
     let select_refnos = vec![RefU64::from_url_refno("9304_2").unwrap()];
     let refnos = get_uda_type_refnos_from_select_refnos(select_refnos, "STDMODELITEM", "ZONE", &aios_mgr).await?;
     dbg!(&refnos);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_refnos_from_names_fulltext() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+    let names = vec!["1WCC778VN".to_string(), "/1WCC0578".to_string(), "/-RX-CCV-R02-13".to_string()];
+    let result = query_refnos_from_names_fulltext(names, &database).await?;
+    dbg!(&result);
     Ok(())
 }
