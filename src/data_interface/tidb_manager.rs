@@ -1505,9 +1505,11 @@ impl PdmsDataInterface for AiosDBManager {
             );
             return Ok(Default::default());
         }
-        // dbg!(scom_ref);
+        #[cfg(debug_assertions)]
+        dbg!(scom_ref);
         let scom_info = self.get_or_create_scom_info(scom_ref)?;
-        // dbg!(&scom_info);
+        #[cfg(debug_assertions)]
+        dbg!(&scom_info);
         // dbg!(&scom_info.axis_params);
         let mut context = self.get_or_create_cata_context(desi_refno, desi_axis_map)?;
 
