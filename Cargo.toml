@@ -4,7 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["gen_model", "opencascade_rs"] #
+#default = ["gen_model"] #
+default = ["opencascade_rs"]
 truck = []
 viewer = []  #是否开启视图
 gen_model = ["aios_core/gen_model"]
@@ -45,7 +46,7 @@ parry2d = { path="../crates/parry/crates/parry2d"}
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path = "../crates/aios-core" }
 bevy_transform = { path = "../crates/bevy/crates/bevy_transform"}
-pdms_io = {path = "../pdms-io"}
+pdms_io = {path = "../pdms-io-8-30"}
 #csg = { path = "../crates/csgrs/csg" }
 arangors_lite = { path = "../crates/arangors-lite"}
 #heed = {path = "../crates/heed/heed"}
@@ -67,7 +68,7 @@ debug_print = "1.0.0"
 
 #造型功能，先在database测试
 opencascade = { path = "../crates/opencascade-rs/crates/opencascade", optional = true}
-serde_with = "3.3.0"
+serde_with = "3.0.0"
 tokio-stream = "0.1.14"
 rayon = "1.7.0"
 redb = "1.0.5"
@@ -79,6 +80,7 @@ num_enum = "0.7.0"
 #geo = "0.24.1"
 
 
+
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
 
@@ -87,7 +89,7 @@ version = "0.6.3"
 default-features = false
 features = [
     "runtime-async-std-rustls",
-    #    "runtime-async-std-native-tls",
+#    "runtime-async-std-native-tls",
     "macros",
     "mysql",
     "tls",
