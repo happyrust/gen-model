@@ -53,7 +53,7 @@ use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use aios_core::consts::WORD_HASH;
-use aios_core::pdms_types::AttrVal::DoubleArrayType;
+use aios_core::pdms_types::AttrVal::{DoubleArrayType, StringArrayType};
 use log::error;
 use tokio::sync::RwLock;
 use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
@@ -233,8 +233,12 @@ impl PdmsDataInterface for AiosDBManager {
                 if let Some(desp) = att_map.get_f64_vec("DESP") {
                     let unpars = att_map.get_i32_vec("UNIPAR").unwrap_or_default();
                     let ddesp = desp.iter()
-                        .zip(unpars).map(|(x, f)| if f == WORD_HASH as i32 { 0.0 } else { *x })
+                        .zip(unpars.clone()).map(|(x, f)| if f == WORD_HASH as i32 { 0.0 } else { *x })
                         .collect::<Vec<f64>>();
+                    let wdesp = desp.iter()
+                        .zip(unpars).map(|(x, f)| if f == WORD_HASH as i32 { db1_dehash(*x as u32) } else { "".to_string() })
+                        .collect::<Vec<String>>();
+                    att_map.insert(db1_hash("WDES"), StringArrayType(wdesp));
                     att_map.insert(db1_hash("DDES"), DoubleArrayType(ddesp));
                 }
                 return Ok(att_map);

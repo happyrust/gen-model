@@ -13,11 +13,11 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 
-pub async fn get_data_center_atta_attr(refno: PdmsElement,bran_name:&str,database:&ArDatabase,aios_mgr:&AiosDBManager) -> DataCenterInstance {
+pub async fn get_data_center_atta_attr(refno: PdmsElement, bran_name: &str, database: &ArDatabase, aios_mgr: &AiosDBManager) -> DataCenterInstance {
     let need_query_material_code = vec![("ITEMB14".to_string(), "Code".to_string()),
                                         ("ITEMB15".to_string(), "RCCM".to_string()),
                                         ("ITEMB16".to_string(), "QAGrade".to_string()),
-                                        ("ITEMB17".to_string(), "Diameter".to_string()),];
+                                        ("ITEMB17".to_string(), "Diameter".to_string()), ];
     let mut result = Vec::new();
     let item_1 = DataCenterAttr {
         attribute_model_code: "ITEM1".to_string(),
@@ -72,7 +72,7 @@ pub async fn get_data_center_atta_attr(refno: PdmsElement,bran_name:&str,databas
         value: AttrString(tspe).into(),
     });
 
-    let spre_name = query_foreign_name_aql(refno.refno,vec!["SPRE","SPRE"],database).await.unwrap_or(None).unwrap_or("".to_string());
+    let spre_name = query_foreign_name_aql(refno.refno, vec!["SPRE", "SPRE"], database).await.unwrap_or(None).unwrap_or("".to_string());
     let material_code = get_spre_material_code(&spre_name).unwrap_or("".to_string());
     let material_map = if let Ok(puhua_pool) = aios_mgr.get_puhua_pool().await {
         let query_code = need_query_material_code.iter().map(|x| x.1.clone()).collect::<Vec<_>>();
@@ -102,17 +102,59 @@ pub async fn get_data_center_atta_attr(refno: PdmsElement,bran_name:&str,databas
 }
 
 #[tokio::test]
+
 async fn test_get_data_center_atta_attr() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let database = aios_mgr.get_arango_db().await?;
     let tee_refno = RefU64::from_refno_str("24383/66752").unwrap();
     let pool = aios_mgr.get_project_pool_by_refno(tee_refno).await.unwrap();
-    let tee_node = query_ele_node(tee_refno,&pool.1).await.unwrap();
-    let owner_name = query_name(tee_node.owner,&pool.1).await.unwrap();
+    let tee_node = query_ele_node(tee_refno, &pool.1).await.unwrap();
+    let owner_name = query_name(tee_node.owner, &pool.1).await.unwrap();
 
-    let result = get_data_center_atta_attr(tee_node.into(),&owner_name,&database,&aios_mgr).await;
+    let result = get_data_center_atta_attr(tee_node.into(), &owner_name, &database, &aios_mgr).await;
     let mut file = std::fs::File::create("tee.json")?;
     let json = serde_json::to_vec(&result)?;
     file.write_all(&json)?;
     Ok(())
+}
+
+#[test]
+fn test_lock() {
+    use std::sync::{Mutex, Arc};
+    use std::thread;
+
+    // 创建两个互斥锁
+    let mutex1 = Arc::new(Mutex::new(1));
+    let mutex2 = Arc::new(Mutex::new(2));
+
+    let mutex1_clone = Arc::clone(&mutex1);
+    let mutex2_clone = Arc::clone(&mutex2);
+
+    let handle1 = thread::spawn(move || {
+        // 尝试获取 mutex1
+        let _lock1 = mutex1_clone.lock().unwrap();
+        println!("Thread 1 acquired mutex1");
+        // 等待一段时间，模拟其他工作
+        thread::sleep(std::time::Duration::from_millis(10));
+        println!("Thread 1 waiting for mutex2");
+        // 尝试获取 mutex2
+        let _lock2 = mutex2_clone.lock().unwrap();
+        println!("Thread 1 acquired mutex2");
+    });
+
+    let handle2 = thread::spawn(move || {
+        // 尝试获取 mutex2
+        let _lock2 = mutex2.lock().unwrap();
+        println!("Thread 2 acquired mutex2");
+        // 等待一段时间，模拟其他工作
+        thread::sleep(std::time::Duration::from_millis(10));
+        println!("Thread 2 waiting for mutex1");
+        // 尝试获取 mutex1，但由于它已被Thread 1占用，因此会阻塞
+        let _lock1 = mutex1.lock().unwrap();
+        println!("Thread 2 acquired mutex1");
+    });
+
+    // 等待两个线程完成
+    handle1.join().unwrap();
+    handle2.join().unwrap();
 }
