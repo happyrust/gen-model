@@ -111,60 +111,11 @@ fn test_sbfi() -> anyhow::Result<()> {
     dbg!(to_pdms_ori_str(&mat3));
 
     return Ok(());
-
-    let axis_str = "-X45-Y";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    // dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
-
-    let axis_str = "-X30-Y";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    // dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
-
-    let axis_str = "-Y";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
-
-    let axis_str = "X";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
-
-    let axis_str = "-X";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
-
-    let axis_str = "-Y30X";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
-
-    // let refno = RefU64::from_two_nums(17496, 116749);
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-    //
-    // let refno = RefU64::from_two_nums(17496, 137937);
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-    //
-    // let refno = RefU64::from_two_nums(17496, 137938);
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-    //
-    // let refno = RefU64::from_two_nums(17496, 137936);
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-
-    return Ok(());
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
-
-    // return test_sbfi();
-
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
         .build()?;
@@ -206,46 +157,6 @@ async fn main() -> anyhow::Result<()> {
     }
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    // if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
-    //     Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
-    // }
-
-    // let refno = "24381/46973".into();
-    // let hash = db1_hash(":HXYsize");
-    // dbg!(hash);
-    // dbg!(db1_dehash(623723));
-    // dbg!(db1_dehash(640481));
-    // let attr = mgr.get_attr_from_localdb(refno).unwrap_or_default();
-    // // dbg!(attr.map.get(&hash));
-    // // dbg!(&attr.map);
-    // dbg!(&attr);
-    // return Ok(());
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-    // return Ok(());
-    // let refno = "23738/595".into();
-    // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-
-    // let refno = "23736/69".into();
-    // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-
-    // return Ok(());
-
-    // let refno = "23713/6104".into();
-    // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-
-    // let refno = "15192/358994".into();
-    // dbg!(mgr.get_children_from_localdb(refno).unwrap_or_default());
 
     #[cfg(feature = "gen_model")]
     if db_option.gen_model {
