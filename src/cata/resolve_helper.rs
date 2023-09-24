@@ -1,9 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
-use std::{mem, panic};
-use std::str::FromStr;
-use std::sync::Arc;
-use aios_core::parsed_data::*;
+use crate::aql_api::children::query_pre_or_next_node;
+use crate::cata::direction_parse::parse_expr_to_dir;
+use crate::cata::polish_notation::Stack;
+use crate::cata::resolve::resolve_axis_param;
+use crate::data_interface::interface::PdmsDataInterface;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
+use aios_core::parsed_data::*;
 use aios_core::pdms_data::{AxisParam, ScomInfo};
 use aios_core::pdms_types::RefU64;
 use aios_core::tiny_expr::expr_eval::interp;
@@ -13,12 +14,11 @@ use glam::{Mat3, Quat, Vec2, Vec3};
 use itertools::any;
 use nom::Parser;
 use regex::{Captures, NoExpand, Regex};
+use std::collections::{BTreeMap, HashMap};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::{mem, panic};
 use tokio::runtime::Runtime;
-use crate::cata::direction_parse::parse_expr_to_dir;
-use crate::cata::polish_notation::Stack;
-use crate::cata::resolve::resolve_axis_param;
-use crate::data_interface::interface::PdmsDataInterface;
-use crate::aql_api::children::query_pre_or_next_node;
 
 use super::resolve::CataContext;
 
@@ -29,7 +29,9 @@ fn test_exp() {
     let s = "PARAM 1";
     let re = Regex::new(format!(r"^{s}|\s{s}").as_str()).unwrap();
     let rs = "test";
-    let new_exp = re.replace_all(input_exp, format!(" {rs} ").as_str()).to_string();
+    let new_exp = re
+        .replace_all(input_exp, format!(" {rs} ").as_str())
+        .to_string();
     dbg!(new_exp);
 }
 
@@ -49,10 +51,13 @@ fn test_expression_regex() {
     }
     let input_exp = "CPARAM 1";
     if let Some(caps) = re.captures(&input_exp) {
-        println!("{} {} {}", caps.get(1).map_or("", |m| m.as_str()), caps.get(2).map_or("", |m| m.as_str()),
-                 caps.get(3).map_or("", |m| m.as_str()));
+        println!(
+            "{} {} {}",
+            caps.get(1).map_or("", |m| m.as_str()),
+            caps.get(2).map_or("", |m| m.as_str()),
+            caps.get(3).map_or("", |m| m.as_str())
+        );
     }
-
 
     let input_exp = "DESIGN IPARA 1";
     for cap in re.captures_iter(&input_exp) {
@@ -73,14 +78,20 @@ fn test_expression_regex() {
     }
 }
 
-pub fn eval_str_to_f32<T: PdmsDataInterface>(input_expr: impl AsRef<str>,
-                                             context: &CataContext, interface: Option<&T>) -> anyhow::Result<f32> {
+pub fn eval_str_to_f32<T: PdmsDataInterface>(
+    input_expr: impl AsRef<str>,
+    context: &CataContext,
+    interface: Option<&T>,
+) -> anyhow::Result<f32> {
     let input_expr = input_expr.as_ref().trim().to_uppercase();
     eval_str_to_f64(&input_expr, context, interface, true).map(|x| x as f32)
 }
 
-pub fn eval_str_to_f32_or_default<T: PdmsDataInterface>(input_expr: impl AsRef<str>,
-                                                        context: &CataContext, interface: Option<&T>) -> f32 {
+pub fn eval_str_to_f32_or_default<T: PdmsDataInterface>(
+    input_expr: impl AsRef<str>,
+    context: &CataContext,
+    interface: Option<&T>,
+) -> f32 {
     eval_str_to_f32(input_expr, context, interface).unwrap_or(0.0)
 }
 
@@ -102,18 +113,18 @@ pub fn eval_str_to_f32_or_default<T: PdmsDataInterface>(input_expr: impl AsRef<s
 //  MAX  00 00 03 F0
 //  MIN  00 00 03 F1
 
-
 pub const INTERNAL_PDMS_EXPRESS: [&'static str; 22] = [
-    "MAX", "MIN", "COS", "SIN", "LOG", "ABS", "POW", "SQR", "NOT", "AND", "OR",
-    "ATAN", "ACOS", "ATAN2", "ASIN", "INT", "OF", "MOD", "NEGATE", "SUM", "TANF", "TAN",
+    "MAX", "MIN", "COS", "SIN", "LOG", "ABS", "POW", "SQR", "NOT", "AND", "OR", "ATAN", "ACOS",
+    "ATAN2", "ASIN", "INT", "OF", "MOD", "NEGATE", "SUM", "TANF", "TAN",
 ];
 
-
 ///评估表达式的值
-pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
-                                             context: &CataContext,
-                                             interface: Option<&T>,
-                                             replace_err_by_zero: bool) -> anyhow::Result<f64> {
+pub fn eval_str_to_f64<T: PdmsDataInterface>(
+    input_expr: &str,
+    context: &CataContext,
+    interface: Option<&T>,
+    replace_err_by_zero: bool,
+) -> anyhow::Result<f64> {
     if input_expr.is_empty() || input_expr == "UNSET" {
         return Ok(0.0);
     }
@@ -128,15 +139,16 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
             let c2 = caps.get(2).map_or("", |m| m.as_str());
             let refno_str = context.get("RS_DES_REFNO").unwrap().as_str();
             let refno = RefU64::from_refno_str(refno_str)?;
-            let target_refno =
-                match c2 {
-                    "PREV" => interface.get_prev(refno)?,
-                    "NEXT" => interface.get_next(refno)?,
-                    refno_str => RefU64::from_str(refno_str).map_err(|_| anyhow!("wrong refno in of expr"))?
-                };
+            let target_refno = match c2 {
+                "PREV" => interface.get_prev(refno)?,
+                "NEXT" => interface.get_next(refno)?,
+                refno_str => {
+                    RefU64::from_str(refno_str).map_err(|_| anyhow!("wrong refno in of expr"))?
+                }
+            };
             let target_att = interface.get_attr_from_localdb(target_refno)?;
 
-            dbg!(&target_refno);
+            // dbg!(&target_refno);
             if let Some(value) = target_att.get_as_string(c1) {
                 new_exp = new_exp.replace(s, value.as_str());
             } else {
@@ -156,7 +168,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                     //         dbg!(&new_exp);
                     //     }
                     // }
-                    "LBOR" | "LEAWID" | "LEAHEI"=> {
+                    "LBOR" | "LEAWID" | "LEAHEI" => {
                         let axis_map = interface.resolve_axis_params(target_refno, None)?;
                         // dbg!(&target_att);
                         let index = target_att.get_i32("LEAV").unwrap_or_default();
@@ -166,14 +178,14 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                             let v = axis_map.get(&index).unwrap();
                             if c1 == "LEAWID" {
                                 v.pwidth
-                            }else if c1 == "LEAHEI"{
+                            } else if c1 == "LEAHEI" {
                                 v.pheight
-                            }else if c1 == "LBOR"{
+                            } else if c1 == "LBOR" {
                                 v.pbore
-                            }else{
+                            } else {
                                 return Err(anyhow!("{input_expr} not support."));
                             }
-                        }else{
+                        } else {
                             return Err(anyhow!("{input_expr} not support."));
                         };
                         // dbg!(res);
@@ -191,29 +203,41 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
     }
 
     //说明：匹配带小数的情况 PARA[1.1]
-    let re = Regex::new(r"(:?[A-Z_]+[0-9]*)(\s*\[?\s*(([1-9]\d*\.?\d*)|(0\.\d*[1-9]))\s*\]?)?").unwrap();
+    let re =
+        Regex::new(r"(:?[A-Z_]+[0-9]*)(\s*\[?\s*(([1-9]\d*\.?\d*)|(0\.\d*[1-9]))\s*\]?)?").unwrap();
     // 将NEXT PREV 的值统一换成参考号，然后 context_params 要存储 参考号对应的 attr，要是它这个值没有求解，
     // 相当于要递归去求值
     let rpro_re = Regex::new(r"(RPRO)\s+([a-zA-Z0-9]+)").unwrap();
     if new_exp.contains("RPRO") {
-        new_exp = rpro_re.replace_all(&new_exp, |caps: &Captures| {
-            let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
-            let default_key: String = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
-            let v = context.get(&key).map(|x| x.to_string()).unwrap_or("0".to_string());
-            if let Ok(t) = eval_str_to_f64(&v, &context, interface, false) {
-                t.to_string()
-            } else {
-                context.get(&default_key).map(|x| x.to_string()).unwrap_or("0".to_string())
-            }
-        }).trim().to_string();
+        new_exp = rpro_re
+            .replace_all(&new_exp, |caps: &Captures| {
+                let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
+                let default_key: String = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
+                let v = context
+                    .get(&key)
+                    .map(|x| x.to_string())
+                    .unwrap_or("0".to_string());
+                if let Ok(t) = eval_str_to_f64(&v, &context, interface, false) {
+                    t.to_string()
+                } else {
+                    context
+                        .get(&default_key)
+                        .map(|x| x.to_string())
+                        .unwrap_or("0".to_string())
+                }
+            })
+            .trim()
+            .to_string();
     }
 
-    let mut new_exp = new_exp.replace("DESIGN PARAM", "DESP").replace("DESIGN PARA", "DESP");
-    ;
+    let mut new_exp = new_exp
+        .replace("DESIGN PARAM", "DESP")
+        .replace("DESIGN PARA", "DESP");
     let mut result_exp = new_exp.clone();
     //默认两次
     let mut found_replaced = false;
-    let para_name_re = Regex::new(r"(DESI(GN)?\s+)?([I|C|O|A)]?PARA?M?)|DESP|(O|A|W|D)DESP?").unwrap();
+    let para_name_re =
+        Regex::new(r"(DESI(GN)?\s+)?([I|C|O|A)]?PARA?M?)|DESP|(O|A|W|D)DESP?").unwrap();
     for _ in 0..100 {
         for caps in re.captures_iter(&new_exp) {
             let s = caps[0].trim();
@@ -232,7 +256,14 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
                 }
             }
             // 小数向下取整
-            let mut k: String = format!("{}{}", para_name, c3.parse::<f32>().map(|x| x.floor().to_string()).unwrap_or_default()).into();
+            let mut k: String = format!(
+                "{}{}",
+                para_name,
+                c3.parse::<f32>()
+                    .map(|x| x.floor().to_string())
+                    .unwrap_or_default()
+            )
+            .into();
 
             if context.contains_key(&k) {
                 result_exp = result_exp.replace(s, &context[&k]);
@@ -249,14 +280,21 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         //如果有RPRO 需要执行两次处理
         result_exp = result_exp.replace("ATTRIB", "");
         if result_exp.contains("RPRO") {
-            result_exp = rpro_re.replace_all(&result_exp, |caps: &Captures| {
-                let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
-                let default_key: String = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
+            result_exp = rpro_re
+                .replace_all(&result_exp, |caps: &Captures| {
+                    let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
+                    let default_key: String =
+                        format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
 
-                context.get(&key).map(|x| x.to_string()).unwrap_or(
-                    context.get(&default_key).map(|x| x.to_string()).unwrap_or("0".to_string())
-                )
-            }).trim().to_string();
+                    context.get(&key).map(|x| x.to_string()).unwrap_or(
+                        context
+                            .get(&default_key)
+                            .map(|x| x.to_string())
+                            .unwrap_or("0".to_string()),
+                    )
+                })
+                .trim()
+                .to_string();
             found_replaced = true;
         }
         // dbg!(&result_exp);
@@ -267,7 +305,10 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         found_replaced = false;
     }
     // dbg!(&result_exp);
-    let seg_strs: Vec<String> = result_exp.split_whitespace().map(|x| x.trim().into()).collect::<Vec<_>>();
+    let seg_strs: Vec<String> = result_exp
+        .split_whitespace()
+        .map(|x| x.trim().into())
+        .collect::<Vec<_>>();
     if seg_strs.len() == 0 {
         return Ok(0.0);
     }
@@ -344,12 +385,13 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
         result_string.push_str(" ");
     }
     match interp(&result_string.to_lowercase()) {
-        Ok(val) => {
-            Ok(f64_round_3(val).into())
-        }
+        Ok(val) => Ok(f64_round_3(val).into()),
         Err(_) => {
             return if let Ok(mut stack) = Stack::init(&result_string) {
-                stack.eval().ok_or(anyhow::anyhow!(format!("后缀表达式求解失败 {}", &input_expr)))
+                stack.eval().ok_or(anyhow::anyhow!(format!(
+                    "后缀表达式求解失败 {}",
+                    &input_expr
+                )))
             } else {
                 println!("输入表达式 : {}", &input_expr);
                 // dbg!(&context);
@@ -367,21 +409,20 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(input_expr: &str,
 pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGeoParam> {
     let geo = panic::catch_unwind(|| {
         match &gmse.type_name[..] {
-            "SANN" => {
-                CateGeoParam::Profile(CateProfileParam::SANN(SannData {
-                    xy: Vec2::new(gmse.verts[0][0], gmse.verts[0][1]),
-                    dxy: Vec2::new(gmse.dxy[0][0], gmse.dxy[0][1]),
-                    paxis: (gmse.paxises[0].clone()),
-                    pangle: gmse.pang as f32,
-                    pradius: gmse.prad as f32,
-                    pwidth: gmse.pwid as f32,
-                    drad: gmse.drad as f32,
-                    dwid: gmse.dwid as f32,
-                    plin_pos: gmse.plin_pos,
-                    plin_axis: gmse.plin_plax,
-                }))
-            }
-            "SPRO" => {   //structural profile
+            "SANN" => CateGeoParam::Profile(CateProfileParam::SANN(SannData {
+                xy: Vec2::new(gmse.verts[0][0], gmse.verts[0][1]),
+                dxy: Vec2::new(gmse.dxy[0][0], gmse.dxy[0][1]),
+                paxis: (gmse.paxises[0].clone()),
+                pangle: gmse.pang as f32,
+                pradius: gmse.prad as f32,
+                pwidth: gmse.pwid as f32,
+                drad: gmse.drad as f32,
+                dwid: gmse.dwid as f32,
+                plin_pos: gmse.plin_pos,
+                plin_axis: gmse.plin_plax,
+            })),
+            "SPRO" => {
+                //structural profile
                 CateGeoParam::Profile(CateProfileParam::SPRO(SProfileData {
                     verts: gmse.verts.iter().map(|x| x.truncate()).collect(),
                     frads: gmse.frads.clone(),
@@ -390,7 +431,8 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     plin_axis: gmse.plin_plax,
                 }))
             }
-            "SREC" => {   //structural profile
+            "SREC" => {
+                //structural profile
                 CateGeoParam::Profile(CateProfileParam::SREC(SRectData {
                     center: Vec2::new(gmse.xyz[0], gmse.xyz[1]),
                     size: Vec2::new(gmse.lengths[0], gmse.lengths[1]),
@@ -400,15 +442,13 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     plin_axis: gmse.plin_plax,
                 }))
             }
-            "BOXI" => {
-                CateGeoParam::BoxImplied(CateBoxImpliedParam {
-                    axis: None,
-                    width: gmse.lengths[2],
-                    height: gmse.lengths[0],
-                    centre_line_flag: gmse.centre_line_flag,
-                    tube_flag: gmse.tube_flag,
-                })
-            }
+            "BOXI" => CateGeoParam::BoxImplied(CateBoxImpliedParam {
+                axis: None,
+                width: gmse.lengths[2],
+                height: gmse.lengths[0],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            }),
             "LCYL" | "NLCY" => {
                 // 圆柱体
                 CateGeoParam::LCylinder(CateLCylinderParam {
@@ -443,24 +483,22 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "LPYR" | "NLPY" => {
-                CateGeoParam::Pyramid(CatePyramidParam {
-                    refno: gmse.refno,
-                    pa: (gmse.paxises[0].clone()),
-                    pb: (gmse.paxises[1].clone()),
-                    pc: (gmse.paxises[2].clone()),
-                    x_bottom: gmse.xyz[3],
-                    y_bottom: gmse.xyz[4],
-                    x_top: gmse.xyz[5],
-                    y_top: gmse.xyz[6],
-                    dist_to_btm: gmse.distances[1],
-                    dist_to_top: gmse.distances[2],
-                    x_offset: gmse.xyz[7],
-                    y_offset: gmse.xyz[8],
-                    centre_line_flag: gmse.centre_line_flag,
-                    tube_flag: gmse.tube_flag,
-                })
-            }
+            "LPYR" | "NLPY" => CateGeoParam::Pyramid(CatePyramidParam {
+                refno: gmse.refno,
+                pa: (gmse.paxises[0].clone()),
+                pb: (gmse.paxises[1].clone()),
+                pc: (gmse.paxises[2].clone()),
+                x_bottom: gmse.xyz[3],
+                y_bottom: gmse.xyz[4],
+                x_top: gmse.xyz[5],
+                y_top: gmse.xyz[6],
+                dist_to_btm: gmse.distances[1],
+                dist_to_top: gmse.distances[2],
+                x_offset: gmse.xyz[7],
+                y_offset: gmse.xyz[8],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            }),
             "SSLC" | "NSSL" => {
                 if gmse.paxises.len() >= 1 && gmse.diameters.len() >= 1 && gmse.shears.len() >= 4 {
                     CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam {
@@ -481,7 +519,8 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 }
             }
             "LSNO" | "NLSN" => {
-                if gmse.paxises.len() >= 2 && gmse.diameters.len() >= 2 && gmse.distances.len() >= 2 {
+                if gmse.paxises.len() >= 2 && gmse.diameters.len() >= 2 && gmse.distances.len() >= 2
+                {
                     CateGeoParam::Snout(CateSnoutParam {
                         refno: gmse.refno,
                         pa: (gmse.paxises[0].clone()),
@@ -502,16 +541,8 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 if gmse.lengths.len() >= 3 && gmse.xyz.len() >= 3 {
                     CateGeoParam::Box(CateBoxParam {
                         refno: gmse.refno,
-                        size: Vec3::new(
-                            gmse.lengths[0],
-                            gmse.lengths[1],
-                            gmse.lengths[2],
-                        ),
-                        offset: Vec3::new(
-                            gmse.xyz[0],
-                            gmse.xyz[1],
-                            gmse.xyz[2],
-                        ),
+                        size: Vec3::new(gmse.lengths[0], gmse.lengths[1], gmse.lengths[2]),
+                        offset: Vec3::new(gmse.xyz[0], gmse.xyz[1], gmse.xyz[2]),
                         centre_line_flag: gmse.centre_line_flag,
                         tube_flag: gmse.tube_flag,
                     })
@@ -547,18 +578,16 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SDSH" | "NSDS" => {
-                CateGeoParam::Dish(CateDishParam {
-                    refno: gmse.refno,
-                    axis: (gmse.paxises[0].clone()),
-                    dist_to_btm: gmse.distances[0],
-                    height: gmse.phei,
-                    diameter: gmse.diameters[0],
-                    radius: gmse.prad,
-                    centre_line_flag: gmse.centre_line_flag,
-                    tube_flag: gmse.tube_flag,
-                })
-            }
+            "SDSH" | "NSDS" => CateGeoParam::Dish(CateDishParam {
+                refno: gmse.refno,
+                axis: (gmse.paxises[0].clone()),
+                dist_to_btm: gmse.distances[0],
+                height: gmse.phei,
+                diameter: gmse.diameters[0],
+                radius: gmse.prad,
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            }),
             "SEXT" | "NSEX" => {
                 // dbg!(gmse);
                 CateGeoParam::Extrusion(CateExtrusionParam {
@@ -575,31 +604,27 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "SLINE" => {
-                CateGeoParam::Sline(CateSplineParam {
-                    refno: gmse.refno,
-                    start_pt: vec![0.0; 3],
-                    end_pt: vec![0.0; 3],
-                    diameter: gmse.diameters[0],
-                    centre_line_flag: gmse.centre_line_flag,
-                    tube_flag: gmse.tube_flag,
-                })
-            }
-            "SREV" | "NSRE" => {
-                CateGeoParam::Revolution(CateRevolutionParam {
-                    refno: gmse.refno,
-                    pa: (gmse.paxises[0].clone()),
-                    pb: (gmse.paxises[1].clone()),
-                    angle: gmse.pang,
-                    verts: gmse.verts.clone(),
-                    frads: gmse.frads.clone(),
-                    x: gmse.xyz[0],
-                    y: gmse.xyz[1],
-                    z: gmse.xyz[2],
-                    centre_line_flag: gmse.centre_line_flag,
-                    tube_flag: gmse.tube_flag,
-                })
-            }
+            "SLINE" => CateGeoParam::Sline(CateSplineParam {
+                refno: gmse.refno,
+                start_pt: vec![0.0; 3],
+                end_pt: vec![0.0; 3],
+                diameter: gmse.diameters[0],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            }),
+            "SREV" | "NSRE" => CateGeoParam::Revolution(CateRevolutionParam {
+                refno: gmse.refno,
+                pa: (gmse.paxises[0].clone()),
+                pb: (gmse.paxises[1].clone()),
+                angle: gmse.pang,
+                verts: gmse.verts.clone(),
+                frads: gmse.frads.clone(),
+                x: gmse.xyz[0],
+                y: gmse.xyz[1],
+                z: gmse.xyz[2],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            }),
             "SRTO" | "NSRT" => {
                 // 截面为矩形的弯管
                 CateGeoParam::RectTorus(CateRectTorusParam {
@@ -624,14 +649,12 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     tube_flag: gmse.tube_flag,
                 })
             }
-            "TUBE" => {
-                CateGeoParam::TubeImplied(CateTubeImpliedParam {
-                    axis: None,
-                    diameter: gmse.diameters[0],
-                    centre_line_flag: gmse.centre_line_flag,
-                    tube_flag: gmse.tube_flag,
-                })
-            }
+            "TUBE" => CateGeoParam::TubeImplied(CateTubeImpliedParam {
+                axis: None,
+                diameter: gmse.diameters[0],
+                centre_line_flag: gmse.centre_line_flag,
+                tube_flag: gmse.tube_flag,
+            }),
             _ => CateGeoParam::Unknown,
         }
     });
@@ -639,10 +662,12 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
     geo.map_err(|x| anyhow::anyhow!(format!("几何体生成出错, 数据: {:?}", &gmse)))
 }
 
-pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
-                                                 scom: &ScomInfo,
-                                                 context: &CataContext,
-                                                 interface: Option<&T>) -> anyhow::Result<(Vec3, Vec3, Vec3)> {
+pub fn resolve_dir_and_pos<T: PdmsDataInterface>(
+    axis: &AxisParam,
+    scom: &ScomInfo,
+    context: &CataContext,
+    interface: Option<&T>,
+) -> anyhow::Result<(Vec3, Vec3, Vec3)> {
     let mut dir_str = axis.direction.trim();
     let mut ref_dir_str = axis.ref_direction.trim();
     let mut dir = Vec3::ZERO;
@@ -653,9 +678,14 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
     if re.is_match(dir_str) {
         if let Some(cap) = re.captures(dir_str) {
             let is_neg = cap.get(1).map_or("", |m| m.as_str()) == "-";
-            let pnt_indx = cap.get(2).map_or("", |m| m.as_str()).parse::<i32>().unwrap_or(-1);
+            let pnt_indx = cap
+                .get(2)
+                .map_or("", |m| m.as_str())
+                .parse::<i32>()
+                .unwrap_or(-1);
             if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
-                let mut axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
+                let mut axis =
+                    resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
                 let flag = if is_neg { -1.0 } else { 1.0 };
                 dir = flag * mem::take(&mut axis.dir);
                 pos = flag * mem::take(&mut axis.pt);
@@ -670,9 +700,14 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
     if re.is_match(ref_dir_str) {
         if let Some(cap) = re.captures(ref_dir_str) {
             let is_neg = cap.get(1).map_or("", |m| m.as_str()) == "-";
-            let pnt_indx = cap.get(2).map_or("", |m| m.as_str()).parse::<i32>().unwrap_or(-1);
+            let pnt_indx = cap
+                .get(2)
+                .map_or("", |m| m.as_str())
+                .parse::<i32>()
+                .unwrap_or(-1);
             if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
-                let mut axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
+                let mut axis =
+                    resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
                 let flag = if is_neg { -1.0 } else { 1.0 };
                 ref_dir = flag * mem::take(&mut axis.dir);
             } else {
@@ -688,7 +723,11 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(axis: &AxisParam,
 }
 
 //Y is N and Z is U
-pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(ori_str: &str, context: &CataContext, interface: Option<&T>) -> anyhow::Result<Quat> {
+pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(
+    ori_str: &str,
+    context: &CataContext,
+    interface: Option<&T>,
+) -> anyhow::Result<Quat> {
     let dir_strs = ori_str.split(" and ").collect::<Vec<_>>();
     // dbg!(&dir_strs);
     if dir_strs.len() < 2 {
@@ -708,7 +747,8 @@ pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(ori_str: &str, context: &Cata
         let f = strs[0].trim().to_uppercase();
         // dbg!(&f);
 
-        let dir_str = strs[1].trim()
+        let dir_str = strs[1]
+            .trim()
             .replace("E", "X")
             .replace("W", "-X")
             .replace("N", "Y")
@@ -739,7 +779,11 @@ pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(ori_str: &str, context: &Cata
     Ok(Quat::from_mat3(&mat))
 }
 
-pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &CataContext, interface: Option<&T>) -> anyhow::Result<Vec3> {
+pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(
+    pdir: &str,
+    context: &CataContext,
+    interface: Option<&T>,
+) -> anyhow::Result<Vec3> {
     let dir_str = pdir.to_uppercase().replace("AXIS", "");
     let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();
     let mut new_dir_str = dir_str.clone();
@@ -769,7 +813,9 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &CataCo
                 if cap.len() == 4 {
                     let val_str = cap[2].to_string();
                     // dbg!(&val_str);
-                    let val_result = eval_str_to_f64(&val_str, context, interface, true).unwrap_or_default().to_string();
+                    let val_result = eval_str_to_f64(&val_str, context, interface, true)
+                        .unwrap_or_default()
+                        .to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                     // dbg!(&new_dir_str);
                 }
@@ -777,8 +823,7 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(pdir: &str, context: &CataCo
         }
     }
     let dir_str = new_dir_str.replace(" ", "");
-    let v = parse_expr_to_dir(&dir_str).ok_or(anyhow::anyhow!(format!("方向字符串: {} 不正确。", pdir)))?;
+    let v = parse_expr_to_dir(&dir_str)
+        .ok_or(anyhow::anyhow!(format!("方向字符串: {} 不正确。", pdir)))?;
     Ok(v)
 }
-
-
