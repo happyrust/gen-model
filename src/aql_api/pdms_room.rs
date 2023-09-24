@@ -347,22 +347,19 @@ pub async fn query_room_name_from_refnos_aql(
     refnos: Vec<RefU64>,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<PdmsNodeBelongRoomName>> {
-    let refnos = refnos
-        .into_iter()
-        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
-        .collect::<Vec<_>>();
+    let refnos = refnos.into_iter().map(|r| r.to_url_refno()).collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@room_edges,@@room_eles
     for id in @refnos
-    for v,e in 1 inbound id @@room_edges
+    for v,e in 1 inbound concat('pdms_eles/',id) @@room_edges
+        filter v != null
          return {
-            'refno': v._key,
+            'refno': id,
             'room_name': v.name
          }
     ",
-    )
-        .bind_var("refnos", refnos)
+    ).bind_var("refnos", refnos)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);

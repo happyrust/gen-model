@@ -520,6 +520,7 @@ pub async fn get_refno_world_poss_pose(
 pub async fn get_refnos_arrive_leave_info(refnos: Vec<RefU64>, b_request_w_pos: bool, aios_mgr: &AiosDBManager) -> anyhow::Result<HashMap<RefU64, HashMap<String, NamedAttrValue>>> {
     let database = aios_mgr.get_arango_db().await?;
     let points = query_refnos_point_map_aql(refnos, &database).await?;
+    dbg!(&points.len());
     let mut map = HashMap::new();
     for point in points {
         // 找到arrive 和 leave 对应的点集信息

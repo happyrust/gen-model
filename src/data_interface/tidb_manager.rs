@@ -27,7 +27,7 @@ use aios_core::pdms_data::GmParam;
 use aios_core::pdms_data::PlinParam;
 use aios_core::pdms_data::PlinParamData;
 use aios_core::pdms_data::ScomInfo;
-use aios_core::pdms_types::AttrVal::DoubleArrayType;
+use aios_core::pdms_types::AttrVal::{DoubleArrayType, StringArrayType};
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
 use aios_core::shape::pdms_shape::PlantMesh;
@@ -236,9 +236,14 @@ impl PdmsDataInterface for AiosDBManager {
                     let unpars = att_map.get_i32_vec("UNIPAR").unwrap_or_default();
                     let ddesp = desp
                         .iter()
-                        .zip(unpars)
+                        .zip(unpars.clone())
                         .map(|(x, f)| if f == WORD_HASH as i32 { 0.0 } else { *x })
                         .collect::<Vec<f64>>();
+                    let wdesp = desp.iter()
+                        .zip(unpars)
+                        .map(|(x, f)| if f == WORD_HASH as i32 { db1_dehash(*x as u32) } else { "".to_string() })
+                        .collect::<Vec<String>>();
+                    att_map.insert(db1_hash("WDES"), StringArrayType(wdesp));
                     att_map.insert(db1_hash("DDES"), DoubleArrayType(ddesp));
                 }
                 return Ok(att_map);
@@ -974,7 +979,9 @@ impl PdmsDataInterface for AiosDBManager {
                 //     dbg!(quat_to_pdms_ori_str(&rotation));
                 // }
 
-                translation += rotation * (pos + plin_pos) + rotation * new_quat * delta_vec;
+
+                translation +=
+                    rotation * (pos + plin_pos) + rotation * new_quat * delta_vec;
 
                 #[cfg(debug_assertions)]
                 {
