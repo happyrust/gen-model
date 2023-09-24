@@ -27,7 +27,7 @@ use aios_core::pdms_data::GmParam;
 use aios_core::pdms_data::PlinParam;
 use aios_core::pdms_data::PlinParamData;
 use aios_core::pdms_data::ScomInfo;
-use aios_core::pdms_types::AttrVal::DoubleArrayType;
+use aios_core::pdms_types::AttrVal::{DoubleArrayType, StringArrayType};
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
 use aios_core::shape::pdms_shape::PlantMesh;
@@ -236,7 +236,7 @@ impl PdmsDataInterface for AiosDBManager {
                     let unpars = att_map.get_i32_vec("UNIPAR").unwrap_or_default();
                     let ddesp = desp
                         .iter()
-                        .zip(unpars)
+                        .zip(unpars.clone())
                         .map(|(x, f)| if f == WORD_HASH as i32 { 0.0 } else { *x })
                         .collect::<Vec<f64>>();
                     let wdesp = desp.iter()
