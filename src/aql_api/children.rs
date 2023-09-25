@@ -1467,6 +1467,54 @@ pub async fn query_room_belong_site_name(rooms: Vec<String>, database: &ArDataba
     Ok(result)
 }
 
+/// owner的children中，第一个类型为 att_type 的 element
+///
+/// filter_noun 找到第一个 att_type为 filter_noun 的数据
+pub async fn query_first_children(refnos: Vec<RefU64>, filter_noun: &str, database: &ArDatabase) -> anyhow::Result<Option<PdmsElement>> {
+    let ids = RefU64::to_arangodb_ids(AQL_PDMS_ELES_COLLECTION, refnos);
+    // 若 filter_noun 以 ! 开头 则排除某类型后，取第一个 例如 "!ATTA"
+    let filter_str = if filter_noun.starts_with("!") {
+        format!("filter c.noun != '{}'", &filter_noun[1..])
+    } else if filter_noun.is_empty() {
+        // 若 filter_noun 为空，则不做过滤
+        format!("// empty")
+    } else {
+        // 若 filter_noun 为正常值,则只需要第一个出现为某类型的元素
+        format!("filter c.noun == '{}'", filter_noun)
+    };
+    // 生成查询 aql
+    let aql_str = format!(r#"
+    With @@pdms_eles,@@pdms_edges
+    for id in @ids
+    let owner = (
+    for v in 1 outbound id pdms_edges
+        filter v != null
+        return v._id
+    )
+    for o in owner
+        for c,e in 1 inbound o pdms_edges
+        filter c != null
+        //filter_noun
+        sort e.order
+        limit 1
+        return {{
+            _key:c._key,
+            owner:c.owner,
+            name:c.name,
+            noun:c.noun,
+            version:0,
+            children_count:0,
+    }}"#);
+    // 对传入的filter_noun 的不同情况进行替换
+    let filter_aql_str = aql_str.replace("//filter_noun", &filter_str);
+    let aql = AqlQuery::new(filter_aql_str.as_str())
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("ids", ids);
+    let result = database.aql_query::<PdmsElement>(aql).await?;
+    if result.is_empty() { return Ok(None); };
+    Ok(Some(result[0].clone()))
+}
 
 #[tokio::test]
 async fn test_vague_query_refnos_user_set_aql() -> anyhow::Result<()> {
@@ -1525,6 +1573,24 @@ async fn test_query_refnos_from_names_fulltext() -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let names = vec!["1WCC778VN".to_string(), "/1WCC0578".to_string(), "/-RX-CCV-R02-13".to_string()];
     let result = query_refnos_from_names_fulltext(names, &database).await?;
+    dbg!(&result);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_first_children() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+    let refnos = vec![RefU64::from_refno_str("24383/66687").unwrap()];
+    let result = query_first_children(refnos.clone(), "VALV", &database).await?;
+    dbg!(&result);
+    let result = query_first_children(refnos.clone(), "!ATTA", &database).await?;
+    dbg!(&result);
+    let result = query_first_children(refnos, "", &database).await?;
     dbg!(&result);
     Ok(())
 }
