@@ -1148,8 +1148,9 @@ pub async fn gen_cata_geos(
         };
         let htube_pt = branch_transform.transform_point(branch_att.get_vec3("HPOS").unwrap());
         let hdir = branch_transform
-            .transform_point(branch_att.get_vec3("HDIR").unwrap())
+            .transform_vec3(branch_att.get_vec3("HDIR").unwrap())
             .normalize_or_zero();
+        dbg!(to_pdms_vec_str(&hdir));
         let bran_ttube_pt = branch_transform.transform_point(branch_att.get_vec3("TPOS").unwrap());
 
         let is_hang = branch_att.get_type() == "HANG";
@@ -1168,7 +1169,6 @@ pub async fn gen_cata_geos(
             TUBI_GEO_HASH
         };
 
-        let mut href_type = "".to_string();
         let tref = branch_att
             .get_foreign_refno(if is_hang { "TREF" } else { "LSTU" })
             .unwrap_or_default();
@@ -1248,14 +1248,6 @@ pub async fn gen_cata_geos(
                 dbg!(inst_info);
                 continue;
             };
-            // let Ok(Some(ele_transform)) = mgr.get_world_transform(refno) else {
-            //     continue;
-            // };
-            //需要更新离开的方向，不然不一致，会出现方向问题
-            // if cur_type == "ATTA" {
-            //     current_tubing.desire_leave_dir =
-            //         continue;
-            // }
             println!("正在处理直段{}: {}", cur_type, refno.to_refno_string());
             let world_trans = inst_info.world_transform;
             let axis_map = &inst_geos_data.ptset_map;
@@ -1275,7 +1267,6 @@ pub async fn gen_cata_geos(
                     current_tubing.desire_arrive_dir = a_dir;
                     if current_tubing.is_dir_ok() {
                         if let Some(t) = current_tubing.get_transform() {
-                            // dbg!(current_tubing.leave_refno);
                             inst_tubi_map.insert(
                                 current_tubing.leave_refno,
                                 EleGeosInfo {
