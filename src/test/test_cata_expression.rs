@@ -17,7 +17,7 @@ fn test_parse_param_with_point_digit() {
     let cata_context = CataContext {
         context,
     };
-    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &cata_context, None, true);
+    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &cata_context, None, true, "DIST");
     dbg!(&r);
     assert_eq!(r.unwrap(), -55.0);
 }
@@ -30,7 +30,7 @@ fn test_parse_design_param() {
     let cata_context = CataContext {
         context,
     };
-    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &cata_context, None, true);
+    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &cata_context, None, true, "DIST");
     dbg!(&r);
     assert_eq!(r.unwrap(), -15.0);
 }
@@ -46,7 +46,7 @@ fn test_parse_param_with_of_operator() {
         context,
     };
     // 是提前准备，还是在使用的时候去获取
-    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &cata_context, Some(&interface), true);
+    let r = eval_str_to_f64::<AiosDBManager>(input_exp, &cata_context, Some(&interface), true, "DIST");
     dbg!(&r);
     assert_eq!(r.unwrap(), 850.0);
 }
@@ -70,7 +70,7 @@ fn parse_3_axis() {
     let str = "X (60.0)  Y ";
     let str = "X ( 45 )  Y ( 35 ) Z";
     let str = "TANF PARAM 2 DDANGLE";
-    let r = eval_str_to_f64::<AiosDBManager>(str, &cata_context, None, true);
+    let r = eval_str_to_f64::<AiosDBManager>(str, &cata_context, None, true, "DIST");
     dbg!(r);
 }
 
@@ -124,7 +124,7 @@ fn test_math_exp() {
     let cata_context = CataContext {
         context,
     };
-    dbg!(eval_str_to_f64::<AiosDBManager>(expr, &cata_context, None, true))
+    dbg!(eval_str_to_f64::<AiosDBManager>(expr, &cata_context, None, true, "DIST"))
         .expect("TODO: panic message");
 }
 

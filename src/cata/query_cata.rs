@@ -76,6 +76,8 @@ pub fn query_axis_params<T: PdmsDataInterface>(
     let children = interface.get_children_attrs(refno)?;
 
     for child in children {
+        //plin不在收集范围
+        if child.get_type() == "PLIN" {  continue; }
         let number = child.get_i32("NUMB").unwrap_or(-1);
         if let Some(axis) = get_axis_param(&child) {
             map.entry(number).or_insert(axis);
@@ -128,6 +130,7 @@ pub fn resolve_cata_comp<T: PdmsDataInterface>(
     let cat_ref = scom_info.attr_map.get_refno().unwrap_or_default();
 
     let axis_map = resolve_axis_params(des_refno, scom_info, &cur_context, interface);
+    // dbg!(&axis_map);
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
         if scom_info.plin_map.contains_key(plin.as_str()) {
             Some(scom_info.plin_map.get(plin.as_str()).unwrap().clone())

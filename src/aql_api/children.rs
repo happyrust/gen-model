@@ -447,6 +447,7 @@ pub async fn query_refnos_from_names_fulltext(names: Vec<String>, database: &ArD
 /// module ： DESI，CATA等
 pub async fn query_mdb_world_fulltext(mdb: &str, module: &str, database: &ArDatabase) -> anyhow::Result<Option<PdmsElement>> {
     let mdb_name = replace_symbols(mdb);
+    dbg!(&mdb_name);
     // 将 mdb_name存在返回的name中，方便判断是否为请求的mdb_name，word的name都是 /*
     let aql = AqlQuery::new("
     with @@pdms_eles,@@pdms_edges
@@ -467,6 +468,7 @@ pub async fn query_mdb_world_fulltext(mdb: &str, module: &str, database: &ArData
         .bind_var("mdb", mdb_name)
         .bind_var("module", module);
     let result = database.aql_query::<PdmsElement>(aql).await?;
+    dbg!(&result);
     // 判断从数据库中返回的值中，哪个是需要的
     let mdb = format!("/{}", mdb);
     for r in result {
@@ -487,15 +489,15 @@ pub async fn query_mdb_world_fulltext(mdb: &str, module: &str, database: &ArData
 
 /// 将字符串 符号都转为 ，
 fn replace_symbols(input: &str) -> String {
-    let mut result = String::new();
-    for c in input.chars() {
-        if c.is_alphanumeric() {
-            result.push(c);
-        } else {
-            result.push(',');
-        }
-    }
-    result
+    // let mut result = String::new();
+    // for c in input.chars() {
+    //     if c.is_alphanumeric() {
+    //         result.push(c);
+    //     } else {
+    //         result.push(',');
+    //     }
+    // }
+    input.to_string()
 }
 
 ///搜索沿着路径查询目标节点

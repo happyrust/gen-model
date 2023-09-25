@@ -469,7 +469,8 @@ impl PdmsDataInterface for AiosDBManager {
 
             // 通过 fulltext在数据库中查询
             let database = self.get_arango_db().await?;
-            let ele = query_mdb_world_fulltext(mdb_name,module,&database).await?;
+            let ele = query_mdb_world_fulltext(mdb_name, module, &database).await?;
+            dbg!(&ele);
             if let Some(ele) = ele {
                 GLOBAL_MDB_WORLD_MAP.insert(hash_name, ele.clone());
                 return Ok(ele);
@@ -1234,8 +1235,9 @@ impl PdmsDataInterface for AiosDBManager {
                 }
             }
         }
-        // let children = self.get_deep_children_attrs(refno, &TOTAL_CATA_GEO_NOUN_NAMES).await.unwrap();
         for geo_am in children {
+            //todo visible 不应该在这里执行过滤
+            //后续如果需要使用这些不同等级的模型，需要切换
             if !geo_am.is_visible_by_level(None).unwrap_or(true) {
                 continue;
             }
@@ -1354,23 +1356,26 @@ impl PdmsDataInterface for AiosDBManager {
             let radi = desi_att.get_as_string("RADI").unwrap_or("0.0".into());
             context.insert(DDRADIUS_STR.into(), (radi.clone()));
 
-            //将attrmap里，是double的UDA属性，放入context
-            for (k, v) in desi_att.iter() {
-                let str = db1_dehash(*k);
+            //放入UDA的数据
+            let named_att = self
+                .get_named_attr_from_localdb(desi_refno)
+                .unwrap_or_default();
+            for (str, v) in named_att.map {
                 let n = if str.starts_with(":") {
-                    if str.len() < 5 {
-                        str.to_uppercase()
-                    } else {
-                        str[0..5].to_uppercase()
-                    }
+                    // if str.len() < 5 {
+                    // dbg!(&str);
+                    str.to_uppercase()
+                    // } else {
+                    //     str[0..5].to_uppercase()
+                    // }
                 } else {
                     str.to_uppercase()
                 };
                 match v {
-                    AttrVal::DoubleType(d) => {
+                    NamedAttrValue::F32Type(d) => {
                         context.insert(n, d.to_string());
                     }
-                    AttrVal::DoubleArrayType(ds) => {
+                    NamedAttrValue::F32VecType(ds) => {
                         for (i, d) in ds.into_iter().enumerate() {
                             // dbg!(format!("{}{}", &n, i+1));
                             context.insert(format!("{}{}", &n, i + 1), d.to_string());
@@ -1430,6 +1435,7 @@ impl PdmsDataInterface for AiosDBManager {
                         format!("PARAM{}", i + 1).into(),
                         params[i].to_string().into(),
                     );
+                    context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
                     context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
                 }
                 let mut owner_ref = desi_att.get_owner().unwrap_or_default();
@@ -1451,8 +1457,12 @@ impl PdmsDataInterface for AiosDBManager {
                         let exp = child.get_as_string("PPRO").unwrap_or_default();
                         let default_key = format!("{}_default_expr", key);
                         let default_expr = child.get_as_string("DPRO").unwrap_or_default();
+                        let type_key = format!("{}_default_type", key);
+                        let type_value = child.get_as_string("PTYP").unwrap_or_default();
+
                         context.insert(key, exp);
-                        context.insert(default_key.into(), default_expr);
+                        context.insert(default_key, default_expr);
+                        context.insert(type_key, type_value);
                     }
                 }
 
@@ -1525,7 +1535,6 @@ impl PdmsDataInterface for AiosDBManager {
         let scom_info = self.get_or_create_scom_info(scom_ref)?;
         #[cfg(debug_assertions)]
         dbg!(&scom_info);
-        // dbg!(&scom_info.axis_params);
         let mut context = self.get_or_create_cata_context(desi_refno, desi_axis_map)?;
 
         let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(self), Some(context));
@@ -1552,14 +1561,15 @@ impl PdmsDataInterface for AiosDBManager {
         let context = context.unwrap_or(self.get_or_create_cata_context(refno, None)?);
         for i in 0..scom.axis_params.len() {
             // dbg!(&scom.axis_params[i]);
-            match resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self)) {
-                Ok(axis) => {
+            let axis = resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self));
+            // {
+                // Ok(axis) => {
                     map.insert(scom.axis_param_numbers[i], axis);
-                }
-                Err(e) => {
-                    println!("{} resolve_axis_params 出错： {:?}", refno, &e);
-                }
-            }
+                // }
+                // Err(e) => {
+                //     println!("{} resolve_axis_params 出错： {:?}", refno, &e);
+                // }
+            // }
         }
         Ok(map)
     }
