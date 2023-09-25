@@ -90,6 +90,7 @@ pub async fn gen_prim_geos(
                 let Ok(Some(mut trans_origin)) = mgr_clone.get_world_transform(refno) else {
                     continue;
                 };
+                // dbg!(trans_origin);
 
                 let mut geo_insts = vec![];
                 let mut item_trans = Transform::IDENTITY;
@@ -158,7 +159,8 @@ pub async fn gen_prim_geos(
                     .convert_to_geo_param()
                     .unwrap_or(PdmsGeoParam::Unknown);
                 let geo_hash = brep_shape.hash_unit_mesh_params();
-                let mut geo_aabb = if !replace_mesh && let Ok(aabb) = mgr_clone.get_mesh_aabb_from_localdb(geo_hash) {
+                // dbg!(geo_hash);
+                let geo_aabb = if !replace_mesh && let Ok(aabb) = mgr_clone.get_mesh_aabb_from_localdb(geo_hash) {
                     if let Ok(mesh) = mgr_clone.get_mesh_from_localdb(geo_hash) {
                         cached_mesh_mgr.insert(geo_hash, PlantGeoData {
                             geo_hash,
@@ -168,9 +170,6 @@ pub async fn gen_prim_geos(
                     }
                     aabb
                 } else {
-                    if !attr.is_neg() {
-                        continue;
-                    }
                     let tmp_tol = if attr.is_neg() {
                         tol_ratio
                     } else {
@@ -181,7 +180,9 @@ pub async fn gen_prim_geos(
                     };
                     aabb
                 };
+                // dbg!(&attr);
                 let visible = attr.is_visible_by_level(None).unwrap_or(true);
+                // dbg!(visible);
                 geos_info.visible = visible;
                 let tr = &item_trans;
                 let ele_aabb = aabb_apply_transform(&geo_aabb, &tr);
