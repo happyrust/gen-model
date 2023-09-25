@@ -1150,8 +1150,9 @@ pub async fn gen_cata_geos(
         let hdir = branch_transform
             .transform_vec3(branch_att.get_vec3("HDIR").unwrap())
             .normalize_or_zero();
-        dbg!(to_pdms_vec_str(&hdir));
+        // dbg!(to_pdms_vec_str(&hdir));
         let bran_ttube_pt = branch_transform.transform_point(branch_att.get_vec3("TPOS").unwrap());
+        // dbg!(bran_ttube_pt);
 
         let is_hang = branch_att.get_type() == "HANG";
         let h_ref = branch_att
@@ -1266,6 +1267,7 @@ pub async fn gen_cata_geos(
                     current_tubing.end_pt = a_pos;
                     current_tubing.desire_arrive_dir = a_dir;
                     if current_tubing.is_dir_ok() {
+                        // dbg!(&current_tubing);
                         if let Some(t) = current_tubing.get_transform() {
                             inst_tubi_map.insert(
                                 current_tubing.leave_refno,
@@ -1363,6 +1365,7 @@ pub async fn gen_cata_geos(
                     //todo 需要取得连接到的，tref的点对应的arrive方向
                     current_tubing.desire_arrive_dir = -current_tubing.desire_leave_dir;
                     if current_tubing.is_dir_ok() {
+                        // dbg!(&current_tubing);
                         if let Some(t) = current_tubing.get_transform() {
                             inst_tubi_map.insert(
                                 current_tubing.leave_refno,
