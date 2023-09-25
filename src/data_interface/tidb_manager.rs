@@ -1434,6 +1434,7 @@ impl PdmsDataInterface for AiosDBManager {
                         format!("PARAM{}", i + 1).into(),
                         params[i].to_string().into(),
                     );
+                    context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
                     context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
                 }
                 let mut owner_ref = desi_att.get_owner().unwrap_or_default();
@@ -1455,8 +1456,12 @@ impl PdmsDataInterface for AiosDBManager {
                         let exp = child.get_as_string("PPRO").unwrap_or_default();
                         let default_key = format!("{}_default_expr", key);
                         let default_expr = child.get_as_string("DPRO").unwrap_or_default();
+                        let type_key = format!("{}_default_type", key);
+                        let type_value = child.get_as_string("PTYP").unwrap_or_default();
+
                         context.insert(key, exp);
-                        context.insert(default_key.into(), default_expr);
+                        context.insert(default_key, default_expr);
+                        context.insert(type_key, type_value);
                     }
                 }
 
@@ -1555,14 +1560,15 @@ impl PdmsDataInterface for AiosDBManager {
         let context = context.unwrap_or(self.get_or_create_cata_context(refno, None)?);
         for i in 0..scom.axis_params.len() {
             // dbg!(&scom.axis_params[i]);
-            match resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self)) {
-                Ok(axis) => {
+            let axis = resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self));
+            // {
+                // Ok(axis) => {
                     map.insert(scom.axis_param_numbers[i], axis);
-                }
-                Err(e) => {
-                    println!("{} resolve_axis_params 出错： {:?}", refno, &e);
-                }
-            }
+                // }
+                // Err(e) => {
+                //     println!("{} resolve_axis_params 出错： {:?}", refno, &e);
+                // }
+            // }
         }
         Ok(map)
     }

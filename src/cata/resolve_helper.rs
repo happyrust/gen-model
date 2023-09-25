@@ -82,17 +82,19 @@ pub fn eval_str_to_f32<T: PdmsDataInterface>(
     input_expr: impl AsRef<str>,
     context: &CataContext,
     interface: Option<&T>,
+    dtse_unit: &str,
 ) -> anyhow::Result<f32> {
     let input_expr = input_expr.as_ref().trim().to_uppercase();
-    eval_str_to_f64(&input_expr, context, interface, true).map(|x| x as f32)
+    eval_str_to_f64(&input_expr, context, interface, true, dtse_unit).map(|x| x as f32)
 }
 
 pub fn eval_str_to_f32_or_default<T: PdmsDataInterface>(
     input_expr: impl AsRef<str>,
     context: &CataContext,
     interface: Option<&T>,
+    dtse_unit: &str,
 ) -> f32 {
-    eval_str_to_f32(input_expr, context, interface).unwrap_or(0.0)
+    eval_str_to_f32(input_expr, context, interface, dtse_unit).unwrap_or(0.0)
 }
 
 //  SIN  00 00 03 85
@@ -124,6 +126,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
     context: &CataContext,
     interface: Option<&T>,
     replace_err_by_zero: bool,
+    dtse_unit: &str,
 ) -> anyhow::Result<f64> {
     if input_expr.is_empty() || input_expr == "UNSET" {
         return Ok(0.0);
@@ -209,17 +212,24 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
     // 相当于要递归去求值
     let rpro_re = Regex::new(r"(RPRO)\s+([a-zA-Z0-9]+)").unwrap();
     if new_exp.contains("RPRO") {
+        let mut found_dtse_mismatch = false;
         new_exp = rpro_re
             .replace_all(&new_exp, |caps: &Captures| {
                 let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
                 let default_key: String = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
+                let key_type: String = format!("{}_{}_type", &caps[1], &caps[2]).into();
+                //if not same type, or doesn't exist, just return error
+                if context.get(&key_type).map(|x| x.as_str() != dtse_unit).unwrap_or(false)  {
+                    found_dtse_mismatch = true;
+                }
                 let v = context
                     .get(&key)
                     .map(|x| x.to_string())
                     .unwrap_or("0".to_string());
-                if let Ok(t) = eval_str_to_f64(&v, &context, interface, false) {
+                if let Ok(t) = eval_str_to_f64(&v, &context, interface, false, "DIST") {
                     t.to_string()
                 } else {
+                    //use default value
                     context
                         .get(&default_key)
                         .map(|x| x.to_string())
@@ -228,6 +238,10 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
             })
             .trim()
             .to_string();
+
+        if found_dtse_mismatch {
+            return Err(anyhow::anyhow!("DTSE 表达式有问题，可能单位不一致"));
+        }
     }
 
     let mut new_exp = new_exp
@@ -269,8 +283,11 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
                 result_exp = result_exp.replace(s, &context[&k]);
                 found_replaced = true;
             } else if is_some_param {
-                if !replace_err_by_zero {
-                    return Err(anyhow::anyhow!(format!("{input_expr}： {} not found.", &k)));
+                //if !replace_err_by_zero
+                //todo 需要弄清楚，直接整体返回0.0， 不用坐特殊处理？ 是否可行
+                {
+                    // return Ok(0.0);
+                    return Err(anyhow::anyhow!(format!("{input_expr}:： {} not found.", &k)));
                 }
                 println!("{input_expr}： {} not found, use 0.", &k);
                 result_exp = result_exp.replace(s, " 0");
@@ -685,7 +702,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(
                 .unwrap_or(-1);
             if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
                 let mut axis =
-                    resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
+                    resolve_axis_param(&scom.axis_params[indx], scom, context, interface);
                 let flag = if is_neg { -1.0 } else { 1.0 };
                 dir = flag * mem::take(&mut axis.dir);
                 pos = flag * mem::take(&mut axis.pt);
@@ -694,7 +711,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(
             }
         }
     } else {
-        dir = parse_str_axis_to_vec3(dir_str, context, interface).unwrap_or(Vec3::Z);
+        dir = parse_str_axis_to_vec3_or_default(dir_str, context, interface);
     }
 
     if re.is_match(ref_dir_str) {
@@ -707,7 +724,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(
                 .unwrap_or(-1);
             if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
                 let mut axis =
-                    resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
+                    resolve_axis_param(&scom.axis_params[indx], scom, context, interface);
                 let flag = if is_neg { -1.0 } else { 1.0 };
                 ref_dir = flag * mem::take(&mut axis.dir);
             } else {
@@ -716,7 +733,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(
         }
     } else {
         //unset 不存在 ref dir的情况
-        ref_dir = parse_str_axis_to_vec3(ref_dir_str, context, interface).unwrap_or(Vec3::Y);
+        ref_dir = parse_str_axis_to_vec3_or_default(ref_dir_str, context, interface);
     }
 
     return Ok((dir, ref_dir, pos));
@@ -756,7 +773,7 @@ pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(
             .replace("U", "Z")
             .replace("D", "-Z");
         // dbg!(&dir_str);
-        let dir = parse_str_axis_to_vec3(&dir_str, context, interface)?;
+        let dir = parse_str_axis_to_vec3_or_default(&dir_str, context, interface);
         // dbg!(dir);
         comb_dir_str.push_str(f.as_str());
         match f.as_str() {
@@ -779,6 +796,15 @@ pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(
     Ok(Quat::from_mat3(&mat))
 }
 
+pub fn parse_str_axis_to_vec3_or_default<T: PdmsDataInterface>(
+    pdir: &str,
+    context: &CataContext,
+    interface: Option<&T>,
+) -> Vec3{
+    parse_str_axis_to_vec3(pdir, context, interface).unwrap_or(Vec3::Y)
+}
+
+///解析表达式里的axis
 pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(
     pdir: &str,
     context: &CataContext,
@@ -796,11 +822,11 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(
         for cap in re.captures_iter(&dir_str) {
             if cap.len() == 6 {
                 let val_str = cap[2].to_string();
-                let val_result = eval_str_to_f64(&val_str, context, interface, true)?.to_string();
+                let val_result = eval_str_to_f64(&val_str, context, interface, true, "AXIS")?.to_string();
                 new_dir_str = dir_str.replace(&val_str, &val_result);
 
                 let val_str = cap[4].to_string();
-                let val_result = eval_str_to_f64(&val_str, context, interface, true)?.to_string();
+                let val_result = eval_str_to_f64(&val_str, context, interface, true, "AXIS")?.to_string();
                 new_dir_str = new_dir_str.replace(&val_str, &val_result);
                 is_three = true;
             }
@@ -813,9 +839,7 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(
                 if cap.len() == 4 {
                     let val_str = cap[2].to_string();
                     // dbg!(&val_str);
-                    let val_result = eval_str_to_f64(&val_str, context, interface, true)
-                        .unwrap_or_default()
-                        .to_string();
+                    let val_result = eval_str_to_f64(&val_str, context, interface, true, "AXIS")?.to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                     // dbg!(&new_dir_str);
                 }

@@ -66,22 +66,22 @@ pub async fn save_stp_data_to_arangodb(
     "Ok".to_string()
 }
 
-// #[cfg(not(feature = "opencascade_rs"))]
-// ///导出水淹计算stp
-// pub async fn export_stp(
-//     mgr: &AiosDBManager,
-//     stp_packet: ExportFloodingStpEvent,
-// ) -> anyhow::Result<bool> {
-//     let mut file = File::create(format!(
-//         "./assets/walter_steps/{}.stp",
-//         stp_packet.file_name.as_str()
-//     ))?;
-//     let mut test_str = "测试STP文件下载";
-//     file.write_all(test_str.as_bytes())?;
-//
-//     Ok(true)
-// }
-//
+#[cfg(not(feature = "opencascade_rs"))]
+///导出水淹计算stp
+pub async fn export_stp(
+    mgr: &AiosDBManager,
+    stp_packet: ExportFloodingStpEvent,
+) -> anyhow::Result<bool> {
+    let mut file = File::create(format!(
+        "./assets/walter_steps/{}.stp",
+        stp_packet.file_name.as_str()
+    ))?;
+    let mut test_str = "测试STP文件下载";
+    file.write_all(test_str.as_bytes())?;
+
+    Ok(true)
+}
+
 
 #[cfg(feature = "opencascade_rs")]
 ///导出水淹计算stp

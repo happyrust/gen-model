@@ -745,7 +745,7 @@ pub async fn gen_cata_geos(
                             //将负实体和正实体统计出来
                             let mut merged_cata_aabb: Option<Aabb> = None;
                             let mut n_merged_cata_aabb: Option<Aabb> = None;
-                            dbg!(ele_refno);
+                            // dbg!(ele_refno);
                             //直接将所有的几何体组合起来
                             for shape in shapes {
                                 let CateBrepShape {
@@ -758,6 +758,8 @@ pub async fn gen_cata_geos(
                                     is_ngmr,
                                     ..
                                 } = shape;
+                                // #[cfg(debug_assertions)]
+                                // dbg!(&brep_shape);
                                 if !brep_shape.check_valid() {
                                     continue;
                                 }
@@ -914,7 +916,7 @@ pub async fn gen_cata_geos(
                             // if geo_insts.len() > 0
                             //类似支吊架这种，即使没有模型，也要保留信息
                             {
-                                dbg!(geo_insts.len());
+                                // dbg!(geo_insts.len());
                                 let mut inst_key = geos_info.get_inst_key();
                                 let mut origin = EleInstGeosData {
                                     inst_key,
@@ -1670,7 +1672,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                     gen_cata_geos(
                         mgr_clone,
                         instance_mgr_clone,
-                        // scom_info_map_clone,
                         Arc::new(target_single_cata_map),
                         Arc::new(Default::default()),
                         sjus_map_clone,
@@ -1987,11 +1988,11 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             };
                             // dbg!(&comp_geos_info);
                             inst_info_result_map_clone.insert(comp_refno, comp_geos_info);
-                            let comp_type = mgr
-                                .get_refno_basic(comp_refno)
-                                .unwrap()
-                                .get_type()
-                                .to_string();
+                            let comp_type = mgr.get_type_name(comp_refno);
+                                // .get_refno_basic(comp_refno)
+                                // .unwrap()
+                                // .get_type()
+                                // .to_string();
                             inst_geos_result_map_clone.insert(
                                 inst_key.to_string(),
                                 EleInstGeosData {
@@ -2264,7 +2265,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
 
                         let relative_mat = parent_matrix_inverse
                             * geos_info.world_transform.compute_matrix().as_dmat4();
-                        dbg!(refno);
+                        // dbg!(refno);
                         for g in &geos_data.insts {
                             if !g.visible || !geo_refnos.contains(&g.refno) {
                                 dbg!(g.refno);

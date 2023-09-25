@@ -35,11 +35,11 @@ use indexmap::IndexMap;
 use tokio::sync::{mpsc, RwLock};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use itertools::Itertools;
-use crate::api::attr::{query_attr, query_uda_ukey_udet_all, query_uda_ukey_udna_all};
+use crate::api::attr::*;
 use crate::api::children::*;
 use crate::api::element::*;
 use crate::api::project_mdb::{gen_insert_project_mdb_sql, query_db_nums_of_mdb};
-use crate::api::refno_info::{cache_plin_plax, get_ref0_projects, sync_refno_basic_map};
+use crate::api::refno_info::*;
 use crate::aql_api::children::{query_children_order_aql, query_deep_children_refnos_fuzzy};
 use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
 use crate::aql_api::pdms_mesh::{query_all_geo_hashs, query_pdms_mesh_aql};
@@ -49,7 +49,7 @@ use crate::cata::resolve::{CataContext, CATA_CONTEXT_MAP, SCOM_INFO_MAP};
 use crate::cata::resolve_helper::eval_str_to_f32;
 use crate::consts::*;
 use crate::consts::PDMS_DBNO_INFOS_TABLE;
-use crate::consts::{FUZZY_QUERT, GLOBAL_DATABASE, PDMS_INFO_DB, PUHUA_MATERIAL_DATABASE};
+use crate::consts::*;
 use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager};
@@ -462,6 +462,9 @@ impl AiosDBManager {
                 if let Some(kv) = self.project_map.get(project) {
                     sync_refno_basic_map(kv.value()).await.unwrap();
                 }
+                // if let Some(att_db) = self.local_attr_db_map.get(project).map(|x| x.value().clone()){
+                //     sync_local_refno_basic_map();
+                // }
             }
         }
         if self.db_option.reset_mdb_project.unwrap_or(false) {
@@ -907,7 +910,7 @@ impl AiosDBManager {
         desi_refno: RefU64,
     ) -> anyhow::Result<f32> {
         let context = self.get_or_create_cata_context(desi_refno, None)?;
-        eval_str_to_f32(expr, &context, Some(self))
+        eval_str_to_f32(expr, &context, Some(self), "DIST")
     }
 
     ///查询单个element
