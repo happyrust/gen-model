@@ -369,12 +369,12 @@ pub(crate) async fn get_refno_desc(
     refno: RefU64,
     aios_mgr: &AiosDBManager,
 ) -> anyhow::Result<String> {
-    let database = aios_mgr.get_arango_db().await?;
-    let Some(catr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "CATR"]).await? else {
-        return Ok("".to_string());
-    };
+    // let database = aios_mgr.get_arango_db().await?;
+    // let Some(catr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "CATR"]).await? else {
+    //     return Ok("".to_string());
+    // };
     // let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok("".to_string()); };
-    let attr = aios_mgr.get_attr(catr).await?;
+    let attr = aios_mgr.get_cat_attmap(refno)?;
     Ok(attr.get_str("DESC").unwrap_or("").to_string())
 }
 
@@ -397,16 +397,16 @@ pub(crate) async fn get_refno_desp(
 }
 
 /// 获取元件的 para
-pub(crate) async fn get_refno_paras(
+pub(crate) fn get_refno_paras(
     refno: RefU64,
     aios_mgr: &AiosDBManager,
 ) -> anyhow::Result<Vec<f64>> {
-    let database = aios_mgr.get_arango_db().await?;
-    let Some(catr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "CATR"]).await? else {
-        return Ok(vec![]);
-    };
+    // let database = aios_mgr.get_arango_db().await?;
+    // let Some(catr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "CATR"]).await? else {
+    //     return Ok(vec![]);
+    // };
     // let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok(vec![]); };
-    let attr = aios_mgr.get_attr(catr).await?;
+    let Some(attr) = aios_mgr.get_cat_attmap(refno) else { return Ok(vec![]); };
     Ok(attr.get_f64_vec("PARA").unwrap_or(vec![]))
 }
 
@@ -520,7 +520,6 @@ pub async fn get_refno_world_poss_pose(
 pub async fn get_refnos_arrive_leave_info(refnos: Vec<RefU64>, b_request_w_pos: bool, aios_mgr: &AiosDBManager) -> anyhow::Result<HashMap<RefU64, HashMap<String, NamedAttrValue>>> {
     let database = aios_mgr.get_arango_db().await?;
     let points = query_refnos_point_map_aql(refnos, &database).await?;
-    dbg!(&points.len());
     let mut map = HashMap::new();
     for point in points {
         // 找到arrive 和 leave 对应的点集信息
@@ -529,6 +528,10 @@ pub async fn get_refnos_arrive_leave_info(refnos: Vec<RefU64>, b_request_w_pos: 
         let Some(AttrVal::IntegerType(leave)) = attr.get_val("LEAV") else { continue; };
         let Some(arrive_point) = point.ptset_map.get(arrive) else { continue; };
         let Some(leave_point) = point.ptset_map.get(leave) else { continue; };
+        map.entry(point.refno).or_insert_with(HashMap::new)
+            .entry("ARRIVE_POINT".to_string()).or_insert(NamedAttrValue::Vec3Type(arrive_point.pt));
+        map.entry(point.refno).or_insert_with(HashMap::new)
+            .entry("LEAVE_POINT".to_string()).or_insert(NamedAttrValue::Vec3Type(leave_point.pt));
         // 查询世界坐标
         if b_request_w_pos {
             let w_pos = aios_mgr.get_world_transform(point.refno)?.unwrap_or_default();

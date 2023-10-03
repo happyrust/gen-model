@@ -1134,7 +1134,6 @@ pub async fn set_pdms_major_from_excel(name_map: &Vec<PdmsSscMajorCode>,
         // 每一个 site 和下面的 zone 的更新 pdms_eles 语句
         let update_site_aql = format!("With {AQL_PDMS_ELES_COLLECTION}
         update {{'_key':'{}' , 'major': '{}'}} in {}", site_refno.to_url_refno(), contains_key[0].site_code, AQL_PDMS_ELES_COLLECTION);
-        dbg!(&update_site_aql);
         update_aqls.push(update_site_aql);
         for (zone_name, zone_code) in &contains_key[0].zone_map {
             if zone_name == "%ELSE" {

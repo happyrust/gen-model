@@ -28,20 +28,12 @@ pub async fn get_dq_support_sctn_data(
 ) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
-    // 圆盘的数据
-    // 1516为 sctn 1907为 gensec,sctn
-    // let mut select_type = if aios_mgr.db_option.project_code == "1516" { vec!["SCTN"] } else { vec!["GENSEC","SCTN"] };
     let Ok(children) =
         query_refnos_travel_children_with_type_aql(&database, &refnos, sctn_types).await
         else { return Ok(DataCenterProject::default()); };
     for child in children.clone() {
-        let Ok(implicit_attr) = aios_mgr
-            .get_implicit_attr(child.refno, Some(vec!["GTYP"]))
-            .await
-            else {
-                continue;
-            };
-        let Some(gtype) = implicit_attr.get_str("GTYP") else {
+        let Ok(attr) = aios_mgr.get_attr(child.refno).await else { continue; };
+        let Some(gtype) = attr.get_str("GTYP") else {
             continue;
         };
         match gtype {
@@ -89,7 +81,6 @@ pub async fn get_dq_support_sctn_data(
                     value: desc,
                 });
                 let paras = get_refno_paras(fixing.refno, &aios_mgr)
-                    .await
                     .unwrap_or(Vec::new());
                 fixing_attrs.push(DataCenterAttr {
                     attribute_model_code: "PARTDK1".to_string(),
@@ -152,7 +143,6 @@ pub async fn get_dq_support_sctn_data(
                     value: desc,
                 });
                 let paras = get_refno_paras(fixing.refno, &aios_mgr)
-                    .await
                     .unwrap_or(Vec::new());
                 fixing_attrs.push(DataCenterAttr {
                     attribute_model_code: "PARTDK1".to_string(),
@@ -416,7 +406,6 @@ async fn get_dq_support_sctn_gtype_beam_data(
         }
         if ftub.is_some() {
             let paras = get_refno_paras(ftub.unwrap(), aios_mgr)
-                .await
                 .unwrap_or(vec![]);
             if !paras.is_empty() {
                 // let bolt = get_tray_bolt_specifications(paras[0] as f32);
@@ -554,7 +543,7 @@ async fn test_query_around_owner_within_radius() {
 async fn test_get_dq_support_sctn_data() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let refnos = vec![RefU64::from_refno_str("24383/86099").unwrap()];
-    let result = get_dq_support_sctn_data(refnos, &aios_mgr,vec![]).await?;
+    let result = get_dq_support_sctn_data(refnos, &aios_mgr, vec![]).await?;
     let mut file = std::fs::File::create("data_center_test/PARTDA_PARTDB_PARTDK.json")?;
     let json = serde_json::to_vec(&result)?;
     file.write_all(&json)?;

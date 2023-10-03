@@ -1,6 +1,7 @@
 use std::io::Write;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::{GeoBasicType, RefU64};
+use aios_core::pdms_user::RefnoMajor;
 use parry3d::utils::hashmap::HashMap;
 use regex::Regex;
 use crate::api::room_code::query_room_code;
@@ -16,8 +17,8 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
     let database = aios_mgr.get_arango_db().await?;
     if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos,
                                                                      vec!["STRU".to_string()]).await {
-        // let refnos = children.iter().map(|child| child.refno).collect::<Vec<RefU64>>();
-        // let major_map = get_refnos_major_map(refnos, &database).await.unwrap_or_default();
+        let refnos = children.iter().map(|child| child.refno).collect::<Vec<RefU64>>();
+        let major_map = get_refnos_major_map(refnos, &database).await.unwrap_or_default();
         for stru in children {
             let mut attr = Vec::new();
             let Ok(stru_attr) = aios_mgr.get_attr(stru.refno).await else { continue; };
@@ -85,15 +86,15 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
                 attribute_model_code: "ERECAB10".to_string(),
                 value: AttrValue::AttrString(file_code.to_string()).into(),
             });
-            // let major = major_map.get(&stru.refno).unwrap_or_default();
-            // attr.push(DataCenterAttr {
-            //     attribute_model_code: "ERECAB11".to_string(),
-            //     value: AttrValue::AttrString(major.major.to_string()).into(),
-            // });
-            // attr.push(DataCenterAttr {
-            //     attribute_model_code: "ERECAB12".to_string(),
-            //     value: AttrValue::AttrString(major.major_classify.to_string()).into(),
-            // });
+            let major = major_map.get(&stru.refno).map_or(RefnoMajor::default(), |x| x.clone());
+            attr.push(DataCenterAttr {
+                attribute_model_code: "ERECAB11".to_string(),
+                value: AttrValue::AttrString(major.major.to_string()).into(),
+            });
+            attr.push(DataCenterAttr {
+                attribute_model_code: "ERECAB12".to_string(),
+                value: AttrValue::AttrString(major.major_classify.to_string()).into(),
+            });
             attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB13".to_string(),
                 value: AttrValue::AttrString("QA2".to_string()).into(),
