@@ -1,3 +1,4 @@
+#[cfg(feature = "opencascade_rs")]
 use crate::plug_in::water_calculation::export_stp;
 use crate::plug_in::water_calculation::{ save_stp_data_to_arangodb};
 use crate::rvm::data_api::query_rvm_geo_instance_aql;

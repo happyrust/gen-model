@@ -111,60 +111,11 @@ fn test_sbfi() -> anyhow::Result<()> {
     dbg!(to_pdms_ori_str(&mat3));
 
     return Ok(());
-
-    let axis_str = "-X45-Y";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    // dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
-
-    let axis_str = "-X30-Y";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    // dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
-
-    let axis_str = "-Y";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
-
-    let axis_str = "X";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
-
-    let axis_str = "-X";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
-
-    let axis_str = "-Y30X";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    dbg!(to_pdms_ori_str(&cal_mat3_by_zdir(addition_axis)));
-
-    // let refno = RefU64::from_two_nums(17496, 116749);
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-    //
-    // let refno = RefU64::from_two_nums(17496, 137937);
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-    //
-    // let refno = RefU64::from_two_nums(17496, 137938);
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-    //
-    // let refno = RefU64::from_two_nums(17496, 137936);
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-
-    return Ok(());
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
-
-    // return test_sbfi();
-
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
         .build()?;
@@ -206,38 +157,6 @@ async fn main() -> anyhow::Result<()> {
     }
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    // if let Ok(cache_mesh) = PlantMeshesData::deserialize_from_bin_file(&"assets/mesh/mesh.bin") {
-    //     Arc::get_mut(&mut mgr).unwrap().cached_mesh_mgr = Arc::new(RwLock::new(cache_mesh));
-    // }
-
-    // let refno = "=23713/3498".into();
-    // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-    // return Ok(());
-    // let refno = "23738/595".into();
-    // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-
-    // let refno = "23736/69".into();
-    // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-
-    // return Ok(());
-
-    // let refno = "23713/6104".into();
-    // // dbg!(mgr.get_attr_from_localdb(refno).unwrap_or_default());
-    // let transform = mgr.get_world_transform(refno)?.unwrap_or_default();
-    // dbg!(quat_to_pdms_ori_str(&transform.rotation));
-    // dbg!(transform);
-
-    // let refno = "15192/358994".into();
-    // dbg!(mgr.get_children_from_localdb(refno).unwrap_or_default());
 
     #[cfg(feature = "gen_model")]
     if db_option.gen_model {
@@ -319,10 +238,10 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = ":E=2X";
+    let noun = "UDA";
     let hash = db1_hash(noun);
     dbg!(hash);
-    let hashes = [738251934];
+    let hashes = [919309, 640481, 919399];
     for hash in hashes {
         let str = db1_dehash(hash);
         dbg!(&hash);

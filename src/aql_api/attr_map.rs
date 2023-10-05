@@ -1,8 +1,6 @@
 use crate::api::attr::query_attr;
 use crate::aql_api::*;
-use crate::consts::{
-    AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_SIBL_EDGES_COLLECTION,
-};
+use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_GEO_COLLECTION, AQL_PDMS_INST_INFO_COLLECTION, AQL_SIBL_EDGES_COLLECTION};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -28,6 +26,7 @@ use sqlx::{MySql, Pool};
 use std::collections::{HashMap, HashSet};
 use std::process::id;
 use std::str::FromStr;
+use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
 use crate::graph_db::structs::{PdmsEleEdge, PdmsEleGraphNode, PdmsMdbEdge};
 
 pub type IndexNamedAttMap = IndexMap<String, NamedAttrValue>;
@@ -218,5 +217,30 @@ pub async fn query_names_from_refnos_aql(refnos: Vec<RefU64>, database: &ArDatab
     }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("ids", ids);
     let result = database.aql_query::<PdmsRefnoNameAql>(aql).await?;
+    Ok(result)
+}
+
+/// 查询多个参考号的点集
+pub async fn query_refnos_point_map_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<InstPointMap>> {
+    let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, refnos);
+    let aql = AqlQuery::new("
+    with @@pdms_eles,@@pdms_edges,@@pdms_inst_infos,@@pdms_inst_geos
+    for id in @ids
+        let v = document(id)
+        filter v != null
+        let cata_hash = document(@@pdms_inst_infos,v._key)
+        let hash = cata_hash.cata_hash == null ? cata_hash._key : cata_hash.cata_hash
+        let geo = document(@@pdms_inst_geos,hash)
+        filter geo != null
+        return {
+            'refno': v._key,
+            'att_type': v.noun,
+            'ptset_map': geo.ptset_map
+        }").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION)
+        .bind_var("@pdms_inst_geos", AQL_PDMS_INST_GEO_COLLECTION)
+        .bind_var("ids", ids);
+    let result = database.aql_query::<InstPointMap>(aql).await?;
     Ok(result)
 }

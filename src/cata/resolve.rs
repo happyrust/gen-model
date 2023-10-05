@@ -36,16 +36,22 @@ pub fn resolve_axis_params<T: PdmsDataInterface>(
     let mut map = BTreeMap::new();
     // dbg!(&scom.axis_params);
     for i in 0..scom.axis_params.len() {
-        // dbg!(&scom.axis_params[i]);
-        match resolve_axis_param(&scom.axis_params[i], scom, context, Some(interface)) {
-            Ok(axis) => {
-                // dbg!(&axis);
-                map.insert(scom.axis_param_numbers[i], axis);
-            }
-            Err(e) => {
-                println!("{} resolve_axis_params 出错： {:?}", refno, &e);
-            }
-        }
+        // if scom.axis_params[i].direction.is_empty() {
+        //     dbg!(&scom.axis_params[i]);
+        //     let refno = scom.axis_params[i].refno;
+        //     let att = interface.get_attr_from_localdb(refno).unwrap_or_default();
+        //     dbg!(att);
+        // }
+        let axis = resolve_axis_param(&scom.axis_params[i], scom, context, Some(interface));
+        // {
+        //     Ok(axis) => {
+        // dbg!(&axis);
+        map.insert(scom.axis_param_numbers[i], axis);
+        //     }
+        //     Err(e) => {
+        //         println!("{} resolve_axis_params 出错： {:?}", refno, &e);
+        //     }
+        // }
     }
     map
 }
@@ -211,68 +217,67 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
     let angle = context[DDANGLE_STR].parse::<f32>().unwrap_or(0.0).to_radians();
     let radius = context[DDRADIUS_STR].parse::<f32>().unwrap_or(0.0);
     let height = context[DDHEIGHT_STR].parse::<f32>().unwrap_or(0.0);
+    // dbg!(&gm.diameters);
     let diameters = gm.diameters
         .iter()
-        .map(|exp| eval_str_to_f32(exp, context, interface))
-        .collect::<anyhow::Result<_>>()?;
+        .map(|exp| eval_str_to_f32_or_default(exp, context, interface, "DIST"))
+        .collect();
+    // dbg!(&diameters);
 
     let distances = gm.distances
         .iter()
-        .map(|exp| eval_str_to_f32(exp, context, interface))
-        .collect::<anyhow::Result<_>>()?;
+        .map(|exp| eval_str_to_f32_or_default(exp, context, interface, "DIST"))
+        .collect();
 
     let shears = gm.shears
         .iter()
-        .map(|exp| eval_str_to_f32(exp, context, interface))
-        .collect::<anyhow::Result<_>>()?;
+        .map(|exp| eval_str_to_f32_or_default(exp, context, interface, "DIST"))
+        .collect();
 
     let mut verts = vec![];
     for vert in &gm.verts {
-        if let f0 = eval_str_to_f32(&vert[0], context, interface)? &&
-            let f1 = eval_str_to_f32(&vert[1], context, interface)? &&
-            let f2 = eval_str_to_f32(&vert[2].as_str(), context, interface)?
+        let f0 = eval_str_to_f32_or_default(&vert[0], context, interface, "DIST");
+        let f1 = eval_str_to_f32_or_default(&vert[1], context, interface, "DIST");
+        let f2 = eval_str_to_f32_or_default(&vert[2].as_str(), context, interface, "DIST");
         {
             verts.push(Vec3::new(f0, f1, f2));
         }
     }
 
-    if gm.phei.contains("LEA") {
-        dbg!(&gm);
-    }
 
-    let phei = eval_str_to_f32_or_default(&gm.phei, context, interface);
-    let offset = eval_str_to_f32_or_default(&gm.offset, context, interface);
+    let phei = eval_str_to_f32_or_default(&gm.phei, context, interface, "DIST");
+    let offset = eval_str_to_f32_or_default(&gm.offset, context, interface, "DIST");
 
-    let pang = eval_str_to_f32_or_default(&gm.pang, context, interface);
-    let pwid = eval_str_to_f32_or_default(&gm.pwid, context, interface);
-    let drad = eval_str_to_f32_or_default(&gm.drad, context, interface);
-    let dwid = eval_str_to_f32_or_default(&gm.dwid, context, interface);
+    let pang = eval_str_to_f32_or_default(&gm.pang, context, interface, "DIST");
+    let pwid = eval_str_to_f32_or_default(&gm.pwid, context, interface, "DIST");
+    let drad = eval_str_to_f32_or_default(&gm.drad, context, interface, "DIST");
+    let dwid = eval_str_to_f32_or_default(&gm.dwid, context, interface, "DIST");
 
     let mut frads = gm.frads
         .iter()
-        .map(|exp| eval_str_to_f32(&exp, context, interface))
-        .collect::<anyhow::Result<_>>()?;
+        .map(|exp| eval_str_to_f32_or_default(exp, context, interface, "DIST"))
+        .collect();
 
-    let prad = eval_str_to_f32(&gm.prad, context, interface)?;
+    let prad = eval_str_to_f32_or_default(&gm.prad, context, interface, "DIST");
 
     let dxy = gm.dxy
         .iter()
         .try_fold::<_, _, anyhow::Result<_>>(vec![], |mut acc, exp| {
-            let f0 = eval_str_to_f32(&exp[0], context, interface)? as f32;
-            let f1 = eval_str_to_f32(&exp[1], context, interface)? as f32;
+            let f0 = eval_str_to_f32_or_default(&exp[0], context, interface, "DIST");
+            let f1 = eval_str_to_f32_or_default(&exp[1], context, interface, "DIST");
             acc.push(Vec2::new(f0, f1));
             Ok(acc)
         })?;
 
     let lengths = gm.lengths
         .iter()
-        .map(|exp| eval_str_to_f32(&exp, context, interface))
-        .collect::<anyhow::Result<_>>()?;
+        .map(|exp| eval_str_to_f32_or_default(exp, context, interface, "DIST"))
+        .collect();
 
     let xyz = gm.xyz
         .iter()
-        .map(|exp| eval_str_to_f32(&exp, context, interface))
-        .collect::<anyhow::Result<_>>()?;
+        .map(|exp| eval_str_to_f32_or_default(exp, context, interface, "DIST"))
+        .collect();
 
     let mut paxises: Vec<Option<CateAxisParam>> = Vec::new();
     for axis_str in gm.paxises.iter() {
@@ -298,7 +303,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
                 }
             }
         } else {
-            let dir = parse_str_axis_to_vec3(axis, context, interface)?;
+            let dir = parse_str_axis_to_vec3_or_default(axis, context, interface);
             let axis = CateAxisParam {
                 refno: Default::default(),
                 number: 0,
@@ -317,12 +322,12 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
     let mut plin_plax = Vec3::X;
     if let Some(jusl) = jusl_param {
         //直接把 jusl_dxy加上
-        plin_pos = Vec2::new(eval_str_to_f32(&jusl.vxy[0], context, interface)?,
-                               eval_str_to_f32(&jusl.vxy[1], context, interface)?)
-            + Vec2::new(eval_str_to_f32(&jusl.dxy[0], context, interface)?,
-                        eval_str_to_f32(&jusl.dxy[1], context, interface)?);
+        plin_pos = Vec2::new(eval_str_to_f32_or_default(&jusl.vxy[0], context, interface, "DIST"),
+                             eval_str_to_f32_or_default(&jusl.vxy[1], context, interface, "DIST"))
+            + Vec2::new(eval_str_to_f32_or_default(&jusl.dxy[0], context, interface, "DIST"),
+                        eval_str_to_f32_or_default(&jusl.dxy[1], context, interface, "DIST"));
 
-        plin_plax = parse_str_axis_to_vec3(&jusl.plax, context, interface)?;
+        plin_plax = parse_str_axis_to_vec3_or_default(&jusl.plax, context, interface);
     }
     let type_name = gm.gm_type.clone();
     Ok(GmseParamData {
@@ -359,7 +364,7 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
     scom: &ScomInfo,
     context: &CataContext,
     interface: Option<&T>,
-) -> anyhow::Result<CateAxisParam> {
+) -> CateAxisParam {
     let key: String = axis_param.pconnect.replace("\n", "").replace(" ", "").into();
     let pconnect = if context.contains_key(&key) {
         let tmp = context[&key].parse::<u32>().unwrap_or(0u32);
@@ -368,14 +373,15 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
         key.clone()
     };
     let number = axis_param.number;
-    let pbore = eval_str_to_f32(&axis_param.pbore, &context, interface)?;
-    let pwidth = eval_str_to_f32(&axis_param.pwidth, &context, interface)?;
-    let pheight = eval_str_to_f32(&axis_param.pheight, &context, interface)?;
+    let pbore = eval_str_to_f32_or_default(&axis_param.pbore, &context, interface, "DIST");
+    let pwidth = eval_str_to_f32_or_default(&axis_param.pwidth, &context, interface, "DIST");
+    let pheight = eval_str_to_f32_or_default(&axis_param.pheight, &context, interface, "DIST");
     match axis_param.type_name.as_str() {
         "PTAX" => {
-            let d = eval_str_to_f32(&axis_param.distance, &context, interface)?;
-            let (dir, ref_dir,  pos) = resolve_dir_and_pos(axis_param, scom, context, interface)?;
-            Ok(CateAxisParam {
+            let d = eval_str_to_f32_or_default(&axis_param.distance, &context, interface, "DIST");
+            let (dir, ref_dir, pos) =
+                resolve_dir_and_pos(axis_param, scom, context, interface).unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
+            CateAxisParam {
                 refno: axis_param.refno,
                 number,
                 pt: Vec3::new(d * dir[0] + pos[0], d * dir[1] + pos[1], d * dir[2] + pos[2]),
@@ -385,14 +391,16 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
                 pwidth,
                 pheight,
                 ref_dir,
-            })
+            }
         }
         "PTCA" | "PTMI" => {
-            let x = eval_str_to_f32(&axis_param.x, &context, interface)?;
-            let y = eval_str_to_f32(&axis_param.y, &context, interface)?;
-            let z = eval_str_to_f32(&axis_param.z, &context, interface)?;
-            let (dir, ref_dir,  pos)  = resolve_dir_and_pos(axis_param, scom, context, interface)?;
-            Ok(CateAxisParam {
+            let x = eval_str_to_f32_or_default(&axis_param.x, &context, interface, "DIST");
+            let y = eval_str_to_f32_or_default(&axis_param.y, &context, interface, "DIST");
+            let z = eval_str_to_f32_or_default(&axis_param.z, &context, interface, "DIST");
+            let (dir, ref_dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)
+                .unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
+            // dbg!((axis_param.refno, dir));
+            CateAxisParam {
                 refno: axis_param.refno,
                 number,
                 pt: Vec3::new(pos[0] + x, pos[1] + y, pos[2] + z),
@@ -402,32 +410,35 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
                 pwidth,
                 pheight,
                 ref_dir,
-            })
+            }
         }
         "PTPOS" => {
-            let (dir, ref_dir,  pos)  = resolve_dir_and_pos(axis_param, scom, context, interface)?;
-            let pnt_index_str = axis_param.pnt_index_str.as_ref().ok_or(anyhow::anyhow!("pnt_index_str 错误"))?;
-            let paras = pnt_index_str.split_whitespace().map(|x| x.trim().to_owned()).collect::<Vec<_>>();
-            if paras.len() == 2 {
-                let pnt_index = paras[1].parse::<i32>().unwrap_or(i32::MAX);
-                if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_index) {
-                    let axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface)?;
-                    return Ok(CateAxisParam {
-                        refno: axis_param.refno,
-                        number,
-                        pt: axis.pt,
-                        dir,
-                        pconnect,
-                        pbore,
-                        pwidth,
-                        pheight,
-                        ref_dir,
-                    });
+            let (dir, ref_dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)
+                .unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
+            let mut cate_axis = CateAxisParam {
+                number,
+                dir,
+                pconnect,
+                pbore,
+                pwidth,
+                pheight,
+                ref_dir,
+                ..Default::default()
+            };
+            if let Some(pnt_index_str) = axis_param.pnt_index_str.as_ref() {
+                let paras = pnt_index_str.split_whitespace().map(|x| x.trim().to_owned()).collect::<Vec<_>>();
+                if paras.len() == 2 {
+                    let pnt_index = paras[1].parse::<i32>().unwrap_or(i32::MAX);
+                    if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_index) {
+                        let axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface);
+                        cate_axis.refno = axis_param.refno;
+                        cate_axis.pt = axis.pt;
+                    }
                 }
             }
-            return Ok(CateAxisParam::default());
+            return cate_axis;
         }
-        _ => Ok(CateAxisParam::default())
+        _ => CateAxisParam::default()
     }
 }
 

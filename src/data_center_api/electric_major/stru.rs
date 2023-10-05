@@ -49,7 +49,7 @@ pub async fn get_dq_scoj_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
             for child in children {
                 let mut attr = Vec::new();
                 let desc = get_refno_desc(child.refno, aios_mgr).await.unwrap_or("".to_string());
-                let Ok(paras) = get_refno_paras(child.refno, aios_mgr).await else { continue; };
+                let Ok(paras) = get_refno_paras(child.refno, aios_mgr) else { continue; };
                 if paras.len() < 3 { continue; };
                 attr.push(DataCenterAttr {
                     attribute_model_code: "PARTD15".to_string(),

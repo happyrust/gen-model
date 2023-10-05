@@ -266,13 +266,10 @@ impl AiosDBManager {
         if foreigns.is_empty() { return None; }
         while let Ok(att) = self.get_attr_from_localdb(refno)  {
             let key = foreigns.get(0).unwrap_or(foreigns.last().unwrap());
-            dbg!(&refno);
-            dbg!(&self.get_type_name(refno));
             if func(refno) {
-                target = Some(refno);
-            } else {
                 break;
             }
+            target = Some(refno);
             if let Some(r) = att.get_foreign_refno(key){
                 refno = r;
             }
@@ -294,7 +291,7 @@ impl AiosDBManager {
             "\
     WITH @@pdms_eles, @@pdms_edges, @@pdms_mdbs
     for v, e in 1 inbound @id @@pdms_edges
-        filter v!= null && (length(@filter) == 0 or v.noun in @filter) && (e.db_type == null or length(@db_types) == 0 or e.db_type in @db_types)
+        filter v != null && (length(@filter) == 0 or v.noun in @filter) && (e.db_type == null or length(@db_types) == 0 or e.db_type in @db_types)
         sort e.order
         let child = document(@@pdms_eles, v._key)
          return {
@@ -305,8 +302,7 @@ impl AiosDBManager {
             'order': child.order,
             'children_count':length(for c in 1 inbound child._id pdms_edges
                                 return 1 ),
-        }
-    ")
+        }")
             .bind_var("id", id)
             .bind_var("filter", filter)
             .bind_var("db_types", db_types)
@@ -314,7 +310,6 @@ impl AiosDBManager {
             .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
             .bind_var("@pdms_mdbs", AQL_PDMS_MDBS_EDGES_COLLECTION);
         let results: Vec<PdmsElement> = self.get_arango_db().await?.aql_query(aql).await?;
-        // dbg!(&results);
         Ok(results)
     }
 }

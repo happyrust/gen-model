@@ -1,16 +1,23 @@
 use std::collections::HashMap;
 use std::io::Write;
+use std::process::id;
+use std::vec;
 use aios_core::data_center::AttrValue::{AttrIntArray, AttrMap, AttrString};
 use aios_core::data_center::{AttrValue, CableWeight, DataCenterAttr, DataCenterInstance, DataCenterProject};
-use aios_core::pdms_types::RefU64;
+use aios_core::options::DbOption;
+use aios_core::pdms_types::{NamedAttrValue, PdmsElement, RefU64};
+use aios_core::pdms_user::RefnoMajor;
 use anyhow::anyhow;
 use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
+use glam::Vec3;
+use parry2d::simba::scalar::SupersetOf;
 use regex::Regex;
 use serde::{Serialize, Deserialize};
 use crate::api::attr::query_explicit_attr;
-use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_refnos_travel_children_with_type_aql, query_travel_children_with_type_aql};
-use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
-use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
+use crate::api::children::query_ancestor_refnos_till_type_aql;
+use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_children_refnos, query_refnos_belong_major, query_refnos_travel_children_with_type_aql, query_travel_children_with_type_aql};
+use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql, query_foreign_refnos_aql};
+use crate::aql_api::pdms_room::{query_room_codes_from_owner, query_room_name_from_owner_aql, query_room_name_from_refno_aql};
 use crate::data_center_api::bran::atta::get_data_center_atta_attr;
 use crate::data_center_api::bran::cap::get_data_center_cap_attr;
 use crate::data_center_api::bran::coup::get_data_center_coup_attr;
@@ -23,10 +30,11 @@ use crate::data_center_api::bran::redu::get_data_center_redu_attr;
 use crate::data_center_api::bran::tee::get_data_center_tee_attr;
 use crate::data_center_api::bran::tubi::get_data_center_tubi_attr;
 use crate::data_center_api::bran::weld::get_data_center_weld_attr;
-use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_latest_version, get_refno_paras};
+use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_latest_version, get_refno_paras, get_refnos_arrive_leave_info};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
+use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 /// 获取 管段元数据
 pub fn get_data_center_bran_attr(refno: RefU64) -> Vec<DataCenterAttr> {
@@ -130,9 +138,21 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
     let regex = Regex::new(r"\d.*:\d")?; // 判断字符串是否包含有多个数字加一个:
     if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos,
                                                                      vec!["BRAN".to_string()]).await {
+        let bran_refnos = children.iter().map(|c| c.refno).collect::<Vec<RefU64>>();
+        // 通过 owner返回房间号（只返回一个）
+        let room_name_map = query_room_name_from_owner_aql(bran_refnos.clone(), &database).await?;
+        let room_name_map = room_name_map.into_iter()
+            .map(|r| (r.refno, r.room_name))
+            .collect::<HashMap<RefU64, String>>();
+        // 查找bran所属专业
+        let major_map = query_refnos_belong_major(bran_refnos, &database).await?;
+        let major_map = major_map.into_iter().map(|x| (x.refno.clone(), x)).collect::<HashMap<String, RefnoMajor>>();
+        // 找到每个bran所属的site的name
         for bran in children {
-            let bran_children = query_children_order_aql(&database, bran.refno).await?;
-            let room_name = query_room_name_from_refno_aql(bran.refno, &database).await?.unwrap_or("".to_string());
+            let bran_children = aios_mgr.query_children_eles_order(bran.refno, &vec![], &vec![]).await?;
+            // let room_name = query_room_name_from_refno_aql(bran.refno, &database).await?.unwrap_or("".to_string());
+            let bran_attr = aios_mgr.get_attr(bran.refno).await?;
+            let room_name = room_name_map.get(&bran.refno).unwrap_or(&"".to_string()).clone();
             let pspe_name = query_foreign_name_aql(bran.refno, vec!["PSPE", "PSPE"], &database).await?;
             let mut kind = "".to_string();
             if let Some(pspe_name) = pspe_name {
@@ -151,6 +171,8 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
             let mut bridge_dir = "".to_string();
             let mut b_climbing = false;
             let mut b_wheel = false;
+            let mut b_find_ftub = false;
+            let mut bend_para_11 = 0.0;
             // 找到bran下的第一个ftub
             for child in &bran_children {
                 if child.noun == "ATTA" { continue; }
@@ -166,10 +188,12 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 }
 
                 if child.noun == "FTUB" {
-                    let mut paras = get_refno_paras(child.refno, aios_mgr).await?;
-                    tray_width = paras.get(0).unwrap_or(&0.0).to_string();
-                    tray_height = paras.get(1).unwrap_or(&0.0).to_string();
-                    break;
+                    if !b_find_ftub {
+                        let mut paras = get_refno_paras(child.refno, aios_mgr)?;
+                        tray_width = paras.get(0).unwrap_or(&0.0).to_string();
+                        tray_height = paras.get(1).unwrap_or(&0.0).to_string();
+                        b_find_ftub = true;
+                    }
                 }
                 if !b_climbing {
                     if child.noun == "ELBO" {
@@ -178,6 +202,12 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 }
                 if !b_wheel {
                     if child.noun == "BEND" {
+                        // 找BRAN下面的BEND取PARA11
+                        if b_wheel == false {
+                            let paras = get_refno_paras(child.refno, aios_mgr)?;
+                            let para_11 = paras.get(10).unwrap_or(&0.0);
+                            bend_para_11 = *para_11;
+                        }
                         b_wheel = true;
                     }
                 }
@@ -198,22 +228,113 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 attribute_model_code: "ERECB1".to_string(),
                 value: AttrValue::AttrString(bran.name.clone()).into(),
             });
-
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB2".to_string(),
+                value: AttrValue::AttrString("".to_string()).into(),
+            });
             erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB3".to_string(),
                 value: AttrValue::AttrString(room_name.clone()).into(),
             });
             erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB4".to_string(),
+                value: AttrValue::AttrString("".to_string()).into(),
+            });
+            // 获取site的name和desc
+            let site_refno = aios_mgr.get_ancestor_refno_of_type_data(bran.refno, "SITE")?;
+            let site_attr = aios_mgr.get_attr(site_refno).await?;
+            let site_name = site_attr.get_name().unwrap_or("".to_string());
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB7".to_string(),
+                value: AttrValue::AttrString(site_name.split("-").collect::<Vec<_>>().get(0).unwrap_or(&"").to_string()).into(),
+            });
+            let desc = site_attr.get_str("DESC").unwrap_or("").to_string();
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB8".to_string(),
+                value: AttrValue::AttrString(desc).into(),
+            });
+
+            let major_info = major_map.get(&bran.refno.to_refno_string()).map_or(RefnoMajor::default(), |x| x.clone());
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB9".to_string(),
+                value: AttrValue::AttrString(major_info.major.to_string()).into(),
+            });
+
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB10".to_string(),
+                value: AttrValue::AttrString(major_info.major_classify.to_string()).into(),
+            });
+            let bran_name_split = bran.name.split("-").collect::<Vec<_>>();
+            // 判断BRAN的NAME按-分割从0开始数第0位，LV：低压，MV：中压，M：测量，C：控制，IED：IED
+            let bran_name_first = bran_name_split.get(0).map_or("", |x| x);
+            let bran_type = match_bran_type(bran_name_first);
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB16".to_string(),
+                value: AttrValue::AttrString(bran_type).into(),
+            });
+            // NAME按“-”分割取第1个字符，可配置。GR,IY:B序列,OR,CO:A序列,YE:保护组I,BL:保护组II，RE：保护组III，BR:保护组VI，PU:PAMS1，TU:PAMS2
+            let bran_name_first = bran_name_split.get(1).map_or("", |x| x);
+            let bran_series = match_bran_series(bran_name_first);
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB17".to_string(),
+                value: AttrValue::AttrString(bran_series).into(),
+            });
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB21".to_string(),
+                value: AttrValue::AttrString(format!("{}mm{}", tray_width, kind)).into(),
+            });
+            // HPOS TPOS
+            let hpos = bran_attr.get_f64_vec("HPOS").unwrap_or(vec![]);
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB23".to_string(),
+                value: AttrValue::AttrFloatArray(hpos.into_iter().map(|x| x as f32).collect()).into(),
+            });
+            let tpos = bran_attr.get_f64_vec("TPOS").unwrap_or(vec![]);
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB24".to_string(),
+                value: AttrValue::AttrFloatArray(tpos.into_iter().map(|x| x as f32).collect()).into(),
+            });
+
+            erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB25".to_string(),
                 value: AttrValue::AttrBool(b_climbing).into(),
+            });
+            // 求两个ELBO之间FTUB的长度
+            let mut distance = 0.0;
+            if b_climbing {
+                let ftub = match_ftub_between_elbo(&bran_children);
+                if let Some(ftub) = ftub {
+                    let arrive_leave_map = get_refnos_arrive_leave_info(vec![ftub], false, aios_mgr).await.unwrap_or_default();
+                    if let Some(arrive_leave_info) = arrive_leave_map.get(&ftub) {
+                        let arrive_pt = arrive_leave_info.get(&"ARRIVE_POINT".to_string())
+                            .map_or(NamedAttrValue::Vec3Type(Vec3::ZERO), |pt| pt.clone());
+                        let leave_pt = arrive_leave_info.get(&"LEAVE_POINT".to_string())
+                            .map_or(NamedAttrValue::Vec3Type(Vec3::ZERO), |pt| pt.clone());
+
+                        if let NamedAttrValue::Vec3Type(arrive) = arrive_pt {
+                            if let NamedAttrValue::Vec3Type(leave) = leave_pt {
+                                distance = arrive.distance(leave);
+                            }
+                        }
+                    }
+                }
+            }
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB26".to_string(),
+                value: AttrValue::AttrFloat(distance).into(),
             });
             erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB27".to_string(),
                 value: AttrValue::AttrBool(b_wheel).into(),
             });
             erecb_attr.push(DataCenterAttr {
-                attribute_model_code: "ERECB21".to_string(),
-                value: AttrValue::AttrString(format!("{}mm{}", tray_width, kind)).into(),
+                attribute_model_code: "ERECB28".to_string(),
+                value: AttrValue::AttrFloat(bend_para_11 as f32).into(),
+            });
+            let cable_weight = math_cable_weight(&kind, &tray_width);
+            erecb_attr.push(DataCenterAttr {
+                attribute_model_code: "ERECB29".to_string(),
+                value: AttrValue::AttrString(cable_weight).into(),
             });
             erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB31".to_string(),
@@ -243,8 +364,16 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 attributes: erecb_attr,
             });
 
+            // 获取 bran下元件的数据
+            let bran_refnos = bran_children.iter().map(|child| child.refno).collect::<Vec<RefU64>>();
+            let bran_children_spre = query_foreign_refnos_aql(&database, bran_refnos, vec!["SPRE".to_string(), "SPRE".to_string()]).await?;
+            let children_spre_map = bran_children_spre.into_iter()
+                .filter(|c| RefU64::from_url_refno(&c.refno).is_some())
+                .map(|e| (RefU64::from_url_refno(&e.refno).unwrap(), e.name))
+                .collect::<HashMap<RefU64, String>>();
             for child in bran_children {
-                let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], &database).await?.unwrap_or_default();
+                // let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], &database).await?.unwrap_or_default();
+                let spre_name = children_spre_map.get(&child.refno).unwrap_or(&"".to_string()).clone();
                 let mut object_code = None;
                 match child.noun.as_str() {
                     "FTUB" => { if spre_name.contains("RISER") { object_code = Some("PARTEH") } else { object_code = Some("PARTEF") } }
@@ -416,7 +545,7 @@ pub async fn query_gy_bran_data_datacenter(select_refno: RefU64, aios_mgr: &Aios
             }
         }
         // tubi
-        let mut tubi_instances = get_data_center_tubi_attr(bran.refno,&bran.name,&database,aios_mgr).await;
+        let mut tubi_instances = get_data_center_tubi_attr(bran.refno, &bran.name, &database, aios_mgr).await;
         instances.append(&mut tubi_instances);
     }
     Ok(DataCenterProject {
@@ -427,13 +556,123 @@ pub async fn query_gy_bran_data_datacenter(select_refno: RefU64, aios_mgr: &Aios
     })
 }
 
+/// 返回bran中 两个elbo之间相邻的ftub（排除atta），且只返回一个
+fn match_ftub_between_elbo(bran_children: &Vec<PdmsElement>) -> Option<RefU64> {
+    let children = bran_children.iter().filter(|child| &child.noun != "ATTA").collect::<Vec<_>>();
+    let mut idx = 0;
+    let children_len = children.len();
+    for child in &children {
+        if child.noun == "ELBO".to_string() || child.noun == "BEND".to_string() {
+            if idx + 2 > children_len { return None; };
+            let next_node = children[idx + 1].noun == "FTUB".to_string();
+            let next_next_node = children[idx + 2].noun == "ELBO".to_string() || children[idx + 2].noun == "BEND".to_string();
+            if next_node && next_next_node {
+                return Some(children[idx + 1].refno);
+            }
+        }
+        idx += 1;
+    }
+    return None;
+}
+
+/// 匹配桥架类型
+fn match_bran_type(input: &str) -> String {
+    match input {
+        s if s.starts_with("/LV") => { "低压".to_string() }
+        s if s.starts_with("/MV") => { "中压".to_string() }
+        s if s.starts_with("/M") => { "测量".to_string() }
+        s if s.starts_with("/C") => { "控制".to_string() }
+        s if s.starts_with("/IED") => { "IED".to_string() }
+        _ => { "".to_string() }
+    }
+}
+
+/// 匹配bran的系列
+fn match_bran_series(bran_name: &str) -> String {
+    let bran_name_split = bran_name.split("-").collect::<Vec<_>>();
+    if bran_name_split.len() < 2 { return "".to_string(); }
+    let split = bran_name_split[1];
+    match split {
+        "GR" | "IY" => { "B序列".to_string() }
+        "OR" | "CO" => { "A序列".to_string() }
+        "YE" => { "保护组I".to_string() }
+        "BL" => { "保护组II".to_string() }
+        "RE" => { "保护组III".to_string() }
+        "BR" => { "保护组VI".to_string() }
+        "PU" => { "PAMS1".to_string() }
+        "TU" => { "PAMS2".to_string() }
+        _ => { "".to_string() }
+    }
+}
+
+fn math_cable_weight(tray_name: &str, tray_width: &str) -> String {
+    match tray_name {
+        "梯架" => {
+            match tray_width {
+                "600" => "100".to_string(),
+                "500" => "75".to_string(),
+                "300" => "45".to_string(),
+                _ => "0.0".to_string()
+            }
+        }
+        "带孔托盘" => {
+            match tray_width {
+                "200" => "30".to_string(),
+                "100" => "15".to_string(),
+                _ => "0.0".to_string()
+            }
+        }
+        "实底托盘" => {
+            match tray_width {
+                "600" => "100".to_string(),
+                "500" => "75".to_string(),
+                "300" => "45".to_string(),
+                "100" => "15".to_string(),
+                "50" => "7.5".to_string(),
+                _ => "0.0".to_string()
+            }
+        }
+        _ => "0.0".to_string()
+    }
+}
+
 #[tokio::test]
 async fn test_query_gy_bran_data_datacenter() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let tee_refno = RefU64::from_refno_str("24383/66761").unwrap();
-    let result = query_gy_bran_data_datacenter(tee_refno,&aios_mgr).await?;
+    let result = query_gy_bran_data_datacenter(tee_refno, &aios_mgr).await?;
     let mut file = std::fs::File::create("bran.json")?;
     let json = serde_json::to_vec(&result)?;
     file.write_all(&json)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_dq_bran_data_datacenter() -> anyhow::Result<()> {
+    let aios_mgr = AiosDBManager::init_form_config().await?;
+    let bran_refno = vec![RefU64::from_refno_str("24383/84157").unwrap()];
+    let result = get_dq_bran_data(&bran_refno, &aios_mgr).await?;
+    let mut file = std::fs::File::create("data_center_test/dq_bran.json")?;
+    let json = serde_json::to_vec(&result)?;
+    file.write_all(&json)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_match_ftub_between_elbo() -> anyhow::Result<()> {
+    use config::{Config, ConfigError, Environment, File};
+    let s = Config::builder()
+        .add_source(File::with_name("DbOption"))
+        .build()?;
+    let db_option: DbOption = s.try_deserialize().unwrap();
+    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
+    let refno = RefU64::from_refno_str("24383/84088").unwrap();
+    let children = query_children_order_aql(&database, refno).await?;
+    let ftub = match_ftub_between_elbo(&children);
+    dbg!(&ftub);
+    let error_refno = RefU64::from_refno_str("24383/84151").unwrap();
+    let children = query_children_order_aql(&database, error_refno).await?;
+    let ftub = match_ftub_between_elbo(&children);
+    dbg!(&ftub);
     Ok(())
 }

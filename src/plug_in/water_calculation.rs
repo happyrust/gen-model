@@ -5,7 +5,7 @@ use bevy_transform::prelude::Transform;
 use glam::Vec3;
 use crate::api::attr::query_attr;
 use crate::api::children::travel_children_with_type;
-use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
+use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_WATER_CALCULATION_COLLECTION};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{save_arangodb_doc, ArDatabase};
@@ -156,13 +156,13 @@ pub async fn export_stp(
                 let mut box_shape = AdHocShape::make_box(100.0, extents.y as f64 / 10.0, extents.z as f64).0;
                 box_shape.transform_by_mat(&transform.compute_matrix().as_dmat4());
                 let t_shape = Rc::new(box_shape);
-                refnos.into_iter().for_each(|o|{
+                refnos.into_iter().for_each(|o| {
                     boolean_map.entry(o).or_default().push((*refno, t_shape.clone()));
                 });
                 break;
             } else {
                 let t_shape = Rc::new(shape);
-                refnos.into_iter().for_each(|o|{
+                refnos.into_iter().for_each(|o| {
                     boolean_map.entry(o).or_default().push((*refno, t_shape.clone()));
                 });
             }
@@ -191,6 +191,32 @@ pub async fn export_stp(
 
     Ok(true)
 }
+
+
+///删除水淹计算的指定key的记录
+pub async fn delete_water_calculation_data(
+    database: &ArDatabase,
+    key: String,
+) -> anyhow::Result<Option<Vec<FloodingStpToArangodb>>> {
+    let aql = format!("With {AQL_HOLE_DATA_COLLECTION} remove {{'_key':'{}'}} in {}", key, AQL_WATER_CALCULATION_COLLECTION);
+    let result = database.aql_query::<FloodingStpToArangodb>(AqlQuery::new(aql.as_str())).await?;
+    return Ok(Some(result));
+}
+
+///清空水淹计算的指定key的记录
+pub async fn truncate_water_calculation_data(
+    database: &ArDatabase,
+) -> anyhow::Result<Option<Vec<FloodingStpToArangodb>>> {
+    let aql = AqlQuery::new("\
+    With water_calculation
+    for data in water_calculation
+            REMOVE data IN water_calculation
+    ");
+    let result = database.aql_query::<FloodingStpToArangodb>(aql).await?;
+    // let result = database.aql_query::<FloodingStpToArangodb>(AqlQuery::new(aql.as_str())).await?;
+    return Ok(Some(result));
+}
+
 
 ///查询数据库中是否已有当前名称的文件
 pub async fn query_water_calculation_data(

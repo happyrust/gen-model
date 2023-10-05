@@ -43,8 +43,38 @@ pub async fn get_ref0_projects(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32
     Ok(map)
 }
 
+// pub async fn sync_local_refno_basic_map(att_db: sled::Tree) -> anyhow::Result<bool> {
+//
+//
+//
+//     let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE}");
+//     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+//     match results {
+//         Ok(vals) => {
+//             for val in vals {
+//                 let refno = (val.get::<i64, _>("ID") as u64).into();
+//                 let owner = (val.get::<i64, _>("OWNER") as u64).into();
+//                 let type_name = val.get::<String, _>("TYPE");
+//                 let table = qualified_table_name(type_name.as_str());
+//                 if CACHED_REFNO_BASIC_MAP.get(&refno).is_none() {
+//                     let _ = CACHED_REFNO_BASIC_MAP.insert(refno, &CachedRefBasic {
+//                         owner,
+//                         table,
+//                     });
+//                 }
+//             }
+//         }
+//         Err(e) => {
+//             dbg!(&e);
+//             dbg!(sql);
+//             return Err(anyhow::anyhow!(e.to_string()));
+//         }
+//     }
+//     Ok(true)
+// }
+
 /// 获取生成refno到RefBasic的映射, todo 存储有点慢，需要批量存储
-pub async fn sync_refno_basic_map(pool: &Pool<MySql>/*, mdb_dbnums: &BTreeSet<i32>*/) -> anyhow::Result<bool> {
+pub async fn sync_refno_basic_map(pool: &Pool<MySql>) -> anyhow::Result<bool> {
     let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE}");
     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
     match results {

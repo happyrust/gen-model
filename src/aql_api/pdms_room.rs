@@ -1,7 +1,7 @@
 use crate::api::attr::get_site_major_from_uda;
 use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_deep_children_refnos_fuzzy};
-use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsRefnoNameAql};
-use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
+use crate::aql_api::{convert_refno_vec_from_vec_string, PdmsRefnoNameAql, PdmsRoomNameAql};
+use crate::aql_api::pdms_mesh::{query_all_geo_hashs, query_pdms_mesh_aql, query_refnos_meshes_aql};
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::consts::{
@@ -11,7 +11,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::graph_db::pdms_arango::*;
-use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
+use crate::graph_db::pdms_inst_arango::{query_compound_inst_hashes_aql, query_instance_level_with_refno_in_arangodb, query_insts_shape_data, query_rvm_instance_data_from_owner_aql, query_rvm_instance_data_from_refno_aql};
 use crate::rvm::data_api::query_rvm_geo_instance_aql;
 use aios_core::pdms_types::*;
 use aios_core::pdms_types::{PdmsElement, RefU64, UdaMajorType};
@@ -32,6 +32,26 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use aios_core::options::DbOption;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
+use parry3d::shape::Cuboid;
+
+macro_rules! find_f32_min_value {
+    ($collection:expr, $field:ident) => {
+        {
+            let epsilon:f32 = 0.01; // 设置精度
+
+            let min_value = $collection.iter()
+            .min_by(|a, b|
+               if (a.$field - b.$field).abs() < epsilon {
+                    std::cmp::Ordering::Equal
+                } else if a.$field < b.$field {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                }
+            );
+        }
+    };
+}
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct RoomData {
@@ -225,6 +245,42 @@ pub async fn query_room_code_from_owner(
     }
 }
 
+/// 查询children某个节点数据哪个参考号，并返回是否为反应堆厂房(RS)
+pub async fn query_room_codes_from_owners(
+    owner_refno: Vec<RefU64>,
+    database: &ArDatabase,
+) -> anyhow::Result<Vec<PdmsRoomNameAql>> {
+    let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, owner_refno);
+    let aql = AqlQuery::new(
+        "
+    With @@pdms_eles,@@pdms_edges,@@room_edges,@@room_eles
+    for id in @ids
+    for v in 0..2 inbound id @@pdms_edges
+    filter v != null
+    for r in 1 inbound v._id @@room_edges
+            filter r != null
+            limit 1
+            let b_rs = (
+                for o in 0..5 outbound CONCAT('pdms_eles/',r._key) pdms_edges
+                filter o != null
+                filter o.noun == 'SITE'
+                return CONTAINS(o.name,'RS')
+            )
+            return {
+                'refno': v._key,
+                'room_name': r.name,
+                'b_rs':b_rs[0]
+            }
+    ", )
+        .bind_var("ids", ids)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION);
+    let result = database.aql_query::<PdmsRoomNameAql>(aql).await?;
+    Ok(result)
+}
+
 /// 查询owner下children在哪些房间里面
 pub async fn query_room_codes_from_owner(
     owner_refno: RefU64,
@@ -242,8 +298,7 @@ pub async fn query_room_codes_from_owner(
                 'refno': v._key,
                 'name': r.name
             }
-    ", )
-        .bind_var("id", refno)
+    ", ).bind_var("id", refno)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
@@ -292,22 +347,19 @@ pub async fn query_room_name_from_refnos_aql(
     refnos: Vec<RefU64>,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<PdmsNodeBelongRoomName>> {
-    let refnos = refnos
-        .into_iter()
-        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
-        .collect::<Vec<_>>();
+    let refnos = refnos.into_iter().map(|r| r.to_url_refno()).collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@room_edges,@@room_eles
     for id in @refnos
-    for v,e in 1 inbound id @@room_edges
+    for v,e in 1 inbound concat('pdms_eles/',id) @@room_edges
+        filter v != null
          return {
-            'refno': v._key,
+            'refno': id,
             'room_name': v.name
          }
     ",
-    )
-        .bind_var("refnos", refnos)
+    ).bind_var("refnos", refnos)
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
@@ -431,21 +483,20 @@ pub async fn query_equi_room_name_from_refnos_aql(
     for id in @ids
     let v = document(id)
     filter v != null
-    filter v.noun == 'EQUI'
-            let children = (
-            for e in 1..2 inbound v._id pdms_edges
+    let children = (
+        for e in 0..2 inbound v._id pdms_edges
                 return e._id )
-            let result = (
-                for child in children
-                for r in 1 inbound child room_edges
-                    filter r != null
-                    limit 1
-                    return {
-                        'refno': v._key,
-                        'name': v.name,
-                        'room_name': r.name
-                    }
-             )
+        let result = (
+            for child in children
+            for r in 1 inbound child room_edges
+                filter r != null
+                limit 1
+                return {
+                    'refno': v._key,
+                    'name': v.name,
+                    'room_name': r.name
+                }
+         )
      return result ",
     )
         .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
@@ -660,7 +711,7 @@ pub async fn query_room_refno_from_room_refno_aql(
         .bind_var("id", id)
         .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
         .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
-        .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION);
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION);
     let result = database.aql_query::<String>(aql).await?;
     let refnos = convert_refno_vec_from_vec_string(result);
     Ok(refnos)
@@ -890,8 +941,8 @@ impl AiosDBManager {
         if is_end_pt {
             whole_key_points.sort_by(|a, b| a.length().partial_cmp(&b.length()).unwrap());
             let end_key_points = vec![
-                whole_key_points.first().cloned().unwrap(),
-                whole_key_points.last().cloned().unwrap(),
+                whole_key_points.first().cloned().unwrap_or_default(),
+                whole_key_points.last().cloned().unwrap_or_default(),
             ];
             return Ok(Some((end_key_points, whole_aabb)));
         }
@@ -1189,6 +1240,122 @@ impl AiosDBManager {
             .unique()
             .collect::<Vec<_>>();
         Ok(result)
+    }
+
+    /// 查询设备相对楼板高度
+    pub async fn query_equi_relation_floor_height(&self, refno: RefU64) -> anyhow::Result<Option<f32>> {
+        let database = self.get_arango_db().await?;
+        let instances = query_rvm_instance_data_from_owner_aql(refno, &database).await?;
+        if instances.is_empty() { return Ok(None); };
+        // 找到设备最低点的元件
+        let r = instances.iter().min_by(|x, y| {
+            if x.world_transform.translation.z < y.world_transform.translation.z {
+                std::cmp::Ordering::Less
+            } else if x.world_transform.translation.z == y.world_transform.translation.z {
+                std::cmp::Ordering::Equal
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        });
+        if r.is_none() { return Ok(None); };
+        // 找到最低点所属的房间
+        let geo_info = r.unwrap().clone();
+        let room_transform = query_room_name_aabb_from_refno(vec![RefU64::from_url_refno(&geo_info._key).unwrap()],
+                                                             &database).await?;
+        // 找到设备最底端的坐标
+        let mut aabb = None;
+        for inst in instances {
+            if aabb.is_none() {
+                aabb = inst.aabb;
+            } else {
+                let inst_aabb = inst.aabb.unwrap();
+                aabb.as_mut().unwrap().merge(&inst_aabb);
+            }
+        }
+        if aabb == None { return Ok(None); };
+        let aabb = aabb.unwrap();
+        let btm_center = aabb.center() + aabb.half_extents().z * parry3d::math::Vector::new(Vec3::NEG_Z.x, Vec3::NEG_Z.y, Vec3::NEG_Z.z);
+        // 过滤房间周围的物项
+        // for room in room_transform {
+        let Some(rtree) = &self.rtree else { return Ok(None); };
+        let floors = rtree
+            .locate_intersecting_bounds(&aabb)
+            .filter(|x| self.get_type_name(x.0) == "FLOOR")
+            .collect::<Vec<_>>();
+        let floor_refnos = floors.iter().map(|x| x.0).collect::<Vec<_>>();
+        // 查询 floor 的 mesh
+        let check_insts_data = query_insts_shape_data(&database, &floor_refnos, None).await?;
+        for (&check_refno, info) in &check_insts_data.inst_info_map {
+            let Some(inst_geos) = check_insts_data.get_inst_geos(info) else {
+                continue;
+            };
+            for inst_geo in inst_geos {
+                let Ok(Some(need_check_mesh)) = self.get_plant_mesh(inst_geo.geo_hash).await
+                    else {
+                        continue;
+                    };
+                let t = info.world_transform * inst_geo.transform;
+                let collider_mesh = need_check_mesh.get_tri_mesh(t.compute_matrix());
+                let tri_mesh = collider_mesh.cast_local_ray_and_get_normal(
+                    &Ray::new(btm_center,
+                              (-Vec3::Z).into()),
+                    100000.0,
+                    true);
+                if tri_mesh.is_some() {
+                    dbg!(&tri_mesh.unwrap().toi);
+                }
+            }
+        }
+        // for (refno, aabb) in floors {}
+        // // 找到距离最近的参考号
+        // let precision = 2; // 设置精度
+        // let epsilon = 10.0_f32.powf(-precision as f32);
+        // let min_value = result.iter().min_by(|&a, &b| {
+        //     if (a.1 - b.1).abs() < epsilon {
+        //         std::cmp::Ordering::Equal
+        //     } else if a.1 < b.1 {
+        //         std::cmp::Ordering::Less
+        //     } else {
+        //         std::cmp::Ordering::Greater
+        //     }
+        // });
+        // let Some(min_value) = min_value else { continue; };
+        // // 过滤出几个相同距离的floor
+        // let min_values: Vec<(RefU64, f32)> = result
+        //     .iter()
+        //     .filter(|x| (x.1 - min_value.1).abs() < epsilon)
+        //     .cloned()
+        //     .collect();
+        // // 找到楼板的高度
+        // let mut distance_result = Vec::new();
+        // for (refno, distance) in min_values {
+        //     let children = self.get_children_refs(refno).await?;
+        //     let ploo = children
+        //         .into_iter()
+        //         .filter(|x| self.get_type_name(*x) == "PLOO")
+        //         .collect::<Vec<_>>();
+        //     if ploo.is_empty() { continue; };
+        //     let Ok(ploo_attr) = self.get_attr_from_localdb(ploo[0]) else { continue; };
+        //     let Some(AttrVal::DoubleType(height)) = ploo_attr.get_val("HEIG") else { continue; };
+        //     let result = ((distance - *height as f32) * 100.0).round() / 100.0;
+        //     if result < 0.0 { continue; };
+        //     distance_result.push((refno, result));
+        // }
+        // // 返回最小值
+        // let min_distance = distance_result.into_iter().min_by(|a, b| {
+        //     if (a.1 - b.1).abs() < epsilon {
+        //         std::cmp::Ordering::Equal
+        //     } else if a.1 < b.1 {
+        //         std::cmp::Ordering::Less
+        //     } else {
+        //         std::cmp::Ordering::Greater
+        //     }
+        // });
+        // if min_distance.is_some() {
+        //     return Ok(Some(min_distance.unwrap().1));
+        // }
+        // }
+        Ok(None)
     }
 
     ///通过子节点包围盒查询周围的构件
@@ -1501,6 +1668,60 @@ pub async fn query_room_aabb_from_room_code(room_names: Vec<String>, database: &
     Ok(result)
 }
 
+pub async fn query_room_name_aabb_from_refno(refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<RoomElement>> {
+    let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, refno);
+    let aql = AqlQuery::new("\
+    With @@room_eles,@@room_edges,@@pdms_eles,@@pdms_edges
+    for id in @ids
+    for room in 1 inbound id @@room_edges
+    return {
+        '_key': room._key,
+        'name': room.name,
+        'aabb': room.aabb,
+        'panels': [],
+    }").bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("ids", ids);
+    let result = database.aql_query::<RoomElement>(aql).await?;
+    Ok(result)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BranThroughRooms {
+    pub key: String,
+    pub rooms: Vec<String>,
+}
+
+/// 查询bran穿过了哪几个房间
+pub async fn query_bran_through_rooms_aql(bran_refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<HashMap<RefU64, Vec<String>>> {
+    let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, bran_refnos);
+    let aql = AqlQuery::new("
+    with @@pdms_eles,@@pdms_edges,@@room_eles,@@room_edges
+    for id in @ids
+    let names = (
+    for v in 1 inbound id @@pdms_edges
+        let name = (
+        for r in 1 inbound v._id @@room_edges return r.name)
+            filter length(name)!=0
+            return distinct name )
+    return {
+        id: id,
+        room_names: flatten(names)
+    }").bind_var("ids", ids)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+        .bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION);
+    let result = database.aql_query::<BranThroughRooms>(aql).await?;
+    let mut map = HashMap::new();
+    for r in result {
+        let Some(refno) = RefU64::from_arangodb_refno_str(&r.key) else { continue; };
+        map.entry(refno).or_insert(r.rooms);
+    }
+    Ok(map)
+}
 
 #[tokio::test]
 async fn test_get_room_aabb_from_room_code() -> anyhow::Result<()> {
@@ -1512,5 +1733,13 @@ async fn test_get_room_aabb_from_room_code() -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let result = query_room_aabb_from_room_code(vec!["R531".to_string()], &database).await?;
     dbg!(&result);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_equi_relation_floor_height() -> anyhow::Result<()> {
+    let mgr = AiosDBManager::init_form_config().await?;
+    let refno = "24381/100677".into();
+    mgr.query_equi_relation_floor_height(refno).await?;
     Ok(())
 }

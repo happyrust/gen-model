@@ -35,11 +35,21 @@ pub struct PdmsRefnoNameAql {
     pub name: String,
 }
 
+#[derive(Debug, Default,Clone, Serialize, Deserialize)]
+pub struct PdmsRoomNameAql {
+    pub refno: String,
+    pub room_name: String,
+    #[serde(default)]
+    pub b_rs: bool,
+}
+
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PdmsOwnerNameAql {
     #[serde_as(as = "DisplayFromStr")]
     pub refno: RefU64,
+    #[serde(default)]
+    pub name: String,
     #[serde_as(as = "DisplayFromStr")]
     pub owner: RefU64,
     pub owner_noun: String,
