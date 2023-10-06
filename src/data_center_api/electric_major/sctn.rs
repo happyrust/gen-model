@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Write;
 use crate::api::element::query_children;
 use crate::aql_api::children::{
@@ -14,10 +15,13 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::{EleTreeNode, RefU64};
 use arangors_lite::AqlQuery;
+use bevy_transform::prelude::Transform;
+use glam::{Vec3, Vec3A};
 use crate::graph_db::pdms_arango::ArDatabase;
 use serde::{Serialize, Deserialize};
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
+use crate::aql_api::pdms_room::query_room_name_from_refnos_aql;
 use crate::consts::{AQL_FOREIGN_EDGES_COLLECTION, AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION};
 
 /// 获取电气支吊架 型钢数据
@@ -31,6 +35,13 @@ pub async fn get_dq_support_sctn_data(
     let Ok(children) =
         query_refnos_travel_children_with_type_aql(&database, &refnos, sctn_types).await
         else { return Ok(DataCenterProject::default()); };
+    // 查询所有需要的房间号
+    let refnos = children.iter().map(|child| child.refno).collect::<Vec<RefU64>>();
+    let room_map = query_room_name_from_refnos_aql(refnos, &database).await?;
+    let room_map = room_map.into_iter()
+        .map(|x| (x.refno, x.room_name))
+        .collect::<HashMap<RefU64, String>>();
+
     for child in children.clone() {
         let Ok(attr) = aios_mgr.get_attr(child.refno).await else { continue; };
         let Some(gtype) = attr.get_str("GTYP") else {
@@ -38,7 +49,7 @@ pub async fn get_dq_support_sctn_data(
         };
         match gtype {
             "BOX" => {
-                let attr = get_dq_support_sctn_gtype_box_data(&child, aios_mgr)
+                let attr = get_dq_support_sctn_gtype_box_data(&child, &room_map, aios_mgr)
                     .await
                     .unwrap_or((vec![], "".to_string()));
                 result.push(DataCenterInstance {
@@ -50,7 +61,7 @@ pub async fn get_dq_support_sctn_data(
                 });
             }
             "BEAM" => {
-                let attr = get_dq_support_sctn_gtype_beam_data(&child, aios_mgr)
+                let attr = get_dq_support_sctn_gtype_beam_data(&child, &room_map, aios_mgr)
                     .await
                     .unwrap_or((vec![], "".to_string()));
                 result.push(DataCenterInstance {
@@ -183,94 +194,249 @@ pub async fn get_dq_support_sctn_data(
 /// 获取电气支吊架 型钢数据 gtype 为 box
 async fn get_dq_support_sctn_gtype_box_data(
     refno: &EleTreeNode,
+    room_map: &HashMap<RefU64, String>,
     aios_mgr: &AiosDBManager,
 ) -> anyhow::Result<(Vec<DataCenterAttr>, String)> {
     let database = aios_mgr.get_arango_db().await?;
-    let mut attr = Vec::new();
+    let mut data_center_attr = Vec::new();
     let desc = get_refno_desc(refno.refno, aios_mgr)
         .await
         .unwrap_or("".to_string());
-    attr.push(DataCenterAttr {
-        attribute_model_code: "PARTD15".to_string(),
-        value: AttrValue::AttrString(desc.clone()).into(),
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PART1".to_string(),
+        value: AttrValue::AttrString(refno.refno.to_refno_str()).into(),
     });
-    attr.push(DataCenterAttr {
+    let owner_refno = aios_mgr.get_ancestor_refno_till_type(refno.refno, &vec!["STRU"]);
+    // 往上找到STRU的NAME
+    let mut owner_name = "".to_string();
+    if let Some(owner_refno) = owner_refno {
+        let owner_attr = aios_mgr.get_attr(owner_refno).await.unwrap_or_default();
+        owner_name = owner_attr.get_name().unwrap_or("".to_string());
+    }
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PART2".to_string(),
+        value: AttrValue::AttrString(owner_name).into(),
+    });
+
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PART3".to_string(),
+        value: AttrValue::AttrString("方钢".to_string()).into(),
+    });
+
+    let transform = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or(Transform::default());
+    let pos = transform.translation;
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PART4".to_string(),
+        value: AttrValue::AttrVec3(pos).into(),
+    });
+    let attr = aios_mgr.get_attr(refno.refno).await.unwrap_or_default();
+    let ori = attr.get_vec3("ORI").unwrap_or(Vec3::ZERO);
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PART5".to_string(),
+        value: AttrValue::AttrVec3(ori).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD2".to_string(),
+        value: AttrValue::AttrString("SCTN".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD3".to_string(),
+        value: AttrValue::AttrString("方钢".to_string()).into(),
+    });
+    let spre_attr = aios_mgr.get_foreign_attrmap(refno.refno, "SPRE").unwrap_or_default();
+    let spre_name = spre_attr.get_name().unwrap_or("".to_string());
+    let spre_name_split = spre_name.split("-").collect::<Vec<_>>();
+
+    let spre_name_first = spre_name_split.first().unwrap_or(&"").to_string();
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD4".to_string(),
+        value: AttrValue::AttrString(spre_name_first).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD8".to_string(),
+        value: AttrValue::AttrString("F-SC1".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD9".to_string(),
+        value: AttrValue::AttrString("NA".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD10".to_string(),
+        value: AttrValue::AttrString("抗震I级".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PARTD11".to_string(),
         value: AttrValue::AttrString("Q355B".to_string()).into(),
     });
-    let spre_name = query_foreign_name_aql(refno.refno, vec!["SPRE", "SPRE"], &database)
-        .await?
-        .unwrap_or("".to_string());
-    let spre_name_split = spre_name.split("-").collect::<Vec<_>>();
-    if let Some(spre_name_split_last) = spre_name_split.last() {
-        let spre_name_split_last_split = spre_name_split_last.split("X").collect::<Vec<_>>();
-        if spre_name_split_last_split.len() >= 3 {
-            attr.push(DataCenterAttr {
-                attribute_model_code: "PARTDA26".to_string(),
-                value: AttrValue::AttrString(format!(
-                    "{}X{}",
-                    spre_name_split_last_split[0], spre_name_split_last_split[1]
-                ))
-                    .into(),
-            });
-            attr.push(DataCenterAttr {
-                attribute_model_code: "PARTDA27".to_string(),
-                value: AttrValue::AttrString(spre_name_split[2].to_string()).into(),
-            });
-        }
-    }
-    if let Ok(Some((poss, pose))) =
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD12".to_string(),
+        value: AttrValue::AttrString("mm".to_string()).into(),
+    });
+    let room_code = room_map.get(&refno.refno).map_or("".to_string(), |x| x.to_string());
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD14".to_string(),
+        value: AttrValue::AttrString(room_code).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD15".to_string(),
+        value: AttrValue::AttrString(desc.clone()).into(),
+    });
+    let catr_attr = aios_mgr.get_cat_attmap(refno.refno).unwrap_or_default();
+    // PARA1xPARA1xPARA2
+    let paras = catr_attr.get_f64_vec("PARA").unwrap_or(vec![]);
+    let para_0 = paras.get(0).map_or(0.0, |x| *x);
+    let para_1 = paras.get(1).map_or(0.0, |x| *x);
+    let para_2 = paras.get(2).map_or(0.0, |x| *x);
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD26".to_string(),
+        value: AttrValue::AttrString(format!("{}X{}X{}", para_0, para_1, para_2)).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD27".to_string(),
+        value: AttrValue::AttrFloat(para_1 as f32).into(),
+    });
+    let mut poss = Vec3::ZERO;
+    let mut pose = Vec3::ZERO;
+    let mut distance = 0.0;
+    if let Ok(Some((poss_q, pose_q))) =
         get_refno_world_poss_pose(refno.refno, &refno.noun, &database, aios_mgr).await
     {
-        attr.push(DataCenterAttr {
-            attribute_model_code: "PARTDA31".to_string(),
-            value: AttrValue::AttrVec3(pose).into(),
-        });
-        attr.push(DataCenterAttr {
-            attribute_model_code: "PARTDA32".to_string(),
-            value: AttrValue::AttrVec3(poss).into(),
-        });
-        let distance = pose.distance(poss);
-        attr.push(DataCenterAttr {
-            attribute_model_code: "PARTDA28".to_string(),
-            value: AttrValue::AttrFloat(distance).into(),
-        });
+        poss = poss_q;
+        pose = pose_q;
+        distance = pose.distance(poss);
     }
-    attr.push(DataCenterAttr {
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD6".to_string(),
+        value: AttrValue::AttrFloat(distance).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTDA28".to_string(),
+        value: AttrValue::AttrFloat(distance).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PARTDA29".to_string(),
         value: AttrValue::AttrString("全焊透".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTDA30".to_string(),
+        value: AttrValue::AttrString("".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTDA31".to_string(),
+        value: AttrValue::AttrVec3(pose).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTDA32".to_string(),
+        value: AttrValue::AttrVec3(poss).into(),
     });
     let ori_str = get_ori_angle_str(refno.refno, aios_mgr)
         .await
         .unwrap_or("".to_string());
-    attr.push(DataCenterAttr {
+    data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PARTDA33".to_string(),
         value: AttrValue::AttrString(ori_str).into(),
     });
-    attr.push(DataCenterAttr {
+    data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PARTDA34".to_string(),
-        value: AttrValue::AttrString("100".to_string()).into(),
+        value: AttrValue::AttrString("100mm".to_string()).into(),
     });
-    Ok((attr, desc))
+    Ok((data_center_attr, desc))
 }
 
 /// 获取电气支吊架 型钢数据 gtype 为 beam
 async fn get_dq_support_sctn_gtype_beam_data(
     refno: &EleTreeNode,
+    room_map: &HashMap<RefU64, String>,
     aios_mgr: &AiosDBManager,
 ) -> anyhow::Result<(Vec<DataCenterAttr>, String)> {
     let database = aios_mgr.get_arango_db().await?;
-    let mut attr = Vec::new();
+    let mut data_center_attr = Vec::new();
     let desc = get_refno_desc(refno.refno, aios_mgr)
         .await
         .unwrap_or("".to_string());
-    attr.push(DataCenterAttr {
-        attribute_model_code: "PARTD15".to_string(),
-        value: AttrValue::AttrString(desc.clone()).into(),
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PART1".to_string(),
+        value: AttrValue::AttrString(refno.refno.to_refno_str()).into(),
     });
-    attr.push(DataCenterAttr {
+    let owner_refno = aios_mgr.get_ancestor_refno_till_type(refno.refno, &vec!["STRU"]);
+    // 往上找到STRU的NAME
+    let mut owner_name = "".to_string();
+    if let Some(owner_refno) = owner_refno {
+        let owner_attr = aios_mgr.get_attr(owner_refno).await.unwrap_or_default();
+        owner_name = owner_attr.get_name().unwrap_or("".to_string());
+    }
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PART2".to_string(),
+        value: AttrValue::AttrString(owner_name).into(),
+    });
+
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PART3".to_string(),
+        value: AttrValue::AttrString("方钢".to_string()).into(),
+    });
+
+    let transform = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or(Transform::default());
+    let pos = transform.translation;
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PART4".to_string(),
+        value: AttrValue::AttrVec3(pos).into(),
+    });
+    let attr = aios_mgr.get_attr(refno.refno).await.unwrap_or_default();
+    let ori = attr.get_vec3("ORI").unwrap_or(Vec3::ZERO);
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PART5".to_string(),
+        value: AttrValue::AttrVec3(ori).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD2".to_string(),
+        value: AttrValue::AttrString("SCTN".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD3".to_string(),
+        value: AttrValue::AttrString("方钢".to_string()).into(),
+    });
+    let spre_attr = aios_mgr.get_foreign_attrmap(refno.refno, "SPRE").unwrap_or_default();
+    let spre_name = spre_attr.get_name().unwrap_or("".to_string());
+    let spre_name_split = spre_name.split("-").collect::<Vec<_>>();
+
+    let spre_name_first = spre_name_split.first().unwrap_or(&"").to_string();
+    let spre_name_last = spre_name_split.last().unwrap_or(&"").to_string();
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD4".to_string(),
+        value: AttrValue::AttrString(spre_name_first).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD6".to_string(),
+        value: AttrValue::AttrString("1".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD8".to_string(),
+        value: AttrValue::AttrString("F-SC1".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD9".to_string(),
+        value: AttrValue::AttrString("NA".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD10".to_string(),
+        value: AttrValue::AttrString("抗震I级".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PARTD11".to_string(),
         value: AttrValue::AttrString("Q355B".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD12".to_string(),
+        value: AttrValue::AttrString("个".to_string()).into(),
+    });
+    let room_code = room_map.get(&refno.refno).map_or("".to_string(), |x| x.to_string());
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD14".to_string(),
+        value: AttrValue::AttrString(room_code).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTD15".to_string(),
+        value: AttrValue::AttrString(desc.clone()).into(),
     });
     let children = query_children_eles(&database, refno.refno).await?;
     let mut fitt = None;
@@ -281,88 +447,83 @@ async fn get_dq_support_sctn_gtype_beam_data(
         }
     }
     let fitt_spre_name = if let Some(fitt) = fitt {
-        Some(
-            query_foreign_name_aql(fitt, vec!["SPRE", "SPRE"], &database)
-                .await
-                .unwrap_or(None)
-                .unwrap_or("".to_string()),
-        )
+        let spre_attr = aios_mgr.get_foreign_attrmap(fitt, "SPRE").unwrap_or_default();
+        Some(spre_attr.get_name().unwrap_or("".to_string()))
     } else {
         None
     };
     match fitt_spre_name.clone() {
         Some(s) if s.contains("Z2") => {
-            attr.push(DataCenterAttr {
+            data_center_attr.push(DataCenterAttr {
                 attribute_model_code: "PART3".to_string(),
                 value: AttrValue::AttrString("异型钢".to_string()).into(),
             });
-            attr.push(DataCenterAttr {
+            data_center_attr.push(DataCenterAttr {
+                attribute_model_code: "PART26".to_string(),
+                value: AttrValue::AttrString("异型钢".to_string()).into(),
+            });
+            data_center_attr.push(DataCenterAttr {
                 attribute_model_code: "PARTDB29".to_string(),
                 value: AttrValue::AttrString("异型钢/异型钢".to_string()).into(),
             });
-            attr.push(DataCenterAttr {
+            data_center_attr.push(DataCenterAttr {
                 attribute_model_code: "PARTDB30".to_string(),
                 value: AttrValue::AttrString("异型钢".to_string()).into(),
             });
         }
         Some(s) if s.contains("Z3") => {
-            attr.push(DataCenterAttr {
+            data_center_attr.push(DataCenterAttr {
                 attribute_model_code: "PART3".to_string(),
                 value: AttrValue::AttrString("方钢".to_string()).into(),
             });
-            attr.push(DataCenterAttr {
+            data_center_attr.push(DataCenterAttr {
+                attribute_model_code: "PART26".to_string(),
+                value: AttrValue::AttrString("异型钢".to_string()).into(),
+            });
+            data_center_attr.push(DataCenterAttr {
                 attribute_model_code: "PARTDB29".to_string(),
                 value: AttrValue::AttrString("槽钢/方钢".to_string()).into(),
             });
-            attr.push(DataCenterAttr {
+            data_center_attr.push(DataCenterAttr {
                 attribute_model_code: "PARTDB30".to_string(),
                 value: AttrValue::AttrString("槽钢".to_string()).into(),
             });
         }
-        None => {
-            attr.push(DataCenterAttr {
+        _ => {
+            data_center_attr.push(DataCenterAttr {
                 attribute_model_code: "PART3".to_string(),
                 value: AttrValue::AttrString("槽钢".to_string()).into(),
             });
-            attr.push(DataCenterAttr {
+            data_center_attr.push(DataCenterAttr {
+                attribute_model_code: "PART26".to_string(),
+                value: AttrValue::AttrString("异型钢".to_string()).into(),
+            });
+            data_center_attr.push(DataCenterAttr {
                 attribute_model_code: "PARTDB29".to_string(),
                 value: AttrValue::AttrString("槽钢/槽钢".to_string()).into(),
             });
-            attr.push(DataCenterAttr {
+            data_center_attr.push(DataCenterAttr {
                 attribute_model_code: "PARTDB30".to_string(),
                 value: AttrValue::AttrString("槽钢/槽钢".to_string()).into(),
             });
         }
-        _ => {}
     }
 
-    if let Ok(Some((poss, pose))) =
+    let mut poss = Vec3::ZERO;
+    let mut pose = Vec3::ZERO;
+    if let Ok(Some((poss_q, pose_q))) =
         get_refno_world_poss_pose(refno.refno, &refno.noun, &database, aios_mgr).await
     {
-        let distance = poss.distance(pose);
-        attr.push(DataCenterAttr {
-            attribute_model_code: "PARTDB27".to_string(),
-            value: AttrValue::AttrFloat(distance).into(),
-        });
-        attr.push(DataCenterAttr {
-            attribute_model_code: "PARTDB36".to_string(),
-            value: AttrValue::AttrVec3(poss).into(),
-        });
+        poss = poss_q;
+        pose = pose_q;
     }
 
-    let spre_name = query_foreign_name_aql(refno.refno, vec!["SPRE", "SPRE"], &database)
-        .await?
-        .unwrap_or("".to_string());
-    let spre_name_split_last = spre_name
-        .split("-")
-        .collect::<Vec<_>>()
-        .last()
-        .unwrap_or(&"")
-        .to_string();
-    attr.push(DataCenterAttr {
-        attribute_model_code: "PARTDB32".to_string(),
-        value: AttrValue::AttrString(spre_name_split_last.to_string()).into(),
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTDB27".to_string(),
+        value: AttrValue::AttrString(spre_name_last.clone()).into(),
     });
+
+
     let fitt_spre_name_split = if let Some(fitt_spre_name) = fitt_spre_name {
         fitt_spre_name
             .split("-")
@@ -371,23 +532,31 @@ async fn get_dq_support_sctn_gtype_beam_data(
             .unwrap_or(&"")
             .to_string()
     } else {
-        spre_name_split_last
+        spre_name_last
     };
-    attr.push(DataCenterAttr {
+    data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PARTDB33".to_string(),
         value: AttrValue::AttrString(fitt_spre_name_split.to_string()).into(),
     });
-    attr.push(DataCenterAttr {
+    data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PARTDB35".to_string(),
         value: AttrValue::AttrString("连续角焊".to_string()).into(),
     });
-    attr.push(DataCenterAttr {
-        attribute_model_code: "PARTDB38".to_string(),
-        value: AttrValue::AttrString("M12".to_string()).into(),
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTDB36".to_string(),
+        value: AttrValue::AttrVec3(poss).into(),
     });
-    attr.push(DataCenterAttr {
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTDB37".to_string(),
+        value: AttrValue::AttrVec3(pose).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "PARTDB38".to_string(),
+        value: AttrValue::AttrString("".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PARTDB39".to_string(),
-        value: AttrValue::AttrString("A4-80".to_string()).into(),
+        value: AttrValue::AttrString("不锈钢".to_string()).into(),
     });
     let bran_refno = aios_mgr
         .query_around_owner_within_radius(refno.refno, true, None, true, &["BRAN"])
@@ -396,6 +565,9 @@ async fn get_dq_support_sctn_gtype_beam_data(
     let mut ftub = None;
     if !bran_refno.is_empty() {
         let bran_refno = bran_refno[0];
+        let bran_attr = aios_mgr.get_attr(bran_refno).await.unwrap_or_default();
+        let bran_name = bran_attr.get_name().unwrap_or("".to_string());
+
         let children = query_children_order_aql(&database, bran_refno).await?;
         // 找到第一个 ftub
         for child in children {
@@ -413,29 +585,37 @@ async fn get_dq_support_sctn_gtype_beam_data(
                     .await
                     .unwrap_or("".to_string());
                 let spacing = get_tray_bolt_spacing(&pspec, paras[0] as f32);
-                attr.push(DataCenterAttr {
+                data_center_attr.push(DataCenterAttr {
                     attribute_model_code: "PARTDB40".to_string(),
                     value: AttrValue::AttrString(spacing).into(),
                 });
                 let connection_method = get_tray_connection_method(paras[0] as f32);
-                attr.push(DataCenterAttr {
+                data_center_attr.push(DataCenterAttr {
                     attribute_model_code: "PARTDB41".to_string(),
                     value: AttrValue::AttrString(connection_method).into(),
+                });
+                data_center_attr.push(DataCenterAttr {
+                    attribute_model_code: "PARTDB42".to_string(),
+                    value: AttrValue::AttrString(bran_name).into(),
                 });
             }
         }
     }
     if bran_refno.is_empty() || ftub.is_none() {
-        attr.push(DataCenterAttr {
+        data_center_attr.push(DataCenterAttr {
             attribute_model_code: "PARTDB40".to_string(),
             value: AttrValue::AttrString("".to_string()).into(),
         });
-        attr.push(DataCenterAttr {
+        data_center_attr.push(DataCenterAttr {
             attribute_model_code: "PARTDB41".to_string(),
             value: AttrValue::AttrString("".to_string()).into(),
         });
+        data_center_attr.push(DataCenterAttr {
+            attribute_model_code: "PARTDB42".to_string(),
+            value: AttrValue::AttrString("".to_string()).into(),
+        });
     }
-    Ok((attr, desc))
+    Ok((data_center_attr, desc))
 }
 
 #[serde_as]

@@ -7,7 +7,6 @@ use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
 use crate::api::element::query_name;
-use crate::api::room_code::query_room_code;
 use crate::aql_api::foreign_refnos::query_foreign_name_aql;
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::aql_api::tubi::query_tubi_from_bran;

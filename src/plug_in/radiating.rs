@@ -21,7 +21,6 @@ use dashmap::DashMap;
 use nom::Parser;
 use once_cell::sync::OnceCell;
 use crate::api::element::query_id_from_name;
-use crate::api::room_code::query_room_code;
 use crate::aql_api::pdms_element::query_id_from_names_aql;
 use crate::aql_api::pdms_room::{get_room_code_from_attr, query_bran_through_rooms_aql, query_room_code_from_owner, query_room_codes_from_owners, query_room_name_from_refno_aql};
 use crate::aql_api::PdmsRoomNameAql;

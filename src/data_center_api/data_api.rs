@@ -374,7 +374,7 @@ pub(crate) async fn get_refno_desc(
     //     return Ok("".to_string());
     // };
     // let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok("".to_string()); };
-    let attr = aios_mgr.get_cat_attmap(refno)?;
+    let Some(attr) = aios_mgr.get_cat_attmap(refno) else { return Ok("".to_string()); };
     Ok(attr.get_str("DESC").unwrap_or("").to_string())
 }
 
@@ -592,7 +592,7 @@ pub(crate) async fn get_ori_angle_str(
     refno: RefU64,
     aios_mgr: &AiosDBManager,
 ) -> anyhow::Result<String> {
-    let Ok(ori) = aios_mgr.get_implicit_attr(refno, Some(vec!["ORI"])).await else {
+    let Ok(ori) = aios_mgr.get_attr(refno).await else {
         return Ok("".to_string());
     };
     let Some(ori) = ori.get_vec3("ORI") else {

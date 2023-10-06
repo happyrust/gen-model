@@ -4,7 +4,6 @@ use anyhow::anyhow;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::api::element::query_name;
-use crate::api::room_code::query_room_code;
 use crate::aql_api::pdms_room::*;
 use crate::consts::PUHUA_GY_MATERIAL_TABLE;
 use crate::data_center_api::pipe::get_datacenter_bran_data;
