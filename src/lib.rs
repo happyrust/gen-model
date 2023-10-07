@@ -46,6 +46,7 @@ pub mod spatial_tree;
 pub mod ansys;
 pub mod test;
 pub mod other_plat;
+pub mod version_management;
 
 pub mod viewer;
 pub mod plug_in;
