@@ -10,16 +10,16 @@ pub async fn get_dq_stru_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
     let database = aios_mgr.get_arango_db().await?;
     if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos, vec!["STRU".to_string()]).await {
         for child in children {
-            let mut attr = Vec::new();
-            attr.push(DataCenterAttr {
+            let mut data_center_attr = Vec::new();
+            data_center_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECAB1".to_string(),
                 value: child.name.to_string(),
             });
-            attr.push(DataCenterAttr {
+            data_center_attr.push(DataCenterAttr {
                 attribute_model_code: "PARTDG26".to_string(),
                 value: "M20".to_string(),
             });
-            attr.push(DataCenterAttr {
+            data_center_attr.push(DataCenterAttr {
                 attribute_model_code: "PARTD11".to_string(),
                 value: "不锈钢".to_string(),
             });
@@ -28,7 +28,7 @@ pub async fn get_dq_stru_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> 
                 project_code: aios_mgr.db_option.project_code.to_string(),
                 instance_code: child.name,
                 version: get_refno_latest_version(),
-                attributes: attr,
+                attributes: data_center_attr,
             });
         }
     }

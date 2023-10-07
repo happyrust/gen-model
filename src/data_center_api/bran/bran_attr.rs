@@ -135,7 +135,7 @@ pub async fn get_sg_pipe_bran_name(refnos: Vec<RefU64>, database: &ArDatabase) -
 pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
-    let regex = Regex::new(r"\d.*:\d")?; // 判断字符串是否包含有多个数字加一个:
+
     if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos,
                                                                      vec!["BRAN".to_string()]).await {
         let bran_refnos = children.iter().map(|c| c.refno).collect::<Vec<RefU64>>();
@@ -371,6 +371,8 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 .filter(|c| RefU64::from_url_refno(&c.refno).is_some())
                 .map(|e| (RefU64::from_url_refno(&e.refno).unwrap(), e.name))
                 .collect::<HashMap<RefU64, String>>();
+            let regex = Regex::new(r"\d.*:\d")?; // 判断字符串是否包含有多个数字加一个:
+
             for child in bran_children {
                 // let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], &database).await?.unwrap_or_default();
                 let spre_name = children_spre_map.get(&child.refno).unwrap_or(&"".to_string()).clone();
@@ -385,7 +387,6 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 if object_code.is_none() { continue; };
 
                 let mut attr = Vec::new();
-
                 let world_transform = aios_mgr.get_world_transform(child.refno)?.unwrap_or_default();
                 attr.push(DataCenterAttr {
                     attribute_model_code: "PART4".to_string(),

@@ -620,7 +620,7 @@ async fn get_dq_support_sctn_gtype_beam_data(
 
 #[serde_as]
 #[derive(Clone, Default, Serialize, Deserialize)]
-struct EleNodeWithSpreName {
+pub struct EleNodeWithSpreName {
     #[serde_as(as = "DisplayFromStr")]
     pub refno: RefU64,
     pub noun: String,
