@@ -5,6 +5,7 @@ use std::vec;
 use aios_core::data_center::AttrValue::{AttrIntArray, AttrMap, AttrString};
 use aios_core::data_center::{AttrValue, CableWeight, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::options::DbOption;
+use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
 use aios_core::pdms_types::{NamedAttrValue, PdmsElement, RefU64};
 use aios_core::pdms_user::RefnoMajor;
 use anyhow::anyhow;
@@ -15,9 +16,10 @@ use regex::Regex;
 use serde::{Serialize, Deserialize};
 use crate::api::attr::query_explicit_attr;
 use crate::api::children::query_ancestor_refnos_till_type_aql;
+use crate::aql_api::attr_map::query_refnos_point_map_aql;
 use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_children_refnos, query_refnos_belong_major, query_refnos_travel_children_with_type_aql, query_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql, query_foreign_refnos_aql};
-use crate::aql_api::pdms_room::{query_room_codes_from_owner, query_room_name_from_owner_aql, query_room_name_from_refno_aql};
+use crate::aql_api::pdms_room::{query_room_codes_from_owner, query_room_name_from_owner_aql, query_room_name_from_refno_aql, query_room_name_from_refnos_aql};
 use crate::data_center_api::bran::atta::get_data_center_atta_attr;
 use crate::data_center_api::bran::cap::get_data_center_cap_attr;
 use crate::data_center_api::bran::coup::get_data_center_coup_attr;
@@ -27,7 +29,7 @@ use crate::data_center_api::bran::flan::get_data_center_flan_attr;
 use crate::data_center_api::bran::gask::get_data_center_gask_attr;
 use crate::data_center_api::bran::olet::get_data_center_olet_attr;
 use crate::data_center_api::bran::redu::get_data_center_redu_attr;
-use crate::data_center_api::bran::tee::get_data_center_tee_attr;
+use crate::data_center_api::bran::tee::{get_data_center_tee_attr, get_dq_tee_data};
 use crate::data_center_api::bran::tubi::get_data_center_tubi_attr;
 use crate::data_center_api::bran::weld::get_data_center_weld_attr;
 use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_latest_version, get_refno_paras, get_refnos_arrive_leave_info};
@@ -150,12 +152,18 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
         // 找到每个bran所属的site的name
         for bran in children {
             let bran_children = aios_mgr.query_children_eles_order(bran.refno, &vec![], &vec![]).await?;
-            // let room_name = query_room_name_from_refno_aql(bran.refno, &database).await?.unwrap_or("".to_string());
+            let bran_children_refnos = bran_children.iter().map(|x| x.refno).collect::<Vec<_>>();
+            let room_name = query_room_name_from_refnos_aql(bran_children_refnos, &database).await.unwrap_or(vec![]);
+            let bran_children_room_map = room_name
+                .into_iter()
+                .map(|x| (x.refno, x.room_name))
+                .collect::<HashMap<RefU64, String>>();
+
             let bran_attr = aios_mgr.get_attr(bran.refno).await?;
             let room_name = room_name_map.get(&bran.refno).unwrap_or(&"".to_string()).clone();
             let pspe_name = query_foreign_name_aql(bran.refno, vec!["PSPE", "PSPE"], &database).await?;
             let mut kind = "".to_string();
-            if let Some(pspe_name) = pspe_name {
+            if let Some(ref pspe_name) = pspe_name {
                 match pspe_name {
                     s if s.contains("Ladder") => { kind = "梯架".to_string() }
                     s if s.contains("Ventilated") => { kind = "带孔托盘".to_string() }
@@ -172,10 +180,21 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
             let mut b_climbing = false;
             let mut b_wheel = false;
             let mut b_find_ftub = false;
+            let mut b_cover = false;
+            let mut ftub_paras = vec![];
             let mut bend_para_11 = 0.0;
             // 找到bran下的第一个ftub
-            for child in &bran_children {
+            for (idx, child) in bran_children.iter().enumerate() {
                 if child.noun == "ATTA" { continue; }
+                // BRAN下第一个元件（去除ATTA）的DESP[3]为1,则为是，否则为否。
+                if idx == 0 {
+                    let desp = get_refno_desp(child.refno, aios_mgr).await.unwrap_or(vec![]);
+                    if desp.len() > 4 {
+                        if desp[3] == 1.0 {
+                            b_cover = true;
+                        }
+                    }
+                }
                 if bridge_dir.is_empty() {
                     let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], &database).await?;
                     if let Some(spre_name) = spre_name {
@@ -189,10 +208,11 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
 
                 if child.noun == "FTUB" {
                     if !b_find_ftub {
-                        let mut paras = get_refno_paras(child.refno, aios_mgr)?;
+                        let paras = get_refno_paras(child.refno, aios_mgr)?;
                         tray_width = paras.get(0).unwrap_or(&0.0).to_string();
                         tray_height = paras.get(1).unwrap_or(&0.0).to_string();
                         b_find_ftub = true;
+                        ftub_paras = paras;
                     }
                 }
                 if !b_climbing {
@@ -359,12 +379,19 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
             result.push(DataCenterInstance {
                 object_model_code: "ERECB".to_string(),
                 project_code: aios_mgr.db_option.project_code.to_string(),
-                instance_code: bran.name,
+                instance_code: bran.name.clone(),
                 version: get_refno_latest_version(),
                 attributes: erecb_attr,
             });
 
             // 获取 bran下元件的数据
+            let mut point_type = vec!["TEE".to_string(), "BEND".to_string()];
+            let need_query_point = bran_children.iter()
+                .filter(|child| point_type.contains(&child.noun))
+                .map(|child| child.refno).collect::<Vec<RefU64>>();
+            let points_map = query_refnos_point_map_aql(need_query_point, &database).await.unwrap_or(vec![]);
+            let points_map = points_map.into_iter().map(|x| (x.refno, x)).collect::<HashMap<RefU64, InstPointMap>>();
+
             let bran_refnos = bran_children.iter().map(|child| child.refno).collect::<Vec<RefU64>>();
             let bran_children_spre = query_foreign_refnos_aql(&database, bran_refnos, vec!["SPRE".to_string(), "SPRE".to_string()]).await?;
             let children_spre_map = bran_children_spre.into_iter()
@@ -372,14 +399,18 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 .map(|e| (RefU64::from_url_refno(&e.refno).unwrap(), e.name))
                 .collect::<HashMap<RefU64, String>>();
             let regex = Regex::new(r"\d.*:\d")?; // 判断字符串是否包含有多个数字加一个:
-
             for child in bran_children {
                 // let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], &database).await?.unwrap_or_default();
                 let spre_name = children_spre_map.get(&child.refno).unwrap_or(&"".to_string()).clone();
+                let room_name = bran_children_room_map.get(&child.refno).map_or("".to_string(), |x| x.to_string());
                 let mut object_code = None;
                 match child.noun.as_str() {
                     "FTUB" => { if spre_name.contains("RISER") { object_code = Some("PARTEH") } else { object_code = Some("PARTEF") } }
-                    "TEE" => { object_code = Some("PARTEA") }
+                    "TEE" => {
+                        let Ok(r) = get_dq_tee_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
+                                                    &kind, b_cover, &points_map, aios_mgr).await else { continue; };
+                        result.push(r);
+                    }
                     "CROS" => { object_code = Some("PARTEJ") }
                     "BEND" => { if regex.is_match(&spre_name) { object_code = Some("PARTEB") } }
                     _ => {}
