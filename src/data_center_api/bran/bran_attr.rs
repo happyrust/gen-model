@@ -20,12 +20,12 @@ use crate::aql_api::attr_map::query_refnos_point_map_aql;
 use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_children_refnos, query_refnos_belong_major, query_refnos_travel_children_with_type_aql, query_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql, query_foreign_refnos_aql};
 use crate::aql_api::pdms_room::{query_room_codes_from_owner, query_room_name_from_owner_aql, query_room_name_from_refno_aql, query_room_name_from_refnos_aql};
-use crate::data_center_api::bran::atta::get_data_center_atta_attr;
-use crate::data_center_api::bran::bend::get_dq_bend_data;
+use crate::data_center_api::bran::atta::{get_data_center_atta_attr, get_dq_atta_data};
+use crate::data_center_api::bran::bend::{get_dq_bend_angle_data, get_dq_bend_data};
 use crate::data_center_api::bran::cap::get_data_center_cap_attr;
 use crate::data_center_api::bran::coup::get_data_center_coup_attr;
 use crate::data_center_api::bran::cros::{get_data_center_cros_attr, get_dq_cros_data};
-use crate::data_center_api::bran::elbo::get_data_center_elbo_attr;
+use crate::data_center_api::bran::elbo::{get_data_center_elbo_attr, get_dq_elbo_spre_data};
 use crate::data_center_api::bran::flan::get_data_center_flan_attr;
 use crate::data_center_api::bran::ftub::*;
 use crate::data_center_api::bran::gask::get_data_center_gask_attr;
@@ -387,7 +387,7 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
             });
 
             // 获取 bran下元件的数据
-            let mut point_type = vec!["TEE".to_string(), "BEND".to_string()];
+            let mut point_type = vec!["TEE".to_string(), "BEND".to_string(), "FTUB".to_string(), "CROS".to_string(), "BEND".to_string()];
             let need_query_point = bran_children.iter()
                 .filter(|child| point_type.contains(&child.noun))
                 .map(|child| child.refno).collect::<Vec<RefU64>>();
@@ -406,14 +406,30 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 let spre_name = children_spre_map.get(&child.refno).unwrap_or(&"".to_string()).clone();
                 let room_name = bran_children_room_map.get(&child.refno).map_or("".to_string(), |x| x.to_string());
                 match child.noun.as_str() {
+                    "ATTA" => {
+                        if spre_name.contains("LAS") {
+                            let Ok(r) = get_dq_atta_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
+                                                         aios_mgr).await else { continue; };
+                            result.push(r);
+                        }
+                    }
+                    "ELBO" => {
+                        if spre_name.contains("LED") || spre_name.contains("LEU") {
+                            let attr = aios_mgr.get_attr(child.refno).await.unwrap_or_default();
+                            let angle = attr.get_f32("ANGL").unwrap_or(0.0);
+                            let Ok(r) = get_dq_elbo_spre_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
+                                                              angle, aios_mgr).await else { continue; };
+                            result.push(r);
+                        }
+                    }
                     "FTUB" => {
                         if spre_name.contains("RISER") {
                             let Ok(r) = get_dq_ftub_contains_riser_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
-                                                                            aios_mgr).await else { continue; };
+                                                                        aios_mgr).await else { continue; };
                             result.push(r);
                         } else if spre_name.contains("RDivider") {
                             let Ok(r) = get_dq_ftub_contains_rdivider_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
-                                                                            &points_map, aios_mgr).await else { continue; };
+                                                                           &points_map, aios_mgr).await else { continue; };
                             result.push(r);
                         } else {
                             let Ok(r) = get_dq_ftub_data(&child, &bran.name, &spre_name, &room_name,
@@ -428,18 +444,27 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                     }
                     "CROS" => {
                         let Ok(r) = get_dq_cros_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
-                                                    &kind, b_cover, &points_map, aios_mgr).await else { continue; };
+                                                     &kind, b_cover, &points_map, aios_mgr).await else { continue; };
                         result.push(r);
                     }
                     "REDU" => {
                         let Ok(r) = get_dq_redu_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
-                                                     &kind, b_cover, &points_map, aios_mgr).await else { continue; };
+                                                     aios_mgr).await else { continue; };
                         result.push(r);
                     }
                     "BEND" => {
                         if regex.is_match(&spre_name) {
                             let Ok(r) = get_dq_bend_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
                                                          &kind, b_cover, &points_map, aios_mgr).await else { continue; };
+                            result.push(r);
+                        } else {
+                            let attr = aios_mgr.get_attr(child.refno).await.unwrap_or_default();
+                            // angle！=45/90
+                            let angle = attr.get_f32("ANGL").unwrap_or(0.0);
+                            if angle == 45.0 || angle == 90.0 { continue; };
+                            let Ok(r) = get_dq_bend_angle_data(&child, &bran.name, &spre_name,
+                                                               &room_name, &ftub_paras, angle,
+                                                               aios_mgr).await else { continue; };
                             result.push(r);
                         }
                     }

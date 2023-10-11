@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::RefU64;
 use arangors_lite::AqlQuery;
 use bevy_transform::prelude::Transform;
 use glam::Vec3;
+use parry2d::utils::Array1;
 use crate::aql_api::children::query_ancestor_till_types_aql;
+use crate::aql_api::pdms_room::query_room_name_from_refnos_aql;
 use crate::consts::{AQL_FOREIGN_EDGES_COLLECTION, AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION};
 use crate::data_center_api::data_api::{get_refno_desc, get_refno_desi_desc, get_refno_latest_version, get_refno_paras};
 use crate::data_center_api::electric_major::sctn::EleNodeWithSpreName;
@@ -16,6 +19,13 @@ pub async fn get_dq_fixing_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -
     let database = aios_mgr.get_arango_db().await?;
     let mut result = Vec::new();
     let fixings = query_dq_circular_plate(refnos, &database).await.unwrap_or(vec![]);
+    let fixing_refnos = fixings.iter().map(|x| x.refno).collect::<Vec<RefU64>>();
+    let room_name = query_room_name_from_refnos_aql(fixing_refnos, &database).await.unwrap_or(vec![]);
+    let room_map = room_name
+        .into_iter()
+        .map(|x| (x.refno, x.room_name))
+        .collect::<HashMap<RefU64, String>>();
+
     for fixing in fixings {
         let mut fixing_attrs = Vec::new();
         fixing_attrs.push(DataCenterAttr {
@@ -51,19 +61,39 @@ pub async fn get_dq_fixing_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -
             attribute_model_code: "PARTD4".to_string(),
             value: AttrValue::AttrString(spre_name.clone()).into(),
         });
+        let room_name = room_map.get(&fixing.refno).map_or("".to_string(), |x| x.to_string());
+        fixing_attrs.push(DataCenterAttr {
+            attribute_model_code: "PARTD14".to_string(),
+            value: AttrValue::AttrString(room_name).into(),
+        });
+        let mut object_code = "".to_string();
         match spre_name {
             s if s.contains("JT3") => {
                 get_dq_finxing_jt_3(&fixing, aios_mgr, &database, &mut fixing_attrs, false).await;
+                object_code = "PARTDK".to_string();
             }
             s if s.contains("JT4") => {
                 get_dq_finxing_jt_3(&fixing, aios_mgr, &database, &mut fixing_attrs, true).await;
+                object_code = "PARTDK".to_string();
+            }
+            s if s.contains("C1") => {
+                get_dq_finxing_c1(&s, &mut fixing_attrs);
+                object_code = "PARTDJ".to_string()
+            }
+            s if s.contains("C2") => {
+                get_dq_finxing_c2(fixing.refno,&s, &mut fixing_attrs,aios_mgr);
+                object_code = "PARTDE".to_string()
+            }
+            s if s.contains("MGB") => {
+                get_dq_finxing_mgb(fixing.refno, &s, &mut fixing_attrs, aios_mgr);
+                object_code = "PARTDH".to_string()
             }
             _ => {
                 continue;
             }
         }
         result.push(DataCenterInstance {
-            object_model_code: "PARTDK".to_string(),
+            object_model_code: object_code,
             project_code: aios_mgr.db_option.project_code.to_string(),
             instance_code: fixing.refno.to_refno_str(),
             version: get_refno_latest_version(),
@@ -132,8 +162,6 @@ async fn get_dq_finxing_jt_3(fixing: &EleNodeWithSpreName,
         attribute_model_code: "PARTD12".to_string(),
         value: AttrValue::AttrString("个".to_string()).into(),
     });
-
-    let mut stru_desc = None;
     let desc = get_refno_desc(fixing.refno, &aios_mgr)
         .await
         .unwrap_or("".to_string());
@@ -141,6 +169,7 @@ async fn get_dq_finxing_jt_3(fixing: &EleNodeWithSpreName,
         attribute_model_code: "PARTD15".to_string(),
         value: desc,
     });
+    let mut stru_desc = None;
     let paras = get_refno_paras(fixing.refno, &aios_mgr)
         .unwrap_or(Vec::new());
     fixing_attrs.push(DataCenterAttr {
@@ -196,6 +225,166 @@ async fn get_dq_finxing_jt_3(fixing: &EleNodeWithSpreName,
         value: AttrValue::AttrFloat(
             partdk_4
         ).into(),
+    });
+}
+
+fn get_dq_finxing_c1(spre_name: &str,
+                     mut fixing_attrs: &mut Vec<DataCenterAttr>) {
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PART3".to_string(),
+        value: AttrValue::AttrString("螺纹杆".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD3".to_string(),
+        value: AttrValue::AttrString("欧姆卡".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD4".to_string(),
+        value: AttrValue::AttrString("SCTN".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD6".to_string(),
+        value: AttrValue::AttrString("1".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD8".to_string(),
+        value: AttrValue::AttrString("F-SC1".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD9".to_string(),
+        value: AttrValue::AttrString("NA".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD10".to_string(),
+        value: AttrValue::AttrString("抗震I级".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD11".to_string(),
+        value: AttrValue::AttrString("Q355B".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD12".to_string(),
+        value: AttrValue::AttrString("个".to_string()).into(),
+    });
+    let spre_last = spre_name.split("-").collect::<Vec<&str>>().last().map_or("".to_string(), |x| x.to_string());
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD15".to_string(),
+        value: spre_last,
+    });
+}
+
+fn get_dq_finxing_c2(refno:RefU64,
+                     spre_name: &str,
+                     mut fixing_attrs: &mut Vec<DataCenterAttr>,
+                    aios_mgr:&AiosDBManager) {
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PART3".to_string(),
+        value: AttrValue::AttrString("管卡".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD3".to_string(),
+        value: AttrValue::AttrString("管卡".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD4".to_string(),
+        value: AttrValue::AttrString(spre_name.to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD6".to_string(),
+        value: AttrValue::AttrString("1".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD8".to_string(),
+        value: AttrValue::AttrString("F-SC1".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD9".to_string(),
+        value: AttrValue::AttrString("NA".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD10".to_string(),
+        value: AttrValue::AttrString("抗震I级".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD11".to_string(),
+        value: AttrValue::AttrString("Q355B".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD12".to_string(),
+        value: AttrValue::AttrString("个".to_string()).into(),
+    });
+    let spre_last = spre_name.split("-").collect::<Vec<&str>>().last().map_or("".to_string(), |x| x.to_string());
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD15".to_string(),
+        value: spre_last,
+    });
+    let paras = get_refno_paras(refno, aios_mgr).unwrap_or(vec![]);
+    let para_10 = paras.get(9).map_or(0.0, |x| *x);
+    let para_8 = paras.get(7).map_or(0.0, |x| *x);
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTDE26".to_string(),
+        value: AttrValue::AttrFloat(para_10 as f32).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTDE27".to_string(),
+        value: AttrValue::AttrFloat(para_8 as f32).into(),
+    });
+}
+
+fn get_dq_finxing_mgb(refno: RefU64, spre_name: &str,
+                      mut fixing_attrs: &mut Vec<DataCenterAttr>, aios_mgr: &AiosDBManager) {
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PART3".to_string(),
+        value: AttrValue::AttrString("螺纹杆".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD3".to_string(),
+        value: AttrValue::AttrString("螺纹杆".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD4".to_string(),
+        value: AttrValue::AttrString(spre_name.to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD6".to_string(),
+        value: AttrValue::AttrString("1".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD8".to_string(),
+        value: AttrValue::AttrString("F-SC1".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD9".to_string(),
+        value: AttrValue::AttrString("NA".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD10".to_string(),
+        value: AttrValue::AttrString("抗震I级".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD11".to_string(),
+        value: AttrValue::AttrString("Q355B".to_string()).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD12".to_string(),
+        value: AttrValue::AttrString("个".to_string()).into(),
+    });
+    let spre_last = spre_name.split("-").collect::<Vec<&str>>().last().map_or("".to_string(), |x| x.to_string());
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTD15".to_string(),
+        value: spre_last,
+    });
+    let paras = get_refno_paras(refno, aios_mgr).unwrap_or(vec![]);
+    let para_1 = paras.get(0).map_or(0.0, |x| *x);
+    let para_2 = paras.get(1).map_or(0.0, |x| *x);
+    let para_3 = paras.get(2).map_or(0.0, |x| *x);
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTDH26".to_string(),
+        value: AttrValue::AttrString(format!("{}X{}", para_1, para_2)).into(),
+    });
+    fixing_attrs.push(DataCenterAttr {
+        attribute_model_code: "PARTDH27".to_string(),
+        value: AttrValue::AttrFloat(para_3 as f32).into(),
     });
 }
 
