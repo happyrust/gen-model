@@ -2,7 +2,7 @@ use aios_core::pdms_types::RefU64;
 use arangors_lite::AqlQuery;
 use crate::aql_api::PdmsRefnoNameAql;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 
 /// 通过 name集合 查找对应的参考号
 pub async fn query_id_from_names_aql(names: Vec<String>, att_type: Option<&str>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsRefnoNameAql>> {

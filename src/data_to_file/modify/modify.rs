@@ -287,74 +287,75 @@ pub fn find_data_in_origin_file(input: &[u8], buf: &[u8]) -> Option<OldDataPage>
 
 /// 将修改的值写入到 DataPage中
 pub fn convert_new_data_page(mut page: OldDataPage, data: ModifyNewData, pdms_database_info: &PdmsDatabaseInfo, latest_page_no: u32) -> Option<Vec<u8>> {
-    let mut new_data = vec![];
-    let attr_type = data.get_type_hash_u32();
-    let noun = data.get_noun_hash_u32();
-    // 检测修改的属性是否是该类型存在的属性
-    let b_type_value = check_b_type_value(&pdms_database_info.noun_attr_info_map, attr_type as i32, noun as i32);
-    if !b_type_value { return None; }
-    // 修改隐式属性中的 page_no
-    let new_page_no = latest_page_no + 1;
-    page.implicit_data.splice(0x1C..0x20, new_page_no.to_be_bytes()[..4].to_vec());
-    page.implicit_data.splice(0x24..0x28, new_page_no.to_be_bytes()[..4].to_vec());
-    // 修改的内容为隐式属性
-    if let Some((noun_pos, offset)) = check_b_implicit_data(&pdms_database_info.noun_attr_info_map, attr_type as i32, noun as i32) {
-        return match data.data {
-            BoolType(value) => {
-                let r = modify_bool_implicit_data(&page.implicit_data, offset, value);
-                let position = ((offset + 1) * 4) as usize;
-                page.implicit_data.splice(position..position + 4, r.to_be_bytes()[..4].to_vec());
-                Some(OldDataPage {
-                    implicit_data: page.implicit_data,
-                    children: page.children,
-                    explicit_data: page.explicit_data,
-                }.convert_new_data_page())
-            }
-            _ => {
-                let data = data.convert_implicit_data_to_vec(true);
-                let len = data.len();
-                let origin_len = page.implicit_data.len();
-                new_data = page.implicit_data[..noun_pos + 4].to_vec();
-                new_data = [new_data, data].concat();
-                if noun_pos + len < origin_len {
-                    new_data = [new_data, page.implicit_data[len + noun_pos + 4..].to_vec()].concat(); // +4是因为 data前面还有个 007
-                }
-                Some(OldDataPage {
-                    implicit_data: new_data,
-                    children: page.children,
-                    explicit_data: page.explicit_data,
-                }.convert_new_data_page())
-            }
-        };
-        // 修改的内容为显示属性
-    } else {
-        // 如果已存在该显示属性，则在原来的基础上修改
-        if let Some(pos) = find_iter(&page.explicit_data, &noun.to_be_bytes()[..]).next() {
-            let data = data.convert_explicit_data_to_vec(true);
-            // 未修改的属性直接复制到new_data中
-            new_data = page.explicit_data[..pos].to_vec();
-            new_data = [new_data, data].concat();
-            let attr_len = (u16::from_be_bytes(page.explicit_data[pos + 6..pos + 8].try_into().unwrap()) * 4) as usize;
-            // 修改的属性后面还有未改变的值，也直接复制过来
-            if pos + 8 + attr_len < *&page.explicit_data.len() {
-                new_data = [new_data, page.explicit_data[pos + 8 + attr_len..].to_vec()].concat();
-            }
-        } else {
-            // 若不存在则在后面新增
-            let mut data = data.convert_explicit_data_to_vec(true);
-            new_data = [page.explicit_data, take(&mut data)].concat();
-        }
-
-
-        let len = (*&new_data.len() as u16 / 4).to_be_bytes();
-        new_data.splice(2..4, len); // 修改显示属性 01 后的长度
-
-        Some(OldDataPage {
-            implicit_data: page.implicit_data,
-            children: page.children,
-            explicit_data: new_data,
-        }.convert_new_data_page())
-    }
+    // let mut new_data = vec![];
+    // let attr_type = data.get_type_hash_u32();
+    // let noun = data.get_noun_hash_u32();
+    // // 检测修改的属性是否是该类型存在的属性
+    // let b_type_value = check_b_type_value(&pdms_database_info.noun_attr_info_map, attr_type as i32, noun as i32);
+    // if !b_type_value { return None; }
+    // // 修改隐式属性中的 page_no
+    // let new_page_no = latest_page_no + 1;
+    // page.implicit_data.splice(0x1C..0x20, new_page_no.to_be_bytes()[..4].to_vec());
+    // page.implicit_data.splice(0x24..0x28, new_page_no.to_be_bytes()[..4].to_vec());
+    // // 修改的内容为隐式属性
+    // if let Some((noun_pos, offset)) = check_b_implicit_data(&pdms_database_info.noun_attr_info_map, attr_type as i32, noun as i32) {
+    //     return match data.data {
+    //         BoolType(value) => {
+    //             let r = modify_bool_implicit_data(&page.implicit_data, offset, value);
+    //             let position = ((offset + 1) * 4) as usize;
+    //             page.implicit_data.splice(position..position + 4, r.to_be_bytes()[..4].to_vec());
+    //             Some(OldDataPage {
+    //                 implicit_data: page.implicit_data,
+    //                 children: page.children,
+    //                 explicit_data: page.explicit_data,
+    //             }.convert_new_data_page())
+    //         }
+    //         _ => {
+    //             let data = data.convert_implicit_data_to_vec(true);
+    //             let len = data.len();
+    //             let origin_len = page.implicit_data.len();
+    //             new_data = page.implicit_data[..noun_pos + 4].to_vec();
+    //             new_data = [new_data, data].concat();
+    //             if noun_pos + len < origin_len {
+    //                 new_data = [new_data, page.implicit_data[len + noun_pos + 4..].to_vec()].concat(); // +4是因为 data前面还有个 007
+    //             }
+    //             Some(OldDataPage {
+    //                 implicit_data: new_data,
+    //                 children: page.children,
+    //                 explicit_data: page.explicit_data,
+    //             }.convert_new_data_page())
+    //         }
+    //     };
+    //     // 修改的内容为显示属性
+    // } else {
+    //     // 如果已存在该显示属性，则在原来的基础上修改
+    //     if let Some(pos) = find_iter(&page.explicit_data, &noun.to_be_bytes()[..]).next() {
+    //         let data = data.convert_explicit_data_to_vec(true);
+    //         // 未修改的属性直接复制到new_data中
+    //         new_data = page.explicit_data[..pos].to_vec();
+    //         new_data = [new_data, data].concat();
+    //         let attr_len = (u16::from_be_bytes(page.explicit_data[pos + 6..pos + 8].try_into().unwrap()) * 4) as usize;
+    //         // 修改的属性后面还有未改变的值，也直接复制过来
+    //         if pos + 8 + attr_len < *&page.explicit_data.len() {
+    //             new_data = [new_data, page.explicit_data[pos + 8 + attr_len..].to_vec()].concat();
+    //         }
+    //     } else {
+    //         // 若不存在则在后面新增
+    //         let mut data = data.convert_explicit_data_to_vec(true);
+    //         new_data = [page.explicit_data, take(&mut data)].concat();
+    //     }
+    //
+    //
+    //     let len = (*&new_data.len() as u16 / 4).to_be_bytes();
+    //     new_data.splice(2..4, len); // 修改显示属性 01 后的长度
+    //
+    //     Some(OldDataPage {
+    //         implicit_data: page.implicit_data,
+    //         children: page.children,
+    //         explicit_data: new_data,
+    //     }.convert_new_data_page())
+    // }
+    None
 }
 
 #[inline]

@@ -24,7 +24,7 @@ use crate::data_center_api::bran::flan::get_data_center_flan_attr;
 use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::metadata::{convert_str_to_hash, get_characters_in_str};
 
 macro_rules! query_metadata {

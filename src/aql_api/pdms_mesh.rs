@@ -11,7 +11,7 @@ use glam::{Quat, Vec3};
 use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_MESH_COLLECTION, PDMS_MESH};
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::graph_db::pdms_inst_arango::*;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;

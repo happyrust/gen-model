@@ -19,7 +19,7 @@ use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
 use crate::cata::resolve_helper::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use once_cell::sync::Lazy;
 
 pub static CATA_CONTEXT_MAP: Lazy<DashMap<RefU64, CataContext>> = Lazy::new(DashMap::new);

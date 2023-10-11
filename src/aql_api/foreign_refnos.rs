@@ -5,7 +5,7 @@ use clap::builder::Str;
 use crate::aql_api::{PdmsRefnoNameAql, PdmsSpreNameAql};
 use crate::consts::{AQL_PDMS_ELES_COLLECTION, PDMS_ELEMENTS_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::consts::AQL_FOREIGN_EDGES_COLLECTION;
 
 ///可选的去过滤查询, start_types 和 endtypes，都是外键的类型

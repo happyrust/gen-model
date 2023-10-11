@@ -14,7 +14,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::{EleTreeNode, RefU64};
 use arangors_lite::AqlQuery;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use serde::{Serialize, Deserialize};
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;

@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
 use aios_core::consts::NAME_HASH;
-
 use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::db1_hash;
 use anyhow::anyhow;
@@ -9,12 +8,9 @@ use dashmap::DashMap;
 use futures::poll;
 use itertools::Itertools;
 use log::info;
-use parse_pdms_db::parse::WholeAttMap;
 use smol_str::SmolStr;
 use sqlx::{Error, MySql, Pool, Row};
-// use sea_orm::sea_query::any;
 use sqlx::mysql::{MySqlQueryResult, MySqlRow};
-
 use crate::api::attr::{query_explicit_attr, query_implicit_attr};
 use crate::api::children::{query_db_num_by_refno, query_numbdb_from_refnos};
 use crate::api::dbno_sql::{query_dbno_count};

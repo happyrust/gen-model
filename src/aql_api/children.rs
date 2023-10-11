@@ -2,7 +2,7 @@ use crate::api::attr::{query_attr, query_uda_ukey};
 use crate::aql_api::*;
 use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_ROOM_ELES_COLLECTION, AQL_SIBL_EDGES_COLLECTION};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{

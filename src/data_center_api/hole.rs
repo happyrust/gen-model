@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::{env, fs};
-
+use crate::consts::*;
 use std::io::Write;
 use aios_core::create_attas_structs::VirtualHoleGraphNode;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject, HoleType, ItemValue};
@@ -8,21 +8,20 @@ use aios_core::negative_mesh_type::NegativeEdges;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use aios_core::tool::hash_tool::hash_two_str;
-use bb8_arangodb::arangors_lite::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::AqlQuery;
 
-use chrono::DateTime;
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use glam::Vec3;
 use regex::Regex;
-use sqlx::{Error, Executor, MySql, Pool, Row};
-use sqlx::mysql::{MySqlQueryResult, MySqlRow};
+use sqlx::{Executor, MySql, Pool, Row};
 use aios_core::create_attas_structs::VirtualHoleGraphNodeQuery;
 use config::{Config, File};
+use crate::arangodb::ArDatabase;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
-use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION, HOLES_TABLE};
+use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_HOLE_EDGE_COLLECTION};
 use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{ArDatabase, remove_arangodb_with_refno_key, save_arangodb_doc, update_arangodb_doc};
+use crate::graph_db::pdms_arango::{save_arangodb_doc, update_arangodb_doc};
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 /// 正则匹配字符串中的数字

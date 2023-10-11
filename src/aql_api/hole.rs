@@ -17,7 +17,7 @@ use crate::aql_api::pdms_room::*;
 use crate::consts::*;
 use crate::data_center_api::hole::{query_entity_hole_data, query_hole_data_aql};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 

@@ -87,28 +87,29 @@ fn change_owner_data(mut owner_data: OldDataPage, order: usize, refno: RefU64) -
 }
 
 fn convert_data_by_attr(data_page: DataPageIncrement, new_refno: RefU64) -> Option<Vec<u8>> {
-    let mut implicit_head_data = vec![];
-    // 生成 参考号 + type + owner 的 bytes
-    implicit_head_data.append(&mut [new_refno.0.to_be_bytes()[..8].to_vec(),
-        db1_hash(&data_page.attr_type).to_be_bytes()[..4].to_vec(), data_page.owner_refno.0.to_be_bytes()[..8].to_vec()].concat());
-    // 获取当前 data_page 的 page_num
-    let latest_session_page_num = parse_to_u32(&data_page.old_file[40..44]);
-    let latest_session_page = get_latest_session_page(&data_page.old_file, latest_session_page_num);
-    let latest_page_num = parse_to_u32(&latest_session_page[20..24]);
-    let current_data_page_num = latest_page_num + 1;
-    implicit_head_data.append(&mut current_data_page_num.to_be_bytes()[..4].to_vec());
-    // 未知含义的16个byte数据 暂时用 0 代替
-    implicit_head_data.append(&mut vec![0; 16]);
-    // 将显示属性和隐式属性分类 ， 新增的数据暂时不考虑他是否有子节点，默认为叶子节点
-    let new_data_page = OldDataPage::from_attr_map(new_refno, data_page.attr, data_page.info_map.noun_attr_info_map);
-    if new_data_page.is_none() { return None; }
-    let mut new_data_page = new_data_page.unwrap();
-    // 补全隐式属性开头的数据
-    new_data_page.implicit_data = [implicit_head_data, new_data_page.implicit_data].concat();
-    let len = new_data_page.implicit_data.len() / 4 + 1;
-    let head = (len as u32).to_be_bytes().to_vec();
-    new_data_page.implicit_data = [head, new_data_page.implicit_data].concat();
-    Some(new_data_page.turn_self_into_vec())
+    // let mut implicit_head_data = vec![];
+    // // 生成 参考号 + type + owner 的 bytes
+    // implicit_head_data.append(&mut [new_refno.0.to_be_bytes()[..8].to_vec(),
+    //     db1_hash(&data_page.attr_type).to_be_bytes()[..4].to_vec(), data_page.owner_refno.0.to_be_bytes()[..8].to_vec()].concat());
+    // // 获取当前 data_page 的 page_num
+    // let latest_session_page_num = parse_to_u32(&data_page.old_file[40..44]);
+    // let latest_session_page = get_latest_session_page(&data_page.old_file, latest_session_page_num);
+    // let latest_page_num = parse_to_u32(&latest_session_page[20..24]);
+    // let current_data_page_num = latest_page_num + 1;
+    // implicit_head_data.append(&mut current_data_page_num.to_be_bytes()[..4].to_vec());
+    // // 未知含义的16个byte数据 暂时用 0 代替
+    // implicit_head_data.append(&mut vec![0; 16]);
+    // // 将显示属性和隐式属性分类 ， 新增的数据暂时不考虑他是否有子节点，默认为叶子节点
+    // let new_data_page = OldDataPage::from_attr_map(new_refno, data_page.attr, data_page.info_map.noun_attr_info_map);
+    // if new_data_page.is_none() { return None; }
+    // let mut new_data_page = new_data_page.unwrap();
+    // // 补全隐式属性开头的数据
+    // new_data_page.implicit_data = [implicit_head_data, new_data_page.implicit_data].concat();
+    // let len = new_data_page.implicit_data.len() / 4 + 1;
+    // let head = (len as u32).to_be_bytes().to_vec();
+    // new_data_page.implicit_data = [head, new_data_page.implicit_data].concat();
+    // Some(new_data_page.turn_self_into_vec())
+    None
 }
 
 /// 将显式属性转换为 bytes

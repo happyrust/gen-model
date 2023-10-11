@@ -22,7 +22,7 @@ use crate::aql_api::children::*;
 use crate::aql_api::PdmsRefnoNameAql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::{AiosDBManager};
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::graph_db::pdms_inst_arango::*;
 use crate::rvm::data_api::*;
 use crate::rvm::head::{create_head_data, create_tail_data};

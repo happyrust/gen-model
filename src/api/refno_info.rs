@@ -16,7 +16,7 @@ use crate::api::element::query_types_refnos;
 use crate::aql_api::plin_attr::query_plin_attrs;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::defines::CACHED_REFNO_BASIC_MAP;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 
 
 const WDJZ: i32 = 642952044;

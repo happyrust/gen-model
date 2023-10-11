@@ -33,7 +33,7 @@ use crate::data_center_api::bran::weld::get_data_center_weld_attr;
 use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_latest_version, get_refno_paras, get_refnos_arrive_leave_info};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 /// 获取 管段元数据

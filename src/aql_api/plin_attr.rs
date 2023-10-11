@@ -14,7 +14,7 @@ use crate::cata::direction_parse::parse_expr_to_dir;
 use crate::consts::AQL_PLIN_ELES_COLLECTION;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 #[derive(Debug, Default)]

@@ -2,16 +2,16 @@ use std::sync::Arc;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
-use bb8_arangodb::arangors_lite::{AqlQuery, Database};
+use bb8_arangodb::arangors_lite::AqlQuery;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
-use sqlx::{MySql, Pool};
 use crate::api::attr::query_attr;
 use crate::aql_api::children::query_children_eles;
+use crate::arangodb::ArDatabase;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{ArDatabase, create_arango_document, save_arangodb_doc};
-use crate::consts::AQL_PDMS_ELES_COLLECTION;
+use crate::graph_db::pdms_arango::{create_arango_document, save_arangodb_doc};
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
+use crate::consts::*;
 
 /// 土建出图轴网需要的数据
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

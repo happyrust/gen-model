@@ -12,7 +12,7 @@ use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_owner_with
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_center_api::data_api::{get_quarantine_room_name, get_refno_latest_version};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 pub async fn get_valv_data(refnos: Vec<RefU64>, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<DataCenterProject> {

@@ -3,15 +3,10 @@ use aios_core::water_calculation::*;
 use opencascade::adhoc::AdHocShape;
 use bevy_transform::prelude::Transform;
 use glam::Vec3;
-use crate::api::attr::query_attr;
-use crate::api::children::travel_children_with_type;
-use crate::consts::{AQL_HOLE_DATA_COLLECTION, AQL_WATER_CALCULATION_COLLECTION};
-use crate::data_interface::interface::PdmsDataInterface;
+use crate::consts::AQL_WATER_CALCULATION_COLLECTION;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{save_arangodb_doc, ArDatabase};
+use crate::graph_db::pdms_arango::save_arangodb_doc;
 use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
-use crate::rvm::data_api::query_rvm_geo_instance_aql;
-use aios_core::pdms_types::AttrMap;
 use aios_core::pdms_types::{GeoBasicType, RefU64};
 use aios_core::water_calculation::ExportFloodingStpEvent;
 use aios_core::water_calculation::FloodingStpToArangodb;
@@ -24,11 +19,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
-use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
 use std::rc::Rc;
-
+use crate::arangodb::ArDatabase;
+use std::fs::File;
+use crate::consts::*;
+use std::io::Write;
 
 /// 将数据保存至图数据库
 pub async fn save_stp_data_to_arangodb(

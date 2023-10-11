@@ -1,31 +1,27 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::fs::File;
 use std::hash::Hash;
-use std::io::{Read, Write};
-use std::mem::transmute;
+use std::io::Write;
 use std::sync::Arc;
 use aios_core::options::DbOption;
-use aios_core::pdms_types::{AttrVal, EleTreeNode, RefU64, RefU64Vec};
+use aios_core::pdms_types::{EleTreeNode, RefU64};
 use anyhow::anyhow;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::{DashMap, DashSet};
-use futures::future::OkInto;
-use smol_str::SmolStr;
-use sqlx::{Acquire, Error, MySql, Pool, Row};
+use sqlx::{Acquire, MySql, Pool, Row};
 use sqlx::Executor;
 use serde::{Deserialize, Serialize};
-use sqlx::mysql::MySqlRow;
 use crate::api::children::*;
 use crate::api::element::*;
 use crate::api::project_mdb::query_db_nums_of_mdb;
 use crate::api::ssc_data::*;
-use crate::aql_api::children::{query_ancestor_till_type_aql, query_refnos_ancestor_with_name_till_type_aql, query_travel_children_aql};
+use crate::aql_api::children::{query_refnos_ancestor_with_name_till_type_aql, query_travel_children_aql};
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
-use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleGraphNode, SSCEleGraphNode};
+use crate::graph_db::structs::PdmsEleData;
 use crate::metadata::convert_str_to_hash;
 use crate::tables;
 use aios_core::aql_types::AqlEdge;
@@ -35,8 +31,9 @@ use nom::character::complete::u32;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
-use crate::aql_api::pdms_room::{query_all_room_aql, query_room_refno_from_room_refno_aql, query_rooms_refnos_aql};
+use crate::aql_api::pdms_room::{query_all_room_aql, query_room_refno_from_room_refno_aql};
 use crate::aql_api::PdmsOwnerNameAql;
+use crate::arangodb::ArDatabase;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct SiteExcelData {
@@ -367,7 +364,7 @@ pub async fn get_room_info_from_excel_refactor(database: &ArDatabase) -> anyhow:
         };
         let refno = RefU64(name_hash);
         let owner = RefU64(owner);
-        nodes.push(PdmsEleGraphNode {
+        nodes.push(PdmsEleData {
             refno,
             owner,
             name: workshop.to_string(),
@@ -383,7 +380,7 @@ pub async fn get_room_info_from_excel_refactor(database: &ArDatabase) -> anyhow:
             let Some(level_name) = match_level_name(level) else { continue; };
             let refno = RefU64(level_name_hash);
             let owner = RefU64(name_hash);
-            let node = PdmsEleGraphNode {
+            let node = PdmsEleData {
                 refno,
                 owner,
                 name: level_name.to_string(),
@@ -399,7 +396,7 @@ pub async fn get_room_info_from_excel_refactor(database: &ArDatabase) -> anyhow:
                 let refno = RefU64(room_name_hash);
                 let owner = RefU64(level_name_hash);
                 edges.push(AqlEdge::new(refno, owner, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
-                nodes.push(PdmsEleGraphNode {
+                nodes.push(PdmsEleData {
                     refno,
                     owner,
                     name: room.to_string(),
@@ -416,7 +413,7 @@ pub async fn get_room_info_from_excel_refactor(database: &ArDatabase) -> anyhow:
                     let refno = RefU64(site_level_name_hash);
                     let owner = RefU64(room_name_hash);
                     edges.push(AqlEdge::new(refno, owner, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
-                    nodes.push(PdmsEleGraphNode {
+                    nodes.push(PdmsEleData {
                         refno,
                         owner,
                         name: site_name.to_string(),
@@ -432,7 +429,7 @@ pub async fn get_room_info_from_excel_refactor(database: &ArDatabase) -> anyhow:
                         let owner = RefU64(site_level_name_hash);
                         let Some(zone_name) = pdms_level.name_map.get(zone) else { continue; };
                         edges.push(AqlEdge::new(refno, owner, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
-                        nodes.push(PdmsEleGraphNode {
+                        nodes.push(PdmsEleData {
                             refno,
                             owner,
                             name: zone_name.to_string(),
@@ -763,7 +760,7 @@ pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Res
                 let owner_name_hash = convert_str_to_hash(format!("{}{}", room_name, owner.owner_name).as_str());
                 let refno = RefU64(owner_name_hash);
                 let owner_refno = RefU64(owner_owner_hash);
-                ssc_nodes.push(PdmsEleGraphNode {
+                ssc_nodes.push(PdmsEleData {
                     refno,
                     owner: owner_refno,
                     name: owner.owner_name.to_string(),
@@ -776,7 +773,7 @@ pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Res
                 // 存放元件
                 let refno = info.refno;
                 let owner = RefU64(owner_name_hash);
-                ssc_nodes.push(PdmsEleGraphNode {
+                ssc_nodes.push(PdmsEleData {
                     refno,
                     owner: owner,
                     name: info.name.to_string(),
@@ -793,7 +790,7 @@ pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Res
                 let owner_name_split = owner_name_split.get(1).unwrap_or(&"").to_string();
                 let refno = RefU64(convert_str_to_hash(format!("{}{}", room_name, owner_name_split).as_str()));
                 let owner_refno = RefU64(owner_owner_hash);
-                ssc_nodes.push(PdmsEleGraphNode {
+                ssc_nodes.push(PdmsEleData {
                     refno,
                     owner: owner_refno,
                     name: owner_name_split.to_string(),
@@ -806,7 +803,7 @@ pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Res
                 // owner下两个固定层级
                 let owner_refno = refno;
                 let refno = RefU64(convert_str_to_hash(format!("{}{}{}", room_name, owner_name_split, "STRU").as_str()));
-                ssc_nodes.push(PdmsEleGraphNode {
+                ssc_nodes.push(PdmsEleData {
                     refno,
                     owner: owner_refno,
                     name: "STRU".to_string(),
@@ -817,7 +814,7 @@ pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Res
                 });
                 ssc_edges.push(AqlEdge::new(refno, owner_refno, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
                 let refno = RefU64(convert_str_to_hash(format!("{}{}{}", room_name, owner_name_split, "REST").as_str()));
-                ssc_nodes.push(PdmsEleGraphNode {
+                ssc_nodes.push(PdmsEleData {
                     refno,
                     owner: owner_refno,
                     name: "REST".to_string(),
@@ -830,7 +827,7 @@ pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Res
                 // 将房间下元件放到这两个固定层级下面
                 let refno = info.refno;
                 let owner_refno = RefU64(convert_str_to_hash(format!("{}{}{}", room_name, owner_name_split, owner.owner_noun).as_str()));
-                ssc_nodes.push(PdmsEleGraphNode {
+                ssc_nodes.push(PdmsEleData {
                     refno,
                     owner: owner_refno,
                     name: info.name.to_string(),
@@ -1199,7 +1196,7 @@ pub async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
             let owner = if v.owner.is_some() { convert_str_to_hash(&v.owner.unwrap()) } else { 0 };
             let refno = RefU64(name_hash);
             let owner = RefU64(owner);
-            eles_results.push(PdmsEleGraphNode {
+            eles_results.push(PdmsEleData {
                 refno,
                 noun: v.att_type.unwrap(),
                 order: idx,

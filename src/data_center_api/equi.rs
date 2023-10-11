@@ -12,7 +12,7 @@ use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 /// 获得工艺设备的数据

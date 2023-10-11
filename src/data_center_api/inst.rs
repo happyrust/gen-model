@@ -12,7 +12,7 @@ use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 
 pub async fn get_inst_data(refnos: Vec<RefU64>, database: &ArDatabase, pool: &Pool<MySql>) -> anyhow::Result<DataCenterProject> {
     let mut instance = Vec::new();

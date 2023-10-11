@@ -13,8 +13,8 @@ use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
-use crate::graph_db::pdms_arango::ArPool;
-use crate::graph_db::structs::PdmsEleGraphNode;
+use crate::arangodb::ArPool;
+use crate::graph_db::structs::PdmsEleData;
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::cache::mgr::*;
 use aios_core::cache::refno::*;
@@ -81,9 +81,9 @@ pub struct AiosDBManager {
 
     pub local_mesh_aabb_db: sled::Tree,
 
-    pub ref0_projects: DashMap<u32, Vec<String>>,
+    // pub ref0_projects: DashMap<u32, Vec<String>>,
 
-    pub info_pool: Pool<MySql>,
+    // pub info_pool: Pool<MySql>,
 
     pub projects: Vec<String>,
 

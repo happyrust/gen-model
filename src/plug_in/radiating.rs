@@ -13,7 +13,7 @@ use crate::aql_api::tubi::query_tubi_from_bran;
 use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_GEO_COLLECTION, AQL_PDMS_INST_INFO_COLLECTION};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use serde::{Serialize, Deserialize};
 use aios_core::pdms_types::ser_refno_as_str;
 use aios_core::pdms_types::de_refno_from_key_str;

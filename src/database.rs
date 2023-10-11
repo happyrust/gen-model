@@ -1,11 +1,6 @@
 use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::default;
-use std::fmt::format;
 use std::fs;
-use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,31 +8,22 @@ use std::time::Instant;
 
 use aios_core::consts::*;
 use aios_core::pdms_types::AttrVal::StringType;
-use aios_core::pdms_types::{
-    AttrMap, AttrVal, NounHash, PdmsDatabaseInfo, PlantMeshesData, RefU64, RefU64Vec,
-};
-use aios_core::tool::db_tool::{convert_to_hash, db1_dehash, db1_hash, GLOBAL_UDA_NAME_MAP};
+use aios_core::pdms_types::{AttrMap, AttrVal, NamedAttrMap, NounHash, RefU64, RefU64Vec, WholeAttMap};
+use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::tool::float_tool::f64_round_3;
-use anyhow::anyhow;
 use dashmap::{DashMap, DashSet};
 use itertools::Itertools;
-use nom::character::complete::u64;
 use parse_pdms_db::parse::*;
-use parse_pdms_db::parse_file;
-use smol_str::SmolStr;
-use sqlx::mysql::MySqlArguments;
 use sqlx::pool::PoolConnection;
 use sqlx::{Connection, MySql, MySqlPool, Pool};
 use sqlx::{Error, Executor};
 
 use crate::api::element::*;
-use crate::api::ssc_data::SscEleNode;
 use crate::aql_api::PdmsPLINAttrAql;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
-use crate::graph_db::{ForeignEdges, ParaDocument};
-use crate::ssc::{gen_insert_ssc_node_sql, insert_set_ssc_node_sql, insert_ssc_room_node};
+use crate::graph_db::ParaDocument;
 use crate::tables;
 use crate::tables::*;
 use aios_core::cache::mgr::BytesTrait;
@@ -46,12 +32,9 @@ use aios_core::helper::table::{qualified_column_name, qualified_table_name};
 use aios_core::options::DbOption;
 use aios_core::pdms_data::ATTR_INFO_MAP;
 use parry3d::utils::hashmap::FxHasher32;
-use sled::transaction::ConflictableTransactionError;
 use std::hash::{Hash, Hasher};
-use std::ops::Range;
-use std::str::FromStr;
-use id_tree::Tree;
-use indexmap::IndexMap;
+use crate::arangodb::{ArDatabase, ArPool};
+use crate::terminusdb::client::{get_versioned_client, save_versioned_pdms_eles};
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -135,20 +118,12 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
     let mut time = Instant::now();
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
-    create_info_database(&default_conn_str, &db_option.project_name).await?;
-
-    let pdms_info_pool = AiosDBManager::get_db_pool(
-        &default_conn_str,
-        &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name),
-    )
-        .await?;
+    if db_option.sync_tidb.unwrap_or(false) {
+        create_info_database(&default_conn_str, &db_option.project_name).await?;
+    }
     let mut create_tables_elapse = 0;
     dbg!("执行多线程解析");
     for project in &db_option.included_projects {
-        create_project_database(project, &default_conn_str).await?;
-        let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
-        let mut table_time = Instant::now();
-        let mut tables_sql = String::new();
 
         let (att_map_tree, children_tree) = {
             let db_path = format!("{}.db", &project);
@@ -163,60 +138,71 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             (tree, children_tree)
         };
 
-        let db_info = get_default_pdms_db_info();
-        for (k, v) in db_info.noun_attr_info_map.clone() {
-            let mut attr_map = BTreeMap::new();
-            let type_name = db1_dehash(k as u32);
-            if type_name.is_empty() {
-                continue;
-            }
-            let mut tmp_sets = HashSet::new();
-            for (kk, vv) in v {
-                let att_name = vv.name.to_string();
-                if &att_name != "unset" {
-                    if att_name.starts_with(":") || vv.offset == 0 {
-                        continue;
-                    }
-                    if !tmp_sets.contains(&att_name) {
-                        tmp_sets.insert(att_name.clone());
-                    } else {
-                        continue;
-                    }
-                    if kk == TYPE_HASH as i32 {
-                        attr_map.insert(
-                            vv.offset,
-                            (att_name, StringType(db1_dehash(k as u32).into())),
-                        );
-                    } else {
-                        attr_map.insert(vv.offset, (att_name, vv.default_val));
+        if db_option.sync_tidb.unwrap_or(false){
+            create_project_database(project, &default_conn_str).await?;
+            let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
+            let mut table_time = Instant::now();
+            let mut tables_sql = String::new();
+            let db_info = get_default_pdms_db_info();
+            for (k, v) in db_info.noun_attr_info_map.clone() {
+                let mut attr_map = BTreeMap::new();
+                let type_name = db1_dehash(k as u32);
+                if type_name.is_empty() {
+                    continue;
+                }
+                let mut tmp_sets = HashSet::new();
+                for (kk, vv) in v {
+                    let att_name = vv.name.to_string();
+                    if &att_name != "unset" {
+                        if att_name.starts_with(":") || vv.offset == 0 {
+                            continue;
+                        }
+                        if !tmp_sets.contains(&att_name) {
+                            tmp_sets.insert(att_name.clone());
+                        } else {
+                            continue;
+                        }
+                        if kk == TYPE_HASH as i32 {
+                            attr_map.insert(
+                                vv.offset,
+                                (att_name, StringType(db1_dehash(k as u32).into())),
+                            );
+                        } else {
+                            attr_map.insert(vv.offset, (att_name, vv.default_val));
+                        }
                     }
                 }
+                tables_sql.push_str(&tables::gen_create_implicit_tables_sql(
+                    type_name.as_str(),
+                    &attr_map,
+                ));
+                tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
+                tables_sql.push_str(&tables::gen_create_uda_tables_sql());
             }
-            tables_sql.push_str(&tables::gen_create_implicit_tables_sql(
-                type_name.as_str(),
-                &attr_map,
-            ));
-            tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
-            tables_sql.push_str(&tables::gen_create_uda_tables_sql());
+            let mut conn = project_pool.acquire().await?;
+            tables_sql.push_str(&tables::gen_create_element_tables_sql());
+            tables_sql.push_str(&gen_create_project_mdb_sql());
+            tables_sql.push_str(&gen_create_data_state_tables_sql());
+            tables_sql.push_str(&gen_create_pdms_version_table_sql());
+            tables_sql.push_str(&gen_create_room_code_table_sql());
+            tables_sql.push_str(&gen_create_file_version_table_sql());
+            let result = execute_sql(&mut conn, tables_sql.as_str()).await;
+            create_tables_elapse += table_time.elapsed().as_millis();
         }
-        let mut conn = project_pool.acquire().await?;
-        tables_sql.push_str(&tables::gen_create_element_tables_sql());
-        tables_sql.push_str(&gen_create_project_mdb_sql());
-        tables_sql.push_str(&gen_create_data_state_tables_sql());
-        tables_sql.push_str(&gen_create_pdms_version_table_sql());
-        tables_sql.push_str(&gen_create_room_code_table_sql());
-        tables_sql.push_str(&gen_create_file_version_table_sql());
-        let result = execute_sql(&mut conn, tables_sql.as_str()).await;
-        create_tables_elapse += table_time.elapsed().as_millis();
 
-        let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
-        let arango_pool = connect_arangodb(db_option).await?;
+
+        // let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
+        // let pdms_info_pool = AiosDBManager::get_db_pool(
+        //     &default_conn_str,
+        //     &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name),
+        // ).await?;
+
         match sync_total_async_threaded(
-            arango_pool.clone(),
+            // arango_pool.clone(),
             &db_option,
             project,
-            project_pool.clone(),
-            pdms_info_pool.clone(),
+            // project_pool.clone(),
+            // pdms_info_pool.clone(),
             att_map_tree.clone(),
             children_tree.clone(),
         ).await {
@@ -536,11 +522,11 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
 
 ///多线程同步数据，包括增量同步
 pub async fn sync_total_async_threaded(
-    arango_pool: ArPool,
+    // arango_pool: ArPool,
     db_option: &DbOption,
     project: &str,
-    pool: Pool<MySql>,
-    info_pool: Pool<MySql>,
+    // pool: Pool<MySql>,
+    // info_pool: Pool<MySql>,
     attmap_tree: sled::Tree,
     children_tree: sled::Tree,
 ) -> anyhow::Result<()> {
@@ -577,7 +563,7 @@ pub async fn sync_total_async_threaded(
             .collect::<Vec<PathBuf>>()
     };
     // 先解析一遍uda
-    dbg!("解析uda文件");
+    // dbg!("解析uda文件");
     let _ = parse_uda_file(project, children_files.clone(),&need_parsed_files).await;
     // 正式解析
     let project = Arc::new(project.to_string());
@@ -591,10 +577,13 @@ pub async fn sync_total_async_threaded(
         is_replace = true
     }
     let mut uda_map: HashMap<i32, AttrMap> = HashMap::new();
-    let mut version_map = HashMap::new();
+    // let mut version_map = HashMap::new();
     let only_update_dbinfo = db_option.only_update_dbinfo;
     let only_sync_sys = db_option.only_sync_sys;
     let chunk_size = db_option.sync_chunk_size.unwrap_or(10_0000) as usize;
+
+    let sync_tidb = db_option.sync_tidb.unwrap_or(false);
+
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
         if file_name.ends_with("com") || file_name.ends_with("mis") {
@@ -622,6 +611,7 @@ pub async fn sync_total_async_threaded(
             let children_map_clone = Arc::new(children_map);
 
             if db_option.sync_graph_db.unwrap_or(true) {
+                let arango_pool = connect_arangodb(&db_option).await?;
                 let database = arango_pool
                     .get()
                     .await?
@@ -639,6 +629,7 @@ pub async fn sync_total_async_threaded(
                 }
             }
 
+            let versioned_client = Arc::new(get_versioned_client().await);
             for (chunk_index, chunk_refnos) in all_refnos.chunks(chunk_size).enumerate() {
                 let path_clone = path.clone();
                 let file_name_clone = file_name.clone();
@@ -665,65 +656,112 @@ pub async fn sync_total_async_threaded(
                     )
                 }).await {
                     println!("Processing {} chunk index: {chunk_index}", &file_name);
-                    let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(
-                        db_no,
-                        &file_name,
-                        version,
-                        project_clone.clone().as_str(),
-                        db_type.clone(),
-                    );
-                    let mut info_conn = info_pool.acquire().await.unwrap();
 
-                    //保存dbno的信息表
-                    let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( id, NUMBDB, FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
-                    sql.push_str(dbinfo_value_sql.as_str());
-                    if is_replace {
-                        sql = sql.replace("INSERT IGNORE", "REPLACE");
-                    }
-                    let result = info_conn.execute(sql.as_str()).await;
-                    match result {
-                        Ok(_) => {}
-                        Err(e) => {
-                            dbg!(&e);
-                            dbg!(sql.as_str());
+                    if sync_tidb {
+                        let default_conn_str = AiosDBManager::get_default_conn_str(&db_option);
+                        let info_pool = AiosDBManager::get_db_pool(
+                            &default_conn_str,
+                            &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name),
+                        ).await?;
+
+                        let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(
+                            db_no,
+                            &file_name,
+                            version,
+                            project_clone.clone().as_str(),
+                            db_type.clone(),
+                        );
+                        let mut info_conn = info_pool.acquire().await.unwrap();
+
+                        //保存dbno的信息表
+                        let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( id, NUMBDB, FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
+                        sql.push_str(dbinfo_value_sql.as_str());
+                        if is_replace {
+                            sql = sql.replace("INSERT IGNORE", "REPLACE");
                         }
-                    }
-                    //保存refno的信息表
-                    let mut sql = format!(
-                        "INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (ID, REF0, PROJECT) VALUES "
-                    );
-                    for kv in &refno_info_map {
-                        let mut s: FxHasher32 = Default::default();
-                        kv.value().ref_0.hash(&mut s);
-                        project_clone.hash(&mut s);
-                        let h = s.finish();
-                        sql.push_str(&format!(
-                            r#"({}, {},'{}') ,"#,
-                            h,
-                            kv.value().ref_0,
-                            project_clone.as_str()
-                        ));
-                    }
-                    sql.remove(sql.len() - 1);
-                    if is_replace {
-                        sql = sql.replace("INSERT IGNORE", "REPLACE");
-                    }
-                    let result = info_conn.execute(sql.as_str()).await;
-                    match result {
-                        Ok(_) => {}
-                        Err(e) => {
-                            dbg!(&e);
-                            dbg!(sql.as_str());
+                        let result = info_conn.execute(sql.as_str()).await;
+                        match result {
+                            Ok(_) => {}
+                            Err(e) => {
+                                dbg!(&e);
+                                dbg!(sql.as_str());
+                            }
                         }
+                        //保存refno的信息表
+                        let mut sql = format!(
+                            "INSERT IGNORE INTO {PDMS_REFNO_INFOS_TABLE} (ID, REF0, PROJECT) VALUES "
+                        );
+                        for kv in &refno_info_map {
+                            let mut s: FxHasher32 = Default::default();
+                            kv.value().ref_0.hash(&mut s);
+                            project_clone.hash(&mut s);
+                            let h = s.finish();
+                            sql.push_str(&format!(
+                                r#"({}, {},'{}') ,"#,
+                                h,
+                                kv.value().ref_0,
+                                project_clone.as_str()
+                            ));
+                        }
+                        sql.remove(sql.len() - 1);
+                        if is_replace {
+                            sql = sql.replace("INSERT IGNORE", "REPLACE");
+                        }
+                        let result = execute_sql(&mut info_conn, sql.as_str()).await;
                     }
 
-                    version_map.entry(file_name.clone()).or_insert(version);
-                    set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
 
-                    total_attr_map.iter_mut().for_each(|mut x| {
-                        let name = cal_default_name(*x.key(), x.value(), &children_map_clone);
-                        x.value_mut().explicit_attmap.insert(NAME_HASH, AttrVal::StringType(name));
-                    });
+                    // version_map.entry(file_name.clone()).or_insert(version);
+                    // set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
+
+                    // total_attr_map.iter_mut().for_each(|mut x| {
+                    //     let name = cal_default_name(*x.key(), x.value(), &children_map_clone);
+                    //     x.value_mut().explicit_attmap.insert(NAME_HASH, AttrVal::StringType(name));
+                    // });
+
+                    let client = versioned_client.clone();
+                    // save_versioned_pdms_eles(
+                    //     &client,
+                    //     &total_attr_map,
+                    //     db_no as i32,
+                    // ).await?;
+                    let db_info = get_default_pdms_db_info();
+                    const ATTS_CHUNK_COUNT: usize = 10_000;
+                    for kv in &type_ele_map {
+                        let noun: i32 = *kv.key() as _;
+                        let type_name = db1_dehash(noun as _);
+                        // if type_name.as_str() != "FITT" {
+                        //     continue;
+                        // }
+                        dbg!(kv.value().len());
+                        for refnos in &kv.value().iter().chunks(ATTS_CHUNK_COUNT) {
+                            let mut maps = vec![];
+                            for refno in refnos {
+                                let att = total_attr_map.get(&refno).unwrap().merge();
+                                let named_att_map: NamedAttrMap = att.into();
+                                //需要检查一遍能否插入，不能就需要更新schema
+                                if let Some(new_schema) = db_info.check_schema(noun, &named_att_map) {
+                                    dbg!(&new_schema);
+                                    let schema_res = client.insert_doc(new_schema.as_str(), "dpc", "Update schema", true, false, true).await?;
+                                    dbg!(schema_res);
+                                }
+                                let map = named_att_map.gen_versioned_json_map();
+                                maps.push(map);
+                            }
+
+                            // dbg!(&json);
+                            let json = serde_json::to_string(&maps).unwrap_or_default();
+                            let att_res = client.insert_doc(json.as_str(), "dpc", "Add Attributes", false, true, false).await?;
+                            dbg!(att_res);
+                            if !att_res {
+                                dbg!(maps.iter().next());
+                            }
+                            // break;
+                        }
+                        // break;
+                    }
+
+
 
                     //类型暂时不多线程
                     let total_attr_map_arc = Arc::new(total_attr_map);
@@ -732,6 +770,7 @@ pub async fn sync_total_async_threaded(
                     // 将部分数据保存到图数据库
                     if db_option.sync_graph_db.unwrap_or(true) {
                         //if db_type == "CATA" || db_type == "DESI"
+                        let arango_pool = connect_arangodb(&db_option).await?;
                         {
                             let database = arango_pool
                                 .get()
@@ -767,17 +806,6 @@ pub async fn sync_total_async_threaded(
                             let mut vec = att.into_rkyv_compress_bytes();
                             attmap_tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
                         }
-
-                        // let c = total_attr_map_arc.clone();
-                        // let tree = db.open_tree("attr_map")?;
-                        // tree.transaction::<_, _, ()>(|tx_db| {
-                        //     for kv in c.as_ref() {
-                        //         let mut vec = kv.value().merge().into_bytes();
-                        //         tx_db.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
-                        //     }
-                        //     Ok(())
-                        //     // Ok::<(), ConflictableTransactionError<_>>(())
-                        // }).expect("Error inserting local db ");
                     }
 
                     //heed lmdb 的实现
@@ -828,8 +856,10 @@ pub async fn sync_total_async_threaded(
                     //     println!("保存到本地db完成");
                     // }
 
+
+
                     //如果不需要同步tidb，continue
-                    if !db_option.sync_tidb.unwrap_or(true) {
+                    if !sync_tidb {
                         continue;
                     }
 
@@ -843,8 +873,13 @@ pub async fn sync_total_async_threaded(
                         }
                         let total_attr_map_arc = total_attr_map_arc.clone();
                         let children_map_arc = children_map_arc.clone();
-                        let pool_clone = pool.clone();
-                        let arango_pool_clone = arango_pool.clone();
+                        let default_conn_str = AiosDBManager::get_default_conn_str(&db_option);
+                        let pool_clone = AiosDBManager::get_db_pool(&default_conn_str, project_name.as_str()).await?;
+                        // let info_pool = AiosDBManager::get_db_pool(
+                        //     &default_conn_str,
+                        //     &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name),
+                        // ).await?;
+                        // let pool_clone = pool.clone();
                         let error_sql_clone = error_sql.clone();
                         // println!("类型: {} 数量: {}", db1_dehash(type_hash), type_refnos.len());
 
@@ -862,7 +897,6 @@ pub async fn sync_total_async_threaded(
                                 let children_map_arc_clone = children_map_arc.clone();
                                 let all_refnos = all_refnos.clone();
                                 let pool_clone = pool_clone.clone();
-                                let arango_pool_clone = arango_pool_clone.clone();
                                 let error_sql_clone = error_sql_clone.clone();
                                 let mut implicit_values_sql = String::new();
                                 let mut explicit_values_sql = String::new();
@@ -990,93 +1024,105 @@ pub async fn sync_total_async_threaded(
 
                     futures::future::join_all(take(&mut type_handles)).await;
 
-                    let mut project_conn = pool.acquire().await.unwrap();
                     // 将带有 room_code 属性的保存下来
                     if !db_option.only_update_dbinfo {
-                        for (room_name, refnos) in room_code_map.clone() {
-                            let mut room_code_sql =
-                                format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
-                            for refno in refnos.clone() {
-                                room_code_sql.push_str(&format!(
-                                    "( {},'{}' ) ,",
-                                    refno.0,
-                                    room_name.clone()
-                                ));
-                            }
-                            room_code_sql.remove(room_code_sql.len() - 1);
-                            if is_replace {
-                                room_code_sql = room_code_sql.replace("INSERT IGNORE", "REPLACE");
-                            }
-                            let result = project_conn.execute(room_code_sql.as_str()).await;
-                            match result {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(&e);
-                                    dbg!(room_code_sql.as_str());
-                                }
-                            }
-                        }
+                        // let default_conn_str = AiosDBManager::get_default_conn_str(&db_option);
+                        // let pool_clone = AiosDBManager::get_db_pool(&default_conn_str, project_name_clone.as_str()).await?;
+                        // let mut project_conn = pool.acquire().await.unwrap();
+                        // for (room_name, refnos) in room_code_map.clone() {
+                        //     let mut room_code_sql =
+                        //         format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
+                        //     for refno in refnos.clone() {
+                        //         room_code_sql.push_str(&format!(
+                        //             "( {},'{}' ) ,",
+                        //             refno.0,
+                        //             room_name.clone()
+                        //         ));
+                        //     }
+                        //     room_code_sql.remove(room_code_sql.len() - 1);
+                        //     if is_replace {
+                        //         room_code_sql = room_code_sql.replace("INSERT IGNORE", "REPLACE");
+                        //     }
+                        //     let result = project_conn.execute(room_code_sql.as_str()).await;
+                        //     match result {
+                        //         Ok(_) => {}
+                        //         Err(e) => {
+                        //             dbg!(&e);
+                        //             dbg!(room_code_sql.as_str());
+                        //         }
+                        //     }
+                        // }
                     }
                 }
             }
         }
+
+        //重新更新一下database info，有可能发生了更新
+        let db_info = get_default_pdms_db_info();
+        let _ = db_info.save(None);
     }
-    // 保存 uda_map
-    if uda_map.len() > 0 {
-        let mut uda_sql = format!("INSERT IGNORE INTO {PDMS_UDA_ATT_TABLE} (TYPE,DATA) VALUES");
-        for (noun, value) in uda_map.into_iter() {
-            let data = value.into_compress_bytes();
-            uda_sql.push_str(&format!("({},0x{}),", noun, hex::encode(data)))
+    if sync_tidb {
+        let default_conn_str = AiosDBManager::get_default_conn_str(&db_option);
+        let pool = AiosDBManager::get_db_pool(&default_conn_str, project.as_str()).await?;
+        // 保存 uda_map
+        if uda_map.len() > 0 {
+            let mut uda_sql = format!("INSERT IGNORE INTO {PDMS_UDA_ATT_TABLE} (TYPE,DATA) VALUES");
+            for (noun, value) in uda_map.into_iter() {
+                let data = value.into_compress_bytes();
+                uda_sql.push_str(&format!("({},0x{}),", noun, hex::encode(data)))
+            }
+            let mut project_conn = pool.acquire().await.unwrap();
+            uda_sql.remove(uda_sql.len() - 1);
+            let result = project_conn.execute(uda_sql.as_str()).await;
+            match result {
+                Ok(_) => {}
+                Err(e) => {
+                    dbg!(&e);
+                    dbg!(uda_sql.as_str());
+                }
+            }
         }
-        let mut project_conn = pool.acquire().await.unwrap();
-        uda_sql.remove(uda_sql.len() - 1);
-        let result = project_conn.execute(uda_sql.as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(&e);
-                dbg!(uda_sql.as_str());
+        if !error_sql.is_empty() {
+            // 重新执行有问题的sql
+            println!("正在重新插入有问题的sql语句, 共 {} 条", error_sql.len());
+            let mut conn = pool.acquire().await?;
+            for sql in error_sql.iter() {
+                let _ = conn.execute(sql.key().as_str()).await;
+                // if r.is_ok() {
+                //     error_sql.remove(sql.key());
+                // }
             }
         }
     }
+
     // 保存每个file最新的page_num
-    if version_map.len() > 0 {
-        let table_sql = gen_create_file_version_table_sql();
-        let mut version_sql =
-            format!("INSERT IGNORE INTO {PDMS_FILE_VERSION_TABLE} (FILENAME,VERSION) VALUES");
-        for (file_name, version) in version_map.into_iter() {
-            version_sql.push_str(&format!("('{}',{}),", file_name, version))
-        }
-        let mut project_conn = pool.acquire().await.unwrap();
-        version_sql.remove(version_sql.len() - 1);
-        let result = project_conn.execute(table_sql.as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(&e);
-                dbg!(table_sql.as_str());
-            }
-        }
-        let result = project_conn.execute(version_sql.as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(&e);
-                dbg!(version_sql.as_str());
-            }
-        }
-    }
-    if !error_sql.is_empty() {
-        // 重新执行有问题的sql
-        println!("正在重新插入有问题的sql语句, 共 {} 条", error_sql.len());
-        let mut conn = pool.acquire().await?;
-        for sql in error_sql.iter() {
-            let _ = conn.execute(sql.key().as_str()).await;
-            // if r.is_ok() {
-            //     error_sql.remove(sql.key());
-            // }
-        }
-    }
+    // if version_map.len() > 0 {
+    //     let table_sql = gen_create_file_version_table_sql();
+    //     let mut version_sql =
+    //         format!("INSERT IGNORE INTO {PDMS_FILE_VERSION_TABLE} (FILENAME,VERSION) VALUES");
+    //     for (file_name, version) in version_map.into_iter() {
+    //         version_sql.push_str(&format!("('{}',{}),", file_name, version))
+    //     }
+    //     let mut project_conn = pool.acquire().await.unwrap();
+    //     version_sql.remove(version_sql.len() - 1);
+    //     let result = project_conn.execute(table_sql.as_str()).await;
+    //     match result {
+    //         Ok(_) => {}
+    //         Err(e) => {
+    //             dbg!(&e);
+    //             dbg!(table_sql.as_str());
+    //         }
+    //     }
+    //     let result = project_conn.execute(version_sql.as_str()).await;
+    //     match result {
+    //         Ok(_) => {}
+    //         Err(e) => {
+    //             dbg!(&e);
+    //             dbg!(version_sql.as_str());
+    //         }
+    //     }
+    // }
+
     Ok(())
 }
 

@@ -17,7 +17,7 @@ use crate::consts::AQL_DATA_ELES_COLLECTION;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::DataDocument;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 /// 查询 catr refno引用的 dtse下 data 的 ppro和 dpro数据

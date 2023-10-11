@@ -8,7 +8,7 @@ use crate::aql_api::children::query_travel_children_with_out_leaf_aql;
 use crate::consts::PDMS_DATA_STATE;
 use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 
 /// 查找该节点下的所有子节点的data_state数据
 pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>, arango_database: &ArDatabase) -> anyhow::Result<DataStateVec> {

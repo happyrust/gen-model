@@ -3,7 +3,7 @@ use crate::aql_api::*;
 use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_GEO_COLLECTION, AQL_PDMS_INST_INFO_COLLECTION, AQL_SIBL_EDGES_COLLECTION};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{
@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::process::id;
 use std::str::FromStr;
 use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
-use crate::graph_db::structs::{PdmsEleEdge, PdmsEleGraphNode, PdmsMdbEdge};
+use crate::graph_db::structs::{PdmsEleEdge, PdmsEleData, PdmsMdbEdge};
 
 pub type IndexNamedAttMap = IndexMap<String, NamedAttrValue>;
 
@@ -127,7 +127,7 @@ impl AiosDBManager {
 
 
     ///通过指定的过滤条件来查询
-    pub async fn query_ele_nodes_by_expression(&self, expression: &str) -> anyhow::Result<Vec<PdmsEleGraphNode>> {
+    pub async fn query_ele_nodes_by_expression(&self, expression: &str) -> anyhow::Result<Vec<PdmsEleData>> {
         let aql_string = format!(r#"
             with pdms_eles
             for v in pdms_eles
@@ -139,7 +139,7 @@ impl AiosDBManager {
             AqlQuery::new(aql_string.as_str());
 
         let result = self.get_arango_db().await?
-            .aql_query::<PdmsEleGraphNode>(aql).await.unwrap();
+            .aql_query::<PdmsEleData>(aql).await.unwrap();
         Ok(result)
     }
 

@@ -23,7 +23,7 @@ use pdms_io::io::PdmsIO;
 use crate::consts::*;
 use crate::defines::CACHED_REFNO_BASIC_MAP;
 use crate::graph_db::pdms_arango::{remove_edges_arangodb, save_arangodb_with_db_option};
-use crate::graph_db::structs::{PdmsEleEdge, PdmsEleGraphNode};
+use crate::graph_db::structs::{PdmsEleEdge, PdmsEleData};
 use std::sync::Arc;
 use walkdir::WalkDir;
 use serde::{Serialize, Deserialize};
@@ -243,7 +243,7 @@ impl AiosDBManager {
                         }
                     }
                 }
-                let pdms_element = PdmsEleGraphNode {
+                let pdms_element = PdmsEleData {
                     refno,
                     owner,
                     name,

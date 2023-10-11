@@ -11,7 +11,7 @@ use crate::data_center_api::auto_get_attr::get_material_map_from_code;
 use crate::data_center_api::data_api::{get_bran_itema_attr, get_refno_latest_version, get_spre_material_code};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 
 pub async fn get_data_center_coup_attr(refno: PdmsElement,bran_name:&str,database:&ArDatabase,aios_mgr:&AiosDBManager) -> DataCenterInstance {
     let need_query_material_code = vec![("ITEMA11".to_string(), "Code".to_string()),

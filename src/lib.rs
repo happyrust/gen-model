@@ -1,6 +1,7 @@
 #![feature(let_chains)]
 #![feature(async_closure)]
 #![feature(exact_size_is_empty)]
+#![feature(slice_take)]
 // 暂时屏蔽warnings
 #![allow(warnings)]
 
@@ -49,6 +50,9 @@ pub mod other_plat;
 
 pub mod viewer;
 pub mod plug_in;
+
+pub mod arangodb;
+pub mod terminusdb;
 
 #[macro_use]
 extern crate derive_more;

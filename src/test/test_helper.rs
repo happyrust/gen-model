@@ -1,13 +1,8 @@
 use crate::data_interface::tidb_manager::AiosDBManager;
-use config::{Config, ConfigError, Environment, File};
-use std::env;
-use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
-use std::sync::Arc;
-use bb8_arangodb::arangors_lite::Database;
-use tokio::runtime::Runtime;
+use config::{Config, File};
 use crate::graph_db::pdms_arango::*;
-use crate::plot_data::hangers;
 use aios_core::options::DbOption;
+use crate::arangodb::ArPool;
 
 /// ams 的测试数据库
 pub fn get_test_ams_db_manager() -> AiosDBManager {

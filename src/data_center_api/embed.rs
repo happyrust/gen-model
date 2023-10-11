@@ -1,23 +1,23 @@
 use std::{env, fs};
 use std::io::Write;
-use aios_core::aql_types::AqlEdge;
 use aios_core::create_attas_structs::VirtualEmbedGraphNode;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject, ItemValue};
 use aios_core::negative_mesh_type::NegativeEdges;
 use aios_core::options::DbOption;
-use aios_core::pdms_types::{RefU64, UdaMajorType};
+use aios_core::pdms_types::RefU64;
 use aios_core::tool::hash_tool::hash_two_str;
 use aios_core::create_attas_structs::VirtualEmbedGraphNodeQuery;
-use bb8_arangodb::arangors_lite::{AqlQuery, Database};
-use sqlx::{Error, MySql, Pool, Row};
-use sqlx::mysql::MySqlRow;
+use bb8_arangodb::arangors_lite::AqlQuery;
+use sqlx::{MySql, Pool, Row};
+use crate::arangodb::ArDatabase;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::data_center_api::hole::{convert_time_to_vec, get_pos_from_str};
-use crate::consts::{AQL_EMBED_DATA_COLLECTION, AQL_EMBED_EDGE_COLLECTION, EMBED_TABLE};
+use crate::consts::{AQL_EMBED_DATA_COLLECTION, AQL_EMBED_EDGE_COLLECTION};
 use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{ArDatabase, save_arangodb_doc, update_arangodb_doc};
+use crate::graph_db::pdms_arango::{save_arangodb_doc, update_arangodb_doc};
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
+use crate::consts::*;
 
 pub async fn create_embed_data(pool: &Pool<MySql>) -> anyhow::Result<Option<DataCenterProject>> {
     let mut instances = Vec::new();

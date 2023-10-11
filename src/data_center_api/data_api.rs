@@ -16,7 +16,7 @@ use crate::consts::PUHUA_DQ_MATERIAL_TABLE;
 use crate::data_center_api::auto_get_attr::get_material_map_from_code;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use glam::Vec3;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -369,12 +369,7 @@ pub(crate) async fn get_refno_desc(
     refno: RefU64,
     aios_mgr: &AiosDBManager,
 ) -> anyhow::Result<String> {
-    // let database = aios_mgr.get_arango_db().await?;
-    // let Some(catr) = query_foreign_refno_aql(&database, refno, &vec!["SPRE", "CATR"]).await? else {
-    //     return Ok("".to_string());
-    // };
-    // let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok("".to_string()); };
-    let attr = aios_mgr.get_cat_attmap(refno)?;
+    let attr = aios_mgr.get_cat_attmap(refno).unwrap_or_default();
     Ok(attr.get_str("DESC").unwrap_or("").to_string())
 }
 

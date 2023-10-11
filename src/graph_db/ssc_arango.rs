@@ -2,7 +2,7 @@ use aios_core::pdms_types::{EleGeosInfo, RefU64};
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::AQL_PDMS_INST_INFO_COLLECTION;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::graph_db::structs::{PdmsEleGraphEdge, SSCEleGraphNode};
 
 /// 将 ssc固定节点保存到图数据库（zone下面的层级除外）

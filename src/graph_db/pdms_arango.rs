@@ -1,39 +1,26 @@
-use std::io::Write;
 use sqlx::Row;
-use serde::{Deserialize, Serialize};
 use serde_json::value::Value;
 use crate::consts::*;
-use bb8_arangodb::arangors_lite::{AqlQuery, ClientError, Collection, Database};
+use bb8_arangodb::arangors_lite::{AqlQuery, ClientError};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem::take;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
-use aios_core::create_attas_structs::{VirtualEmbedGraphNode, VirtualHoleGraphNode};
+use std::sync::Arc;
 use aios_core::options::DbOption;
-use aios_core::pdms_types::{PdmsElement, RefU64, RefU64Vec};
-use aios_core::tool::db_tool::{db1_dehash, db1_hash};
-use anyhow::anyhow;
+use aios_core::pdms_types::{PdmsElement, RefU64, WholeAttMap};
+use aios_core::tool::db_tool::db1_hash;
 use bb8_arangodb::{ArangoConnectionManager, AuthenticationMethod};
 use bb8_arangodb::arangors_lite::collection::CollectionType;
 use bb8_arangodb::bb8::Pool;
 use dashmap::{DashMap, DashSet};
-use futures::future::ok;
 use itertools::Itertools;
-use log::info;
-use parse_pdms_db::parse::WholeAttMap;
-// use regex::internal::Input;
 use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
-use crate::api::children::query_contain_noun_refnos;
 use crate::api::element::*;
-use crate::api::project_mdb::query_db_nums_of_mdb;
+use crate::arangodb::{ArDatabase, ArPool};
 use crate::consts::AQL_PDMS_EDGES_COLLECTION;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::{DataDocument, ForeignEdges};
-use crate::graph_db::structs::{PdmsEleGraphEdge, PdmsEleEdge, PdmsEleGraphNode};
-
-pub type ArDatabase = arangors_lite::Database;
-pub type ArPool = Pool<ArangoConnectionManager>;
+use crate::graph_db::structs::{PdmsEleEdge, PdmsEleGraphEdge, PdmsEleData};
 
 
 ///创建arangodb的连接池
@@ -45,6 +32,7 @@ pub async fn connect_arangodb(db_option: &DbOption) -> anyhow::Result<ArPool> {
     Ok(Pool::builder().max_size(100).build(manager).await?)
 }
 
+///创建arango的document
 pub async fn create_arango_document(database: &ArDatabase, collection_name: &str, collection_type: CollectionType) -> anyhow::Result<()> {
     match collection_type {
         CollectionType::Document => {
@@ -90,7 +78,7 @@ pub async fn create_arango_document(database: &ArDatabase, collection_name: &str
 /// 在同步的时候就将 pdms_element 保存到图数据库
 pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: &DashMap<RefU64, WholeAttMap>
                                          , children_map: &HashMap<RefU64, Vec<(RefU64, String)>>, dbnum: i32) -> anyhow::Result<()> {
-    let mut results = Vec::new();
+    let mut elements = Vec::new();
     let mut edges = Vec::new();
     for (refno, whole_attr) in total_attr_map.clone() {
         let Some(owner) = whole_attr.implicit_attmap.get_owner() else{
@@ -104,7 +92,7 @@ pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: 
             &children_map,
         ) as u32;
         let cata_hash = whole_attr.merge().cal_cata_hash().map(|x| x.to_string());
-        let pdms_element = PdmsEleGraphNode {
+        let pdms_element = PdmsEleData {
             refno,
             owner,
             name,
@@ -121,10 +109,10 @@ pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: 
             order,
             ..Default::default()
         };
-        results.push(pdms_element);
+        elements.push(pdms_element);
         edges.push(pdms_edges);
     }
-    for result in results.chunks(ARANGODB_SAVE_AMOUNT) {
+    for result in elements.chunks(ARANGODB_SAVE_AMOUNT) {
         let json = serde_json::to_value(result)?;
         save_arangodb_with_db_option(database, json, AQL_PDMS_ELES_COLLECTION).await?;
     }

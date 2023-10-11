@@ -3,7 +3,7 @@ use aios_core::pdms_types::{GeoBasicType, RefU64};
 use crate::aql_api::children::query_travel_children_filter_negative_sibl_nodes;
 use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::test::test_helper::{get_test_ams_db_manager, get_test_ams_db_manager_async};

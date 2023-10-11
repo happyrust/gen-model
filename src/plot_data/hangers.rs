@@ -1,32 +1,22 @@
 use std::collections::HashMap;
-use std::env;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
-use aios_core::options::DbOption;
-use aios_core::pdms_types::{EleTreeNode, PdmsElement, RefU64};
+use aios_core::pdms_types::{PdmsElement, RefU64};
 use aios_core::plot_struct::hanger::*;
-use bb8_arangodb::arangors_lite::{AqlQuery, Database};
-use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
+use bb8_arangodb::arangors_lite::AqlQuery;
 use calamine::{Error, open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
 use dashmap::DashMap;
-use glam::{Vec2, Vec3};
-use nom::Parser;
-// use geo::Area;
-// use geo::LineString;
-use parse_pdms_db::parse_explict_tools::times_keep_f32_two_decimal_place;
-// use sea_orm::sea_query::IndexType::Hash;
 use sqlx::{MySql, Pool, Row};
-use crate::api::children::{travel_children_eles, travel_children_for_elenode, travel_children_with_type};
-use crate::aql_api::children::{query_travel_children_aql, query_travel_children_with_type_aql};
+use crate::api::children::travel_children_for_elenode;
+use crate::aql_api::children::query_travel_children_aql;
 use crate::aql_api::foreign_refnos::query_foreign_name_aql;
 use serde::{Deserialize, Serialize};
 use crate::api::attr::{query_explicit_attr, query_implicit_attr};
 use crate::api::element::query_name;
-use crate::api::ssc_data::travel_ssc_children;
+use crate::arangodb::ArDatabase;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{ArDatabase, create_arango_document, save_arangodb_with_db_option};
-use crate::consts::PDMS_ELEMENTS_TABLE;
 use crate::data_interface::interface::PdmsDataInterface;
+use crate::consts::*;
 
 /// 提前将支吊架出图需要的数据存储在图数据库中
 pub async fn save_hangers_data(mgr: Arc<AiosDBManager>) -> anyhow::Result<Option<HangerData>> {

@@ -1,5 +1,6 @@
 use aios_core::options::DbOption;
-use crate::graph_db::pdms_arango::{ArDatabase, connect_arangodb};
+use crate::arangodb::ArDatabase;
+use crate::graph_db::pdms_arango::connect_arangodb;
 
 pub async fn get_arangodb_conn_from_db_option_for_test(o: &DbOption) -> anyhow::Result<ArDatabase>{
     let pool = connect_arangodb(o).await?;

@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::env;
-use aios_core::pdms_data::NewDataOperate;
 use aios_core::pdms_types::{AttrMap, EleOperation, RefU64, RefU64Vec};
 use chrono::{Datelike, DateTime, Local, Timelike};
-use parse_pdms_db::parse::WholeAttMap;
 use sqlx::{Executor, MySql, Pool, Row};
 use sqlx::types::Uuid;
 use serde::{Serialize, Deserialize};
