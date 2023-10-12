@@ -17,6 +17,7 @@ use aios_core::pdms_types::{EleTreeNode, RefU64};
 use arangors_lite::AqlQuery;
 use bevy_transform::prelude::Transform;
 use glam::{Vec3, Vec3A};
+use nom::character::complete::u32;
 use crate::graph_db::pdms_arango::ArDatabase;
 use serde::{Serialize, Deserialize};
 use serde_with::serde_as;
@@ -93,7 +94,7 @@ pub async fn get_dq_support_sctn_data(
                     let r = get_dq_support_sctn_spre_s11_data(&child, &room_map, &spre_name, aios_mgr).await.unwrap_or((vec![], "".to_string()));
                     if !r.0.is_empty() {
                         result.push(DataCenterInstance {
-                            object_model_code: "PARTDD".to_string(),
+                            object_model_code: "PARTDC".to_string(),
                             project_code: aios_mgr.db_option.project_code.to_string(),
                             instance_code: child.name,
                             version: get_refno_latest_version(),
@@ -865,4 +866,11 @@ async fn test_get_dq_support_sctn_data() -> anyhow::Result<()> {
     let json = serde_json::to_vec(&result)?;
     file.write_all(&json)?;
     Ok(())
+}
+
+#[test]
+fn test_checked_add() {
+    let a:u8 = u8::MAX -1;
+    let b = a.checked_add(1);
+    dbg!(&b);
 }
