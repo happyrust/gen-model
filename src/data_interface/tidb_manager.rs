@@ -47,7 +47,7 @@ use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::error;
 use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
-use pdms_io::watch::PdmsWatcher;
+// use pdms_io::watch::PdmsWatcher;
 use redb::{ReadableTable, TableDefinition};
 use sqlx::{Executor, MySql, Pool, Row};
 use std::boxed::Box;
@@ -57,6 +57,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+use pdms_io::watch::PdmsWatcher;
 use tokio::sync::RwLock;
 
 // #[derive(Debug)]

@@ -61,6 +61,7 @@ use crate::graph_db::structs::{PdmsEleEdge, PdmsEleGraphNode, PdmsMdbEdge};
 use crate::tables::gen_create_project_mdb_sql;
 use nalgebra::Point3;
 use pdms_io::watch::PdmsWatcher;
+// use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
 
 pub const TUBI_TOL: f32 = 10.0f32;

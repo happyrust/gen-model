@@ -50,6 +50,7 @@ pub mod version_management;
 
 pub mod viewer;
 pub mod plug_in;
+pub mod data_state;
 
 #[macro_use]
 extern crate derive_more;
