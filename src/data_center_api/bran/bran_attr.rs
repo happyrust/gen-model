@@ -20,19 +20,21 @@ use crate::aql_api::attr_map::query_refnos_point_map_aql;
 use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_children_refnos, query_refnos_belong_major, query_refnos_travel_children_with_type_aql, query_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql, query_foreign_refnos_aql};
 use crate::aql_api::pdms_room::{query_room_codes_from_owner, query_room_name_from_owner_aql, query_room_name_from_refno_aql, query_room_name_from_refnos_aql};
-use crate::data_center_api::bran::atta::get_data_center_atta_attr;
+use crate::data_center_api::bran::atta::{get_data_center_atta_attr, get_dq_atta_data};
+use crate::data_center_api::bran::bend::{get_dq_bend_angle_data, get_dq_bend_data};
 use crate::data_center_api::bran::cap::get_data_center_cap_attr;
 use crate::data_center_api::bran::coup::get_data_center_coup_attr;
-use crate::data_center_api::bran::cros::get_data_center_cros_attr;
-use crate::data_center_api::bran::elbo::get_data_center_elbo_attr;
+use crate::data_center_api::bran::cros::{get_data_center_cros_attr, get_dq_cros_data};
+use crate::data_center_api::bran::elbo::{get_data_center_elbo_attr, get_dq_elbo_spre_data};
 use crate::data_center_api::bran::flan::get_data_center_flan_attr;
+use crate::data_center_api::bran::ftub::*;
 use crate::data_center_api::bran::gask::get_data_center_gask_attr;
 use crate::data_center_api::bran::olet::get_data_center_olet_attr;
-use crate::data_center_api::bran::redu::get_data_center_redu_attr;
+use crate::data_center_api::bran::redu::{get_data_center_redu_attr, get_dq_redu_data};
 use crate::data_center_api::bran::tee::{get_data_center_tee_attr, get_dq_tee_data};
 use crate::data_center_api::bran::tubi::get_data_center_tubi_attr;
 use crate::data_center_api::bran::weld::get_data_center_weld_attr;
-use crate::data_center_api::data_api::{get_dq_material_code, get_refno_desc, get_refno_desp, get_refno_latest_version, get_refno_paras, get_refnos_arrive_leave_info};
+use crate::data_center_api::data_api::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -385,7 +387,7 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
             });
 
             // 获取 bran下元件的数据
-            let mut point_type = vec!["TEE".to_string(), "BEND".to_string()];
+            let mut point_type = vec!["TEE".to_string(), "BEND".to_string(), "FTUB".to_string(), "CROS".to_string(), "BEND".to_string()];
             let need_query_point = bran_children.iter()
                 .filter(|child| point_type.contains(&child.noun))
                 .map(|child| child.refno).collect::<Vec<RefU64>>();
@@ -398,70 +400,76 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 .filter(|c| RefU64::from_url_refno(&c.refno).is_some())
                 .map(|e| (RefU64::from_url_refno(&e.refno).unwrap(), e.name))
                 .collect::<HashMap<RefU64, String>>();
-            let regex = Regex::new(r"\d.*:\d")?; // 判断字符串是否包含有多个数字加一个:
+            let regex = Regex::new(r"(\d+):")?; // 判断字符串是否包含有多个数字加一个:
             for child in bran_children {
                 // let spre_name = query_foreign_name_aql(child.refno, vec!["SPRE", "SPRE"], &database).await?.unwrap_or_default();
                 let spre_name = children_spre_map.get(&child.refno).unwrap_or(&"".to_string()).clone();
                 let room_name = bran_children_room_map.get(&child.refno).map_or("".to_string(), |x| x.to_string());
-                let mut object_code = None;
                 match child.noun.as_str() {
-                    "FTUB" => { if spre_name.contains("RISER") { object_code = Some("PARTEH") } else { object_code = Some("PARTEF") } }
+                    "ATTA" => {
+                        if spre_name.contains("LAS") {
+                            let Ok(r) = get_dq_atta_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
+                                                         aios_mgr).await else { continue; };
+                            result.push(r);
+                        }
+                    }
+                    "ELBO" => {
+                        if spre_name.contains("LED") || spre_name.contains("LEU") {
+                            let attr = aios_mgr.get_attr(child.refno).await.unwrap_or_default();
+                            let angle = attr.get_f32("ANGL").unwrap_or(0.0);
+                            let Ok(r) = get_dq_elbo_spre_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
+                                                              angle, aios_mgr).await else { continue; };
+                            result.push(r);
+                        }
+                    }
+                    "FTUB" => {
+                        if spre_name.contains("RISER") {
+                            let Ok(r) = get_dq_ftub_contains_riser_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
+                                                                        aios_mgr).await else { continue; };
+                            result.push(r);
+                        } else if spre_name.contains("RDivider") {
+                            let Ok(r) = get_dq_ftub_contains_rdivider_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
+                                                                           &points_map, aios_mgr).await else { continue; };
+                            result.push(r);
+                        } else {
+                            let Ok(r) = get_dq_ftub_data(&child, &bran.name, &spre_name, &room_name,
+                                                         &kind, b_cover, &points_map, aios_mgr).await else { continue; };
+                            result.push(r);
+                        }
+                    }
                     "TEE" => {
                         let Ok(r) = get_dq_tee_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
                                                     &kind, b_cover, &points_map, aios_mgr).await else { continue; };
                         result.push(r);
                     }
-                    "CROS" => { object_code = Some("PARTEJ") }
-                    "BEND" => { if regex.is_match(&spre_name) { object_code = Some("PARTEB") } }
+                    "CROS" => {
+                        let Ok(r) = get_dq_cros_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
+                                                     &kind, b_cover, &points_map, aios_mgr).await else { continue; };
+                        result.push(r);
+                    }
+                    "REDU" => {
+                        let Ok(r) = get_dq_redu_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
+                                                     aios_mgr).await else { continue; };
+                        result.push(r);
+                    }
+                    "BEND" => {
+                        if regex.is_match(&spre_name) {
+                            let Ok(r) = get_dq_bend_data(&child, &bran.name, &spre_name, &room_name, &ftub_paras,
+                                                         &kind, b_cover, &points_map, aios_mgr).await else { continue; };
+                            result.push(r);
+                        } else {
+                            let attr = aios_mgr.get_attr(child.refno).await.unwrap_or_default();
+                            // angle！=45/90
+                            let angle = attr.get_f32("ANGL").unwrap_or(0.0);
+                            if angle == 45.0 || angle == 90.0 { continue; };
+                            let Ok(r) = get_dq_bend_angle_data(&child, &bran.name, &spre_name,
+                                                               &room_name, &ftub_paras, angle,
+                                                               aios_mgr).await else { continue; };
+                            result.push(r);
+                        }
+                    }
                     _ => {}
                 }
-                if object_code.is_none() { continue; };
-
-                let mut attr = Vec::new();
-                let world_transform = aios_mgr.get_world_transform(child.refno)?.unwrap_or_default();
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "PART4".to_string(),
-                    value: AttrValue::AttrVec3(world_transform.translation).into(),
-                });
-
-                let stander_num = get_refno_desc(child.refno, aios_mgr).await.unwrap_or_default();
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "PARTE4".to_string(),
-                    value: AttrValue::AttrString(stander_num.to_string()).into(),
-                });
-                let material_map = get_dq_material_code(&spre_name,
-                                                        &stander_num, &vec!["ItemCode".to_string(), "Unit".to_string()], aios_mgr).await.unwrap_or_default();
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "PARTE5".to_string(),
-                    value: AttrValue::AttrString(material_map.get("ItemCode").unwrap_or(&"".to_string()).to_string()).into(),
-                });
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "PARTE12".to_string(),
-                    value: AttrValue::AttrString(material_map.get("Unit").unwrap_or(&"".to_string()).to_string()).into(),
-                });
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "PARTE15".to_string(),
-                    value: AttrValue::AttrString(tray_width.to_string()).into(),
-                });
-                attr.push(DataCenterAttr {
-                    attribute_model_code: "PARTE16".to_string(),
-                    value: AttrValue::AttrString(tray_height.to_string()).into(),
-                });
-
-                // let desp = get_refno_desp(child.refno,aios_mgr).await.unwrap_or_default();
-                // let mut b_cover = if desp.len() < 4 { false } else { if desp[3] == 1.0 { true } else { false } };
-                // attr.push(DataCenterAttr {
-                //     attribute_model_code: "PARTEF29".to_string(),
-                //     value: AttrValue::AttrBool(b_cover).into(),
-                // });
-
-                result.push(DataCenterInstance {
-                    object_model_code: object_code.unwrap().to_string(),
-                    project_code: aios_mgr.db_option.project_code.to_string(),
-                    instance_code: child.name.to_string(),
-                    version: get_refno_latest_version(),
-                    attributes: attr,
-                });
             }
         }
     }
