@@ -16,16 +16,7 @@ pub struct SetStatusData {
     pub attr_map: AttrMap,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct RefnoStatusInfo {
-    pub refno: RefU64,
-    pub status: String,
-    pub user: String,
-    // 设置状态的时间
-    pub time: String,
-    // 备注
-    pub node: String,
-}
+
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RefnoStatusDifference {
