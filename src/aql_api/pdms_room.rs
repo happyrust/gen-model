@@ -393,7 +393,7 @@ pub async fn query_room_name_from_owner_aql(
             } )
         let result = (
             for child in children
-            for r in 1 inbound child._id room_edges
+            for r in 1..2 inbound child._id room_edges
                 filter r != null
                 limit 1
                 return {

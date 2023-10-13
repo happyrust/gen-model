@@ -446,8 +446,7 @@ pub async fn query_refnos_from_names_fulltext(names: Vec<String>, database: &ArD
 ///
 /// module ： DESI，CATA等
 pub async fn query_mdb_world_fulltext(mdb: &str, module: &str, database: &ArDatabase) -> anyhow::Result<Option<PdmsElement>> {
-    let mdb_name = replace_symbols(mdb);
-    dbg!(&mdb_name);
+    // let mdb_name = replace_symbols(mdb);
     // 将 mdb_name存在返回的name中，方便判断是否为请求的mdb_name，word的name都是 /*
     let aql = AqlQuery::new("
     with @@pdms_eles,@@pdms_edges
@@ -465,10 +464,9 @@ pub async fn query_mdb_world_fulltext(mdb: &str, module: &str, database: &ArData
         }
     ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
-        .bind_var("mdb", mdb_name)
+        .bind_var("mdb", mdb)
         .bind_var("module", module);
     let result = database.aql_query::<PdmsElement>(aql).await?;
-    dbg!(&result);
     // 判断从数据库中返回的值中，哪个是需要的
     let mdb = format!("/{}", mdb);
     for r in result {
@@ -489,14 +487,14 @@ pub async fn query_mdb_world_fulltext(mdb: &str, module: &str, database: &ArData
 
 /// 将字符串 符号都转为 ，
 fn replace_symbols(input: &str) -> String {
-    // let mut result = String::new();
-    // for c in input.chars() {
-    //     if c.is_alphanumeric() {
-    //         result.push(c);
-    //     } else {
-    //         result.push(',');
-    //     }
-    // }
+    let mut result = String::new();
+    for c in input.chars() {
+        if c.is_alphanumeric() {
+            result.push(c);
+        } else {
+            result.push(',');
+        }
+    }
     input.to_string()
 }
 
@@ -1367,15 +1365,17 @@ pub async fn get_uda_type_refnos_from_select_refnos(select_refnos: Vec<RefU64>,
     let database = aios_mgr.get_arango_db().await?;
     // 因为typex是解析时已经dehash过了,不是对应的udna，
     // 传入得uda_type是udna，需要统一转为 db1_dehash_const 的值
-    let uda_type_ukey = db1_hash(format!(":{}", uda_type).as_str());
-    let uda_type_db_dehash = db1_dehash_const(uda_type_ukey);
+    // let uda_type_ukey = db1_hash(format!(":{}", uda_type).as_str());
+    // let uda_type_db_dehash = db1_dehash_const(uda_type_ukey);
     // 先查找到所有的 base_type ， 再通过 typex 进行过滤
     let type_refnos = query_refnos_travel_children_with_type_aql(&database,
                                                                  &select_refnos, vec![base_type.to_string()]).await?;
     for refno in type_refnos {
-        let Ok(attr) = aios_mgr.get_attr(refno.refno).await else { continue; };
+        let Ok(attr) = aios_mgr.get_attr(refno.refno).await else {
+            continue;
+        };
         let typex = attr.get_typex().to_string();
-        if uda_type_db_dehash == typex {
+        if base_type != typex && !typex.is_empty() {
             result.push(refno.into());
         }
     }
