@@ -16,6 +16,7 @@ use regex::Regex;
 use serde::{Serialize, Deserialize};
 use crate::api::attr::query_explicit_attr;
 use crate::api::children::query_ancestor_refnos_till_type_aql;
+use crate::api::room_code::query_room_code_with_refnos;
 use crate::aql_api::attr_map::query_refnos_point_map_aql;
 use crate::aql_api::children::{query_children_eles, query_children_order_aql, query_children_refnos, query_refnos_belong_major, query_refnos_travel_children_with_type_aql, query_travel_children_with_type_aql};
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql, query_foreign_refnos_aql};
@@ -100,7 +101,7 @@ pub fn get_data_center_bran_attr(refno: RefU64) -> Vec<DataCenterAttr> {
 }
 
 /// 给排水专业 获取 bran和pipe的name
-pub async fn get_sg_pipe_bran_name(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<DataCenterProject> {
+pub async fn get_sg_pipe_bran_name(refnos: Vec<RefU64>, database: &ArDatabase, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut result = Vec::new();
     if let Ok(children) = query_refnos_travel_children_with_type_aql(&database, &refnos,
                                                                      vec!["PIPE".to_string()]).await {
@@ -119,7 +120,7 @@ pub async fn get_sg_pipe_bran_name(refnos: Vec<RefU64>, database: &ArDatabase) -
                 });
                 result.push(DataCenterInstance {
                     object_model_code: "SEGMA".to_string(),
-                    project_code: "1516".to_string(),
+                    project_code: aios_mgr.db_option.project_code.clone(),
                     instance_code: bran.name,
                     version: get_refno_latest_version(),
                     attributes: attr,
@@ -129,7 +130,7 @@ pub async fn get_sg_pipe_bran_name(refnos: Vec<RefU64>, database: &ArDatabase) -
     }
     Ok(DataCenterProject {
         package_code: DataCenterProject::convert_package_code(),
-        project_code: "1516".to_string(),
+        project_code: aios_mgr.db_option.project_code.clone(),
         owner: "KY1801".to_string(),
         instances: result,
     })
@@ -533,52 +534,66 @@ pub async fn query_gy_bran_data_datacenter(select_refno: RefU64, aios_mgr: &Aios
     let database = aios_mgr.get_arango_db().await?;
     let brans = query_travel_children_with_type_aql(&database, select_refno, "BRAN").await?;
     for bran in brans {
-        let children = query_children_order_aql(&database, bran.refno).await?;
+        let children = aios_mgr.query_children_eles_order(bran.refno, &vec![], &vec![]).await?;
+        let bran_refnos = children.iter().map(|child| child.refno).collect::<Vec<_>>();
+        let room_name = query_room_name_from_refnos_aql(bran_refnos, &database).await.unwrap_or(vec![]);
+        let room_map = room_name
+            .into_iter()
+            .map(|x| (x.refno, x.room_name))
+            .collect::<HashMap<RefU64, String>>();
         //  bran 下的元件
         for child in children {
+            let room_code = room_map.get(&child.refno).map_or("".to_string(), |x| x.clone());
             match child.noun.clone().as_str() {
                 "ATTA" => {
-                    let instance = get_data_center_atta_attr(child, &bran.name, &database, aios_mgr).await;
-                    instances.push(instance);
+                    // ITEMB
+                    // ATTA等级库的名字是否包含 NPHS-
+                    let spre_attr = aios_mgr.get_foreign_attrmap(child.refno, "SPRE").unwrap_or_default();
+                    let spre_name = spre_attr.get_name().unwrap_or("".to_string());
+                    if spre_name.contains("NPHS-") {
+                        let instance = get_data_center_atta_attr(child, &bran.name, room_code
+                                                                 , &database, aios_mgr).await;
+                        instances.push(instance);
+                    }
                 }
                 "ELBO" => {
-                    let instance = get_data_center_elbo_attr(child, &bran.name, &database, aios_mgr).await;
+                    let instance = get_data_center_elbo_attr(child, &bran.name, room_code, &database, aios_mgr).await;
                     instances.push(instance);
                 }
                 "CAP" => {
-                    let instance = get_data_center_cap_attr(child, &bran.name, &database, aios_mgr).await;
+                    let instance = get_data_center_cap_attr(child, &bran.name, room_code, &database, aios_mgr).await;
                     instances.push(instance);
                 }
                 "COUP" => {
-                    let instance = get_data_center_coup_attr(child, &bran.name, &database, aios_mgr).await;
+                    let instance = get_data_center_coup_attr(child, &bran.name, room_code, &database, aios_mgr).await;
                     instances.push(instance);
                 }
                 "CROS" => {
-                    let instance = get_data_center_cros_attr(child, &bran.name, &database, aios_mgr).await;
+                    let instance = get_data_center_cros_attr(child, &bran.name, room_code, &database, aios_mgr).await;
                     instances.push(instance);
                 }
                 "FLAN" => {
-                    let instance = get_data_center_flan_attr(child, &bran.name, &database, aios_mgr).await;
+                    let instance = get_data_center_flan_attr(child, &bran.name, room_code, &database, aios_mgr).await;
                     instances.push(instance);
                 }
                 "GASK" => {
-                    let instance = get_data_center_gask_attr(child, &bran.name, &database, aios_mgr).await;
+                    let instance = get_data_center_gask_attr(child, &bran.name, room_code, &database, aios_mgr).await;
                     instances.push(instance);
                 }
                 "OLET" => {
-                    let instance = get_data_center_olet_attr(child, &bran.name, &database, aios_mgr).await;
+                    let instance = get_data_center_olet_attr(child, &bran.name, room_code, &database, aios_mgr).await;
                     instances.push(instance);
                 }
                 "REDU" => {
-                    let instance = get_data_center_redu_attr(child, &bran.name, &database, aios_mgr).await;
+                    let instance = get_data_center_redu_attr(child, &bran.name, room_code, &database, aios_mgr).await;
                     instances.push(instance);
                 }
                 "TEE" => {
-                    let instance = get_data_center_tee_attr(child, &bran.name, &database, aios_mgr).await;
+                    let instance = get_data_center_tee_attr(child, &bran.name, room_code, &database, aios_mgr).await;
                     instances.push(instance);
                 }
                 "WELD" => {
-                    let instance = get_data_center_weld_attr(child, &bran.name, &database, aios_mgr).await;
+                    let instance = get_data_center_weld_attr(child, &bran.name, room_code, aios_mgr).await;
                     instances.push(instance);
                 }
                 _ => {}
@@ -674,6 +689,22 @@ fn math_cable_weight(tray_name: &str, tray_width: &str) -> String {
         }
         _ => "0.0".to_string()
     }
+}
+
+pub fn float_eq<T>(x: T, y: T, epsilon: f64) -> bool
+    where T: std::ops::Sub + Into<f64>,
+{
+    let x = x.into();
+    let y = y.into();
+    (x - y).abs() < epsilon
+}
+
+#[test]
+fn test_float_eq() {
+    let x = 0.00001;
+    let y = 0.001;
+    let epsilon = 0.0001;
+    dbg!(float_eq(x,y,epsilon));
 }
 
 #[tokio::test]

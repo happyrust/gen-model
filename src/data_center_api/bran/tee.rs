@@ -18,7 +18,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 
-pub async fn get_data_center_tee_attr(refno: PdmsElement, bran_name: &str, database: &ArDatabase, aios_mgr: &AiosDBManager) -> DataCenterInstance {
+pub async fn get_data_center_tee_attr(refno: PdmsElement, bran_name: &str, room_code: String, database: &ArDatabase, aios_mgr: &AiosDBManager) -> DataCenterInstance {
     let need_query_material_code = vec![("ITEMA11".to_string(), "Code".to_string()),
                                         ("ITEMA12".to_string(), "Name".to_string()), ("ITEMA13".to_string(), "Make".to_string()),
                                         ("ITEMA14".to_string(), "Mat".to_string()),
@@ -28,7 +28,7 @@ pub async fn get_data_center_tee_attr(refno: PdmsElement, bran_name: &str, datab
                                         ("ITEMA18".to_string(), "QAGrade".to_string()), ];
     let mut result = Vec::new();
     // 重复的取值
-    get_bran_itema_attr(refno.clone(), bran_name, database, aios_mgr, &mut result).await;
+    get_bran_itema_attr(refno.clone(), bran_name, room_code, database, aios_mgr, &mut result).await;
 
     let spre_name = query_foreign_name_aql(refno.refno, vec!["SPRE", "SPRE"], database).await.unwrap_or(None).unwrap_or("".to_string());
     let material_code = get_spre_material_code(&spre_name).unwrap_or("".to_string());
@@ -208,7 +208,7 @@ pub async fn get_dq_tee_data(refno: &PdmsElement, bran_name: &str, spre_name: &s
         attribute_model_code: "PARTEA32".to_string(),
         value: AttrValue::AttrVec3(other_pos).into(),
     });
-    Ok(DataCenterInstance{
+    Ok(DataCenterInstance {
         object_model_code: "PARTEA".to_string(),
         project_code: aios_mgr.db_option.project_code.to_string(),
         instance_code: refno.name.to_string(),
@@ -227,7 +227,7 @@ async fn test_get_data_center_tee_attr() -> anyhow::Result<()> {
     let tee_node = query_ele_node(tee_refno, &pool.1).await.unwrap();
     let owner_name = query_name(tee_node.owner, &pool.1).await.unwrap();
 
-    let result = get_data_center_tee_attr(tee_node.into(), &owner_name, &database, &aios_mgr).await;
+    let result = get_data_center_tee_attr(tee_node.into(), &owner_name, "".to_string(),&database, &aios_mgr).await;
     let mut file = std::fs::File::create("tee.json")?;
     let json = serde_json::to_vec(&result)?;
     file.write_all(&json)?;

@@ -59,10 +59,11 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
         .collect::<HashMap<String, f32>>();
     let names = request.keys().map(|name| name.clone()).collect::<Vec<_>>();
     // 通过pipe name 查询到pipe的所有参考后
-    //let pipe_refnos = query_id_from_names_aql(names, Some("PIPE"), &database).await?;
+    // let pipe_refnos = query_id_from_names_aql(names, Some("PIPE"), &database).await?;
     let pipe_refnos = query_refnos_from_names_fulltext(names, &database).await?;
     let mut result = Vec::new();
     for (_name, pipe_ele) in pipe_refnos {
+    // for pipe_ele in pipe_refnos {
         let Some(temp) = request.get(&pipe_ele.name) else { continue; };
         let Ok(bran_refnos) = query_children_with_name_aql(&database, pipe_ele.refno).await else { continue; };
         // 一次查询 pipe下所有bran穿过的房间

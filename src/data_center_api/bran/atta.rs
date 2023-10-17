@@ -15,7 +15,8 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 
-pub async fn get_data_center_atta_attr(refno: PdmsElement, bran_name: &str, database: &ArDatabase, aios_mgr: &AiosDBManager) -> DataCenterInstance {
+pub async fn get_data_center_atta_attr(refno: PdmsElement, bran_name: &str, room_code: String,
+                                       database: &ArDatabase, aios_mgr: &AiosDBManager) -> DataCenterInstance {
     let need_query_material_code = vec![("ITEMB14".to_string(), "Code".to_string()),
                                         ("ITEMB15".to_string(), "RCCM".to_string()),
                                         ("ITEMB16".to_string(), "QAGrade".to_string()),
@@ -57,7 +58,6 @@ pub async fn get_data_center_atta_attr(refno: PdmsElement, bran_name: &str, data
         value: AttrString(quat_to_pdms_ori_str(&world_position.rotation)).into(),
     };
     result.push(item_8);
-    let room_code = query_room_name_from_refno_aql(refno.refno, database).await.unwrap_or(None).unwrap_or("".to_string());
     result.push(DataCenterAttr {
         attribute_model_code: "ITEMB11".to_string(),
         value: AttrString(room_code).into(),
@@ -73,8 +73,13 @@ pub async fn get_data_center_atta_attr(refno: PdmsElement, bran_name: &str, data
         attribute_model_code: "ITEMB13".to_string(),
         value: AttrString(tspe).into(),
     });
+    let spre_attr = aios_mgr.get_foreign_attrmap(refno.refno, "SPRE").unwrap_or_default();
+    let spre_name = spre_attr.get_name().unwrap_or("".to_string());
+    result.push(DataCenterAttr {
+        attribute_model_code: "ITEMB14".to_string(),
+        value: AttrString(spre_name.clone()).into(),
+    });
 
-    let spre_name = query_foreign_name_aql(refno.refno, vec!["SPRE", "SPRE"], database).await.unwrap_or(None).unwrap_or("".to_string());
     let material_code = get_spre_material_code(&spre_name).unwrap_or("".to_string());
     let material_map = if let Ok(puhua_pool) = aios_mgr.get_puhua_pool().await {
         let query_code = need_query_material_code.iter().map(|x| x.1.clone()).collect::<Vec<_>>();
@@ -95,7 +100,7 @@ pub async fn get_data_center_atta_attr(refno: PdmsElement, bran_name: &str, data
         });
     }
     DataCenterInstance {
-        object_model_code: "ITEMAB".to_string(),
+        object_model_code: "ITEMB".to_string(),
         project_code: aios_mgr.db_option.project_code.to_string(),
         instance_code: refno.name,
         version: get_refno_latest_version(),
@@ -194,10 +199,11 @@ pub async fn get_dq_atta_data(refno: &PdmsElement, bran_name: &str, spre_name: &
         value: AttrValue::AttrFloat(para_2 as f32).into(),
     });
     let para = get_refno_paras(refno.refno, aios_mgr).unwrap_or(vec![]);
-    let para_2 = para.get(1).map_or(0.0, |x| *x);
+    // para3
+    let para_3 = para.get(2).map_or(0.0, |x| *x);
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PARTEE25".to_string(),
-        value: AttrValue::AttrFloat(para_2 as f32).into(),
+        value: AttrValue::AttrFloat(para_3 as f32).into(),
     });
     Ok(DataCenterInstance {
         object_model_code: "PARTEE".to_string(),
@@ -209,7 +215,6 @@ pub async fn get_dq_atta_data(refno: &PdmsElement, bran_name: &str, spre_name: &
 }
 
 #[tokio::test]
-
 async fn test_get_data_center_atta_attr() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let database = aios_mgr.get_arango_db().await?;
@@ -218,7 +223,7 @@ async fn test_get_data_center_atta_attr() -> anyhow::Result<()> {
     let tee_node = query_ele_node(tee_refno, &pool.1).await.unwrap();
     let owner_name = query_name(tee_node.owner, &pool.1).await.unwrap();
 
-    let result = get_data_center_atta_attr(tee_node.into(), &owner_name, &database, &aios_mgr).await;
+    let result = get_data_center_atta_attr(tee_node.into(), &owner_name, "".to_string(), &database, &aios_mgr).await;
     let mut file = std::fs::File::create("tee.json")?;
     let json = serde_json::to_vec(&result)?;
     file.write_all(&json)?;

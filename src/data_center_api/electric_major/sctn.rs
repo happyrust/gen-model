@@ -134,11 +134,15 @@ async fn get_dq_support_sctn_gtype_box_data(
         attribute_model_code: "PART1".to_string(),
         value: AttrValue::AttrString(refno.refno.to_refno_str()).into(),
     });
+    let mut stru_desc = "".to_string();
     let owner_refno = aios_mgr.get_ancestor_refno_till_type(refno.refno, &vec!["STRU"]);
     // 往上找到STRU的NAME
     let mut owner_name = "".to_string();
     if let Some(owner_refno) = owner_refno {
         let owner_attr = aios_mgr.get_attr(owner_refno).await.unwrap_or_default();
+        if let Some(desc) = owner_attr.get_str("DESC") {
+            stru_desc = desc.to_string();
+        }
         owner_name = owner_attr.get_name().unwrap_or("".to_string());
     }
     data_center_attr.push(DataCenterAttr {
@@ -152,11 +156,8 @@ async fn get_dq_support_sctn_gtype_box_data(
     });
 
     let transform = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or(Transform::default());
-    let pos = transform.translation;
-    data_center_attr.push(DataCenterAttr {
-        attribute_model_code: "PART4".to_string(),
-        value: AttrValue::AttrVec3(pos).into(),
-    });
+
+
     let attr = aios_mgr.get_attr(refno.refno).await.unwrap_or_default();
     let ori = attr.get_vec3("ORI").unwrap_or(Vec3::ZERO);
     data_center_attr.push(DataCenterAttr {
@@ -232,6 +233,38 @@ async fn get_dq_support_sctn_gtype_box_data(
         poss = poss_q;
         pose = pose_q;
         distance = pose.distance(poss);
+    }
+    // 判断STRU>DESC是否包含floor来分辨吊架还是支架，吊架取方钢的高点，支架取方钢低点
+    let mut pos = Vec3::ZERO;
+    // 支架
+    if stru_desc.to_lowercase().contains("floor") {
+        if poss.z < pose.z {
+            let pos = transform.transform_point(poss);
+            data_center_attr.push(DataCenterAttr {
+                attribute_model_code: "PART4".to_string(),
+                value: AttrValue::AttrVec3(pos).into(),
+            });
+        } else {
+            let pos = transform.transform_point(pose);
+            data_center_attr.push(DataCenterAttr {
+                attribute_model_code: "PART4".to_string(),
+                value: AttrValue::AttrVec3(pos).into(),
+            });
+        }
+    } else {
+        if poss.z > pose.z {
+            let pos = transform.transform_point(poss);
+            data_center_attr.push(DataCenterAttr {
+                attribute_model_code: "PART4".to_string(),
+                value: AttrValue::AttrVec3(pos).into(),
+            });
+        } else {
+            let pos = transform.transform_point(pose);
+            data_center_attr.push(DataCenterAttr {
+                attribute_model_code: "PART4".to_string(),
+                value: AttrValue::AttrVec3(pos).into(),
+            });
+        }
     }
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PARTD6".to_string(),
@@ -870,7 +903,7 @@ async fn test_get_dq_support_sctn_data() -> anyhow::Result<()> {
 
 #[test]
 fn test_checked_add() {
-    let a:u8 = u8::MAX -1;
+    let a: u8 = u8::MAX - 1;
     let b = a.checked_add(1);
     dbg!(&b);
 }
