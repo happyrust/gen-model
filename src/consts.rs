@@ -82,4 +82,6 @@ pub const AQL_HOLE_EDGE_COLLECTION: &'static str = "hole_edge";
 pub const AQL_EMBED_EDGE_COLLECTION: &'static str = "embed_edge";
 pub const AQL_WATER_CALCULATION_COLLECTION: &'static str = "water_calculation";
 
+
+
 pub const DESI: &'static str = "DESI";
