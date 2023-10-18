@@ -10,6 +10,7 @@ use crate::aql_api::pdms_room::query_room_name_from_refnos_aql;
 use crate::consts::{AQL_FOREIGN_EDGES_COLLECTION, AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION};
 use crate::data_center_api::data_api::{get_refno_desc, get_refno_desi_desc, get_refno_latest_version, get_refno_paras};
 use crate::data_center_api::electric_major::sctn::EleNodeWithSpreName;
+use crate::data_center_api::electric_major::stru::get_dq_jldatu_fixing_data;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -81,7 +82,7 @@ pub async fn get_dq_fixing_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -
                 object_code = "PARTDJ".to_string()
             }
             s if s.contains("C2") => {
-                get_dq_finxing_c2(fixing.refno,&s, &mut fixing_attrs,aios_mgr);
+                get_dq_finxing_c2(fixing.refno, &s, &mut fixing_attrs, aios_mgr);
                 object_code = "PARTDE".to_string()
             }
             s if s.contains("MGB") => {
@@ -89,7 +90,8 @@ pub async fn get_dq_fixing_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -
                 object_code = "PARTDH".to_string()
             }
             _ => {
-                continue;
+                get_dq_jldatu_fixing_data(fixing.refno, &s, &mut fixing_attrs, aios_mgr);
+                object_code = "PARTDG".to_string()
             }
         }
         result.push(DataCenterInstance {
@@ -273,10 +275,10 @@ fn get_dq_finxing_c1(spre_name: &str,
     });
 }
 
-fn get_dq_finxing_c2(refno:RefU64,
+fn get_dq_finxing_c2(refno: RefU64,
                      spre_name: &str,
                      mut fixing_attrs: &mut Vec<DataCenterAttr>,
-                    aios_mgr:&AiosDBManager) {
+                     aios_mgr: &AiosDBManager) {
     fixing_attrs.push(DataCenterAttr {
         attribute_model_code: "PART3".to_string(),
         value: AttrValue::AttrString("管卡".to_string()).into(),
