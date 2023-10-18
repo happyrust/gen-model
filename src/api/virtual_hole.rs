@@ -1,10 +1,11 @@
 use aios_core::data_center::{SendHoleData, SendHoleDataToArango};
-use aios_core::create_attas_structs::VirtualHoleGraphNodeQuery;
+use aios_core::create_attas_structs::{ VirtualHoleGraphNodeQuery};
 use aios_core::create_attas_structs::VirtualEmbedGraphNode;
 use aios_core::create_attas_structs::VirtualHoleGraphNode;
 use crate::graph_db::pdms_arango::{ArDatabase, connect_arangodb};
 use aios_core::create_attas_structs::VirtualEmbedGraphNodeQuery;
 use bb8_arangodb::arangors_lite::AqlQuery;
+use crate::data_interface::tidb_manager::AiosDBManager;
 
 pub async fn query_virtual_hole_data(database: &ArDatabase, key_value: &str) -> anyhow::Result<Option<Vec<SendHoleData>>> {
     let aql = AqlQuery::new("with virtual_hole let v = document('virtual_hole',@_key)\
@@ -27,7 +28,7 @@ pub async fn query_virtual_hole_data(database: &ArDatabase, key_value: &str) -> 
 // }
 
 pub async fn query_all_virtual_hole_audit_data(database: &ArDatabase) -> anyhow::Result<Option<Vec<SendHoleDataToArango>>> {
-    let aql = AqlQuery::new("with virtual_hole
+    let aql = AqlQuery::new("with  @@collection
                                                 FOR u IN @@collection
                                                 return unset(u , '_id','_rev')")
         .bind_var("@collection", "virtual_hole");
@@ -70,4 +71,17 @@ pub async fn query_embed_data_status_by_key(database: &ArDatabase, key: &str) ->
     return Ok(Some((data_vec)));
 }
 
+
+
+
+#[tokio::test]
+async fn test_query_hole_model_data_by_key() -> anyhow::Result<()> {
+    let aios_mgr = AiosDBManager::init_form_config().await?;
+    let database = aios_mgr.get_arango_db().await?;
+    let key = "bca176a3-a8cf-4e1f-b21e-50ac7f56ab5d11".to_string();
+    if let Ok(Some(result)) = query_hole_model_data_by_key(&database,key).await{
+        dbg!(&result);
+    }
+    Ok(())
+}
 

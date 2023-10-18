@@ -311,3 +311,15 @@ fn test_() {
     let result = get_uda_info().clone();
     dbg!(&result.0);
 }
+
+// #[tokio::test]
+// async fn test_query_hole_model_data_by_key() -> anyhow::Result<()> {
+//     let aios_mgr = AiosDBManager::init_form_config().await?;
+//     let database = aios_mgr.get_arango_db().await?;
+//     let keys = vec!["bca176a3-a8cf-4e1f-b21e-50ac7f56ab5d11".to_string(),"bca176a3-a8cf-4e1f-b21e-50ac7f56ab5d13".to_string()];
+//     if let Ok(Some(result)) = query_hole_model_data_by_key(&database,keys).await{
+//         dbg!(&result);
+//     }
+//     Ok(())
+// }
+//
