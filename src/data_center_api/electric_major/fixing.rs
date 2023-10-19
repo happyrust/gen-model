@@ -89,7 +89,7 @@ pub async fn get_dq_fixing_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -
                 get_dq_finxing_mgb(fixing.refno, &s, &mut fixing_attrs, aios_mgr);
                 object_code = "PARTDH".to_string()
             }
-            _ => {
+            s => {
                 get_dq_jldatu_fixing_data(fixing.refno, &s, &mut fixing_attrs, aios_mgr);
                 object_code = "PARTDG".to_string()
             }
