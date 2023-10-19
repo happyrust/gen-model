@@ -1,13 +1,20 @@
 use std::collections::HashMap;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance};
+use aios_core::data_center::AttrValue::*;
 use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
 use aios_core::pdms_types::{AttrVal, PdmsElement, RefU64};
+use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use bevy_transform::prelude::Transform;
+use dashmap::DashMap;
 use glam::Vec3;
 use regex::Regex;
-use crate::data_center_api::data_api::{get_refno_desc, get_refno_latest_version, get_refno_paras};
+use crate::aql_api::foreign_refnos::query_foreign_name_aql;
+use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
+use crate::data_center_api::auto_get_attr::get_material_map_from_code;
+use crate::data_center_api::data_api::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_arango::ArDatabase;
 
 /// 获取电气bend数据
 pub async fn get_dq_bend_data(refno: &PdmsElement, bran_name: &str, spre_name: &str, room_name: &str, ftub_paras: &Vec<f64>,
@@ -152,9 +159,124 @@ pub async fn get_dq_bend_data(refno: &PdmsElement, bran_name: &str, spre_name: &
     })
 }
 
+/// 获取工艺专业bend数据
+pub async fn get_gy_bend_data(refno: &PdmsElement, bran_name: &str, room_code: String,
+                              database: &ArDatabase, aios_mgr: &AiosDBManager) -> DataCenterInstance {
+    let mut result = Vec::new();
+    let spre_attr = aios_mgr.get_foreign_attrmap(refno.refno, "SPRE").unwrap_or_default();
+    let spre_name = spre_attr.get_name().unwrap_or("".to_string());
+    let bran_spre_material_code = get_spre_material_code(&spre_name).unwrap_or("".to_string());
+    let need_query_material_code = vec![("ITEMA11".to_string(), "Code".to_string()),
+                                        ("ITEMA12".to_string(), "Name".to_string()),
+                                        ("ITEMA13".to_string(), "Make".to_string()),
+                                        ("ITEMA14".to_string(), "Mat".to_string()),
+                                        ("ITEMA15".to_string(), "MatSpec".to_string()),
+                                        ("ITEMA16".to_string(), "Spec".to_string()),
+                                        ("ITEMA17".to_string(), "RCCM".to_string()),
+                                        ("ITEMA18".to_string(), "QAGrade".to_string()),
+                                        ("ITEMAA2".to_string(), "Weight".to_string()),
+                                        ("ITEMAA5".to_string(), "Diameter".to_string()),
+                                        ("ITEMAA7".to_string(), "Link".to_string())];
+    result.push(DataCenterAttr {
+        attribute_model_code: "ITEM1".to_string(),
+        value: AttrString(refno.refno.to_refno_string()).into(),
+    });
+    let item_1 = DataCenterAttr {
+        attribute_model_code: "ITEMA1".to_string(),
+        value: AttrString(refno.name.clone()).into(),
+    };
+    result.push(item_1);
+    let item_2 = DataCenterAttr {
+        attribute_model_code: "ITEMA2".to_string(),
+        value: AttrString(refno.noun.clone()).into(),
+    };
+    result.push(item_2);
+    let item_3 = DataCenterAttr {
+        attribute_model_code: "ITEMA3".to_string(),
+        value: AttrString(bran_name.to_string()).into(),
+    };
+    result.push(item_3);
+    let item_4 = DataCenterAttr {
+        attribute_model_code: "ITEMA4".to_string(),
+        value: AttrString("".to_string()).into(),
+    };
+    result.push(item_4);
+    let world_position = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or_default();
+    let item_5 = DataCenterAttr {
+        attribute_model_code: "ITEMA5".to_string(),
+        value: AttrVec3(world_position.translation).into(),
+    };
+    result.push(item_5);
+    let item_8 = DataCenterAttr {
+        attribute_model_code: "ITEMA8".to_string(),
+        value: AttrString(quat_to_pdms_ori_str(&world_position.rotation)).into(),
+    };
+    result.push(item_8);
+
+    let material_map = if let Ok(puhua_pool) = aios_mgr.get_puhua_pool().await {
+        let query_code = need_query_material_code.iter().map(|x| x.1.clone()).collect::<Vec<_>>();
+        let material_map = get_material_map_from_code(&bran_spre_material_code, query_code, &puhua_pool).await;
+        material_map
+    } else {
+        DashMap::default()
+    };
+    for (item_code, material_code) in &need_query_material_code {
+        let material = if material_map.contains_key(material_code) {
+            material_map.get(material_code).unwrap().value().clone()
+        } else {
+            "".to_string()
+        };
+        result.push(DataCenterAttr {
+            attribute_model_code: item_code.to_string(),
+            value: material,
+        });
+    }
+
+    // 单位 kg
+    let weight_unit: f32 = if material_map.contains_key("Weight") {
+        material_map.get("Weight").unwrap().value().clone().parse().unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    // let weight = length * weight_unit / 1000.0;
+    result.push(DataCenterAttr {
+        attribute_model_code: "ITEMAA2".to_string(),
+        value: AttrFloat(weight_unit).into(),
+    });
+    result.push(DataCenterAttr {
+        attribute_model_code: "ITEMA20".to_string(),
+        value: AttrString(room_code).into(),
+    });
+    let attr = aios_mgr.get_attr(refno.refno).await.unwrap_or_default();
+
+    let ispec = get_ispec_from_attr(&attr, &aios_mgr).await.unwrap_or("".to_string());
+    result.push(DataCenterAttr {
+        attribute_model_code: "ITEMA21".to_string(),
+        value: AttrString(ispec).into(),
+    });
+    let tspe = query_foreign_name_aql(refno.refno, vec!["TSPE", "TSPE"], database).await.unwrap_or(None).unwrap_or("".to_string());
+    result.push(DataCenterAttr {
+        attribute_model_code: "ITEMA22".to_string(),
+        value: AttrString(tspe).into(),
+    });
+    let r_text = get_rtext_from_attr(&attr, aios_mgr).await.unwrap_or("".to_string());
+    result.push(DataCenterAttr {
+        attribute_model_code: "ITEMA24".to_string(),
+        value: AttrString(r_text).into(),
+    });
+    get_material_pressure_code("ITEMAA3", "ITEMAA4", "ITEMAA6", &mut result, &material_map);
+    DataCenterInstance {
+        object_model_code: "ITEMAA".to_string(),
+        project_code: aios_mgr.db_option.project_code.to_string(),
+        instance_code: refno.name.clone(),
+        version: get_refno_latest_version(),
+        attributes: result,
+    }
+}
+
 /// 获取电气bend数据 angle != 45 || 90
 pub async fn get_dq_bend_angle_data(refno: &PdmsElement, bran_name: &str, spre_name: &str,
-                                    room_name: &str, ftub_paras: &Vec<f64>,angle:f32,
+                                    room_name: &str, ftub_paras: &Vec<f64>, angle: f32,
                                     aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterInstance> {
     let mut data_center_attr = Vec::new();
     data_center_attr.push(DataCenterAttr {

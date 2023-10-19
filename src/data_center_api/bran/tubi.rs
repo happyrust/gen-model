@@ -11,7 +11,7 @@ use crate::aql_api::foreign_refnos::query_foreign_name_aql;
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::aql_api::tubi::query_tubi_from_bran;
 use crate::data_center_api::auto_get_attr::get_material_map_from_code;
-use crate::data_center_api::data_api::{get_ispec_from_attr, get_refno_latest_version, get_rtext_from_attr, get_spre_material_code};
+use crate::data_center_api::data_api::{get_ispec_from_attr, get_material_pressure_code, get_refno_latest_version, get_rtext_from_attr, get_spre_material_code};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
@@ -135,6 +135,7 @@ pub async fn get_data_center_tubi_attr(bran_refno: RefU64,bran_name:&str, databa
             attribute_model_code: "ITEMA24".to_string(),
             value: AttrString(r_text).into(),
         });
+        get_material_pressure_code("ITEMAA3", "ITEMAA4", "ITEMAA6", &mut result, &material_map);
         instances.push(DataCenterInstance {
             object_model_code: "ITEMAA".to_string(),
             project_code: aios_mgr.db_option.project_code.to_string(),

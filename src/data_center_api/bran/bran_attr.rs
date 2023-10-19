@@ -22,7 +22,7 @@ use crate::aql_api::children::{query_children_eles, query_children_order_aql, qu
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql, query_foreign_refnos_aql};
 use crate::aql_api::pdms_room::{query_room_codes_from_owner, query_room_name_from_owner_aql, query_room_name_from_refno_aql, query_room_name_from_refnos_aql};
 use crate::data_center_api::bran::atta::{get_data_center_atta_attr, get_dq_atta_data};
-use crate::data_center_api::bran::bend::{get_dq_bend_angle_data, get_dq_bend_data};
+use crate::data_center_api::bran::bend::{get_dq_bend_angle_data, get_dq_bend_data, get_gy_bend_data};
 use crate::data_center_api::bran::cap::get_data_center_cap_attr;
 use crate::data_center_api::bran::coup::get_data_center_coup_attr;
 use crate::data_center_api::bran::cros::{get_data_center_cros_attr, get_dq_cros_data};
@@ -537,6 +537,11 @@ pub async fn query_gy_bran_data_datacenter(select_refno: RefU64, aios_mgr: &Aios
         let children = aios_mgr.query_children_eles_order(bran.refno, &vec![], &vec![]).await?;
         let bran_refnos = children.iter().map(|child| child.refno).collect::<Vec<_>>();
         let room_name = query_room_name_from_refnos_aql(bran_refnos, &database).await.unwrap_or(vec![]);
+
+        let bran_room_name = if room_name.is_empty() { "".to_string() } else { room_name[0].room_name.clone() };
+        let bran_data = get_data_center_bran_single_attr(&bran.clone().into(), &bran_room_name, aios_mgr).await;
+        instances.push(bran_data);
+
         let room_map = room_name
             .into_iter()
             .map(|x| (x.refno, x.room_name))
@@ -594,6 +599,10 @@ pub async fn query_gy_bran_data_datacenter(select_refno: RefU64, aios_mgr: &Aios
                 }
                 "WELD" => {
                     let instance = get_data_center_weld_attr(child, &bran.name, room_code, aios_mgr).await;
+                    instances.push(instance);
+                }
+                "BEND" => {
+                    let instance = get_gy_bend_data(&child, &bran.name, room_code, &database,aios_mgr).await;
                     instances.push(instance);
                 }
                 _ => {}
@@ -691,6 +700,65 @@ fn math_cable_weight(tray_name: &str, tray_width: &str) -> String {
     }
 }
 
+/// 获取bran本身的attr
+async fn get_data_center_bran_single_attr(bran: &PdmsElement, room_code: &str, aios_mgr: &AiosDBManager) -> DataCenterInstance {
+    let mut data_center_attr = Vec::new();
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEM1".to_string(),
+        value: AttrString(bran.refno.to_refno_str()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA1".to_string(),
+        value: AttrString(bran.name.clone()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA2".to_string(),
+        value: AttrString(bran.noun.clone()).into(),
+    });
+    let owner_attr = aios_mgr.get_attr(bran.owner).await.unwrap_or_default();
+    let owner_name = owner_attr.get_name().unwrap_or("".to_string());
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA3".to_string(),
+        value: AttrString(owner_name).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA4".to_string(),
+        value: AttrString("".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA20".to_string(),
+        value: AttrString(room_code.to_string()).into(),
+    });
+    let bran_attr = aios_mgr.get_attr(bran.refno).await.unwrap_or_default();
+    let ispec = get_ispec_from_attr(&bran_attr, &aios_mgr).await.unwrap_or("".to_string());
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA21".to_string(),
+        value: AttrString(ispec).into(),
+    });
+    let tspec = aios_mgr.get_foreign_attrmap(bran.refno, "TSPE").unwrap_or_default();
+    let tspec_name = tspec.get_name().unwrap_or("".to_string());
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA22".to_string(),
+        value: AttrString(tspec_name).into(),
+    });
+    // [入口refno,出口refno,第三点refno]
+    let href = bran_attr.get_refu64("HREF").unwrap_or(RefU64(0));
+    let tref = bran_attr.get_refu64("TREF").unwrap_or(RefU64(0));
+    let connect_str = format!("[{},{},{}]", href.to_refno_str(), tref.to_refno_str(), bran.refno.to_refno_str());
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA23".to_string(),
+        value: AttrString(connect_str).into(),
+    });
+
+    DataCenterInstance {
+        object_model_code: "ITEMA".to_string(),
+        project_code: aios_mgr.db_option.project_code.to_string(),
+        instance_code: bran.name.clone(),
+        version: get_refno_latest_version(),
+        attributes: data_center_attr,
+    }
+}
+
 pub fn float_eq<T>(x: T, y: T, epsilon: f64) -> bool
     where T: std::ops::Sub + Into<f64>,
 {
@@ -704,7 +772,7 @@ fn test_float_eq() {
     let x = 0.00001;
     let y = 0.001;
     let epsilon = 0.0001;
-    dbg!(float_eq(x,y,epsilon));
+    dbg!(float_eq(x, y, epsilon));
 }
 
 #[tokio::test]
