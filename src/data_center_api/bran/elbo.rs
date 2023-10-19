@@ -13,7 +13,8 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::ArDatabase;
 
-pub async fn get_data_center_elbo_attr(refno: PdmsElement, bran_name: &str, database: &ArDatabase, aios_mgr: &AiosDBManager) -> DataCenterInstance {
+pub async fn get_data_center_elbo_attr(refno: PdmsElement, bran_name: &str, room_code: String,
+                                       database: &ArDatabase, aios_mgr: &AiosDBManager) -> DataCenterInstance {
     let need_query_material_code = vec![("ITEMA11".to_string(), "Code".to_string()),
                                         ("ITEMA12".to_string(), "Name".to_string()),
                                         ("ITEMA13".to_string(), "Make".to_string()),
@@ -27,9 +28,10 @@ pub async fn get_data_center_elbo_attr(refno: PdmsElement, bran_name: &str, data
                                         ("ITEMAD7".to_string(), "Link".to_string())];
     let mut result = Vec::new();
     // 重复的取值
-    get_bran_itema_attr(refno.clone(), bran_name, database, aios_mgr, &mut result).await;
+    get_bran_itema_attr(refno.clone(), bran_name, room_code,database, aios_mgr, &mut result).await;
 
-    let spre_name = query_foreign_name_aql(refno.refno, vec!["SPRE", "SPRE"], database).await.unwrap_or(None).unwrap_or("".to_string());
+    let spre_attr = aios_mgr.get_foreign_attrmap(refno.refno, "SPRE").unwrap_or_default();
+    let spre_name = spre_attr.get_name().unwrap_or("".to_string());
     let material_code = get_spre_material_code(&spre_name).unwrap_or("".to_string());
     let material_map = if let Ok(puhua_pool) = aios_mgr.get_puhua_pool().await {
         let query_code = need_query_material_code.iter().map(|x| x.1.clone()).collect::<Vec<_>>();
@@ -49,7 +51,7 @@ pub async fn get_data_center_elbo_attr(refno: PdmsElement, bran_name: &str, data
             value: material,
         });
     }
-    get_material_pressure_code("ITEMAD3","ITEMAD4","ITEMAD6",&mut result,&material_map);
+    get_material_pressure_code("ITEMAD3", "ITEMAD4", "ITEMAD6", &mut result, &material_map);
     let attr = aios_mgr.get_attr(refno.refno).await.unwrap_or_default();
     let radius = get_elbo_radius(&attr, aios_mgr).await.unwrap_or("".to_string());
     result.push(DataCenterAttr {
@@ -110,8 +112,8 @@ async fn get_elbo_radius(attr: &AttrMap, aios_mgr: &AiosDBManager) -> anyhow::Re
 
 /// 电气专业 type = elbo and spre contain LED/LEU
 pub async fn get_dq_elbo_spre_data(refno: &PdmsElement, bran_name: &str, spre_name: &str,
-                                    room_name: &str, ftub_paras: &Vec<f64>,angle:f32,
-                                    aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterInstance> {
+                                   room_name: &str, ftub_paras: &Vec<f64>, angle: f32,
+                                   aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterInstance> {
     let mut data_center_attr = Vec::new();
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART1".to_string(),

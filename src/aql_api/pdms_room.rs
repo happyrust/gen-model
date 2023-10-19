@@ -250,12 +250,12 @@ pub async fn query_room_codes_from_owners(
     owner_refno: Vec<RefU64>,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<PdmsRoomNameAql>> {
-    let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, owner_refno);
+    let ids = owner_refno.into_iter().map(|id| id.to_url_refno()).collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@pdms_edges,@@room_edges,@@room_eles
     for id in @ids
-    for v in 0..2 inbound id @@pdms_edges
+    for v in 0..2 inbound CONCAT('pdms_eles/',id) @@pdms_edges
     filter v != null
     for r in 1 inbound v._id @@room_edges
             filter r != null
@@ -267,7 +267,7 @@ pub async fn query_room_codes_from_owners(
                 return CONTAINS(o.name,'RS')
             )
             return {
-                'refno': v._key,
+                'refno': id,
                 'room_name': r.name,
                 'b_rs':b_rs[0]
             }

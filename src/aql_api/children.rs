@@ -424,7 +424,11 @@ pub async fn query_refnos_from_names_fulltext(names: Vec<String>, database: &ArD
         }
     ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("names", full_text_names);
-    let result = database.aql_query::<PdmsElement>(aql).await?;
+    let mut result = database.aql_query::<PdmsElement>(aql).await?;
+    // 如果 查出的值为空，就不适用full_text查
+    if result.is_empty() {
+        result = query_refnos_from_names(names.clone(), database, None).await.unwrap_or(vec![]);
+    }
     // 通过传入值与数据库模糊查询返回值对比，匹配需要的值
     let mut map = DashMap::new();
     // 数据库中取值的 name 都是带有 /, 传参names与其统一
