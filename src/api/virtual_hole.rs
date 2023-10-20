@@ -74,14 +74,3 @@ pub async fn query_embed_data_status_by_key(database: &ArDatabase, key: &str) ->
 
 
 
-#[tokio::test]
-async fn test_query_hole_model_data_by_key() -> anyhow::Result<()> {
-    let aios_mgr = AiosDBManager::init_form_config().await?;
-    let database = aios_mgr.get_arango_db().await?;
-    let key = "bca176a3-a8cf-4e1f-b21e-50ac7f56ab5d11".to_string();
-    if let Ok(Some(result)) = query_hole_model_data_by_key(&database,key).await{
-        dbg!(&result);
-    }
-    Ok(())
-}
-

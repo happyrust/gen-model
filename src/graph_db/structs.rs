@@ -20,6 +20,7 @@ pub struct PdmsEleGraphNode {
     pub dbnum: i32,
     #[serde(default)]
     pub cata_hash: Option<String>,
+    // pub tag_lock:bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
