@@ -123,7 +123,7 @@ pub async fn travel_children_with_type(refno: RefU64, att_type: String, pool: &P
     let mut result = vec![];
     let children = travel_children_eles(refno, pool).await?;
     let sql = gen_query_names_from_refnos_with_type_sql(children, att_type);
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let vals = sqlx::query(&sql).fetch_all(pool).await?;
     for val in vals {
         let refno = RefU64(val.get::<i64, _>("ID") as u64);
         let name = val.get::<String, _>("NAME");
@@ -149,7 +149,7 @@ pub async fn travel_children_with_refno(refno: RefU64, pool: &Pool<MySql>) -> an
 pub async fn query_children_id_name_with_type(pool: &Pool<MySql>, refno: RefU64, att_type: &str) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = vec![];
     let sql = gen_query_children_id_name_with_type_sql(refno, att_type);
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let vals = sqlx::query(&sql).fetch_all(pool).await?;
     for val in vals {
         let child_refno = RefU64(val.get::<i64, _>("ID") as u64);
         let name = val.get::<String, _>("NAME");
@@ -163,7 +163,7 @@ pub async fn fuzzy_query_refnos_by_name(att_type: String, name: String, pool: &P
     let mut result = vec![];
     let att_type = if att_type == "\"\"" { None } else { Some(att_type) };
     let sql = gen_fuzzy_query_refnos_by_name_sql(att_type, name);
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let vals = sqlx::query(&sql).fetch_all(pool).await?;
     for val in vals {
         let refno = RefU64(val.get::<i64, _>("ID") as u64);
         let name = val.get::<String, _>("NAME");
@@ -175,7 +175,7 @@ pub async fn fuzzy_query_refnos_by_name(att_type: String, name: String, pool: &P
 pub async fn fuzzy_query_refnos_by_name_limit(name: String, numbdbs: &BTreeSet<i32>, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = vec![];
     let sql = gen_fuzzy_query_refnos_by_name_sql_limit(name, numbdbs);
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let vals = sqlx::query(&sql).fetch_all(pool).await?;
     for val in vals {
         let refno = RefU64(val.get::<i64, _>("ID") as u64);
         let name = val.get::<String, _>("NAME");
@@ -188,7 +188,7 @@ pub async fn fuzzy_query_refnos_by_name_limit(name: String, numbdbs: &BTreeSet<i
 pub async fn query_numbdb_from_refnos(refnos: Vec<RefU64>, pool: &Pool<MySql>) -> anyhow::Result<Vec<i32>> {
     if refnos.is_empty() { return Ok(vec![]); }
     let sql = gen_query_numbdb_from_refnos(refnos);
-    let val = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let val = sqlx::query(&sql).fetch_all(pool).await;
     return match val {
         Ok(vals) => {
             let mut result = vec![];
@@ -207,7 +207,7 @@ pub async fn query_numbdb_from_refnos(refnos: Vec<RefU64>, pool: &Pool<MySql>) -
 /// 获取参考号属于那个dbnum
 pub async fn query_db_num_by_refno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<i32> {
     let sql = gen_query_numbdb_by_refno(refno);
-    let val = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let val = sqlx::query(&sql).fetch_one(pool).await?;
     Ok(val.try_get::<i32, _>("NUMBDB")?)
 }
 
@@ -409,7 +409,7 @@ pub async fn query_mdb_all_dbnums(mdb: &str, pool: &Pool<MySql>) -> anyhow::Resu
     let mut sql = String::new();
     sql.push_str(&format!("SELECT DB_NUM FROM {PDMS_PROJECT_MDB_TABLE} WHERE MDB_NAME='/{}' ORDER BY ORDER_NUM", mdb));
     // dbg!(&sql);
-    let val = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let val = sqlx::query(&sql).fetch_all(pool).await?;
     let mut dbnums = BTreeSet::new();
     for v in val {
         dbnums.insert(v.get::<i32, _>(0));
@@ -435,7 +435,7 @@ pub async fn cache_mdb_module_numbdbs(mdb: &str, module: &str, pool: &Pool<MySql
 pub async fn query_type_refnos_by_numbdb(numbdb: i32, att_type: String, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
     let mut result = vec![];
     let sql = gen_query_refnos_by_numbdb(numbdb, att_type);
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let vals = sqlx::query(&sql).fetch_all(pool).await?;
     for val in vals {
         let refno = val.get::<i64, _>("ID");
         result.push(RefU64(refno as u64));
@@ -446,7 +446,7 @@ pub async fn query_type_refnos_by_numbdb(numbdb: i32, att_type: String, pool: &P
 pub async fn query_contain_noun_refnos(noun: String, pool: &Pool<MySql>) -> anyhow::Result<DashSet<String>> {
     let mut result = DashSet::new();
     let sql = gen_query_contain_noun_refnos(noun);
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let vals = sqlx::query(&sql).fetch_all(pool).await?;
     for val in vals {
         let table = val.get::<String, _>("TABLE_NAME").to_uppercase();
         result.insert(table);
@@ -460,7 +460,7 @@ pub async fn query_contain_noun_refnos(noun: String, pool: &Pool<MySql>) -> anyh
 pub async fn query_foreign_refnos_from_table(foreign_type: &str, table_name: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, RefU64)>> {
     let mut result = Vec::new();
     let sql = gen_query_foreign_refnos_from_table_sql(foreign_type, table_name);
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let vals = sqlx::query(&sql).fetch_all(pool).await?;
     for val in vals {
         let refno = RefU64(val.get::<i64, _>("ID") as u64);
         let foreign_refno = RefU64(val.get::<i64, _>(foreign_type) as u64);

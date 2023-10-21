@@ -1,6 +1,6 @@
 // cal_zdis_pki
 
-use aios_core::pdms_types::{GeoBasicType, RefU64};
+use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::SweepPath3D;
 use aios_core::shape::pdms_shape::LEN_TOL;
 use aios_core::tool::math_tool::quat_to_pdms_ori_str;

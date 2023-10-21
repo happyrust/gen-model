@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::env;
-use aios_core::pdms_types::{AttrMap, EleOperation, RefU64, RefU64Vec};
+use aios_core::pdms_types::*;
 use chrono::{Datelike, DateTime, Local, Timelike};
 use sqlx::{Executor, MySql, Pool, Row};
 use sqlx::types::Uuid;
@@ -32,7 +32,7 @@ impl IncreaseDataTiDB {
         for (dbno, increment_data) in dbno_map {
             let Ok(_r) = create_increment_table(dbno, pool).await else { continue; };
             let sql = gen_insert_increment_sql(dbno, increment_data, &session_name);
-            let mut conn = pool.acquire().await?;
+            let mut conn = pool;
             let result = conn.execute(sql.as_str()).await;
             match result {
                 Ok(_) => {}
@@ -74,8 +74,9 @@ fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncreaseDataTiDB>, s
 
 /// 通过uuid查询该条增删记录
 pub async fn query_key_data(key: &str, numbdb: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<IncreaseDataTiDB>> {
+
     let sql = gen_query_key_data_sql(key, numbdb);
-    let val = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let val = sqlx::query(&sql).fetch_one(pool).await?;
     // let id = val.get::<String, _>("ID");
     let refno = RefU64(val.get::<i64, _>("REFNO") as u64);
     let operate = val.get::<i32, _>("OPERATE");
@@ -99,7 +100,7 @@ pub async fn query_key_data(key: &str, numbdb: i32, pool: &Pool<MySql>) -> anyho
 /// 创建对应的增量记录表
 pub async fn create_increment_table(dbno: i32, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let sql = gen_create_increment_table_sql(dbno);
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool;
     let result = conn.execute(sql.as_str()).await;
     match result {
         Ok(_) => {}

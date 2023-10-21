@@ -4,7 +4,7 @@ use sqlx::mysql::MySqlRow;
 // 获取dbno的版本号
 pub async fn query_dbno_version(dbno:i32,pool:&Pool<MySql>) -> anyhow::Result<Option<i32>> {
     let sql = gen_query_dbno_version_sql(dbno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     match result {
         Ok(val) => {
             let version = val.get::<i32,_>("VERSION");

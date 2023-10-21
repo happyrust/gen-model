@@ -3,7 +3,7 @@ use aios_core::create_attas_structs::VirtualHoleGraphNode;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::{PrimExtrusion, PrimSCylinder};
-use aios_core::pdms_types::{GeoBasicType, PdmsElement, RefU64};
+use aios_core::pdms_types::*;
 use aios_core::pdms_types::GeoBasicType::*;
 use aios_core::plugging_material::PluggingData;
 use aios_core::virtual_hole::HoleInstInfo;

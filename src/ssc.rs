@@ -5,7 +5,7 @@ use std::hash::Hash;
 use std::io::Write;
 use std::sync::Arc;
 use aios_core::options::DbOption;
-use aios_core::pdms_types::{EleTreeNode, RefU64};
+use aios_core::pdms_types::*;
 use anyhow::anyhow;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use calamine::{open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
@@ -99,7 +99,7 @@ pub struct RoomExcelData {
 }
 
 pub async fn async_total_ssc_data(project_pool: &Pool<MySql>, mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
-    let mut conn = project_pool.acquire().await?;
+    let mut conn = project_pool;
     // 创建 ssc 表
     let result = conn.execute(tables::gen_create_ssc_element_tables_sql().as_str()).await;
     match result {
@@ -476,7 +476,7 @@ pub async fn insert_set_ssc_node_sql(room_info: HashMap<String, RefU64>, pool: &
     let insert_sql = format!("INSERT IGNORE INTO {PDMS_SSC_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, REAL_PDMS_REFNO,ORDER_NUM) VALUES ");
     let (sql, zone_level_map, zone_name_map, next_refno) = set_ssc_node()?;
     let sql = format!("{}{}", insert_sql, sql);
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool;
     let result = conn.execute(sql.as_str()).await;
     match result {
         Ok(_) => {}
@@ -1063,7 +1063,7 @@ pub async fn query_ssc_room_refnos(room_info: &HashMap<String, RefU64>, pool: &P
     let mut map = HashMap::new();
     if room_info.is_empty() { return Ok(HashMap::default()); }
     let sql = gen_query_ssc_room_refnos_sql(room_info);
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let results = sqlx::query(&sql).fetch_all(pool).await;
     match results {
         Ok(results) => {
             for result in results {

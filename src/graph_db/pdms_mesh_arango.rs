@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::io::Write;
 use std::mem::take;
 use aios_core::cache::mgr::BytesTrait;
-use aios_core::pdms_types::{PlantGeoData, PlantMeshesData};
+use aios_core::pdms_types::*;
 use arangors_lite::AqlQuery;
 use bb8_arangodb::arangors_lite::collection::CollectionType::Document;
 use itertools::Itertools;

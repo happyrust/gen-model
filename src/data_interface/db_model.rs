@@ -431,7 +431,7 @@ impl AiosDBManager {
         //     .get_project_pool(project)
         //     .ok_or(anyhow::anyhow!("Unknown project pool"))?;
         println!("正在初始化mdb: {mdb}");
-        // let mut conn = project_pool.acquire().await?;
+        // let mut conn = project_pool;
         let need_sync_refno_basic = self.db_option.need_sync_refno_basic;
         if need_sync_refno_basic {
             for project in &self.db_option.included_projects {
@@ -667,7 +667,7 @@ impl AiosDBManager {
             db_num
         ));
         let result = sqlx::query(&sql)
-            .fetch_all(&mut pool.acquire().await?)
+            .fetch_all(pool)
             .await?;
         for v in result {
             if let project = v.get::<String, _>(1) {

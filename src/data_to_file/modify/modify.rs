@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::mem::take;
 use aios_core::get_default_pdms_db_info;
 use aios_core::helper::{parse_to_i32, parse_to_u16, parse_to_u32};
-use aios_core::pdms_types::{AttrInfo, AttrVal, PdmsDatabaseInfo, RefI32Tuple, RefU64};
+use aios_core::pdms_types::*;
 use aios_core::pdms_types::AttrVal::{BoolType, DoubleArrayType};
 use aios_core::pdms_types::DbAttributeType::Vec3Type;
 use aios_core::tool::db_tool::{db1_hash, read_attr_info_config_from_json};

@@ -1,31 +1,39 @@
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::fs::File;
 use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use aios_core::consts::*;
+use aios_core::orm::*;
 use aios_core::pdms_types::AttrVal::StringType;
-use aios_core::pdms_types::{AttrMap, AttrVal, NamedAttrMap, NounHash, RefU64, RefU64Vec, WholeAttMap};
+use aios_core::pdms_types::{
+    AttrMap, AttrVal, NamedAttrMap, NounHash, RefU64, RefU64Vec, WholeAttMap,
+};
+use aios_core::types::*;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::tool::float_tool::f64_round_3;
 use dashmap::{DashMap, DashSet};
 use itertools::Itertools;
 use parse_pdms_db::parse::*;
+use sea_orm::{ConnectionTrait, Schema, Statement};
 use sqlx::pool::PoolConnection;
 use sqlx::{Connection, MySql, MySqlPool, Pool};
 use sqlx::{Error, Executor};
 
 use crate::api::element::*;
 use crate::aql_api::PdmsPLINAttrAql;
+use crate::arangodb::{ArDatabase, ArPool};
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::graph_db::ParaDocument;
 use crate::tables;
 use crate::tables::*;
+use crate::versioned_db::client::{get_versioned_client, save_versioned_pdms_eles, save_pdms_eles_to_versioned};
 use aios_core::cache::mgr::BytesTrait;
 use aios_core::get_default_pdms_db_info;
 use aios_core::helper::table::{qualified_column_name, qualified_table_name};
@@ -33,8 +41,7 @@ use aios_core::options::DbOption;
 use aios_core::pdms_data::ATTR_INFO_MAP;
 use parry3d::utils::hashmap::FxHasher32;
 use std::hash::{Hash, Hasher};
-use crate::arangodb::{ArDatabase, ArPool};
-use crate::terminusdb::client::{get_versioned_client, save_versioned_pdms_eles};
+use std::io::Read;
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -46,13 +53,12 @@ pub trait MySqlMethods {
 
 /// 初始化project database
 pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result<()> {
-    let connection = MySqlPool::connect(url).await.unwrap();
-    let mut pool = connection.try_acquire().unwrap();
+    let pool = MySqlPool::connect(url).await.unwrap();
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-        .execute(&mut pool)
-        .await?;
+    .execute(&pool)
+    .await?;
     Ok(())
 }
 
@@ -64,9 +70,9 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
             "CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};",
             project_name
         )
-            .as_str(),
+        .as_str(),
     )
-        .await?;
+    .await?;
 
     //todo 改成一对多的实现
     let mut pool =
@@ -124,7 +130,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     let mut create_tables_elapse = 0;
     dbg!("执行多线程解析");
     for project in &db_option.included_projects {
-
         let (att_map_tree, children_tree) = {
             let db_path = format!("{}.db", &project);
             let config = sled::Config::default()
@@ -138,8 +143,40 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             (tree, children_tree)
         };
 
-        if db_option.sync_tidb.unwrap_or(false){
+        if db_option.sync_versioned.unwrap_or(true) {
+            // dbg!(&default_conn_str);
+            let db = sea_orm::Database::connect(&default_conn_str).await.unwrap();
+            // dbg!(&db);
+            let backend = db.get_database_backend();
+            let schema = Schema::new(backend);
+
+            // let pool = MySqlPool::connect(url).await.unwrap();
+            db.execute(Statement::from_string(
+                backend.clone(),
+                format!("CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8;"),
+            ))
+            .await?;
+
+            let project_db = sea_orm::Database::connect(&db_option.get_mysql_project_db_conn_str())
+                .await
+                .unwrap();
+
+            let mut stmt: sea_orm::sea_query::TableCreateStatement =
+                schema.create_table_from_entity(pdms_element::Entity);
+            stmt.if_not_exists();
+            // dbg!(&stmt);
+            project_db.execute(backend.build(&stmt)).await?;
+
+            let mut stmt: sea_orm::sea_query::TableCreateStatement =
+                schema.create_table_from_entity(BOX::Entity);
+            stmt.if_not_exists();
+            // dbg!(&stmt);
+            project_db.execute(backend.build(&stmt)).await?;
+        }
+
+        if db_option.sync_tidb.unwrap_or(false) {
             create_project_database(project, &default_conn_str).await?;
+
             let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
             let mut table_time = Instant::now();
             let mut tables_sql = String::new();
@@ -179,7 +216,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 tables_sql.push_str(&tables::gen_create_explicit_tables_sql());
                 tables_sql.push_str(&tables::gen_create_uda_tables_sql());
             }
-            let mut conn = project_pool.acquire().await?;
+            let mut conn = project_pool;
             tables_sql.push_str(&tables::gen_create_element_tables_sql());
             tables_sql.push_str(&gen_create_project_mdb_sql());
             tables_sql.push_str(&gen_create_data_state_tables_sql());
@@ -189,7 +226,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             let result = execute_sql(&mut conn, tables_sql.as_str()).await;
             create_tables_elapse += table_time.elapsed().as_millis();
         }
-
 
         // let project_pool = AiosDBManager::get_db_pool(&default_conn_str, project).await?;
         // let pdms_info_pool = AiosDBManager::get_db_pool(
@@ -205,7 +241,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             // pdms_info_pool.clone(),
             att_map_tree.clone(),
             children_tree.clone(),
-        ).await {
+        )
+        .await
+        {
             Ok(_) => {
                 println!("同步数据成功。");
             }
@@ -223,7 +261,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn execute_sql(conn: &mut PoolConnection<MySql>, sql: &str) -> bool {
+pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
     match conn.execute(sql).await {
         Ok(_) => {
             return true;
@@ -232,7 +270,8 @@ pub async fn execute_sql(conn: &mut PoolConnection<MySql>, sql: &str) -> bool {
             match &e {
                 Error::Database(error) => {
                     //index already exist
-                    if error.code() == Some(Cow::from("42000")) {} else {
+                    if error.code() == Some(Cow::from("42000")) {
+                    } else {
                         dbg!(sql);
                     }
                 }
@@ -370,11 +409,16 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                 let uda = if i_att.contains_attr_name("UDNA") {
                     let uda = i_att.get_str("UDNA").unwrap();
                     if uda.is_empty() {
-                        att.explicit_attmap.get_str("DYUDNA").unwrap_or("").to_string()
+                        att.explicit_attmap
+                            .get_str("DYUDNA")
+                            .unwrap_or("")
+                            .to_string()
                     } else {
                         uda.to_string()
                     }
-                } else { "".to_string() };
+                } else {
+                    "".to_string()
+                };
                 table_vals_sql.push_str(&format!("'{}',", uda.to_string()));
             } else if i_att.contains_attr_hash(*noun_hash) {
                 let v = i_att.get(noun_hash).unwrap();
@@ -519,7 +563,6 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
     table_vals_sql
 }
 
-
 ///多线程同步数据，包括增量同步
 pub async fn sync_total_async_threaded(
     // arango_pool: ArPool,
@@ -564,7 +607,7 @@ pub async fn sync_total_async_threaded(
     };
     // 先解析一遍uda
     // dbg!("解析uda文件");
-    let _ = parse_uda_file(project, children_files.clone(),&need_parsed_files).await;
+    let _ = parse_uda_file(project, children_files.clone(), &need_parsed_files).await;
     // 正式解析
     let project = Arc::new(project.to_string());
     let db_option = Arc::new(db_option.clone());
@@ -594,6 +637,16 @@ pub async fn sync_total_async_threaded(
                 continue;
             }
         }
+
+        // let mut file = File::open(&path)?;
+        // let mut buf: Vec<u8> = vec![0u8; 0x800];
+        // let input = {
+        //     file.read_exact(&mut buf).ok();
+        //     &buf[..]
+        // };
+        // let (db_type, file_version, mut db_no) = parse_file_basic_info(&buf);
+        // dbg!(&db_type);
+
         if need_parsed_files.is_none() || need_parsed_files.as_ref().unwrap().contains(&file_name) {
             println!("path={:?}", &file_name);
             let project_clone = project.clone();
@@ -605,7 +658,7 @@ pub async fn sync_total_async_threaded(
                 project_name.clone().as_str(),
                 "",
             )
-                .unwrap_or_default();
+            .unwrap_or_default();
             dbg!(children_map.len());
             let all_refnos = children_map.keys().cloned().collect::<Vec<_>>();
             let children_map_clone = Arc::new(children_map);
@@ -629,23 +682,25 @@ pub async fn sync_total_async_threaded(
                 }
             }
 
-            let versioned_client = Arc::new(get_versioned_client().await);
+            // let versioned_client = Arc::new(get_versioned_client(&db_option.project_name).await);
             for (chunk_index, chunk_refnos) in all_refnos.chunks(chunk_size).enumerate() {
+                let versioned_client =
+                    Arc::new(get_versioned_client(&db_option.project_name).await);
                 let path_clone = path.clone();
                 let file_name_clone = file_name.clone();
                 let chunk_refnos_clone = chunk_refnos.to_vec();
                 let project_name_clone = project_name.clone();
                 if let Ok(Ok(PdmsDbData {
-                                 total_attr_map,
-                                 type_ele_map,
-                                 refno_info_map,
-                                 db_type,
-                                 db_no,
-                                 version,
-                                 room_code_map,
-                                 foreign_refnos_map,
-                                 ..
-                             })) = tokio::task::spawn_blocking(move || {
+                    total_attr_map,
+                    type_ele_map,
+                    refno_info_map,
+                    db_type,
+                    db_no,
+                    version,
+                    room_code_map,
+                    foreign_refnos_map,
+                    ..
+                })) = tokio::task::spawn_blocking(move || {
                     parse_file_with_chunk(
                         &path_clone,
                         &None,
@@ -654,7 +709,9 @@ pub async fn sync_total_async_threaded(
                         "",
                         &chunk_refnos_clone,
                     )
-                }).await {
+                })
+                .await
+                {
                     println!("Processing {} chunk index: {chunk_index}", &file_name);
 
                     if sync_tidb {
@@ -662,7 +719,8 @@ pub async fn sync_total_async_threaded(
                         let info_pool = AiosDBManager::get_db_pool(
                             &default_conn_str,
                             &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name),
-                        ).await?;
+                        )
+                        .await?;
 
                         let mut dbinfo_value_sql = gen_dbinfo_value_insert_sql(
                             db_no,
@@ -671,7 +729,7 @@ pub async fn sync_total_async_threaded(
                             project_clone.clone().as_str(),
                             db_type.clone(),
                         );
-                        let mut info_conn = info_pool.acquire().await.unwrap();
+                        // let mut info_conn = info_pool.acquire().await.unwrap();
 
                         //保存dbno的信息表
                         let mut sql = format!("REPLACE INTO {PDMS_DBNO_INFOS_TABLE} ( id, NUMBDB, FILENAME,VERSION,PROJECT,DB_TYPE ) VALUES ");
@@ -679,7 +737,7 @@ pub async fn sync_total_async_threaded(
                         if is_replace {
                             sql = sql.replace("INSERT IGNORE", "REPLACE");
                         }
-                        let result = info_conn.execute(sql.as_str()).await;
+                        let result = info_pool.execute(sql.as_str()).await;
                         match result {
                             Ok(_) => {}
                             Err(e) => {
@@ -707,9 +765,8 @@ pub async fn sync_total_async_threaded(
                         if is_replace {
                             sql = sql.replace("INSERT IGNORE", "REPLACE");
                         }
-                        let result = execute_sql(&mut info_conn, sql.as_str()).await;
+                        let result = execute_sql(&info_pool, sql.as_str()).await;
                     }
-
 
                     // version_map.entry(file_name.clone()).or_insert(version);
                     // set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
@@ -719,49 +776,119 @@ pub async fn sync_total_async_threaded(
                     //     x.value_mut().explicit_attmap.insert(NAME_HASH, AttrVal::StringType(name));
                     // });
 
-                    let client = versioned_client.clone();
-                    // save_versioned_pdms_eles(
-                    //     &client,
-                    //     &total_attr_map,
-                    //     db_no as i32,
-                    // ).await?;
-                    let db_info = get_default_pdms_db_info();
-                    const ATTS_CHUNK_COUNT: usize = 10_000;
-                    for kv in &type_ele_map {
-                        let noun: i32 = *kv.key() as _;
-                        let type_name = db1_dehash(noun as _);
-                        // if type_name.as_str() != "FITT" {
-                        //     continue;
-                        // }
-                        dbg!(kv.value().len());
-                        for refnos in &kv.value().iter().chunks(ATTS_CHUNK_COUNT) {
-                            let mut maps = vec![];
-                            for refno in refnos {
-                                let att = total_attr_map.get(&refno).unwrap().merge();
-                                let named_att_map: NamedAttrMap = att.into();
-                                //需要检查一遍能否插入，不能就需要更新schema
-                                if let Some(new_schema) = db_info.check_schema(noun, &named_att_map) {
-                                    dbg!(&new_schema);
-                                    let schema_res = client.insert_doc(new_schema.as_str(), "dpc", "Update schema", true, false, true).await?;
-                                    dbg!(schema_res);
-                                }
-                                let map = named_att_map.gen_versioned_json_map();
-                                maps.push(map);
-                            }
+                    // let banana = fruit::ActiveModel {
+                    //     name: Set("Banana".to_owned()),
+                    //     ..Default::default()
+                    // };
+                    // let mut banana: fruit::ActiveModel = banana.save(db).await?;
 
-                            // dbg!(&json);
-                            let json = serde_json::to_string(&maps).unwrap_or_default();
-                            let att_res = client.insert_doc(json.as_str(), "dpc", "Add Attributes", false, true, false).await?;
-                            dbg!(att_res);
-                            if !att_res {
-                                dbg!(maps.iter().next());
-                            }
-                            // break;
-                        }
-                        // break;
-                    }
+                    save_pdms_eles_to_versioned(&db_option, project.as_str(), &total_attr_map, db_no as i32)
+                        .await?;
 
+                    // let mut use_terminus = false;
+                    // if use_terminus && db_type != "CATA" {
+                    //     let client = versioned_client.clone();
+                    //     // save_versioned_pdms_eles(
+                    //     //     &client,
+                    //     //     &total_attr_map,
+                    //     //     db_no as i32,
+                    //     //     &db_option,
+                    //     // ).await?;
+                    //     let db_info = get_default_pdms_db_info();
+                    //     const ATTS_CHUNK_COUNT: usize = 10_000;
 
+                    //     for chunk in &total_attr_map.iter().chunks(ATTS_CHUNK_COUNT) {
+                    //         let mut maps = vec![];
+                    //         for iter in chunk {
+                    //             let refno = iter.key();
+                    //             let att = total_attr_map.get(refno).unwrap().merge();
+                    //             let named_att_map: NamedAttrMap = att.into();
+                    //             let type_name = named_att_map.get_type();
+                    //             if type_name.as_str() != "BOX" {
+                    //                 continue;
+                    //             }
+                    //             let noun = db1_hash(type_name.as_str()) as _;
+                    //             //需要检查一遍能否插入，不能就需要更新schema
+                    //             if let Some(new_schema) = db_info.check_schema(noun, &named_att_map)
+                    //             {
+                    //                 dbg!(&new_schema);
+                    //                 let schema_res = client
+                    //                     .insert_doc(
+                    //                         new_schema.as_str(),
+                    //                         "dpc",
+                    //                         "Update schema",
+                    //                         true,
+                    //                         false,
+                    //                         true,
+                    //                     )
+                    //                     .await?;
+                    //                 dbg!(schema_res);
+                    //             }
+                    //             let map = named_att_map.gen_versioned_json_map();
+                    //             maps.push(map);
+                    //             // break;
+                    //         }
+                    //         // dbg!(&json);
+                    //         if !maps.is_empty() {
+                    //             let json = serde_json::to_string(&maps).unwrap_or_default();
+                    //             let att_res = client
+                    //                 .insert_doc(
+                    //                     json.as_str(),
+                    //                     "dpc",
+                    //                     "Add attributes",
+                    //                     false,
+                    //                     false,
+                    //                     true,
+                    //                 )
+                    //                 .await?;
+                    //             dbg!(att_res);
+                    //             if !att_res {
+                    //                 let first = maps.iter().next();
+                    //                 dbg!(&maps);
+                    //                 dbg!(serde_json::to_string(&first));
+                    //                 break;
+                    //             }
+                    //         }
+                    //         // break;
+                    //     }
+                    // }
+
+                    // for kv in &type_ele_map {
+                    //     let noun: i32 = *kv.key() as _;
+                    //     let type_name = db1_dehash(noun as _);
+                    //     // if type_name.as_str() != "SDTE" {
+                    //     //     continue;
+                    //     // }
+                    //     dbg!((&type_name, noun));
+                    //     dbg!(kv.value().len());
+                    //     for refnos in &kv.value().iter().chunks(ATTS_CHUNK_COUNT) {
+                    //         let mut maps = vec![];
+                    //         for refno in refnos {
+                    //             let att = total_attr_map.get(&refno).unwrap().merge();
+                    //             let named_att_map: NamedAttrMap = att.into();
+                    //             //需要检查一遍能否插入，不能就需要更新schema
+                    //             if let Some(new_schema) = db_info.check_schema(noun, &named_att_map) {
+                    //                 dbg!(&new_schema);
+                    //                 let schema_res = client.insert_doc(new_schema.as_str(), "dpc", "Update schema", true, false, true).await?;
+                    //                 dbg!(schema_res);
+                    //             }
+                    //             let map = named_att_map.gen_versioned_json_map();
+                    //             maps.push(map);
+                    //         }
+                    //         // dbg!(&json);
+                    //         let json = serde_json::to_string(&maps).unwrap_or_default();
+                    //         let att_res = client.insert_doc(json.as_str(), "dpc", "Add Attributes", false, false, true).await?;
+                    //         dbg!(att_res);
+                    //         if !att_res {
+                    //             let first = maps.iter().next();
+                    //             dbg!(first);
+                    //             dbg!(serde_json::to_string(&first));
+                    //             // break;
+                    //         }
+                    //         break;
+                    //     }
+
+                    // }
 
                     //类型暂时不多线程
                     let total_attr_map_arc = Arc::new(total_attr_map);
@@ -783,19 +910,22 @@ pub async fn sync_total_async_threaded(
                                 &total_attr_map_arc,
                                 &children_map_arc,
                                 db_no as i32,
-                            ).await?;
+                            )
+                            .await?;
 
                             save_foreign_refno_edges_in_sync(&database, foreign_refnos_map).await?;
                             // 单独保存plin
-                            save_plin_attr_arangodb(&database, &type_ele_map, &total_attr_map_arc).await?;
+                            // save_plin_attr_arangodb(&database, &type_ele_map, &total_attr_map_arc)
+                            //     .await?;
                             // 将 para 和 des_para保存的图数据库中
-                            save_paras_into_arangodb(&database, &total_attr_map_arc).await?;
+                            // save_paras_into_arangodb(&database, &total_attr_map_arc).await?;
                             // 将 dtse下的data部分数据保存到图数据库
                             save_dtse_value_to_arangodb(
                                 &database,
                                 &type_ele_map,
                                 &total_attr_map_arc,
-                            ).await?;
+                            )
+                            .await?;
                         }
                         println!("图数据库保存完成");
                     }
@@ -856,6 +986,23 @@ pub async fn sync_total_async_threaded(
                     //     println!("保存到本地db完成");
                     // }
 
+                    for kv in type_ele_map.iter() {
+                        let noun: i32 = *kv.key() as _;
+                        let type_name = db1_dehash(noun as _);
+                        if type_name.as_str() != "BOX" {
+                            continue;
+                        }
+                        //不同的类型，应该映射到不同的实体
+                        //要不要用动态类型去保存
+                        //静态转发还是动态转发
+                        for refno in kv.value().iter(){
+                            let att = total_attr_map_arc.get(&refno).unwrap();
+                            //如何将map里的值给到数据结构，通过json可以还原不
+                            // 根据类型创建不同的数据
+                            break;
+                        }
+                        break;
+                    }
 
 
                     //如果不需要同步tidb，continue
@@ -874,7 +1021,9 @@ pub async fn sync_total_async_threaded(
                         let total_attr_map_arc = total_attr_map_arc.clone();
                         let children_map_arc = children_map_arc.clone();
                         let default_conn_str = AiosDBManager::get_default_conn_str(&db_option);
-                        let pool_clone = AiosDBManager::get_db_pool(&default_conn_str, project_name.as_str()).await?;
+                        let pool_clone =
+                            AiosDBManager::get_db_pool(&default_conn_str, project_name.as_str())
+                                .await?;
                         // let info_pool = AiosDBManager::get_db_pool(
                         //     &default_conn_str,
                         //     &format!("{}_{}", PDMS_INFO_DB, &db_option.project_name),
@@ -933,7 +1082,9 @@ pub async fn sync_total_async_threaded(
                                             explicit_values_sql.push_str(
                                                 &gen_explicit_attr_value_sql(att.value()),
                                             );
-                                            let name = att.explicit_attmap.get_name_string()
+                                            let name = att
+                                                .explicit_attmap
+                                                .get_name_string()
                                                 .replace(r#"'"#, r#"\'"#)
                                                 .replace(r#"""#, r#"\""#);
                                             let order = get_order(
@@ -1085,7 +1236,7 @@ pub async fn sync_total_async_threaded(
         if !error_sql.is_empty() {
             // 重新执行有问题的sql
             println!("正在重新插入有问题的sql语句, 共 {} 条", error_sql.len());
-            let mut conn = pool.acquire().await?;
+            let mut conn = pool;
             for sql in error_sql.iter() {
                 let _ = conn.execute(sql.key().as_str()).await;
                 // if r.is_ok() {
@@ -1239,7 +1390,6 @@ async fn save_paras_into_arangodb(
     }
     Ok(())
 }
-
 
 #[tokio::test]
 async fn test_threads() {

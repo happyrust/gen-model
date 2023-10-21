@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
-use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal};
+use aios_core::pdms_types::*;
 use dashmap::DashMap;
 use serde_json::from_str;
 use sqlx::{Error, MySql, MySqlPool, Pool};

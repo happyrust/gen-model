@@ -9,7 +9,7 @@ use crate::consts::*;
 
 pub async fn query_dbno_count(dbno: i32, pool: &Pool<MySql>, project: &str) -> anyhow::Result<i32> {
     let sql = gen_query_dbno_count(dbno, project);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_one(pool).await?;
     Ok(result.try_get::<i32, _>(0)?)
 }
 

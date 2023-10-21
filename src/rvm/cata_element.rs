@@ -1,6 +1,6 @@
 use aios_core::geom_types::RvmGeoInfo;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-use aios_core::pdms_types::{EleGeoInstanceJson, RefU64};
+use aios_core::pdms_types::*;
 use aios_core::prim_geo::helper::RotateInfo;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use bevy_transform::prelude::Transform;

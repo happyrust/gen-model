@@ -28,7 +28,7 @@ pub async fn query_db_quick_info(mdb: &str, module: &str, pool: &Pool<MySql>) ->
     let mut sql = String::new();
     let mdb = if mdb.starts_with("/") { mdb.to_string() } else { format!("/{}", mdb) };
     sql.push_str(&format!("SELECT * FROM {PDMS_PROJECT_MDB_TABLE} WHERE MDB_NAME = '{}' and db_type = '{}' ORDER BY ORDER_NUM ;", mdb, module));
-    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_all(pool).await?;
     let mut vec = vec![];
     for r in result {
         vec.push(DbQuickInfo{
@@ -48,7 +48,7 @@ pub async fn query_world_refnos(mdb: &str, module: &str, pool: &Pool<MySql>) -> 
     let mut sql = String::new();
     let mdb = if mdb.starts_with("/") { mdb.to_string() } else { format!("/{}", mdb) };
     sql.push_str(&format!("SELECT WORLD_REFNO FROM {PDMS_PROJECT_MDB_TABLE} WHERE MDB_NAME = '{}' and db_type = '{}' ORDER BY ORDER_NUM;", mdb, module));
-    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_all(pool).await?;
     let mut vec = vec![];
     for r in result {
         vec.push(RefU64::from_refno_str(&r.get::<String, _>(0)).unwrap() );
@@ -61,7 +61,7 @@ pub async fn query_db_nums_of_mdb(mdb: &str, module: &str, pool: &Pool<MySql>) -
     let mut sql = String::new();
     let mdb = if mdb.starts_with("/") { mdb.to_string() } else { format!("/{}", mdb) };
     sql.push_str(&format!("SELECT DB_NUM FROM {PDMS_PROJECT_MDB_TABLE} WHERE MDB_NAME = '{}' and db_type = '{}' ORDER BY ORDER_NUM;", mdb, module));
-    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_all(pool).await?;
     let mut vec = vec![];
     for r in result {
         vec.push(r.get::<i32, _>(0));
@@ -71,7 +71,7 @@ pub async fn query_db_nums_of_mdb(mdb: &str, module: &str, pool: &Pool<MySql>) -
 
 pub async fn query_if_contains_mdb(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow::Result<bool> {
     let sql = gen_query_contains_mdb_sql(mdb, module);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_one(pool).await?;
     let count = result.get::<i32, _>(0);
     Ok(count != 0)
 }

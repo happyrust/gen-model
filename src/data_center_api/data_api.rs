@@ -1,6 +1,6 @@
 use aios_core::data_center::AttrValue::{AttrFloat, AttrString, AttrVec3};
 use aios_core::data_center::DataCenterAttr;
-use aios_core::pdms_types::{AttrMap, AttrVal, NamedAttrValue, PdmsElement, RefU64};
+use aios_core::pdms_types::*;
 use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use dashmap::DashMap;
 use std::collections::HashMap;
@@ -446,7 +446,7 @@ pub(crate) async fn get_dq_material_code(
     };
     let sql = gen_dq_material_code_sql(spre_name_split_last, stander_num, fileds);
     let pool = aios_mgr.get_puhua_pool().await?;
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool;
     let query_result = conn.fetch_one(sql.as_str()).await?;
     let mut map = HashMap::new();
     for filed in fileds {

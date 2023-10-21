@@ -3,7 +3,7 @@ use std::io::Read;
 use aios_core::get_uda_info;
 use aios_core::options::DbOption;
 use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
-use aios_core::pdms_types::{AttrVal, RefU64};
+use aios_core::pdms_types::*;
 use aios_core::prim_geo::tubing::TubiSize;
 use arangors_lite::AqlQuery;
 use bitvec::macros::internal::funty::Floating;

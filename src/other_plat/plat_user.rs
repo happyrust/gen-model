@@ -7,7 +7,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 /// 将平台的人员（非pdms人员）保存到数据库
 pub async fn save_plat_user(users: Vec<PuHuaPlatUser>, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let create_table_sql = create_plat_user_aql();
-    let mut conn = pool.clone().acquire().await?;
+    let mut conn = pool.clone();
     let create_table_result = conn.execute(create_table_sql.as_str()).await;
     let Ok(_) = create_table_result else { return Ok(()); };
     if users.is_empty() { return Ok(()); }
@@ -20,7 +20,7 @@ pub async fn save_plat_user(users: Vec<PuHuaPlatUser>, pool: &Pool<MySql>) -> an
 pub async fn b_exit_user(aios_mgr: &AiosDBManager, user: &str) -> anyhow::Result<bool> {
     let sql = gen_b_exit_user_sql(user);
     let global_pool = aios_mgr.get_global_pool().await?;
-    let mut conn = global_pool.acquire().await?;
+    let mut conn = global_pool;
     let Ok(result) = conn.fetch_one(sql.as_str()).await else { return Ok(false); };
     let b_exit = result.get::<i32, _>(0) > 0;
     Ok(b_exit)
@@ -32,7 +32,7 @@ pub async fn b_exit_user(aios_mgr: &AiosDBManager, user: &str) -> anyhow::Result
 pub async fn query_all_plat_user(pool: &Pool<MySql>) -> anyhow::Result<Vec<String>> {
     let mut result = Vec::new();
     let sql = gen_query_all_plat_user_sql();
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool;
     let Ok(query_results) = conn.fetch_all(sql.as_str()).await else { return Ok(vec![]); };
     for query_result in query_results {
         let name = query_result.get::<String, _>("work_num");

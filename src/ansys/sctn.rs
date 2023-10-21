@@ -21,7 +21,7 @@ pub async fn query_single_sctn_ansys_data(refno: RefU64, aios_mgr: &AiosDBManage
     // 查找pdms中 sctn 对应的属性
     if let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
         let sql = gen_query_sctn_pdms_data_sql(refno);
-        let result = sqlx::query(&sql).fetch_one(&mut pool.clone().acquire().await?).await;
+        let result = sqlx::query(&sql).fetch_one(&pool).await;
         return match result {
             Ok(v) => {
                 let poss: [f32; 3] = serde_json::from_str(&v.get::<String, _>("POSS")).unwrap_or([0.0; 3]);
@@ -56,7 +56,7 @@ pub async fn query_single_sctn_ansys_data(refno: RefU64, aios_mgr: &AiosDBManage
 pub async fn query_single_sctn_ansys_data_test(refno: RefU64, pool: &Pool<MySql>, cata_pool: &Pool<MySql>, database: &ArDatabase) -> anyhow::Result<Option<SctnAnsysData>> {
     // 查找pdms中 sctn 对应的属性
     let sql = gen_query_sctn_pdms_data_sql(refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     return match result {
         Ok(v) => {
             let poss: [f32; 3] = serde_json::from_str(&v.get::<String, _>("POSS")).unwrap_or([0.0; 3]);
@@ -91,7 +91,7 @@ async fn query_sctn_standard(spre_name: &str, pool: &Pool<MySql>) -> anyhow::Res
     return if spre_name_split.starts_with("[") {
         let standard = &spre_name_split[1..];
         let sql = gen_query_channel_sctn_standard_sql(standard);
-        let query_standard_result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+        let query_standard_result = sqlx::query(&sql).fetch_one(pool).await;
         if query_standard_result.is_err() { return Ok(None); }
         let query_standard_result = query_standard_result.unwrap();
         let h = query_standard_result.get::<f32, _>("H");
@@ -116,7 +116,7 @@ async fn query_sctn_standard(spre_name: &str, pool: &Pool<MySql>) -> anyhow::Res
         if standard.is_none() { return Ok(None); }
         let standard = standard.unwrap();
         let query_standard_sql = gen_query_sctn_standard_sql(&standard);
-        let query_standard_result = sqlx::query(&query_standard_sql).fetch_one(&mut pool.acquire().await?).await;
+        let query_standard_result = sqlx::query(&query_standard_sql).fetch_one(pool).await;
         if query_standard_result.is_err() { return Ok(None); }
         let query_standard_result = query_standard_result.unwrap();
         let h = query_standard_result.get::<f32, _>("H");

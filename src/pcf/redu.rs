@@ -1,4 +1,4 @@
-use aios_core::pdms_types::{AttrMap, RefU64};
+use aios_core::pdms_types::*;
 use sqlx::{MySql, Pool};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::pcf::bran::gen_item_code_data_attr_val;

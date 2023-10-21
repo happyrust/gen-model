@@ -3,7 +3,7 @@ use std::io::Write;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-use aios_core::pdms_types::{GENRAL_NEG_NOUN_NAMES, PdmsElement, RefU64};
+use aios_core::pdms_types::*;
 use bb8_arangodb::arangors_lite::Database;
 use bevy_transform::prelude::Transform;
 use bitvec::macros::internal::funty::Floating;

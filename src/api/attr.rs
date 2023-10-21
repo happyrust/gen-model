@@ -7,8 +7,7 @@ use aios_core::helper::table::qualified_table_name;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam::{PrimExtrusion, PrimRevolution};
 use aios_core::pdms_data::ATTR_INFO_MAP;
-use aios_core::pdms_types::{AttrInfo, AttrMap, AttrVal, DbAttributeType, GeoBasicType, NounHash, RefI32Tuple, RefU64, RefU64Vec, UdaMajorType};
-use aios_core::pdms_types::AttrVal::StringType;
+use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use anyhow::anyhow;
 use sqlx::{Error, MySql, Pool, pool, Row};
@@ -90,7 +89,7 @@ impl AiosDBManager{
 pub async fn query_implicit_attrs_by_owner(owner: RefU64, type_name: &str, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>> {
     let sql = gen_query_implicit_attr_sql_by_owner(owner, &type_name, &column_names);
     let column_names = column_names.unwrap_or_default();
-    let rows = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let rows = sqlx::query(&sql).fetch_all(pool).await?;
     let type_hash = db1_hash(type_name.to_uppercase().as_str());
 
     let mut att_maps = vec![];
@@ -218,7 +217,7 @@ pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic,
         vec![]
     };
     let sql = gen_query_implicit_attr_sql(refno, ref_basic.get_table_name(), &column_names);
-    let row = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let row = sqlx::query(&sql).fetch_one(pool).await?;
     let mut r = convert_row_to_attmap(&row, type_hash, &column_names);
     let mut r = r?;
     //其他的插入
@@ -235,7 +234,7 @@ pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic,
 pub async fn query_foreign_refnos_from_table(noun: &str, table_name: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, RefU64)>> {
     let mut r = vec![];
     let sql = gen_query_value_from_table(noun, table_name);
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let results = sqlx::query(&sql).fetch_all(pool).await;
     match results {
         Ok(results) => {
             for result in results {
@@ -254,7 +253,7 @@ pub async fn query_foreign_refnos_from_table(noun: &str, table_name: &str, pool:
 
 pub async fn query_explicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
     let sql = gen_query_explicit_attr_sql(refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_one(pool).await?;
     let val = result.get::<Vec<u8>, _>("DATA");
     Ok(AttrMap::from_compress_bytes(&val).unwrap_or_default())
 }
@@ -263,7 +262,7 @@ pub async fn query_explicit_attr(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
 pub async fn query_uda_attr(att_type: Vec<i32>, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
     let mut map = AttrMap::default();
     let sql = gen_query_uda_attr_sql(att_type);
-    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_all(pool).await;
     if result.is_err() { return Ok(AttrMap::default()); }
     let results = result.unwrap();
     for result in results {
@@ -350,7 +349,7 @@ pub async fn query_full_attr_with_pool(refno: RefU64, aios_mgr: &AiosDBManager, 
 
 pub async fn insert_attr_info(pool: Pool<MySql>) -> anyhow::Result<()> {
     let sql = gen_insert_attr_info_sql(&ATTR_INFO_MAP);
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool;
     let result = conn.execute(sql.as_str()).await;
     match result {
         Ok(_) => {}
@@ -371,7 +370,7 @@ pub async fn query_position_from_id(refno: RefU64, aios_mgr: &AiosDBManager) -> 
     if pool.is_none() { return Ok(None); }
     let (_, pool) = pool.unwrap();
     let sql = gen_position_from_id(refno, &table_name.value().table);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(&pool).await;
     return match result {
         Ok(v) => {
             let pos: [f64; 3] = serde_json::from_str(&v.get::<String, _>(0)).unwrap();
@@ -383,7 +382,7 @@ pub async fn query_position_from_id(refno: RefU64, aios_mgr: &AiosDBManager) -> 
 
 pub async fn query_ori_from_id(refno: RefU64, table_name: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<Quat>> {
     let sql = gen_query_ori_from_id(refno, table_name);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     return match result {
         Ok(result) => {
             let ang: [f64; 3] = serde_json::from_str(&result.get::<String, _>(0)).unwrap_or([0.0, 0.0, 0.0]);
@@ -399,7 +398,7 @@ pub async fn query_ori_from_id(refno: RefU64, table_name: &str, pool: &Pool<MySq
 pub async fn query_foreign_refno(refno: RefU64, foreign_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let type_name = query_refno_type(refno, pool).await?;
     let sql = gen_query_foreign_refno_sql(refno, &type_name, foreign_type);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     return match result {
         Ok(v) => {
             return Ok(Some(RefU64(v.get::<i64, _>(0) as u64)));
@@ -411,7 +410,7 @@ pub async fn query_foreign_refno(refno: RefU64, foreign_type: &str, pool: &Pool<
 pub async fn query_numbdbs_by_mdb(dbs: RefU64Vec, pool: &Pool<MySql>) -> anyhow::Result<Vec<u32>> {
     let mut r = vec![];
     let sql = gen_query_numbdbs_by_mdb_sql(dbs);
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let results = sqlx::query(&sql).fetch_all(pool).await;
     if let Ok(results) = results {
         for result in results {
             let numbdb = result.get::<i32, _>("NUMBDB");
@@ -473,7 +472,7 @@ pub async fn get_site_major_from_uda(site_refno: RefU64, pool: &Pool<MySql>) -> 
 pub async fn query_uda_ukey_udna_all(pool: &Pool<MySql>) -> anyhow::Result<HashMap<u32, String>> {
     let mut result = HashMap::new();
     let sql = gen_query_uda_name_sql();
-    let query_results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let query_results = sqlx::query(&sql).fetch_all(pool).await?;
     for query_result in query_results {
         let u_key = query_result.get::<i32, _>("UKEY");
         let u_name = query_result.get::<String, _>("UDNA");
@@ -486,7 +485,7 @@ pub async fn query_uda_ukey_udna_all(pool: &Pool<MySql>) -> anyhow::Result<HashM
 pub async fn query_uda_ukey_udet_all(pool: &Pool<MySql>) -> anyhow::Result<HashMap<u32, String>> {
     let mut result = HashMap::new();
     let sql = gen_query_udet_name_sql();
-    let query_results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let query_results = sqlx::query(&sql).fetch_all(pool).await?;
     for query_result in query_results {
         let u_key = query_result.get::<i32, _>("UKEY");
         let u_name = query_result.get::<String, _>("UDNA");
@@ -498,7 +497,7 @@ pub async fn query_uda_ukey_udet_all(pool: &Pool<MySql>) -> anyhow::Result<HashM
 /// 查找某个uda对应的ukey
 pub async fn query_uda_ukey(uda: &str, pool: &Pool<MySql>) -> anyhow::Result<i32> {
     let sql = gen_query_uda_ukey_sql(uda);
-    let query_result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let query_result = sqlx::query(&sql).fetch_one(pool).await?;
     let u_key = query_result.get::<i32, _>("UKEY");
     Ok(u_key)
 }

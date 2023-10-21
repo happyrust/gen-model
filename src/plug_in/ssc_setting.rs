@@ -8,7 +8,7 @@ use sqlx::Row;
 pub async fn update_selected_ssc_site(sites: (Vec<SiteData>, Vec<SiteData>), pool: &Pool<MySql>) -> anyhow::Result<()> {
     //若没有selected_site,则创建表
     let create_table_sql = create_selected_ssc_site_sql();
-    let mut conn = pool.clone().acquire().await?;
+    let mut conn = pool.clone();
     let create_table_result = conn.execute(create_table_sql.as_str()).await;
     let Ok(_) = create_table_result else { return Ok(()); };
 
@@ -47,7 +47,7 @@ fn delete_selected_ssc_site_sql(sites: Vec<SiteData>) -> String {
 pub async fn query_selected_ssc_site(pool: &Pool<MySql>) -> anyhow::Result<Vec<(String, String)>> {
     let mut result = Vec::new();
     let sql = gen_query_selected_ssc_site_sql();
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool;
     let Ok(query_results) = conn.fetch_all(sql.as_str()).await else { return Ok(vec![]); };
     for query_result in query_results {
         let refno = query_result.get::<String, _>("refno");
@@ -59,7 +59,7 @@ pub async fn query_selected_ssc_site(pool: &Pool<MySql>) -> anyhow::Result<Vec<(
 
 pub async fn query_table_ssc(pool: &Pool<MySql>) -> anyhow::Result<&'static str> {
     let sql = gen_query_table_sql();
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool;
     if let Ok(query_results) = conn.fetch_all(sql.as_str()).await {
         if query_results.len() > 0 {
             return Ok("true");

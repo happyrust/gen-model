@@ -20,12 +20,16 @@ pub struct PdmsEleDataVersioned {
     pub refno: RefU64,
     #[serde(serialize_with = "ser_refno_as_ref_type")]
     #[serde(skip_serializing_if = "is_zero")]
+    // #[serde_as(as = "DisplayFromStr")]
     pub owner: RefU64,
     pub name: String,
     pub noun: String,
     // #[serde(default)]
     // pub order: u32,
     pub dbnum: i32,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_tag: Option<String>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cata_hash: Option<String>,
@@ -46,6 +50,7 @@ pub fn ser_refno_as_ref_type<S>(refno: &RefU64, s: S) -> Result<S::Ok, S::Error>
 
 
 impl PdmsEleDataVersioned {
+    //"@class": "PdmsElement",
     pub fn get_scheme() -> &'static str {
         r#"{ "@type" : "Class",
         "@id"   : "PdmsElement",
@@ -62,6 +67,10 @@ impl PdmsEleDataVersioned {
             "@type": "Optional"
         },
         "dbnum"    : "xsd:integer",
+        "status_tag": {
+            "@class": "xsd:string",
+            "@type": "Optional"
+        }, 
         "cata_hash": {
             "@class": "xsd:string",
             "@type": "Optional"}

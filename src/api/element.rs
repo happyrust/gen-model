@@ -24,7 +24,7 @@ pub const ATT_DIVCO: i32 = 688051937;
 /// 通过 refno 返回对应的 type
 pub async fn query_refno_type(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<String> {
     let sql = gen_query_refno_type_sql(refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_one(pool).await?;
     Ok(result.get::<String, _>(0))
 }
 
@@ -67,7 +67,7 @@ pub async fn query_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result
     let mut r = vec![];
     let mut b_map = BTreeMap::new();
     let sql = gen_pdms_elements_get_children_ele_node_sql(refno);
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let vals = sqlx::query(&sql).fetch_all(pool).await?;
     for val in vals {
         let child_refno = RefU64(val.get::<i64, _>("ID") as u64);
         let name = val.get::<String, _>("NAME");
@@ -84,7 +84,7 @@ pub async fn query_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
     let mut r = vec![];
     let mut b_map = BTreeMap::new();
     let sql = gen_pdms_elements_get_children_ele_node_sql(refno);
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let vals = sqlx::query(&sql).fetch_all(pool).await?;
     for val in vals {
         let child_refno = RefU64(val.get::<i64, _>("ID") as u64);
         let name = val.get::<String, _>("NAME");
@@ -111,7 +111,7 @@ pub async fn query_children_eles_without_children_count(refno: RefU64, pool: &Po
     let mut r = vec![];
     let mut b_map = BTreeMap::new();
     let sql = gen_pdms_elements_get_children_ele_node_sql(refno);
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let vals = sqlx::query(&sql).fetch_all(pool).await?;
     for val in vals {
         let child_refno = RefU64(val.get::<i64, _>("ID") as u64);
         let name = val.get::<String, _>("NAME");
@@ -143,7 +143,7 @@ pub async fn query_world(mdb: &str, module: &str, pool: &Pool<MySql>) -> anyhow:
 /// 查询生成Element node
 pub async fn query_ele_node(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
     let sql = format!("SELECT NAME,TYPE,OWNER,CHILDREN_COUNT FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} and IS_DEL = 0;", *refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_one(pool).await?;
     Ok(EleTreeNode {
         refno,
         noun: result.get::<String, _>("TYPE"),
@@ -161,7 +161,7 @@ pub async fn query_ele_nodes_by_refnos(refnos: Vec<RefU64>, pool: &Pool<MySql>) 
     if refno_sql.is_empty() { return Ok(vec![]); }
     refno_sql.remove(refno_sql.len() - 1);
     let sql = format!("SELECT ID,TYPE,NAME,OWNER,CHILDREN_COUNT FROM {PDMS_ELEMENTS_TABLE} WHERE ID in ({}) and IS_DEL = 0;", refno_sql);
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let results = sqlx::query(&sql).fetch_all(pool).await?;
     let mut nodes = Vec::new();
     for result in results {
         let refno = result.get::<i64, _>("ID");
@@ -183,7 +183,7 @@ pub async fn query_ele_nodes_by_refnos(refnos: Vec<RefU64>, pool: &Pool<MySql>) 
 /// 查询生成Element node ,不查询children_count 默认为 0
 pub async fn query_elenode_without_children_count(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<EleTreeNode> {
     let sql = format!("SELECT TYPE,NAME,OWNER FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} and IS_DEL = 0;", *refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_one(pool).await?;
     Ok(EleTreeNode {
         refno,
         noun: result.get::<String, _>("TYPE"),
@@ -206,7 +206,7 @@ pub async fn query_elenodes_without_children_count(refnos: Vec<RefU64>, pool: &P
         sqls.push(sql);
     }
     for sql in sqls {
-        let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+        let result = sqlx::query(&sql).fetch_all(pool).await?;
         for r in result {
             eles.push(EleTreeNode {
                 refno: RefU64(r.get::<i64, _>("ID") as u64),
@@ -228,7 +228,7 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>, m
     let quick = &quicks[0];
     let sql = gen_query_node_id_from_refno_sql(quick.world_refno);
     let world_pool = mgr.get_project_pool(&quick.project).ok_or(anyhow::anyhow!("project not found"))?;
-    let result = sqlx::query(&sql).fetch_one(&mut world_pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(&world_pool).await;
     return match result {
         Ok(val) => {
             let owner = RefU64(val.get::<i64, _>("OWNER") as u64);
@@ -255,7 +255,7 @@ pub async fn query_world_ele_node(mdb: &str, module: &str, pool: &Pool<MySql>, m
 /// 通过 refno 获取 owner
 pub async fn query_owner_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_owner_from_id(refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     return match result {
         Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>(0) as u64))) }
         Err(_) => { Ok(None) }
@@ -266,7 +266,7 @@ pub async fn query_owner_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyhow::R
 pub async fn query_id_from_name(name: &str, att_type: Option<String>, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
     let mut r = vec![];
     let sql = gen_query_id_from_name_sql(name, att_type);
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let results = sqlx::query(&sql).fetch_all(pool).await;
     if let Ok(results) = results {
         for result in results {
             r.push(RefU64(result.get::<i64, _>(0) as u64))
@@ -278,7 +278,7 @@ pub async fn query_id_from_name(name: &str, att_type: Option<String>, pool: &Poo
 /// 通过 name 获取 refno （ssc）
 pub async fn query_id_from_name_ssc(name: &str, pool: Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_id_from_name_ssc_sql(name);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(&pool).await;
     match result {
         Ok(v) => {
             let refno = RefU64(v.get::<i64, _>("ID") as u64);
@@ -317,7 +317,7 @@ fn gen_query_id_from_name_ssc_sql(name: &str) -> String {
 
 pub async fn query_pdms_elements_type_name(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<String> {
     let sql = gen_query_pdms_elements_type_name_sql(refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_one(pool).await?;
     Ok(result.get::<String, _>("TYPE"))
 }
 
@@ -358,7 +358,7 @@ pub type MdbQuickInfoMap = HashMap<String, HashMap<String, Vec<DbQuickInfo>>>;
 pub async fn query_types_refnos(type_names: &[&str], pool: &Pool<MySql>, dbnos: &[i32]) -> anyhow::Result<RefU64Vec> {
     let mut r = vec![];
     let sql = gen_query_type_refnos_sql(type_names, dbnos);
-    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_all(pool).await?;
     for val in result {
         let v = val.get::<i64, _>(0) as u64;
         r.push(RefU64(v));
@@ -368,14 +368,14 @@ pub async fn query_types_refnos(type_names: &[&str], pool: &Pool<MySql>, dbnos: 
 
 pub async fn query_name(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<String> {
     let sql = gen_query_name_sql(refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_one(pool).await?;
     Ok(result.get::<String, _>("NAME"))
 }
 
 /// todo dbno may exist in other database
 pub async fn query_dbno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<i32>> {
     let sql = gen_query_dbno_from_db_sql(refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     return match result {
         Ok(v) => { Ok(Some(v.get::<i32, _>(0))) }
         Err(_) => { Ok(None) }
@@ -385,7 +385,7 @@ pub async fn query_dbno(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Opt
 /// 根据dbno，获取world
 pub async fn query_world_refno_by_dbno(dbno: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_id_by_dbno_type_sql(dbno, "WORL");
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     return match result {
         Ok(v) => { Ok(Some(RefU64(v.get::<i64, _>("ID") as u64))) }
         Err(e) => {
@@ -398,7 +398,7 @@ pub async fn query_world_refno_by_dbno(dbno: i32, pool: &Pool<MySql>) -> anyhow:
 /// 根据 dbno 和 type 查询 refno 和 name
 pub async fn query_id_name_from_dbno_type(dbno: i32, type_name: &str, pool: &Pool<MySql>) -> anyhow::Result<Option<Vec<(RefU64, String)>>> {
     let sql = gen_query_id_name_from_dbno_type_sql(dbno, type_name);
-    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_all(pool).await;
     return match result {
         Ok(vals) => {
             let mut r = vec![];
@@ -416,7 +416,7 @@ pub async fn query_id_name_from_dbno_type(dbno: i32, type_name: &str, pool: &Poo
 /// 根据 dbno 查询 refno name 和 type
 pub async fn query_id_from_dbno_type(dbno: u32, pool: &Pool<MySql>) -> anyhow::Result<Option<Vec<(RefU64, String, String)>>> {
     let sql = gen_query_id_name_type_from_dbno(dbno);
-    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_all(pool).await;
     return match result {
         Ok(vals) => {
             let mut r = vec![];
@@ -440,7 +440,7 @@ pub async fn query_id_from_dbno_type(dbno: u32, pool: &Pool<MySql>) -> anyhow::R
 pub async fn query_types_refnos_names(types: &[&str], pool: &Pool<MySql>, numbdbs: Option<&Vec<i32>>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut r = vec![];
     let sql = gen_query_types_refnos_names(types, numbdbs);
-    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_all(pool).await;
     match result {
         Ok(vals) => {
             for v in vals {
@@ -460,7 +460,7 @@ pub async fn query_types_refnos_names(types: &[&str], pool: &Pool<MySql>, numbdb
 pub async fn query_all_type_name_refnos(att_type: &str, pool: &Pool<MySql>) -> anyhow::Result<Vec<String>> {
     let mut name_vec = vec![];
     let sql = gen_query_all_type_name_refnos(att_type);
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let results = sqlx::query(&sql).fetch_all(pool).await;
     match results {
         Ok(results) => {
             for result in results {
@@ -491,7 +491,7 @@ pub async fn get_zone_divco(refno: RefU64, pool: &Pool<MySql>) -> String {
 pub async fn query_project_dbno_info(project_name: &str, info_pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, Vec<i32>>> {
     let mut map = HashMap::new();
     let sql = gen_query_dbno_info_by_project(project_name);
-    let results = sqlx::query(&sql).fetch_all(&mut info_pool.acquire().await?).await;
+    let results = sqlx::query(&sql).fetch_all(info_pool).await;
     if let Ok(results) = results {
         for result in results {
             let numbdb = result.get::<i32, _>("NUMBDB");
@@ -515,7 +515,7 @@ pub async fn check_exist_refno(refno: RefU64, pool: &Pool<MySql>, mdb_dbnums: &B
     } else {
         format!("SELECT EXISTS(SELECT 1 FROM {PDMS_ELEMENTS_TABLE} WHERE ID = {} AND NUMBDB IN {} )", refno.0, in_sql)
     };
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await?;
+    let result = sqlx::query(&sql).fetch_one(pool).await?;
     Ok(result.get::<bool, _>(0))
 }
 

@@ -1,6 +1,6 @@
 use std::env;
 use std::time::Instant;
-use aios_core::pdms_types::{RefI32Tuple, RefU64};
+use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use sqlx::{MySql, Pool};
 use crate::api::attr;

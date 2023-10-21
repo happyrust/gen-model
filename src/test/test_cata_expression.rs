@@ -1,7 +1,7 @@
 use crate::cata::resolve_helper::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::test::test_helper::get_test_ams_db_manager;
-use aios_core::pdms_types::{AttrMap, AttrVal, RefU64};
+use aios_core::pdms_types::*;
 use aios_core::tiny_expr::expr_eval::interp;
 use regex::Regex;
 use std::collections::BTreeMap;

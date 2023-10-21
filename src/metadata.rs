@@ -101,7 +101,7 @@ pub async fn create_metadata_tree_table_sql(pool: &Pool<MySql>) -> anyhow::Resul
     sql.push_str(&format!("{} TINYINT(1)  ,", "STATE"));          // 状态
     sql.push_str(&format!("{} VARCHAR(50) ", "OWNED_NAME"));     // 所有者
     sql.push_str(");");
-    let mut conn = pool.clone().acquire().await?;
+    let mut conn = pool.clone();
     let result = conn.execute(sql.as_str()).await;
     match result {
         Ok(_) => {}
@@ -131,7 +131,7 @@ pub async fn create_metadata_data_table_sql(pool: &Pool<MySql>) -> anyhow::Resul
     sql.push_str(&format!("{} TINYINT(1)  ,", "STATE"));           // 状态
     sql.push_str(&format!("{} VARCHAR(50) ", "OWNED_NAME"));      // 所有者
     sql.push_str(");");
-    let mut conn = pool.clone().acquire().await?;
+    let mut conn = pool.clone();
     let result = conn.execute(sql.as_str()).await;
     match result {
         Ok(_) => {}
@@ -161,7 +161,7 @@ pub async fn save_metadata_data(data: DashMap<u64, MetadataManagerTreeNode>, poo
     }
     if !b_empty {
         sql.remove(sql.len() - 1);
-        let mut conn = pool.acquire().await?;
+        let mut conn = pool;
         let result = conn.execute(sql.as_str()).await;
         match result {
             Ok(_) => {}
@@ -201,7 +201,7 @@ pub async fn save_metadata_table_data(data: Vec<MetadataManagerTableData>, pool:
     if !b_empty {
         sql.remove(sql.len() - 1);
     }
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool;
     let result = conn.execute(sql.as_str()).await;
     match result {
         Ok(_) => {}
@@ -455,7 +455,7 @@ pub fn convert_metadata_table_value_from_excel_bytes(table_data: Vec<Vec<String>
 
 pub async fn replace_metadata_table_data(data: Vec<ShowMetadataManagerTableData>, pool: &Pool<MySql>) -> anyhow::Result<bool> {
     let sql = gen_replace_metadata_table_data(data);
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool;
     let result = conn.execute(sql.as_str()).await;
     return match result {
         Ok(_) => { Ok(true) }

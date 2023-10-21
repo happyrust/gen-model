@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
-use aios_core::pdms_types::{PdmsElement, RefU64};
+use aios_core::pdms_types::*;
 use aios_core::plot_struct::hanger::*;
 use bb8_arangodb::arangors_lite::AqlQuery;
 use calamine::{Error, open_workbook, RangeDeserializerBuilder, Reader, Xlsx};
@@ -103,7 +103,7 @@ async fn get_all_hangers_with_atta(atta_name: &str, pool: &Pool<MySql>) -> anyho
     let mut hangers_map: DashMap<String, RefU64> = DashMap::new(); // key -> atta_name , value ->  map : key att_type(REST/STRU) value:refno
     let mut atta_map: DashMap<String, RefU64> = DashMap::new(); // key : atta 的 name , value ： atta 的 refno
     let sql = gen_query_stru_and_rest_with_atta_name_sql(atta_name);
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let results = sqlx::query(&sql).fetch_all(pool).await;
     if results.is_err() { return Ok((hangers_map, atta_map)); }
     let results = results.unwrap();
     for result in results {

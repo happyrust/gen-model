@@ -56,7 +56,7 @@ pub async fn create_embed_data_aql(keys: Vec<String>, project_code: &str, databa
 async fn query_embed_data(id: u64, pool: &Pool<MySql>) -> anyhow::Result<Option<DataCenterInstance>> {
     let mut instances = Vec::new();
     let sql = gen_query_embed_data_sql(id);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     match result {
         Ok(result) => {
             let ref_str = result.try_get::<String, _>("REF").unwrap_or("".to_string());

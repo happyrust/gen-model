@@ -4,7 +4,7 @@ use std::sync::Arc;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::db_number::DbNumMgr;
 use aios_core::helper::table::qualified_table_name;
-use aios_core::pdms_types::{AttrVal, NounHash, RefU64, RefU64Vec};
+use aios_core::pdms_types::*;
 use anyhow::anyhow;
 use bb8_arangodb::arangors_lite::Database;
 use crate::consts::*;
@@ -26,7 +26,7 @@ pub async fn get_ref0_projects(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32
     let mut map = DashMap::new();
     let sql = format!("SELECT REF0, PROJECT FROM {PDMS_REFNO_INFOS_TABLE}");
     // dbg!(&sql);
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let results = sqlx::query(&sql).fetch_all(pool).await;
     match results {
         Ok(vals) => {
             for val in vals {
@@ -48,7 +48,7 @@ pub async fn get_ref0_projects(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32
 //
 //
 //     let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE}");
-//     let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+//     let results = sqlx::query(&sql).fetch_all(pool).await;
 //     match results {
 //         Ok(vals) => {
 //             for val in vals {
@@ -76,7 +76,7 @@ pub async fn get_ref0_projects(pool: &Pool<MySql>) -> anyhow::Result<DashMap<u32
 /// 获取生成refno到RefBasic的映射, todo 存储有点慢，需要批量存储
 pub async fn sync_refno_basic_map(pool: &Pool<MySql>) -> anyhow::Result<bool> {
     let sql = format!("SELECT ID, OWNER, TYPE  FROM {PDMS_ELEMENTS_TABLE}");
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let results = sqlx::query(&sql).fetch_all(pool).await;
     match results {
         Ok(vals) => {
             for val in vals {
@@ -106,7 +106,7 @@ pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: &[i32], arango_db: &ArDa
     let fitt_refnos = query_types_refnos(&vec!["FITT"], pool, dbnos).await?;
     if fitt_refnos.len() == 0 { return Ok(DashMap::new()); }
     let sql = gen_query_refnos_implicit_string_attr("FITT", vec!["POSL"], fitt_refnos);
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let results = sqlx::query(&sql).fetch_all(pool).await?;
     for result in results {
         let refno = RefU64(result.get::<i64, _>("ID") as u64);
         let pos_line = result.get::<String, _>("POSL");

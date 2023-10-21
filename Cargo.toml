@@ -19,7 +19,7 @@ hex = "0.4.3"
 once_cell = "1.12.0"
 futures = "0.3.21"
 smol_str = "0.2.0"
-itertools = "0.10.3"
+itertools = "0.11" 
 lazy_static = "1.4.0"
 async-trait = "0.1.52"
 dotenv = "0.15.0"
@@ -45,6 +45,7 @@ parry2d = { path="../new-crates/parry/crates/parry2d"}
 parse_pdms_db = { path = "../aios-parse-pdms" }
 aios_core = { path = "../new-crates/aios-core" }
 bevy_transform = { path = "../new-crates/bevy/crates/bevy_transform"}
+bevy_reflect = { path = "../new-crates/bevy/crates/bevy_reflect"}
 pdms_io = {path = "../pdms-io"}
 #csg = { path = "../new-crates/csgrs/csg" }
 arangors_lite = { path = "../new-crates/arangors-lite"}
@@ -77,6 +78,7 @@ notify = "6.1.1"
 walkdir = "2.3.3"
 num_enum = "0.7.0"
 jsonxf = "1.1.1"
+sea-orm = {version = "0.12.4", features = ["sqlx-all", "runtime-async-std"]}
 #liquid-json = "0.6.0"
 #geo = "0.24.1"
 
@@ -85,17 +87,17 @@ jsonxf = "1.1.1"
 cc = { version = "1.0", features = ["parallel"] }
 
 [dependencies.sqlx]
-version = "0.6.3"
+version = "0.7.2"
 default-features = false
 features = [
     "runtime-async-std-rustls",
     #    "runtime-async-std-native-tls",
     "macros",
     "mysql",
-    "tls",
+    # "tls",
     "chrono",
     "json",
-    "decimal",
+    # "decimal",
     "bigdecimal",
     "uuid",
     "time",

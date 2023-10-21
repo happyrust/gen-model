@@ -8,7 +8,7 @@ use crate::consts::PDMS_ELEMENTS_TABLE;
 /// 传入一个用户名，判断是否存在与 pdms 的用户中
 pub async fn query_b_existence_pdms_user(user_name:&str,pool:&Pool<MySql>) -> anyhow::Result<bool> {
     let sql = gen_query_b_existence_pdms_user_sql(user_name);
-    let val = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let val = sqlx::query(&sql).fetch_one(pool).await;
     if let Ok(val) = val {
         let b_exist = val.get::<i32,_>("COUNT(1)");
         return if b_exist > 0 { Ok(true) } else { Ok(false) }
@@ -19,7 +19,7 @@ pub async fn query_b_existence_pdms_user(user_name:&str,pool:&Pool<MySql>) -> an
 pub async fn query_all_pdms_user(pool:&Pool<MySql>) -> anyhow::Result<DashSet<String>> {
     let mut result = DashSet::new();
     let sql = gen_query_all_user_sql();
-    let val = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let val = sqlx::query(&sql).fetch_all(pool).await;
     if let Ok(vals) = val {
         for val in vals {
             let name = val.get::<String,_>("NAME");

@@ -13,7 +13,7 @@ use std::ops::Deref;
 use std::time::Instant;
 use lazy_static::lazy_static;
 use dashmap::{DashMap, DashSet};
-use aios_core::pdms_types::{AttrInfo, DbAttributeType, RefU64};
+use aios_core::pdms_types::*;
 use serde_json::from_str;
 use aios_core::pdms_types::PdmsDatabaseInfo;
 use aios_core::tool::db_tool::db1_dehash;
@@ -52,7 +52,7 @@ pub mod viewer;
 pub mod plug_in;
 
 pub mod arangodb;
-pub mod terminusdb;
+pub mod versioned_db;
 
 #[macro_use]
 extern crate derive_more;

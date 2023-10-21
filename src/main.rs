@@ -35,7 +35,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Instant;
 use aios_database::arangodb::create::create_arangodb_docs;
-use aios_database::terminusdb::create::create_versioned_schemas;
+use aios_database::versioned_db::create::create_versioned_schemas;
 
 fn test_sbfi() -> anyhow::Result<()> {
     // let axis_str = "Y27.041-X";
@@ -105,8 +105,7 @@ async fn main() -> anyhow::Result<()> {
 
     /// 是否全部同步模型
     if db_option.total_sync {
-        create_versioned_schemas().await.expect("create versioned docs");
-        // return Ok(());
+        // create_versioned_schemas(&db_option.project_name).await.expect("create versioned docs");
         if db_option.sync_graph_db.unwrap_or(false) {
             create_arangodb_docs(&db_option)
                 .await

@@ -116,7 +116,7 @@ pub async fn gen_hole_datacenter_instance_aql(keys: Vec<String>, project_code: &
 /// 查找改参考号属于哪种孔洞
 async fn query_hole_type(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HoleType> {
     let sql = gen_query_hole_type_sql(id);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     match result {
         Ok(result) => {
             let h_type = result.get::<String, _>("hType");
@@ -255,7 +255,7 @@ async fn gen_stuch_data_aql(hole_data: VirtualHoleGraphNode) -> Vec<DataCenterAt
 async fn query_stucj_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, AttrValue>> {
     let mut map = HashMap::new();
     let sql = gen_query_hole_data_sql(id);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     match result {
         Ok(result) => {
             let item_ref = result.try_get::<String, _>("ItemREF").unwrap_or("".to_string());
@@ -446,7 +446,7 @@ async fn query_stucj_data_aql(hole_data: VirtualHoleGraphNode) -> anyhow::Result
 async fn query_stucg_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, AttrValue>> {
     let mut map = HashMap::new();
     let sql = gen_query_hole_data_sql(id);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     match result {
         Ok(result) => {
             let item_ref = result.try_get::<String, _>("ItemREF").unwrap_or("".to_string());
@@ -599,7 +599,7 @@ async fn query_stucg_data_aql(hole_data: VirtualHoleGraphNode) -> anyhow::Result
 async fn query_stuch_data(id: u32, pool: &Pool<MySql>) -> anyhow::Result<HashMap<String, AttrValue>> {
     let mut map = HashMap::new();
     let sql = gen_query_hole_data_sql(id);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     match result {
         Ok(result) => {
             let item_ref = result.try_get::<String, _>("ItemREF").unwrap_or("".to_string());

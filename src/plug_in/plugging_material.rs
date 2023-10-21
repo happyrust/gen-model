@@ -13,18 +13,18 @@ use crate::data_interface::interface::PdmsDataInterface;
 pub async fn get_plugging_setting_data(pool: &Pool<MySql>) -> anyhow::Result<PluggingMaterialVec> {
     //若没有plugging_setting,则创建表
     let create_table_sql = create_plugging_setting_table_sql();
-    let mut conn = pool.clone().acquire().await?;
+    let mut conn = pool.clone();
     let create_table_result = conn.execute(create_table_sql.as_str()).await?;
 
     //若为空表则在表中添加初始数据
     let query_table_sql = gen_query_table_sql();
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool;
     if let Ok(query_results) = conn.fetch_all(query_table_sql.as_str()).await {
         if query_results.len() > 0 {
             //暂时这样判断空表
             if query_results[0].get::<i32, _>("COUNT(*)") == 0 as i32 {
                 let init_table_sql = init_plugging_setting_table_sql();
-                let mut conn = pool.clone().acquire().await?;
+                let mut conn = pool.clone();
                 let init_table_result = conn.execute(init_table_sql.as_str()).await?;
             }
         }
@@ -33,7 +33,7 @@ pub async fn get_plugging_setting_data(pool: &Pool<MySql>) -> anyhow::Result<Plu
     //返回表中的数据
     let mut result = PluggingMaterialVec::default();
     let sql = gen_plugging_setting_table_sql();
-    let mut conn = pool.acquire().await?;
+    let mut conn = pool;
     if let Ok(query_results) = conn.fetch_all(sql.as_str()).await {
         for query_result in query_results {
             let plugging_type = query_result.get::<String, _>("plugging_type");
@@ -59,7 +59,7 @@ pub async fn get_plugging_setting_data(pool: &Pool<MySql>) -> anyhow::Result<Plu
 pub async fn update_plugging_setting_data(plugging: UpdatePluggingSettingEvent, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let add_setting = plugging.add_plugging_setting;
     let delete_setting = plugging.delete_plugging_setting;
-    let mut conn = pool.clone().acquire().await?;
+    let mut conn = pool.clone();
     //新增记录
     let insert_value_sql = gen_insert_plugging_setting_sql(add_setting);
     let _ = conn.execute(insert_value_sql.as_str()).await;

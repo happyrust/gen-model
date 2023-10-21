@@ -1,4 +1,4 @@
-use aios_core::pdms_types::{PdmsElement, RefU64};
+use aios_core::pdms_types::*;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use sqlx::{MySql, Pool, Row};
 use crate::api::element::query_ele_nodes_by_refnos;
@@ -8,7 +8,7 @@ use crate::aql_api::pdms_room::query_all_need_compute_room_refno;
 /// 查询房间号
 pub async fn query_room_code(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<String>> {
     let sql = gen_query_room_code_sql(refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     return match result {
         Ok(val) => {
             Ok(Some(val.get::<String, _>("ROOM_NAME")))
@@ -23,7 +23,7 @@ pub async fn query_room_code(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Resul
 pub async fn query_room_code_with_refnos(refnos: Vec<RefU64>, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = Vec::new();
     let sql = gen_query_room_code_with_refnos_sql(refnos);
-    let query_result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let query_result = sqlx::query(&sql).fetch_all(pool).await;
     match query_result {
         Ok(vals) => {
             for val in vals {

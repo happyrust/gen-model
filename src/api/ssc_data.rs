@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
-use aios_core::pdms_types::{EleTreeNode, RefI32Tuple, RefU64};
+use aios_core::pdms_types::*;
 use dashmap::{DashMap, DashSet};
 use lazy_static::lazy_static;
 use sqlx::{Error, Executor, MySql, Pool, Row};
@@ -78,7 +78,7 @@ pub async fn get_room_refnos_from_spa_tree_aql(room_refno: RefU64, database: &Ar
 /// 获取所有带有房间号的节点属性
 pub async fn query_all_room_data(pool: &Pool<MySql>) -> anyhow::Result<HashMap<RefU64, SscEleNode>> {
     let sql = gen_query_all_room_data_sql();
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let vals = sqlx::query(&sql).fetch_all(pool).await?;
     let mut refno_room_map = DashMap::new();
     let mut sqls = vec![];
     for val in vals {
@@ -149,7 +149,7 @@ pub async fn query_all_room_data_aql(database: &ArDatabase, pool: &Pool<MySql>, 
 
 pub async fn query_ssc_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {
     let sql = gen_query_ssc_children_sql(refno);
-    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_all(pool).await;
     return match result {
         Ok(vals) => {
             let mut r = vec![];
@@ -177,7 +177,7 @@ pub async fn query_ssc_children(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Re
 
 pub async fn query_ssc_children_without_children_count(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<EleTreeNode>> {
     let sql = gen_query_ssc_children_sql(refno);
-    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_all(pool).await;
     return match result {
         Ok(vals) => {
             let mut r = vec![];
@@ -204,7 +204,7 @@ pub async fn query_ssc_children_without_children_count(refno: RefU64, pool: &Poo
 
 pub async fn query_ssc_world(pool: &Pool<MySql>) -> anyhow::Result<Option<EleTreeNode>> {
     let sql = gen_query_ssc_world_sql();
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     return match result {
         Ok(val) => {
             let refno = RefU64(val.get::<i64, _>("ID") as u64);
@@ -229,7 +229,7 @@ pub async fn query_ssc_world(pool: &Pool<MySql>) -> anyhow::Result<Option<EleTre
 /// 查找ssc的owner
 pub async fn query_ssc_owner(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<RefU64>> {
     let sql = gen_query_ssc_owner_sql(refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     return match result {
         Ok(r) => {
             Ok(Some(RefU64(r.get::<i64, _>("OWNER") as u64)))
@@ -245,7 +245,7 @@ pub async fn query_ssc_owner(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Resul
 /// 查找ssc的type
 pub async fn query_ssc_type(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<String>> {
     let sql = gen_query_ssc_type_sql(refno);
-    let result = sqlx::query(&sql).fetch_one(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_one(pool).await;
     return match result {
         Ok(r) => {
             Ok(Some(r.get::<String, _>("TYPE")))
@@ -272,7 +272,7 @@ pub async fn query_ssc_children_contains_types(refno: RefU64, pool: &Pool<MySql>
 
 pub async fn query_ssc_children_count(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<usize> {
     let count_sql = gen_query_ssc_children_count_sql(refno);
-    let count_result = sqlx::query(&count_sql).fetch_one(&mut pool.acquire().await?).await?;
+    let count_result = sqlx::query(&count_sql).fetch_one(pool).await?;
     Ok(count_result.get::<i32, _>(0) as usize)
 }
 

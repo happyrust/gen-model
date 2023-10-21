@@ -1,5 +1,5 @@
 use std::env;
-use aios_core::pdms_types::{DataScope, DataScopeVec, DataState, DataStateVec, RefI32Tuple, RefU64};
+use aios_core::pdms_types::*;
 use bb8_arangodb::arangors_lite::Database;
 use sqlx::{Error, Executor, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
@@ -16,7 +16,7 @@ pub async fn query_refnos_state(refno: RefU64, pool: &Pool<MySql>, arango_databa
     if refnos.len() == 0 { return Ok(DataStateVec::default()); }
     let mut r = vec![];
     let sql = gen_query_refnos_state_sql(refnos);
-    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_all(pool).await;
     match result {
         Ok(vals) => {
             for val in vals {
@@ -44,7 +44,7 @@ pub async fn query_refnos_scope(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Re
     let refnos = travel_children_without_leaf(refno, pool).await?;
     let mut r = vec![];
     let sql = gen_query_refnos_state_sql(refnos);
-    let result = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let result = sqlx::query(&sql).fetch_all(pool).await;
     match result {
         Ok(vals) => {
             for val in vals {

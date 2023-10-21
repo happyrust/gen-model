@@ -1,4 +1,4 @@
-use aios_core::pdms_types::{EleGeosInfo, RefU64};
+use aios_core::pdms_types::*;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::AQL_PDMS_INST_INFO_COLLECTION;
@@ -8,7 +8,7 @@ use crate::graph_db::structs::{PdmsEleGraphEdge, SSCEleGraphNode};
 /// 将 ssc固定节点保存到图数据库（zone下面的层级除外）
 pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &ArDatabase) -> anyhow::Result<()> {
     let sql = gen_query_all_ssc_fixed_nodes_sql();
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await?;
+    let results = sqlx::query(&sql).fetch_all(pool).await?;
     let collection = "ssc_eles";
     let ssc_edge_collection = "ssc_edges";
     for result_chunk in results.chunks(1000) {

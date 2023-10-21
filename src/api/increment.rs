@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
-use aios_core::pdms_types::{AttrMap, EleOperation, IncrementDataSql, RefU64, WholeAttMap};
+use aios_core::pdms_types::*;
 use sqlx::{Error, MySql, Pool, Row};
 use aios_core::pdms_data::{NewDataOperate};
 use chrono::DateTime;
@@ -11,7 +11,7 @@ use serde::{Serialize, Deserialize};
 pub async fn query_latest_data(version: u32, pool: &Pool<MySql>) -> anyhow::Result<Vec<IncrementDataSql>> {
     let mut result = Vec::new();
     let sql = gen_query_latest_data_sql(version);
-    let vals = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let vals = sqlx::query(&sql).fetch_all(pool).await;
     if let Ok(vals) = vals {
         for val in vals {
             let id = val.get::<String, _>("ID");

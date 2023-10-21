@@ -7,7 +7,7 @@ use crate::graph_db::pdms_arango::*;
 use crate::graph_db::pdms_arango::*;
 use crate::graph_db::pdms_inst_arango::{query_insts_shape_data, query_rvm_instance_data_from_owner_aql};
 use aios_core::pdms_types::*;
-use aios_core::pdms_types::{PdmsElement, RefU64, UdaMajorType};
+use aios_core::pdms_types::*;
 use bb8_arangodb::arangors_lite::AqlQuery;
 use bevy_transform::prelude::Transform;
 use glam::Vec3;
@@ -172,7 +172,7 @@ pub async fn query_all_need_compute_room_refno(
     let mut refnos = vec![];
     let sql = gen_query_all_need_compute_room_refno_sql(dbno, room_type, filter_name);
     let results = sqlx::query(&sql)
-        .fetch_all(&mut pool.acquire().await?)
+        .fetch_all(pool)
         .await?;
     for result in results {
         refnos.push((

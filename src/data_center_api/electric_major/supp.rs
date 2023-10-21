@@ -1,6 +1,6 @@
 use std::io::Write;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
-use aios_core::pdms_types::{GeoBasicType, RefU64};
+use aios_core::pdms_types::*;
 use aios_core::pdms_user::RefnoMajor;
 use parry3d::utils::hashmap::HashMap;
 use regex::Regex;

@@ -4,7 +4,7 @@ use std::f32::EPSILON;
 use std::vec::Vec;
 use aios_core::parsed_data::{CateProfileParam, CateGeomsInfo};
 use aios_core::parsed_data::geo_params_data::{CateGeoParam, PdmsGeoParam};
-use aios_core::pdms_types::{AttrMap, RefU64};
+use aios_core::pdms_types::*;
 use aios_core::prim_geo::category::CateBrepShape;
 use aios_core::prim_geo::sweep_solid::SweepSolid;
 use aios_core::prim_geo::spine::{Line3D, Spine3D, SpineCurveType, SweepPath3D};

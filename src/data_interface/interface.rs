@@ -3,7 +3,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{ScomInfo, GmParam};
-use aios_core::pdms_types::{AiosStr, AttrMap, EleTreeNode, NamedAttrMap, PdmsElement, PdmsTree, RefU64, RefU64Vec};
+use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::Spine3D;
 use aios_core::shape::pdms_shape::PlantMesh;
 use async_trait::async_trait;

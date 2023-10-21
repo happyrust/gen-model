@@ -1,7 +1,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::sync::Arc;
-use aios_core::pdms_types::{AttrVal, NounHash, PdmsElement, RefU64};
+use aios_core::pdms_types::*;
 use dashmap::DashMap;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -82,10 +82,10 @@ pub async fn sync_system_db(mgr: &AiosDBManager) -> anyhow::Result<()> {
             })
         }
         let table_sql = gen_create_team_data_sql();
-        let result = sqlx::query(&table_sql).execute(&mut project_db.value().acquire().await?).await;
+        let result = sqlx::query(&table_sql).execute(project_db.value()).await;
         if let Err(e) = result { dbg!(&e); }
         let data_sql = gen_save_team_data_sql(r);
-        let result = sqlx::query(&data_sql).execute(&mut project_db.value().acquire().await?).await;
+        let result = sqlx::query(&data_sql).execute(project_db.value()).await;
         if let Err(e) = result {
             dbg!(&data_sql);
             dbg!(&e);
@@ -97,7 +97,7 @@ pub async fn sync_system_db(mgr: &AiosDBManager) -> anyhow::Result<()> {
 pub async fn query_all_db_refnos(pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
     let mut r = vec![];
     let sql = gen_query_all_db_refnos_sql();
-    let results = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let results = sqlx::query(&sql).fetch_all(pool).await;
     match results {
         Ok(results) => {
             for result in results {

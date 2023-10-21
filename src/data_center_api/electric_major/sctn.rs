@@ -12,7 +12,7 @@ use crate::data_center_api::data_api::{
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
-use aios_core::pdms_types::{EleTreeNode, RefU64};
+use aios_core::pdms_types::*;
 use arangors_lite::AqlQuery;
 use crate::arangodb::ArDatabase;
 use serde::{Serialize, Deserialize};

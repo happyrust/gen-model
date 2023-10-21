@@ -8,7 +8,7 @@ use sqlx::Row;
 /// 保存查询条件到数据库
 pub async fn save_vague_search_condition(condition: SearchConditionSave, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let create_table_sql = create_vague_search_aql();
-    let mut conn = pool.clone().acquire().await?;
+    let mut conn = pool.clone();
     let create_table_result = conn.execute(create_table_sql.as_str()).await;
     let Ok(_) = create_table_result else { return Ok(()); };
     let insert_value_sql = gen_insert_sql(condition);
