@@ -38,7 +38,7 @@ pub async fn save_versioned_pdms_eles(client: &TDBClient, total_attr_map: &DashM
     let mut eles = Vec::with_capacity(total_attr_map.len());
     for kv in total_attr_map.iter() {
         let att_map: NamedAttrMap = kv.value().merge().into();
-        let ele = PdmsEleDataVersioned{
+        let ele = PdmsEleDataVersioned {
             id: format!("PdmsElement/{}", kv.key().to_string()),
             refno: *kv.key(),
             owner: att_map.get_refno_by_att_or_default("OWNER"),
@@ -79,10 +79,10 @@ pub async fn save_pdms_eles_to_versioned(db_option: &DbOption, project: &str, to
     let mut model_chunks: Vec<Vec<pdms_element::ActiveModel>> = vec![];
     for chunk in &total_attr_map.into_iter().chunks(SQL_CHUNK_COUNT) {
         let mut model_chunk = vec![];
-        for kv in chunk{
+        for kv in chunk {
             let att_map: NamedAttrMap = kv.value().merge().into();
 
-            model_chunk.push(pdms_element::Model{
+            model_chunk.push(pdms_element::Model {
                 id: kv.key().to_refno_string(),
                 refno: *kv.key(),
                 owner: att_map.get_refno_by_att_or_default("OWNER"),
@@ -97,22 +97,14 @@ pub async fn save_pdms_eles_to_versioned(db_option: &DbOption, project: &str, to
     }
     // let mut futures = FuturesUnordered::new();
     for models in model_chunks {
-
         let db = sea_orm::Database::connect(&db_option.get_mysql_db_conn_str(project))
             .await
             .unwrap();
         // futures.push(tokio::task::spawn(async move {
-          let _ = aios_core::orm::PdmsElement::insert_many(models).exec(&db).await;
+        //   let test_models : Vec<Box<dyn ActiveModelTrait>> = vec![];
+        let _ = aios_core::orm::PdmsElement::insert_many(models).exec(&db).await;
         // }));
-        
-        let test_box: aios_core::orm::BOX::ActiveModel = aios_core::orm::BOX::Model{
-            id: "0/0".to_owned(),
-            ..Default::default()
-        }.into();
-
-        let _ = test_box.insert(&db).await.unwrap();
-
-        break;
+        // break;
     }
 
     // while let Some(_) = futures.next().await { }

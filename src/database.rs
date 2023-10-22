@@ -35,13 +35,14 @@ use crate::tables;
 use crate::tables::*;
 use crate::versioned_db::client::{get_versioned_client, save_versioned_pdms_eles, save_pdms_eles_to_versioned};
 use aios_core::cache::mgr::BytesTrait;
-use aios_core::get_default_pdms_db_info;
+use aios_core::{get_default_pdms_db_info, orm};
 use aios_core::helper::table::{qualified_column_name, qualified_table_name};
 use aios_core::options::DbOption;
 use aios_core::pdms_data::ATTR_INFO_MAP;
 use parry3d::utils::hashmap::FxHasher32;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
+use bevy_reflect::DynamicStruct;
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -161,17 +162,10 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 .await
                 .unwrap();
 
-            let mut stmt: sea_orm::sea_query::TableCreateStatement =
-                schema.create_table_from_entity(pdms_element::Entity);
-            stmt.if_not_exists();
-            // dbg!(&stmt);
-            project_db.execute(backend.build(&stmt)).await?;
-
-            let mut stmt: sea_orm::sea_query::TableCreateStatement =
-                schema.create_table_from_entity(BOX::Entity);
-            stmt.if_not_exists();
-            // dbg!(&stmt);
-            project_db.execute(backend.build(&stmt)).await?;
+            let mut create_table_sqls = orm::sql::get_all_create_table_sqls().unwrap();
+            for x in create_table_sqls{
+                project_db.execute_unprepared(&x).await.unwrap();
+            }
         }
 
         if db_option.sync_tidb.unwrap_or(false) {
@@ -684,8 +678,9 @@ pub async fn sync_total_async_threaded(
 
             // let versioned_client = Arc::new(get_versioned_client(&db_option.project_name).await);
             for (chunk_index, chunk_refnos) in all_refnos.chunks(chunk_size).enumerate() {
-                let versioned_client =
-                    Arc::new(get_versioned_client(&db_option.project_name).await);
+                //terminus 的方法
+                // let versioned_client =
+                //     Arc::new(get_versioned_client(&db_option.project_name).await);
                 let path_clone = path.clone();
                 let file_name_clone = file_name.clone();
                 let chunk_refnos_clone = chunk_refnos.to_vec();
@@ -782,8 +777,7 @@ pub async fn sync_total_async_threaded(
                     // };
                     // let mut banana: fruit::ActiveModel = banana.save(db).await?;
 
-                    save_pdms_eles_to_versioned(&db_option, project.as_str(), &total_attr_map, db_no as i32)
-                        .await?;
+
 
                     // let mut use_terminus = false;
                     // if use_terminus && db_type != "CATA" {
@@ -985,7 +979,12 @@ pub async fn sync_total_async_threaded(
                     //     write_txn.commit()?;
                     //     println!("保存到本地db完成");
                     // }
-
+                    let vdb = sea_orm::Database::connect(&db_option.get_mysql_db_conn_str(&project_name))
+                        .await
+                        .unwrap();
+                    //开始执行保存数据
+                    // save_pdms_eles_to_versioned(&db_option, project.as_str(), &total_attr_map_arc, db_no as i32)
+                    //     .await?;
                     for kv in type_ele_map.iter() {
                         let noun: i32 = *kv.key() as _;
                         let type_name = db1_dehash(noun as _);
@@ -995,11 +994,19 @@ pub async fn sync_total_async_threaded(
                         //不同的类型，应该映射到不同的实体
                         //要不要用动态类型去保存
                         //静态转发还是动态转发
+                        let mut data_vec = vec![];
                         for refno in kv.value().iter(){
-                            let att = total_attr_map_arc.get(&refno).unwrap();
+                            let att: NamedAttrMap = total_attr_map_arc.get(&refno).unwrap().merge().into();
+                            let ds: DynamicStruct = att.into();
+                            dbg!(&ds);
                             //如何将map里的值给到数据结构，通过json可以还原不
-                            // 根据类型创建不同的数据
+                            // 根据类型创建不同的数据, 直接生成sql数据就好，如果还原成具体类型，需要涉及到很多trait
+                            data_vec.push(ds);
                             break;
+                        }
+                        if let Ok(sql) = orm::sql::gen_insert_many_sql(&type_name, data_vec){
+                            dbg!(&sql);
+                            vdb.execute_unprepared(&sql).await.unwrap();
                         }
                         break;
                     }
