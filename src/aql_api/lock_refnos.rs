@@ -3,7 +3,7 @@ use bb8_arangodb::arangors_lite::Database;
 use crate::graph_db::pdms_arango::{ArDatabase, remove_arangodb_with_refno_key, save_arangodb_doc};
 use serde::{Serialize, Deserialize};
 use crate::consts::AQL_LOCK_REFNOS_COLLECTION;
-
+use crate::graph_db::pdms_arango::query_arangodb_with_refno_key;
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct LockRefnos {
     pub _key: String,
@@ -22,5 +22,9 @@ pub async fn set_lock_refnos(refnos: &Vec<RefU64>, database: &ArDatabase) -> any
 /// 解锁模型的参考号
 pub async fn unset_lock_refnos(refnos: &Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<bool> {
     remove_arangodb_with_refno_key(refnos, AQL_LOCK_REFNOS_COLLECTION, &database).await
+}
+///查询当前参考号的锁定情况
+pub async fn query_lock_status_by_key(key:String, database: &ArDatabase) -> anyhow::Result<bool> {
+    query_arangodb_with_refno_key(key, AQL_LOCK_REFNOS_COLLECTION, &database).await
 }
 

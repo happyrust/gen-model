@@ -1,8 +1,11 @@
+use std::result;
 use aios_core::pdms_types::RefU64;
 use crate::version_management::{RefnoStatusDifference};
 use aios_core::data_state::RefnoStatusInfo;
 use sqlx::{Executor, MySql, Pool, Row};
+use crate::aql_api::children::query_travel_children_aql;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::pdms_arango::ArDatabase;
 
 
 /// 查询该节点所有的数据状态,只返回状态信息，不返回attrmap
@@ -21,22 +24,31 @@ pub async fn query_refno_all_status(aios_mgr: &AiosDBManager, refno: String) -> 
 /// 查询某个节点两个版本之间的差异数据
 ///
 /// 如果为新增或者删除，则不进行对比，old_content 和 new_content 返回空即可
+///
+/// refno为需比较的节点参考号，old_status为两比较版本中的旧版，new_status为两比较版本中的新版
 pub async fn query_difference_between_two_status(refno: &str, old_status: &str, new_status: &str) -> RefnoStatusDifference {
-   return RefnoStatusDifference::default();
+    return RefnoStatusDifference::default();
 }
 
 
 ///判断选择的大版本号是否正确
 ///
-/// 查询需要进行版本更新的所有节点的当前版本号，若存在版本号高于选中的大版本号，则选中的大版本号无效，返回false，否则返回true
+/// 查询需要进行版本更新的所有节点的当前版本号，若存在版本号高于选中的大版本号，则选中的大版本号无效，返回false，否则返回true,同时返回需设置新状态的refnos
+///
+///refnos为选中节点的参考号，status为设置的版本号
+pub async fn judge_selected_version_number(database: &ArDatabase, refnos: Vec<RefU64>, status: String) -> anyhow::Result<(bool, Option<Vec<RefU64>>)> {
+    //1.找到当前refno下所有子孙节点的refno
+    let mut refno_vec = vec![];
+    for refno in refnos {
+        let mut result = query_travel_children_aql(database, refno).await?;
+        let mut result = result.iter().map(|x| x.refno).collect();
+        refno_vec.append(&mut result)
+    }
+    //2.遍历这些refno对应的status，一旦遇到某个refno的status高于所要设置的status就break，返回false
+    //Ok((false,None))
 
-pub async fn judge_selected_version_number(refnos: Vec<RefU64>, status: &str) -> bool {
-    todo!()
-}
-
-///查询与当前节点有关联的所有refno
-pub async fn query_related_refnos(refno: RefU64) -> Vec<RefU64> {
-    todo!()
+    //3.若循环结束，则返回true
+    Ok((true, Some(refno_vec)))
 }
 
 

@@ -254,6 +254,7 @@ impl AiosDBManager {
                     order,
                     dbnum: ele.db_no,
                     cata_hash,
+                    // tag_lock:false,
                 };
                 let key = refno.hash_with_another_refno(owner);
                 let pdms_edge = PdmsEleEdge {

@@ -70,3 +70,7 @@ pub async fn query_embed_data_status_by_key(database: &ArDatabase, key: &str) ->
     let data_vec: Vec<String> = database.aql_query(aql).await?;
     return Ok(Some((data_vec)));
 }
+
+
+
+
