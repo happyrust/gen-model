@@ -217,11 +217,11 @@ async fn get_dq_support_sctn_gtype_box_data(
     let para_1 = paras.get(1).map_or(0.0, |x| *x);
     let para_2 = paras.get(2).map_or(0.0, |x| *x);
     data_center_attr.push(DataCenterAttr {
-        attribute_model_code: "PARTD26".to_string(),
+        attribute_model_code: "PARTDA26".to_string(),
         value: AttrValue::AttrString(format!("{}X{}X{}", para_0, para_1, para_2)).into(),
     });
     data_center_attr.push(DataCenterAttr {
-        attribute_model_code: "PARTD27".to_string(),
+        attribute_model_code: "PARTDA27".to_string(),
         value: AttrValue::AttrFloat(para_1 as f32).into(),
     });
     let mut poss = Vec3::ZERO;

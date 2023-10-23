@@ -1668,6 +1668,29 @@ pub async fn query_room_aabb_from_room_code(room_names: Vec<String>, database: &
     Ok(result)
 }
 
+/// 查询房间下的一个参考号
+pub async fn query_room_one_element_aql(room_names: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
+    let aql = AqlQuery::new("\
+    With @@room_eles,@@room_edges,@@pdms_eles
+    for room in room_eles
+    filter room.name in @room_names
+    for v in 1 outbound room._id room_edges
+    limit 1
+    return {
+         _key:v._key ,
+         owner:0 ,
+         name:room.name,
+         noun:v.noun,
+         version:0,
+         children_count:1
+    }").bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("room_names", room_names);
+    let result = database.aql_query::<PdmsElement>(aql).await?;
+    Ok(result)
+}
+
 pub async fn query_room_name_aabb_from_refno(refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<RoomElement>> {
     let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, refno);
     let aql = AqlQuery::new("\

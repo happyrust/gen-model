@@ -400,6 +400,26 @@ pub async fn query_refnos_from_names(names: Vec<String>, database: &ArDatabase, 
     Ok(result)
 }
 
+/// 通过fulltext所有返回单个name包含的elements
+pub async fn query_refnos_from_name_fulltext(name: String, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
+    // 通过name 模糊查询对应的参考号等信息
+    let aql = AqlQuery::new("
+    with @@pdms_eles
+        for e in fulltext(@@pdms_eles,'name',@name)
+            return {
+            '_key':e._key,
+            'owner':e.owner,
+            'name':e.name,
+            'noun':e.noun,
+            'version':0,
+            'children_count':0,
+        }
+    ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("name", name);
+    let result = database.aql_query::<PdmsElement>(aql).await?;
+    Ok(result)
+}
+
 /// 通过name集合返回对应的参考号
 ///
 /// 使用 fulltext 索引方式
