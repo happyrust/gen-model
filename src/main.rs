@@ -116,13 +116,17 @@ fn test_sbfi() -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
+    use chrono::Local;
+    use std::fs::OpenOptions;
+    // 从配置文件中读取数据库选项
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
 
+    // 如果启用了日志功能
     if db_option.enable_log {
-        let now = chrono::offset::Local::now();
+        let now = Local::now();
         let filename = format!(
             "{}-{}-{}-{}-{}-{}_dblog.txt",
             now.year(),
@@ -132,12 +136,16 @@ async fn main() -> anyhow::Result<()> {
             now.minute(),
             now.second()
         );
-        let file = std::fs::OpenOptions::new()
+
+        // 创建日志文件
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(filename)
             .unwrap();
+
+        // 配置日志过滤器和输出目标
         let mut builder = Builder::from_default_env();
         builder.filter(Some("aios_database"), LevelFilter::Info);
         builder.filter(Some("aios_core"), LevelFilter::Info);
@@ -196,13 +204,21 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// 提前创建图数据库需要的几个collection
+/**
+ * This code is responsible for creating documents in ArangoDB.
+ * It connects to the ArangoDB using the provided database options,
+ * and then creates various documents and edges in the database.
+ */
 async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
+    // Connect to ArangoDB
     let pool = connect_arangodb(db_option).await?;
     let database = pool
         .get()
         .await?
         .db(db_option.arangodb_database.as_str())
         .await?;
+
+    // Create ArangoDB documents and edges
     create_arango_document(&database, AQL_DATA_ELES_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_DESPARA_ELES_COLLECTION, Document).await?;
     create_arango_document(&database, AQL_FOREIGN_EDGES_COLLECTION, Edge).await?;
@@ -233,7 +249,7 @@ async fn create_arangodb_docs(db_option: &DbOption) -> anyhow::Result<()> {
     create_arango_document(&database, AQL_HOLE_EDGE_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_EMBED_EDGE_COLLECTION, Edge).await?;
     create_arango_document(&database, AQL_VIRTUAL_HOLE_COLLECTION, Document).await?;
-    create_arango_document(&database,AQL_THREED_REVIEW_COLLECTION,Document).await?;
+    create_arango_document(&database, AQL_THREED_REVIEW_COLLECTION, Document).await?;
     Ok(())
 }
 
@@ -278,6 +294,13 @@ fn test_turn_bin_into_json() {
     new_file.write_all(&json.into_bytes()).unwrap();
 }
 
+/// This code is a test suite for logging and database operations.
+/// It sets up a logger using the `env_logger` crate and logs an error message.
+/// It also performs database operations using the `AiosDBManager` struct.
+/// The `test_log` function logs an error message to a file.
+/// The `test_db1_dehash` function initializes a database manager, retrieves children within a project,
+/// and calculates a hash value.
+/// This code requires the `env_logger`, `log`, and `tokio` crates to be added as dependencies.
 #[test]
 fn test_log() {
     use env_logger::{fmt::Target, Builder};

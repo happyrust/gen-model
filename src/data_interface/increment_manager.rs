@@ -85,8 +85,9 @@ impl AiosDBManager {
         let mut total_modify_len = 0;
         let mut total_delted_len = 0;
         for (path, (dbno, last_pageno)) in increment_ranges_map {
-            let mut io = PdmsIO::new(path, true);
+            let mut io = PdmsIO::new(path.clone(), true);
             io.open()?;
+            dbg!(&path);
             let eles = io.collect_increment_eles(Some(last_pageno))?;
             for ele in eles {
                 let attmap = ele.whole_attmap.merge();

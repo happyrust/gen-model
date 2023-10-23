@@ -529,10 +529,10 @@ pub async fn read_cable_weight_excel() -> anyhow::Result<HashMap<String, HashMap
 }
 
 /// 获取工艺管件数据(数据中台)
-pub async fn query_gy_bran_data_datacenter(select_refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
+pub async fn query_gy_bran_data_datacenter(select_refnos: &[RefU64], aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
     let mut instances = Vec::new();
     let database = aios_mgr.get_arango_db().await?;
-    let brans = query_travel_children_with_type_aql(&database, select_refno, "BRAN").await?;
+    let brans = query_refnos_travel_children_with_type_aql(&database, select_refnos, vec!["BRAN".to_string()]).await?;
     for bran in brans {
         let children = aios_mgr.query_children_eles_order(bran.refno, &vec![], &vec![]).await?;
         let bran_refnos = children.iter().map(|child| child.refno).collect::<Vec<_>>();
@@ -725,6 +725,51 @@ async fn get_data_center_bran_single_attr(bran: &PdmsElement, room_code: &str, a
         attribute_model_code: "ITEMA4".to_string(),
         value: AttrString("".to_string()).into(),
     });
+    // bran 没有pos 和 ori
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA5".to_string(),
+        value: AttrString("[0.0,0.0,0.0]".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA8".to_string(),
+        value: AttrString("".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA11".to_string(),
+        value: AttrString("".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA12".to_string(),
+        value: AttrString("".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA13".to_string(),
+        value: AttrString("".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA14".to_string(),
+        value: AttrString("".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA15".to_string(),
+        value: AttrString("".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA16".to_string(),
+        value: AttrString("".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA17".to_string(),
+        value: AttrString("".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA18".to_string(),
+        value: AttrString("".to_string()).into(),
+    });
+    data_center_attr.push(DataCenterAttr {
+        attribute_model_code: "ITEMA19".to_string(),
+        value: AttrString("".to_string()).into(),
+    });
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "ITEMA20".to_string(),
         value: AttrString(room_code.to_string()).into(),
@@ -813,5 +858,14 @@ async fn test_match_ftub_between_elbo() -> anyhow::Result<()> {
     let children = query_children_order_aql(&database, error_refno).await?;
     let ftub = match_ftub_between_elbo(&children);
     dbg!(&ftub);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_world_transform() -> anyhow::Result<()> {
+    let aios_mgr = AiosDBManager::init_form_config().await?;
+    let refno = RefU64::from_refno_str("17496/163520").unwrap();
+    let transform = aios_mgr.get_world_transform(refno)?.unwrap_or_default();
+    dbg!(&transform.translation);
     Ok(())
 }
