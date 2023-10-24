@@ -27,7 +27,7 @@ use aios_core::pdms_data::GmParam;
 use aios_core::pdms_data::PlinParam;
 use aios_core::pdms_data::PlinParamData;
 use aios_core::pdms_data::ScomInfo;
-use aios_core::pdms_types::AttrVal::{DoubleArrayType, StringArrayType};
+use aios_core::types::AttrVal::*;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
 use aios_core::shape::pdms_shape::PlantMesh;
@@ -57,6 +57,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
+use aios_core::{AttrMap, NamedAttrValue, RefU64Vec};
 use tokio::sync::RwLock;
 
 // #[derive(Debug)]

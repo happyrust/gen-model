@@ -9,10 +9,7 @@ use std::time::Instant;
 
 use aios_core::consts::*;
 use aios_core::orm::*;
-use aios_core::pdms_types::AttrVal::StringType;
-use aios_core::pdms_types::{
-    AttrMap, AttrVal, NamedAttrMap, NounHash, RefU64, RefU64Vec, WholeAttMap,
-};
+use aios_core::pdms_types::*;
 use aios_core::types::*;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::tool::float_tool::f64_round_3;
@@ -42,6 +39,7 @@ use aios_core::pdms_data::ATTR_INFO_MAP;
 use parry3d::utils::hashmap::FxHasher32;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
+use aios_core::AttrVal::StringType;
 use bevy_reflect::DynamicStruct;
 
 pub trait MySqlMethods {
@@ -145,13 +143,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         };
 
         if db_option.sync_versioned.unwrap_or(true) {
-            // dbg!(&default_conn_str);
             let db = sea_orm::Database::connect(&default_conn_str).await.unwrap();
-            // dbg!(&db);
             let backend = db.get_database_backend();
             let schema = Schema::new(backend);
-
-            // let pool = MySqlPool::connect(url).await.unwrap();
             db.execute(Statement::from_string(
                 backend.clone(),
                 format!("CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8;"),

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use aios_core::pdms_types::*;
+use aios_core::{AttrMap, RefU64Vec};
 use chrono::{Datelike, DateTime, Local, Timelike};
 use sqlx::{Executor, MySql, Pool, Row};
 use sqlx::types::Uuid;

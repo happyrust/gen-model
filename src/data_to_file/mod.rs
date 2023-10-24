@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use aios_core::BHashMap;
+use aios_core::{AttrMap, BHashMap};
 use aios_core::helper::parse_to_u32;
 use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::db1_hash;

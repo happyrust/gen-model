@@ -6,10 +6,8 @@ use aios_core::data_center::AttrValue;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
-use aios_core::pdms_types::AttrVal::IntArrayType;
-use aios_core::pdms_types::{
-    AttrMap, AttrVal, RefU64, TOTAL_CATA_GEO_NOUN_NAMES, TOTAL_GEO_NOUN_NAMES,
-};
+use aios_core::types::AttrVal::IntArrayType;
+use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::db1_dehash;
 use anyhow::anyhow;
 use dashmap::mapref::one::Ref;
@@ -18,6 +16,7 @@ use glam::Vec3;
 use log::{error, info};
 use sled::pin;
 use std::collections::{BTreeMap, HashMap};
+use aios_core::AttrMap;
 use tokio::sync::RwLock;
 
 use super::resolve::CataContext;

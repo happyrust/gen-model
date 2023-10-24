@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
+use aios_core::{AttrMap, RefU64Vec};
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::consts::*;
 use aios_core::helper::table::qualified_table_name;
@@ -25,6 +26,7 @@ use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
+use aios_core::AttrVal;
 
 
 impl AiosDBManager{
@@ -86,7 +88,8 @@ impl AiosDBManager{
 }
 
 /// 指定从特定的表查询数据，根据owner查询
-pub async fn query_implicit_attrs_by_owner(owner: RefU64, type_name: &str, pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>> {
+pub async fn query_implicit_attrs_by_owner(owner: RefU64, type_name: &str, pool: &Pool<MySql>,
+                                           column_names: Option<Vec<&str>>) -> anyhow::Result<Vec<AttrMap>> {
     let sql = gen_query_implicit_attr_sql_by_owner(owner, &type_name, &column_names);
     let column_names = column_names.unwrap_or_default();
     let rows = sqlx::query(&sql).fetch_all(pool).await?;

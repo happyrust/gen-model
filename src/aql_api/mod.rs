@@ -1,3 +1,4 @@
+use aios_core::AttrMap;
 use aios_core::pdms_types::*;
 use serde::{Serialize, Deserialize};
 use serde_with::serde_as;

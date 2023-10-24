@@ -1,3 +1,4 @@
+use aios_core::AttrMap;
 use aios_core::pdms_types::*;
 use sqlx::{MySql, Pool};
 use crate::data_interface::tidb_manager::AiosDBManager;

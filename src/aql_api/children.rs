@@ -5,9 +5,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::arangodb::ArDatabase;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use aios_core::options::DbOption;
-use aios_core::pdms_types::{
-    CataHashRefnoKV, EleTreeNode, PdmsElement, RefU64, RefU64Vec, GENRAL_NEG_NOUN_NAMES,
-};
+use aios_core::pdms_types::*;
 use aios_core::pdms_user::*;
 use aios_core::three_dimensional_review::VagueSearchCondition::And;
 use aios_core::three_dimensional_review::*;
@@ -23,6 +21,7 @@ use sqlx::{MySql, Pool};
 use std::collections::{HashMap, HashSet};
 use std::process::id;
 use std::str::FromStr;
+use aios_core::AttrMap;
 use aios_core::tool::db_tool::{db1_dehash, db1_dehash_const, db1_hash, db1_hash_const};
 use crate::data_interface::interface::PdmsDataInterface;
 

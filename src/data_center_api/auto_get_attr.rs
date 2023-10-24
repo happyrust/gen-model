@@ -2,6 +2,7 @@ use aios_core::data_center::DataCenterAttr;
 use aios_core::pdms_types::*;
 use anyhow::anyhow;
 use std::collections::{BTreeMap, HashMap};
+use aios_core::{AttrMap, AttrVal};
 
 use crate::api::element::query_name;
 use crate::api::room_code::query_room_code;

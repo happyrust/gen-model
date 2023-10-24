@@ -1,5 +1,6 @@
 use std::env;
 use std::io::Write;
+use aios_core::{AttrMap, AttrVal};
 use aios_core::consts::EXPR_ATT_SET;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;

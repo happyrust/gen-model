@@ -1,8 +1,7 @@
 use std::fs;
 use std::io::{Read, Write};
-use aios_core::get_default_pdms_db_info;
+use aios_core::{AttrVal, get_default_pdms_db_info};
 use aios_core::pdms_types::*;
-use aios_core::pdms_types::AttrVal::{BoolType, DoubleArrayType};
 use aios_core::tool::db_tool::db1_hash;
 use memchr::memmem::rfind_iter;
 use crate::data_to_file::modify::modify::{convert_new_data_page, find_data_in_origin_file, ModifyNewData};

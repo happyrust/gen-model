@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use aios_core::get_uda_info;
+use aios_core::{AttrVal, get_uda_info};
 use aios_core::options::DbOption;
 use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
 use aios_core::pdms_types::*;

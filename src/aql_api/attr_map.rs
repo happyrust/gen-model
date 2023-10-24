@@ -1,14 +1,11 @@
 use crate::api::attr::query_attr;
 use crate::aql_api::*;
-use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDMS_INST_GEO_COLLECTION, AQL_PDMS_INST_INFO_COLLECTION, AQL_SIBL_EDGES_COLLECTION};
+use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::arangodb::ArDatabase;
 use aios_core::options::DbOption;
-use aios_core::pdms_types::{
-    CataHashRefnoKV, EleTreeNode, NamedAttrMap, NamedAttrValue, PdmsElement, RefU64, RefU64Vec,
-    GENRAL_NEG_NOUN_NAMES,
-};
+use aios_core::pdms_types::*;
 use aios_core::pdms_user::*;
 use aios_core::three_dimensional_review::VagueSearchCondition::And;
 use aios_core::three_dimensional_review::*;
@@ -25,6 +22,7 @@ use sqlx::{MySql, Pool};
 use std::collections::{HashMap, HashSet};
 use std::process::id;
 use std::str::FromStr;
+use aios_core::NamedAttrValue;
 use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
 use crate::graph_db::structs::{PdmsEleEdge, PdmsEleData, PdmsMdbEdge};
 

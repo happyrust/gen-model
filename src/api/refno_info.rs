@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::sync::Arc;
+use aios_core::{AttrVal, RefU64Vec};
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::db_number::DbNumMgr;
 use aios_core::helper::table::qualified_table_name;

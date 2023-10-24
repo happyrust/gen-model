@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
-use aios_core::pdms_types::AttrVal::RefU64Type;
+use aios_core::AttrVal::RefU64Type;
 use aios_core::pdms_types::RefU64;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use itertools::all;

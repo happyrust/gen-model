@@ -2,6 +2,7 @@ use std::default;
 use std::f32::consts::PI;
 use std::f32::EPSILON;
 use std::vec::Vec;
+use aios_core::AttrMap;
 use aios_core::parsed_data::{CateProfileParam, CateGeomsInfo};
 use aios_core::parsed_data::geo_params_data::{CateGeoParam, PdmsGeoParam};
 use aios_core::pdms_types::*;

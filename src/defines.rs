@@ -6,8 +6,10 @@ use aios_core::pdms_types::*;
 use aios_core::pdms_data::*;
 use aios_core::cache::refno::CachedRefBasic;
 use dashmap::DashMap;
+use aios_core::AttrMap;
 use tokio::sync::RwLock;
 use std::collections::HashMap;
+use aios_core::RefU64Vec;
 
 lazy_static! {
     pub static ref PDMS_ATT_MAP_CACHE: CacheMgr<AttrMap>  = CacheMgr::new("ATTR_MAP_CACHE", false);
