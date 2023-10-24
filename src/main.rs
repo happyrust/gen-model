@@ -28,7 +28,7 @@ use aios_core::tool::math_tool::{
 };
 #[cfg(feature = "gen_model")]
 use aios_database::data_interface::gen_model::gen_geos_data;
-use env_logger::{fmt::Target, Builder};
+use env_logger::{Builder, fmt::Target};
 use log::{error, LevelFilter};
 use std::fs::File;
 use std::io::{Read, Write};
@@ -36,41 +36,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use aios_database::arangodb::create::create_arangodb_docs;
 use aios_database::versioned_db::create::create_versioned_schemas;
-
-fn test_sbfi() -> anyhow::Result<()> {
-    // let axis_str = "Y27.041-X";
-    let axis_str = "Y";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    let mut mat3 = cal_mat3_by_zdir(addition_axis);
-    dbg!(to_pdms_ori_str(&mat3));
-
-    let axis_str = "-Y";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    let mut mat3 = cal_mat3_by_zdir(addition_axis);
-    dbg!(to_pdms_ori_str(&mat3));
-
-    let axis_str = "-Y30X";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    let mut mat3 = cal_mat3_by_zdir(addition_axis);
-    dbg!(to_pdms_ori_str(&mat3));
-
-    let axis_str = "Y30-X";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    let mut mat3 = cal_mat3_by_zdir(addition_axis);
-    dbg!(to_pdms_ori_str(&mat3));
-
-    let axis_str = "-Y30-X";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    let mut mat3 = cal_mat3_by_zdir(addition_axis);
-    dbg!(to_pdms_ori_str(&mat3));
-
-    let axis_str = "-X30-Y";
-    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
-    let mut mat3 = cal_mat3_by_zdir(addition_axis);
-    dbg!(to_pdms_ori_str(&mat3));
-
-    return Ok(());
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

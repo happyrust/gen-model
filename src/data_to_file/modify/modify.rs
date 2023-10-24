@@ -2,6 +2,7 @@ use std::{env, fs};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::mem::take;
+use aios_core::PdmsDatabaseInfo;
 use aios_core::get_default_pdms_db_info;
 use aios_core::helper::{parse_to_i32, parse_to_u16, parse_to_u32};
 use aios_core::pdms_types::*;

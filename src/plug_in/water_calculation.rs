@@ -89,7 +89,7 @@ pub async fn export_stp(
     let all_plugged_hole_refnos: HashSet<RefU64> = stp_packet.all_plugged_hole_refnos().collect();
     let all_plugged_door_refnos: HashSet<RefU64> = stp_packet.all_plugged_door_refnos().collect();
     let export_refnos: Vec<RefU64> = stp_packet.export_refnos().cloned().collect();
-    let shapes_data = query_insts_shape_data(
+    let mut shapes_data = query_insts_shape_data(
         &mgr.get_arango_db().await?,
         &export_refnos,
         Some(&[
@@ -102,6 +102,9 @@ pub async fn export_stp(
 
     let mut total_shapes_map: HashMap<RefU64, Shape> = HashMap::default();
     //one to many relationship
+
+    //针对所有的门，计算一下新的模型信息
+
     let mut boolean_map: BTreeMap<RefU64, Vec<(RefU64, Rc<Shape>)>> = BTreeMap::new();
     for (refno, geos_info) in &shapes_data.inst_info_map {
         //被封堵了的，相当于没有出现过，直接忽略
@@ -109,6 +112,7 @@ pub async fn export_stp(
             continue;
         }
         let is_door = all_plugged_door_refnos.contains(refno);
+        //如果是门，直接换成新的geos_info
         let Some(insts_data) = shapes_data.get_inst_geos_data(geos_info) else {
             continue;
         };
@@ -123,6 +127,9 @@ pub async fn export_stp(
                 } else {
                     Rc::new(shape)
                 };
+                //todo，更改门的角度参数，重新生成men的mesh - 开孔的长方体mesh
+
+
                 for o in own_pos_refnos {
                     if !o.is_valid() {
                         continue;

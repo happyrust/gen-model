@@ -4,7 +4,6 @@ use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_PDM
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::arangodb::ArDatabase;
-use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::{
     CataHashRefnoKV, EleTreeNode, NamedAttrMap, NamedAttrValue, PdmsElement, RefU64, RefU64Vec,

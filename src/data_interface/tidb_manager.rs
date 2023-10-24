@@ -48,7 +48,7 @@ use lazy_static::lazy_static;
 use log::error;
 use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
 use pdms_io::watch::PdmsWatcher;
-use redb::{ReadableTable, TableDefinition};
+// use redb::{ReadableTable, TableDefinition};
 use sqlx::{Executor, MySql, Pool, Row};
 use std::boxed::Box;
 use std::cell::OnceCell;
@@ -123,7 +123,6 @@ impl Debug for AiosDBManager {
     }
 }
 
-const ATTR_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("kv");
 
 #[async_trait]
 impl PdmsDataInterface for AiosDBManager {

@@ -983,14 +983,13 @@ pub async fn sync_total_async_threaded(
                         .await
                         .unwrap();
                     //开始执行保存数据
-                    // save_pdms_eles_to_versioned(&db_option, project.as_str(), &total_attr_map_arc, db_no as i32)
-                    //     .await?;
+                    save_pdms_eles_to_versioned(&db_option, project.as_str(), &total_attr_map_arc, db_no as i32)
+                        .await?;
                     for kv in type_ele_map.iter() {
                         let noun: i32 = *kv.key() as _;
                         let type_name = db1_dehash(noun as _);
-                        if type_name.as_str() != "BOX" {
-                            continue;
-                        }
+                        continue;
+
                         //不同的类型，应该映射到不同的实体
                         //要不要用动态类型去保存
                         //静态转发还是动态转发
@@ -998,7 +997,7 @@ pub async fn sync_total_async_threaded(
                         for refno in kv.value().iter(){
                             let att: NamedAttrMap = total_attr_map_arc.get(&refno).unwrap().merge().into();
                             let ds: DynamicStruct = att.into();
-                            dbg!(&ds);
+                            // dbg!(&ds);
                             //如何将map里的值给到数据结构，通过json可以还原不
                             // 根据类型创建不同的数据, 直接生成sql数据就好，如果还原成具体类型，需要涉及到很多trait
                             data_vec.push(ds);
@@ -1181,36 +1180,6 @@ pub async fn sync_total_async_threaded(
                     }
 
                     futures::future::join_all(take(&mut type_handles)).await;
-
-                    // 将带有 room_code 属性的保存下来
-                    if !db_option.only_update_dbinfo {
-                        // let default_conn_str = AiosDBManager::get_default_conn_str(&db_option);
-                        // let pool_clone = AiosDBManager::get_db_pool(&default_conn_str, project_name_clone.as_str()).await?;
-                        // let mut project_conn = pool.acquire().await.unwrap();
-                        // for (room_name, refnos) in room_code_map.clone() {
-                        //     let mut room_code_sql =
-                        //         format!("INSERT IGNORE INTO {ROOM_CODE} (REFNO,ROOM_NAME) VALUES ");
-                        //     for refno in refnos.clone() {
-                        //         room_code_sql.push_str(&format!(
-                        //             "( {},'{}' ) ,",
-                        //             refno.0,
-                        //             room_name.clone()
-                        //         ));
-                        //     }
-                        //     room_code_sql.remove(room_code_sql.len() - 1);
-                        //     if is_replace {
-                        //         room_code_sql = room_code_sql.replace("INSERT IGNORE", "REPLACE");
-                        //     }
-                        //     let result = project_conn.execute(room_code_sql.as_str()).await;
-                        //     match result {
-                        //         Ok(_) => {}
-                        //         Err(e) => {
-                        //             dbg!(&e);
-                        //             dbg!(room_code_sql.as_str());
-                        //         }
-                        //     }
-                        // }
-                    }
                 }
             }
         }

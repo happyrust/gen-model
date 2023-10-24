@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use crate::cata::resolve::CataContext;
 use crate::cata::resolve_helper::{parse_ori_str_to_quat, parse_str_axis_to_vec3};
 use crate::data_interface::tidb_manager::AiosDBManager;
+use aios_core::tool::direction_parse::*;
+use aios_core::tool::math_tool::*;
 
 //AXIS -Y ( ATAN ( ( DESP[2 ] / 2 + DESP[10 ] ) / ( DESP[3 ] / 2 - DESP[11 ] ) ) ) X
 #[test]
@@ -36,5 +38,40 @@ fn parse_ori(){
     };
     let ori = parse_ori_str_to_quat::<AiosDBManager>(str, &cata_context, None);
     dbg!(ori);
+}
+
+fn test_parse_dir() -> anyhow::Result<()> {
+    // let axis_str = "Y27.041-X";
+    let axis_str = "Y";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "-Y";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "-Y30X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "Y30-X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "-Y30-X";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    let axis_str = "-X30-Y";
+    let mut addition_axis = parse_expr_to_dir(axis_str).unwrap_or_default();
+    let mut mat3 = cal_mat3_by_zdir(addition_axis);
+    dbg!(to_pdms_ori_str(&mat3));
+
+    return Ok(());
 }
 

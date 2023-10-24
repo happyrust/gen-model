@@ -503,6 +503,13 @@ pub async fn gen_loop_geos(
     Ok(true)
 }
 
+
+///生成mesh的逻辑单独拿出来
+pub fn gen_mesh() -> anyhow::Result<>{
+
+}
+
+
 ///获取单个元件的模型数据
 pub fn gen_cata_single_geoms(
     mgr: Arc<AiosDBManager>,
@@ -519,7 +526,6 @@ pub fn gen_cata_single_geoms(
         return Ok(RefU64::default());
     }
     let desi_att = mgr.get_attr_from_localdb(design_refno)?;
-    // dbg!(&desi_att);
     let geoms_info = mgr
         .resolve_desi_comp(design_refno, None, None)
         .unwrap_or_default();
@@ -591,7 +597,6 @@ pub async fn gen_cata_geos(
     mgr: Arc<AiosDBManager>,
     main_instance_mgr: Arc<RwLock<ShapeInstancesData>>,
     target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
-    //branch 下按顺序的清单
     branch_map: Arc<DashMap<RefU64, Vec<PdmsElement>>>,
     sjus_map_arc: Arc<DashMap<RefU64, (Vec3, f32)>>,
 ) -> anyhow::Result<bool> {
@@ -641,7 +646,6 @@ pub async fn gen_cata_geos(
                     let mut shape_insts_data = instance_mgr.write().await;
                     let mut target_geo_data_option = None;
                     let mut process_refno = None;
-                    //reuse代表是否重用，如果
                     if replace_mesh || target_cata.exist_geo.is_none() {
                         //如果没有已有的，需要生成
                         let ele_refno = target_cata.group_refnos[0];
@@ -742,7 +746,6 @@ pub async fn gen_cata_geos(
                             let mut manifold_map: HashMap<RefU64, ManifoldRust> = HashMap::new();
                             let mut geo_insts = vec![];
                             let mut ngmr_geo_insts = vec![];
-                            // let mut cata_aabb: Option<Aabb> = None;
                             //将负实体和正实体统计出来
                             let mut merged_cata_aabb: Option<Aabb> = None;
                             let mut n_merged_cata_aabb: Option<Aabb> = None;
