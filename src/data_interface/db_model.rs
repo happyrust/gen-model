@@ -99,13 +99,13 @@ impl AiosDBManager {
     }
 
     //初始化watcher
-    // pub async fn exec_watcher(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
-    //     tokio::spawn(async move {
-    //         mgr.init_watcher().await.unwrap();
-    //         mgr.async_watch().await.unwrap();
-    //     });
-    //     Ok(())
-    // }
+    pub async fn exec_watcher(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
+        tokio::spawn(async move {
+            mgr.init_watcher().await.unwrap();
+            mgr.async_watch().await.unwrap();
+        });
+        Ok(())
+    }
 
 
     ///总的路径-> 查找到所有000文件夹的路径

@@ -75,6 +75,7 @@ pub async fn save_versioned_pdms_eles(client: &TDBClient, total_attr_map: &DashM
 }
 
 
+/// 保存element数据到版本管理
 pub async fn save_pdms_eles_to_versioned(db_option: &DbOption, project: &str, total_attr_map: &DashMap<RefU64, WholeAttMap>, db_num: i32) -> anyhow::Result<()> {
     let mut model_chunks: Vec<Vec<pdms_element::ActiveModel>> = vec![];
     for chunk in &total_attr_map.into_iter().chunks(SQL_CHUNK_COUNT) {

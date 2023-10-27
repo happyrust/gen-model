@@ -17,7 +17,8 @@ pub fn get_test_ams_db_manager() -> AiosDBManager {
 
 pub async fn get_test_ams_db_manager_async() -> AiosDBManager {
     let s = Config::builder()
-        .add_source(File::with_name("DbOption_ams"))
+        // .add_source(File::with_name("DbOption_ams"))
+        .add_source(File::with_name("DbOption"))
         .build().unwrap();
     let db_option: DbOption = s.try_deserialize().unwrap();
     AiosDBManager::init_form_config().await.unwrap()

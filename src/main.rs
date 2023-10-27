@@ -27,7 +27,7 @@ use aios_core::tool::math_tool::{
     cal_mat3_by_zdir, to_pdms_ori_str,
 };
 #[cfg(feature = "gen_model")]
-use aios_database::data_interface::gen_model::gen_geos_data;
+use aios_database::data_interface::gen_model::gen_all_geos_data;
 use env_logger::{Builder, fmt::Target};
 use log::{error, LevelFilter};
 use std::fs::File;
@@ -87,8 +87,7 @@ async fn main() -> anyhow::Result<()> {
     if db_option.gen_model {
         println!("正在生成模型");
         let mut time = Instant::now();
-
-        gen_geos_data(mgr.clone()).await?;
+        gen_all_geos_data(mgr.clone(), None).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 

@@ -551,6 +551,18 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
     table_vals_sql
 }
 
+pub async fn save_to_arangodb_task(){
+
+}
+
+pub async fn save_to_tidb_task(){
+
+}
+
+pub async fn save_to_versioned_task(){
+
+}
+
 ///多线程同步数据，包括增量同步
 pub async fn sync_total_async_threaded(
     // arango_pool: ArPool,
@@ -625,15 +637,6 @@ pub async fn sync_total_async_threaded(
                 continue;
             }
         }
-
-        // let mut file = File::open(&path)?;
-        // let mut buf: Vec<u8> = vec![0u8; 0x800];
-        // let input = {
-        //     file.read_exact(&mut buf).ok();
-        //     &buf[..]
-        // };
-        // let (db_type, file_version, mut db_no) = parse_file_basic_info(&buf);
-        // dbg!(&db_type);
 
         if need_parsed_files.is_none() || need_parsed_files.as_ref().unwrap().contains(&file_name) {
             println!("path={:?}", &file_name);
@@ -979,29 +982,19 @@ pub async fn sync_total_async_threaded(
                     //开始执行保存数据
                     save_pdms_eles_to_versioned(&db_option, project.as_str(), &total_attr_map_arc, db_no as i32)
                         .await?;
+                    const ATTS_CHUNK_COUNT: usize = 500;
                     for kv in type_ele_map.iter() {
                         let noun: i32 = *kv.key() as _;
                         let type_name = db1_dehash(noun as _);
-                        continue;
-
-                        //不同的类型，应该映射到不同的实体
-                        //要不要用动态类型去保存
-                        //静态转发还是动态转发
-                        let mut data_vec = vec![];
-                        for refno in kv.value().iter(){
-                            let att: NamedAttrMap = total_attr_map_arc.get(&refno).unwrap().merge().into();
-                            let ds: DynamicStruct = att.into();
-                            // dbg!(&ds);
-                            //如何将map里的值给到数据结构，通过json可以还原不
-                            // 根据类型创建不同的数据, 直接生成sql数据就好，如果还原成具体类型，需要涉及到很多trait
-                            data_vec.push(ds);
-                            break;
+                        for refnos in &kv.value().iter().chunks(ATTS_CHUNK_COUNT) {
+                            let mut data_vec = vec![];
+                            for refno in refnos {
+                                let att: NamedAttrMap = total_attr_map_arc.get(refno).unwrap().merge().into();
+                                data_vec.push(att);
+                            }
+                            NamedAttrMap::exec_insert_many(data_vec, &vdb, false).await.unwrap();
+                            // break;
                         }
-                        if let Ok(sql) = orm::sql::gen_insert_many_sql(&type_name, data_vec){
-                            dbg!(&sql);
-                            vdb.execute_unprepared(&sql).await.unwrap();
-                        }
-                        break;
                     }
 
 

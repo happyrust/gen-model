@@ -43,12 +43,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
+/// 生成模型暂时现在用的本地缓存，这样生成的速度会加快，如果增量更新过来的数据
+/// 先保存到sled，然后调用增量更新的
+
 /// 生成基本体的几何数据
 pub async fn gen_prim_geos(
     mgr: Arc<AiosDBManager>,
     instance_mgr: Arc<RwLock<ShapeInstancesData>>,
     prim_refnos: &[RefU64],
-    sjus_map_arc: Arc<DashMap<RefU64, (Vec3, f32)>>,
 ) -> anyhow::Result<bool> {
     let t = Instant::now();
     let db_option = &mgr.db_option;
@@ -69,7 +71,6 @@ pub async fn gen_prim_geos(
 
         let all_refnos = all_refnos.clone();
         let processed_cnt = processed_cnt.clone();
-        let sjus_map_clone = sjus_map_arc.clone();
         let handle = tokio::spawn(async move {
             let start_idx = i * batch_size;
             let mut end_idx = start_idx + batch_size;
@@ -505,8 +506,8 @@ pub async fn gen_loop_geos(
 
 
 ///生成mesh的逻辑单独拿出来
-pub fn gen_mesh() -> anyhow::Result<>{
-
+pub fn gen_mesh() -> anyhow::Result<()> {
+    Ok(())
 }
 
 
@@ -677,9 +678,9 @@ pub async fn gen_cata_geos(
                         for (ele_refno, shapes) in brep_shapes_map {
                             let Ok(Some(mut origin_trans)) =
                                 mgr_clone.get_world_transform(ele_refno)
-                            else {
-                                continue;
-                            };
+                                else {
+                                    continue;
+                                };
 
                             let Ok(ele_att) = mgr_clone.get_attr_from_localdb(ele_refno) else {
                                 continue;
@@ -807,8 +808,8 @@ pub async fn gen_cata_geos(
                                         rotation: rot,
                                         scale,
                                     }
-                                    .compute_matrix()
-                                    .as_dmat4();
+                                        .compute_matrix()
+                                        .as_dmat4();
                                     let Some(aabb) = cached_mesh_mgr.get_aabb(geo_hash) else {
                                         continue;
                                     };
@@ -1038,9 +1039,9 @@ pub async fn gen_cata_geos(
                             ele_refno.to_refno_string(),
                         );
                         let Ok(Some(mut origin_trans)) = mgr_clone.get_world_transform(ele_refno)
-                        else {
-                            continue;
-                        };
+                            else {
+                                continue;
+                            };
 
                         let Some(ref_basic) = mgr_clone.get_refno_basic(ele_refno) else {
                             continue;
@@ -1460,28 +1461,53 @@ pub enum NgmrRemovedType {
     All = 7,
 }
 
+///石家庄 push -> 到北京
+///北京 push -> 到石家庄
+
+///暂时还是依赖sled，后面可以考虑surrealdb
+///将数据同步到本地数据库
+pub async fn sync_to_localdb(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
+    Ok(())
+}
+
 ///生成几何体数据
-pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> {
+pub async fn gen_all_geos_data(mut mgr: Arc<AiosDBManager>, only_update_refnos: Option<Vec<RefU64>>) -> anyhow::Result<bool> {
     let time = Instant::now();
+    //根据需要拉入数据到本地数据库也可以
+    let if_only_refnos = only_update_refnos.is_some();
+    let update_refnos = only_update_refnos.unwrap_or_default();
     let db_option = &mgr.db_option;
     let project = &mgr.db_option.project_name;
     let mdb = &mgr.db_option.mdb_name;
     let mut db_nos = mgr.db_option.manual_db_nums.clone().unwrap_or_default();
 
-    if db_nos.is_empty() {
+    //only_refnos 需要处理, 查询到可能是几何体的、或者元件库的模型
+    //prim 需要判断是否是负实体，如果是负实体，需要把owner换进去
+    //cata 需要判断是否是可能有负实体的模型，后面也要把关联的模型加入运算
+
+    //如果是删除操作，直接跳过即可
+    //只更新指定的模型
+
+    if !if_only_refnos && db_nos.is_empty() {
         let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
         let pool = AiosDBManager::get_db_pool(&url, project).await?;
+        //todo 通过图数据库查询db_nos
         db_nos = query_db_nums_of_mdb(mdb, &mgr.db_option.module, &pool).await?;
         db_nos.sort();
         println!("当前mdb的所有dbnos: {:?}", db_nos);
     }
-
-    let adb = mgr.get_arango_db().await?;
     // dbg!(&db_nos);
     let replace_mesh = mgr.db_option.replace_mesh;
+    if if_only_refnos {
+        db_nos = vec![0];
+    }
 
     for db_no in db_nos {
-        println!("开始处理db: {db_no}");
+        if if_only_refnos {
+            println!("开始处理更新模型数量: {}", update_refnos.len());
+        } else {
+            println!("开始处理db: {db_no}");
+        }
         let d_types = &mgr.db_option.debug_refno_types;
         let not_debug = db_option.debug_refno_types.is_empty();
         let mut run_cache_cata = d_types.iter().any(|x| x == "CATA");
@@ -1489,53 +1515,6 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
         let mut run_cache_prim = d_types.iter().any(|x| x == "PRIM");
 
         let mut shape_insts_data = ShapeInstancesData::default();
-        let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
-        let unit_box_aabb = Aabb::new(Point3::new(-0.5, -0.5, -0.5), Point3::new(0.5, 0.5, 0.5));
-        shape_insts_data.insert_geos_data(
-            TUBI_GEO_HASH.to_string(),
-            EleInstGeosData {
-                inst_key: TUBI_GEO_HASH.to_string(),
-                refno: Default::default(),
-                insts: vec![EleInstGeo {
-                    geo_hash: TUBI_GEO_HASH,
-                    refno: Default::default(),
-                    owner_pos_refnos: Default::default(),
-                    geo_param: PdmsGeoParam::PrimSCylinder(SCylinder::default()),
-                    pts: vec![],
-                    aabb: Some(unit_cyli_aabb),
-                    transform: Default::default(),
-                    visible: true,
-                    is_tubi: true,
-                    geo_type: GeoBasicType::Tubi,
-                }],
-                aabb: Some(unit_cyli_aabb),
-                type_name: "TUBI".to_string(),
-                ptset_map: Default::default(),
-            },
-        );
-        shape_insts_data.insert_geos_data(
-            BOXI_GEO_HASH.to_string(),
-            EleInstGeosData {
-                inst_key: BOXI_GEO_HASH.to_string(),
-                refno: Default::default(),
-                insts: vec![EleInstGeo {
-                    geo_hash: BOXI_GEO_HASH,
-                    refno: Default::default(),
-                    owner_pos_refnos: Default::default(),
-                    geo_param: PdmsGeoParam::PrimBox(SBox::default()),
-                    pts: vec![],
-                    aabb: Some(unit_box_aabb),
-                    transform: Default::default(),
-                    visible: true,
-                    is_tubi: true,
-                    geo_type: GeoBasicType::Tubi,
-                }],
-                aabb: Some(unit_box_aabb),
-                type_name: "BOXI".to_string(),
-                ptset_map: Default::default(),
-            },
-        );
-
         let instance_mgr = Arc::new(RwLock::new(shape_insts_data));
 
         let target_dbnos = [db_no];
@@ -1546,163 +1525,206 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
             continue;
         }
 
-        //提前缓存好，
-        let target_ploo_refnos = mgr
-            .get_gen_model_target_refnos(GeoEnum::PLOO, &target_dbnos, false)
-            .await?;
+        //提前缓存ploo
         let loop_sjus_map = DashMap::new();
-        target_ploo_refnos.iter().for_each(|r| {
-            let Ok(loop_att) = mgr.get_attr_from_localdb(*r) else {
-                return;
-            };
-            let owner = loop_att.get_owner().unwrap_or_default();
-            let mut height = loop_att
-                .get_f32("HEIG")
-                .unwrap_or(loop_att.get_f32("HEIG").unwrap_or_default());
-            let sjus = loop_att.get_str("SJUS").unwrap_or_default();
-            let off_z = cal_sjus_value(sjus, height);
-            //对齐方式的距离，应该存储下来，子节点要与其保持一致的偏移
-            //插入方向和偏移距离
-            loop_sjus_map.insert(owner, (Vec3::NEG_Z * off_z, height));
-        });
+        if if_only_refnos {
+            let target_ploo_refnos = mgr
+                .get_gen_model_target_refnos(GeoEnum::PLOO, &target_dbnos, false)
+                .await?;
+            target_ploo_refnos.iter().for_each(|r| {
+                let Ok(loop_att) = mgr.get_attr_from_localdb(*r) else {
+                    return;
+                };
+                let owner = loop_att.get_owner().unwrap_or_default();
+                let mut height = loop_att
+                    .get_f32("HEIG")
+                    .unwrap_or(loop_att.get_f32("HEIG").unwrap_or_default());
+                let sjus = loop_att.get_str("SJUS").unwrap_or_default();
+                let off_z = cal_sjus_value(sjus, height);
+                //对齐方式的距离，应该存储下来，子节点要与其保持一致的偏移
+                //插入方向和偏移距离
+                loop_sjus_map.insert(owner, (Vec3::NEG_Z * off_z, height));
+            });
+        }
+
 
         let loop_sjus_map_arc = Arc::new(loop_sjus_map);
         //元件库的模型计算
-        //求出有多少个是一样的模型
-        let target_cata_refnos = mgr
-            .get_gen_model_target_refnos(GeoEnum::CATA_BRAN_AND_HANGER_REUSE, &target_dbnos, false)
-            .await?;
-        println!("使用管道或者支吊架元件库数量: {}", target_cata_refnos.len());
-        //查询出branch 和 branch 下的子节点
-        let mut branch_refnos_map = DashMap::new();
-        let mut bran_comp_eles = vec![];
-        for refno in &target_cata_refnos {
-            let att = mgr.get_attr_from_localdb(*refno).unwrap_or_default();
-            //必须按照顺序
-            let children = mgr.query_children_eles_order(*refno, &[], &[]).await?;
-            if children.is_empty() && !CATA_HAS_TUBI_GEO_NAMES.contains(&att.get_type()) {
-                continue;
-            }
-            bran_comp_eles.extend(children.iter().map(|x| x.refno));
-            //求出元件对应的outside bore
-            branch_refnos_map.insert(*refno, children);
-        }
-        let target_bran_reuse_cata_map = mgr
-            .get_gen_model_map_by_cata_hash(
-                GeoEnum::CATA_BRAN_AND_HANGER_REUSE,
-                &target_dbnos,
-                true,
-                false,
-            )
-            .await?;
-        let target_single_reuse_cata_map = mgr
-            .get_gen_model_map_by_cata_hash(GeoEnum::CATA_SINGLE_REUSE, &target_dbnos, false, false)
-            .await?;
-        let target_single_cata_map = mgr
-            .get_gen_model_map_by_cata_hash(
-                GeoEnum::CATA_WITHOUT_REUSE,
-                &target_dbnos,
-                false,
-                false,
-            )
-            .await?;
-        #[cfg(debug_assertions)]
         {
-            dbg!(&target_bran_reuse_cata_map.len());
-            dbg!(target_bran_reuse_cata_map
-                .iter()
-                .map(|x| (x.key().clone(), x.value().group_refnos.clone()))
-                .collect::<Vec<_>>());
-            dbg!(target_single_reuse_cata_map.len());
-            dbg!(&target_single_cata_map.len());
+
+            //求出有多少个是一样的模型
+            let target_bran_hanger_refnos = if if_only_refnos {
+                update_refnos.iter().filter(|&x| {
+                    let type_name = mgr.get_type_name(*x);
+                    CATA_HAS_TUBI_GEO_NAMES.contains(&type_name.as_str())
+                }).cloned().collect()
+            } else {
+                mgr.get_gen_model_target_refnos(GeoEnum::CATA_BRAN_AND_HANGER_REUSE, &target_dbnos, false)
+                    .await?
+            };
+            println!("使用管道或者支吊架元件库数量: {}", target_bran_hanger_refnos.len());
+            //查询出branch 和 branch 下的子节点
+            let mut branch_refnos_map = DashMap::new();
+            let mut bran_comp_eles = vec![];
+            for refno in &target_bran_hanger_refnos {
+                let att = mgr.get_attr_from_localdb(*refno).unwrap_or_default();
+                //必须按照顺序
+                let children = mgr.query_children_eles_order(*refno, &[], &[]).await?;
+                if children.is_empty() && !CATA_HAS_TUBI_GEO_NAMES.contains(&att.get_type()) {
+                    continue;
+                }
+                bran_comp_eles.extend(children.iter().map(|x| x.refno));
+                //求出元件对应的outside bore
+                branch_refnos_map.insert(*refno, children);
+            }
+            ///管道类的需要获到它的信息
+            let target_bran_reuse_cata_map = if if_only_refnos {
+                //直接在sql里查询出来这些，主要是cata hash的值要返回
+                Default::default()
+            } else {
+                mgr.get_gen_model_map_by_cata_hash(
+                    GeoEnum::CATA_BRAN_AND_HANGER_REUSE,
+                    &target_dbnos,
+                    true,
+                    false,
+                )
+                    .await?
+            };
+            // let target_single_reuse_cata_map = if if_only_refnos {
+            //     update_refnos.iter().filter(|&x| {
+            //         let type_name = mgr.get_type_name(*x);
+            //         CATA_SINGLE_REUSE_GEO_NAMES.contains(&type_name.as_str())
+            //     }).cloned().collect()
+            // } else {
+            //     mgr.get_gen_model_map_by_cata_hash(GeoEnum::CATA_SINGLE_REUSE, &target_dbnos, false, false)
+            //         .await?
+            // };
+            let target_single_cata_map = if if_only_refnos {
+                // update_refnos.iter().filter(|&x| {
+                //     let type_name = mgr.get_type_name(*x);
+                //     CATA_WITHOUT_REUSE_GEO_NAMES.contains(&type_name.as_str())
+                // }).cloned().collect()
+                Default::default()
+            } else {
+                mgr
+                .get_gen_model_map_by_cata_hash(
+                    GeoEnum::CATA_WITHOUT_REUSE,
+                    &target_dbnos,
+                    false,
+                    false,
+                )
+                .await?
+            };
+            #[cfg(debug_assertions)]
+            {
+                dbg!(&target_bran_reuse_cata_map.len());
+                // dbg!(target_bran_reuse_cata_map
+                //     .iter()
+                //     .map(|x| (x.key().clone(), x.value().group_refnos.clone()))
+                //     .collect::<Vec<_>>());
+                // dbg!(target_single_reuse_cata_map.len());
+                dbg!(&target_single_cata_map.len());
+            }
+
+            let mut has_run_cata = false;
+            if run_cache_cata {
+                let mut handles = vec![];
+                //bran，hanger下需要重用的模型
+                if !target_bran_reuse_cata_map.is_empty() || !branch_refnos_map.is_empty() {
+                    let mgr_clone = mgr.clone();
+                    let instance_mgr_clone = instance_mgr.clone();
+                    let sjus_map_clone = loop_sjus_map_arc.clone();
+                    {
+                        instance_mgr_clone.write().await.fill_basic_shapes();
+                    }
+                    let handle = tokio::spawn(async move {
+                        gen_cata_geos(
+                            mgr_clone,
+                            instance_mgr_clone,
+                            Arc::new(target_bran_reuse_cata_map),
+                            Arc::new(branch_refnos_map),
+                            sjus_map_clone,
+                        )
+                            .await
+                            .unwrap();
+                    });
+                    has_run_cata = true;
+                    handles.push(handle);
+                }
+
+                ///需要重用的类型
+                // if !target_single_reuse_cata_map.is_empty() {
+                //     let mgr_clone = mgr.clone();
+                //     let instance_mgr_clone = instance_mgr.clone();
+                //     let sjus_map_clone = loop_sjus_map_arc.clone();
+                //     let handle = tokio::spawn(async move {
+                //         gen_cata_geos(
+                //             mgr_clone,
+                //             instance_mgr_clone,
+                //             // scom_info_map_clone,
+                //             Arc::new(target_single_reuse_cata_map),
+                //             Arc::new(Default::default()),
+                //             sjus_map_clone,
+                //         )
+                //             .await
+                //             .unwrap();
+                //     });
+                //     has_run_cata = true;
+                //     handles.push(handle);
+                // }
+
+                //不能重用的类型
+                if !target_single_cata_map.is_empty() {
+                    let mgr_clone = mgr.clone();
+                    let sjus_map_clone = loop_sjus_map_arc.clone();
+                    let instance_mgr_clone = instance_mgr.clone();
+                    let handle = tokio::spawn(async move {
+                        gen_cata_geos(
+                            mgr_clone,
+                            instance_mgr_clone,
+                            Arc::new(target_single_cata_map),
+                            Arc::new(Default::default()),
+                            sjus_map_clone,
+                        )
+                            .await
+                            .unwrap();
+                    });
+                    has_run_cata = true;
+                    handles.push(handle);
+                }
+
+                futures::future::join_all(handles).await;
+                if has_run_cata {
+                    let mut mesh_mgr = mgr.cached_mesh_mgr.write().await;
+                    let shape_insts_data = instance_mgr.read().await;
+                    println!("当前db下的元件库生成统计：");
+                    dbg!(mesh_mgr.len());
+                    dbg!(shape_insts_data.inst_info_map.len());
+                    // dbg!(&inst_data.inst_info_map);
+                    dbg!(shape_insts_data.inst_tubi_map.len());
+                }
+            }
         }
 
-        let mut has_run_cata = false;
-        if run_cache_cata {
-            let mut handles = vec![];
-            //bran，hanger下需要重用的模型
-            if !target_bran_reuse_cata_map.is_empty() || !branch_refnos_map.is_empty() {
-                let mgr_clone = mgr.clone();
-                let instance_mgr_clone = instance_mgr.clone();
-                let sjus_map_clone = loop_sjus_map_arc.clone();
-                let handle = tokio::spawn(async move {
-                    gen_cata_geos(
-                        mgr_clone,
-                        instance_mgr_clone,
-                        Arc::new(target_bran_reuse_cata_map),
-                        Arc::new(branch_refnos_map),
-                        sjus_map_clone,
-                    )
-                    .await
-                    .unwrap();
-                });
-                has_run_cata = true;
-                handles.push(handle);
-            }
-
-            ///需要重用的类型
-            if !target_single_reuse_cata_map.is_empty() {
-                let mgr_clone = mgr.clone();
-                let instance_mgr_clone = instance_mgr.clone();
-                let sjus_map_clone = loop_sjus_map_arc.clone();
-                let handle = tokio::spawn(async move {
-                    gen_cata_geos(
-                        mgr_clone,
-                        instance_mgr_clone,
-                        // scom_info_map_clone,
-                        Arc::new(target_single_reuse_cata_map),
-                        Arc::new(Default::default()),
-                        sjus_map_clone,
-                    )
-                    .await
-                    .unwrap();
-                });
-                has_run_cata = true;
-                handles.push(handle);
-            }
-
-            //不能重用的类型
-            if !target_single_cata_map.is_empty() {
-                let mgr_clone = mgr.clone();
-                let sjus_map_clone = loop_sjus_map_arc.clone();
-                let instance_mgr_clone = instance_mgr.clone();
-                let handle = tokio::spawn(async move {
-                    gen_cata_geos(
-                        mgr_clone,
-                        instance_mgr_clone,
-                        Arc::new(target_single_cata_map),
-                        Arc::new(Default::default()),
-                        sjus_map_clone,
-                    )
-                    .await
-                    .unwrap();
-                });
-                has_run_cata = true;
-                handles.push(handle);
-            }
-
-            futures::future::join_all(handles).await;
-            if has_run_cata {
-                let mut mesh_mgr = mgr.cached_mesh_mgr.write().await;
-                let shape_insts_data = instance_mgr.read().await;
-                println!("当前db下的元件库生成统计：");
-                dbg!(mesh_mgr.len());
-                dbg!(shape_insts_data.inst_info_map.len());
-                // dbg!(&inst_data.inst_info_map);
-                dbg!(shape_insts_data.inst_tubi_map.len());
-            }
-        }
 
         let mut has_geom_refnos = vec![];
-        for root_refno in root_refnos.clone() {
-            let refnos = mgr.query_refnos_has_geos(root_refno).await?;
-            has_geom_refnos.extend_from_slice(&refnos);
+        if !if_only_refnos {
+            for root_refno in root_refnos.clone() {
+                let refnos = mgr.query_refnos_has_geos(root_refno).await?;
+                has_geom_refnos.extend_from_slice(&refnos);
+            }
+            dbg!(has_geom_refnos.len());
         }
-        dbg!(has_geom_refnos.len());
-        if !has_geom_refnos.is_empty() {
-            let target_loop_refnos = mgr
-                .get_gen_model_target_refnos(GeoEnum::LOOP_AND_PLOO, &target_dbnos, false)
-                .await?;
+
+        if !has_geom_refnos.is_empty() || if_only_refnos {
+            let target_loop_refnos = if if_only_refnos {
+                update_refnos.iter().filter(|&x| {
+                    GNERAL_LOOP_NOUN_NAMES.contains(&mgr.get_type_name(*x).as_str())
+                }).cloned().collect()
+            } else {
+                mgr.get_gen_model_target_refnos(GeoEnum::LOOP_AND_PLOO, &target_dbnos, false)
+                    .await?
+            };
             println!("使用LOOP的数量: {}", target_loop_refnos.len());
             if run_cache_loop && !target_loop_refnos.is_empty() {
                 let instance_mgr_clone = instance_mgr.clone();
@@ -1715,29 +1737,34 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                         &target_loop_refnos,
                         sjus_map_clone,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
             }
 
-            let target_prim_refnos = mgr
-                .get_gen_model_target_refnos(GeoEnum::PRIM, &target_dbnos, false)
-                .await?;
+            ///基本体模型的生成
+            let target_prim_refnos = if if_only_refnos {
+                update_refnos.iter().filter(|&x| {
+                    dbg!(mgr.get_type_name(*x));
+                    GNERAL_PRIM_NOUN_NAMES.contains(&mgr.get_type_name(*x).as_str())
+                }).cloned().collect()
+            } else {
+                mgr.get_gen_model_target_refnos(GeoEnum::PRIM, &target_dbnos, false)
+                    .await?
+            };
             println!("使用基本体数量: {}", target_prim_refnos.len());
             if run_cache_prim && !target_prim_refnos.is_empty() {
                 let instance_mgr_clone = instance_mgr.clone();
                 let mgr_clone = mgr.clone();
-                let sjus_map_clone = loop_sjus_map_arc.clone();
                 let handle = tokio::spawn(async move {
                     gen_prim_geos(
                         mgr_clone.clone(),
                         instance_mgr_clone.clone(),
                         target_prim_refnos.as_slice(),
-                        sjus_map_clone,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
             }
@@ -1777,9 +1804,9 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             println!("正在处理: {} 下的负实体", comp_refno);
 
                             let Ok(children_refnos) = mgr.get_children_from_localdb(comp_refno)
-                            else {
-                                return;
-                            };
+                                else {
+                                    return;
+                                };
                             let mut neg_refnos = vec![];
                             children_refnos.iter().for_each(|x| {
                                 for c in &origin_neg_refnos {
@@ -1805,9 +1832,9 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                             // dbg!(&pos_refnos);
                             let Some(w_trans) =
                                 trans_map.get(&comp_refno).map(|x| x.value().clone())
-                            else {
-                                return;
-                            };
+                                else {
+                                    return;
+                                };
                             // #[cfg(debug_assertions)]
                             // {
                             //     dbg!(w_trans);
@@ -1830,20 +1857,20 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                                     continue;
                                 };
                                 let Some(inst_geos) = inst_data.get_inst_geos_data_mut(&geos_info)
-                                else {
-                                    continue;
-                                };
+                                    else {
+                                        continue;
+                                    };
                                 let mut pos_aabb = Aabb::new_invalid();
                                 let pos_refno = pos_refnos[0];
                                 for geo_inst in &mut inst_geos.insts {
                                     let Some(mesh) = mesh_mgr_clone.get_mesh(geo_inst.geo_hash)
-                                    else {
-                                        continue;
-                                    };
+                                        else {
+                                            continue;
+                                        };
                                     let Some(aabb) = mesh_mgr_clone.get_aabb(geo_inst.geo_hash)
-                                    else {
-                                        continue;
-                                    };
+                                        else {
+                                            continue;
+                                        };
                                     let world_geo_mat = geos_info.world_transform;
                                     #[cfg(debug_assertions)]
                                     {
@@ -1984,13 +2011,9 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                                 flow_pt_indexs: vec![],
                                 geo_type: GeoBasicType::Compound,
                             };
-                            // dbg!(&comp_geos_info);
                             inst_info_result_map_clone.insert(comp_refno, comp_geos_info);
                             let comp_type = mgr.get_type_name(comp_refno);
-                                // .get_refno_basic(comp_refno)
-                                // .unwrap()
-                                // .get_type()
-                                // .to_string();
+
                             inst_geos_result_map_clone.insert(
                                 inst_key.to_string(),
                                 EleInstGeosData {
@@ -2049,9 +2072,9 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                 ///查找是否是某些参考号的子节点
                 for (refno, geos_info) in shape_insts_data.ngmr_inst_info_map.clone() {
                     let Some(geos_data) = shape_insts_data.get_inst_geos_data_mut(&geos_info)
-                    else {
-                        continue;
-                    };
+                        else {
+                            continue;
+                        };
                     let att = mgr.get_attr_from_localdb(refno).unwrap_or_default();
                     let c_ref = att.get_foreign_refno("CREF");
                     #[cfg(debug_assertions)]
@@ -2217,14 +2240,14 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
                 println!("开始处理ngmr的负实体模型");
                 for (parent, ngmr_map) in boolean_ngmr_map {
                     let Some(parent_geos_info) = shape_insts_data.get_final_inst_info(parent)
-                    else {
-                        continue;
-                    };
+                        else {
+                            continue;
+                        };
                     let Some(parent_geos_data) =
                         shape_insts_data.get_inst_geos_data(parent_geos_info)
-                    else {
-                        continue;
-                    };
+                        else {
+                            continue;
+                        };
                     if parent_geos_data.insts.is_empty() {
                         continue;
                     }
@@ -2356,7 +2379,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
             let inst_data = instance_mgr.read().await;
             println!("当前db下的基本体生成统计：");
             dbg!(inst_data.inst_geos_map.len());
-            // dbg!(&inst_data);
+            dbg!(&inst_data.inst_geos_map);
             save_instance_to_graph_db(&mgr, &inst_data).await?;
         }
 
@@ -2372,6 +2395,7 @@ pub async fn gen_geos_data(mut mgr: Arc<AiosDBManager>) -> anyhow::Result<bool> 
     println!("生成所有模型时间: {}ms", time.elapsed().as_millis());
     Ok(true)
 }
+
 
 pub fn query_tubi_size(
     mgr: &AiosDBManager,
