@@ -5,7 +5,7 @@ use crate::api::element::query_ele_nodes_by_refnos;
 use crate::aql_api::convert_refno_vec_from_vec_string;
 use crate::aql_api::pdms_room::query_all_need_compute_room_refno;
 
-/// 查询房间号
+// 查询房间号
 pub async fn query_room_code(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<String>> {
     let sql = gen_query_room_code_sql(refno);
     let result = sqlx::query(&sql).fetch_one(pool).await;
@@ -19,7 +19,7 @@ pub async fn query_room_code(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Resul
     };
 }
 
-/// 查询多个参考号所在的房间号
+// 查询多个参考号所在的房间号
 pub async fn query_room_code_with_refnos(refnos: Vec<RefU64>, pool: &Pool<MySql>) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut result = Vec::new();
     let sql = gen_query_room_code_with_refnos_sql(refnos);
@@ -39,7 +39,7 @@ pub async fn query_room_code_with_refnos(refnos: Vec<RefU64>, pool: &Pool<MySql>
     Ok(result)
 }
 
-/// 查找所有房间节点，暂时按 1516 命名格式过滤
+// 查找所有房间节点，暂时按 1516 命名格式过滤
 pub async fn query_room_nodes(dbno: &Vec<i32>, pool: &Pool<MySql>) -> anyhow::Result<Vec<PdmsElement>> {
     let room_infos = query_all_need_compute_room_refno(
         dbno,

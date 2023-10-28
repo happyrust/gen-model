@@ -94,6 +94,7 @@ pub struct PdmsEleData {
     pub dbnum: i32,
     #[serde(default)]
     pub cata_hash: Option<String>,
+    // pub tag_lock:bool,
 }
 
 

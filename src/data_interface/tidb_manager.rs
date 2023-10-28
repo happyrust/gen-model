@@ -470,7 +470,6 @@ impl PdmsDataInterface for AiosDBManager {
             // 通过 fulltext在数据库中查询
             let database = self.get_arango_db().await?;
             let ele = query_mdb_world_fulltext(mdb_name, module, &database).await?;
-            dbg!(&ele);
             if let Some(ele) = ele {
                 GLOBAL_MDB_WORLD_MAP.insert(hash_name, ele.clone());
                 return Ok(ele);

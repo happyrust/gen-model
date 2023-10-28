@@ -2,11 +2,12 @@ use std::io::Write;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::*;
 use aios_core::pdms_user::RefnoMajor;
+use bevy_transform::prelude::Transform;
+use nalgebra::sup;
 use parry3d::utils::hashmap::HashMap;
 use regex::Regex;
-use crate::api::room_code::query_room_code;
-use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_children_eles, query_refnos_belong_major, query_refnos_travel_children_with_type_aql, query_travel_children_with_type_aql};
-use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
+use crate::aql_api::children::{get_uda_type_refnos_from_select_refnos, query_ancestor_name_of_type_aql, query_children_eles, query_refnos_belong_major, query_refnos_travel_children_with_type_aql, query_travel_children_with_type_aql};
+use crate::aql_api::pdms_room::{query_room_name_from_owner_aql, query_room_name_from_refno_aql};
 use crate::data_center_api::data_api::{get_refno_desc, get_refno_desi_desc, get_refno_latest_version, get_refnos_major_map, take_off_name_first_char};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -232,9 +233,129 @@ pub async fn get_dq_support_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) 
     })
 }
 
+
 /// 仪表管道支吊架类
+///
+/// SITE name contains(INSTHB)>ZONE name contains(SUPP) > :SUPP
 pub async fn query_dq_erecad_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
-    Ok(DataCenterProject::default())
+    let database = aios_mgr.get_arango_db().await?;
+    let mut result = Vec::new();
+    // 查询自定义类型 :SUPP
+    let supps = get_uda_type_refnos_from_select_refnos(refnos, "SUPP", "ZONE", aios_mgr).await.unwrap_or(vec![]);
+    // 通过 owner返回房间号（只返回一个）
+    let supp_refnos = supps.iter().map(|s| s.refno).collect::<Vec<RefU64>>();
+    let room_name_map = query_room_name_from_owner_aql(supp_refnos, &database).await?;
+    let room_name_map = room_name_map.into_iter()
+        .map(|r| (r.refno, r.room_name))
+        .collect::<HashMap<RefU64, String>>();
+
+    for supp in supps {
+        let mut data_center_attr = Vec::new();
+        let Ok(attr) = aios_mgr.get_attr(supp.refno).await else { continue; };
+        data_center_attr.push(DataCenterAttr {
+            attribute_model_code: "ERECAD1".to_string(),
+            value: supp.name.clone(),
+        });
+        // :ZD_BZBM，取,前面的
+        let standard_num = attr.get_str(":ZD_BZBM").map_or("".to_string(), |x| x.to_string());
+        let split = standard_num.split(",").collect::<Vec<_>>().first().map_or("".to_string(), |x| x.to_string());
+        data_center_attr.push(DataCenterAttr {
+            attribute_model_code: "ERECAD2".to_string(),
+            value: split.clone(),
+        });
+        let room_name = room_name_map.get(&supp.refno).map_or("".to_string(), |x| x.to_string());
+        data_center_attr.push(DataCenterAttr {
+            attribute_model_code: "ERECAD3".to_string(),
+            value: room_name,
+        });
+        let transform = aios_mgr.get_world_transform(supp.refno).unwrap_or(None).unwrap_or(Transform::default());
+        let pos = transform.translation;
+        data_center_attr.push(DataCenterAttr {
+            attribute_model_code: "ERECAD4".to_string(),
+            value: AttrValue::AttrVec3(pos).into(),
+        });
+
+        let mut b_anti_seismic = "".to_string();
+        if split == "1SA".to_string() {
+            b_anti_seismic = "抗震".to_string();
+        } else if split == "1S".to_string() {
+            b_anti_seismic = "非抗震".to_string();
+        }
+        data_center_attr.push(DataCenterAttr {
+            attribute_model_code: "ERECAD5".to_string(),
+            value: AttrValue::AttrString(b_anti_seismic).into(),
+        });
+        data_center_attr.push(DataCenterAttr {
+            attribute_model_code: "ERECAD6".to_string(),
+            value: AttrValue::AttrString(standard_num).into(),
+        });
+
+        result.push(DataCenterInstance {
+            object_model_code: "ERECAD".to_string(),
+            project_code: aios_mgr.db_option.project_code.to_string(),
+            instance_code: supp.name,
+            version: get_refno_latest_version(),
+            attributes: data_center_attr,
+        });
+    }
+    Ok(DataCenterProject {
+        package_code: DataCenterProject::convert_package_code(),
+        project_code: aios_mgr.db_option.project_code.to_string(),
+        owner: "KY1801".to_string(),
+        instances: result,
+    })
+}
+
+pub async fn query_dq_erecc_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterProject> {
+    let database = aios_mgr.get_arango_db().await?;
+    let mut result = Vec::new();
+    // 查询自定义类型 :SUPP
+    let supps = get_uda_type_refnos_from_select_refnos(refnos, "SUPP", "ZONE", aios_mgr).await.unwrap_or(vec![]);
+    // 通过 owner返回房间号（只返回一个）
+    let supp_refnos = supps.iter().map(|s| s.refno).collect::<Vec<RefU64>>();
+    let room_name_map = query_room_name_from_owner_aql(supp_refnos, &database).await?;
+    let room_name_map = room_name_map.into_iter()
+        .map(|r| (r.refno, r.room_name))
+        .collect::<HashMap<RefU64, String>>();
+
+    for supp in supps {
+        let mut data_center_attr = Vec::new();
+        let Ok(attr) = aios_mgr.get_attr(supp.refno).await else { continue; };
+        data_center_attr.push(DataCenterAttr {
+            attribute_model_code: "ERECC1".to_string(),
+            value: supp.name.clone(),
+        });
+        // :ZD_BZBM
+        let standard_num = attr.get_str(":ZD_BZBM").map_or("".to_string(), |x| x.to_string());
+        data_center_attr.push(DataCenterAttr {
+            attribute_model_code: "ERECC2".to_string(),
+            value: standard_num,
+        });
+        let room_name = room_name_map.get(&supp.refno).map_or("".to_string(), |x| x.to_string());
+        data_center_attr.push(DataCenterAttr {
+            attribute_model_code: "ERECC3".to_string(),
+            value: room_name,
+        });
+        let equi_num = attr.get_str(":ZD_YBSB").map_or("".to_string(), |x| x.to_string());
+        data_center_attr.push(DataCenterAttr {
+            attribute_model_code: "ERECC4".to_string(),
+            value: equi_num,
+        });
+
+        result.push(DataCenterInstance {
+            object_model_code: "ERECC".to_string(),
+            project_code: aios_mgr.db_option.project_code.to_string(),
+            instance_code: supp.name,
+            version: get_refno_latest_version(),
+            attributes: data_center_attr,
+        });
+    }
+    Ok(DataCenterProject {
+        package_code: DataCenterProject::convert_package_code(),
+        project_code: aios_mgr.db_option.project_code.to_string(),
+        owner: "KY1801".to_string(),
+        instances: result,
+    })
 }
 
 /// 判断字段串是否包含 S1到 S17的任意一种

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
@@ -6,9 +7,8 @@ use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors_lite::Database;
 use sqlx::{MySql, Pool};
 use crate::api::refno_info::query_refno_height_position;
-use crate::api::room_code::query_room_code;
 use crate::aql_api::children::{query_refnos_travel_children_with_type_aql};
-use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
+use crate::aql_api::pdms_room::{query_room_name_from_refno_aql, query_room_name_from_refnos_aql};
 use crate::data_center_api::data_api::get_refno_latest_version;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -18,8 +18,15 @@ pub async fn get_inst_data(refnos: Vec<RefU64>, database: &ArDatabase, pool: &Po
     let mut instance = Vec::new();
     if let Ok(valves) = query_refnos_travel_children_with_type_aql(&database, &refnos,
                                                                    vec!["INST".to_string(), "EQUI".to_string()]).await {
+        // 查询所有需要的房间号
+        let refnos = valves.iter().map(|child| child.refno).collect::<Vec<RefU64>>();
+        let room_map = query_room_name_from_refnos_aql(refnos, &database).await?;
+        let room_map = room_map.into_iter()
+            .map(|x| (x.refno, x.room_name))
+            .collect::<HashMap<RefU64, String>>();
+
         for valv in valves {
-            let room_name = query_room_code(valv.refno, pool).await?.unwrap_or("".to_string());
+            let room_name = room_map.get(&valv.refno).unwrap_or(&"".to_string()).clone();
             let position = query_refno_height_position(valv.refno, pool).await?;
             instance.push(DataCenterInstance {
                 object_model_code: "COMPADD".to_string(),

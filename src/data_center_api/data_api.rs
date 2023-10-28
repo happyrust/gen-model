@@ -96,6 +96,7 @@ pub struct PipeRoomCodeData {
 pub(crate) async fn get_bran_itema_attr(
     refno: PdmsElement,
     bran_name: &str,
+    room_code: String,
     database: &ArDatabase,
     aios_mgr: &AiosDBManager,
     mut result: &mut Vec<DataCenterAttr>,
@@ -139,10 +140,6 @@ pub(crate) async fn get_bran_itema_attr(
         value: AttrString(quat_to_pdms_ori_str(&world_position.rotation)).into(),
     };
     result.push(item_8);
-    let room_code = query_room_name_from_refno_aql(refno.refno, database)
-        .await
-        .unwrap_or(None)
-        .unwrap_or("".to_string());
     result.push(DataCenterAttr {
         attribute_model_code: "ITEMA20".to_string(),
         value: AttrString(room_code).into(),
@@ -349,9 +346,34 @@ pub fn get_thickness_pressure_level(
     thickness: &str,
     thickness_value: &str,
     pressure_level: &str,
-    spre_code: &str,
+    pressure_code: &str,
 ) -> Vec<DataCenterAttr> {
-    vec![]
+    let mut result = Vec::new();
+    let mut thickness_code = "".to_string();
+    let mut thickness_value_code = "".to_string();
+    let mut pressure_level_code = "".to_string();
+
+    if pressure_code.clone().to_lowercase().starts_with("sch") {
+        thickness_code = pressure_code.to_string();
+    } else if pressure_code.ends_with("mm") {
+        thickness_value_code = pressure_code.to_string();
+    } else if pressure_code.starts_with("CL") || pressure_code.starts_with("PN") {
+        pressure_level_code = pressure_code.to_string();
+    }
+
+    result.push(DataCenterAttr {
+        attribute_model_code: thickness.to_string(),
+        value: thickness_code.to_string(),
+    });
+    result.push(DataCenterAttr {
+        attribute_model_code: thickness_value.to_string(),
+        value: thickness_value_code.to_string(),
+    });
+    result.push(DataCenterAttr {
+        attribute_model_code: pressure_level.to_string(),
+        value: pressure_level_code.to_string(),
+    });
+    result
 }
 
 /// 获取该元件的房间号，和离该元件最近的其他房间的房间号
@@ -588,7 +610,7 @@ pub(crate) async fn get_ori_angle_str(
     refno: RefU64,
     aios_mgr: &AiosDBManager,
 ) -> anyhow::Result<String> {
-    let Ok(ori) = aios_mgr.get_implicit_attr(refno, Some(vec!["ORI"])).await else {
+    let Ok(ori) = aios_mgr.get_attr(refno).await else {
         return Ok("".to_string());
     };
     let Some(ori) = ori.get_vec3("ORI") else {

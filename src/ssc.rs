@@ -372,6 +372,7 @@ pub async fn get_room_info_from_excel_refactor(database: &ArDatabase) -> anyhow:
             dbnum: 0,
             order: idx as u32,
             cata_hash: None,
+            // tag_lock:false,
         });
         edges.push(AqlEdge::new(refno, owner, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
         for (idx, (level, rooms)) in level_map.into_iter().enumerate() {
@@ -388,6 +389,7 @@ pub async fn get_room_info_from_excel_refactor(database: &ArDatabase) -> anyhow:
                 dbnum: 0,
                 order: idx as u32,
                 cata_hash: None,
+                // tag_lock:false,
             };
             nodes.push(node);
             edges.push(AqlEdge::new(refno, owner, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
@@ -404,6 +406,7 @@ pub async fn get_room_info_from_excel_refactor(database: &ArDatabase) -> anyhow:
                     dbnum: 0,
                     order: idx as u32,
                     cata_hash: None,
+                    // tag_lock:false,
                 });
                 // 解决房间下的专业层级
                 // 专业层级
@@ -421,6 +424,7 @@ pub async fn get_room_info_from_excel_refactor(database: &ArDatabase) -> anyhow:
                         dbnum: 0,
                         order: idx as u32,
                         cata_hash: None,
+                        // tag_lock:false,
                     });
                     // 专业下具体细分
                     for (idx, zone) in zones.iter().enumerate() {
@@ -437,6 +441,7 @@ pub async fn get_room_info_from_excel_refactor(database: &ArDatabase) -> anyhow:
                             dbnum: 0,
                             order: idx as u32,
                             cata_hash: None,
+                            // tag_lock:false,
                         });
                     }
                 }
@@ -768,6 +773,7 @@ pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Res
                     dbnum: 0,
                     order: idx as u32,
                     cata_hash: None,
+                    // tag_lock:false,
                 });
                 ssc_edges.push(AqlEdge::new(refno, owner_refno, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
                 // 存放元件
@@ -781,6 +787,7 @@ pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Res
                     order: idx as u32,
                     dbnum: 0,
                     cata_hash: None,
+                    // tag_lock:false,
                 });
                 ssc_edges.push(AqlEdge::new(refno, owner, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
             } else {
@@ -798,6 +805,7 @@ pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Res
                     order: idx as u32,
                     dbnum: 0,
                     cata_hash: None,
+                    // tag_lock:false,
                 });
                 ssc_edges.push(AqlEdge::new(refno, owner_refno, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
                 // owner下两个固定层级
@@ -811,6 +819,7 @@ pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Res
                     dbnum: 0,
                     order: idx as u32,
                     cata_hash: None,
+                    // tag_lock:false,
                 });
                 ssc_edges.push(AqlEdge::new(refno, owner_refno, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
                 let refno = RefU64(convert_str_to_hash(format!("{}{}{}", room_name, owner_name_split, "REST").as_str()));
@@ -822,6 +831,7 @@ pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Res
                     dbnum: 0,
                     order: idx as u32,
                     cata_hash: None,
+                    // tag_lock:false,
                 });
                 ssc_edges.push(AqlEdge::new(refno, owner_refno, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
                 // 将房间下元件放到这两个固定层级下面
@@ -835,6 +845,7 @@ pub async fn insert_ssc_room_node_refactor(database: &ArDatabase) -> anyhow::Res
                     dbnum: 0,
                     order: idx as u32,
                     cata_hash: None,
+                    // tag_lock:false,
                 });
                 ssc_edges.push(AqlEdge::new(refno, owner_refno, AQL_SSC_ELES_COLLECTION, AQL_SSC_ELES_COLLECTION));
             }
@@ -1204,6 +1215,7 @@ pub async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
                 owner,
                 dbnum: 0,
                 cata_hash: None,
+                // tag_lock:false,
             });
 
             edge_results.push(AqlEdge {

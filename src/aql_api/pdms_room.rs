@@ -242,12 +242,12 @@ pub async fn query_room_codes_from_owners(
     owner_refno: Vec<RefU64>,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<PdmsRoomNameAql>> {
-    let ids = RefU64::to_arangodb_ids(&AQL_PDMS_ELES_COLLECTION, owner_refno);
+    let ids = owner_refno.into_iter().map(|id| id.to_url_refno()).collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@pdms_edges,@@room_edges,@@room_eles
     for id in @ids
-    for v in 0..2 inbound id @@pdms_edges
+    for v in 0..2 inbound CONCAT('pdms_eles/',id) @@pdms_edges
     filter v != null
     for r in 1 inbound v._id @@room_edges
             filter r != null
@@ -259,7 +259,7 @@ pub async fn query_room_codes_from_owners(
                 return CONTAINS(o.name,'RS')
             )
             return {
-                'refno': v._key,
+                'refno': id,
                 'room_name': r.name,
                 'b_rs':b_rs[0]
             }
@@ -385,7 +385,7 @@ pub async fn query_room_name_from_owner_aql(
             } )
         let result = (
             for child in children
-            for r in 1 inbound child._id room_edges
+            for r in 1..2 inbound child._id room_edges
                 filter r != null
                 limit 1
                 return {
@@ -1657,6 +1657,29 @@ pub async fn query_room_aabb_from_room_code(room_names: Vec<String>, database: &
     }").bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
         .bind_var("room_names", room_names);
     let result = database.aql_query::<RoomElement>(aql).await?;
+    Ok(result)
+}
+
+/// 查询房间下的一个参考号
+pub async fn query_room_one_element_aql(room_names: Vec<String>, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
+    let aql = AqlQuery::new("\
+    With @@room_eles,@@room_edges,@@pdms_eles
+    for room in room_eles
+    filter room.name in @room_names
+    for v in 1 outbound room._id room_edges
+    limit 1
+    return {
+         _key:v._key ,
+         owner:0 ,
+         name:room.name,
+         noun:v.noun,
+         version:0,
+         children_count:1
+    }").bind_var("@room_eles", AQL_ROOM_ELES_COLLECTION)
+        .bind_var("@room_edges", AQL_ROOM_EDGES_COLLECTION)
+        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("room_names", room_names);
+    let result = database.aql_query::<PdmsElement>(aql).await?;
     Ok(result)
 }
 

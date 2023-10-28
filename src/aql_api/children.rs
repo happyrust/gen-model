@@ -399,6 +399,26 @@ pub async fn query_refnos_from_names(names: Vec<String>, database: &ArDatabase, 
     Ok(result)
 }
 
+/// 通过fulltext所有返回单个name包含的elements
+pub async fn query_refnos_from_name_fulltext(name: String, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
+    // 通过name 模糊查询对应的参考号等信息
+    let aql = AqlQuery::new("
+    with @@pdms_eles
+        for e in fulltext(@@pdms_eles,'name',@name)
+            return {
+            '_key':e._key,
+            'owner':e.owner,
+            'name':e.name,
+            'noun':e.noun,
+            'version':0,
+            'children_count':0,
+        }
+    ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+        .bind_var("name", name);
+    let result = database.aql_query::<PdmsElement>(aql).await?;
+    Ok(result)
+}
+
 /// 通过name集合返回对应的参考号
 ///
 /// 使用 fulltext 索引方式
@@ -423,7 +443,11 @@ pub async fn query_refnos_from_names_fulltext(names: Vec<String>, database: &ArD
         }
     ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("names", full_text_names);
-    let result = database.aql_query::<PdmsElement>(aql).await?;
+    let mut result = database.aql_query::<PdmsElement>(aql).await?;
+    // 如果 查出的值为空，就不适用full_text查
+    if result.is_empty() {
+        result = query_refnos_from_names(names.clone(), database, None).await.unwrap_or(vec![]);
+    }
     // 通过传入值与数据库模糊查询返回值对比，匹配需要的值
     let mut map = DashMap::new();
     // 数据库中取值的 name 都是带有 /, 传参names与其统一
@@ -445,8 +469,7 @@ pub async fn query_refnos_from_names_fulltext(names: Vec<String>, database: &ArD
 ///
 /// module ： DESI，CATA等
 pub async fn query_mdb_world_fulltext(mdb: &str, module: &str, database: &ArDatabase) -> anyhow::Result<Option<PdmsElement>> {
-    let mdb_name = replace_symbols(mdb);
-    dbg!(&mdb_name);
+    // let mdb_name = replace_symbols(mdb);
     // 将 mdb_name存在返回的name中，方便判断是否为请求的mdb_name，word的name都是 /*
     let aql = AqlQuery::new("
     with @@pdms_eles,@@pdms_edges
@@ -464,10 +487,9 @@ pub async fn query_mdb_world_fulltext(mdb: &str, module: &str, database: &ArData
         }
     ").bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
-        .bind_var("mdb", mdb_name)
+        .bind_var("mdb", mdb)
         .bind_var("module", module);
     let result = database.aql_query::<PdmsElement>(aql).await?;
-    dbg!(&result);
     // 判断从数据库中返回的值中，哪个是需要的
     let mdb = format!("/{}", mdb);
     for r in result {
@@ -488,14 +510,14 @@ pub async fn query_mdb_world_fulltext(mdb: &str, module: &str, database: &ArData
 
 /// 将字符串 符号都转为 ，
 fn replace_symbols(input: &str) -> String {
-    // let mut result = String::new();
-    // for c in input.chars() {
-    //     if c.is_alphanumeric() {
-    //         result.push(c);
-    //     } else {
-    //         result.push(',');
-    //     }
-    // }
+    let mut result = String::new();
+    for c in input.chars() {
+        if c.is_alphanumeric() {
+            result.push(c);
+        } else {
+            result.push(',');
+        }
+    }
     input.to_string()
 }
 
@@ -1366,15 +1388,17 @@ pub async fn get_uda_type_refnos_from_select_refnos(select_refnos: Vec<RefU64>,
     let database = aios_mgr.get_arango_db().await?;
     // 因为typex是解析时已经dehash过了,不是对应的udna，
     // 传入得uda_type是udna，需要统一转为 db1_dehash_const 的值
-    let uda_type_ukey = db1_hash(format!(":{}", uda_type).as_str());
-    let uda_type_db_dehash = db1_dehash_const(uda_type_ukey);
+    // let uda_type_ukey = db1_hash(format!(":{}", uda_type).as_str());
+    // let uda_type_db_dehash = db1_dehash_const(uda_type_ukey);
     // 先查找到所有的 base_type ， 再通过 typex 进行过滤
     let type_refnos = query_refnos_travel_children_with_type_aql(&database,
                                                                  &select_refnos, vec![base_type.to_string()]).await?;
     for refno in type_refnos {
-        let Ok(attr) = aios_mgr.get_attr(refno.refno).await else { continue; };
+        let Ok(attr) = aios_mgr.get_attr(refno.refno).await else {
+            continue;
+        };
         let typex = attr.get_typex().to_string();
-        if uda_type_db_dehash == typex {
+        if base_type != typex && !typex.is_empty() {
             result.push(refno.into());
         }
     }
@@ -1471,8 +1495,8 @@ pub async fn query_room_belong_site_name(rooms: Vec<String>, database: &ArDataba
 /// owner的children中，第一个类型为 att_type 的 element
 ///
 /// filter_noun 找到第一个 att_type为 filter_noun 的数据
-pub async fn query_first_children(refnos: Vec<RefU64>, filter_noun: &str, database: &ArDatabase) -> anyhow::Result<Option<PdmsElement>> {
-    let ids = RefU64::to_arangodb_ids(AQL_PDMS_ELES_COLLECTION, refnos);
+pub async fn query_first_children(refnos: Vec<RefU64>, filter_noun: &str, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
+    let ids = refnos.into_iter().map(|refno| refno.to_url_refno()).collect::<Vec<String>>();
     // 若 filter_noun 以 ! 开头 则排除某类型后，取第一个 例如 "!ATTA"
     let filter_str = if filter_noun.starts_with("!") {
         format!("filter c.noun != '{}'", &filter_noun[1..])
@@ -1488,24 +1512,30 @@ pub async fn query_first_children(refnos: Vec<RefU64>, filter_noun: &str, databa
     With @@pdms_eles,@@pdms_edges
     for id in @ids
     let owner = (
-    for v in 1 outbound id pdms_edges
+    for v in 1 outbound concat('pdms_eles/',id) pdms_edges
         filter v != null
-        return v._id
+        return {{
+            '_id':v._id,
+            'key':id,
+        }}
     )
+    let r = (
     for o in owner
-        for c,e in 1 inbound o pdms_edges
+        for c,e in 1 inbound o._id pdms_edges
         filter c != null
         //filter_noun
         sort e.order
         limit 1
         return {{
             _key:c._key,
-            owner:c.owner,
+            owner:o.key,
             name:c.name,
             noun:c.noun,
             version:0,
             children_count:0,
-    }}"#);
+    }})
+    return r[0]
+    "#);
     // 对传入的filter_noun 的不同情况进行替换
     let filter_aql_str = aql_str.replace("//filter_noun", &filter_str);
     let aql = AqlQuery::new(filter_aql_str.as_str())
@@ -1513,8 +1543,7 @@ pub async fn query_first_children(refnos: Vec<RefU64>, filter_noun: &str, databa
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
         .bind_var("ids", ids);
     let result = database.aql_query::<PdmsElement>(aql).await?;
-    if result.is_empty() { return Ok(None); };
-    Ok(Some(result[0].clone()))
+    Ok(result)
 }
 
 #[tokio::test]

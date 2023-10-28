@@ -81,7 +81,7 @@ pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: 
     let mut elements = Vec::new();
     let mut edges = Vec::new();
     for (refno, whole_attr) in total_attr_map.clone() {
-        let Some(owner) = whole_attr.implicit_attmap.get_owner() else{
+        let Some(owner) = whole_attr.implicit_attmap.get_owner() else {
             continue;
         };
         let name = cal_default_name(refno, &whole_attr, children_map);
@@ -99,7 +99,8 @@ pub async fn save_pdms_element_to_arango(database: &ArDatabase, total_attr_map: 
             noun: noun.to_string(),
             order,
             dbnum,
-            cata_hash
+            cata_hash,
+            // tag_lock: false,
         };
         let key = refno.hash_with_another_refno(owner);
         let pdms_edges = PdmsEleEdge {
@@ -414,28 +415,28 @@ pub async fn save_arangodb_doc(json: Value, collection: &str, database: &ArDatab
     Ok(())
 }
 
-pub async fn update_arangodb_doc(key:&str,value: Value,collection: &str, database: &ArDatabase) -> anyhow::Result<()> {
+pub async fn update_arangodb_doc(key: &str, value: Value, collection: &str, database: &ArDatabase) -> anyhow::Result<()> {
     let aql_str = AqlQuery::new("
         With @@collection
         let doc = document(@@collection,@key)
         update doc with @value in @@collection")
-        .bind_var("@collection",collection)
-        .bind_var("key",key)
-        .bind_var("value",value);
+        .bind_var("@collection", collection)
+        .bind_var("key", key)
+        .bind_var("value", value);
     let _result: Vec<()> = database.aql_query(aql_str).await?;
     Ok(())
 }
 
 pub async fn remove_arangodb_with_refno_key(refnos: &Vec<RefU64>, collection: &str, database: &ArDatabase) -> anyhow::Result<bool> {
     let keys = refnos.into_iter().map(|refno| refno.to_url_refno()).collect::<Vec<_>>();
+    dbg!(&keys);
     let aql = AqlQuery::new(
         "
-            with @@collection
-            FOR D IN @DATA
+            with @@COLLECTION
+            FOR D IN @keys
                     REMOVE D IN @@COLLECTION")
-        .bind_var("data", keys)
-        .bind_var("collection", collection)
-        ;
+        .bind_var("@COLLECTION", collection)
+        .bind_var("keys", keys);
     let result = database.aql_query::<Vec<()>>(aql).await;
     Ok(!result.is_err())
 }
@@ -463,4 +464,18 @@ pub async fn save_arangodb_with_db_option_create_collection(database: &ArDatabas
         ;
     let _result: Vec<()> = database.aql_query(aql).await?;
     Ok(())
+}
+
+
+pub async fn query_arangodb_with_refno_key(key: String, collection: &str, database: &ArDatabase) -> anyhow::Result<bool> {
+    dbg!(&key);
+    let aql = AqlQuery::new(
+        " with @@COLLECTION return document(@@COLLECTION,@_key)._key")
+        .bind_var("@COLLECTION", collection)
+        .bind_var("_key", key);
+    if let Ok(result) = database.aql_query::<String>(aql).await {
+        return Ok(true);
+    } else {
+        return Ok(false);
+    }
 }

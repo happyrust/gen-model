@@ -1,4 +1,5 @@
 use std::{env, fs};
+use std::collections::HashMap;
 use std::io::Write;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::options::DbOption;
@@ -7,9 +8,8 @@ use bb8_arangodb::arangors_lite::Database;
 use sqlx::{MySql, Pool};
 use crate::api::children::query_owner_till_type;
 use crate::api::element::{query_name, query_owner_from_id};
-use crate::api::room_code::query_room_code;
 use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_owner_with_type_aql, query_refnos_travel_children_with_type_aql, query_travel_children_aql};
-use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
+use crate::aql_api::pdms_room::{query_room_name_from_refno_aql, query_room_name_from_refnos_aql};
 use crate::data_center_api::data_api::{get_quarantine_room_name, get_refno_latest_version};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::arangodb::ArDatabase;
@@ -19,8 +19,15 @@ pub async fn get_valv_data(refnos: Vec<RefU64>, database: &ArDatabase, pool: &Po
     let mut instance = Vec::new();
     if let Ok(valves) = query_refnos_travel_children_with_type_aql(database,
                                                                    &refnos, vec!["VALV".to_string()]).await {
+        // 查询所有需要的房间号
+        let refnos = valves.iter().map(|child| child.refno).collect::<Vec<RefU64>>();
+        let room_map = query_room_name_from_refnos_aql(refnos, &database).await?;
+        let room_map = room_map.into_iter()
+            .map(|x| (x.refno, x.room_name))
+            .collect::<HashMap<RefU64, String>>();
+
         for valv in valves {
-            let room_name = query_room_code(valv.refno, pool).await?.unwrap_or("".to_string());
+            let room_name = room_map.get(&valv.refno).unwrap_or(&"".to_string()).clone();
             instance.push(DataCenterInstance {
                 object_model_code: "COMPBA".to_string(),
                 project_code: "1516".to_string(),

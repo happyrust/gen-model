@@ -108,6 +108,7 @@ pub async fn get_audit_data(aios_mgr: &AiosDBManager, data: &mut SendHoleData) {
                 }
             }
         }
+        dbg!("****");
     }
 }
 
@@ -195,6 +196,10 @@ pub async fn update_virtual_hole_status(document_key: &str, status: &str, databa
     }
     Ok("完成赋值".to_string())
 }
+
+
+
+
 
 
 #[tokio::test]

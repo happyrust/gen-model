@@ -21,7 +21,6 @@ use dashmap::DashMap;
 use nom::Parser;
 use once_cell::sync::OnceCell;
 use crate::api::element::query_id_from_name;
-use crate::api::room_code::query_room_code;
 use crate::aql_api::pdms_element::query_id_from_names_aql;
 use crate::aql_api::pdms_room::{get_room_code_from_attr, query_bran_through_rooms_aql, query_room_code_from_owner, query_room_codes_from_owners, query_room_name_from_refno_aql};
 use crate::aql_api::PdmsRoomNameAql;
@@ -60,10 +59,11 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
         .collect::<HashMap<String, f32>>();
     let names = request.keys().map(|name| name.clone()).collect::<Vec<_>>();
     // 通过pipe name 查询到pipe的所有参考后
-    //let pipe_refnos = query_id_from_names_aql(names, Some("PIPE"), &database).await?;
+    // let pipe_refnos = query_id_from_names_aql(names, Some("PIPE"), &database).await?;
     let pipe_refnos = query_refnos_from_names_fulltext(names, &database).await?;
     let mut result = Vec::new();
     for (_name, pipe_ele) in pipe_refnos {
+    // for pipe_ele in pipe_refnos {
         let Some(temp) = request.get(&pipe_ele.name) else { continue; };
         let Ok(bran_refnos) = query_children_with_name_aql(&database, pipe_ele.refno).await else { continue; };
         // 一次查询 pipe下所有bran穿过的房间
@@ -312,3 +312,15 @@ fn test_() {
     let result = get_uda_info().clone();
     dbg!(&result.0);
 }
+
+// #[tokio::test]
+// async fn test_query_hole_model_data_by_key() -> anyhow::Result<()> {
+//     let aios_mgr = AiosDBManager::init_form_config().await?;
+//     let database = aios_mgr.get_arango_db().await?;
+//     let keys = vec!["bca176a3-a8cf-4e1f-b21e-50ac7f56ab5d11".to_string(),"bca176a3-a8cf-4e1f-b21e-50ac7f56ab5d13".to_string()];
+//     if let Ok(Some(result)) = query_hole_model_data_by_key(&database,keys).await{
+//         dbg!(&result);
+//     }
+//     Ok(())
+// }
+//

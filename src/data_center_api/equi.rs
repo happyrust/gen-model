@@ -6,7 +6,6 @@ use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors_lite::Database;
 use sqlx::{MySql, Pool};
 use crate::api::refno_info::query_refno_height_position;
-use crate::api::room_code::query_room_code;
 use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_owner_with_type_aql, query_refnos_travel_children_with_type_aql};
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_center_api::data_api::get_refno_latest_version;

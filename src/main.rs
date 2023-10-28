@@ -45,8 +45,9 @@ async fn main() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
 
+    // 如果启用了日志功能
     if db_option.enable_log {
-        let now = chrono::offset::Local::now();
+        let now = Local::now();
         let filename = format!(
             "{}-{}-{}-{}-{}-{}_dblog.txt",
             now.year(),
@@ -56,12 +57,16 @@ async fn main() -> anyhow::Result<()> {
             now.minute(),
             now.second()
         );
-        let file = std::fs::OpenOptions::new()
+
+        // 创建日志文件
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(filename)
             .unwrap();
+
+        // 配置日志过滤器和输出目标
         let mut builder = Builder::from_default_env();
         builder.filter(Some("aios_database"), LevelFilter::Info);
         builder.filter(Some("aios_core"), LevelFilter::Info);
@@ -161,6 +166,13 @@ fn test_turn_bin_into_json() {
     new_file.write_all(&json.into_bytes()).unwrap();
 }
 
+/// This code is a test suite for logging and database operations.
+/// It sets up a logger using the `env_logger` crate and logs an error message.
+/// It also performs database operations using the `AiosDBManager` struct.
+/// The `test_log` function logs an error message to a file.
+/// The `test_db1_dehash` function initializes a database manager, retrieves children within a project,
+/// and calculates a hash value.
+/// This code requires the `env_logger`, `log`, and `tokio` crates to be added as dependencies.
 #[test]
 fn test_log() {
     use env_logger::{fmt::Target, Builder};

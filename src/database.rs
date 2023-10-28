@@ -120,14 +120,19 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
 
 /// 初始化同步pdms数据到数据
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
+    // 开始同步pdms/E3D项目的数据
     println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
+    // 计时器开始
     let mut time = Instant::now();
+    // 获取默认的数据库连接字符串
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
     if db_option.sync_tidb.unwrap_or(false) {
         create_info_database(&default_conn_str, &db_option.project_name).await?;
     }
     let mut create_tables_elapse = 0;
+    // 执行多线程解析
     dbg!("执行多线程解析");
+    // 遍历所有包含的项目
     for project in &db_option.included_projects {
         let (att_map_tree, children_tree) = {
             let db_path = format!("{}.db", &project);
@@ -233,14 +238,18 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         .await
         {
             Ok(_) => {
+                // 同步数据成功
                 println!("同步数据成功。");
             }
             Err(e) => {
+                // 同步数据失败，打印错误信息
                 println!("{}", e.to_string());
             }
         }
     }
+    // 输出创建表所花费的时间
     println!("创建表花费时间: {} ms", create_tables_elapse);
+    // 输出初始化数据库所花费的时间
     println!(
         "初始化数据库时间: {} ms",
         time.elapsed().as_millis() - create_tables_elapse
@@ -340,30 +349,36 @@ pub fn gen_implicit_attr_insert_sql(hash: u32) -> (String, Vec<NounHash>) {
 pub fn gen_uda_attr_value_sql(att: &WholeAttMap) -> String {
     let mut table_vals_sql = String::new();
     let i_att = &att.implicit_attmap;
-    let refno = i_att.get_refno().unwrap();
-    let type_name = i_att.get_type();
-    let owner = i_att.get_owner().unwrap();
-    let data = hex::encode(att.uda_attmap.into_compress_bytes());
+    let refno = i_att.get_refno().unwrap();  // 获取引用号
+    let type_name = i_att.get_type();  // 获取类型名称
+    let owner = i_att.get_owner().unwrap();  // 获取所有者
+    let data = hex::encode(att.uda_attmap.into_compress_bytes());  // 将uda_attmap转换为压缩字节并进行十六进制编码
     table_vals_sql.push_str(&format!(
-        r#"({}, '{}', '{}', {}, 0x{}),"#,
-        refno.0,
-        refno.to_refno_str(),
-        type_name,
-        owner.0,
-        data
+        r#"({}, '{}', '{}', {}, 0x{}),"#,  // 插入语句模板
+        refno.0,  // 引用号的第一个元素
+        refno.to_refno_str(),  // 引用号的字符串表示
+        type_name,  // 类型名称
+        owner.0,  // 所有者的第一个元素
+        data  // 数据
     ));
-
     table_vals_sql
 }
 
 #[inline]
 pub fn gen_explicit_attr_value_sql(att: &WholeAttMap) -> String {
+    // 创建一个空字符串，用于存储生成的SQL语句
     let mut table_vals_sql = String::new();
+    // 获取implicit_attmap字段的引用
     let i_att = &att.implicit_attmap;
+    // 获取refno字段的值，并确保其存在
     let refno = i_att.get_refno().unwrap();
+    // 获取type字段的值
     let type_name = i_att.get_type();
+    // 获取owner字段的值，并确保其存在
     let owner = i_att.get_owner().unwrap();
+    // 将explicit_attmap字段转换为压缩字节数组，并将其转换为十六进制字符串
     let data = hex::encode(att.explicit_attmap.into_compress_bytes());
+    // 构建SQL语句，并将其添加到table_vals_sql字符串中
     table_vals_sql.push_str(&format!(
         r#"({}, '{}', '{}', {}, 0x{}),"#,
         refno.0,
@@ -372,29 +387,34 @@ pub fn gen_explicit_attr_value_sql(att: &WholeAttMap) -> String {
         owner.0,
         data
     ));
-
+    // 返回生成的SQL语句
     table_vals_sql
 }
 
 /// 生成隐藏属性的插入语句的后面数据部分
 pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHash>) -> String {
-    let mut table_vals_sql = String::new();
-    let i_att = &att.implicit_attmap;
-    let refno = i_att.get_refno().unwrap();
-    let type_name = i_att.get_type();
-    let owner = i_att.get_owner().unwrap();
+    let mut table_vals_sql = String::new();  // 创建一个空字符串，用于存储生成的SQL语句
+    let i_att = &att.implicit_attmap;  // 获取implicit_attmap字段的引用
+    let refno = i_att.get_refno().unwrap();  // 获取refno字段的值，并确保其存在
+    let type_name = i_att.get_type();  // 获取type字段的值
+    let owner = i_att.get_owner().unwrap();  // 获取owner字段的值，并确保其存在
+
     table_vals_sql.push_str(&format!(
-        r#"({}, '{}', '{}', {},"#,
-        refno.0,
-        refno.to_refno_str(),
-        type_name,
-        owner.0
+        r#"({}, '{}', '{}', {},"#,  // 构建SQL语句的前半部分
+        refno.0,  // 将refno的整数值添加到SQL语句中
+        refno.to_refno_str(),  // 将refno的字符串值添加到SQL语句中
+        type_name,  // 将type_name的值添加到SQL语句中
+        owner.0  // 将owner的整数值添加到SQL语句中
     ));
     if let Some(info_map) = ATTR_INFO_MAP.get(&(db1_hash(type_name) as i32)) {
+        // 检查是否存在属性信息映射
         for noun_hash in column_hashes {
-            //如果没有这个属性，需要用unset顶上
+            // 遍历column_hashes中的每个属性哈希值
+            // 如果没有这个属性，需要用unset顶上
             if (type_name == "UDA" || type_name == "UDET") && noun_hash == &db1_hash("UDNA") {
+                // 检查是否为 "UDA" 或 "UDET" 类型，并且属性哈希值为 "UDNA"
                 let uda = if i_att.contains_attr_name("UDNA") {
+                    // 检查是否存在属性名称为 "UDNA"
                     let uda = i_att.get_str("UDNA").unwrap();
                     if uda.is_empty() {
                         att.explicit_attmap
@@ -409,63 +429,78 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                 };
                 table_vals_sql.push_str(&format!("'{}',", uda.to_string()));
             } else if i_att.contains_attr_hash(*noun_hash) {
+                // 检查是否存在属性哈希值对应的属性
                 let v = i_att.get(noun_hash).unwrap();
                 // if let Some(v) = i_att.get(noun_hash) {
                 match v {
+                    // 根据属性值的类型进行匹配
                     AttrVal::InvalidType => {}
                     AttrVal::IntegerType(d) => {
+                        // 将整数类型属性值添加到table_vals_sql字符串中
                         table_vals_sql.push_str(&format!("{},", d.to_string()));
                     }
                     AttrVal::StringType(d) => {
+                        // 将字符串类型属性值添加到table_vals_sql字符串中
                         table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
                     }
                     AttrVal::DoubleType(d) => {
+                        // 将浮点数类型属性值添加到table_vals_sql字符串中（保留3位小数）
                         table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
                     }
                     AttrVal::DoubleArrayType(d) => {
+                        // 将双精度浮点数数组类型属性值序列化为字节数组，并将其转换为十六进制字符串后添加到table_vals_sql字符串中
                         table_vals_sql.push_str(&format!(
                             r#"0x{},"#,
                             hex::encode(bincode::serialize(d).unwrap_or_default().as_slice())
                         ));
                     }
                     AttrVal::StringArrayType(d) => {
+                        // 将字符串数组类型属性值序列化为JSON字符串后添加到table_vals_sql字符串中
                         table_vals_sql.push_str(&format!(
                             r#"'{}',"#,
                             serde_json::to_string(d).unwrap_or_default()
                         ));
                     }
                     AttrVal::BoolArrayType(d) => {
+                        // 将布尔数组类型属性值序列化为JSON字符串后添加到table_vals_sql字符串中
                         table_vals_sql.push_str(&format!(
                             r#"'{}',"#,
                             serde_json::to_string(d).unwrap_or_default()
                         ));
                     }
                     AttrVal::IntArrayType(d) => {
+                        // 将整数数组类型属性值序列化为JSON字符串后添加到table_vals_sql字符串中
                         table_vals_sql.push_str(&format!(
                             r#"'{}',"#,
                             serde_json::to_string(d).unwrap_or_default()
                         ));
                     }
                     AttrVal::BoolType(d) => {
+                        // 将布尔类型属性值转换为整数（1或0）后添加到table_vals_sql字符串中
                         let b = if *d { 1 } else { 0 };
                         table_vals_sql.push_str(&format!("{},", b));
                     }
                     AttrVal::Vec3Type(d) => {
+                        // 将Vec3类型属性值序列化为JSON字符串后添加到table_vals_sql字符串中
                         table_vals_sql.push_str(&format!(
                             r#"'{}',"#,
                             serde_json::to_string(d).unwrap_or_default()
                         ));
                     }
                     AttrVal::ElementType(d) => {
+                        // 将ElementType类型属性值添加到table_vals_sql字符串中
                         table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
                     }
                     AttrVal::WordType(d) => {
+                        // 将WordType类型属性值添加到table_vals_sql字符串中
                         table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
                     }
                     AttrVal::RefU64Type(d) => {
+                        // 将RefU64Type类型属性值添加到table_vals_sql字符串中
                         table_vals_sql.push_str(&format!("{},", d.0));
                     }
                     AttrVal::RefU64Array(d) => {
+                        // 将RefU64Array类型属性值序列化为JSON字符串后添加到table_vals_sql字符串中
                         table_vals_sql.push_str(&format!(
                             r#"'{}',"#,
                             serde_json::to_string(d).unwrap_or_default()
@@ -476,62 +511,77 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
             } else {
                 // 如果udna没值，可能是在dyudna中
                 if info_map.contains_key(&(*noun_hash as i32)) {
+                    // 检查属性信息映射中是否存在属性哈希值对应的属性信息
                     let info = info_map.get(&(*noun_hash as i32)).unwrap();
                     match &info.default_val {
+                        // 根据默认值的类型进行匹配
                         AttrVal::InvalidType => {}
                         AttrVal::IntegerType(d) => {
+                            // 将整数类型的默认值添加到table_vals_sql字符串中
                             table_vals_sql.push_str(&format!("{},", d.to_string()));
                         }
                         AttrVal::StringType(d) => {
+                            // 将字符串类型的默认值添加到table_vals_sql字符串中
                             table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
                         }
                         AttrVal::DoubleType(d) => {
+                            // 将浮点数类型的默认值添加到table_vals_sql字符串中（保留3位小数）
                             table_vals_sql.push_str(&format!("{},", f64_round_3(*d)));
                         }
                         AttrVal::DoubleArrayType(d) => {
+                            // 将双精度浮点数数组类型的默认值序列化为字节数组，并将其转换为十六进制字符串后添加到table_vals_sql字符串中
                             table_vals_sql.push_str(&format!(
                                 r#"0x{},"#,
                                 hex::encode(bincode::serialize(d).unwrap_or_default().as_slice())
                             ));
                         }
                         AttrVal::StringArrayType(d) => {
+                            // 将字符串数组类型的默认值序列化为JSON字符串后添加到table_vals_sql字符串中
                             table_vals_sql.push_str(&format!(
                                 r#"'{}',"#,
                                 serde_json::to_string(d).unwrap_or_default()
                             ));
                         }
                         AttrVal::BoolArrayType(d) => {
+                            // 将布尔数组类型的默认值序列化为JSON字符串后添加到table_vals_sql字符串中
                             table_vals_sql.push_str(&format!(
                                 r#"'{}',"#,
                                 serde_json::to_string(d).unwrap_or_default()
                             ));
                         }
                         AttrVal::IntArrayType(d) => {
+                            // 将整数数组类型的默认值序列化为JSON字符串后添加到table_vals_sql字符串中
                             table_vals_sql.push_str(&format!(
                                 r#"'{}',"#,
                                 serde_json::to_string(d).unwrap_or_default()
                             ));
                         }
                         AttrVal::BoolType(d) => {
+                            // 将布尔类型的默认值转换为整数（1或0）后添加到table_vals_sql字符串中
                             let b = if *d { 1 } else { 0 };
                             table_vals_sql.push_str(&format!("{},", b));
                         }
                         AttrVal::Vec3Type(d) => {
+                            // 将Vec3类型的默认值序列化为JSON字符串后添加到table_vals_sql字符串中
                             table_vals_sql.push_str(&format!(
                                 r#"'{}',"#,
                                 serde_json::to_string(d).unwrap_or_default()
                             ));
                         }
                         AttrVal::ElementType(d) => {
+                            // 将ElementType类型的默认值添加到table_vals_sql字符串中
                             table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
                         }
                         AttrVal::WordType(d) => {
+                            // 将WordType类型的默认值添加到table_vals_sql字符串中
                             table_vals_sql.push_str(&format!(r#"'{}',"#, d.replace(r#"'"#, "")));
                         }
                         AttrVal::RefU64Type(d) => {
+                            // 将RefU64Type类型的默认值添加到table_vals_sql字符串中
                             table_vals_sql.push_str(&format!("{},", d.0));
                         }
                         AttrVal::RefU64Array(d) => {
+                            // 将RefU64Array类型的默认值序列化为JSON字符串后添加到table_vals_sql字符串中
                             table_vals_sql.push_str(&format!(
                                 r#"'{}',"#,
                                 serde_json::to_string(d).unwrap_or_default()
@@ -540,6 +590,7 @@ pub fn gen_implicit_attr_value_sql(att: &WholeAttMap, column_hashes: &Vec<NounHa
                         AttrVal::StringHashType(_) => {}
                     }
                 } else {
+                    // 如果属性信息映射中不存在属性哈希值对应的属性信息，则将 "unset" 添加到table_vals_sql字符串中
                     table_vals_sql.push_str(r#"'unset',"#);
                 }
             }
@@ -573,21 +624,21 @@ pub async fn sync_total_async_threaded(
     attmap_tree: sled::Tree,
     children_tree: sled::Tree,
 ) -> anyhow::Result<()> {
-    let mut data_dir = Path::new(&db_option.project_path);
-    let need_parsed_files = &db_option.included_db_files;
-    let project_dir = data_dir.join(&project);
-    let max_sql_threads_number = db_option.sql_threads_number as usize;
-    let batch_insert_sql_cnt = db_option.batch_insert_sql_cnt as usize;
+    let mut data_dir = Path::new(&db_option.project_path);  // 创建一个Path对象，表示数据目录的路径
+    let need_parsed_files = &db_option.included_db_files;  // 获取需要解析的数据库文件列表
+    let project_dir = data_dir.join(&project);  // 创建一个Path对象，表示项目目录的路径
+    let max_sql_threads_number = db_option.sql_threads_number as usize;  // 获取最大SQL线程数
+    let batch_insert_sql_cnt = db_option.batch_insert_sql_cnt as usize;  // 获取批量插入SQL数量
     if max_sql_threads_number * batch_insert_sql_cnt == 0 {
-        return Err(anyhow::anyhow!(
-            "batch_insert_sql_cnt 或者  sql_threads_number 不能为0"
-        ));
+        // 如果最大SQL线程数和批量插入SQL数量之积为0，则抛出错误
+        return Err(anyhow::anyhow!("batch_insert_sql_cnt 或者  sql_threads_number 不能为0"));
     }
     if !Path::new(&project_dir).exists() {
+        // 如果项目目录不存在，则抛出错误
         return Err(anyhow::anyhow!("项目文件夹指定不正确"));
     }
-
     let mut children_files = {
+        // 获取子文件列表
         let target_dir = fs::read_dir(&project_dir)
             .unwrap()
             .into_iter()
@@ -606,18 +657,18 @@ pub async fn sync_total_async_threaded(
             .collect::<Vec<PathBuf>>()
     };
     // 先解析一遍uda
-    // dbg!("解析uda文件");
+    dbg!("解析uda文件");
     let _ = parse_uda_file(project, children_files.clone(), &need_parsed_files).await;
     // 正式解析
-    let project = Arc::new(project.to_string());
-    let db_option = Arc::new(db_option.clone());
-    let mut error_sql = Arc::new(DashSet::new());
-    //是否替换tidb的数据
-    let mut is_replace = db_option.replace_dbs;
-    let replace_types = db_option.replace_types.clone();
-    let b_replace_types = replace_types.is_some();
+    let project = Arc::new(project.to_string());  // 创建一个Arc对象，表示项目名称
+    let db_option = Arc::new(db_option.clone());  // 创建一个Arc对象，表示数据库选项
+    let mut error_sql = Arc::new(DashSet::new());  // 创建一个Arc对象，表示错误的SQL集合
+    // 是否替换tidb的数据
+    let mut is_replace = db_option.replace_dbs;  // 是否替换数据库的数据
+    let replace_types = db_option.replace_types.clone();  // 获取替换的类型列表
+    let b_replace_types = replace_types.is_some();  // 是否存在替换的类型列表
     if b_replace_types {
-        is_replace = true
+        is_replace = true;
     }
     let mut uda_map: HashMap<i32, AttrMap> = HashMap::new();
     // let mut version_map = HashMap::new();
@@ -628,20 +679,21 @@ pub async fn sync_total_async_threaded(
     let sync_tidb = db_option.sync_tidb.unwrap_or(false);
 
     for path in children_files {
-        let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
+        let file_name = path.file_name().unwrap().to_str().unwrap().to_string();  // 获取文件名
         if file_name.ends_with("com") || file_name.ends_with("mis") {
-            continue;
+            continue;  // 如果文件名以 "com" 或 "mis" 结尾，则跳过循环
         }
         if only_sync_sys {
             if !file_name.ends_with("sys") {
-                continue;
+                continue;  // 如果仅同步系统表，并且文件名不以 "sys" 结尾，则跳过循环
             }
         }
 
         if need_parsed_files.is_none() || need_parsed_files.as_ref().unwrap().contains(&file_name) {
-            println!("path={:?}", &file_name);
-            let project_clone = project.clone();
-            let project_name = project.as_str().to_string();
+            // 如果需要解析的文件列表为空或包含当前文件名，则执行以下代码块
+            println!("path={:?}", &file_name);  // 打印文件路径
+            let project_clone = project.clone();  // 创建项目名称的克隆
+            let project_name = project.as_str().to_string();  // 获取项目名称的字符串
             let mut children_map = parse_file_children_map(
                 &path,
                 &None,
@@ -660,16 +712,15 @@ pub async fn sync_total_async_threaded(
                     .get()
                     .await?
                     .db(&db_option.arangodb_database)
-                    .await?;
-                save_pdms_level_edges_in_sync(&database, &children_map_clone).await?;
+                    .await?;  // 获取ArangoDB数据库连接
+                save_pdms_level_edges_in_sync(&database, &children_map_clone).await?;  // 同步pdms_level_edges到图数据库
             }
-
             if db_option.sync_localdb.unwrap_or(true) {
-                dbg!(children_map_clone.len());
+                dbg!(children_map_clone.len());  // 打印子文件映射的长度
                 for (k, v) in children_map_clone.as_ref() {
                     let children_refnos = RefU64Vec(v.iter().map(|x| x.0).collect::<Vec<_>>());
                     let mut vec = children_refnos.to_bytes()?;
-                    children_tree.insert((**k).to_be_bytes().as_slice(), &*vec)?;
+                    children_tree.insert((**k).to_be_bytes().as_slice(), &*vec)?;  // 将children_tree插入数据库
                 }
             }
 
@@ -925,6 +976,7 @@ pub async fn sync_total_async_threaded(
                         for kv in total_attr_map_arc.as_ref() {
                             let att = kv.value().merge();
                             let mut vec = att.into_rkyv_compress_bytes();
+                            // 将attmap_tree插入数据库
                             attmap_tree.insert((**kv.key()).to_be_bytes().as_slice(), &*vec)?;
                         }
                     }
@@ -1005,10 +1057,10 @@ pub async fn sync_total_async_threaded(
 
                     for (type_hash, type_refnos) in type_ele_map {
                         if b_replace_types {
-                            let replace_types = replace_types.clone().unwrap();
-                            let att_type = db1_dehash(type_hash);
+                            let replace_types = replace_types.clone().unwrap();  // 获取替换的类型列表
+                            let att_type = db1_dehash(type_hash);  // 获取当前类型的字符串表示
                             if !replace_types.contains(&att_type) {
-                                continue;
+                                continue;  // 如果当前类型不在替换的类型列表中，则跳过循环
                             }
                         }
                         let total_attr_map_arc = total_attr_map_arc.clone();
