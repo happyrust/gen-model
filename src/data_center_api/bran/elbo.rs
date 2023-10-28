@@ -3,6 +3,7 @@ use aios_core::AttrMap;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance};
 use aios_core::data_center::AttrValue::{AttrFloat, AttrString};
 use aios_core::pdms_types::*;
+use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use glam::Vec3;
 use crate::api::attr::query_explicit_attr;

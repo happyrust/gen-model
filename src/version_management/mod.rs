@@ -1,4 +1,5 @@
-use aios_core::pdms_types::{AttrMap, EleOperation, RefU64};
+use aios_core::pdms_types::EleOperation;
+use aios_core::types::*;
 use serde::{Serialize,Deserialize};
 
 pub mod set_status;

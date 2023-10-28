@@ -5,7 +5,7 @@ use aios_core::data_state::RefnoStatusInfo;
 use sqlx::{Executor, MySql, Pool, Row};
 use crate::aql_api::children::query_travel_children_aql;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 
 
 /// 查询该节点所有的数据状态,只返回状态信息，不返回attrmap
@@ -54,7 +54,7 @@ pub async fn judge_selected_version_number(database: &ArDatabase, refnos: Vec<Re
 
 pub async fn query_all_version(pool: &Pool<MySql>, refno: String) -> anyhow::Result<Vec<RefnoStatusInfo>> {
     let sql = gen_query_all_version_sql(refno);
-    let val = sqlx::query(&sql).fetch_all(&mut pool.acquire().await?).await;
+    let val = sqlx::query(&sql).fetch_all(pool).await;
     return match val {
         Ok(vals) => {
             let mut result = vec![];

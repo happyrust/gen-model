@@ -1,5 +1,5 @@
-use aios_core::pdms_types::{AttrMap, RefU64};
 use crate::version_management::SetStatusData;
+use aios_core::types::*;
 
 /// 在增量更新中对比最新的属性，当 :CNPEversion 发生变化时,则需要存储该部分数据
 pub async fn check_need_update_version(attr_map:&AttrMap) -> bool {

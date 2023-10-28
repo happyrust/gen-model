@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance};
 use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
-use aios_core::pdms_types::{AttrVal, PdmsElement, RefU64};
+use aios_core::pdms_types::{PdmsElement};
+use aios_core::types::*;
 use bevy_transform::prelude::Transform;
 use glam::Vec3;
 use regex::Regex;

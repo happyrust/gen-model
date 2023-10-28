@@ -13,7 +13,7 @@ use crate::data_center_api::electric_major::sctn::EleNodeWithSpreName;
 use crate::data_center_api::electric_major::stru::get_dq_jldatu_fixing_data;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 
 // 圆板类
 pub async fn get_dq_fixing_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<DataCenterInstance>> {

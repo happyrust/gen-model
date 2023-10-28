@@ -7,15 +7,16 @@ use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use glam::Vec3;
+use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
 use crate::api::element::{query_ele_node, query_name};
 use crate::aql_api::foreign_refnos::query_foreign_name_aql;
 use crate::aql_api::pdms_room::query_room_name_from_refno_aql;
 use crate::data_center_api::auto_get_attr::get_material_map_from_code;
-use crate::data_center_api::data_api::{get_bran_itema_attr, get_refno_desc, get_refno_latest_version, get_spre_material_code};
+use crate::data_center_api::data_api::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::arangodb::ArDatabase;
-
+use aios_core::AttrVal;
 pub async fn get_data_center_cros_attr(refno: PdmsElement, bran_name: &str, room_code: String,
                                        database: &ArDatabase, aios_mgr: &AiosDBManager) -> DataCenterInstance {
     let need_query_material_code = vec![("ITEMA11".to_string(), "Code".to_string()),

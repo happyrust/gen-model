@@ -7,7 +7,7 @@ use bevy_transform::prelude::Transform;
 use bitvec::macros::internal::funty::Floating;
 use glam::{Quat, Vec3};
 use nom::number::streaming::f32;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 use crate::options::DbOption;
 
 pub async fn create_cata_element_data(refno: RefU64, desi_instance: RvmGeoInfo, database: &ArDatabase) -> anyhow::Result<Vec<u8>> {

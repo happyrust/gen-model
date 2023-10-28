@@ -1,6 +1,5 @@
 use arangors_lite::AqlQuery;
-use crate::consts::AQL_THREED_REVIEW_COLLECTION;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 
 pub async fn remove_threed_review_with_key(database: &ArDatabase, key: String) -> anyhow::Result<bool> {
     let aql = AqlQuery::new(

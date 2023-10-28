@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance};
 use aios_core::data_center::AttrValue::*;
 use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
-use aios_core::pdms_types::{AttrVal, PdmsElement, RefU64};
+use aios_core::pdms_types::{ PdmsElement};
+use aios_core::types::*;
 use aios_core::tool::math_tool::quat_to_pdms_ori_str;
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
@@ -14,7 +15,7 @@ use crate::data_center_api::auto_get_attr::get_material_map_from_code;
 use crate::data_center_api::data_api::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::ArDatabase;
+use crate::arangodb::ArDatabase;
 
 /// 获取电气bend数据
 pub async fn get_dq_bend_data(refno: &PdmsElement, bran_name: &str, spre_name: &str, room_name: &str, ftub_paras: &Vec<f64>,

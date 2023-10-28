@@ -15,6 +15,8 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use aios_core::data_center::{AttrValue, DataCenterAttr, DataCenterInstance, DataCenterProject};
 use aios_core::pdms_types::*;
 use arangors_lite::AqlQuery;
+use bevy_transform::prelude::Transform;
+use glam::Vec3;
 use crate::arangodb::ArDatabase;
 use serde::{Serialize, Deserialize};
 use serde_with::serde_as;
