@@ -1,36 +1,55 @@
 use std::collections::HashMap;
 use std::env;
+use std::sync::Arc;
+use serde_with::DisplayFromStr;
 use aios_core::pdms_types::*;
 use aios_core::{AttrMap, RefU64Vec};
 use chrono::{Datelike, DateTime, Local, Timelike};
 use sqlx::{Executor, MySql, Pool, Row};
 use sqlx::types::Uuid;
 use serde::{Serialize, Deserialize};
+use serde_with::serde_as;
+use surrealdb::sql::Thing;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 pub const INCREMENT_DATA: &'static str = "INCREMENT_DATA";
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IncreaseDataTiDB {
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct IncrModelUpdateLog {
+    //有哪些模型发生了修改
+    pub refno: Vec<RefU64>,
+    // pub timestamp: ,
+}
+
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct IncrUpdateLog {
+    #[serde_as(as = "DisplayFromStr")]
     pub refno: RefU64,
     pub data_operate: EleOperation,
     pub numbdb: i32,
+    // #[serde_as(as = "Vec<DisplayFromStr>")]
     pub children: RefU64Vec,
     pub old_attr: AttrMap,
     pub new_attr: AttrMap,
     pub new_version: u32,
     pub old_version: u32,
+
+    //按时间戳去对比更新是否完成
+    pub timestamp: surrealdb::sql::Datetime,
 }
 
-impl IncreaseDataTiDB {
+
+
+impl IncrUpdateLog {
     /// 将增量数据保存到对应的表
-    pub async fn save_increment_data(increment_datas: Vec<IncreaseDataTiDB>, session_name: String, pool: &Pool<MySql>) -> anyhow::Result<()> {
+    pub async fn save_increment_data_to_sql(increment_datas: Vec<IncrUpdateLog>, session_name: String, pool: &Pool<MySql>) -> anyhow::Result<()> {
         // 将数据根据dbno分类
-        let mut dbno_map = HashMap::new();
+        let mut data_map = HashMap::new();
         for data in increment_datas {
-            dbno_map.entry(data.numbdb).or_insert_with(Vec::new).push(data);
+            data_map.entry(data.numbdb).or_insert_with(Vec::new).push(data);
         }
-        for (dbno, increment_data) in dbno_map {
+        for (dbno, increment_data) in data_map {
             let Ok(_r) = create_increment_table(dbno, pool).await else { continue; };
             let sql = gen_insert_increment_sql(dbno, increment_data, &session_name);
             let mut conn = pool;
@@ -45,9 +64,34 @@ impl IncreaseDataTiDB {
         }
         Ok(())
     }
+
+
+
 }
 
-fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncreaseDataTiDB>, session_name: &str) -> String {
+#[derive(Debug, Deserialize)]
+struct Record {
+    #[allow(dead_code)]
+    id: Thing,
+}
+
+// impl AiosDBManager{
+//     pub async fn save_increment_data(&self, incr_logs: &Vec<IncrUpdateLog>, session_name: String) -> anyhow::Result<()> {
+//         for incr_log in incr_logs {
+//             // self.version_db.create()
+//             let created: Vec<Record> = self.version_db
+//                 .create("incr_log")
+//                 .content(incr_log)
+//                 .await.unwrap();
+//         }
+//
+//         //test query by data
+//
+//         Ok(())
+//     }
+// }
+
+fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncrUpdateLog>, session_name: &str) -> String {
     let mut sql = format!("INSERT INTO {dbno}_{INCREMENT_DATA}(ID,REFNO,REFNO_STR,OWNER, OPERATE, VERSION,NUMBDB,TIME,CHILDREN,OLD_DATA,NEW_DATA,USER) VALUES");
     for increment_data in increment_datas {
         // uuid 作为图数据库和 tidb 连接的主键
@@ -74,7 +118,7 @@ fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncreaseDataTiDB>, s
 }
 
 /// 通过uuid查询该条增删记录
-pub async fn query_key_data(key: &str, numbdb: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<IncreaseDataTiDB>> {
+pub async fn query_key_data(key: &str, numbdb: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<IncrUpdateLog>> {
 
     let sql = gen_query_key_data_sql(key, numbdb);
     let val = sqlx::query(&sql).fetch_one(pool).await?;
@@ -86,7 +130,7 @@ pub async fn query_key_data(key: &str, numbdb: i32, pool: &Pool<MySql>) -> anyho
     let old_data = AttrMap::from_rkvy_compress_bytes(&val.get::<Vec<u8>, _>("OLD_DATA"))?;
     let new_data = AttrMap::from_rkvy_compress_bytes(&val.get::<Vec<u8>, _>("NEW_DATA"))?;
     let time = val.get::<String, _>("TIME");
-    Ok(Some(IncreaseDataTiDB {
+    Ok(Some(IncrUpdateLog {
         refno,
         data_operate: EleOperation::from(operate),
         numbdb: numb_db,
@@ -95,6 +139,7 @@ pub async fn query_key_data(key: &str, numbdb: i32, pool: &Pool<MySql>) -> anyho
         new_attr: new_data,
         new_version: 0,
         old_version: 0,
+        timestamp: Default::default(),
     }))
 }
 

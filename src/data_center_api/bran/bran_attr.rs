@@ -308,12 +308,12 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 value: AttrValue::AttrString(format!("{}mm{}", tray_width, kind)).into(),
             });
             // HPOS TPOS
-            let hpos = bran_attr.get_f64_vec("HPOS").unwrap_or(vec![]);
+            let hpos = bran_attr.get_f32_vec("HPOS").unwrap_or(vec![]);
             erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB23".to_string(),
                 value: AttrValue::AttrFloatArray(hpos.into_iter().map(|x| x as f32).collect()).into(),
             });
-            let tpos = bran_attr.get_f64_vec("TPOS").unwrap_or(vec![]);
+            let tpos = bran_attr.get_f32_vec("TPOS").unwrap_or(vec![]);
             erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB24".to_string(),
                 value: AttrValue::AttrFloatArray(tpos.into_iter().map(|x| x as f32).collect()).into(),
@@ -825,7 +825,7 @@ fn test_float_eq() {
 async fn test_query_gy_bran_data_datacenter() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let tee_refno = RefU64::from_refno_str("24383/66761").unwrap();
-    let result = query_gy_bran_data_datacenter(tee_refno, &aios_mgr).await?;
+    let result = query_gy_bran_data_datacenter(&[tee_refno], &aios_mgr).await?;
     let mut file = std::fs::File::create("bran.json")?;
     let json = serde_json::to_vec(&result)?;
     file.write_all(&json)?;

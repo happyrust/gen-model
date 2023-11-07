@@ -411,7 +411,7 @@ pub(crate) async fn get_refno_desp(
     aios_mgr: &AiosDBManager,
 ) -> anyhow::Result<Vec<f64>> {
     let attr = aios_mgr.get_attr(refno).await?;
-    Ok(attr.get_f64_vec("DESP").unwrap_or(vec![]))
+    Ok(attr.get_f32_vec("DESP").unwrap_or(vec![]))
 }
 
 /// 获取元件的 para
@@ -425,7 +425,7 @@ pub(crate) fn get_refno_paras(
     // };
     // let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok(vec![]); };
     let Some(attr) = aios_mgr.get_cat_attmap(refno) else { return Ok(vec![]); };
-    Ok(attr.get_f64_vec("PARA").unwrap_or(vec![]))
+    Ok(attr.get_f32_vec("PARA").unwrap_or(vec![]))
 }
 
 /// 获取电气专业的标准号

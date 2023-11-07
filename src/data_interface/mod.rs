@@ -10,7 +10,7 @@ pub mod db_manager;
 
 pub mod increment_manager;
 
-pub mod increment_cecord;
+pub mod increment_record;
 
 #[cfg(feature = "gen_model")]
 pub mod gen_model;

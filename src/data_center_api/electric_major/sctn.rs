@@ -211,7 +211,7 @@ async fn get_dq_support_sctn_gtype_box_data(
     });
     let catr_attr = aios_mgr.get_cat_attmap(refno.refno).unwrap_or_default();
     // PARA1xPARA1xPARA2
-    let paras = catr_attr.get_f64_vec("PARA").unwrap_or(vec![]);
+    let paras = catr_attr.get_f32_vec("PARA").unwrap_or(vec![]);
     let para_0 = paras.get(0).map_or(0.0, |x| *x);
     let para_1 = paras.get(1).map_or(0.0, |x| *x);
     let para_2 = paras.get(2).map_or(0.0, |x| *x);
@@ -671,7 +671,7 @@ async fn get_dq_support_sctn_spre_s10_data(
     });
     let catr_attr = aios_mgr.get_cat_attmap(refno.refno).unwrap_or_default();
     // PARA1xPARA1xPARA2
-    let paras = catr_attr.get_f64_vec("PARA").unwrap_or(vec![]);
+    let paras = catr_attr.get_f32_vec("PARA").unwrap_or(vec![]);
     let para_0 = paras.get(0).map_or(0.0, |x| *x);
     let para_1 = paras.get(1).map_or(0.0, |x| *x);
     let para_2 = paras.get(2).map_or(0.0, |x| *x);

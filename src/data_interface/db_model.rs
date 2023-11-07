@@ -38,6 +38,8 @@ use crate::tables::gen_create_project_mdb_sql;
 use pdms_io::watch::PdmsWatcher;
 // use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
+use surrealdb::engine::local::RocksDb;
+use surrealdb::Surreal;
 use crate::arangodb::ArDatabase;
 
 pub const TUBI_TOL: f32 = 10.0f32;
@@ -490,6 +492,9 @@ impl AiosDBManager {
         let local_mesh_db = db.open_tree("mesh")?;
         let local_mesh_aabb_db = db.open_tree("aabb")?;
 
+        // let version_db = Surreal::new::<RocksDb>("versioned.sdb").await.unwrap();
+        // version_db.use_ns("ams").use_db("incr").await.unwrap();
+
         for project in &db_option.included_projects {
             //redb 的实现
             // if let Ok(db) = redb::Database::builder()
@@ -558,6 +563,7 @@ impl AiosDBManager {
 
         Ok(Self {
             project_map,
+            // version_db,
             local_attr_db_map,
             local_children_db_map,
             local_mesh_db,

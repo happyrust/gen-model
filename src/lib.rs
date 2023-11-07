@@ -2,6 +2,8 @@
 #![feature(async_closure)]
 #![feature(exact_size_is_empty)]
 #![feature(slice_take)]
+#![feature(const_async_blocks)]
+#![feature(type_alias_impl_trait)]
 // 暂时屏蔽warnings
 #![allow(warnings)]
 
@@ -53,6 +55,9 @@ pub mod data_state;
 
 pub mod arangodb;
 pub mod versioned_db;
+// pub mod surreal_db;
+
+pub mod surreal_service;
 
 #[macro_use]
 extern crate derive_more;

@@ -147,7 +147,7 @@ pub struct CataContext {
 //     pub async fn build(&self, mgr: &AiosDBManager, des_refno: RefU64) -> BTreeMap<String, String> {
 //         let mut context: BTreeMap<String, String> = Default::default();
 //         if let Ok(attr_map) = mgr.get_attr(des_refno).await {
-//             let mut desp = attr_map.get_f64_vec("DESP").unwrap_or_default();
+//             let mut desp = attr_map.get_f32_vec("DESP").unwrap_or_default();
 //             for i in 0..desp.len() {
 //                 context.insert(
 //                     format!("DESI{}", i + 1).into(),

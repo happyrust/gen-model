@@ -102,7 +102,7 @@ async fn get_elbo_radius(attr: &AttrMap, aios_mgr: &AiosDBManager) -> anyhow::Re
     if let Some(catr) = catr {
         let Some((_, pool)) = aios_mgr.get_project_pool_by_refno(catr).await else { return Ok("".to_string()); };
         let catr_explicit = query_explicit_attr(catr, &pool).await?;
-        if let Some(para) = catr_explicit.get_f64_vec("PARA") {
+        if let Some(para) = catr_explicit.get_f32_vec("PARA") {
             if para.len() > 1 {
                 return Ok(para[1].to_string());
             }

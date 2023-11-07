@@ -58,6 +58,9 @@ use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use aios_core::{AttrMap, NamedAttrValue, RefU64Vec};
+use surrealdb::engine::local::{File, RocksDb};
+use surrealdb::Surreal;
+use crate::surreal_service::SUL_DB;
 use tokio::sync::RwLock;
 
 // #[derive(Debug)]
@@ -69,6 +72,8 @@ pub struct AiosDBManager {
 
     // heed
     // pub local_db_map: DashMap<String, (Arc<heed::Env>, Arc<heed::Database<U64<BE>, ByteSlice>>) >,
+
+    // pub version_db: Surreal<surrealdb::engine::local::Db>,
 
     //sled
     ///本地缓存的atrr数据
@@ -184,6 +189,7 @@ impl PdmsDataInterface for AiosDBManager {
                 return Ok(a);
             }
         }
+        //从surreal获取数据
         Err(anyhow::anyhow!("{refno}: not found att"))
     }
 
@@ -232,8 +238,9 @@ impl PdmsDataInterface for AiosDBManager {
             let k = refno.0.to_be_bytes();
             if let Ok(Some(bytes)) = db.get(k.as_slice()) {
                 let mut att_map = AttrMap::from_rkvy_compress_bytes(bytes.as_ref())?;
-                if let Some(desp) = att_map.get_f64_vec("DESP") {
+                if let Some(desp) = att_map.get_f32_vec("DESP") {
                     let unpars = att_map.get_i32_vec("UNIPAR").unwrap_or_default();
+                    //ddesp 和 wdesp 的处理
                     let ddesp = desp
                         .iter()
                         .zip(unpars.clone())
@@ -1338,12 +1345,12 @@ impl PdmsDataInterface for AiosDBManager {
                 context.insert("JUSL".into(), v.into());
             }
             context.insert("DESI_REFNO".into(), desi_refno.to_refno_str());
-            let mut desp = desi_att.get_f64_vec("DESP").unwrap_or_default();
+            let mut desp = desi_att.get_f32_vec("DESP").unwrap_or_default();
             for i in 0..desp.len() {
                 context.insert(format!("DESI{}", i + 1).into(), desp[i].to_string().into());
                 context.insert(format!("DESP{}", i + 1).into(), desp[i].to_string().into());
             }
-            let mut desp = desi_att.get_f64_vec("DDES").unwrap_or_default();
+            let mut desp = desi_att.get_f32_vec("DDES").unwrap_or_default();
             for i in 0..desp.len() {
                 context.insert(format!("DDES{}", i + 1).into(), desp[i].to_string().into());
             }
@@ -1420,7 +1427,7 @@ impl PdmsDataInterface for AiosDBManager {
                     cata_attmap.get_refno().unwrap().to_refno_str(),
                 );
                 // dbg!(&cata_attmap);
-                let params = cata_attmap.get_f64_vec("PARA").unwrap_or_default();
+                let params = cata_attmap.get_f32_vec("PARA").unwrap_or_default();
                 for i in 0..params.len() {
                     context.insert(
                         format!("CPAR{}", i + 1).into(),
@@ -1465,13 +1472,13 @@ impl PdmsDataInterface for AiosDBManager {
                     }
                 }
 
-                let desp = owner_att.get_f64_vec("DESP").unwrap_or_default();
+                let desp = owner_att.get_f32_vec("DESP").unwrap_or_default();
                 for i in 0..desp.len() {
                     context.insert(format!("ODES{}", i + 1).into(), desp[i].to_string().into());
                 }
                 //找到owner 参考号，再找到它的元件库params
                 if let Some(parent_cat_am) = self.get_cat_attmap(owner_ref) {
-                    let params = parent_cat_am.get_f64_vec("PARA").unwrap_or_default();
+                    let params = parent_cat_am.get_f32_vec("PARA").unwrap_or_default();
                     for i in 0..params.len() {
                         context.insert(
                             format!("OPAR{}", i + 1).into(),
@@ -1481,14 +1488,14 @@ impl PdmsDataInterface for AiosDBManager {
                 }
 
                 if let Some(c_att) = self.get_foreign_attrmap(desi_refno, "CREF") {
-                    let desp = c_att.get_f64_vec("DESP").unwrap_or_default();
+                    let desp = c_att.get_f32_vec("DESP").unwrap_or_default();
                     for i in 0..desp.len() {
                         context.insert(format!("ADES{}", i + 1).into(), desp[i].to_string().into());
                     }
                     let c_refno = c_att.get_refno().unwrap_or_default();
 
                     if let Some(attach_cat_am) = self.get_cat_attmap(c_refno) {
-                        let params = attach_cat_am.get_f64_vec("PARA").unwrap_or_default();
+                        let params = attach_cat_am.get_f32_vec("PARA").unwrap_or_default();
                         for i in 0..params.len() {
                             context.insert(
                                 format!("APAR{}", i + 1).into(),

@@ -118,7 +118,7 @@ impl AiosDBManager{
                 for bore in &ispec.1 {
                     if h_bore >= bore.0 && h_bore <= bore.1 {
                         let Ok(catr_attr) = self.get_attr_from_localdb(bore.2) else { break; };
-                        let Some(para) = catr_attr.get_f64_vec("PARA") else { return Ok(vec![]); };
+                        let Some(para) = catr_attr.get_f32_vec("PARA") else { return Ok(vec![]); };
                         return Ok(para);
                     }
                 }

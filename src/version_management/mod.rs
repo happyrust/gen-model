@@ -2,6 +2,7 @@ use aios_core::pdms_types::EleOperation;
 use aios_core::types::*;
 use serde::{Serialize,Deserialize};
 
+pub mod update_log;
 pub mod set_status;
 pub mod query_status;
 

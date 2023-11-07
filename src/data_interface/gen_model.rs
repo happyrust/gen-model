@@ -91,12 +91,11 @@ pub async fn gen_prim_geos(
                 let Ok(Some(mut trans_origin)) = mgr_clone.get_world_transform(refno) else {
                     continue;
                 };
-                // dbg!(trans_origin);
-
                 let mut geo_insts = vec![];
                 let mut item_trans = Transform::IDENTITY;
 
-                let attr = mgr_clone.get_attr_from_localdb(refno).unwrap_or_default();
+                // let attr = mgr_clone.get_attr_from_localdb(refno).unwrap_or_default();
+                let attr = surreal_service::get_named_attmap(refno).await.unwrap_or_default();
                 let mut geos_info = EleGeosInfo {
                     refno,
                     visible: true,
@@ -113,10 +112,10 @@ pub async fn gen_prim_geos(
                 };
                 let mut geo_param = PdmsGeoParam::Unknown;
                 //需要限制负实体的大小，太大，导致负运算失败
-                let limit_size: Option<f32> = if GENRAL_NEG_NOUN_NAMES.contains(&attr.get_type()) {
+                let limit_size: Option<f32> = if GENRAL_NEG_NOUN_NAMES.contains(&attr.get_type_str()) {
                     if let Some(parent_inst) = shape_insts_data
                         .inst_info_map
-                        .get(&attr.get_owner().unwrap_or_default())
+                        .get(&attr.get_owner())
                     {
                         parent_inst
                             .aabb
@@ -1445,6 +1444,7 @@ use aios_core::tool::math_tool::{quat_to_pdms_ori_str, to_pdms_ori_str, to_pdms_
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
+use crate::surreal_service;
 
 #[derive(Debug, Default, IntoPrimitive, Eq, PartialEq, TryFromPrimitive, Copy, Clone)]
 #[repr(i32)]
@@ -2418,7 +2418,7 @@ pub fn query_tubi_size(
         // use default
         {
             if let Ok(cat_att) = mgr.get_attr_from_localdb(tubi_cat_ref) {
-                let params = cat_att.get_f64_vec("PARA").unwrap_or_default();
+                let params = cat_att.get_f32_vec("PARA").unwrap_or_default();
                 if params.len() >= 2 {
                     let tubi_bore = params[if is_hang { 0 } else { 1 }] as f32;
                     return Ok(TubiSize::BoreSize(tubi_bore));

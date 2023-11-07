@@ -3,7 +3,6 @@ pub mod pdms_inst_arango;
 pub mod structs;
 pub mod ssc_arango;
 pub mod pdms_mesh_arango;
-
 use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

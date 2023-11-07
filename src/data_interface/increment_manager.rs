@@ -29,7 +29,7 @@ use aios_core::tool::db_tool::db1_dehash;
 use pdms_io::defines::DbPageBasicInfo;
 use walkdir::WalkDir;
 use serde::{Serialize, Deserialize};
-use crate::data_interface::increment_cecord::IncreaseDataTiDB;
+use crate::data_interface::increment_record::IncrUpdateLog;
 
 #[derive(Debug, Default, Clone)]
 pub struct IncrementInfo {
@@ -83,7 +83,7 @@ impl AiosDBManager {
         let mut edges = vec![];
         let mut total_add_len = 0;
         let mut total_modify_len = 0;
-        let mut total_delted_len = 0;
+        let mut total_deleted_len = 0;
         for (path, (basic_info, last_pageno)) in increment_ranges_map {
             let mut io = PdmsIO::new(path, true);
             io.open()?;
@@ -125,10 +125,11 @@ impl AiosDBManager {
                     EleOperation::None => {}
                     EleOperation::Add => { total_add_len += 1; }
                     EleOperation::Modified => { total_modify_len += 1; }
-                    EleOperation::Deleted => { total_delted_len += 1; }
+                    EleOperation::Deleted => { total_deleted_len += 1; }
                 }
             }
         }
+        let timestamp = surrealdb::sql::Datetime::default();
         // 将记录保存到tidb
         let mut increment_data_record = Vec::new();
         for (noun, eles) in &type_eles_map {
@@ -136,7 +137,7 @@ impl AiosDBManager {
                 match ele.operation {
                     EleOperation::None => { continue; }
                     EleOperation::Add => {
-                        increment_data_record.push(IncreaseDataTiDB {
+                        increment_data_record.push(IncrUpdateLog {
                             refno: ele.refno,
                             data_operate: ele.operation,
                             numbdb: ele.db_no,
@@ -145,11 +146,12 @@ impl AiosDBManager {
                             new_attr: ele.attr.clone(),
                             new_version: 0,
                             old_version: 0,
+                            timestamp: timestamp.clone(),
                         });
                     }
                     EleOperation::Modified => {
                         let Ok(old_attr) = self.get_attr(ele.refno).await else { continue; };
-                        increment_data_record.push(IncreaseDataTiDB {
+                        increment_data_record.push(IncrUpdateLog {
                             refno: ele.refno,
                             data_operate: ele.operation,
                             numbdb: ele.db_no,
@@ -158,6 +160,7 @@ impl AiosDBManager {
                             new_attr: ele.attr.clone(),
                             new_version: 0,
                             old_version: 0,
+                            timestamp: timestamp.clone(),
                         });
                     }
                     EleOperation::Deleted => { continue; }
@@ -167,7 +170,7 @@ impl AiosDBManager {
         // 删除做单独处理
         for (refno, map) in delete_maps {
             let Ok(old_attr) = self.get_attr(refno).await else { continue; };
-            increment_data_record.push(IncreaseDataTiDB {
+            increment_data_record.push(IncrUpdateLog {
                 refno: map.refno,
                 data_operate: map.operation,
                 numbdb: map.db_no,
@@ -176,11 +179,12 @@ impl AiosDBManager {
                 new_attr: map.attr,
                 new_version: 0,
                 old_version: 0,
+                timestamp : timestamp.clone(),
             });
         }
         // 暂时都保存到desi项目里面
         if let Some(pool) = self.project_map.get(&self.db_option.project_name) {
-            let _ = IncreaseDataTiDB::save_increment_data(increment_data_record, "default".to_string(), pool.value()).await?;
+            let _ = IncrUpdateLog::save_increment_data_to_sql(increment_data_record, "default".to_string(), pool.value()).await?;
         }
         ///先更新一遍到本地数据库
         for (noun, eles) in &type_eles_map {
@@ -284,7 +288,7 @@ impl AiosDBManager {
             save_arangodb_with_db_option(&database, json, AQL_PDMS_EDGES_COLLECTION).await?;
         }
 
-        println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_delted_len}");
+        println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_deleted_len}");
 
 
         Ok(true)

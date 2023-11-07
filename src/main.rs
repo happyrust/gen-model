@@ -14,7 +14,10 @@ use aios_database::api::admin::sync_system_db;
 use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::database::*;
-use aios_database::ssc::{get_room_info_from_excel_refactor, insert_ssc_room_node_refactor, save_ssc_level_excel};
+use aios_database::ssc::{
+    get_room_info_from_excel_refactor, insert_ssc_room_node_refactor, save_ssc_level_excel,
+};
+use aios_database::surreal_service::SUL_DB;
 use chrono::{Datelike, Local, Timelike};
 use futures::StreamExt;
 use itertools::Itertools;
@@ -23,19 +26,19 @@ use nom_derive::Parse;
 // use regex::internal::Input;
 use aios_core::options::DbOption;
 use aios_core::tool::direction_parse::parse_expr_to_dir;
-use aios_core::tool::math_tool::{
-    cal_mat3_by_zdir, to_pdms_ori_str,
-};
+use aios_core::tool::math_tool::{cal_mat3_by_zdir, to_pdms_ori_str};
+use aios_database::arangodb::create::create_arangodb_docs;
 #[cfg(feature = "gen_model")]
 use aios_database::data_interface::gen_model::gen_all_geos_data;
-use env_logger::{Builder, fmt::Target};
+use env_logger::{fmt::Target, Builder};
 use log::{error, LevelFilter};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Instant;
-use aios_database::arangodb::create::create_arangodb_docs;
-use aios_database::versioned_db::create::create_versioned_schemas;
+use surrealdb::engine::local::RocksDb;
+use surrealdb::engine::remote::ws::Ws;
+use surrealdb::iam::signin::db;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -72,6 +75,15 @@ async fn main() -> anyhow::Result<()> {
         builder.filter(Some("aios_core"), LevelFilter::Info);
         builder.target(Target::Pipe(Box::new(file))).init();
     }
+
+    SUL_DB
+        .connect::<Ws>("localhost:8002")
+        .with_capacity(1000)
+        .await?;
+    SUL_DB
+        .use_ns(&db_option.project_code)
+        .use_db(&db_option.project_name)
+        .await?;
 
     /// 是否全部同步模型
     if db_option.total_sync {
@@ -123,7 +135,6 @@ async fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
-
 
 #[test]
 fn get_noun_hash() {
@@ -193,7 +204,9 @@ fn test_log() {
 async fn test_db1_dehash() {
     let mgr = AiosDBManager::init_form_config().await.unwrap();
     let refno = RefU64::from_refno_str("24383/91850").unwrap();
-    let children = mgr.get_children_within_project(refno, "AvevaMarineSample").unwrap();
+    let children = mgr
+        .get_children_within_project(refno, "AvevaMarineSample")
+        .unwrap();
     dbg!(&children);
     let hash = db1_hash(":STACbeam");
     dbg!(&hash);
