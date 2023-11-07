@@ -1,6 +1,9 @@
+use std::collections::HashMap;
+use std::sync::Arc;
 use crate::surreal_service::SUL_DB;
 use aios_core::options::DbOption;
 use aios_core::orm::pdms_element;
+use aios_core::orm::pdms_element::Model;
 use aios_core::pdms_types::*;
 use dashmap::DashMap;
 use futures::stream::FuturesUnordered;
@@ -89,8 +92,11 @@ struct Record {
 /// 保存element数据到版本管理
 /// todo 后续再考虑 record links
 // 先暂时使用relate的方式
-pub async fn save_pdms_eles_to_versioned(db_option: &DbOption, project: &str, total_attr_map: &DashMap<RefU64, WholeAttMap>, db_num: i32) -> anyhow::Result<()> {
-    let mut model_chunks: Vec<Vec<serde_json::Value>> = vec![];
+pub async fn save_pdms_eles_to_versioned(db_option: &DbOption, project: &str,
+                                         total_attr_map: &DashMap<RefU64, WholeAttMap>,
+                                         db_num: i32,
+                                         children_map: &HashMap<RefU64, Vec<(RefU64, String)>>) -> anyhow::Result<()> {
+    let mut model_chunks: Vec<Vec<Model>> = vec![];
     // let table_name = format!("pe_{}", db_num);
     let table_name = "pe".to_string();
     //是否需要定义SCHEMA
@@ -115,12 +121,7 @@ pub async fn save_pdms_eles_to_versioned(db_option: &DbOption, project: &str, to
                 cata_hash: None,
                 status_tag: None,
             };
-            let mut value: serde_json::Value = serde_json::to_value(ele).unwrap();
-            //暂时放在这里，针对record link，需要转变一下
-            //todo 后面record link的值都是要还原成name的
-            // let owner_id = format!("{}:{}", &table_name, owner.to_string());
-            // value.as_object_mut().unwrap().insert("owner".into(), owner_id.into());
-            model_chunk.push(value);
+            model_chunk.push(ele);
         }
         model_chunks.push(model_chunk);
     }
@@ -137,43 +138,29 @@ pub async fn save_pdms_eles_to_versioned(db_option: &DbOption, project: &str, to
             // }));
             // break;
         }
-
-        // let mut json = serde_json::to_string(&models)?;
-        //json使用regex匹配"pdms_element_1112:数字_数字" 类似这种的字符串，去掉""
-        // json = json.replace(r#""pdms_element_\d+:\d+_\d+""#, r#"pdms_element_\d+:\d+_\d+"#);
-
-        // dbg!(&json);
-
-        // todo make how to fix
         SUL_DB
             .query(
                 "INSERT IGNORE INTO pe $values"
             )
             .bind(("values", &models))
             .await.unwrap();
-        // 使用owner创建relate关系
-        let mut relate_sqls = vec![];
-        for model in models {
-            let model = model.as_object().unwrap();
-            let owner = model.get("owner").unwrap().as_str().unwrap();
-            let id = model.get("id").unwrap().as_str().unwrap();
-            relate_sqls.push(format!("
-                RELATE {0}:{1}->pe_owner->{0}:{2}
-            ", &table_name, id, owner));
-        }
+    }
+
+    // 使用owner创建relate关系
+    for kv in children_map{
+        let owner = kv.0;
+        let children = kv.1;
+        if children.is_empty() { continue;  }
+        let relate_sqls = children.iter().enumerate().map(|(i, (child, _))| {
+            format!("
+                RELATE {0}:{1}->pe_owner->{0}:{2} set order_num = {3}
+            ", &table_name, child.to_string(), owner.to_string(), i)
+        }).collect::<Vec<String>>();
         SUL_DB
             .query(relate_sqls.join(";"))
             .await.unwrap();
     }
-
     // while let Some(_) = futures.next().await { }
-
-    //todo 最后加入index
-    // DEFINE INDEX userNameIndex ON TABLE user COLUMNS name SEARCH ANALYZER ascii BM25 HIGHLIGHTS;
-    // schemas/relate_pe.surql
-    SUL_DB
-        .query(include_str!("../../schemas/do_relate_pe.surql"))
-        .await.unwrap();
 
     Ok(())
 }

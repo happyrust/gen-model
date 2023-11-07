@@ -250,6 +250,12 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     }
 
     //都结束之后再考虑更新record link，有些外键的type，后面才知道
+    //todo 最后加入index
+    // DEFINE INDEX userNameIndex ON TABLE user COLUMNS name SEARCH ANALYZER ascii BM25 HIGHLIGHTS;
+    // 添加 relate 和 record link
+    SUL_DB
+        .query(include_str!("../schemas/do_relate_pe.surql"))
+        .await.unwrap();
 
     // 输出创建表所花费的时间
     println!("创建表花费时间: {} ms", create_tables_elapse);
@@ -702,7 +708,7 @@ pub async fn sync_total_async_threaded(
                 "",
             )
             .unwrap_or_default();
-            // dbg!(children_map.len());
+            dbg!(children_map.len());
             let all_refnos = children_map.keys().cloned().collect::<Vec<_>>();
             let children_map_clone = Arc::new(children_map);
 
@@ -807,62 +813,6 @@ pub async fn sync_total_async_threaded(
                     // version_map.entry(file_name.clone()).or_insert(version);
                     // set_uda_attr(&type_ele_map, &total_attr_map, &mut uda_map)?;
 
-                    //     for chunk in &total_attr_map.iter().chunks(ATTS_CHUNK_COUNT) {
-                    //         let mut maps = vec![];
-                    //         for iter in chunk {
-                    //             let refno = iter.key();
-                    //             let att = total_attr_map.get(refno).unwrap().merge();
-                    //             let named_att_map: NamedAttrMap = att.into();
-                    //             let type_name = named_att_map.get_type();
-                    //             if type_name.as_str() != "BOX" {
-                    //                 continue;
-                    //             }
-                    //             let noun = db1_hash(type_name.as_str()) as _;
-                    //             //需要检查一遍能否插入，不能就需要更新schema
-                    //             if let Some(new_schema) = db_info.check_schema(noun, &named_att_map)
-                    //             {
-                    //                 dbg!(&new_schema);
-                    //                 let schema_res = client
-                    //                     .insert_doc(
-                    //                         new_schema.as_str(),
-                    //                         "dpc",
-                    //                         "Update schema",
-                    //                         true,
-                    //                         false,
-                    //                         true,
-                    //                     )
-                    //                     .await?;
-                    //                 dbg!(schema_res);
-                    //             }
-                    //             let map = named_att_map.gen_versioned_json_map();
-                    //             maps.push(map);
-                    //             // break;
-                    //         }
-                    //         // dbg!(&json);
-                    //         if !maps.is_empty() {
-                    //             let json = serde_json::to_string(&maps).unwrap_or_default();
-                    //             let att_res = client
-                    //                 .insert_doc(
-                    //                     json.as_str(),
-                    //                     "dpc",
-                    //                     "Add attributes",
-                    //                     false,
-                    //                     false,
-                    //                     true,
-                    //                 )
-                    //                 .await?;
-                    //             dbg!(att_res);
-                    //             if !att_res {
-                    //                 let first = maps.iter().next();
-                    //                 dbg!(&maps);
-                    //                 dbg!(serde_json::to_string(&first));
-                    //                 break;
-                    //             }
-                    //         }
-                    //         // break;
-                    //     }
-                    // }
-
                     // for kv in &type_ele_map {
                     //     let noun: i32 = *kv.key() as _;
                     //     let type_name = db1_dehash(noun as _);
@@ -955,6 +905,7 @@ pub async fn sync_total_async_threaded(
                         project.as_str(),
                         &total_attr_map_arc,
                         db_no as i32,
+                        &children_map_clone,
                     )
                     .await?;
                     dbg!("开始保存属性数据");

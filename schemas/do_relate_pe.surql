@@ -6,7 +6,10 @@ DEFINE INDEX unique_pe_owner
 
 for $p in $pes{
     //update record link
-#     return (select * from (<record> string::concat("pe:", $p['owner'])));
     (update (<record> $p['id']) set owner=(type::thing("pe", $p['owner'])));
-    (relate ($p['id'])->pe_owner->(type::thing("pe", $p['owner'])));
 };
+
+//for $p in $pes{
+    //create relate
+//    (relate ($p['id'])->pe_owner->(type::thing("pe", $p['owner'])));
+//};

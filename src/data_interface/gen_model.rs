@@ -249,7 +249,6 @@ pub async fn gen_loop_geos(
     let t = Instant::now();
     let db_option = &mgr.db_option;
     let mut batch_size = mgr.db_option.gen_model_batch_size;
-    let mut is_debug = false;
     let loop_cnt = loop_refnos.len();
     if loop_cnt == 0 {
         return Ok(true);
@@ -323,10 +322,10 @@ pub async fn gen_loop_geos(
                     continue;
                 }
 
-                let mut sibling_refnos = mgr
+                let mut children_refnos = mgr
                     .get_children_from_localdb(parent_refno)
                     .unwrap_or_default();
-                let cur_sibling_index = sibling_refnos
+                let cur_sibling_index = children_refnos
                     .iter()
                     .filter(|&x| mgr.get_type_name(*x).as_str() == "PLOO")
                     .position(|x| *x == loop_refno)
@@ -393,7 +392,7 @@ pub async fn gen_loop_geos(
                         let loop_attr = mgr.get_attr_from_localdb(loop_refno).unwrap_or_default();
                         //不是第一个loop，需要取第一个的loop的height
                         let mut height = if cur_sibling_index > 0 {
-                            mgr.get_attr_from_localdb(sibling_refnos[0])
+                            mgr.get_attr_from_localdb(children_refnos[0])
                                 .unwrap_or_default()
                                 .get_f32("HEIG")
                                 .unwrap_or_default()

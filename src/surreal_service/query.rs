@@ -8,7 +8,20 @@ pub async fn get_named_attmap(refno: RefU64) -> anyhow::Result<NamedAttrMap> {
         .query(include_str!("../../schemas/query_attmap_by_refno.surql"))
         .bind(("refno", refno.to_string()))
         .await?;
-    let o: SurlValue = response.take(1).unwrap();
+    let o: SurlValue = response.take(1)?;
     let named_attmap: NamedAttrMap = o.into();
     Ok(named_attmap)
+}
+
+
+///获得children
+pub async fn get_children_refnos(refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
+    let mut response = SUL_DB
+        .query(include_str!("../../schemas/query_children_by_refno.surql"))
+        .bind(("refno", refno.to_string()))
+        .await?;
+    dbg!(&response);
+    let refnos: Vec<RefU64> = response.take::<Vec<String>>(0)?
+        .into_iter().map(|s| s.as_str().into()).collect();
+    Ok(refnos)
 }

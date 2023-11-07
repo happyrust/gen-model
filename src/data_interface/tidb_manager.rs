@@ -212,7 +212,6 @@ impl PdmsDataInterface for AiosDBManager {
                 return Ok(a);
             }
         }
-        // Ok(Default::default())
         Err(anyhow::anyhow!(format!("{refno} does not exist")))
     }
 
