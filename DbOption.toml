@@ -47,10 +47,10 @@ sql_threads_number = 50
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
 #版本服务配置
-v_ip = "127.0.0.1"
+v_ip = "localhost"
 v_user = "root"
 v_password = ""
-v_port = "4100"
+v_port = "8001"
 
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"
