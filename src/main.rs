@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     SUL_DB
-        .connect::<Ws>("localhost:8001")
+        .connect::<Ws>(db_option.get_version_db_conn_str())
         .with_capacity(1000)
         .await?;
     SUL_DB
