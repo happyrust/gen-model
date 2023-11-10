@@ -10,7 +10,10 @@ async fn test_gen_box() {
     init_test_surreal().await;
     let mgr = Arc::new(get_test_ams_db_manager_async().await);
     let mut incr_log = IncrGeoUpdateLog::default();
-    incr_log.prim_refnos.push("17496_171666".into());
-    // dbg!(surreal_service::get_named_attmap("17496_171666".into()).await);
+    // incr_log.prim_refnos.push("17496_171666".into());
+    incr_log.loop_refnos.push("17496_266255".into());
+    // dbg!(surreal_service::get_pe("17496_266255".into()).await);
+    // dbg!(surreal_service::get_named_attmap("17496_266255".into()).await);
+    // dbg!(surreal_service::get_children_named_attmaps("17496_266255".into()).await);
     gen_all_geos_data(mgr.clone(), Some(incr_log)).await.unwrap();
 }

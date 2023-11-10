@@ -1486,7 +1486,6 @@ pub async fn gen_all_geos_data(mut mgr: Arc<AiosDBManager>, incr_update_log: Opt
             println!("开始处理db: {db_no}");
         }
         let d_types = &mgr.db_option.debug_refno_types;
-        let not_debug = db_option.debug_refno_types.is_empty();
         let mut run_cache_cata = d_types.iter().any(|x| x == "CATA");
         let mut run_cache_loop = d_types.iter().any(|x| x == "LOOP");
         let mut run_cache_prim = d_types.iter().any(|x| x == "PRIM");
