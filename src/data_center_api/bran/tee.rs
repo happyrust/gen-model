@@ -78,7 +78,7 @@ pub async fn get_dq_tee_data(refno: &PdmsElement, bran_name: &str, spre_name: &s
         attribute_model_code: "PART3".to_string(),
         value: AttrValue::AttrString("三通".to_string()).into(),
     });
-    let transform = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or(Transform::default());
+    let transform = aios_mgr.get_world_transform_or_default(refno.refno).await;
     let pos = transform.translation;
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART4".to_string(),

@@ -866,7 +866,7 @@ async fn test_match_ftub_between_elbo() -> anyhow::Result<()> {
 async fn test_world_transform() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let refno = RefU64::from_refno_str("17496/163520").unwrap();
-    let transform = aios_mgr.get_world_transform(refno)?.unwrap_or_default();
+    let transform = aios_mgr.get_world_transform(refno).await?.unwrap_or_default();
     dbg!(&transform.translation);
     Ok(())
 }

@@ -100,38 +100,43 @@ async fn main() -> anyhow::Result<()> {
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
 
-    #[cfg(feature = "gen_model")]
-    if db_option.gen_model {
-        println!("正在生成模型");
-        let mut time = Instant::now();
-        gen_all_geos_data(mgr.clone(), None).await?;
-        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
-    }
+    // #[cfg(feature = "gen_model")]
+    // if db_option.gen_model {
+    //     println!("正在生成模型");
+    //     let mut time = Instant::now();
+    //     gen_all_geos_data(mgr.clone(), None).await?;
+    //     println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+    // }
+    //
+    // ///生成ssc 树
+    // /// 需要 resource 下文档 ssc_level.xlsx  ssc_room.xlsx 专业分类.xlsx
+    // if db_option.rebuild_ssc_tree {
+    //     println!("正在同步SSC");
+    //     if let Ok(database) = mgr.get_arango_db().await {
+    //         // 保存ssc
+    //         // async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
+    //         // set_arangodb_all_ssc_nodes(project_db.value(), &mgr.get_arango_db().await?).await?;
+    //         let _ = save_ssc_level_excel(&database).await?;
+    //         let _result = get_room_info_from_excel_refactor(&database).await.unwrap();
+    //         let _result = insert_ssc_room_node_refactor(&database).await.unwrap();
+    //     }
+    //     println!("SSC同步完成");
+    // }
+    //
+    // if db_option.only_sync_sys {
+    //     println!("正在同步TEAM DATA");
+    //     sync_system_db(&mgr).await?;
+    // }
+    //
+    // //房间树要重写
+    // if db_option.gen_spatial_tree {
+    //     mgr.calculate_rooms().await.expect("房间计算失败");
+    // }
 
-    ///生成ssc 树
-    /// 需要 resource 下文档 ssc_level.xlsx  ssc_room.xlsx 专业分类.xlsx
-    if db_option.rebuild_ssc_tree {
-        println!("正在同步SSC");
-        if let Ok(database) = mgr.get_arango_db().await {
-            // 保存ssc
-            // async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
-            // set_arangodb_all_ssc_nodes(project_db.value(), &mgr.get_arango_db().await?).await?;
-            let _ = save_ssc_level_excel(&database).await?;
-            let _result = get_room_info_from_excel_refactor(&database).await.unwrap();
-            let _result = insert_ssc_room_node_refactor(&database).await.unwrap();
-        }
-        println!("SSC同步完成");
-    }
-
-    if db_option.only_sync_sys {
-        println!("正在同步TEAM DATA");
-        sync_system_db(&mgr).await?;
-    }
-
-    //房间树要重写
-    if db_option.gen_spatial_tree {
-        mgr.calculate_rooms().await.expect("房间计算失败");
-    }
+    //是否需要重构下面的这行代码？
+    // tokio::join!(
+        AiosDBManager::exec_watcher(mgr.clone()).await.unwrap();
+    // );
 
     Ok(())
 }

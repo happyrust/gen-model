@@ -27,8 +27,8 @@ pub struct ProfileGeosPoints {
     pub points: Vec<(Vec3, Vec3, Vec3)>,
 }
 
-pub fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
-                                                       att: &AttrMap,
+pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
+                                                       att: &NamedAttrMap,
                                                        geom_info: &CateGeomsInfo,
                                                        brep_shapes_map: &CateBrepShapeMap,
                                                        interface: &T, ) -> anyhow::Result<bool> {
@@ -39,7 +39,7 @@ pub fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
     let mut extrude_dir = Vec3::Z;
     let mut drns = att.get_vec3("DRNS").unwrap_or_default().normalize();
     let mut drne = att.get_vec3("DRNE").unwrap_or_default().normalize();
-    let parent_refno = att.get_owner().unwrap();
+    let parent_refno = att.get_owner();
     let mut spine_paths = if type_name == "GENSEC" || type_name == "WALL" {
         let children_refs = interface.get_children_from_localdb(refno)?;
         let mut paths = vec![];
@@ -99,8 +99,8 @@ pub fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
 
     // let drne = Vec3::X;
     if drns.is_normalized() && drne.is_normalized() {
-        let parent_rot = interface.get_world_transform(parent_refno).unwrap_or_default().unwrap_or_default().rotation;
-        let current_rot = interface.get_world_transform(refno).unwrap_or_default().unwrap_or_default().rotation;
+        let parent_rot = interface.get_world_transform_or_default(parent_refno).await.rotation;
+        let current_rot = interface.get_world_transform_or_default(refno).await.rotation;
         let new_rot =  current_rot.inverse() * parent_rot;
 
         let mut tmp_drns = (new_rot.mul_vec3(drns)).normalize();

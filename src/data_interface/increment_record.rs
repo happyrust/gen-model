@@ -14,16 +14,47 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 
 pub const INCREMENT_DATA: &'static str = "INCREMENT_DATA";
 
+
+///需要修改的模型的增量参考号数据
+#[serde_as]
 #[derive(Debug, Serialize, Deserialize, Default)]
-pub struct IncrModelUpdateLog {
-    //有哪些模型发生了修改
-    pub refno: Vec<RefU64>,
-    // pub timestamp: ,
+pub struct IncrGeoUpdateLog {
+    // pub versions: Vec<>,
+    //基本体模型修改了的参考号
+    #[serde_as(as = "Vec<DisplayFromStr>")]
+    pub prim_refnos: Vec<RefU64>,
+    //拉伸体模型修改了的参考号
+    #[serde_as(as = "Vec<DisplayFromStr>")]
+    pub loop_refnos: Vec<RefU64>,
+    //元件库模型的属性修改了的参考号
+    #[serde_as(as = "Vec<DisplayFromStr>")]
+    pub bran_hanger_refnos: Vec<RefU64>,
+    //元件库模型的属性修改了的参考号
+    #[serde_as(as = "Vec<DisplayFromStr>")]
+    pub basic_cata_refnos: Vec<RefU64>,
+    //删除了的模型
+    pub delete_refnos: Vec<RefU64>,
+
+    //属性时间戳
+    pub att_timestamp: surrealdb::sql::Datetime,
+    //模型时间戳
+    pub mesh_timestamp: Option<surrealdb::sql::Datetime>,
 }
+
+impl IncrGeoUpdateLog{
+
+    #[inline]
+    pub fn count(&self) -> usize{
+        self.prim_refnos.len() + self.loop_refnos.len() + self.basic_cata_refnos.len() + self.bran_hanger_refnos.len()
+    }
+}
+
+//各个db的信息记录，需要跟踪起来？
+
 
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Default)]
-pub struct IncrUpdateLog {
+pub struct IncrEleUpdateLog {
     #[serde_as(as = "DisplayFromStr")]
     pub refno: RefU64,
     pub data_operate: EleOperation,
@@ -41,9 +72,9 @@ pub struct IncrUpdateLog {
 
 
 
-impl IncrUpdateLog {
+impl IncrEleUpdateLog {
     /// 将增量数据保存到对应的表
-    pub async fn save_increment_data_to_sql(increment_datas: Vec<IncrUpdateLog>, session_name: String, pool: &Pool<MySql>) -> anyhow::Result<()> {
+    pub async fn save_increment_data_to_sql(increment_datas: Vec<IncrEleUpdateLog>, session_name: String, pool: &Pool<MySql>) -> anyhow::Result<()> {
         // 将数据根据dbno分类
         let mut data_map = HashMap::new();
         for data in increment_datas {
@@ -91,16 +122,15 @@ struct Record {
 //     }
 // }
 
-fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncrUpdateLog>, session_name: &str) -> String {
+fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncrEleUpdateLog>, session_name: &str) -> String {
     let mut sql = format!("INSERT INTO {dbno}_{INCREMENT_DATA}(ID,REFNO,REFNO_STR,OWNER, OPERATE, VERSION,NUMBDB,TIME,CHILDREN,OLD_DATA,NEW_DATA,USER) VALUES");
     for increment_data in increment_datas {
         // uuid 作为图数据库和 tidb 连接的主键
         let id = Uuid::new_v4().to_string();
         let operate = increment_data.data_operate.into_tidb_num();
         let mut owner = increment_data.new_attr.get_owner();
-        if owner.is_none() { owner = increment_data.old_attr.get_owner() }
-        if owner.is_none() { continue; }
-        let owner = owner.unwrap().0;
+        if owner.is_unset() { owner = increment_data.old_attr.get_owner() }
+        if owner.is_unset() { continue; }
         let old_data = hex::encode(increment_data.old_attr.into_rkyv_compress_bytes());
         let new_data = hex::encode(increment_data.new_attr.into_rkyv_compress_bytes());
         let children = hex::encode(bincode::serialize(&increment_data.children).unwrap_or(vec![]));
@@ -118,7 +148,7 @@ fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncrUpdateLog>, sess
 }
 
 /// 通过uuid查询该条增删记录
-pub async fn query_key_data(key: &str, numbdb: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<IncrUpdateLog>> {
+pub async fn query_key_data(key: &str, numbdb: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<IncrEleUpdateLog>> {
 
     let sql = gen_query_key_data_sql(key, numbdb);
     let val = sqlx::query(&sql).fetch_one(pool).await?;
@@ -130,7 +160,7 @@ pub async fn query_key_data(key: &str, numbdb: i32, pool: &Pool<MySql>) -> anyho
     let old_data = AttrMap::from_rkvy_compress_bytes(&val.get::<Vec<u8>, _>("OLD_DATA"))?;
     let new_data = AttrMap::from_rkvy_compress_bytes(&val.get::<Vec<u8>, _>("NEW_DATA"))?;
     let time = val.get::<String, _>("TIME");
-    Ok(Some(IncrUpdateLog {
+    Ok(Some(IncrEleUpdateLog {
         refno,
         data_operate: EleOperation::from(operate),
         numbdb: numb_db,

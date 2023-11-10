@@ -55,7 +55,7 @@ pub async fn get_dq_fixing_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -
             value: AttrValue::AttrString(owner_name).into(),
         });
         //获取fixing的世界坐标转换
-        let transform = aios_mgr.get_world_transform(fixing.refno).unwrap_or(None).unwrap_or(Transform::default());
+        let transform = aios_mgr.get_world_transform(fixing.refno).await?.unwrap_or_default();
         let pos = transform.translation;
         fixing_attrs.push(DataCenterAttr {
             //PART4参数对应fixing节点的世界坐标位置

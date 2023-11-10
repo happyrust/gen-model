@@ -89,7 +89,7 @@ pub async fn create_tee_branch_point_data(aios_mgr: &AiosDBManager, attr: &AttrM
 }
 
 async fn create_tee_set_on_branch_1_point_data(aios_mgr: &AiosDBManager, refno: RefU64) -> Vec<u8> {
-    let world_transform = aios_mgr.get_world_transform(refno);
+    let world_transform = aios_mgr.get_world_transform(refno).await;
     if let Ok(Some(world_transform)) = world_transform {
         return gen_branch_1_point_data_str(world_transform.translation);
     }

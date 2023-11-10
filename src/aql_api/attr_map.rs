@@ -88,7 +88,7 @@ impl AiosDBManager {
                 continue;
             };
             let world_transform = if contains_trans {
-                self.get_world_transform(refno)
+                self.get_world_transform(refno).await
                     .unwrap_or_default()
                     .unwrap_or_default()
             } else {

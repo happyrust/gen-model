@@ -1,5 +1,5 @@
 #同步文件配置false
-total_sync = true
+total_sync = false
 enable_log = false
 sync_graph_db = false
 sync_versioned = false
@@ -18,7 +18,7 @@ project_name = "AvevaMarineSample"
 project_code = 1516
 module = "DESI"
 #是否生成模型数据
-gen_model = true
+gen_model = false
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树

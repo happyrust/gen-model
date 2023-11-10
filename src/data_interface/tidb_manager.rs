@@ -62,8 +62,9 @@ use surrealdb::engine::local::{File, RocksDb};
 use surrealdb::Surreal;
 use crate::surreal_service::SUL_DB;
 use tokio::sync::RwLock;
+use crate::surreal_service;
 
-// #[derive(Debug)]
+#[derive(Clone)]
 pub struct AiosDBManager {
     //不同project的连接池子
     pub project_map: DashMap<String, Pool<MySql>>,
@@ -106,7 +107,7 @@ pub struct AiosDBManager {
     pub cached_world_transforms_map: Arc<DashMap<RefU64, bevy_transform::prelude::Transform>>,
 
     // pub mdb_dbnums: BTreeSet<i32>,
-    pub watcher: PdmsWatcher,
+    pub watcher: Arc<PdmsWatcher>,
 
     ///所有元素的tree
     pub rtree: Option<AccelerationTree>,
@@ -783,9 +784,8 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(ancestors)
     }
 
-    //make a sync function, no need to be async
     ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
-    fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
+    async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
         let mut ancestors = VecDeque::new();
         let mut rotation = Quat::IDENTITY;
         let mut translation = Vec3::ZERO;
@@ -805,11 +805,12 @@ impl PdmsDataInterface for AiosDBManager {
         }
 
         for (refno, ref_basic) in ancestors {
-            let att = self.get_attr_from_localdb(refno)?;
+            // let att = self.get_attr_from_localdb(refno)?;
+            let att = surreal_service::get_named_attmap(refno).await?;
             let mut pos = att.get_position().unwrap_or_default();
             let mut quat = Quat::IDENTITY;
             //土建特殊情况的一些处理
-            if att.contains_attr_name("ZDIS") {
+            if att.contains_key("ZDIS") {
                 let zdist = att.get_f32("ZDIS").unwrap_or_default();
                 let pkdi = att.get_f32("PKDI").unwrap_or_default();
                 let result = self.cal_zdis_pkdi_in_section(ref_basic.owner, pkdi, zdist);
@@ -817,7 +818,7 @@ impl PdmsDataInterface for AiosDBManager {
                 quat *= result.0;
             }
 
-            if att.contains_attr_name("NPOS") {
+            if att.contains_key("NPOS") {
                 let npos = att.get_vec3("NPOS").unwrap_or_default();
                 pos += npos;
             }
@@ -877,7 +878,7 @@ impl PdmsDataInterface for AiosDBManager {
             }
 
             let bangle = att.get_f32("BANG").unwrap_or_default();
-            if need_bangle || att.contains_attr_name("BANG") {
+            if need_bangle || att.contains_key("BANG") {
                 quat = quat * Quat::from_rotation_z(bangle.to_radians());
             }
             //固定方位，不会怎旋转方向，但是会移动
@@ -888,7 +889,7 @@ impl PdmsDataInterface for AiosDBManager {
             let mut has_cut_back = false;
             let mut cut_dir = Vec3::Y;
             //如果posl有，就不起用CUTB，相当于CUTB是一个手动对齐
-            if att.get_str("POSL").is_none() && att.contains_attr_name("CUTB") {
+            if att.get_str("POSL").is_none() && att.contains_key("CUTB") {
                 has_cut_back = true;
                 cut_dir = att.get_vec3("CUTP").unwrap_or(cut_dir);
                 let cut_len = att.get_f32("CUTB").unwrap_or_default();
@@ -896,7 +897,7 @@ impl PdmsDataInterface for AiosDBManager {
                 if c_ref.is_valid() && let Ok(c_att) = self.get_attr_from_localdb(c_ref) &&
                     let Some(poss) = c_att.get_poss() &&
                     let Some(pose) = c_att.get_pose() {
-                    let c_t = self.get_world_transform(c_ref)?.unwrap_or_default();
+                    let c_t = self.get_world_transform(c_ref).await?.unwrap_or_default();
                     let w_poss = c_t.translation;
                     let axis = (pose - poss);
                     let len = axis.length();
@@ -913,7 +914,7 @@ impl PdmsDataInterface for AiosDBManager {
                 }
             }
             //如果有posl
-            if att.contains_attr_name("POSL") {
+            if att.contains_key("POSL") {
                 let pos_line = att.get_str_or_default("POSL");
                 let delta_vec = att.get_vec3("DELP").unwrap_or_default();
                 // dbg!(pos_line);
@@ -922,7 +923,7 @@ impl PdmsDataInterface for AiosDBManager {
                 let mut own_plin_pos = Vec3::ZERO;
                 let mut pline_plax = Vec3::X;
                 let mut new_quat = Quat::IDENTITY;
-                let mut plin_owner = att.get_owner().unwrap();
+                let mut plin_owner = att.get_owner();
                 // POSL 的处理, 获得父节点的形集, 自身的形集处理，已经在profile里处理过
                 let mut cur_plin_param = None;
                 let mut own_plin_param = None;
@@ -942,8 +943,8 @@ impl PdmsDataInterface for AiosDBManager {
                     target_own_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
                     let own_pos_line = target_own_att.get_str_or_default("JUSL");
                     // dbg!(own_pos_line);
-                    cur_plin_param = self.query_pline(plin_owner, pos_line)?;
-                    own_plin_param = self.query_pline(plin_owner, own_pos_line)?;
+                    cur_plin_param = self.query_pline(plin_owner, pos_line).await?;
+                    own_plin_param = self.query_pline(plin_owner, own_pos_line).await?;
                     if cur_plin_param.is_some() {
                         break;
                     }
@@ -959,7 +960,7 @@ impl PdmsDataInterface for AiosDBManager {
                     plin_pos -= own_param.pt;
                     // dbg!(&own_param);
                 }
-                let mut y_axis = if att.contains_attr_name("YDIR") {
+                let mut y_axis = if att.contains_key("YDIR") {
                     att.get_vec3("YDIR").unwrap_or_default()
                 } else {
                     Vec3::Z
@@ -1049,6 +1050,11 @@ impl PdmsDataInterface for AiosDBManager {
         }))
     }
 
+    #[inline]
+    async fn get_world_transform_or_default(&self, refno: RefU64) -> Transform{
+        self.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default()
+    }
+
     ///获得子节点集合的属性
     async fn get_deep_children_attrs(
         &self,
@@ -1073,7 +1079,7 @@ impl PdmsDataInterface for AiosDBManager {
     ) -> anyhow::Result<Vec<RefU64>> {
         let db = &self.get_arango_db().await?;
         let world_pos = self
-            .get_world_transform(refno)?
+            .get_world_transform(refno).await?
             .unwrap_or_default()
             .translation;
         self.get_refnos_within_bound_radius_by_pos(world_pos, distance)
@@ -1330,7 +1336,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///创建desi参考号的元件库计算上下文
-    fn get_or_create_cata_context(
+    async fn get_or_create_cata_context(
         &self,
         desi_refno: RefU64,
         extra_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
@@ -1338,7 +1344,7 @@ impl PdmsDataInterface for AiosDBManager {
         let cata_context = if let Some(cata) = CATA_CONTEXT_MAP.get(&desi_refno) {
             cata.value().clone()
         } else {
-            let desi_att = self.get_attr_from_localdb(desi_refno)?;
+            let desi_att = surreal_service::get_named_attmap(desi_refno).await?;
             let mut context = CataContext::default();
             if let Some(v) = desi_att.get_as_string("JUSL") {
                 context.insert("JUSL".into(), v.into());
@@ -1392,7 +1398,7 @@ impl PdmsDataInterface for AiosDBManager {
 
             //添加 LEAWID、 LEAHEI、ARRWID、ARRHEI的值
             if let Some(axis_map) = extra_axis_map {
-                if desi_att.contains_attr_name("LEAV") {
+                if desi_att.contains_key("LEAV") {
                     let arrive = desi_att.get_i32("ARRI").unwrap_or_default();
                     let leave = desi_att.get_i32("LEAV").unwrap_or_default();
 
@@ -1443,19 +1449,23 @@ impl PdmsDataInterface for AiosDBManager {
                     context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
                     context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
                 }
-                let mut owner_ref = desi_att.get_owner().unwrap_or_default();
-                let mut owner_att = self.get_attr_from_localdb(owner_ref).unwrap_or_default();
-                while !owner_att.contains_attr_name("GTYP") {
+                let mut owner_ref = desi_att.get_owner();
+                // let mut owner_att = self.get_attr_from_localdb(owner_ref).unwrap_or_default();
+                let mut owner_att = surreal_service::get_named_attmap(owner_ref).await?;
+                //todo use a single query to get all the ancestors' attmap
+                while !owner_att.contains_key("GTYP") {
                     if owner_att.get_refno().is_none() || owner_att.get_type() == "ZONE" {
                         break;
                     }
-                    owner_ref = owner_att.get_owner().unwrap_or_default();
-                    owner_att = self.get_attr_from_localdb(owner_ref).unwrap_or_default();
+                    owner_ref = owner_att.get_owner();
+                    // owner_att = self.get_attr_from_localdb(owner_ref).unwrap_or_default();
+                    owner_att = surreal_service::get_named_attmap(owner_ref).await?;
                 }
 
                 //dtse 的信息处理
                 let dtre_refno: RefU64 = cata_attmap.get_foreign_refno("DTRE").unwrap_or_default();
-                let children = self.get_children_attrs(dtre_refno).unwrap_or_default();
+                // let children = self.get_children_attrs(dtre_refno).unwrap_or_default();
+                let children = surreal_service::get_children_named_attmaps(dtre_refno).await?;
                 for child in children {
                     if let Some(k) = child.get_as_string("DKEY") {
                         let key = format!("RPRO_{}", &k);
@@ -1511,7 +1521,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///求解design component
-    fn resolve_desi_comp(
+    async fn resolve_desi_comp(
         &self,
         desi_refno: RefU64,
         mut scom_ref_option: Option<RefU64>,
@@ -1540,7 +1550,7 @@ impl PdmsDataInterface for AiosDBManager {
         let scom_info = self.get_or_create_scom_info(scom_ref)?;
         #[cfg(debug_assertions)]
         dbg!(&scom_info);
-        let mut context = self.get_or_create_cata_context(desi_refno, desi_axis_map)?;
+        let mut context = self.get_or_create_cata_context(desi_refno, desi_axis_map).await?;
 
         let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(self), Some(context));
         // dbg!(&geom_info.as_ref().unwrap().n_geometries);
@@ -1552,7 +1562,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     /// 求解axis的数值
-    fn resolve_axis_params(
+    async fn resolve_axis_params(
         &self,
         refno: RefU64,
         context: Option<CataContext>,
@@ -1563,7 +1573,7 @@ impl PdmsDataInterface for AiosDBManager {
             return Ok(Default::default());
         }
         let scom = self.get_or_create_scom_info(scom_refno)?;
-        let context = context.unwrap_or(self.get_or_create_cata_context(refno, None)?);
+        let context = context.unwrap_or(self.get_or_create_cata_context(refno, None).await?);
         for i in 0..scom.axis_params.len() {
             // dbg!(&scom.axis_params[i]);
             let axis = resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self));

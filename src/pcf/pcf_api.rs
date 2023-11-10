@@ -92,7 +92,7 @@ pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut mate
 
 /// 生成 center_point 数据
 pub async fn create_center_point_data(refno: RefU64, aios_mgr: &AiosDBManager) -> Vec<u8> {
-    let center_point = aios_mgr.get_world_transform(refno);
+    let center_point = aios_mgr.get_world_transform(refno).await;
     if let Ok(Some(center_point)) = center_point {
         return gen_center_point_data(center_point.translation);
     }
@@ -101,7 +101,7 @@ pub async fn create_center_point_data(refno: RefU64, aios_mgr: &AiosDBManager) -
 
 /// 生成 cords_point 数据
 pub async fn create_cords_point_data(refno: RefU64, aios_mgr: &AiosDBManager) -> Vec<u8> {
-    let center_point = aios_mgr.get_world_transform(refno);
+    let center_point = aios_mgr.get_world_transform(refno).await;
     if let Ok(Some(center_point)) = center_point {
         return gen_cords_point_data(center_point.translation);
     }

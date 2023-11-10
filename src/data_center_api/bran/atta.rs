@@ -15,7 +15,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::arangodb::ArDatabase;
 
-pub async fn get_data_center_atta_attr(refno: PdmsElement, bran_name: &str, room_code: String,
+pub async fn get_data_center_atta_attr(pe: PdmsElement, bran_name: &str, room_code: String,
                                        database: &ArDatabase, aios_mgr: &AiosDBManager) -> DataCenterInstance {
     let need_query_material_code = vec![("ITEMB14".to_string(), "Code".to_string()),
                                         ("ITEMB15".to_string(), "RCCM".to_string()),
@@ -24,17 +24,17 @@ pub async fn get_data_center_atta_attr(refno: PdmsElement, bran_name: &str, room
     let mut result = Vec::new();
     let item_1 = DataCenterAttr {
         attribute_model_code: "ITEM1".to_string(),
-        value: AttrString(refno.refno.to_refno_string()).into(),
+        value: AttrString(pe.refno.to_refno_string()).into(),
     };
     result.push(item_1);
     let item_2 = DataCenterAttr {
         attribute_model_code: "ITEMB1".to_string(),
-        value: AttrString(refno.name.clone()).into(),
+        value: AttrString(pe.name.clone()).into(),
     };
     result.push(item_2);
     let item_3 = DataCenterAttr {
         attribute_model_code: "ITEMB2".to_string(),
-        value: AttrString(refno.noun).into(),
+        value: AttrString(pe.noun).into(),
     };
     result.push(item_3);
     let item_4 = DataCenterAttr {
@@ -47,7 +47,7 @@ pub async fn get_data_center_atta_attr(refno: PdmsElement, bran_name: &str, room
         value: AttrString("".to_string()).into(),
     };
     result.push(item_5);
-    let world_position = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or_default();
+    let world_position = aios_mgr.get_world_transform_or_default(pe.refno).await;
     let item_5 = DataCenterAttr {
         attribute_model_code: "ITEMB5".to_string(),
         value: AttrVec3(world_position.translation).into(),
@@ -62,18 +62,18 @@ pub async fn get_data_center_atta_attr(refno: PdmsElement, bran_name: &str, room
         attribute_model_code: "ITEMB11".to_string(),
         value: AttrString(room_code).into(),
     });
-    let attr = aios_mgr.get_attr(refno.refno).await.unwrap_or_default();
+    let attr = aios_mgr.get_attr(pe.refno).await.unwrap_or_default();
     let ispec = get_ispec_from_attr(&attr, &aios_mgr).await.unwrap_or("".to_string());
     result.push(DataCenterAttr {
         attribute_model_code: "ITEMB12".to_string(),
         value: AttrString(ispec).into(),
     });
-    let tspe = query_foreign_name_aql(refno.refno, vec!["TSPE", "TSPE"], database).await.unwrap_or(None).unwrap_or("".to_string());
+    let tspe = query_foreign_name_aql(pe.refno, vec!["TSPE", "TSPE"], database).await.unwrap_or(None).unwrap_or("".to_string());
     result.push(DataCenterAttr {
         attribute_model_code: "ITEMB13".to_string(),
         value: AttrString(tspe).into(),
     });
-    let spre_attr = aios_mgr.get_foreign_attrmap(refno.refno, "SPRE").unwrap_or_default();
+    let spre_attr = aios_mgr.get_foreign_attrmap(pe.refno, "SPRE").unwrap_or_default();
     let spre_name = spre_attr.get_name().unwrap_or("".to_string());
     result.push(DataCenterAttr {
         attribute_model_code: "ITEMB14".to_string(),
@@ -102,7 +102,7 @@ pub async fn get_data_center_atta_attr(refno: PdmsElement, bran_name: &str, room
     DataCenterInstance {
         object_model_code: "ITEMB".to_string(),
         project_code: aios_mgr.db_option.project_code.to_string(),
-        instance_code: refno.name,
+        instance_code: pe.name,
         version: get_refno_latest_version(),
         attributes: result,
     }
@@ -125,7 +125,7 @@ pub async fn get_dq_atta_data(refno: &PdmsElement, bran_name: &str, spre_name: &
         attribute_model_code: "PART3".to_string(),
         value: AttrValue::AttrString("连接板".to_string()).into(),
     });
-    let transform = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or(Transform::default());
+    let transform = aios_mgr.get_world_transform(refno.refno).await.unwrap_or_default().unwrap_or_default();
     let pos = transform.translation;
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART4".to_string(),

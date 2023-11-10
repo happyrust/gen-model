@@ -67,12 +67,14 @@ pub fn resolve_gms<T: PdmsDataInterface>(
 ) -> Vec<CateGeoParam> {
     gmse_raw_paras
         .iter()
+        .cloned()
         .filter_map(|g| {
             if g.visible_flag {
                 if g.gm_type == "SPRO" && g.verts.is_empty() {
                     return None;
                 }
-                let r = resolve_paragon_gm_params(des_refno, &g, jusl_param, context, axis_params, interface);
+                let r = resolve_paragon_gm_params(des_refno, &g,
+                                                  jusl_param, context, axis_params, interface);
                 return match r {
                     Ok(v) => {
                         Some(v)

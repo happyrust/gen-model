@@ -193,7 +193,7 @@ async fn auto_get_attr_from_metadata_excel_single_function(
 ) -> Option<String> {
     match function {
         "world_position()" => {
-            let Ok(Some(position)) = aios_mgr.get_world_transform(refno) else {
+            let Ok(Some(position)) = aios_mgr.get_world_transform(refno).await else {
                 return None;
             };
             Some(
@@ -201,7 +201,7 @@ async fn auto_get_attr_from_metadata_excel_single_function(
             )
         }
         "orientation()" => {
-            let Ok(Some(position)) = aios_mgr.get_world_transform(refno) else {
+            let Ok(Some(position)) = aios_mgr.get_world_transform(refno).await else {
                 return None;
             };
             Some(serde_json::to_string(&position.rotation).unwrap_or("[0.0,0.0,0.0]".to_string()))

@@ -87,11 +87,11 @@ impl AiosDBManager {
         println!("正在初始化uda");
         mgr.init_uda_map().await?;
         println!("uda初始化完成");
-        mgr.init_mdb(
-            &db_option.project_name,
-            &db_option.mdb_name,
-            &db_option.module,
-        ).await?;
+        // mgr.init_mdb(
+        //     &db_option.project_name,
+        //     &db_option.mdb_name,
+        //     &db_option.module,
+        // ).await?;
         //初始化watcher
         // mgr.init_watcher().await?;
         //加载空间树
@@ -103,12 +103,18 @@ impl AiosDBManager {
 
     //初始化watcher
     pub async fn exec_watcher(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
-        tokio::spawn(async move {
-            mgr.init_watcher().await.unwrap();
-            mgr.async_watch().await.unwrap();
-        });
+        mgr.init_watcher().await.unwrap();
+        mgr.async_watch().await.unwrap();
         Ok(())
     }
+
+    // pub async fn spawn_exec_watcher(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
+    //     tokio::spawn(async move {
+    //         mgr.init_watcher().await.unwrap();
+    //         mgr.async_watch().await.unwrap();
+    //     });
+    //     Ok(())
+    // }
 
 
     ///总的路径-> 查找到所有000文件夹的路径
@@ -448,12 +454,12 @@ impl AiosDBManager {
         }
         //todo 调整tidb，暂时不启用
         // if self.db_option.reset_mdb_project.unwrap_or(false) {
-            // let create_sql = gen_create_project_mdb_sql();
-            // let _ = conn.execute(create_sql.as_str()).await;
-            // println!("正在插入mdb数据");
-            // let _ = self
-            //     .insert_project_mdb(&project_pool, &self.info_pool)
-            //     .await;
+        // let create_sql = gen_create_project_mdb_sql();
+        // let _ = conn.execute(create_sql.as_str()).await;
+        // println!("正在插入mdb数据");
+        // let _ = self
+        //     .insert_project_mdb(&project_pool, &self.info_pool)
+        //     .await;
         // }
         // cache_mdb_site_map(mdb, module, &project_pool).await;
         // self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
@@ -578,7 +584,7 @@ impl AiosDBManager {
             arango_pool,
             cached_world_transforms_map: Arc::new(Default::default()),
             // mdb_dbnums: Default::default(),
-            watcher,
+            watcher: Arc::new(watcher),
             rtree: None,
             room_panels_rtree: None,
             room_info_map: Default::default(),
@@ -887,12 +893,12 @@ impl AiosDBManager {
 
     /// 通用的解析表达式的方法, 解析desi参考号下的 表达式值
     /// 如果 desi_refno 为空，代表design的数据不需要参与计算
-    pub fn resolve_expression_to_f32(
+    pub async fn resolve_expression_to_f32(
         &self,
         expr: &str,
         desi_refno: RefU64,
     ) -> anyhow::Result<f32> {
-        let context = self.get_or_create_cata_context(desi_refno, None)?;
+        let context = self.get_or_create_cata_context(desi_refno, None).await?;
         eval_str_to_f32(expr, &context, Some(self), "DIST")
     }
 

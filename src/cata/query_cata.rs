@@ -22,7 +22,7 @@ use tokio::sync::RwLock;
 use super::resolve::CataContext;
 
 ///求解design component
-pub fn resolve_desi_comp<T: PdmsDataInterface>(
+pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     interface: Option<&T>,
     desi_refno: RefU64,
     mut scom_ref_option: Option<RefU64>,
@@ -49,9 +49,7 @@ pub fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     // dbg!(scom_ref);
     let scom_info = interface.get_or_create_scom_info(scom_ref)?;
-    // dbg!(&scom_info.gm_params);
-    // dbg!(&scom_info.axis_params);
-    let mut context = interface.get_or_create_cata_context(desi_refno, desi_axis_map)?;
+    let mut context = interface.get_or_create_cata_context(desi_refno, desi_axis_map).await?;
     
     let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(interface), Some(context));
     // dbg!(&geom_info.as_ref().unwrap().n_geometries);

@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use crate::graph_db::structs::PdmsEleDataVersioned;
 use crate::surreal_service::SUL_DB;
 use aios_core::options::DbOption;
 use aios_core::orm::pdms_element;
@@ -7,15 +6,16 @@ use aios_core::orm::pdms_element::Model;
 use aios_core::pdms_types::*;
 use dashmap::DashMap;
 use futures::stream::FuturesUnordered;
-use serde::Deserialize;
 use futures::StreamExt;
-use termnius_client::client::TDBClient;
-use sea_orm::entity::prelude::*;
-use crate::graph_db::structs::PdmsEleDataVersioned;
 use itertools::Itertools;
+use sea_orm::entity::prelude::*;
+use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashMap;
+use std::sync::Arc;
 use surrealdb::dbs::Response;
 use surrealdb::sql::Thing;
+use termnius_client::client::TDBClient;
 
 pub async fn get_versioned_client(project: &str) -> TDBClient {
     let mut client = termnius_client::client::TDBClientBuilder::default()
@@ -42,8 +42,12 @@ const SQL_CHUNK_COUNT: usize = 1000;
 // const SQL_CHUNK_COUNT: usize = 1;
 const JSON_CHUNK_COUNT: usize = 10_000;
 
-
-pub async fn save_versioned_pdms_eles(client: &TDBClient, total_attr_map: &DashMap<RefU64, WholeAttMap>, db_num: i32, db_option: &DbOption) -> anyhow::Result<()> {
+pub async fn save_versioned_pdms_eles(
+    client: &TDBClient,
+    total_attr_map: &DashMap<RefU64, WholeAttMap>,
+    db_num: i32,
+    db_option: &DbOption,
+) -> anyhow::Result<()> {
     let mut eles = Vec::with_capacity(total_attr_map.len());
     for kv in total_attr_map.iter() {
         let att_map: NamedAttrMap = kv.value().merge().into();
@@ -64,7 +68,17 @@ pub async fn save_versioned_pdms_eles(client: &TDBClient, total_attr_map: &DashM
     for result in eles.chunks(JSON_CHUNK_COUNT) {
         let json = serde_json::to_string(result)?;
 
-        let doc_res = client.insert_doc(json.as_str(), "dpc", "Add Pdms Elements.", false, false, true).await.unwrap_or_default();
+        let doc_res = client
+            .insert_doc(
+                json.as_str(),
+                "dpc",
+                "Add Pdms Elements.",
+                false,
+                false,
+                true,
+            )
+            .await
+            .unwrap_or_default();
         dbg!(doc_res);
 
         // let project = db_option.project_name.clone();
@@ -92,12 +106,14 @@ struct Record {
 /// 保存element数据到版本管理
 /// todo 后续再考虑 record links
 // 先暂时使用relate的方式
-pub async fn save_pdms_eles_to_versioned(db_option: &DbOption, project: &str,
-                                         total_attr_map: &DashMap<RefU64, WholeAttMap>,
-                                         db_num: i32,
-                                         children_map: &HashMap<RefU64, Vec<(RefU64, String)>>) -> anyhow::Result<()> {
+pub async fn save_pdms_eles_to_versioned(
+    db_option: &DbOption,
+    project: &str,
+    total_attr_map: &DashMap<RefU64, NamedAttrMap>,
+    db_num: i32,
+    children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
+) -> anyhow::Result<()> {
     let mut model_chunks: Vec<Vec<Model>> = vec![];
-    // let table_name = format!("pe_{}", db_num);
     let table_name = "pe".to_string();
     //是否需要定义SCHEMA
     // SUL_DB
@@ -109,17 +125,21 @@ pub async fn save_pdms_eles_to_versioned(db_option: &DbOption, project: &str,
     for chunk in &total_attr_map.into_iter().chunks(SQL_CHUNK_COUNT) {
         let mut model_chunk = vec![];
         for kv in chunk {
-            let att_map: NamedAttrMap = kv.value().merge().into();
+            let att_map = kv.value();
             let owner = att_map.get_refno_by_att_or_default("OWNER");
+            let refno = *kv.key();
             let ele = pdms_element::Model {
-                id: kv.key().to_string(),
-                refno: *kv.key(),
+                id: refno.to_string(),
+                refno,
                 owner,
                 name: att_map.get_string_or_default("NAME"),
                 noun: att_map.get_type(),
                 dbnum: db_num,
                 cata_hash: None,
                 status_tag: None,
+                version_tag: None,
+                e3d_version: att_map.get_e3d_version(),
+                lock: false,
             };
             model_chunk.push(ele);
         }
@@ -128,7 +148,7 @@ pub async fn save_pdms_eles_to_versioned(db_option: &DbOption, project: &str,
     // let mut futures = FuturesUnordered::new();
     for models in model_chunks {
         //save to sql, todo 保存到tidb
-        if false{
+        if false {
             // let db = sea_orm::Database::connect(&db_option.get_mysql_db_conn_str(project))
             //     .await
             //     .unwrap();
@@ -139,26 +159,35 @@ pub async fn save_pdms_eles_to_versioned(db_option: &DbOption, project: &str,
             // break;
         }
         SUL_DB
-            .query(
-                "INSERT IGNORE INTO pe $values"
-            )
+            .query("INSERT IGNORE INTO pe $values")
             .bind(("values", &models))
-            .await.unwrap();
+            .await
+            .unwrap();
     }
 
     // 使用owner创建relate关系
-    for kv in children_map{
+    for kv in children_map {
         let owner = kv.0;
         let children = kv.1;
-        if children.is_empty() { continue;  }
-        let relate_sqls = children.iter().enumerate().map(|(i, (child, _))| {
-            format!("
+        if children.is_empty() {
+            continue;
+        }
+        let relate_sqls = children
+            .iter()
+            .enumerate()
+            .map(|(i, (child, _))| {
+                format!(
+                    "
                 RELATE {0}:{1}->pe_owner->{0}:{2} set order_num = {3}
-            ", &table_name, child.to_string(), owner.to_string(), i)
-        }).collect::<Vec<String>>();
-        SUL_DB
-            .query(relate_sqls.join(";"))
-            .await.unwrap();
+            ",
+                    &table_name,
+                    child.to_string(),
+                    owner.to_string(),
+                    i
+                )
+            })
+            .collect::<Vec<String>>();
+        SUL_DB.query(relate_sqls.join(";")).await.unwrap();
     }
     // while let Some(_) = futures.next().await { }
 

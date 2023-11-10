@@ -54,7 +54,7 @@ pub struct RoomData {
 }
 
 ///Room元素
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RoomElement {
     #[serde(serialize_with = "ser_refno_as_key_str")]
     #[serde(deserialize_with = "de_refno_from_key_str")]
@@ -313,7 +313,7 @@ pub async fn get_room_infos_from_owner(
         for code in room_codes {
             if !info_map.contains_key(&code.name) {
                 let Some(refno) = RefU64::from_url_refno(&code.refno) else { continue; };
-                let world_pos = aios_mgr.get_world_transform(refno).unwrap_or(None);
+                let world_pos = aios_mgr.get_world_transform(refno).await.unwrap_or(None);
                 let translation = world_pos.unwrap_or_default().translation;
                 info_map.entry(code.name).or_insert(translation);
             }
@@ -325,7 +325,7 @@ pub async fn get_room_infos_from_owner(
             let Ok(room_code) = get_room_code_from_attr(child.refno, aios_mgr).await else { continue; };
             if room_code.is_empty() { continue; };
             if !info_map.contains_key(&room_code) {
-                let world_pos = aios_mgr.get_world_transform(child.refno).unwrap_or(None);
+                let world_pos = aios_mgr.get_world_transform(child.refno).await.unwrap_or(None);
                 let translation = world_pos.unwrap_or_default().translation;
                 info_map.entry(room_code).or_insert(translation);
             }

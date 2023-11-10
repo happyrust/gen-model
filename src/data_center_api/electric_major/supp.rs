@@ -268,7 +268,7 @@ pub async fn query_dq_erecad_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager)
             attribute_model_code: "ERECAD3".to_string(),
             value: room_name,
         });
-        let transform = aios_mgr.get_world_transform(supp.refno).unwrap_or(None).unwrap_or(Transform::default());
+        let transform = aios_mgr.get_world_transform(supp.refno).await?.unwrap_or_default();
         let pos = transform.translation;
         data_center_attr.push(DataCenterAttr {
             attribute_model_code: "ERECAD4".to_string(),

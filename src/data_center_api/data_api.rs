@@ -59,7 +59,7 @@ pub async fn get_inst_data_from_inst_major(
     }
     let refnos = query_travel_children_with_type_aql(&database, refno, "INST").await?;
     for ele in refnos {
-        let pos = mgr.get_world_transform(ele.refno)?;
+        let pos = mgr.get_world_transform(ele.refno).await?;
         if pos.is_none() {
             continue;
         }
@@ -127,7 +127,7 @@ pub(crate) async fn get_bran_itema_attr(
     };
     result.push(item_5);
     let world_position = aios_mgr
-        .get_world_transform(refno.refno)
+        .get_world_transform(refno.refno).await
         .unwrap_or(None)
         .unwrap_or_default();
     let item_5 = DataCenterAttr {
@@ -268,7 +268,7 @@ pub async fn get_equi_data_from_electric_major(
     }
     let refnos = query_travel_children_with_type_aql(&database, refno, "EQUI").await?;
     for ele in refnos {
-        let pos = mgr.get_world_transform(ele.refno)?;
+        let pos = mgr.get_world_transform(ele.refno).await?;
         if pos.is_none() {
             continue;
         }
@@ -497,17 +497,17 @@ pub async fn get_refno_world_poss_pose(
             // 默认只有两个点
             let poss_point = points[0].refno;
             let pose_point = points[1].refno;
-            let Ok(Some(poss)) = aios_mgr.get_world_transform(poss_point) else {
+            let Ok(Some(poss)) = aios_mgr.get_world_transform(poss_point).await else {
                 return Ok(None);
             };
-            let Ok(Some(pose)) = aios_mgr.get_world_transform(pose_point) else {
+            let Ok(Some(pose)) = aios_mgr.get_world_transform(pose_point).await else {
                 return Ok(None);
             };
             Ok(Some((poss.translation, pose.translation)))
         }
         "BRAN" => {
             let bran_attr = aios_mgr.get_attr(refno).await?;
-            let Ok(Some(branch_transform)) = aios_mgr.get_world_transform(refno) else {
+            let Ok(Some(branch_transform)) = aios_mgr.get_world_transform(refno).await else {
                 return Ok(None);
             };
             let hpos_wrt = branch_transform.transform_point(bran_attr.get_vec3("HPOS").unwrap());
@@ -515,7 +515,7 @@ pub async fn get_refno_world_poss_pose(
             Ok(Some((hpos_wrt, tpos_wrt)))
         }
         _ => {
-            let Some(world_transform) = aios_mgr.get_world_transform(refno)? else {
+            let Some(world_transform) = aios_mgr.get_world_transform(refno).await? else {
                 return Ok(None);
             };
             let attr = aios_mgr.get_attr(refno).await?;
@@ -552,7 +552,7 @@ pub async fn get_refnos_arrive_leave_info(refnos: Vec<RefU64>, b_request_w_pos: 
             .entry("LEAVE_POINT".to_string()).or_insert(NamedAttrValue::Vec3Type(leave_point.pt));
         // 查询世界坐标
         if b_request_w_pos {
-            let w_pos = aios_mgr.get_world_transform(point.refno)?.unwrap_or_default();
+            let w_pos = aios_mgr.get_world_transform(point.refno).await?.unwrap_or_default();
             // 根据世界坐标变换
             let arrive_transform = w_pos.transform_point(arrive_point.pt);
             let leave_transform = w_pos.transform_point(leave_point.pt);

@@ -116,7 +116,7 @@ pub async fn get_dq_cross_element_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBMan
                 attribute_model_code: "COMP6".to_string(),
                 value: AttrValue::AttrString("电气贯穿件".to_string()).into(),
             });
-            let position = aios_mgr.get_world_transform(child.refno)?.unwrap_or_default();
+            let position = aios_mgr.get_world_transform(child.refno).await?.unwrap_or_default();
             attr.push(DataCenterAttr {
                 attribute_model_code: "COMPB3".to_string(),
                 value: AttrValue::AttrFloat(position.translation.z).into(),

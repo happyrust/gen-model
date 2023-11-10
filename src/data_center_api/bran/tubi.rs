@@ -60,7 +60,7 @@ pub async fn get_data_center_tubi_attr(bran_refno: RefU64,bran_name:&str, databa
             value: AttrString("".to_string()).into(),
         };
         result.push(item_4);
-        let world_position = aios_mgr.get_world_transform(from).unwrap_or(None).unwrap_or_default();
+        let world_position = aios_mgr.get_world_transform_or_default(from).await;
         let item_5 = DataCenterAttr {
             attribute_model_code: "ITEMA5".to_string(),
             value: AttrVec3(world_position.translation).into(),

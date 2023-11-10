@@ -154,7 +154,7 @@ async fn get_dq_support_sctn_gtype_box_data(
         value: AttrValue::AttrString("方钢".to_string()).into(),
     });
 
-    let transform = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or(Transform::default());
+    let transform = aios_mgr.get_world_transform_or_default(refno.refno).await;
 
 
     let attr = aios_mgr.get_attr(refno.refno).await.unwrap_or_default();
@@ -335,7 +335,7 @@ async fn get_dq_support_sctn_gtype_beam_data(
         value: AttrValue::AttrString("方钢".to_string()).into(),
     });
 
-    let transform = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or(Transform::default());
+    let transform = aios_mgr.get_world_transform_or_default(refno.refno).await;
     let pos = transform.translation;
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART4".to_string(),
@@ -609,7 +609,7 @@ async fn get_dq_support_sctn_spre_s10_data(
         value: AttrValue::AttrString("Z形铁".to_string()).into(),
     });
 
-    let transform = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or(Transform::default());
+    let transform = aios_mgr.get_world_transform_or_default(refno.refno).await;
     let pos = transform.translation;
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART4".to_string(),
@@ -713,7 +713,7 @@ async fn get_dq_support_sctn_spre_s11_data(
         value: AttrValue::AttrString("固定桥".to_string()).into(),
     });
 
-    let transform = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or(Transform::default());
+    let transform = aios_mgr.get_world_transform_or_default(refno.refno).await;
     let pos = transform.translation;
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART4".to_string(),

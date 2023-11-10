@@ -187,7 +187,9 @@ pub trait PdmsDataInterface: Send + Sync {
     async fn get_ancestor_nodes(&self, refno: RefU64) -> anyhow::Result<VecDeque<EleTreeNode>>;
 
     ///获得指定参考号的世界坐标系
-    fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>>;
+    async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>>;
+
+    async fn get_world_transform_or_default(&self, refno: RefU64) -> Transform;
 
     ///获取当前节点深度遍历后的所有子节点, 是否指定目标节点
     async fn get_deep_children_attrs(
@@ -228,9 +230,10 @@ pub trait PdmsDataInterface: Send + Sync {
 
     fn get_or_create_scom_info(&self, cata_refno: RefU64) -> anyhow::Result<ScomInfo>;
 
-    fn get_or_create_cata_context(&self, desi_refno: RefU64, extra_axis_map: Option<&BTreeMap<i32, CateAxisParam>>) -> anyhow::Result<CataContext>;
+    async fn get_or_create_cata_context(&self, desi_refno: RefU64,
+                                        extra_axis_map: Option<&BTreeMap<i32, CateAxisParam>>) -> anyhow::Result<CataContext>;
 
-    fn resolve_desi_comp(
+    async fn resolve_desi_comp(
         &self,
         desi_refno: RefU64,
         scom_ref_option: Option<RefU64>,
@@ -238,7 +241,7 @@ pub trait PdmsDataInterface: Send + Sync {
         desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
     ) -> anyhow::Result<CateGeomsInfo>;
 
-    fn resolve_axis_params(
+    async fn resolve_axis_params(
         &self,
         refno: RefU64,
         context: Option<CataContext>,

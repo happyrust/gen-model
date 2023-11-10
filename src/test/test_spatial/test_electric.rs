@@ -18,7 +18,7 @@ async fn test_query_support_arms() -> anyhow::Result<()> {
     let mut positions = vec![];
     for s in &support_arms {
         let trans = mgr
-            .get_world_transform(s.refno)
+            .get_world_transform(s.refno).await
             .unwrap_or_default()
             .unwrap_or_default();
         positions.push(trans.translation);

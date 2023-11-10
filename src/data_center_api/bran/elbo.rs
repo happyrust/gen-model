@@ -112,13 +112,13 @@ async fn get_elbo_radius(attr: &AttrMap, aios_mgr: &AiosDBManager) -> anyhow::Re
 }
 
 /// 电气专业 type = elbo and spre contain LED/LEU
-pub async fn get_dq_elbo_spre_data(refno: &PdmsElement, bran_name: &str, spre_name: &str,
+pub async fn get_dq_elbo_spre_data(pe: &PdmsElement, bran_name: &str, spre_name: &str,
                                    room_name: &str, ftub_paras: &Vec<f64>, angle: f32,
                                    aios_mgr: &AiosDBManager) -> anyhow::Result<DataCenterInstance> {
     let mut data_center_attr = Vec::new();
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART1".to_string(),
-        value: AttrValue::AttrString(refno.refno.to_refno_str()).into(),
+        value: AttrValue::AttrString(pe.refno.to_refno_str()).into(),
     });
 
     data_center_attr.push(DataCenterAttr {
@@ -129,13 +129,13 @@ pub async fn get_dq_elbo_spre_data(refno: &PdmsElement, bran_name: &str, spre_na
         attribute_model_code: "PART3".to_string(),
         value: AttrValue::AttrString("垂直可调连接板".to_string()).into(),
     });
-    let transform = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or(Transform::default());
+    let transform = aios_mgr.get_world_transform_or_default(pe.refno).await;
     let pos = transform.translation;
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART4".to_string(),
         value: AttrValue::AttrVec3(pos).into(),
     });
-    let attr = aios_mgr.get_attr(refno.refno).await.unwrap_or_default();
+    let attr = aios_mgr.get_attr(pe.refno).await.unwrap_or_default();
     let ori = attr.get_vec3("ORI").unwrap_or(Vec3::ZERO);
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART5".to_string(),
@@ -153,7 +153,7 @@ pub async fn get_dq_elbo_spre_data(refno: &PdmsElement, bran_name: &str, spre_na
         attribute_model_code: "PARTE3".to_string(),
         value: AttrValue::AttrString("垂直可调连接板".to_string()).into(),
     });
-    let desc = get_refno_desc(refno.refno, aios_mgr)
+    let desc = get_refno_desc(pe.refno, aios_mgr)
         .await
         .unwrap_or("".to_string());
     data_center_attr.push(DataCenterAttr {
@@ -202,7 +202,7 @@ pub async fn get_dq_elbo_spre_data(refno: &PdmsElement, bran_name: &str, spre_na
         attribute_model_code: "PARTE16".to_string(),
         value: AttrValue::AttrFloat(para_2 as f32).into(),
     });
-    let para = get_refno_paras(refno.refno, aios_mgr).unwrap_or(vec![]);
+    let para = get_refno_paras(pe.refno, aios_mgr).unwrap_or(vec![]);
     let para_3 = para.get(2).map_or(0.0, |x| *x);
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PARTED25".to_string(),
@@ -215,7 +215,7 @@ pub async fn get_dq_elbo_spre_data(refno: &PdmsElement, bran_name: &str, spre_na
     Ok(DataCenterInstance {
         object_model_code: "PARTED".to_string(),
         project_code: aios_mgr.db_option.project_code.to_string(),
-        instance_code: refno.name.to_string(),
+        instance_code: pe.name.to_string(),
         version: get_refno_latest_version(),
         attributes: data_center_attr,
     })

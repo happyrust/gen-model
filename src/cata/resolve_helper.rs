@@ -172,27 +172,27 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
                     //     }
                     // }
                     "LBOR" | "LEAWID" | "LEAHEI" => {
-                        let axis_map = interface.resolve_axis_params(target_refno, None)?;
-                        // dbg!(&target_att);
-                        let index = target_att.get_i32("LEAV").unwrap_or_default();
-                        let res = if index == 0 {
-                            target_att.get_f32("HBOR").unwrap_or_default()
-                        } else if axis_map.contains_key(&index) {
-                            let v = axis_map.get(&index).unwrap();
-                            if c1 == "LEAWID" {
-                                v.pwidth
-                            } else if c1 == "LEAHEI" {
-                                v.pheight
-                            } else if c1 == "LBOR" {
-                                v.pbore
-                            } else {
-                                return Err(anyhow!("{input_expr} not support."));
-                            }
-                        } else {
-                            return Err(anyhow!("{input_expr} not support."));
-                        };
-                        // dbg!(res);
-                        new_exp = new_exp.replace(s, res.to_string().as_str());
+                        // let axis_map = interface.resolve_axis_params(target_refno, None).await?;
+                        // // dbg!(&target_att);
+                        // let index = target_att.get_i32("LEAV").unwrap_or_default();
+                        // let res = if index == 0 {
+                        //     target_att.get_f32("HBOR").unwrap_or_default()
+                        // } else if axis_map.contains_key(&index) {
+                        //     let v = axis_map.get(&index).unwrap();
+                        //     if c1 == "LEAWID" {
+                        //         v.pwidth
+                        //     } else if c1 == "LEAHEI" {
+                        //         v.pheight
+                        //     } else if c1 == "LBOR" {
+                        //         v.pbore
+                        //     } else {
+                        //         return Err(anyhow!("{input_expr} not support."));
+                        //     }
+                        // } else {
+                        //     return Err(anyhow!("{input_expr} not support."));
+                        // };
+                        // // dbg!(res);
+                        // new_exp = new_exp.replace(s, res.to_string().as_str());
                     }
                     _ => {
                         // else if let Some(v) = context.get(c1) {

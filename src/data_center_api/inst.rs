@@ -84,7 +84,7 @@ pub async fn get_inst_equi_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -
                 value: AttrValue::AttrString(name.to_string()).into(),
             });
             let room_name = query_room_name_from_refno_aql(equi.refno, &database).await?.unwrap_or("".to_string());
-            let position = aios_mgr.get_world_transform(equi.refno)?;
+            let position = aios_mgr.get_world_transform(equi.refno).await?;
             attr.push(DataCenterAttr {
                 attribute_model_code: "COMP8".to_string(),
                 value: AttrValue::AttrString(room_name).into(),

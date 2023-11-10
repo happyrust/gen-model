@@ -41,7 +41,7 @@ pub async fn get_data_center_weld_attr(refno: PdmsElement, bran_name: &str, room
         value: AttrString("".to_string()).into(),
     };
     result.push(item_5);
-    let world_position = aios_mgr.get_world_transform(refno.refno).unwrap_or(None).unwrap_or_default();
+    let world_position = aios_mgr.get_world_transform_or_default(refno.refno).await;
     let item_5 = DataCenterAttr {
         attribute_model_code: "ITEMC5".to_string(),
         value: AttrVec3(world_position.translation).into(),
