@@ -79,7 +79,7 @@ num_enum = "0.7.0"
 jsonxf = "1.1.1"
 sea-orm = {version = "0.12.4", features = ["sqlx-all", "runtime-async-std"]}
 #surrealdb = { version = "1.0.0", features = ["kv-rocksdb"] }
-surrealdb = { path = "/Users/dongpengcheng/surreal_db/surrealdb/lib", features = ["kv-rocksdb"] }
+surrealdb = { path = "../surrealdb/lib", features = ["kv-rocksdb"] }
 async-once-cell = "0.5.3"
 #liquid-json = "0.6.0"
 #geo = "0.24.1"
