@@ -482,60 +482,9 @@ impl AiosDBManager {
     pub async fn init(db_option: &DbOption) -> anyhow::Result<Self> {
         let dir = db_option.project_path.to_string();
         let mut project_map = DashMap::new();
-        let mut local_attr_db_map = DashMap::new();
-        let mut local_children_db_map = DashMap::new();
         let db_option = Self::get_db_option()?;
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
-        // use heed::types::*;
-        // use heed::{Database, EnvOpenOptions};
-        let db_path = format!("{}.db", "mesh");
-        let config = sled::Config::default()
-            .path(db_path)
-            .mode(sled::Mode::HighThroughput)
-            .cache_capacity(10_000_000_000)
-            .flush_every_ms(Some(1000));
-        let db = config.open()?;
-        let local_mesh_db = db.open_tree("mesh")?;
-        let local_mesh_aabb_db = db.open_tree("aabb")?;
-
-        // let version_db = Surreal::new::<RocksDb>("versioned.sdb").await.unwrap();
-        // version_db.use_ns("ams").use_db("incr").await.unwrap();
-
         for project in &db_option.included_projects {
-            //redb 的实现
-            // if let Ok(db) = redb::Database::builder()
-            //     .set_cache_size(500 * 1024 * 1024)
-            //     .open(format!("{}.redb", project)) {
-            //     redb_map.entry(project.clone()).or_insert(Arc::new(db));
-            // }
-
-            // local_db_map
-            let db_path = format!("{}.db", project);
-            let config = sled::Config::default()
-                .path(db_path)
-                .mode(sled::Mode::HighThroughput)
-                .cache_capacity(10_000_000_000)
-                .flush_every_ms(Some(1000));
-            if let Ok(db) = config.open() {
-                local_attr_db_map
-                    .entry(project.clone())
-                    .or_insert(db.open_tree("attr_map")?);
-                local_children_db_map
-                    .entry(project.clone())
-                    .or_insert(db.open_tree("children")?);
-            }
-            // let env = EnvOpenOptions::new()
-            //     .map_size(10 * 1024 * 1024 * 1024) // 10G 的映射大小
-            //     .max_dbs(3000)
-            //     .open(db_path)?;
-            // let mut rtxn = env.read_txn()?;
-            // if let Some(db) = env.open_database::<U64<BE>, ByteSlice>(&rtxn, Some("att"))?{
-            //     println!("加载本地db={}", project);
-            //     local_db_map.entry(project.clone()).or_insert((Arc::new(env.clone()), Arc::new(db)));
-            // }
-
-            // heed 的实现
-
             if db_option.use_tidb.unwrap_or(false) {
                 let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
                 match project_pool {
@@ -550,15 +499,6 @@ impl AiosDBManager {
                 println!("正在创建数据库连接 {project}");
             }
         }
-        // let info_conn = AiosDBManager::get_db_pool(
-        //     &default_conn,
-        //     &format!(
-        //         "{}_{}",
-        //         PDMS_INFO_DB,
-        //         &db_option.project_name.to_uppercase()
-        //     ),
-        // ).await?;
-        // let ref0_projects = get_ref0_projects(&info_conn).await?;
         let projects = db_option.included_projects.clone();
         println!("正在创建图数据库连接");
         let arango_pool = connect_arangodb(&db_option).await?;
@@ -569,13 +509,6 @@ impl AiosDBManager {
 
         Ok(Self {
             project_map,
-            // version_db,
-            local_attr_db_map,
-            local_children_db_map,
-            local_mesh_db,
-            local_mesh_aabb_db,
-            // ref0_projects,
-            // info_pool: info_conn,
             projects,
             needed_parse_files: None,
             project_path: dir,
@@ -628,17 +561,6 @@ impl AiosDBManager {
         self.project_map.get(self.get_cur_project()).map(|x| x.value().clone())
     }
 
-    /// 根据project获取连接池
-    #[inline]
-    pub fn get_cur_attmap_tree(&self) -> Option<sled::Tree> {
-        self.local_attr_db_map.get(self.get_cur_project()).map(|x| x.value().clone())
-    }
-
-    /// 根据project获取连接池
-    #[inline]
-    pub fn get_cur_children_tree(&self) -> Option<sled::Tree> {
-        self.local_children_db_map.get(self.get_cur_project()).map(|x| x.value().clone())
-    }
 
     ///获得project 的db
     #[inline]

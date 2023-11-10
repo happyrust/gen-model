@@ -69,29 +69,6 @@ pub struct AiosDBManager {
     //不同project的连接池子
     pub project_map: DashMap<String, Pool<MySql>>,
 
-    // pub local_db_map: DashMap<String, Arc<redb::Database>>,
-
-    // heed
-    // pub local_db_map: DashMap<String, (Arc<heed::Env>, Arc<heed::Database<U64<BE>, ByteSlice>>) >,
-
-    // pub version_db: Surreal<surrealdb::engine::local::Db>,
-
-    //sled
-    ///本地缓存的atrr数据
-    pub local_attr_db_map: DashMap<String, sled::Tree>,
-
-    ///本地缓存的children数据
-    pub local_children_db_map: DashMap<String, sled::Tree>,
-
-    ///本地缓存的mesh数据
-    pub local_mesh_db: sled::Tree,
-
-    pub local_mesh_aabb_db: sled::Tree,
-
-    // pub ref0_projects: DashMap<u32, Vec<String>>,
-
-    // pub info_pool: Pool<MySql>,
-
     pub projects: Vec<String>,
 
     pub needed_parse_files: Option<Vec<String>>,
@@ -106,7 +83,6 @@ pub struct AiosDBManager {
 
     pub cached_world_transforms_map: Arc<DashMap<RefU64, bevy_transform::prelude::Transform>>,
 
-    // pub mdb_dbnums: BTreeSet<i32>,
     pub watcher: Arc<PdmsWatcher>,
 
     ///所有元素的tree
@@ -217,45 +193,37 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     fn get_mesh_from_localdb(&self, geo_hash: u64) -> anyhow::Result<PlantMesh> {
-        let k = geo_hash.to_be_bytes();
-        if let Some(bytes) = self.local_mesh_db.get(&k)? {
-            return PlantMesh::from_compress_bytes(bytes.as_ref());
-        }
         Err(anyhow::anyhow!(format!("{geo_hash} mesh not exist")))
     }
 
     fn get_mesh_aabb_from_localdb(&self, geo_hash: u64) -> anyhow::Result<Aabb> {
-        let k = geo_hash.to_be_bytes();
-        if let Some(bytes) = self.local_mesh_aabb_db.get(&k)? {
-            return Aabb::from_bytes(bytes.as_ref());
-        }
         Err(anyhow::anyhow!(format!("{geo_hash} aabb not exist.")))
     }
 
     /// 从本地数据库获得最全的数据
     fn get_attr_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<AttrMap> {
-        if let Some(db) = self.local_attr_db_map.get(project) {
-            let k = refno.0.to_be_bytes();
-            if let Ok(Some(bytes)) = db.get(k.as_slice()) {
-                let mut att_map = AttrMap::from_rkvy_compress_bytes(bytes.as_ref())?;
-                if let Some(desp) = att_map.get_f32_vec("DESP") {
-                    let unpars = att_map.get_i32_vec("UNIPAR").unwrap_or_default();
-                    //ddesp 和 wdesp 的处理
-                    let ddesp = desp
-                        .iter()
-                        .zip(unpars.clone())
-                        .map(|(x, f)| if f == WORD_HASH as i32 { 0.0 } else { *x })
-                        .collect::<Vec<f64>>();
-                    let wdesp = desp.iter()
-                        .zip(unpars)
-                        .map(|(x, f)| if f == WORD_HASH as i32 { db1_dehash(*x as u32) } else { "".to_string() })
-                        .collect::<Vec<String>>();
-                    att_map.insert(db1_hash("WDES"), StringArrayType(wdesp));
-                    att_map.insert(db1_hash("DDES"), DoubleArrayType(ddesp));
-                }
-                return Ok(att_map);
-            }
-        }
+        // if let Some(db) = self.local_attr_db_map.get(project) {
+        //     let k = refno.0.to_be_bytes();
+        //     if let Ok(Some(bytes)) = db.get(k.as_slice()) {
+        //         let mut att_map = AttrMap::from_rkvy_compress_bytes(bytes.as_ref())?;
+        //         if let Some(desp) = att_map.get_f32_vec("DESP") {
+        //             let unpars = att_map.get_i32_vec("UNIPAR").unwrap_or_default();
+        //             //ddesp 和 wdesp 的处理
+        //             let ddesp = desp
+        //                 .iter()
+        //                 .zip(unpars.clone())
+        //                 .map(|(x, f)| if f == WORD_HASH as i32 { 0.0 } else { *x })
+        //                 .collect::<Vec<f64>>();
+        //             let wdesp = desp.iter()
+        //                 .zip(unpars)
+        //                 .map(|(x, f)| if f == WORD_HASH as i32 { db1_dehash(*x as u32) } else { "".to_string() })
+        //                 .collect::<Vec<String>>();
+        //             att_map.insert(db1_hash("WDES"), StringArrayType(wdesp));
+        //             att_map.insert(db1_hash("DDES"), DoubleArrayType(ddesp));
+        //         }
+        //         return Ok(att_map);
+        //     }
+        // }
         Err(anyhow::anyhow!(format!("{refno} att not exist")))
     }
 
@@ -264,12 +232,12 @@ impl PdmsDataInterface for AiosDBManager {
         refno: RefU64,
         project: &str,
     ) -> anyhow::Result<RefU64Vec> {
-        if let Some(db) = self.local_children_db_map.get(project) {
-            let k = refno.0.to_be_bytes();
-            if let Ok(Some(bytes)) = db.get(k.as_slice()) {
-                return RefU64Vec::from_bytes(bytes.as_ref());
-            }
-        }
+        // if let Some(db) = self.local_children_db_map.get(project) {
+        //     let k = refno.0.to_be_bytes();
+        //     if let Ok(Some(bytes)) = db.get(k.as_slice()) {
+        //         return RefU64Vec::from_bytes(bytes.as_ref());
+        //     }
+        // }
         Err(anyhow::anyhow!(format!(
             "{refno} att not exist in {project}"
         )))
