@@ -1,6 +1,6 @@
 use std::default;
 use std::f32::consts::PI;
-use std::f32::EPSILON;
+use crate::surreal_service;
 use std::vec::Vec;
 use aios_core::AttrMap;
 use aios_core::parsed_data::{CateProfileParam, CateGeomsInfo};
@@ -34,30 +34,31 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                                                        interface: &T, ) -> anyhow::Result<bool> {
     let geoms = &geom_info.geometries;
     if geoms.len() == 0 { return Ok(false); }
-    let type_name = att.get_type();
+    let type_name = att.get_type_str();
     let mut plax = Vec3::Z;
     let mut extrude_dir = Vec3::Z;
     let mut drns = att.get_vec3("DRNS").unwrap_or_default().normalize();
     let mut drne = att.get_vec3("DRNE").unwrap_or_default().normalize();
     let parent_refno = att.get_owner();
     let mut spine_paths = if type_name == "GENSEC" || type_name == "WALL" {
-        let children_refs = interface.get_children_from_localdb(refno)?;
+        // let children_refs = interface.get_children_from_localdb(refno)?;
+        let children_refs = surreal_service::get_children_refnos(refno).await.unwrap_or_default();
         let mut paths = vec![];
         for x in children_refs.iter() {
-
-            let type_name = interface.get_type_name(*x);
+            let type_name = interface.get_type_name(*x).await;
             if type_name != "SPINE" {
                 continue;
             }
-            let spine_att = interface.get_attr_from_localdb(*x)?;
+            let spine_att = surreal_service::get_named_attmap(*x).await?;
             drns = spine_att.get_vec3("DRNS").unwrap_or_default();
             drne = spine_att.get_vec3("DRNE").unwrap_or_default();
-            let ch_refs = interface.get_children_from_localdb(*x)?;
+            // let ch_refs = interface.get_children_from_localdb(*x)?;
+            let ch_refs = surreal_service::get_children_refnos(*x).await.unwrap_or_default();
             if (ch_refs.len() - 1) % 2 == 0 {
                 for i in 0..(ch_refs.len() - 1) / 2 {
-                    let att1: AttrMap = interface.get_attr_from_localdb(ch_refs[2 * i])?;
-                    let att2 = interface.get_attr_from_localdb(ch_refs[2 * i + 1])?;
-                    let att3 = interface.get_attr_from_localdb(ch_refs[2 * i + 2])?;
+                    let att1 = surreal_service::get_named_attmap(ch_refs[2 * i]).await?;
+                    let att2 = surreal_service::get_named_attmap(ch_refs[2 * i + 1]).await?;
+                    let att3 = surreal_service::get_named_attmap(ch_refs[2 * i + 2]).await?;
                     let pt0 = att1.get_position().unwrap_or_default();
                     let pt1 = att3.get_position().unwrap_or_default();
                     let mid_pt = att2.get_position().unwrap_or_default();
@@ -79,11 +80,11 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                     });
                 }
             } else if ch_refs.len() == 2 {
-                let att1: AttrMap = interface.get_attr_from_localdb(ch_refs[0])?;
-                let att2 = interface.get_attr_from_localdb(ch_refs[1])?;
+                let att1 = surreal_service::get_named_attmap(ch_refs[0]).await?;
+                let att2 = surreal_service::get_named_attmap(ch_refs[1]).await?;
                 let pt0 = att1.get_position().unwrap_or_default();
                 let pt1 = att2.get_position().unwrap_or_default();
-                if att1.get_type() == "POINSP" && att2.get_type() == "POINSP" {
+                if att1.get_type_str() == "POINSP" && att2.get_type_str() == "POINSP" {
                     paths.push(Spine3D {
                         pt0,
                         pt1,

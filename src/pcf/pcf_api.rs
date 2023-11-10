@@ -52,7 +52,7 @@ pub async fn gen_node_basic_data(refno: RefU64, mut data: &mut Vec<u8>, mut mate
     let attr = query_attr(refno, &aios_mgr, None).await;
     if attr.is_err() { return false; }
     let attr = attr.unwrap();
-    let type_name = attr.get_type();
+    let type_name = attr.get_type_str();
     if !PCF_NODES.contains(type_name) { return false; }
     if !["ATTA", "TEE"].contains(&type_name) { // TEE 需要做特殊处理
         data.append(&mut gen_type_name_data(type_name));

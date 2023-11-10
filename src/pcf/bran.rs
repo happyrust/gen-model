@@ -24,6 +24,7 @@ use crate::pcf::pcf_api::{create_end_position_null_data, create_pipeline_href_da
 use crate::pcf::tee::gen_tee_data;
 use crate::pcf::tubi::gen_tubi_data;
 use crate::pcf::valv::gen_valv_data;
+use crate::surreal_service;
 
 fn gen_pcf_file_head() -> String {
     "ISOGEN-FILES            ISOGEN.FLS
@@ -41,8 +42,9 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
     data.append(&mut gen_pcf_file_head().into_bytes());
     let pool = aios_mgr.project_map.get(&aios_mgr.db_option.project_name).unwrap();
     let database = aios_mgr.get_arango_db().await?;
-    let bran_attr = query_attr(refno, &aios_mgr, None).await?;
-    let bran_name = bran_attr.get_name_string();
+    // let bran_attr = query_attr(refno, &aios_mgr, None).await?;
+    let bran_attr = surreal_service::get_named_attmap(refno).await?;
+    let bran_name = bran_attr.get_name_or_default();
 
     // 先把 pipe_thickness 算好，需要的直接放进去就好了
     let pipe_refno = aios_mgr.get_owner(refno);
@@ -109,7 +111,7 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
 pub async fn gen_bran_pipeline_reference_data(attr: &AttrMap, start_position: Vec3, pool: &Pool<MySql>,
                                               pipe_thickness_data: &Vec<u8>,pipe_temp:f64) -> Vec<u8> {
     let mut data = vec![];
-    let name = attr.get_name_string();
+    let name = attr.get_name_or_default();
     data.append(&mut gen_pipeline_reference_data_str_head(name.as_str()));
     data.append(&mut gen_start_co_ords_data(start_position));
     data.append(&mut create_temperature_data(pipe_temp));

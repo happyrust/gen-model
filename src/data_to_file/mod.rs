@@ -73,44 +73,6 @@ impl OldDataPage {
         result.splice(0..value.len(), value);
         result
     }
-
-    /// 将 attr_map 还原成 bytes，暂时不考虑有children的情况
-    pub fn from_attr_map(refno:RefU64,attr_map: AttrMap, info_map: DashMap<i32, DashMap<i32, AttrInfo>>) -> Option<Self> {
-        let mut implicit_map = BTreeMap::new(); // 隐式属性需要根据offset排序
-        let mut explicit_map = AttrMap::default();
-        let att_type = attr_map.get_type();
-        // 将attr_map 分为显示和隐式两部分
-        let noun_info_map = info_map.get(&(db1_hash(att_type) as i32));
-        if noun_info_map.is_none() { return None; }
-        let noun_info_map = noun_info_map.unwrap();
-        for (noun_hash, info) in noun_info_map.clone().into_iter() {
-            let noun_hash = (noun_hash as u32);
-            if ATT_BYTES_SET.contains(&noun_hash) { continue; }
-            if let Some(val) = attr_map.map.get(&noun_hash) {
-                if info.offset == 0 {
-                    explicit_map.insert(noun_hash, val.clone());
-                } else {
-                    implicit_map.insert(info.offset, (noun_hash, val.clone()));
-                }
-            } else {
-                // 隐式属性为空时，保存默认值，显示属性不管
-                if info.offset != 0 {
-                    implicit_map.insert(info.offset, (noun_hash, info.default_val.clone()));
-                }
-            }
-        }
-        // 将分类好的属性转换成bytes
-        let implicit_bytes = convert_new_node_data_implicit(implicit_map, false);
-        let explicit_bytes = convert_new_node_data_explicit(refno,explicit_map, false);
-        // 给显示属性加上 01和长度，隐式属性前面还有值需要添加，所有不加长度
-        let mut explicit_len = vec![0u8, 1];
-        explicit_len = [explicit_len, ((explicit_bytes.len() / 4 + 1) as u16).to_be_bytes().to_vec()].concat();
-        Some(Self {
-            implicit_data: implicit_bytes,
-            children: vec![],
-            explicit_data: [explicit_len, explicit_bytes].concat(),
-        })
-    }
 }
 
 /// 从pdms文件中，获得 pdms 最新的 page_no

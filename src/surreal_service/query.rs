@@ -9,10 +9,38 @@ pub async fn get_pe(refno: RefU64) -> anyhow::Result<Option<pdms_element::Model>
         .query(include_str!("../../schemas/query_pe_by_refno.surql"))
         .bind(("refno", refno.to_string()))
         .await?;
-    // dbg!(&response);
     let pe: Option<pdms_element::Model> = response.take(0)?;
-    // dbg!(&pe);
     Ok(pe)
+}
+
+///查询到祖先节点列表
+pub async fn get_ancestor(refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
+    let mut response = SUL_DB
+        .query(include_str!("../../schemas/query_ancestor_by_refno.surql"))
+        .bind(("refno", refno.to_string()))
+        .await?;
+    let s = response.take::<Vec<String>>(1)?;
+    Ok(s.into_iter().map(|s| s.as_str().into()).collect())
+}
+
+pub async fn get_ancestor_attmaps(refno: RefU64) -> anyhow::Result<Vec<NamedAttrMap>> {
+    let mut response = SUL_DB
+        .query(include_str!("../../schemas/query_ancestor_attmaps_by_refno.surql"))
+        .bind(("refno", refno.to_string()))
+        .await?;
+    let o: SurlValue = response.take(1)?;
+    let os: Vec<SurlValue> = o.try_into().unwrap();
+    let named_attmaps: Vec<NamedAttrMap> = os.into_iter().map(|x| x.into()).collect();
+    Ok(named_attmaps)
+}
+
+pub async fn get_type_name(refno: RefU64) -> anyhow::Result<String> {
+    let mut response = SUL_DB
+        .query(r#"return (select value noun from only (type::thing("pe", $refno)));"#)
+        .bind(("refno", refno.to_string()))
+        .await?;
+    let type_name: Option<String> = response.take(0)?;
+    Ok(type_name.unwrap_or_default())
 }
 
 ///通过surql查询属性数据
@@ -33,9 +61,8 @@ pub async fn get_children_named_attmaps(refno: RefU64) -> anyhow::Result<Vec<Nam
         .await?;
     let o: SurlValue = response.take(0)?;
     let os: Vec<SurlValue> = o.try_into().unwrap();
-    // dbg!(os.len());
-    let named_attmap: Vec<NamedAttrMap> = os.into_iter().map(|x| x.into()).collect();
-    Ok(named_attmap)
+    let named_attmaps: Vec<NamedAttrMap> = os.into_iter().map(|x| x.into()).collect();
+    Ok(named_attmaps)
 }
 
 

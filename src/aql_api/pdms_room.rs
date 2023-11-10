@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use aios_core::options::DbOption;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::arangodb::ArDatabase;
+use crate::surreal_service;
 
 macro_rules! find_f32_min_value {
     ($collection:expr, $field:ident) => {
@@ -869,33 +870,34 @@ impl AiosDBManager {
         refnos: &[RefU64],
         geo_type_filter: Option<&[GeoBasicType]>,
     ) -> anyhow::Result<HashMap<RefU64, (RefU64, RefU64)>> {
-        let through_children_map: HashMap<RefU64, Vec<RefU64>> = refnos
-            .into_iter()
-            .map(|x| {
-                (*x, {
-                    let children = self.get_children_from_localdb(*x).unwrap_or_default();
-                    if children.is_empty() {
-                        vec![*x]
-                    } else {
-                        children.0
-                    }
-                })
-            })
-            .collect();
-        let mut res_map = HashMap::new();
-        for (through_refno, children) in through_children_map {
-            if let Ok(mut result) = self
-                .query_ele_own_room_panels(&children, Some(through_refno), geo_type_filter)
-                .await
-            {
-                for (k, mut v) in result {
-                    let r1 = v.pop().unwrap_or_default();
-                    let r0 = v.pop().unwrap_or_default();
-                    res_map.insert(k, (r0, r1));
-                }
-            }
-        }
-        Ok(res_map)
+        // let through_children_map: HashMap<RefU64, Vec<RefU64>> = refnos
+        //     .into_iter()
+        //     .map(|x| {
+        //         (*x, {
+        //             let children = surreal_service::get_children_refnos(*x).unwrap_or_default();
+        //             if children.is_empty() {
+        //                 vec![*x]
+        //             } else {
+        //                 children.0
+        //             }
+        //         })
+        //     })
+        //     .collect();
+        // let mut res_map = HashMap::new();
+        // for (through_refno, children) in through_children_map {
+        //     if let Ok(mut result) = self
+        //         .query_ele_own_room_panels(&children, Some(through_refno), geo_type_filter)
+        //         .await
+        //     {
+        //         for (k, mut v) in result {
+        //             let r1 = v.pop().unwrap_or_default();
+        //             let r0 = v.pop().unwrap_or_default();
+        //             res_map.insert(k, (r0, r1));
+        //         }
+        //     }
+        // }
+        // Ok(res_map)
+        Ok(Default::default())
     }
 
     ///返回批量参考号的关键点和包围盒
@@ -1270,9 +1272,11 @@ impl AiosDBManager {
         // 过滤房间周围的物项
         // for room in room_transform {
         let Some(rtree) = &self.rtree else { return Ok(None); };
+        //rtree 直接把类型信息带入进去
+        //todo fix
         let floors = rtree
             .locate_intersecting_bounds(&aabb)
-            .filter(|x| self.get_type_name(x.0) == "FLOOR")
+            // .filter(|x| self.get_type_name(x.0) == "FLOOR")
             .collect::<Vec<_>>();
         let floor_refnos = floors.iter().map(|x| x.0).collect::<Vec<_>>();
         // 查询 floor 的 mesh
@@ -1327,7 +1331,7 @@ impl AiosDBManager {
         //         .filter(|x| self.get_type_name(*x) == "PLOO")
         //         .collect::<Vec<_>>();
         //     if ploo.is_empty() { continue; };
-        //     let Ok(ploo_attr) = self.get_attr_from_localdb(ploo[0]) else { continue; };
+        //     let Ok(ploo_attr) = surreal_service::get_named_attmap(ploo[0]) else { continue; };
         //     let Some(AttrVal::DoubleType(height)) = ploo_attr.get_val("HEIG") else { continue; };
         //     let result = ((distance - *height as f32) * 100.0).round() / 100.0;
         //     if result < 0.0 { continue; };
@@ -1361,7 +1365,7 @@ impl AiosDBManager {
         own_filter_types: &[&str],
         intersect_method: IntersectMethod,
     ) -> anyhow::Result<Vec<SpatialQueryResult>> {
-        let mut children_refnos = self.get_children_from_localdb(refno)?;
+        let mut children_refnos = surreal_service::get_children_refnos(refno).await?;
         let mut result: Vec<SpatialQueryResult> = Vec::new();
         for r in children_refnos {
             let around = self
@@ -1479,18 +1483,20 @@ impl AiosDBManager {
                 whole_aabb.tighten(s);
             }
         }
+
+        //todo fix
         let mut intersects = if is_aabb {
             rtree
                 .locate_intersecting_bounds(&whole_aabb)
                 .filter(|x| x.0 != refno)
                 .filter(|x| {
                     filter_types.is_empty()
-                        || filter_types.contains(&self.get_type_name(x.0).as_str())
+                        // || filter_types.contains(&self.get_type_name(x.0))
                 })
                 .filter(|x| {
                     own_filter_types.is_empty()
-                        || own_filter_types
-                        .contains(&self.get_type_name(self.get_owner(x.0)).as_str())
+                        // || own_filter_types
+                        // .contains(&self.get_type_name(self.get_owner(x.0)).as_str())
                 })
                 .map(|(refno, bbox)| SpatialQueryResult {
                     refno,
@@ -1509,12 +1515,12 @@ impl AiosDBManager {
                 .filter(|x| x.0 != refno)
                 .filter(|x| {
                     filter_types.is_empty()
-                        || filter_types.contains(&self.get_type_name(x.0).as_str())
+                        // || filter_types.contains(&self.get_type_name(x.0))
                 })
                 .filter(|x| {
                     own_filter_types.is_empty()
-                        || own_filter_types
-                        .contains(&self.get_type_name(self.get_owner(x.0)).as_str())
+                        // || own_filter_types
+                        // .contains(&self.get_type_name(self.get_owner(x.0)).as_str())
                 })
                 .map(|(refno, bbox)| SpatialQueryResult {
                     refno,

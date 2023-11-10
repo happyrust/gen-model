@@ -39,7 +39,7 @@ pub fn resolve_axis_params<T: PdmsDataInterface>(
         // if scom.axis_params[i].direction.is_empty() {
         //     dbg!(&scom.axis_params[i]);
         //     let refno = scom.axis_params[i].refno;
-        //     let att = interface.get_attr_from_localdb(refno).unwrap_or_default();
+        //     let att = surreal_service::get_named_attmap(refno).await.unwrap_or_default();
         //     dbg!(att);
         // }
         let axis = resolve_axis_param(&scom.axis_params[i], scom, context, Some(interface));

@@ -19,7 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::{mem, panic};
 use tokio::runtime::Runtime;
-
+use crate::surreal_service;
 use super::resolve::CataContext;
 
 #[test]
@@ -142,66 +142,68 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
             let c2 = caps.get(2).map_or("", |m| m.as_str());
             let refno_str = context.get("RS_DES_REFNO").unwrap().as_str();
             let refno = RefU64::from_refno_str(refno_str)?;
-            let target_refno = match c2 {
-                "PREV" => interface.get_prev(refno)?,
-                "NEXT" => interface.get_next(refno)?,
-                refno_str => {
-                    RefU64::from_str(refno_str).map_err(|_| anyhow!("wrong refno in of expr"))?
-                }
-            };
-            let target_att = interface.get_attr_from_localdb(target_refno)?;
+            // let target_refno = match c2 {
+            //     "PREV" => interface.get_prev(refno)?,
+            //     "NEXT" => interface.get_next(refno)?,
+            //     refno_str => {
+            //         RefU64::from_str(refno_str).map_err(|_| anyhow!("wrong refno in of expr"))?
+            //     }
+            // };
+            // let target_att = surreal_service::get_named_attmap(target_refno).await?;
 
             // dbg!(&target_refno);
-            if let Some(value) = target_att.get_as_string(c1) {
-                new_exp = new_exp.replace(s, value.as_str());
-            } else {
-                match c1 {
-                    // "ABOR" | "ARRWID" | "ARRHEI" => {
-                    //     let axis_map = interface.resolve_axis_params(target_refno)?;
-                    //     let index = target_att.get_i32("LEAV").unwrap_or_default();
-                    //     if axis_map.contains_key(&index) {
-                    //         let v = axis_map.get(&index).unwrap();
-                    //         if c1 == "ARRWID" {
-                    //             new_exp = new_exp.replace(s, v.pwidth.to_string().as_str());
-                    //         }else if c1 == "ARRHEI"{
-                    //             new_exp = new_exp.replace(s, v.pheight.to_string().as_str());
-                    //         }else if c1 == "ABOR"{
-                    //             new_exp = new_exp.replace(s, v.pbore.to_string().as_str());
-                    //         }
-                    //         dbg!(&new_exp);
-                    //     }
-                    // }
-                    "LBOR" | "LEAWID" | "LEAHEI" => {
-                        // let axis_map = interface.resolve_axis_params(target_refno, None).await?;
-                        // // dbg!(&target_att);
-                        // let index = target_att.get_i32("LEAV").unwrap_or_default();
-                        // let res = if index == 0 {
-                        //     target_att.get_f32("HBOR").unwrap_or_default()
-                        // } else if axis_map.contains_key(&index) {
-                        //     let v = axis_map.get(&index).unwrap();
-                        //     if c1 == "LEAWID" {
-                        //         v.pwidth
-                        //     } else if c1 == "LEAHEI" {
-                        //         v.pheight
-                        //     } else if c1 == "LBOR" {
-                        //         v.pbore
-                        //     } else {
-                        //         return Err(anyhow!("{input_expr} not support."));
-                        //     }
-                        // } else {
-                        //     return Err(anyhow!("{input_expr} not support."));
-                        // };
-                        // // dbg!(res);
-                        // new_exp = new_exp.replace(s, res.to_string().as_str());
-                    }
-                    _ => {
-                        // else if let Some(v) = context.get(c1) {
-                        //     new_exp = new_exp.replace(s, v.as_str());
-                        //     dbg!(&new_exp);
-                        // }else
-                    }
-                }
-            }
+            // if let Some(value) = target_att.get_as_string(c1) {
+            //     new_exp = new_exp.replace(s, value.as_str());
+            // } else {
+            //     match c1 {
+            //         // "ABOR" | "ARRWID" | "ARRHEI" => {
+            //         //     let axis_map = interface.resolve_axis_params(target_refno)?;
+            //         //     let index = target_att.get_i32("LEAV").unwrap_or_default();
+            //         //     if axis_map.contains_key(&index) {
+            //         //         let v = axis_map.get(&index).unwrap();
+            //         //         if c1 == "ARRWID" {
+            //         //             new_exp = new_exp.replace(s, v.pwidth.to_string().as_str());
+            //         //         }else if c1 == "ARRHEI"{
+            //         //             new_exp = new_exp.replace(s, v.pheight.to_string().as_str());
+            //         //         }else if c1 == "ABOR"{
+            //         //             new_exp = new_exp.replace(s, v.pbore.to_string().as_str());
+            //         //         }
+            //         //         dbg!(&new_exp);
+            //         //     }
+            //         // }
+            //         "LBOR" | "LEAWID" | "LEAHEI" => {
+            //             // let axis_map = interface.resolve_axis_params(target_refno, None).await?;
+            //             // // dbg!(&target_att);
+            //             // let index = target_att.get_i32("LEAV").unwrap_or_default();
+            //             // let res = if index == 0 {
+            //             //     target_att.get_f32("HBOR").unwrap_or_default()
+            //             // } else if axis_map.contains_key(&index) {
+            //             //     let v = axis_map.get(&index).unwrap();
+            //             //     if c1 == "LEAWID" {
+            //             //         v.pwidth
+            //             //     } else if c1 == "LEAHEI" {
+            //             //         v.pheight
+            //             //     } else if c1 == "LBOR" {
+            //             //         v.pbore
+            //             //     } else {
+            //             //         return Err(anyhow!("{input_expr} not support."));
+            //             //     }
+            //             // } else {
+            //             //     return Err(anyhow!("{input_expr} not support."));
+            //             // };
+            //             // // dbg!(res);
+            //             // new_exp = new_exp.replace(s, res.to_string().as_str());
+            //         }
+            //         _ => {
+            //             // else if let Some(v) = context.get(c1) {
+            //             //     new_exp = new_exp.replace(s, v.as_str());
+            //             //     dbg!(&new_exp);
+            //             // }else
+            //         }
+            //     }
+            // }
+            //
+
         }
     }
 
@@ -415,7 +417,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
                 // println!("计算后表达式 : {}", &result_string);
                 // let refno_str = context.get("RS_CATR_REFNO").unwrap().as_str();
                 // let refno = RefU64::from_refno_str(refno_str)?;
-                // dbg!(interface.unwrap().get_attr_from_localdb(refno).unwrap());
+                // dbg!(interface.unwrap().surreal_service::get_named_attmap(refno).await.unwrap());
                 Err(anyhow::anyhow!(format!("求解失败 {}", &input_expr)))
             };
         }

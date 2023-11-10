@@ -30,31 +30,14 @@ pub trait PdmsDataInterface: Send + Sync {
     }
 
     ///获得属性
-    async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
+    async fn get_attr(&self, refno: RefU64) -> anyhow::Result<NamedAttrMap>;
 
     ///获得参考号类型
-    fn get_type_name(&self, refno: RefU64) -> String;
+    async fn get_type_name(&self, refno: RefU64) -> String;
 
-    fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64>;
+    async fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64>;
 
-    fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64>;
-
-    ///从本地获取属性数据
-    fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
-
-    fn get_full_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
-
-    /// 获取attrmap转换为NamedAttrMap
-    fn get_named_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<NamedAttrMap>;
-
-    ///从本地获取children
-    fn get_children_from_localdb(&self, refno: RefU64) -> anyhow::Result<RefU64Vec>;
-
-    ///从本地获取mesh属性数据
-    fn get_mesh_from_localdb(&self, geo_hash: u64) -> anyhow::Result<PlantMesh>;
-
-    ///从本地获取mesh aabb属性数据
-    fn get_mesh_aabb_from_localdb(&self, geo_hash: u64) -> anyhow::Result<Aabb>;
+    async fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64>;
 
     fn get_attr_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<AttrMap>;
 
@@ -65,7 +48,7 @@ pub trait PdmsDataInterface: Send + Sync {
     ) -> anyhow::Result<RefU64Vec>;
 
     ///获得包含UDA的属性
-    async fn get_attr_with_uda(&self, refno: RefU64) -> anyhow::Result<AttrMap>;
+    async fn get_attr_with_uda(&self, refno: RefU64) -> anyhow::Result<NamedAttrMap>;
 
     ///获得参考号的Owner
     fn get_owner(&self, refno: RefU64) -> RefU64;
@@ -128,10 +111,7 @@ pub trait PdmsDataInterface: Send + Sync {
 
     async fn get_children_nodes(&self, refno: RefU64) -> anyhow::Result<Vec<EleTreeNode>>;
 
-    ///获得子节点的属性集合
-    fn get_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>>;
-
-    ///获得子节点的refno集合
+     ///获得子节点的refno集合
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec>;
 
     async fn get_name(&self, refno: RefU64) -> anyhow::Result<String>;
@@ -153,10 +133,7 @@ pub trait PdmsDataInterface: Send + Sync {
     ///获得refno的祖先参考号
     fn get_ancestors_refnos(&self, refno: RefU64) -> Vec<RefU64>;
 
-    ///获得refno的祖先参考号, 排除world
-    fn get_ancestors_refnos_without_world(&self, refno: RefU64) -> Vec<RefU64>;
-
-    ///查询指定参考号下哪些有负实体的参考号
+      ///查询指定参考号下哪些有负实体的参考号
     async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>>;
 
     ///查询指定参考号下负实体和正实体的集合
@@ -196,7 +173,7 @@ pub trait PdmsDataInterface: Send + Sync {
         &self,
         refno: RefU64,
         nouns: &[&str],
-    ) -> anyhow::Result<Vec<AttrMap>>;
+    ) -> anyhow::Result<Vec<NamedAttrMap>>;
 
     /*******  几何相关算法    ********/
 
@@ -213,22 +190,22 @@ pub trait PdmsDataInterface: Send + Sync {
     ) -> anyhow::Result<Vec<RefU64>>;
 
     ///获得spline的路径，包括直线路径，圆弧路径
-    fn get_spline_path(&self, refno: RefU64) -> anyhow::Result<Vec<Spine3D>>;
+    async fn get_spline_path(&self, refno: RefU64) -> anyhow::Result<Vec<Spine3D>>;
 
     //元件库常用的方法
-    fn get_foreign_refno(&self, refno: RefU64, foreign: &str) -> Option<RefU64>;
+    async fn get_foreign_refno(&self, refno: RefU64, foreign: &str) -> Option<RefU64>;
 
-    fn get_foreign_attrmap(&self, refno: RefU64, foreign: &str) -> Option<AttrMap>;
+    async fn get_foreign_attrmap(&self, refno: RefU64, foreign: &str) -> Option<NamedAttrMap>;
 
-    fn get_spre_ref(&self, refno: RefU64) -> Option<RefU64>;
+    async fn get_spre_ref(&self, refno: RefU64) -> Option<RefU64>;
 
-    fn get_cat_ref(&self, refno: RefU64) -> Option<RefU64>;
+    async fn get_cat_ref(&self, refno: RefU64) -> Option<RefU64>;
 
-    fn get_cat_attmap(&self, refno: RefU64) -> Option<AttrMap>;
+    async fn get_cat_attmap(&self, refno: RefU64) -> Option<NamedAttrMap>;
 
-    fn query_gm_params(&self, refno: RefU64) -> anyhow::Result<Vec<GmParam>>;
+    async fn query_gm_params(&self, refno: RefU64) -> anyhow::Result<Vec<GmParam>>;
 
-    fn get_or_create_scom_info(&self, cata_refno: RefU64) -> anyhow::Result<ScomInfo>;
+    async fn get_or_create_scom_info(&self, cata_refno: RefU64) -> anyhow::Result<ScomInfo>;
 
     async fn get_or_create_cata_context(&self, desi_refno: RefU64,
                                         extra_axis_map: Option<&BTreeMap<i32, CateAxisParam>>) -> anyhow::Result<CataContext>;

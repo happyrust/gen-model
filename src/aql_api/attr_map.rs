@@ -25,6 +25,7 @@ use std::str::FromStr;
 use aios_core::NamedAttrValue;
 use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
 use crate::graph_db::structs::{PdmsEleEdge, PdmsEleData, PdmsMdbEdge};
+use crate::surreal_service;
 
 pub type IndexNamedAttMap = IndexMap<String, NamedAttrValue>;
 
@@ -63,63 +64,79 @@ impl AiosDBManager {
         noun_filter: impl IntoIterator<Item=&str>,
         get_children: bool,
     ) -> anyhow::Result<Vec<IndexNamedAttMap>> {
-        let att_names_vec = att_names.into_iter().collect::<Vec<&str>>();
-        let mut contains_trans = att_names_vec.iter().any(|&x| x == "W_POS" || x == "W_ORI");
-        let filter_set = noun_filter.into_iter().collect::<HashSet<_>>();
-        let mut result = vec![];
-        let target_refnos: Vec<RefU64> = if get_children {
-            refnos
-                .into_iter()
-                .map(|x| self.get_children_from_localdb(*x).unwrap_or_default().0)
-                .flatten()
-                .filter(|x| filter_set.is_empty() ||
-                    filter_set.contains(&self.get_type_name(*x).as_str())
-                )
-                .collect::<Vec<_>>()
-        } else {
-            refnos.into_iter().cloned().filter(|x| filter_set.is_empty() ||
-                filter_set.contains(&self.get_type_name(*x).as_str())
-            ).collect::<Vec<_>>()
-        };
-        for refno in target_refnos {
-            let mut attr_values = IndexNamedAttMap::new();
-            let Ok(attr) = self.get_attr_from_localdb(refno) else {
-                result.push(attr_values);
-                continue;
-            };
-            let world_transform = if contains_trans {
-                self.get_world_transform(refno).await
-                    .unwrap_or_default()
-                    .unwrap_or_default()
-            } else {
-                Default::default()
-            };
-
-            for &name in att_names_vec.iter() {
-                let translation = world_transform.translation;
-                if name == "W_POS" {
-                    attr_values.insert(
-                        name.to_owned(),
-                        NamedAttrValue::F32VecType(vec![
-                            translation.x,
-                            translation.y,
-                            translation.z,
-                        ]),
-                    );
-                } else if name == "W_ORI" {
-                    let rotation = quat_to_pdms_ori_str(&world_transform.rotation);
-                    attr_values.insert(name.to_owned(), NamedAttrValue::StringType(rotation));
-                } else if let Some(value) = attr.get_att_by_name(name) {
-                    attr_values.insert(name.to_owned(), NamedAttrValue::from(value));
-                } else {
-                    attr_values.insert(name.to_owned(), NamedAttrValue::StringType("".to_string()));
-                }
-            }
-
-            result.push(attr_values);
-        }
-
-        Ok(result)
+        // let att_names_vec = att_names.into_iter().collect::<Vec<&str>>();
+        // let mut contains_trans = att_names_vec.iter().any(|&x| x == "W_POS" || x == "W_ORI");
+        // let filter_set = noun_filter.into_iter().collect::<HashSet<_>>();
+        // let mut result = vec![];
+        // let target_refnos: Vec<RefU64> = if get_children {
+        //     let mut t_refnos = vec![];
+        //     for &refno in refnos  {
+        //         t_refnos.extend_from_slice(&surreal_service::get_children_refnos(refno).await
+        //             .unwrap_or_default()
+        //             // .into_iter()
+        //             // .filter(|x|
+        //             //     filter_set.contains(&self.get_type_name(*x).as_str())
+        //             // )
+        //             // .collect()
+        //         );
+        //     }
+        //     t_refnos
+        //     // refnos
+        //     //     .into_iter()
+        //     //     .map(|x|
+        //     //         // surreal_service::get_children_refnos(*x).unwrap_or_default().0
+        //     //
+        //     //     )
+        //     //     .flatten()
+        //     //     .filter(|x| filter_set.is_empty() ||
+        //     //         filter_set.contains(&self.get_type_name(*x).as_str())
+        //     //     )
+        //     //     .collect::<Vec<_>>()
+        // } else {
+        //     refnos.into_iter().cloned().filter(|x| filter_set.is_empty() ||
+        //         filter_set.contains(&self.get_type_name(*x).as_str())
+        //     ).collect::<Vec<_>>()
+        // };
+        // for refno in target_refnos {
+        //     let mut attr_values = IndexNamedAttMap::new();
+        //     let Ok(attr) = surreal_service::get_named_attmap(refno).await else {
+        //         result.push(attr_values);
+        //         continue;
+        //     };
+        //     let world_transform = if contains_trans {
+        //         self.get_world_transform(refno).await
+        //             .unwrap_or_default()
+        //             .unwrap_or_default()
+        //     } else {
+        //         Default::default()
+        //     };
+        //
+        //     for &name in att_names_vec.iter() {
+        //         let translation = world_transform.translation;
+        //         if name == "W_POS" {
+        //             attr_values.insert(
+        //                 name.to_owned(),
+        //                 NamedAttrValue::F32VecType(vec![
+        //                     translation.x,
+        //                     translation.y,
+        //                     translation.z,
+        //                 ]),
+        //             );
+        //         } else if name == "W_ORI" {
+        //             let rotation = quat_to_pdms_ori_str(&world_transform.rotation);
+        //             attr_values.insert(name.to_owned(), NamedAttrValue::StringType(rotation));
+        //         } else if let Some(value) = attr.get_att_by_name(name) {
+        //             attr_values.insert(name.to_owned(), NamedAttrValue::from(value));
+        //         } else {
+        //             attr_values.insert(name.to_owned(), NamedAttrValue::StringType("".to_string()));
+        //         }
+        //     }
+        //
+        //     result.push(attr_values);
+        // }
+        //
+        // Ok(result)
+        Ok(vec![])
     }
 
 

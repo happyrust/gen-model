@@ -74,7 +74,7 @@ impl AiosDBManager {
                 let mut ele_op = EleOperation::Modified;
                 // 删除只是owner的children变化了，但是需要记录删除的节点
                 if let Ok(old_refnos) = surreal_service::get_children_refnos(ele.refno).await {
-                    // if let Ok(old_refnos) = self.get_children_from_localdb(ele.refno) {
+                    // if let Ok(old_refnos) = surreal_service::get_children_refnos(ele.refno) {
                     old_refnos
                         .iter()
                         .filter(|x| !ele.children.contains(*x))

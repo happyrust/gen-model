@@ -20,7 +20,7 @@ pub async fn gen_tee_data(aios_mgr: &AiosDBManager, attr: &AttrMap, bran_attr: &
     let refno = attr.get_refno();
     if refno.is_none() { return vec![]; }
     let refno = refno.unwrap();
-    let type_name = attr.get_type();
+    let type_name = attr.get_type_str();
     let s_key = get_s_key_value(attr, aios_mgr, pool).await;
     let s_key = s_key.unwrap_or("".to_string());
     // TEE 的 SKEY 值为 TEST时 需要做特殊处理

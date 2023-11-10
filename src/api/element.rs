@@ -734,62 +734,13 @@ fn gen_pdms_elements_get_children_count_sql(refno: RefU64) -> String {
     sql
 }
 
-#[inline]
-pub fn gen_pdms_element_insert_sql(
-    att: &WholeAttMap,
-    name: &str,
-    dbno: u32,
-    order: usize,
-    children_count: usize,
-) -> String {
-    let implicit = &att.implicit_attmap;
-    let refno = implicit.get_refno().unwrap();
-    let type_name = implicit.get_type();
-    let owner = implicit.get_owner();
-
-    let mut sql = String::new();
-    sql.push_str(&format!(
-        r#"({}, '{}', '{}', {},'{}' , {} , {} , {} ,0 ) ,"#,
-        refno.0,
-        refno.to_refno_str(),
-        type_name,
-        owner.0,
-        name,
-        dbno,
-        order,
-        children_count
-    ));
-    sql
-}
-
-#[inline]
-pub fn gen_dbinfo_value_insert_sql(
-    dbno: u32,
-    filename: &str,
-    version: u32,
-    project: &str,
-    db_type: String,
-) -> String {
-    let mut sql = String::new();
-    sql.push_str(&format!(
-        r#"('{}', {},'{}',{} , '{}','{}')"#,
-        format!("{}_{}", project, dbno),
-        dbno,
-        filename,
-        version,
-        project,
-        db_type
-    ));
-    sql
-}
-
 ///如果名称未给定，根据属性列表和children列表获得当前的元素的名称
 pub fn cal_default_name(
     refno: RefU64,
     attr: &NamedAttrMap,
     children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
 ) -> String {
-    let type_name = attr.get_type();
+    let type_name = attr.get_type_str();
     return if let Some(name) = attr.get_name() {
         name
     } else {
@@ -798,7 +749,7 @@ pub fn cal_default_name(
         if let Some(children) = children_map.get(&owner) {
             idx = children
                 .iter()
-                .filter(|(_, type_)| type_.as_str() == type_name.as_str())
+                .filter(|(_, type_)| type_.as_str() == type_name)
                 .position(|node| node.0 == refno)
                 .unwrap_or_default()
                 + 1;

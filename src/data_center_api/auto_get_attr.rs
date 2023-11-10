@@ -52,7 +52,7 @@ pub async fn auto_get_datacenter_attr(
     metadata_excel_map: &HashMap<String, Vec<DataCenterMetadata>>,
 ) -> anyhow::Result<BTreeMap<String, DataCenterAttr>> {
     let mut map = BTreeMap::new();
-    let att_type = attr.get_type();
+    let att_type = attr.get_type_str();
     let Some(metadata) = metadata_excel_map.get(att_type) else {
         return Ok(map);
     };

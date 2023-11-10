@@ -11,15 +11,10 @@ use glam::Vec3;
 
 use smol_str::SmolStr;
 use sqlx::{Executor, MySql, Pool};
-use crate::api::children::travel_children_with_type;
 use crate::api::element::query_name;
 use crate::aql_api::children::query_travel_children_with_type_aql;
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
-use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::arangodb::ArDatabase;
-use crate::pcf::bran::get_bran_name_and_children;
-use crate::pcf::excel_api::get_pipe_thickness_table;
 use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_TUBI_EDGES_COLLECTION};
 use crate::data_interface::db_model::TUBI_TOL;
 
