@@ -81,8 +81,6 @@ pub struct AiosDBManager {
 
     pub arango_pool: ArPool,
 
-    pub cached_world_transforms_map: Arc<DashMap<RefU64, bevy_transform::prelude::Transform>>,
-
     pub watcher: Arc<PdmsWatcher>,
 
     ///所有元素的tree
@@ -110,12 +108,12 @@ impl Debug for AiosDBManager {
 #[async_trait]
 impl PdmsDataInterface for AiosDBManager {
     /// 获得最全的数据
-    async fn get_attr(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
+    async fn get_attr(&self, refno: RefU64) -> anyhow::Result<NamedAttrMap> {
         return if PDMS_ATT_MAP_CACHE.get(&refno).is_some() {
             let k = PDMS_ATT_MAP_CACHE.get(&refno).unwrap();
             Ok(k.value().clone())
         } else {
-            let attr = self.get_attr_from_localdb(refno)?;
+            let attr = surreal_service::get_named_attmap(refno).await?;
             PDMS_ATT_MAP_CACHE
                 .insert(refno, &attr)
                 .expect("PDMS_ATT_MAP_CACHE save error.");
@@ -123,31 +121,29 @@ impl PdmsDataInterface for AiosDBManager {
         };
     }
 
-    fn get_type_name(&self, refno: RefU64) -> String {
-        self.get_refno_basic(refno)
-            .map(|x| x.get_type().to_string())
-            .unwrap_or("unset".to_string())
+    async fn get_type_name(&self, refno: RefU64) -> String {
+        surreal_service::get_type_name(refno).await.unwrap_or_default()
     }
 
     ///获得下一个构件的参考号
-    fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64> {
+    async fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64> {
         let owner = self.get_owner(refno);
-        let children_refnos = self.get_children_from_localdb(owner)?;
+        let children_refnos = surreal_service::get_children_refnos(owner).await?;
         let pos = children_refnos
             .iter()
             .position(|x| *x == refno)
             .unwrap_or_default();
         if pos == children_refnos.len() - 1 {
-            self.get_next(owner)
+            self.get_next(owner).await
         } else {
             Ok(children_refnos[pos + 1])
         }
     }
 
     ///获得上一个构件的参考号
-    fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64> {
+    async fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64> {
         let owner = self.get_owner(refno);
-        let children_refnos = self.get_children_from_localdb(owner)?;
+        let children_refnos = surreal_service::get_children_refnos(owner).await?;
         let pos = children_refnos
             .iter()
             .position(|x| *x == refno)
@@ -159,46 +155,6 @@ impl PdmsDataInterface for AiosDBManager {
         }
     }
 
-    ///从本地数据库获取属性
-    fn get_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
-        for project in &self.db_option.included_projects {
-            if let Ok(a) = self.get_attr_within_project(refno, project.as_str()) {
-                return Ok(a);
-            }
-        }
-        //从surreal获取数据
-        Err(anyhow::anyhow!("{refno}: not found att"))
-    }
-
-    fn get_full_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
-        let mut att_map = self.get_attr_from_localdb(refno)?;
-        aios_core::get_default_pdms_db_info().fill_default_values(&mut att_map);
-        Ok(att_map)
-    }
-
-    /// 获取attrmap并转为 NamedAttrMap
-    fn get_named_attr_from_localdb(&self, refno: RefU64) -> anyhow::Result<NamedAttrMap> {
-        let att_map = self.get_attr_from_localdb(refno)?;
-        Ok(att_map.into())
-    }
-
-    ///获得子节点的参考号集合
-    fn get_children_from_localdb(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
-        for project in &self.db_option.included_projects {
-            if let Ok(a) = self.get_children_within_project(refno, project.as_str()) {
-                return Ok(a);
-            }
-        }
-        Err(anyhow::anyhow!(format!("{refno} does not exist")))
-    }
-
-    fn get_mesh_from_localdb(&self, geo_hash: u64) -> anyhow::Result<PlantMesh> {
-        Err(anyhow::anyhow!(format!("{geo_hash} mesh not exist")))
-    }
-
-    fn get_mesh_aabb_from_localdb(&self, geo_hash: u64) -> anyhow::Result<Aabb> {
-        Err(anyhow::anyhow!(format!("{geo_hash} aabb not exist.")))
-    }
 
     /// 从本地数据库获得最全的数据
     fn get_attr_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<AttrMap> {
@@ -244,12 +200,12 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     /// 获得最全的数据
-    async fn get_attr_with_uda(&self, refno: RefU64) -> anyhow::Result<AttrMap> {
+    async fn get_attr_with_uda(&self, refno: RefU64) -> anyhow::Result<NamedAttrMap> {
         let mut attr = self.get_attr(refno).await?;
         //暂时把UDA 屏蔽
         // for pool in &self.project_map {
         //     // uda 赋值需要加上元件库
-        //     let uda_attr = query_uda_attr(attr.get_type(), &pool).await?;
+        //     let uda_attr = query_uda_attr(attr.get_type_str(), &pool).await?;
         //     for (k, v) in uda_attr.map {
         //         attr.entry(k).or_insert(v);
         //     }
@@ -285,7 +241,7 @@ impl PdmsDataInterface for AiosDBManager {
             t_types,
             depth,
         )
-        .await;
+            .await;
         t_refnos
     }
 
@@ -472,22 +428,10 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(r)
     }
 
-    ///获得children的属性集合
-    //todo use local db to get children refnos
-    fn get_children_attrs(&self, refno: RefU64) -> anyhow::Result<Vec<AttrMap>> {
-        let mut r = vec![];
-        if let Ok(children) = self.get_children_from_localdb(refno) {
-            for child in children {
-                let attr = self.get_attr_from_localdb(child).unwrap_or_default();
-                r.push(attr);
-            }
-        }
-        Ok(r)
-    }
 
     ///获得参考号下的子节点
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
-        self.get_children_from_localdb(refno)
+        surreal_service::get_children_refnos(refno).await.map(|x| x.into())
     }
 
     ///获得参考号的name
@@ -540,19 +484,6 @@ impl PdmsDataInterface for AiosDBManager {
         result
     }
 
-    ///获得不包含world的父节点路径
-    fn get_ancestors_refnos_without_world(&self, refno: RefU64) -> Vec<RefU64> {
-        let mut result = vec![refno]; //需要包含自己
-        let mut cur_refno = refno;
-        while let Some(b) = CACHED_REFNO_BASIC_MAP.get(&cur_refno) {
-            if b.get_type() == "WORL" {
-                break;
-            }
-            cur_refno = b.owner;
-            result.push(cur_refno);
-        }
-        result
-    }
 
     ///查询哪些有负实体的参考号
     async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
@@ -567,8 +498,8 @@ impl PdmsDataInterface for AiosDBManager {
         return UNIQUE(negatives)
         ",
         )
-        .bind_var("key", refno_url)
-        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+            .bind_var("key", refno_url)
+            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self
             .get_arango_db()
             .await?
@@ -648,8 +579,8 @@ impl PdmsDataInterface for AiosDBManager {
                     return distinct parent._key
         "#,
         )
-        .bind_var("keys", refno_urls)
-        .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+            .bind_var("keys", refno_urls)
+            .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self.get_arango_db().await?.aql_query::<String>(aql).await?;
         let refnos = refno_strs
             .iter()
@@ -674,8 +605,8 @@ impl PdmsDataInterface for AiosDBManager {
             return UNIQUE(refnos)
         "#,
         )
-        .bind_var("key", refno_url)
-        .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
+            .bind_var("key", refno_url)
+            .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
         let refno_strs = self
             .get_arango_db()
             .await?
@@ -709,8 +640,8 @@ impl PdmsDataInterface for AiosDBManager {
                 ]
         "#,
         )
-        .bind_var("key", refno_url)
-        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+            .bind_var("key", refno_url)
+            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let result: HashMap<RefU64, Vec<RefU64>> = self
             .get_arango_db()
             .await?
@@ -752,36 +683,29 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(ancestors)
     }
 
+    ///使用cache，需要从db manager里移除出来
     ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
     async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
-        let mut ancestors = VecDeque::new();
+        let mut ancestors = surreal_service::get_ancestor_attmaps(refno).await?;
+        ancestors.reverse();
+        // dbg!(&ancestors);
         let mut rotation = Quat::IDENTITY;
         let mut translation = Vec3::ZERO;
-        let mut cur_refno = refno;
-        while let Some(ref_basic) = self.get_refno_basic(cur_refno) {
-            //后面是不是要缓存这个层级结构
-            if self.cached_world_transforms_map.contains_key(&cur_refno) {
-                self.cached_world_transforms_map.get(&cur_refno).map(|x| {
-                    rotation = x.rotation;
-                    translation = x.translation;
-                });
-                break;
-            }
-            let tmp_owner = ref_basic.get_owner();
-            ancestors.push_front((cur_refno, ref_basic));
-            cur_refno = tmp_owner;
-        }
 
-        for (refno, ref_basic) in ancestors {
-            // let att = self.get_attr_from_localdb(refno)?;
-            let att = surreal_service::get_named_attmap(refno).await?;
+        for atts in ancestors.windows(2) {
+            let o_att = &atts[0];
+            let att = &atts[1];
+            let owner = o_att.get_refno_or_default();
+            let refno = att.get_refno_or_default();
+            // dbg!(refno);
             let mut pos = att.get_position().unwrap_or_default();
+            // dbg!(pos);
             let mut quat = Quat::IDENTITY;
             //土建特殊情况的一些处理
             if att.contains_key("ZDIS") {
                 let zdist = att.get_f32("ZDIS").unwrap_or_default();
                 let pkdi = att.get_f32("PKDI").unwrap_or_default();
-                let result = self.cal_zdis_pkdi_in_section(ref_basic.owner, pkdi, zdist);
+                let result = self.cal_zdis_pkdi_in_section(owner, pkdi, zdist).await;
                 pos += result.1;
                 quat *= result.0;
             }
@@ -791,7 +715,7 @@ impl PdmsDataInterface for AiosDBManager {
                 pos += npos;
             }
 
-            let owner_type_name = self.get_type_name(ref_basic.owner);
+            let owner_type_name = self.get_type_name(owner).await;
             let owner_is_gensec = owner_type_name == "GENSEC";
             let mut quat_v = att.get_rotation();
             let mut need_bangle = false;
@@ -799,26 +723,28 @@ impl PdmsDataInterface for AiosDBManager {
                 quat = quat_v.unwrap();
             } else {
                 let (l_poss, l_pose) = if owner_is_gensec {
+                    //todo fix
                     //找到spine，获取spine的两个顶点
-                    let mut positions: Vec<Vec3> = self
-                        .get_children_from_localdb(ref_basic.owner)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .find(|x| self.get_type_name(*x).as_str() == "SPINE")
-                        .map(|x| {
-                            self.get_children_attrs(x)
-                                .unwrap_or_default()
-                                .into_iter()
-                                .map(|x| x.get_position().unwrap_or_default())
-                        })
-                        .into_iter()
-                        .flatten()
-                        .collect();
-                    if positions.len() == 2 {
-                        (Some(positions[0]), Some(positions[1]))
-                    } else {
+                    // let mut positions: Vec<Vec3> =
+                    //     surreal_service::get_children_named_attmaps(ref_basic.owner)
+                    //         .await
+                    //         .unwrap_or_default()
+                    //         .into_iter()
+                    //         .find(|x| x.get_type_str() == "SPINE")
+                    //         .map(|x| async {
+                    //             surreal_service::get_children_named_attmaps(x.get_refno().unwrap_or_default())
+                    //                 .await
+                    //                 .unwrap_or_default()
+                    //                 .into_iter()
+                    //                 .map(|x| x.get_position().unwrap_or_default())
+                    //         })
+                    //         .into_iter()
+                    //         .collect();
+                    // if positions.len() == 2 {
+                    //     (Some(positions[0]), Some(positions[1]))
+                    // } else {
                         (None, None)
-                    }
+                    // }
                 } else {
                     (att.get_poss(), att.get_pose())
                 };
@@ -850,7 +776,7 @@ impl PdmsDataInterface for AiosDBManager {
                 quat = quat * Quat::from_rotation_z(bangle.to_radians());
             }
             //固定方位，不会怎旋转方向，但是会移动
-            let mut fixed_posl_ori = att.get_type() == "ENDATU";
+            let mut fixed_posl_ori = att.get_type_str() == "ENDATU";
 
             //对于有CUTB的情况，需要直接对齐过去, 不需要在这里计算
             let c_ref = att.get_foreign_refno("CREF").unwrap_or_default();
@@ -861,8 +787,7 @@ impl PdmsDataInterface for AiosDBManager {
                 has_cut_back = true;
                 cut_dir = att.get_vec3("CUTP").unwrap_or(cut_dir);
                 let cut_len = att.get_f32("CUTB").unwrap_or_default();
-                // dbg!(quat_to_pdms_ori_str(&c_t.rotation));
-                if c_ref.is_valid() && let Ok(c_att) = self.get_attr_from_localdb(c_ref) &&
+                if c_ref.is_valid() && let Ok(c_att) = surreal_service::get_named_attmap(c_ref).await &&
                     let Some(poss) = c_att.get_poss() &&
                     let Some(pose) = c_att.get_pose() {
                     let c_t = self.get_world_transform(c_ref).await?.unwrap_or_default();
@@ -870,7 +795,6 @@ impl PdmsDataInterface for AiosDBManager {
                     let axis = (pose - poss);
                     let len = axis.length();
                     let w_pose = w_poss + c_t.rotation * Vec3::Z * len;
-                    // dbg!((w_poss, w_pose, translation));
                     let dist_s = translation.distance(w_poss);
                     let dist_e = translation.distance(w_pose);
                     //取离node最近的点
@@ -881,106 +805,92 @@ impl PdmsDataInterface for AiosDBManager {
                     }
                 }
             }
-            //如果有posl
-            if att.contains_key("POSL") {
-                let pos_line = att.get_str_or_default("POSL");
-                let delta_vec = att.get_vec3("DELP").unwrap_or_default();
-                // dbg!(pos_line);
-                //plin里的位置偏移
-                let mut plin_pos = Vec3::ZERO;
-                let mut own_plin_pos = Vec3::ZERO;
-                let mut pline_plax = Vec3::X;
-                let mut new_quat = Quat::IDENTITY;
-                let mut plin_owner = att.get_owner();
-                // POSL 的处理, 获得父节点的形集, 自身的形集处理，已经在profile里处理过
-                let mut cur_plin_param = None;
-                let mut own_plin_param = None;
-                let mut target_own_att = AttrMap::default();
-                while cur_plin_param.is_none() {
-                    let Some(t) = self.get_refno_basic(plin_owner) else {
-                        break;
-                    };
-                    // #[cfg(debug_assertions)]
-                    // dbg!(t.get_type());
-                    if !HAS_PLIN_TYPES.contains(&t.get_type()) {
-                        plin_owner = t.get_owner();
-                        continue;
-                    }
-                    // dbg!(plin_owner);
-                    // dbg!(pos_line);
-                    target_own_att = self.get_attr_from_localdb(plin_owner).unwrap_or_default();
-                    let own_pos_line = target_own_att.get_str_or_default("JUSL");
-                    // dbg!(own_pos_line);
-                    cur_plin_param = self.query_pline(plin_owner, pos_line).await?;
-                    own_plin_param = self.query_pline(plin_owner, own_pos_line).await?;
-                    if cur_plin_param.is_some() {
-                        break;
-                    }
-                    plin_owner = t.get_owner();
-                }
-                let is_lmirror = target_own_att.get_bool("LMIRR").unwrap_or_default();
-                if let Some(param) = cur_plin_param {
-                    plin_pos = param.pt;
-                    pline_plax = param.plax;
-                    // dbg!(&param);
-                }
-                if let Some(own_param) = own_plin_param {
-                    plin_pos -= own_param.pt;
-                    // dbg!(&own_param);
-                }
-                let mut y_axis = if att.contains_key("YDIR") {
-                    att.get_vec3("YDIR").unwrap_or_default()
-                } else {
-                    Vec3::Z
-                };
-                //和LMIRROR 有关系
-                let z_axis = if is_lmirror { -pline_plax } else { pline_plax };
-                let x_axis = y_axis.cross(z_axis).normalize();
-                let posl_quat = if fixed_posl_ori {
-                    Quat::IDENTITY
-                } else {
-                    Quat::from_mat3(&Mat3::from_cols(x_axis, y_axis, z_axis))
-                };
-                // #[cfg(debug_assertions)]
-                // {
-                //     dbg!(quat_to_pdms_ori_str(&posl_quat));
-                //     dbg!(quat_to_pdms_ori_str(&quat));
-                // }
-                new_quat = posl_quat * quat;
-                // #[cfg(debug_assertions)]
-                // {
-                //     dbg!(quat_to_pdms_ori_str(&new_quat));
-                //     dbg!(translation);
-                //     dbg!(quat_to_pdms_ori_str(&rotation));
-                // }
-
-
-                translation +=
-                    rotation * (pos + plin_pos) + rotation * new_quat * delta_vec;
-
-                #[cfg(debug_assertions)]
-                {
-                    dbg!(translation);
-                    dbg!(quat_to_pdms_ori_str(&rotation));
-                }
-                //没有POSL时，需要使用cutback的方向
-                rotation = rotation * new_quat;
-                if pos_line == "unset" && has_cut_back {
-                    // dbg!(has_cut_back);
-                    //need to perpendicular to the Y axis
-                    let mat3 = Mat3::from_quat(rotation);
-                    let y_axis = mat3.y_axis;
-                    let ref_axis = cut_dir;
-                    // dbg!(cut_dir);
-                    let x_axis = y_axis.cross(ref_axis).normalize();
-                    let z_axis = x_axis.cross(y_axis).normalize();
-                    let new_mat = Mat3::from_cols(x_axis, y_axis, z_axis);
-                    // dbg!(new_mat);
-                    rotation = Quat::from_mat3(&new_mat);
-                }
-                // #[cfg(debug_assertions)]
-                // dbg!(quat_to_pdms_ori_str(&rotation));
-            } else {
+            //todo fix 处理 posl的计算
+            // if att.contains_key("POSL") {
+            //     let pos_line = att.get_str_or_default("POSL");
+            //     let delta_vec = att.get_vec3("DELP").unwrap_or_default();
+            //     // dbg!(pos_line);
+            //     //plin里的位置偏移
+            //     let mut plin_pos = Vec3::ZERO;
+            //     let mut pline_plax = Vec3::X;
+            //     let mut new_quat = Quat::IDENTITY;
+            //     let mut plin_owner = att.get_owner();
+            //     // POSL 的处理, 获得父节点的形集, 自身的形集处理，已经在profile里处理过
+            //     let mut cur_plin_param = None;
+            //     let mut own_plin_param = None;
+            //     let mut target_own_att = NamedAttrMap::default();
+            //     while cur_plin_param.is_none() {
+            //         let Some(t) = self.get_refno_basic(plin_owner) else {
+            //             break;
+            //         };
+            //         // #[cfg(debug_assertions)]
+            //         // dbg!(t.get_type());
+            //         if !HAS_PLIN_TYPES.contains(&t.get_type()) {
+            //             plin_owner = t.get_owner();
+            //             continue;
+            //         }
+            //         // dbg!(plin_owner);
+            //         // dbg!(pos_line);
+            //         target_own_att = surreal_service::get_named_attmap(plin_owner).await.unwrap_or_default();
+            //         let own_pos_line = target_own_att.get_str_or_default("JUSL");
+            //         // dbg!(own_pos_line);
+            //         cur_plin_param = self.query_pline(plin_owner, pos_line).await?;
+            //         own_plin_param = self.query_pline(plin_owner, own_pos_line).await?;
+            //         if cur_plin_param.is_some() {
+            //             break;
+            //         }
+            //         plin_owner = t.get_owner();
+            //     }
+            //     let is_lmirror = target_own_att.get_bool("LMIRR").unwrap_or_default();
+            //     if let Some(param) = cur_plin_param {
+            //         plin_pos = param.pt;
+            //         pline_plax = param.plax;
+            //         // dbg!(&param);
+            //     }
+            //     if let Some(own_param) = own_plin_param {
+            //         plin_pos -= own_param.pt;
+            //         // dbg!(&own_param);
+            //     }
+            //     let mut y_axis = if att.contains_key("YDIR") {
+            //         att.get_vec3("YDIR").unwrap_or_default()
+            //     } else {
+            //         Vec3::Z
+            //     };
+            //     //和LMIRROR 有关系
+            //     let z_axis = if is_lmirror { -pline_plax } else { pline_plax };
+            //     let x_axis = y_axis.cross(z_axis).normalize();
+            //     let posl_quat = if fixed_posl_ori {
+            //         Quat::IDENTITY
+            //     } else {
+            //         Quat::from_mat3(&Mat3::from_cols(x_axis, y_axis, z_axis))
+            //     };
+            //     new_quat = posl_quat * quat;
+            //     translation +=
+            //         rotation * (pos + plin_pos) + rotation * new_quat * delta_vec;
+            //
+            //     #[cfg(debug_assertions)]
+            //     {
+            //         dbg!(translation);
+            //         dbg!(quat_to_pdms_ori_str(&rotation));
+            //     }
+            //     //没有POSL时，需要使用cutback的方向
+            //     rotation = rotation * new_quat;
+            //     if pos_line == "unset" && has_cut_back {
+            //         // dbg!(has_cut_back);
+            //         //need to perpendicular to the Y axis
+            //         let mat3 = Mat3::from_quat(rotation);
+            //         let y_axis = mat3.y_axis;
+            //         let ref_axis = cut_dir;
+            //         // dbg!(cut_dir);
+            //         let x_axis = y_axis.cross(ref_axis).normalize();
+            //         let z_axis = x_axis.cross(y_axis).normalize();
+            //         let new_mat = Mat3::from_cols(x_axis, y_axis, z_axis);
+            //         // dbg!(new_mat);
+            //         rotation = Quat::from_mat3(&new_mat);
+            //     }
+            // } else
+            //
+            {
                 translation = translation + rotation * pos;
                 rotation = rotation * quat;
             }
@@ -993,21 +903,18 @@ impl PdmsDataInterface for AiosDBManager {
             if trans.is_nan() {
                 return Ok(None);
             }
-            self.cached_world_transforms_map
-                .entry(refno)
-                .or_insert(trans);
+            //将rotation 还原为角度
+            if self.db_option.debug_print_world_transform {
+                let rot_mat = Mat3::from_quat(rotation);
+                let ori_str = math_tool::to_pdms_ori_xyz_str(&rot_mat);
+                println!(
+                    "{} : {:?}",
+                    refno.to_refno_str(),
+                    (translation, ori_str)
+                );
+            }
         }
-        //将rotation 还原为角度
-        if self.db_option.debug_print_world_transform {
-            let rot_mat = Mat3::from_quat(rotation);
-            let ori_str = math_tool::to_pdms_ori_str(&rot_mat);
-            println!(
-                "{} : {} {:?}",
-                refno.to_refno_str(),
-                rot_mat,
-                (translation, ori_str)
-            );
-        }
+
         if rotation.is_nan() || translation.is_nan() {
             return Ok(None);
         }
@@ -1019,7 +926,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     #[inline]
-    async fn get_world_transform_or_default(&self, refno: RefU64) -> Transform{
+    async fn get_world_transform_or_default(&self, refno: RefU64) -> Transform {
         self.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default()
     }
 
@@ -1028,12 +935,12 @@ impl PdmsDataInterface for AiosDBManager {
         &self,
         refno: RefU64,
         nouns: &[&str],
-    ) -> anyhow::Result<Vec<AttrMap>> {
+    ) -> anyhow::Result<Vec<NamedAttrMap>> {
         let mut r = vec![];
         let children =
             query_deep_children_refnos_fuzzy(&self.get_arango_db().await?, &[refno], nouns).await?;
         for child in children {
-            let attr = self.get_attr_from_localdb(child).unwrap_or_default();
+            let attr = surreal_service::get_named_attmap(child).await.unwrap_or_default();
             r.push(attr);
         }
         Ok(r)
@@ -1071,18 +978,16 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     ///获取对应的截面sweep 线，包含了sctn的处理情况
-    fn get_spline_path(&self, refno: RefU64) -> anyhow::Result<Vec<Spine3D>> {
-        let children_refs = self.get_children_from_localdb(refno)?;
+    async fn get_spline_path(&self, refno: RefU64) -> anyhow::Result<Vec<Spine3D>> {
+        let children_refs = surreal_service::get_children_refnos(refno).await?;
         let mut paths = vec![];
         for x in children_refs {
-            let type_name = self.get_type_name(x);
+            let type_name = self.get_type_name(x).await;
             if type_name != "SPINE" {
                 continue;
             }
-            let spine_att = self.get_attr_from_localdb(x)?;
-            // drns = spine_att.get_vec3("DRNS").unwrap_or_default();
-            // drne = spine_att.get_vec3("DRNE").unwrap_or_default();
-            let children_atts = self.get_children_attrs(x)?;
+            let spine_att = surreal_service::get_named_attmap(x).await?;
+            let children_atts = surreal_service::get_children_named_attmaps(x).await?;
             if (children_atts.len() - 1) % 2 == 0 {
                 for i in 0..(children_atts.len() - 1) / 2 {
                     let att1 = &(children_atts[2 * i]);
@@ -1113,7 +1018,7 @@ impl PdmsDataInterface for AiosDBManager {
                 let att2 = &children_atts[1];
                 let pt0 = att1.get_position().unwrap_or_default();
                 let pt1 = att2.get_position().unwrap_or_default();
-                if att1.get_type() == "POINSP" && att2.get_type() == "POINSP" {
+                if att1.get_type_str() == "POINSP" && att2.get_type_str() == "POINSP" {
                     paths.push(Spine3D {
                         pt0,
                         pt1,
@@ -1127,7 +1032,7 @@ impl PdmsDataInterface for AiosDBManager {
 
         //考虑sctn这种直接拉升出来的情况
         if paths.is_empty() {
-            let att = self.get_attr_from_localdb(refno)?;
+            let att = surreal_service::get_named_attmap(refno).await?;
             if let Some(poss) = att.get_poss() &&
                 let Some(pose) = att.get_pose() {
                 paths.push(Spine3D {
@@ -1145,71 +1050,86 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获得外键的属性
     #[inline]
-    fn get_foreign_refno(&self, refno: RefU64, foreign: &str) -> Option<RefU64> {
-        let att = self.get_attr_from_localdb(refno).ok()?;
+    async fn get_foreign_refno(&self, refno: RefU64, foreign: &str) -> Option<RefU64> {
+        let att = surreal_service::get_named_attmap(refno).await.ok()?;
         att.get_foreign_refno(foreign)
     }
 
     ///获得外键的属性
     #[inline]
-    fn get_foreign_attrmap(&self, refno: RefU64, foreign: &str) -> Option<AttrMap> {
-        self.get_foreign_refno(refno, foreign)
-            .map(|x| self.get_attr_from_localdb(x).ok())
-            .flatten()
+    async fn get_foreign_attrmap(&self, refno: RefU64, foreign: &str) -> Option<NamedAttrMap> {
+        if let Some(f) = self.get_foreign_refno(refno, foreign).await {
+            surreal_service::get_named_attmap(f).await.ok()
+        } else {
+            None
+        }
     }
 
     ///获得元件库的spre参考号
     #[inline]
-    fn get_spre_ref(&self, refno: RefU64) -> Option<RefU64> {
-        self.get_foreign_refno(refno, "SPRE")
+    async fn get_spre_ref(&self, refno: RefU64) -> Option<RefU64> {
+        self.get_foreign_refno(refno, "SPRE").await
     }
 
     //todo need some test for this function
     ///获得元件库的catr参考号
     #[inline]
-    fn get_cat_ref(&self, refno: RefU64) -> Option<RefU64> {
+    async fn get_cat_ref(&self, refno: RefU64) -> Option<RefU64> {
         let cat_ref = self
             .get_foreign_attrmap(refno, "SPRE")
+            .await
             .map(|x| x.get_foreign_refno("CATR").or(x.get_refno()))
             .flatten();
         if cat_ref.is_some() {
             return cat_ref;
         }
         let self_cat_ref = self
-            .get_foreign_attrmap(refno, "CATR")
-            .map(|x| {
-                let c_refno = x.get_refno().unwrap_or_default();
-                match x.get_type() {
-                    "TABITE" => self
-                        .get_foreign_attrmap(c_refno, "PRTREF")
-                        .map(|x| x.get_foreign_refno("CATR").unwrap_or_default()),
-                    "SPCO" => self.get_foreign_refno(c_refno, "CATR"),
-                    _ => Some(c_refno),
-                }
-            })
-            .flatten();
-        self_cat_ref
+            .get_foreign_refno(refno, "CATR")
+            .await.unwrap_or_default();
+        //todo fix here
+        // let self_cat_ref = self
+        //     .get_foreign_attrmap(refno, "CATR")
+        //     .await
+        //     .map(|x| async {
+        //         let c_refno = x.get_refno().unwrap_or_default();
+        //         match x.get_type_str() {
+        //             "TABITE" => self
+        //                 .get_foreign_attrmap(c_refno, "PRTREF")
+        //                 .await
+        //                 .map(|x| x.get_foreign_refno("CATR").unwrap_or_default()),
+        //             "SPCO" => self.get_foreign_refno(c_refno, "CATR").await,
+        //             _ => Some(c_refno),
+        //         }
+        //     })
+        //     .unwrap_or_default();
+        Some(self_cat_ref)
     }
 
     ///获得元件库的catr属性数据
     #[inline]
-    fn get_cat_attmap(&self, refno: RefU64) -> Option<AttrMap> {
-        self.get_cat_ref(refno)
-            .map(|x| self.get_attr_from_localdb(x).ok())
-            .flatten()
+    async fn get_cat_attmap(&self, refno: RefU64) -> Option<NamedAttrMap> {
+        // self.get_cat_ref(refno).await.and_then(|x| async {
+        //     surreal_service::get_named_attmap(x).await.ok()
+        // })
+
+        if let Some(cat_ref) = self.get_cat_ref(refno).await {
+            surreal_service::get_named_attmap(cat_ref).await.ok()
+        }else{
+            None
+        }
     }
 
     ///收集几何参数
-    fn query_gm_params(&self, refno: RefU64) -> anyhow::Result<Vec<GmParam>> {
+    async fn query_gm_params(&self, refno: RefU64) -> anyhow::Result<Vec<GmParam>> {
         let mut gms = vec![];
         let mut children = vec![];
-        for c in self.get_children_attrs(refno)? {
-            if TOTAL_CATA_GEO_NOUN_NAMES.contains(&c.get_type()) {
+        for c in surreal_service::get_children_named_attmaps(refno).await? {
+            if TOTAL_CATA_GEO_NOUN_NAMES.contains(&c.get_type_str()) {
                 children.push(c.clone());
             }
             //有可能嵌套负实体
-            for cc in self.get_children_attrs(c.get_refno().unwrap_or_default())? {
-                if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type()) {
+            for cc in surreal_service::get_children_named_attmaps(c.get_refno_or_default()).await? {
+                if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type_str()) {
                     children.push(cc.clone());
                 }
             }
@@ -1220,19 +1140,19 @@ impl PdmsDataInterface for AiosDBManager {
             if !geo_am.is_visible_by_level(None).unwrap_or(true) {
                 continue;
             }
-            let is_spro = geo_am.get_type() == "SPRO"; //todo add other types
-            gms.push(query_gm_param(&geo_am, self, is_spro).unwrap_or_default());
+            let is_spro = geo_am.get_type_str() == "SPRO"; //todo add other types
+            gms.push(query_gm_param(&geo_am, self, is_spro).await.unwrap_or_default());
         }
         Ok(gms)
     }
 
     ///收集SCOM的信息
-    fn get_or_create_scom_info(&self, cata_refno: RefU64) -> anyhow::Result<ScomInfo> {
+    async fn get_or_create_scom_info(&self, cata_refno: RefU64) -> anyhow::Result<ScomInfo> {
         let scom_info = if let Some(info) = SCOM_INFO_MAP.get(&cata_refno) {
             info.value().clone()
         } else {
-            let attr_map = self.get_attr_from_localdb(cata_refno)?;
-            let type_noun = attr_map.get_type();
+            let attr_map = surreal_service::get_named_attmap(cata_refno).await?;
+            let type_noun = attr_map.get_type_str();
             let ptref_name = match type_noun {
                 "SPRF" => "PSTR",
                 _ => "PTRE",
@@ -1240,8 +1160,8 @@ impl PdmsDataInterface for AiosDBManager {
             let mut axis_params = vec![];
             let mut axis_param_numbers = vec![];
             if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
-                if let Ok(ptre_am) = self.get_attr_from_localdb(ptre_refno) {
-                    if let Ok(axis_param_map) = query_axis_params(&ptre_am, Some(self)) {
+                if let Ok(ptre_am) = surreal_service::get_named_attmap(ptre_refno).await {
+                    if let Ok(axis_param_map) = query_axis_params(&ptre_am).await {
                         axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
                         axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
                     }
@@ -1253,17 +1173,17 @@ impl PdmsDataInterface for AiosDBManager {
             };
             let mut gm_params = vec![];
             if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
-                gm_params = self.query_gm_params(gmse_refno)?;
+                gm_params = self.query_gm_params(gmse_refno).await?;
             }
             let mut ngm_params = vec![];
             //-ve， 和design发生左右的负实体
             if let Some(gmse_refno) = attr_map.get_foreign_refno("NGMR") {
-                ngm_params = self.query_gm_params(gmse_refno)?;
+                ngm_params = self.query_gm_params(gmse_refno).await?;
             }
 
             let mut plin_map = HashMap::new();
             if let Some(pstr_refno) = attr_map.get_foreign_refno("PSTR") {
-                let pstr_am = self.get_children_attrs(pstr_refno)?;
+                let pstr_am = surreal_service::get_children_named_attmaps(pstr_refno).await?;
                 for a in pstr_am {
                     if let Some(k) = a.get_as_string("PKEY") {
                         plin_map.insert(
@@ -1336,9 +1256,10 @@ impl PdmsDataInterface for AiosDBManager {
             context.insert(DDRADIUS_STR.into(), (radi.clone()));
 
             //放入UDA的数据
-            let named_att = self
-                .get_named_attr_from_localdb(desi_refno)
-                .unwrap_or_default();
+            // let named_att = self
+            //     .get_named_attr_from_localdb(desi_refno)
+            //     .unwrap_or_default();
+            let named_att = surreal_service::get_named_attmap(desi_refno).await.unwrap_or_default();
             for (str, v) in named_att.map {
                 let n = if str.starts_with(":") {
                     // if str.len() < 5 {
@@ -1394,7 +1315,7 @@ impl PdmsDataInterface for AiosDBManager {
 
             context.insert("RS_DES_REFNO".into(), desi_refno.to_refno_str());
             //添加cata的信息
-            if let Some(cata_attmap) = self.get_cat_attmap(desi_refno) {
+            if let Some(cata_attmap) = self.get_cat_attmap(desi_refno).await {
                 context.insert(
                     "RS_CATR_REFNO".into(),
                     cata_attmap.get_refno().unwrap().to_refno_str(),
@@ -1418,21 +1339,21 @@ impl PdmsDataInterface for AiosDBManager {
                     context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
                 }
                 let mut owner_ref = desi_att.get_owner();
-                // let mut owner_att = self.get_attr_from_localdb(owner_ref).unwrap_or_default();
+                // let mut owner_att = surreal_service::get_named_attmap(owner_ref).await.unwrap_or_default();
                 let mut owner_att = surreal_service::get_named_attmap(owner_ref).await?;
                 //todo use a single query to get all the ancestors' attmap
                 while !owner_att.contains_key("GTYP") {
-                    if owner_att.get_refno().is_none() || owner_att.get_type() == "ZONE" {
+                    if owner_att.get_refno().is_none() || owner_att.get_type_str() == "ZONE" {
                         break;
                     }
                     owner_ref = owner_att.get_owner();
-                    // owner_att = self.get_attr_from_localdb(owner_ref).unwrap_or_default();
+                    // owner_att = surreal_service::get_named_attmap(owner_ref).await.unwrap_or_default();
                     owner_att = surreal_service::get_named_attmap(owner_ref).await?;
                 }
 
                 //dtse 的信息处理
                 let dtre_refno: RefU64 = cata_attmap.get_foreign_refno("DTRE").unwrap_or_default();
-                // let children = self.get_children_attrs(dtre_refno).unwrap_or_default();
+                // let children = surreal_service::get_children_named_attmaps(dtre_refno).await.unwrap_or_default();
                 let children = surreal_service::get_children_named_attmaps(dtre_refno).await?;
                 for child in children {
                     if let Some(k) = child.get_as_string("DKEY") {
@@ -1454,7 +1375,7 @@ impl PdmsDataInterface for AiosDBManager {
                     context.insert(format!("ODES{}", i + 1).into(), desp[i].to_string().into());
                 }
                 //找到owner 参考号，再找到它的元件库params
-                if let Some(parent_cat_am) = self.get_cat_attmap(owner_ref) {
+                if let Some(parent_cat_am) = self.get_cat_attmap(owner_ref).await {
                     let params = parent_cat_am.get_f32_vec("PARA").unwrap_or_default();
                     for i in 0..params.len() {
                         context.insert(
@@ -1464,14 +1385,14 @@ impl PdmsDataInterface for AiosDBManager {
                     }
                 }
 
-                if let Some(c_att) = self.get_foreign_attrmap(desi_refno, "CREF") {
+                if let Some(c_att) = self.get_foreign_attrmap(desi_refno, "CREF").await {
                     let desp = c_att.get_f32_vec("DESP").unwrap_or_default();
                     for i in 0..desp.len() {
                         context.insert(format!("ADES{}", i + 1).into(), desp[i].to_string().into());
                     }
                     let c_refno = c_att.get_refno().unwrap_or_default();
 
-                    if let Some(attach_cat_am) = self.get_cat_attmap(c_refno) {
+                    if let Some(attach_cat_am) = self.get_cat_attmap(c_refno).await {
                         let params = attach_cat_am.get_f32_vec("PARA").unwrap_or_default();
                         for i in 0..params.len() {
                             context.insert(
@@ -1496,10 +1417,10 @@ impl PdmsDataInterface for AiosDBManager {
         //传入额外的参数进来，用于解析轴线参数
         desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
     ) -> anyhow::Result<CateGeomsInfo> {
-        let desi_att = self.get_attr_from_localdb(desi_refno)?;
+        let desi_att = surreal_service::get_named_attmap(desi_refno).await?;
         //todo 改到使用图数据库去查找
         if scom_ref_option.is_none() {
-            scom_ref_option = self.get_cat_ref(desi_refno);
+            scom_ref_option = self.get_cat_ref(desi_refno).await;
         }
         let scom_ref = scom_ref_option.ok_or(anyhow::anyhow!(format!(
             "SCOM not exist in element: {}",
@@ -1515,16 +1436,15 @@ impl PdmsDataInterface for AiosDBManager {
         }
         #[cfg(debug_assertions)]
         dbg!(scom_ref);
-        let scom_info = self.get_or_create_scom_info(scom_ref)?;
+        let scom_info = self.get_or_create_scom_info(scom_ref).await?;
         #[cfg(debug_assertions)]
         dbg!(&scom_info);
         let mut context = self.get_or_create_cata_context(desi_refno, desi_axis_map).await?;
 
         let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(self), Some(context));
-        // dbg!(&geom_info.as_ref().unwrap().n_geometries);
         if geom_info.is_err() {
             error!("{:?}", geom_info.as_ref().err());
-            error!("{:?}", desi_att.to_string_hashmap());
+            error!("{:?}", &desi_att);
         }
         geom_info
     }
@@ -1536,22 +1456,22 @@ impl PdmsDataInterface for AiosDBManager {
         context: Option<CataContext>,
     ) -> anyhow::Result<BTreeMap<i32, CateAxisParam>> {
         let mut map = BTreeMap::new();
-        let scom_refno = self.get_cat_ref(refno).unwrap_or_default();
+        let scom_refno = self.get_cat_ref(refno).await.unwrap_or_default();
         if !scom_refno.is_valid() {
             return Ok(Default::default());
         }
-        let scom = self.get_or_create_scom_info(scom_refno)?;
+        let scom = self.get_or_create_scom_info(scom_refno).await?;
         let context = context.unwrap_or(self.get_or_create_cata_context(refno, None).await?);
         for i in 0..scom.axis_params.len() {
             // dbg!(&scom.axis_params[i]);
             let axis = resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self));
             // {
-                // Ok(axis) => {
-                    map.insert(scom.axis_param_numbers[i], axis);
-                // }
-                // Err(e) => {
-                //     println!("{} resolve_axis_params 出错： {:?}", refno, &e);
-                // }
+            // Ok(axis) => {
+            map.insert(scom.axis_param_numbers[i], axis);
+            // }
+            // Err(e) => {
+            //     println!("{} resolve_axis_params 出错： {:?}", refno, &e);
+            // }
             // }
         }
         Ok(map)

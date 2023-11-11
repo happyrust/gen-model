@@ -8,7 +8,7 @@ use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use sqlx::{Error, MySql, Pool, Row};
 use sqlx::mysql::MySqlRow;
-use crate::api::attr::{query_explicit_attr, query_attr, query_full_attr_with_pool};
+use crate::api::attr::{query_explicit_attr};
 use crate::api::children::query_ancestor_of_type;
 use crate::api::element::query_name;
 use crate::aql_api::children::{query_ancestor_name_of_type_aql, query_ancestor_till_type_aql, query_ancestor_till_types_aql};
@@ -16,6 +16,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::consts::TEAM_DATA_TABLE;
 use aios_core::pdms_user::PdmsElementWithUser;
 use crate::data_interface::interface::PdmsDataInterface;
+use crate::surreal_service;
 
 ///管理员信息
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -37,11 +38,10 @@ pub async fn sync_system_db(mgr: &AiosDBManager) -> anyhow::Result<()> {
         let mut r = vec![];
         let all_db_refnos = query_all_db_refnos(project_db.value()).await?;
         for db_refno in all_db_refnos {
-            let db_attr = mgr.get_attr(db_refno).await;
-            if db_attr.is_err() {
+            // let db_attr = mgr.get_attr(db_refno).await;
+            let Ok(db_attr) = surreal_service::get_named_attmap(db_refno).await else{
                 continue;
-            }
-            let db_attr = db_attr.unwrap();
+            };
             let team_refno = query_ancestor_till_types_aql(&database, db_refno, vec!["TEAM"]).await?;
             if team_refno.is_none() {
                 continue;
@@ -56,7 +56,7 @@ pub async fn sync_system_db(mgr: &AiosDBManager) -> anyhow::Result<()> {
                 team_name_map.get(&team_refno).unwrap().to_string()
             };
 
-            let db_name = db_attr.get_name_string();
+            let db_name = db_attr.get_name_or_default();
             let s_type = db_attr.get_str("STYP").unwrap_or("0");
             let mut names = db_name.split('/').collect::<Vec<_>>();
             if names.len() < 2 {

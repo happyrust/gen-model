@@ -11,10 +11,11 @@ use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
 
 impl AiosDBManager {
     /// 计算ZDIS和PKDI, refno 是有这个SPLINE属性或者SCTN这种的参考号
-    pub fn cal_zdis_pkdi_in_section(&self, refno: RefU64, pkdi: f32, zdis: f32) -> (Quat, Vec3) {
+    pub async fn cal_zdis_pkdi_in_section(&self, refno: RefU64, pkdi: f32, zdis: f32) -> (Quat, Vec3) {
         let mut pos = Vec3::default();
         let mut quat = Quat::IDENTITY;
         let mut spline_paths = self.get_spline_path(refno)
+            .await
             .unwrap_or_default();
         let mut sweep_paths = spline_paths.iter()
             .map(|x| x.generate_paths().0).flatten().collect::<Vec<_>>();

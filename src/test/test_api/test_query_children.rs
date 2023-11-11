@@ -1,6 +1,7 @@
 use aios_core::pdms_types::RefU64;
 use crate::aql_api::children::SearchAlongParam;
 use crate::data_interface::interface::PdmsDataInterface;
+use crate::surreal_service;
 use crate::test::test_helper::{get_test_ams_db_manager, get_test_ams_db_manager_async};
 
 ///  测试沿着路径搜索目标节点
@@ -20,11 +21,11 @@ async fn test_search_along_path() -> anyhow::Result<()> {
     dbg!(serde_json::to_string(&param).unwrap());
     let result = mgr.search_refnos_along_path_by_param(&param).await?;
     dbg!(result.0.len());
-    dbg!(result
-        .iter()
-        .take(50)
-        .map(|x| { mgr.get_attr_from_localdb(x.0 .0).unwrap().get_name_string() })
-        .collect::<Vec<_>>());
+    // dbg!(result
+    //     .iter()
+    //     .take(50)
+    //     .map(|x| { surreal_service::get_named_attmap(x.0 .0).unwrap().get_name_or_default() })
+    //     .collect::<Vec<_>>());
 
     Ok(())
 }

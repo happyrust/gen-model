@@ -34,7 +34,7 @@ use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
 use crate::graph_db::pdms_arango::{connect_arangodb, save_arangodb_with_db_option};
 use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
 use crate::graph_db::structs::{PdmsEleEdge, PdmsEleData, PdmsMdbEdge};
-use crate::tables::gen_create_project_mdb_sql;
+use crate::surreal_service;
 use pdms_io::watch::PdmsWatcher;
 // use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
@@ -515,8 +515,6 @@ impl AiosDBManager {
             db_option,
             cached_mesh_mgr: Arc::new(Default::default()),
             arango_pool,
-            cached_world_transforms_map: Arc::new(Default::default()),
-            // mdb_dbnums: Default::default(),
             watcher: Arc::new(watcher),
             rtree: None,
             room_panels_rtree: None,
@@ -635,15 +633,15 @@ impl AiosDBManager {
         let mdbs = query_types_refnos(&vec!["MDB"], project_pool, &[]).await?;
         dbg!(&mdbs);
         for mdb_refno in mdbs {
-            let Ok(mdb_attr) = self.get_attr_from_localdb(mdb_refno) else {
+            let Ok(mdb_attr) = surreal_service::get_named_attmap(mdb_refno).await else {
                 continue;
             };
-            let mdb_name = mdb_attr.get_name_string();
+            let mdb_name = mdb_attr.get_name_or_default();
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 // dbg!(&dbs);
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
-                    let att = self.get_attr_from_localdb(*db_refno).unwrap_or_default();
+                    let att = surreal_service::get_named_attmap(*db_refno).await.unwrap_or_default();
                     let Some(db_num) = att.get_i32("NUMBDB") else {
                         continue;
                     };
@@ -693,13 +691,13 @@ impl AiosDBManager {
 
         for mdb in &mdbs {
             let mdb_refno = mdb.refno;
-            let Ok(mdb_attr) = self.get_attr_from_localdb(mdb_refno) else {
+            let Ok(mdb_attr) = surreal_service::get_named_attmap(mdb_refno).await else {
                 continue;
             };
-            let name = mdb_attr.get_name_string();
+            let name = mdb_attr.get_name_or_default();
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 for (i, db_refno) in dbs.into_iter().enumerate() {
-                    let att = self.get_attr_from_localdb(db_refno).unwrap_or_default();
+                    let att = surreal_service::get_named_attmap(db_refno).await.unwrap_or_default();
                     let Some(db_num) = att.get_i32("NUMBDB") else {
                         continue;
                     };
@@ -757,14 +755,14 @@ impl AiosDBManager {
                     };
                     pdms_edges.push(edge);
                 }
-                // let children = self.get_children_from_localdb(root_world.refno).unwrap_or_default();
+                // let children = surreal_service::get_children_refnos(root_world.refno).unwrap_or_default();
                 let mut order = 0;
                 for dbnum in dbnums {
                     let Some(world) = ele_nodes.iter().find(|x| x.dbnum == dbnum) else {
                         continue;
                     };
                     mdb_edges_map.entry(dbnum).and_modify(|x| x.world_refno = world.refno);
-                    let site_refnos = self.get_children_from_localdb(world.refno).unwrap_or_default();
+                    let site_refnos = surreal_service::get_children_refnos(world.refno).await.unwrap_or_default();
                     let Some(mdb_data) = mdb_edges_map.get(&dbnum) else {
                         continue;
                     };
@@ -800,14 +798,14 @@ impl AiosDBManager {
     }
 
     ///获得参考号对应的一般类型
-    pub fn get_generic_type(&self, refno: RefU64) -> PdmsGenericType {
+    pub async fn get_generic_type(&self, refno: RefU64) -> PdmsGenericType {
         let mut cur_refno = refno;
-        while let Some(b) = CACHED_REFNO_BASIC_MAP.get(&cur_refno) {
-            let type_name = b.get_type();
+        while let Ok(b) = surreal_service::get_named_attmap(cur_refno).await {
+            let type_name = b.get_type_str();
             if PDMS_GNERAL_TYPE_NAMES_MAP.contains_key(&type_name) {
                 return *PDMS_GNERAL_TYPE_NAMES_MAP.get(type_name).unwrap();
             }
-            cur_refno = b.owner;
+            cur_refno = b.get_owner();
         }
         PdmsGenericType::UNKOWN
     }

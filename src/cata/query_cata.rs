@@ -16,8 +16,9 @@ use glam::Vec3;
 use log::{error, info};
 use sled::pin;
 use std::collections::{BTreeMap, HashMap};
-use aios_core::AttrMap;
+use aios_core::{AttrMap, NamedAttrValue};
 use tokio::sync::RwLock;
+use crate::surreal_service;
 
 use super::resolve::CataContext;
 
@@ -30,10 +31,10 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
 ) -> anyhow::Result<CateGeomsInfo> {
     let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
-    let desi_att = interface.get_attr_from_localdb(desi_refno)?;
+    let desi_att = surreal_service::get_named_attmap(desi_refno).await?;
     //todo 改到使用图数据库去查找
     if scom_ref_option.is_none() {
-        scom_ref_option = interface.get_cat_ref(desi_refno);
+        scom_ref_option = interface.get_cat_ref(desi_refno).await;
     }
     let scom_ref = scom_ref_option.ok_or(anyhow::anyhow!(format!(
         "SCOM not exist in element: {}",
@@ -48,33 +49,31 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
         return Ok(Default::default());
     }
     // dbg!(scom_ref);
-    let scom_info = interface.get_or_create_scom_info(scom_ref)?;
+    let scom_info = interface.get_or_create_scom_info(scom_ref).await?;
     let mut context = interface.get_or_create_cata_context(desi_refno, desi_axis_map).await?;
     
     let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(interface), Some(context));
     // dbg!(&geom_info.as_ref().unwrap().n_geometries);
     if geom_info.is_err() {
         error!("{:?}", geom_info.as_ref().err());
-        error!("{:?}", desi_att.to_string_hashmap());
+        error!("{:?}", &desi_att);
     }
     geom_info
 }
 
 
 ///查询 Axis 参数
-pub fn query_axis_params<T: PdmsDataInterface>(
-    attr_map: &AttrMap,
-    interface: Option<&T>,
+pub async fn query_axis_params(
+    attr_map: &NamedAttrMap,
 ) -> anyhow::Result<BTreeMap<i32, AxisParam>> {
     // 查找ptse
-    let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
     let mut map = BTreeMap::new();
     let refno = attr_map.get_refno().unwrap_or_default();
-    let children = interface.get_children_attrs(refno)?;
+    let children = surreal_service::get_children_named_attmaps(refno).await?;
 
     for child in children {
         //plin不在收集范围
-        if child.get_type() == "PLIN" {  continue; }
+        if child.get_type_str() == "PLIN" {  continue; }
         let number = child.get_i32("NUMB").unwrap_or(-1);
         if let Some(axis) = get_axis_param(&child) {
             map.entry(number).or_insert(axis);
@@ -84,7 +83,7 @@ pub fn query_axis_params<T: PdmsDataInterface>(
 }
 
 ///查询gmse的参数
-pub fn query_gm_params<T: PdmsDataInterface>(
+pub async fn query_gm_params<T: PdmsDataInterface>(
     attr_map: &AttrMap,
     interface: Option<&T>,
 ) -> anyhow::Result<Vec<GmParam>> {
@@ -92,12 +91,12 @@ pub fn query_gm_params<T: PdmsDataInterface>(
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
     let mut children = vec![];
-    for c in interface.get_children_attrs(refno)? {
-        if TOTAL_CATA_GEO_NOUN_NAMES.contains(&c.get_type()) {
+    for c in surreal_service::get_children_named_attmaps(refno).await? {
+        if TOTAL_CATA_GEO_NOUN_NAMES.contains(&c.get_type_str()) {
             children.push(c.clone());
         } else {
-            for cc in interface.get_children_attrs(c.get_refno().unwrap_or_default())? {
-                if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type()) {
+            for cc in surreal_service::get_children_named_attmaps(c.get_refno_or_default()).await? {
+                if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type_str()) {
                     children.push(cc.clone());
                 }
             }
@@ -107,16 +106,16 @@ pub fn query_gm_params<T: PdmsDataInterface>(
         if !geo_am.is_visible_by_level(None).unwrap_or(true) {
             continue;
         }
-        dbg!(&geo_am);
-        let is_spro = geo_am.get_type() == "SPRO"; //todo add other types
-        gms.push(query_gm_param(&geo_am, interface, is_spro).unwrap_or_default());
+        // dbg!(&geo_am);
+        let is_spro = geo_am.get_type_str() == "SPRO"; //todo add other types
+        gms.push(query_gm_param(&geo_am, interface, is_spro).await.unwrap_or_default());
     }
     Ok(gms)
 }
 
 ///对元件库的SCOM Element进行求值计算
 pub fn resolve_cata_comp<T: PdmsDataInterface>(
-    des_att: &AttrMap,
+    des_att: &NamedAttrMap,
     scom_info: &ScomInfo,
     interface: Option<&T>,
     context: Option<CataContext>,
@@ -164,7 +163,7 @@ pub fn resolve_cata_comp<T: PdmsDataInterface>(
 }
 
 ///获得AxisParam
-pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
+pub fn get_axis_param(attr_map: &NamedAttrMap) -> Option<AxisParam> {
     let type_name = attr_map.get_as_string("TYPE").unwrap_or_default();
     let pconnect = attr_map.get_as_string("PCON").unwrap_or_default();
     let pbore = attr_map.get_as_string("PBOR").unwrap_or_default();
@@ -180,9 +179,9 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             x: "".into(),
             y: "".into(),
             z: "".into(),
-            distance: attr_map.get_as_smol_str("PDIS")?,
-            direction: attr_map.get_as_smol_str("PAXI")?,
-            ref_direction: attr_map.get_as_smol_str("PZAXI").unwrap_or_default(),
+            distance: attr_map.get_as_string("PDIS")?,
+            direction: attr_map.get_as_string("PAXI")?,
+            ref_direction: attr_map.get_as_string("PZAXI").unwrap_or_default(),
             pconnect,
             pbore,
             pwidth,
@@ -193,12 +192,12 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             refno,
             type_name,
             number,
-            x: attr_map.get_as_smol_str("PX")?,
-            y: attr_map.get_as_smol_str("PY")?,
-            z: attr_map.get_as_smol_str("PZ")?,
+            x: attr_map.get_as_string("PX")?,
+            y: attr_map.get_as_string("PY")?,
+            z: attr_map.get_as_string("PZ")?,
             distance: "".into(),
-            direction: { attr_map.get_as_smol_str("PTCD").unwrap_or("Y".into()) },
-            ref_direction: attr_map.get_as_smol_str("PZAXI").unwrap_or_default(),
+            direction: { attr_map.get_as_string("PTCD").unwrap_or("Y".into()) },
+            ref_direction: attr_map.get_as_string("PZAXI").unwrap_or_default(),
             pconnect,
             pbore,
             pwidth,
@@ -209,12 +208,12 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
             refno,
             type_name,
             number,
-            x: attr_map.get_as_smol_str("PX")?,
-            y: attr_map.get_as_smol_str("PY")?,
-            z: attr_map.get_as_smol_str("PZ")?,
+            x: attr_map.get_as_string("PX")?,
+            y: attr_map.get_as_string("PY")?,
+            z: attr_map.get_as_string("PZ")?,
             distance: "".into(),
-            direction: attr_map.get_as_smol_str("PAXI")?,
-            ref_direction: attr_map.get_as_smol_str("PZAXI").unwrap_or_default(),
+            direction: attr_map.get_as_string("PAXI")?,
+            ref_direction: attr_map.get_as_string("PZAXI").unwrap_or_default(),
             pconnect,
             pbore,
             pwidth,
@@ -230,9 +229,9 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
                 x: "".into(),
                 y: "".into(),
                 z: "".into(),
-                distance: attr_map.get_as_smol_str("PTCP").unwrap_or("0".into()),
-                direction: attr_map.get_as_smol_str("PTCD").unwrap_or("Y".into()),
-                ref_direction: attr_map.get_as_smol_str("PZAXI").unwrap_or_default(),
+                distance: attr_map.get_as_string("PTCP").unwrap_or("0".into()),
+                direction: attr_map.get_as_string("PTCD").unwrap_or("Y".into()),
+                ref_direction: attr_map.get_as_string("PZAXI").unwrap_or_default(),
                 pconnect,
                 pbore,
                 pwidth,
@@ -261,15 +260,15 @@ pub fn get_axis_param(attr_map: &AttrMap) -> Option<AxisParam> {
 }
 
 ///获得gmse的params
-pub fn query_gm_param(
-    a: &AttrMap,
+pub async fn query_gm_param(
+    a: &NamedAttrMap,
     interface: &dyn PdmsDataInterface,
     is_spro: bool,
 ) -> Option<GmParam> {
     let mut paxises = a.get_attr_strings_without_default(&["PAXI", "PAAX", "PBAX", "PCAX"]);
     if let Some(val) = a.get_val("PTS") {
         match val {
-            IntArrayType(v) => {
+            NamedAttrValue::IntArrayType(v) => {
                 for s in v {
                     paxises.push(s.to_string().into());
                 }
@@ -286,13 +285,13 @@ pub fn query_gm_param(
     let mut frads = vec![];
     let mut dxy = vec![];
     let refno = a.get_refno().unwrap_or_default();
-    let type_name = a.get_type();
+    let type_name = a.get_type_str();
     if type_name == "SEXT" || type_name == "NSEX" || type_name == "SREV" || type_name == "NSRE" {
         //先暂时不考虑负实体
-        let children = interface.get_children_attrs(refno).ok()?;
+        let children = surreal_service::get_children_named_attmaps(refno).await.ok()?;
         for child in children {
-            if let Some(r) = child.get_refno() && child.get_type() == "SLOO" {
-                for a in interface.get_children_attrs(r).unwrap_or_default() {
+            if let Some(r) = child.get_refno() && child.get_type_str() == "SLOO" {
+                for a in surreal_service::get_children_named_attmaps(r).await.unwrap_or_default() {
                     verts.push([(a.get_as_string("PX").unwrap_or_default()),
                         (a.get_as_string("PY").unwrap_or_default()),
                         (a.get_as_string("PZ").unwrap_or_default())
@@ -302,9 +301,9 @@ pub fn query_gm_param(
             }
         }
     } else {
-        let cur_type = interface.get_type_name(refno);
+        let cur_type = interface.get_type_name(refno).await;
         if is_spro && cur_type.as_str() == "SPRO" {
-            for a in interface.get_children_attrs(refno).ok().unwrap_or_default() {
+            for a in surreal_service::get_children_named_attmaps(refno).await.ok().unwrap_or_default() {
                 verts.push([
                     (a.get_as_string("PX").unwrap_or_default()),
                     (a.get_as_string("PY").unwrap_or_default()),
@@ -332,7 +331,7 @@ pub fn query_gm_param(
 
     Some(GmParam {
         refno: a.get_refno().unwrap_or_default(),
-        gm_type: a.get_type().to_owned(),
+        gm_type: a.get_type_str().to_owned(),
         prad: (a.get_as_string("PRAD").unwrap_or_default()),
         pang: (a.get_as_string("PANG").unwrap_or_default()),
         pwid: (a.get_as_string("PWID").unwrap_or_default()),

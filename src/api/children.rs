@@ -24,6 +24,7 @@ use crate::aql_api::children::query_owner_with_type_aql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::defines::{RString, CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
 use crate::arangodb::ArDatabase;
+use crate::surreal_service;
 
 /// 遍历该节点下的 children (包含自己)
 pub async fn travel_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
@@ -223,13 +224,13 @@ pub async fn query_owner_type_from_id(refno: RefU64, pool: &Pool<MySql>) -> anyh
 
 impl AiosDBManager {
     pub fn get_ancestor_refno_of_type_data(&self, mut refno: RefU64, att_type: &str) -> anyhow::Result<RefU64> {
-        let att_type = qualified_table_name(&att_type).to_lowercase();
-        while let Some(basic) = self.get_refno_basic(refno) {
-            if &basic.get_type().to_lowercase() == &att_type {
-                return Ok(refno);
-            }
-            refno = basic.get_owner();
-        }
+        // let att_type = qualified_table_name(&att_type).to_lowercase();
+        // while let Some(basic) = self.get_refno_basic(refno) {
+        //     if &basic.get_type_str().to_lowercase() == &att_type {
+        //         return Ok(refno);
+        //     }
+        //     refno = basic.get_owner();
+        // }
         Err(anyhow::anyhow!("not exist"))
     }
 
@@ -260,11 +261,11 @@ impl AiosDBManager {
     }
 
 
-    pub fn traverse_foreign(&self, mut refno: RefU64, foreigns: &[&str], func: impl Fn(RefU64) -> bool) -> Option<RefU64> {
+    pub async fn traverse_foreign(&self, mut refno: RefU64, foreigns: &[&str], func: impl Fn(RefU64) -> bool) -> Option<RefU64> {
         let mut target = None;
         let mut index: usize = 0;
         if foreigns.is_empty() { return None; }
-        while let Ok(att) = self.get_attr_from_localdb(refno)  {
+        while let Ok(att) = surreal_service::get_named_attmap(refno).await  {
             let key = foreigns.get(0).unwrap_or(foreigns.last().unwrap());
             if func(refno) {
                 break;

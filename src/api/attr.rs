@@ -47,7 +47,7 @@ impl AiosDBManager{
             // let pos_geos = geo_insts.iter().filter(|x| x.geo_type == GeoBasicType::Pos ).collect::<Vec<_>>();
             if geo_insts.is_empty() { continue;  }
             let geo_inst = &geo_insts[0];
-            let type_name = self.get_type_name(*refno);
+            let type_name = self.get_type_name(*refno).await;
 
              match &geo_inst.geo_param {
                 PrimRevolution(r) => {
@@ -194,43 +194,44 @@ pub fn convert_row_to_attmap(row: &MySqlRow, type_hash: i32, column_names: &[&st
 /// 获得隐式属性
 pub async fn query_implicit_attr(refno: RefU64, ref_basic: &CachedRefBasic,
                                  pool: &Pool<MySql>, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
-    let type_name = ref_basic.get_type();
-    let type_hash = ref_basic.get_noun_hash() as i32;
-    let mut exclude_columns = vec![];
-    //需要过滤一遍
-    let column_names = if column_names.is_some() {
-        let mut column_names = column_names.unwrap();
-        if column_names.len() == 0 { return Ok(AttrMap::default()); }
-        if let Some(names_map) = ATTR_INFO_MAP.get_names_of_type(type_name) {
-            // exclude_columns = column_names.drain_filter(|x| {
-            //     !names_map.value().contains(*x)
-            // }).collect();
-            let mut i = 0;
-            while i < column_names.len() {
-                if !names_map.value().contains(column_names[i]) {
-                    exclude_columns.push(column_names[i]);
-                    column_names.swap_remove(i);
-                } else {
-                    i += 1;
-                }
-            }
-        }
-        column_names
-    } else {
-        vec![]
-    };
-    let sql = gen_query_implicit_attr_sql(refno, ref_basic.get_table_name(), &column_names);
-    let row = sqlx::query(&sql).fetch_one(pool).await?;
-    let mut r = convert_row_to_attmap(&row, type_hash, &column_names);
-    let mut r = r?;
-    //其他的插入
-    if exclude_columns.len() > 0 {
-        exclude_columns.iter().for_each(|x| {
-            let hash = NounHash::from(db1_hash(*x));
-            r.insert(hash, AttrVal::InvalidType);
-        });
-    }
-    Ok(r)
+    // let type_name = ref_basic.get_type_str();
+    // let type_hash = ref_basic.get_noun_hash() as i32;
+    // let mut exclude_columns = vec![];
+    // //需要过滤一遍
+    // let column_names = if column_names.is_some() {
+    //     let mut column_names = column_names.unwrap();
+    //     if column_names.len() == 0 { return Ok(AttrMap::default()); }
+    //     if let Some(names_map) = ATTR_INFO_MAP.get_names_of_type(type_name) {
+    //         // exclude_columns = column_names.drain_filter(|x| {
+    //         //     !names_map.value().contains(*x)
+    //         // }).collect();
+    //         let mut i = 0;
+    //         while i < column_names.len() {
+    //             if !names_map.value().contains(column_names[i]) {
+    //                 exclude_columns.push(column_names[i]);
+    //                 column_names.swap_remove(i);
+    //             } else {
+    //                 i += 1;
+    //             }
+    //         }
+    //     }
+    //     column_names
+    // } else {
+    //     vec![]
+    // };
+    // let sql = gen_query_implicit_attr_sql(refno, ref_basic.get_table_name(), &column_names);
+    // let row = sqlx::query(&sql).fetch_one(pool).await?;
+    // let mut r = convert_row_to_attmap(&row, type_hash, &column_names);
+    // let mut r = r?;
+    // //其他的插入
+    // if exclude_columns.len() > 0 {
+    //     exclude_columns.iter().for_each(|x| {
+    //         let hash = NounHash::from(db1_hash(*x));
+    //         r.insert(hash, AttrVal::InvalidType);
+    //     });
+    // }
+    // Ok(r)
+    Ok(Default::default())
 }
 
 /// 查找整张表的 外键 refno 返回自身 refno + foreign refno
@@ -290,65 +291,34 @@ pub async fn query_refno_uda_value(refno: RefU64, uda_name: &str, pool: &Pool<My
 }
 
 pub async fn query_attr(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>) -> anyhow::Result<AttrMap> {
-    if let Some((project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
-        let ref_basic = aios_mgr.get_refno_basic(refno);
-        if ref_basic.is_none() { return Ok(AttrMap::default()); }
-        let ref_basic = ref_basic.unwrap();
-        //need to use join
-        let mut attr = query_implicit_attr(refno, ref_basic.value(), &pool, column_names).await?;
-        let att_type = attr.get_type().to_string();
-        let explicit_attr = query_explicit_attr(refno, &pool).await?;
-        let ele = query_ele_node(refno, &pool).await?;
-        // let b_bran = query_ancestor_of_type_from_cache(ele.refno, "PIPE").is_some();
-
-        for (k, v) in explicit_attr.map {
-            attr.entry(k).or_insert(v);
-        }
-
-        // 赋默认值
-        if let Some(map) = ATTR_INFO_MAP.map.get(&(db1_hash(&ele.noun) as i32)) {
-            for values in map.value() {
-                attr.entry((*values.key() as u32)).or_insert(values.default_val.clone());
-            }
-        }
-        attr.insert(REFNO_HASH, AttrVal::RefU64Type(ele.refno));
-        attr.insert(NAME_HASH, AttrVal::StringType(ele.name.into()));
-        attr.insert(OWNER_HASH, AttrVal::RefU64Type(ele.owner));
-        return Ok(attr);
-    }
+    // if let Some((project, pool)) = aios_mgr.get_project_pool_by_refno(refno).await {
+    //     let ref_basic = aios_mgr.get_refno_basic(refno);
+    //     if ref_basic.is_none() { return Ok(AttrMap::default()); }
+    //     let ref_basic = ref_basic.unwrap();
+    //     //need to use join
+    //     let mut attr = query_implicit_attr(refno, ref_basic.value(), &pool, column_names).await?;
+    //     let att_type = attr.get_type_str().to_string();
+    //     let explicit_attr = query_explicit_attr(refno, &pool).await?;
+    //     let ele = query_ele_node(refno, &pool).await?;
+    //     // let b_bran = query_ancestor_of_type_from_cache(ele.refno, "PIPE").is_some();
+    //
+    //     for (k, v) in explicit_attr.map {
+    //         attr.entry(k).or_insert(v);
+    //     }
+    //
+    //     // 赋默认值
+    //     if let Some(map) = ATTR_INFO_MAP.map.get(&(db1_hash(&ele.noun) as i32)) {
+    //         for values in map.value() {
+    //             attr.entry((*values.key() as u32)).or_insert(values.default_val.clone());
+    //         }
+    //     }
+    //     attr.insert(REFNO_HASH, AttrVal::RefU64Type(ele.refno));
+    //     attr.insert(NAME_HASH, AttrVal::StringType(ele.name.into()));
+    //     attr.insert(OWNER_HASH, AttrVal::RefU64Type(ele.owner));
+    //     return Ok(attr);
+    // }
     Ok(AttrMap::default())
 }
-
-pub async fn query_full_attr_with_pool(refno: RefU64, aios_mgr: &AiosDBManager, column_names: Option<Vec<&str>>, pool: &Pool<MySql>) -> anyhow::Result<AttrMap> {
-    let ref_basic = aios_mgr.get_refno_basic(refno);
-    if ref_basic.is_none() { return Ok(AttrMap::default()); }
-    let ref_basic = ref_basic.unwrap();
-    let mut attr = query_implicit_attr(refno, ref_basic.value(), &pool, column_names).await?;
-    let att_type = attr.get_type().to_string();
-    let explicit_attr = query_explicit_attr(refno, &pool).await?;
-    let ele = query_ele_node(refno, &pool).await?;
-    for (k, v) in explicit_attr.map {
-        attr.entry(k).or_insert(v);
-    }
-    for pool in &aios_mgr.project_map {
-        // uda 赋值需要加上元件库
-        let uda_attr = query_uda_attr(vec![db1_hash(&att_type) as i32], &pool).await?;
-        for (k, v) in uda_attr.map {
-            attr.entry(k).or_insert(v);
-        }
-    }
-    // 赋默认值
-    if let Some(map) = ATTR_INFO_MAP.map.get(&(db1_hash(&ele.noun) as i32)) {
-        for values in map.value() {
-            attr.entry((*values.key() as u32)).or_insert(values.default_val.clone());
-        }
-    }
-    attr.insert(REFNO_HASH, AttrVal::RefU64Type(ele.refno));
-    attr.insert(NAME_HASH, AttrVal::StringType(ele.name.into()));
-    attr.insert(OWNER_HASH, AttrVal::RefU64Type(ele.owner));
-    Ok(attr)
-}
-
 
 pub async fn insert_attr_info(pool: Pool<MySql>) -> anyhow::Result<()> {
     let sql = gen_insert_attr_info_sql(&ATTR_INFO_MAP);

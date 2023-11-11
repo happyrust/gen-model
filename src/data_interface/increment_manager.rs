@@ -71,10 +71,10 @@ impl AiosDBManager {
             for ele in eles {
                 let mut attmap: NamedAttrMap = ele.whole_attmap.merge().into();
                 attmap.set_e3d_version(ele.version as _);
+                // dbg!(&attmap);
                 let mut ele_op = EleOperation::Modified;
                 // 删除只是owner的children变化了，但是需要记录删除的节点
                 if let Ok(old_refnos) = surreal_service::get_children_refnos(ele.refno).await {
-                    // if let Ok(old_refnos) = self.get_children_from_localdb(ele.refno) {
                     old_refnos
                         .iter()
                         .filter(|x| !ele.children.contains(*x))
@@ -106,8 +106,7 @@ impl AiosDBManager {
                         attr: attmap,
                         children: ele.children,
                         operation: ele_op,
-                    })
-                ;
+                    });
 
                 match ele_op {
                     EleOperation::None => {}
@@ -129,13 +128,34 @@ impl AiosDBManager {
             if type_name.is_empty() {
                 continue;
             }
-            let atts = v.iter().map(|x| &x.attr).collect::<Vec<_>>();
+            let atts = v.iter().map(|x| x.attr.gen_versioned_json_map()).collect::<Vec<_>>();
+
             //使用surreal 保存NamedAttrMap
             SUL_DB
                 .query(format!("INSERT IGNORE INTO {} $values", &type_name))
                 .bind(("values", &atts))
                 .await
                 .unwrap();
+
+            for vv in v{
+                if vv.children.is_empty() {
+                    continue;
+                }
+                let relate_sqls = vv.children
+                    .iter()
+                    .enumerate()
+                    .map(|(i, child)| {
+                        format!("RELATE pe:{}->pe_owner->pe:{} set order_num = {}",
+                                child.to_string(),
+                                vv.refno.to_string(),
+                                i
+                        )
+                    })
+                    .collect::<Vec<String>>();
+                // dbg!(&relate_sqls);
+                SUL_DB.query(relate_sqls.join(";")).await.unwrap();
+            }
+
         }
 
         // let mut increment_data_record = Vec::new();
@@ -219,15 +239,20 @@ impl AiosDBManager {
                 }
 
                 let type_name = incr.attr.get_type_str();
-                if PRIMITIVE_NOUN_NAMES.contains(&type_name) {
-                    geo_update_log.prim_refnos.push(refno);
-                } else if GNERAL_LOOP_NOUN_NAMES.contains(&type_name) {
-                    geo_update_log.loop_refnos.push(refno);
-                } else if CATA_HAS_TUBI_GEO_NAMES.contains(&type_name) {
-                    geo_update_log.basic_cata_refnos.push(refno);
-                } else if CATA_GEO_NAMES.contains(&type_name) {
-                    geo_update_log.basic_cata_refnos.push(refno);
+
+                //还是要查询一下，有可能在子节点里
+                {
+                    if PRIMITIVE_NOUN_NAMES.contains(&type_name) {
+                        geo_update_log.prim_refnos.push(refno);
+                    } else if GNERAL_LOOP_NOUN_NAMES.contains(&type_name) {
+                        geo_update_log.loop_refnos.push(refno);
+                    } else if CATA_HAS_TUBI_GEO_NAMES.contains(&type_name) {
+                        geo_update_log.basic_cata_refnos.push(refno);
+                    } else if CATA_GEO_NAMES.contains(&type_name) {
+                        geo_update_log.basic_cata_refnos.push(refno);
+                    }
                 }
+
 
                 let pdms_element = pdms_element::Model {
                     id: refno.to_string(),
@@ -253,7 +278,19 @@ impl AiosDBManager {
                 .bind(("values", &c))
                 .await
                 .unwrap();
+            let mut sqls = vec![];
+            //更新一遍链接关系
+            for m in c{
+                //update owner record link
+                sqls.push(format!("update (<record> pe:{}) set owner = (type::thing(\"pe\", \"{}\"));", m.refno, m.owner));
+                //update refno record link
+                sqls.push(format!("update (<record> pe:{}) set refno = (type::thing(\"{}\", \"{}\"));", m.refno, m.noun, m.refno));
+            }
+            if !sqls.is_empty() {
+                SUL_DB.query(sqls.join(";")).await.unwrap();
+            }
         }
+
 
         // let database = self.get_arango_db().await?;
         // for result in pdms_elements.chunks(ARANGODB_SAVE_AMOUNT) {
@@ -273,6 +310,7 @@ impl AiosDBManager {
         // }
 
         dbg!(geo_update_log.prim_refnos.len());
+        dbg!(&geo_update_log);
         let r: Vec<IncrGeoUpdateLog> = SUL_DB
             .create("incr_model_log")
             .content(&geo_update_log)

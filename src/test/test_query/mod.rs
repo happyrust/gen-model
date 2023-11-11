@@ -9,6 +9,8 @@ pub mod test_query_fuzzy;
 
 pub mod query;
 
+pub mod transform;
+
 pub async fn init_test_surreal() {
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))

@@ -114,7 +114,6 @@ pub async fn save_pdms_eles_to_versioned(
     children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
 ) -> anyhow::Result<()> {
     let mut model_chunks: Vec<Vec<Model>> = vec![];
-    let table_name = "pe".to_string();
     //是否需要定义SCHEMA
     // SUL_DB
     //     .query(format!(r#"
@@ -176,11 +175,7 @@ pub async fn save_pdms_eles_to_versioned(
             .iter()
             .enumerate()
             .map(|(i, (child, _))| {
-                format!(
-                    "
-                RELATE {0}:{1}->pe_owner->{0}:{2} set order_num = {3}
-            ",
-                    &table_name,
+                format!("RELATE pe:{}->pe_owner->pe:{} set order_num = {}",
                     child.to_string(),
                     owner.to_string(),
                     i

@@ -15,6 +15,7 @@ use crate::consts::AQL_PLIN_ELES_COLLECTION;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::arangodb::ArDatabase;
+use crate::surreal_service;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
 #[derive(Debug, Default)]
@@ -78,16 +79,16 @@ impl AiosDBManager {
         if self.plin_params_map.contains_key(&refno) {
             return Ok(self.plin_params_map.get(&refno).unwrap().get(jusl).map(|x| x.value().clone()));
         }
-        let att = self.get_attr_from_localdb(refno)?;
-        let spre_att = self.get_attr_from_localdb(att.get_foreign_refno("SPRE").unwrap_or_default()).unwrap_or_default();
-        let cat_att = self.get_attr_from_localdb(spre_att.get_foreign_refno("CATR").unwrap_or_default()).unwrap_or_default();
+        let att = surreal_service::get_named_attmap(refno).await?;
+        let spre_att = surreal_service::get_named_attmap(att.get_foreign_refno("SPRE").unwrap_or_default()).await.unwrap_or_default();
+        let cat_att = surreal_service::get_named_attmap(att.get_foreign_refno("CATR").unwrap_or_default()).await.unwrap_or_default();
         let psref = cat_att.get_foreign_refno("PSTR").unwrap_or(cat_att.get_foreign_refno("PTSS").unwrap_or_default());
         if !psref.is_valid() { return Ok(None);  }
-        let c_refnos = self.get_children_from_localdb(psref).unwrap_or_default();
+        let c_refnos = surreal_service::get_children_refnos(psref).await.unwrap_or_default();
         // dbg!(&c_refnos);
         let mut result = None;
         for c_refno in c_refnos {
-            let a = self.get_attr_from_localdb(c_refno)?;
+            let a = surreal_service::get_named_attmap(c_refno).await?;
             let Some(p_key) = a.get_as_string("PKEY") else {
                 continue;
             };

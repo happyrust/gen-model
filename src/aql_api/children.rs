@@ -1397,10 +1397,11 @@ pub async fn get_uda_type_refnos_from_select_refnos(select_refnos: Vec<RefU64>,
         let Ok(attr) = aios_mgr.get_attr(refno.refno).await else {
             continue;
         };
-        let typex = attr.get_typex().to_string();
-        if base_type != typex && !typex.is_empty() {
+        //todo fix
+        // let typex = attr.get_typex().to_string();
+        // if base_type != typex && !typex.is_empty() {
             result.push(refno.into());
-        }
+        // }
     }
     Ok(result)
 }

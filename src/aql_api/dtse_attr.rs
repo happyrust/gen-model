@@ -4,8 +4,7 @@ use aios_core::pdms_types::RefU64;
 use aios_core::pdms_types::UdaMajorType::P;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
 use dashmap::DashMap;
-use futures::future;
-use futures::future::ok;
+use crate::surreal_service;
 use once_cell::sync::Lazy;
 use crate::api::attr::query_attr;
 use crate::api::children::travel_children_with_type;
@@ -63,26 +62,27 @@ pub static BRAN_IPARAM_MAP: Lazy<DashMap<RefU64, Vec<f64>>> = Lazy::new(DashMap:
 impl AiosDBManager{
 
     /// 查询保温层参数
-    pub fn query_ipara_from_ele(&self, ele_refno: RefU64) -> anyhow::Result<Vec<f64>> {
+    pub async fn query_ipara_from_ele(&self, ele_refno: RefU64) -> anyhow::Result<Vec<f64>> {
         let owner = self.get_owner(ele_refno);
         if BRAN_IPARAM_MAP.contains_key(&owner) {
             return Ok(BRAN_IPARAM_MAP.get(&owner).unwrap().clone());
         }
-        let owner_type = self.get_type_name(owner);
+        let owner_type = self.get_type_name(owner).await;
         if owner_type.as_str() == "BRAN" {
             // let mgr = self.clone();
             let s = futures::executor::block_on(async {
                 self.query_ipara_from_bran(owner).await.unwrap_or_default()
             });
-            BRAN_IPARAM_MAP.insert(ele_refno, s);
+            // BRAN_IPARAM_MAP.insert(ele_refno, s);
         }
         Ok(vec![])
     }
 
     /// 查询保温层参数
-    pub async fn query_ipara_from_bran(&self, bran_refno: RefU64) -> anyhow::Result<Vec<f64>> {
+    pub async fn query_ipara_from_bran(&self, bran_refno: RefU64) -> anyhow::Result<Vec<f32>> {
         let database = self.get_arango_db().await?;
-        let bran_attr = self.get_full_attr_from_localdb(bran_refno)?;
+        // let bran_attr = self.get_full_attr_from_localdb(bran_refno)?;
+        let bran_attr = surreal_service::get_named_attmap(bran_refno).await?;
         let temp = bran_attr.get_f32("TEMP").unwrap_or(-100000.0);
         let h_bore = bran_attr.get_f32("HBOR").unwrap_or(0.0);
         let Some(ispec) = bran_attr.get_refu64("ISPE") else { return Ok(vec![]); };
@@ -98,12 +98,12 @@ impl AiosDBManager{
         // ispec_vec : 0 : 温度范围 , 1 : 外径范围以及引用的catr
         let mut ispec_vec = Vec::new();
         for (t_ref, bore_vec) in bore_map {
-            let Ok(temp_attr) = self.get_full_attr_from_localdb(t_ref) else { continue; };
+            let Ok(temp_attr) = surreal_service::get_named_attmap(t_ref).await else { continue; };
             let Some(temp_answer) = temp_attr.get_f32("ANSW") else { continue; };
             let Some(temp_max_answer) = temp_attr.get_f32("MAXA") else { continue; };
             let mut bore_value_vec = Vec::new();
             for bore in bore_vec {
-                let Ok(bore_attr) = self.get_full_attr_from_localdb(bore.refno) else { continue; };
+                let Ok(bore_attr) = surreal_service::get_named_attmap(bore.refno).await else { continue; };
                 let Some(bore_answer) = bore_attr.get_f32("ANSW") else { continue; };
                 let Some(bore_max_answer) = bore_attr.get_f32("MAXA") else { continue; };
                 let Some(catr_refno) = bore_attr.get_refu64("CATR") else { continue; };
@@ -117,7 +117,7 @@ impl AiosDBManager{
             if temp >= ispec.0.0 && temp <= ispec.0.1 {
                 for bore in &ispec.1 {
                     if h_bore >= bore.0 && h_bore <= bore.1 {
-                        let Ok(catr_attr) = self.get_attr_from_localdb(bore.2) else { break; };
+                        let Ok(catr_attr) = surreal_service::get_named_attmap(bore.2).await else { break; };
                         let Some(para) = catr_attr.get_f32_vec("PARA") else { return Ok(vec![]); };
                         return Ok(para);
                     }

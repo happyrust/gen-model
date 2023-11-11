@@ -11,7 +11,7 @@ pub async fn get_penetration_detail_by_refno(aios_mgr: &AiosDBManager, refno_vec
     for i in refno_vec {
         if let Ok(attr) = aios_mgr.get_attr(i.0.clone()).await {
             //找到name中包含“ZZZ”的元素
-            if attr.get_name_string().contains("ZZZ") {
+            if attr.get_name_or_default().contains("ZZZ") {
                 let mut data = PenetrationData::default();
                 if let Ok(Some(translation)) = aios_mgr.get_world_transform(i.0.clone()).await {
                     //获得位置
@@ -22,7 +22,7 @@ pub async fn get_penetration_detail_by_refno(aios_mgr: &AiosDBManager, refno_vec
                 //获得自身refno
                 data.refno = i.0.clone();
                 //获得name
-                data.name = attr.get_name_string();
+                data.name = attr.get_name_or_default();
                 //获得x偏移角度
                 get_x_deviation_angle(&mut data);
                 //获得高差
