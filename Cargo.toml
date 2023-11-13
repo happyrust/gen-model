@@ -84,6 +84,8 @@ async-once-cell = "0.5.3"
 #liquid-json = "0.6.0"
 #geo = "0.24.1"
 
+spawn_groups = { git = "https://github.com/Genaro-Chris/spawn_groups.git"}
+
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }

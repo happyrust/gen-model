@@ -1,5 +1,5 @@
 #同步文件配置false
-total_sync = false
+total_sync = true
 enable_log = false
 sync_graph_db = false
 sync_versioned = false

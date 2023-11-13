@@ -13,9 +13,11 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use surrealdb::dbs::Response;
 use surrealdb::sql::Thing;
 use termnius_client::client::TDBClient;
+use tokio::task::JoinHandle;
 
 pub async fn get_versioned_client(project: &str) -> TDBClient {
     let mut client = termnius_client::client::TDBClientBuilder::default()
@@ -38,7 +40,8 @@ pub async fn get_versioned_client(project: &str) -> TDBClient {
     client
 }
 
-const SQL_CHUNK_COUNT: usize = 1000;
+// const SQL_CHUNK_COUNT: usize = 1000;
+const SQL_CHUNK_COUNT: usize = 500;
 // const SQL_CHUNK_COUNT: usize = 1;
 const JSON_CHUNK_COUNT: usize = 10_000;
 
@@ -92,6 +95,8 @@ pub async fn save_versioned_pdms_eles(
         // }));
     }
 
+
+
     // while let Some(_) = futures.next().await { }
 
     Ok(())
@@ -113,6 +118,7 @@ pub async fn save_pdms_eles_to_versioned(
     db_num: i32,
     children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
 ) -> anyhow::Result<()> {
+    use itertools::Itertools;
     let mut model_chunks: Vec<Vec<Model>> = vec![];
     //是否需要定义SCHEMA
     // SUL_DB
@@ -134,7 +140,8 @@ pub async fn save_pdms_eles_to_versioned(
                 name: att_map.get_string_or_default("NAME"),
                 noun: att_map.get_type(),
                 dbnum: db_num,
-                cata_hash: None,
+                // cata_hash: None,
+                cata_hash: att_map.cal_cata_hash().map(|x| x.to_string()),
                 status_tag: None,
                 version_tag: None,
                 e3d_version: att_map.get_e3d_version(),
@@ -145,6 +152,8 @@ pub async fn save_pdms_eles_to_versioned(
         model_chunks.push(model_chunk);
     }
     // let mut futures = FuturesUnordered::new();
+    let mut time = Instant::now();
+    let mut join_set = tokio::task::JoinSet::new();
     for models in model_chunks {
         //save to sql, todo 保存到tidb
         if false {
@@ -157,14 +166,22 @@ pub async fn save_pdms_eles_to_versioned(
             // }));
             // break;
         }
-        SUL_DB
-            .query("INSERT IGNORE INTO pe $values")
-            .bind(("values", &models))
-            .await
-            .unwrap();
+        join_set.spawn(async {
+            SUL_DB
+                .query("INSERT IGNORE INTO pe $values")
+                .bind(("values", models))
+                .await
+                .unwrap();
+        });
     }
+    while let Some(_) = join_set.join_next().await {}
 
+    println!("Save pes task costs {} s", time.elapsed().as_secs_f32());
+
+    let mut relate_join_set = tokio::task::JoinSet::new();
     // 使用owner创建relate关系
+    let mut all_relate_sqls = vec![];
+    time = Instant::now();
     for kv in children_map {
         let owner = kv.0;
         let children = kv.1;
@@ -175,16 +192,24 @@ pub async fn save_pdms_eles_to_versioned(
             .iter()
             .enumerate()
             .map(|(i, (child, _))| {
-                format!("RELATE pe:{}->pe_owner->pe:{} set order_num = {}",
+                format!(
+                    "RELATE pe:{}->pe_owner->pe:{} set order_num = {}",
                     child.to_string(),
                     owner.to_string(),
                     i
                 )
             })
             .collect::<Vec<String>>();
-        SUL_DB.query(relate_sqls.join(";")).await.unwrap();
+        all_relate_sqls.extend_from_slice(&relate_sqls);
     }
-    // while let Some(_) = futures.next().await { }
-
+    let mut chunks = all_relate_sqls.chunks(SQL_CHUNK_COUNT);
+    for mut s in chunks{
+        let sql =  s.into_iter().join(";");
+        relate_join_set.spawn(async move {
+            SUL_DB.query(sql).await.unwrap();
+        });
+    }
+    while let Some(_) = relate_join_set.join_next().await {}
+    println!("Relate pes task costs {} s", time.elapsed().as_secs_f32());
     Ok(())
 }

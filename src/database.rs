@@ -135,19 +135,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     dbg!("执行多线程解析");
     // 遍历所有包含的项目
     for project in &db_option.included_projects {
-        let (att_map_tree, children_tree) = {
-            let db_path = format!("{}.db", &project);
-            let config = sled::Config::default()
-                .path(db_path)
-                .mode(sled::Mode::HighThroughput)
-                .cache_capacity(10_000_000_000)
-                .flush_every_ms(Some(1000));
-            let db = config.open()?;
-            let tree = db.open_tree("attr_map")?;
-            let children_tree = db.open_tree("children")?;
-            (tree, children_tree)
-        };
-
         if db_option.sync_versioned.unwrap_or(true) {
             let db = sea_orm::Database::connect(&default_conn_str).await.unwrap();
             let backend = db.get_database_backend();
@@ -491,26 +478,38 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
                     .await?;
                     dbg!("开始保存属性数据");
                     const ATTS_CHUNK_COUNT: usize = 500;
+                    let mut join_set = tokio::task::JoinSet::new();
+                    let mut save_atts_time = Instant::now();
                     for kv in type_ele_map.iter() {
                         let noun: i32 = *kv.key() as _;
                         let type_name = db1_dehash(noun as _);
                         if type_name.is_empty() {
                             continue;
                         }
+                        let insert_sql = Arc::new(format!("INSERT IGNORE INTO {} $values", &type_name));
                         for refnos in &kv.value().iter().chunks(ATTS_CHUNK_COUNT) {
                             let mut data_vec = vec![];
                             for refno in refnos {
                                 let att = total_attr_map_arc.get(refno).unwrap();
                                 data_vec.push(att.gen_versioned_json_map());
                             }
+                            let insert_sql_clone = insert_sql.clone();
                             //使用surreal 保存NamedAttrMap
-                            SUL_DB
-                                .query(format!("INSERT IGNORE INTO {} $values", &type_name))
-                                .bind(("values", &data_vec))
-                                .await
-                                .unwrap();
+                            join_set.spawn(async move {
+                                SUL_DB
+                                    .query(&*insert_sql_clone)
+                                    .bind(("values", data_vec))
+                                    .await
+                                    .unwrap();
+                            });
                         }
                     }
+                    //等待保存任务完成
+                    while let Some(_) = join_set.join_next().await {}
+                    println!(
+                        "保存属性数据完成，耗时: {} s",
+                        save_atts_time.elapsed().as_secs_f32()
+                    );
                 }
             }
         }
