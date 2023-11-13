@@ -168,10 +168,11 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     //todo 最后加入index
     // DEFINE INDEX userNameIndex ON TABLE user COLUMNS name SEARCH ANALYZER ascii BM25 HIGHLIGHTS;
     // 添加 relate 和 record link
-    SUL_DB
-        .query(include_str!("../schemas/do_relate_pe.surql"))
-        .await
-        .unwrap();
+    // 可以提前把所有的 pe 保存了，再更新属性里的类型？还是直接就通过pe去找到真正的类型
+    // SUL_DB
+    //     .query(include_str!("../schemas/do_relate_pe.surql"))
+    //     .await
+    //     .unwrap();
 
     // 输出创建表所花费的时间
     println!("创建表花费时间: {} ms", create_tables_elapse);
@@ -185,16 +186,15 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
 }
 
 pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
-    match conn.execute(sql).await {
+    return match conn.execute(sql).await {
         Ok(_) => {
-            return true;
+            true
         }
         Err(e) => {
             match &e {
                 Error::Database(error) => {
                     //index already exist
-                    if error.code() == Some(Cow::from("42000")) {
-                    } else {
+                    if error.code() == Some(Cow::from("42000")) {} else {
                         dbg!(sql);
                     }
                 }
@@ -202,73 +202,9 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
                     dbg!(&e);
                 }
             }
-            return false;
+            false
         }
     }
-}
-
-pub fn gen_explicit_att_insert_sql(
-    refno: RefU64,
-    type_name: &str,
-    owner: RefU64,
-    e_att: &AttrMap,
-) -> String {
-    let mut sql = String::new();
-    let mut table_columns_sql = String::new();
-    let table_name = qualified_table_name(type_name);
-    // table_columns_sql.push_str("REPLACE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA)");
-    table_columns_sql
-        .push_str("INSERT IGNORE INTO {PDMS_EXPLICIT_TABLE} (ID, REFNO, TYPE, OWNER, DATA)");
-
-    let mut table_vals_sql = String::new();
-    let data = hex::encode(e_att.into_compress_bytes());
-    table_vals_sql.push_str(&format!(
-        r#"({}, '{}', '{}', {}, 0x{})"#,
-        refno.0,
-        refno.to_refno_str(),
-        table_name,
-        owner.0,
-        data
-    ));
-
-    sql.push_str(&table_columns_sql);
-    sql.push_str(" VALUES ");
-    sql.push_str(&table_vals_sql);
-
-    sql
-}
-
-/// 生成隐藏属性的插入语句的前面列名部分
-pub fn gen_implicit_attr_insert_sql(hash: u32) -> (String, Vec<NounHash>) {
-    let type_name = db1_dehash(hash);
-    let table_name = qualified_table_name(type_name.as_str());
-    let mut table_columns_sql = String::new();
-    // if b_replace {
-    //     table_columns_sql.push_str(&format!("REPLACE INTO {} (ID, REFNO, TYPE, OWNER", table_name));
-    // } else {
-    table_columns_sql.push_str(&format!(
-        "INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER",
-        table_name
-    ));
-    // }
-
-    let implicit_names = ATTR_INFO_MAP.get_type_implicit_att_names(type_name.as_str());
-    let column_hashs = implicit_names
-        .iter()
-        .filter_map(|x| (x != "unset").then(|| (db1_hash(x.as_str()))))
-        .collect();
-    let v_sql = implicit_names
-        .iter()
-        .map(|x| qualified_column_name(x.as_str()))
-        .join(",");
-    // dbg!(&v_sql);
-    if v_sql.len() > 0 {
-        table_columns_sql.push_str(" , ");
-    }
-    table_columns_sql.push_str(v_sql.as_str());
-    table_columns_sql.push_str(") VALUES ");
-
-    (table_columns_sql, column_hashs)
 }
 
 #[inline]
@@ -287,33 +223,6 @@ pub fn gen_uda_attr_value_sql(att: &WholeAttMap) -> String {
     //     owner.0,                          // 所有者的第一个元素
     //     data                              // 数据
     // ));
-    table_vals_sql
-}
-
-#[inline]
-pub fn gen_explicit_attr_value_sql(att: &WholeAttMap) -> String {
-    // 创建一个空字符串，用于存储生成的SQL语句
-    let mut table_vals_sql = String::new();
-    // // 获取implicit_attmap字段的引用
-    // let i_att = &att.implicit_attmap;
-    // // 获取refno字段的值，并确保其存在
-    // let refno = i_att.get_refno().unwrap();
-    // // 获取type字段的值
-    // let type_name = i_att.get_type_str();
-    // // 获取owner字段的值，并确保其存在
-    // let owner = i_att.get_owner();
-    // // 将explicit_attmap字段转换为压缩字节数组，并将其转换为十六进制字符串
-    // let data = hex::encode(att.explicit_attmap.into_compress_bytes());
-    // // 构建SQL语句，并将其添加到table_vals_sql字符串中
-    // table_vals_sql.push_str(&format!(
-    //     r#"({}, '{}', '{}', {}, 0x{}),"#,
-    //     refno.0,
-    //     refno.to_refno_str(),
-    //     type_name,
-    //     owner.0,
-    //     data
-    // ));
-    // 返回生成的SQL语句
     table_vals_sql
 }
 
@@ -468,14 +377,13 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
 
                     //开始执行保存数据
                     dbg!("开始保存pdms_element数据");
-                    save_pdms_eles_to_versioned(
-                        &db_option,
-                        project.as_str(),
+                    save_pdms_eles_to_surreal(
                         &total_attr_map_arc,
                         db_no as i32,
                         &children_map_clone,
                     )
                     .await?;
+                    return Ok(());
                     dbg!("开始保存属性数据");
                     const ATTS_CHUNK_COUNT: usize = 500;
                     let mut join_set = tokio::task::JoinSet::new();

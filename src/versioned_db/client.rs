@@ -111,21 +111,19 @@ struct Record {
 /// 保存element数据到版本管理
 /// todo 后续再考虑 record links
 // 先暂时使用relate的方式
-pub async fn save_pdms_eles_to_versioned(
-    db_option: &DbOption,
-    project: &str,
+pub async fn save_pdms_eles_to_surreal(
     total_attr_map: &DashMap<RefU64, NamedAttrMap>,
     db_num: i32,
     children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
 ) -> anyhow::Result<()> {
     use itertools::Itertools;
-    let mut model_chunks: Vec<Vec<Model>> = vec![];
+    let mut model_chunks: Vec<Vec<serde_json::Value>> = vec![];
     //是否需要定义SCHEMA
     // SUL_DB
     //     .query(format!(r#"
     //         DEFINE TABLE {0} SCHEMALESS;
     //         DEFINE FIELD owner ON {0} TYPE option<record<{0}>>;
-    //     "#, &table_name))
+    //     "#, "pe"))
     //     .await.unwrap();
     for chunk in &total_attr_map.into_iter().chunks(SQL_CHUNK_COUNT) {
         let mut model_chunk = vec![];
@@ -140,18 +138,20 @@ pub async fn save_pdms_eles_to_versioned(
                 name: att_map.get_string_or_default("NAME"),
                 noun: att_map.get_type(),
                 dbnum: db_num,
-                // cata_hash: None,
                 cata_hash: att_map.cal_cata_hash().map(|x| x.to_string()),
                 status_tag: None,
                 version_tag: None,
                 e3d_version: att_map.get_e3d_version(),
                 lock: false,
             };
-            model_chunk.push(ele);
+            let mut value: serde_json::Value = serde_json::to_value(ele).unwrap();
+            value.as_object_mut().unwrap().insert("owner".into(), format!("pe:{}", owner.to_string()).into());
+            model_chunk.push(value);
+            // break;
         }
         model_chunks.push(model_chunk);
+        // break;
     }
-    // let mut futures = FuturesUnordered::new();
     let mut time = Instant::now();
     let mut join_set = tokio::task::JoinSet::new();
     for models in model_chunks {

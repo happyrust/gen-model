@@ -1,7 +1,9 @@
+use std::fmt::format;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::surreal_service;
 use std::sync::Arc;
+use aios_core::orm::pdms_element;
 use aios_core::RefU64;
 use glam::Vec3;
 use surrealdb::sql::Thing;
@@ -81,5 +83,80 @@ async fn test_query_custom() -> anyhow::Result<()> {
     let owner: RefU64 = response.take::<Option<String>>("owner")?.unwrap().into();
     // let owner: Option<RefU64> = response.take("owner").unwrap();
     dbg!(owner);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_record_link() -> anyhow::Result<()> {
+    super::init_test_surreal().await;
+
+    let str1 =         r#"
+            {
+    "id": "25688_32684",
+    "refno": "25688_32684",
+    "owner": "pe:25688_32682",
+    "name": "/1AR07WW0002R",
+    "noun": "FITT",
+    "dbnum": 1112,
+    "e3d_version": 0,
+    "cata_hash": "110329119932332",
+    "lock": false
+}
+        "#;
+
+    let str2 =         r#"
+            {
+     "id": "25688_32682",
+    "refno": "25688_32682",
+    "owner": "pe:25688_32681",
+    "name": "/1AR07WW0002R",
+    "noun": "TEST",
+    "dbnum": 1112,
+    "e3d_version": 0,
+    "cata_hash": "110329119932332",
+    "lock": false
+}
+        "#;
+
+    let d1: pdms_element::Model = serde_json::from_str(
+        str1
+    ).unwrap();
+
+    let d2: pdms_element::Model = serde_json::from_str(
+    str2
+    ).unwrap();
+
+
+    // let response = SUL_DB
+    //     .query("use ns 1516;use db AvevaMarineSample;INSERT IGNORE INTO pe $values")
+    //     .bind(("values", &[serde_json::to_string_pretty(&d1).unwrap(),
+    //         serde_json::to_string_pretty(&d2).unwrap()]))
+    //     .await
+    //     .unwrap();
+    // let s1 = serde_json::to_string_pretty(&d1).unwrap();
+    // let s2 = serde_json::to_string_pretty(&d2).unwrap();
+    let mut v1: serde_json::Value = serde_json::to_value(d1.clone()).unwrap();
+    v1.as_object_mut().unwrap().insert("owner".into(), format!("pe:{}", d1.owner.to_string()).into());
+
+    let mut v2: serde_json::Value = serde_json::to_value(d2).unwrap();
+    v2.as_object_mut().unwrap().insert("owner".into(), format!("pe:{}", "0_0").into());
+
+    let mut sql = format!(r#"use ns 1516;use db AvevaMarineSample;INSERT IGNORE INTO pe {};"#,
+        serde_json::to_string_pretty(&[v1, v2]).unwrap()
+    );
+
+    println!("{}", &sql);
+
+    let response = SUL_DB
+        .query(&sql)
+        // .query("use ns 1516;use db AvevaMarineSample;INSERT IGNORE INTO pe $values")
+        // .bind(("values", &[str1, str2]))
+        .await
+        .unwrap();
+
+    let q = SUL_DB.query("select owner.* from pe:25688_32684;").await.unwrap();
+
+    dbg!(q);
+
     Ok(())
 }
