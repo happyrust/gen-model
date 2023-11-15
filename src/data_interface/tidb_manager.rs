@@ -1075,48 +1075,13 @@ impl PdmsDataInterface for AiosDBManager {
     ///获得元件库的catr参考号
     #[inline]
     async fn get_cat_ref(&self, refno: RefU64) -> Option<RefU64> {
-        let cat_ref = self
-            .get_foreign_attrmap(refno, "SPRE")
-            .await
-            .map(|x| x.get_foreign_refno("CATR").or(x.get_refno()))
-            .flatten();
-        if cat_ref.is_some() {
-            return cat_ref;
-        }
-        let self_cat_ref = self
-            .get_foreign_refno(refno, "CATR")
-            .await.unwrap_or_default();
-        //todo fix here
-        // let self_cat_ref = self
-        //     .get_foreign_attrmap(refno, "CATR")
-        //     .await
-        //     .map(|x| async {
-        //         let c_refno = x.get_refno().unwrap_or_default();
-        //         match x.get_type_str() {
-        //             "TABITE" => self
-        //                 .get_foreign_attrmap(c_refno, "PRTREF")
-        //                 .await
-        //                 .map(|x| x.get_foreign_refno("CATR").unwrap_or_default()),
-        //             "SPCO" => self.get_foreign_refno(c_refno, "CATR").await,
-        //             _ => Some(c_refno),
-        //         }
-        //     })
-        //     .unwrap_or_default();
-        Some(self_cat_ref)
+        surreal_service::get_cat_refno(refno).await.ok().flatten()
     }
 
     ///获得元件库的catr属性数据
     #[inline]
     async fn get_cat_attmap(&self, refno: RefU64) -> Option<NamedAttrMap> {
-        // self.get_cat_ref(refno).await.and_then(|x| async {
-        //     surreal_service::get_named_attmap(x).await.ok()
-        // })
-
-        if let Some(cat_ref) = self.get_cat_ref(refno).await {
-            surreal_service::get_named_attmap(cat_ref).await.ok()
-        }else{
-            None
-        }
+        surreal_service::get_cat_attmap(refno).await.ok()
     }
 
     ///收集几何参数
