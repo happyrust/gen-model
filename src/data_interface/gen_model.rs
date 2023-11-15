@@ -1613,7 +1613,9 @@ pub async fn gen_all_geos_data(
                 let cata_map = DashMap::new();
                 let cata_refnos = &incr_update_log.as_ref().unwrap().basic_cata_refnos;
                 for r in cata_refnos {
+                    dbg!(r);
                     if let Ok(Some(att)) = surreal_service::get_pe(*r).await {
+                        dbg!(&att);
                         if let Some(hash) = att.cata_hash {
                             cata_map.insert(
                                 hash.clone(),

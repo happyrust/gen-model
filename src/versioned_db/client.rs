@@ -14,6 +14,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
+use aios_core::pe::SPdmsElement;
 use surrealdb::dbs::Response;
 use surrealdb::sql::Thing;
 use termnius_client::client::TDBClient;
@@ -41,8 +42,8 @@ pub async fn get_versioned_client(project: &str) -> TDBClient {
 }
 
 // const SQL_CHUNK_COUNT: usize = 1000;
-const SQL_CHUNK_COUNT: usize = 500;
-// const SQL_CHUNK_COUNT: usize = 1;
+const SQL_CHUNK_COUNT: usize = 300;
+// const SQL_CHUNK_COUNT: usize = 300;
 const JSON_CHUNK_COUNT: usize = 10_000;
 
 pub async fn save_versioned_pdms_eles(
@@ -117,7 +118,7 @@ pub async fn save_pdms_eles_to_surreal(
     children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
 ) -> anyhow::Result<()> {
     use itertools::Itertools;
-    let mut model_chunks: Vec<Vec<serde_json::Value>> = vec![];
+    let mut model_chunks: Vec<Vec<SPdmsElement>> = vec![];
     //是否需要定义SCHEMA
     // SUL_DB
     //     .query(format!(r#"
@@ -131,7 +132,7 @@ pub async fn save_pdms_eles_to_surreal(
             let att_map = kv.value();
             let owner = att_map.get_refno_by_att_or_default("OWNER");
             let refno = *kv.key();
-            let ele = pdms_element::Model {
+            let ele = pe::SPdmsElement {
                 id: refno.to_string(),
                 refno,
                 owner,
@@ -144,13 +145,9 @@ pub async fn save_pdms_eles_to_surreal(
                 e3d_version: att_map.get_e3d_version(),
                 lock: false,
             };
-            let mut value: serde_json::Value = serde_json::to_value(ele).unwrap();
-            value.as_object_mut().unwrap().insert("owner".into(), format!("pe:{}", owner.to_string()).into());
-            model_chunk.push(value);
-            // break;
+            model_chunk.push(ele);
         }
         model_chunks.push(model_chunk);
-        // break;
     }
     let mut time = Instant::now();
     let mut join_set = tokio::task::JoinSet::new();
@@ -166,10 +163,15 @@ pub async fn save_pdms_eles_to_surreal(
             // }));
             // break;
         }
-        join_set.spawn(async {
+        let mut jsons_str = vec![];
+        for m in models{
+            jsons_str.push(m.gen_json());
+        }
+        let sql = format!("INSERT IGNORE INTO pe [{}]", jsons_str.join(","));
+        //手动修改，替换掉""
+        join_set.spawn(async move{
             SUL_DB
-                .query("INSERT IGNORE INTO pe $values")
-                .bind(("values", models))
+                .query(sql)
                 .await
                 .unwrap();
         });

@@ -1,2 +1,2 @@
 
-pub mod test_gen_prim;
+pub mod test_gen_basic;

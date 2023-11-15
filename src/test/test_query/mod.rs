@@ -7,7 +7,9 @@ use crate::surreal_service::SUL_DB;
 pub mod test_mdb;
 pub mod test_query_fuzzy;
 
-pub mod query;
+pub mod test_query_regex;
+
+pub mod test_basic_query;
 
 pub mod transform;
 

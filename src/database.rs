@@ -384,7 +384,8 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
                     )
                     .await?;
                     dbg!("开始保存属性数据");
-                    const ATTS_CHUNK_COUNT: usize = 500;
+                    // const ATTS_CHUNK_COUNT: usize = 500;
+                    const ATTS_CHUNK_COUNT: usize = 2;
                     let mut join_set = tokio::task::JoinSet::new();
                     let mut save_atts_time = Instant::now();
                     for kv in type_ele_map.iter() {
@@ -393,19 +394,23 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
                         if type_name.is_empty() {
                             continue;
                         }
-                        let insert_sql = Arc::new(format!("INSERT IGNORE INTO {} $values", &type_name));
+                        // let insert_sql = Arc::new(format!("INSERT IGNORE INTO {} $values", &type_name));
                         for refnos in &kv.value().iter().chunks(ATTS_CHUNK_COUNT) {
-                            let mut data_vec = vec![];
+                            let mut json_vec = vec![];
                             for refno in refnos {
                                 let att = total_attr_map_arc.get(refno).unwrap();
-                                data_vec.push(att.gen_versioned_json_map());
+                                let Some(json) = att.gen_surreal_json() else{
+                                    continue;
+                                };
+                                json_vec.push(json);
                             }
-                            let insert_sql_clone = insert_sql.clone();
+                            // let insert_sql_clone = insert_sql.clone();
+                            let sql = format!("INSERT IGNORE INTO {} [{}]", &type_name, json_vec.join(","));
+                            // println!("test sql: {}", &sql);
                             //使用surreal 保存NamedAttrMap
                             join_set.spawn(async move {
                                 SUL_DB
-                                    .query(&*insert_sql_clone)
-                                    .bind(("values", data_vec))
+                                    .query(sql)
                                     .await
                                     .unwrap();
                             });
@@ -417,6 +422,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
                         "保存属性数据完成，耗时: {} s",
                         save_atts_time.elapsed().as_secs_f32()
                     );
+                    break;
                 }
             }
         }

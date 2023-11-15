@@ -1,15 +1,16 @@
 use crate::surreal_service::{SUL_DB, SUL_DB_ASYNC};
-use aios_core::orm::pdms_element;
 use aios_core::types::*;
 use aios_core::{NamedAttrMap, RefU64};
+use aios_core::pe::SPdmsElement;
+use surrealdb::sql::{Thing, Value};
 
 ///通过surql查询pe数据
-pub async fn get_pe(refno: RefU64) -> anyhow::Result<Option<pdms_element::Model>> {
+pub async fn get_pe(refno: RefU64) -> anyhow::Result<Option<SPdmsElement>> {
     let mut response = SUL_DB
         .query(include_str!("../../schemas/query_pe_by_refno.surql"))
         .bind(("refno", refno.to_string()))
         .await?;
-    let pe: Option<pdms_element::Model> = response.take(0)?;
+    let pe: Option<SPdmsElement> = response.take(0)?;
     Ok(pe)
 }
 
@@ -52,6 +53,26 @@ pub async fn get_named_attmap(refno: RefU64) -> anyhow::Result<NamedAttrMap> {
         .bind(("refno", refno.to_string()))
         .await?;
     let o: SurlValue = response.take(0)?;
+    let named_attmap: NamedAttrMap = o.into();
+    Ok(named_attmap)
+}
+
+pub async fn get_cat_refno(refno: RefU64) -> anyhow::Result<Option<RefU64>> {
+    let mut response = SUL_DB
+        .query(include_str!("../../schemas/query_cata_refno.surql"))
+        .bind(("refno", refno.to_string()))
+        .await?;
+    let o: Option<String> = response.take(1)?;
+    Ok(o.map(|x| x.into()))
+}
+
+pub async fn get_cat_attmap(refno: RefU64) -> anyhow::Result<NamedAttrMap> {
+    let mut response = SUL_DB
+        .query(include_str!("../../schemas/query_cata_attmap.surql"))
+        .bind(("refno", refno.to_string()))
+        .await?;
+    let o: SurlValue = response.take(1)?;
+    // dbg!(&o);
     let named_attmap: NamedAttrMap = o.into();
     Ok(named_attmap)
 }

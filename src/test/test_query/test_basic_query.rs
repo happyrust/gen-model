@@ -13,10 +13,7 @@ use crate::test::test_helper::get_test_ams_db_manager_async;
 #[tokio::test]
 async fn test_query_pe_by_refno() -> anyhow::Result<()> {
     super::init_test_surreal().await;
-    let refno: RefU64 = "17496_107068".into();
-    //serde_json::from_str("17496_107068").unwrap();
-    dbg!(serde_json::to_string(&refno).unwrap());
-    let pe = surreal_service::get_pe("17496_107068".into()).await.unwrap();
+    let pe = surreal_service::get_pe("17496/254421".into()).await.unwrap();
     dbg!(pe);
     Ok(())
 }
@@ -52,7 +49,7 @@ async fn test_query_wtrans_by_refno() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_query_att_by_refno() {
     super::init_test_surreal().await;
-    let attmap = surreal_service::get_named_attmap("17496_118635".into()).await;
+    let attmap = surreal_service::get_named_attmap("17496_105912".into()).await;
     dbg!(attmap);
 }
 
@@ -81,8 +78,19 @@ async fn test_query_custom() -> anyhow::Result<()> {
     let owner_noun: Option<String> = response.take("o_noun").unwrap();
     dbg!(owner_noun);
     let owner: RefU64 = response.take::<Option<String>>("owner")?.unwrap().into();
-    // let owner: Option<RefU64> = response.take("owner").unwrap();
     dbg!(owner);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_query_cata() -> anyhow::Result<()> {
+    super::init_test_surreal().await;
+
+    let cat_refno = surreal_service::get_cat_refno("17496_105912".into()).await.unwrap();
+    dbg!(cat_refno);
+    // get_cat_attmap
+    let cat_attmap = surreal_service::get_cat_attmap("17496_105912".into()).await.unwrap();
+    dbg!(cat_attmap);
     Ok(())
 }
 
@@ -93,8 +101,8 @@ async fn test_query_record_link() -> anyhow::Result<()> {
     let str1 =         r#"
             {
     "id": "25688_32684",
-    "refno": "25688_32684",
-    "owner": "pe:25688_32682",
+    "refno": FITT:25688_32684,
+    "owner": pe:25688_32682,
     "name": "/1AR07WW0002R",
     "noun": "FITT",
     "dbnum": 1112,
@@ -105,26 +113,33 @@ async fn test_query_record_link() -> anyhow::Result<()> {
         "#;
 
     let str2 =         r#"
-            {
-     "id": "25688_32682",
-    "refno": "25688_32682",
-    "owner": "pe:25688_32681",
-    "name": "/1AR07WW0002R",
-    "noun": "TEST",
-    "dbnum": 1112,
-    "e3d_version": 0,
-    "cata_hash": "110329119932332",
-    "lock": false
-}
+    {
+         "id": "25688_32682",
+        "refno": TEST:25688_32682,
+        "owner": pe:25688_32681,
+        "name": "/1AR07WW0002R",
+        "noun": "TEST",
+        "dbnum": 1112,
+        "e3d_version": 0,
+        "cata_hash": "110329119932332",
+        "lock": false
+    }
         "#;
 
-    let d1: pdms_element::Model = serde_json::from_str(
-        str1
-    ).unwrap();
+    // let d1: pdms_element::Model = serde_json::from_str(
+    //     str1
+    // ).unwrap();
+    //
+    // let d2: pdms_element::Model = serde_json::from_str(
+    // str2
+    // ).unwrap();
 
-    let d2: pdms_element::Model = serde_json::from_str(
-    str2
-    ).unwrap();
+    SUL_DB
+        .query("delete pe:25688_32684; delete pe:25688_32682;")
+        // .query("use ns 1516;use db AvevaMarineSample;INSERT IGNORE INTO pe $values")
+        // .bind(("values", &[str1, str2]))
+        .await
+        .unwrap();
 
 
     // let response = SUL_DB
@@ -135,14 +150,15 @@ async fn test_query_record_link() -> anyhow::Result<()> {
     //     .unwrap();
     // let s1 = serde_json::to_string_pretty(&d1).unwrap();
     // let s2 = serde_json::to_string_pretty(&d2).unwrap();
-    let mut v1: serde_json::Value = serde_json::to_value(d1.clone()).unwrap();
-    v1.as_object_mut().unwrap().insert("owner".into(), format!("pe:{}", d1.owner.to_string()).into());
+    // let mut v1: serde_json::Value = serde_json::to_value(d1.clone()).unwrap();
+    // v1.as_object_mut().unwrap().insert("owner".into(), format!("pe:{}", d1.owner.to_string()).into());
+    //
+    // let mut v2: serde_json::Value = serde_json::to_value(d2).unwrap();
+    // v2.as_object_mut().unwrap().insert("owner".into(), format!("pe:{}", "0_0").into());
 
-    let mut v2: serde_json::Value = serde_json::to_value(d2).unwrap();
-    v2.as_object_mut().unwrap().insert("owner".into(), format!("pe:{}", "0_0").into());
-
-    let mut sql = format!(r#"use ns 1516;use db AvevaMarineSample;INSERT IGNORE INTO pe {};"#,
-        serde_json::to_string_pretty(&[v1, v2]).unwrap()
+    let mut sql = format!(r#"use ns 1516;use db AvevaMarineSample;INSERT IGNORE INTO pe [{}, {}];"#,
+        // serde_json::to_string_pretty(&[str1, str2]).unwrap()
+        str1, str2
     );
 
     println!("{}", &sql);
@@ -155,8 +171,9 @@ async fn test_query_record_link() -> anyhow::Result<()> {
         .unwrap();
 
     let q = SUL_DB.query("select owner.* from pe:25688_32684;").await.unwrap();
-
     dbg!(q);
-
+    // let q1 = SUL_DB.query("select owner.* from pe:17496_100102;").await.unwrap();
+    // dbg!(q1);
+    //
     Ok(())
 }
