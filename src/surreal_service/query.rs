@@ -1,8 +1,20 @@
+use std::collections::HashMap;
 use crate::surreal_service::{SUL_DB, SUL_DB_ASYNC};
 use aios_core::types::*;
 use aios_core::{NamedAttrMap, RefU64};
 use aios_core::pe::SPdmsElement;
-use surrealdb::sql::{Thing, Value};
+use indexmap::IndexMap;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde::de::DeserializeOwned;
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct KV<K, V>{
+    k: K,
+    v: V,
+}
+
+
+
 
 ///通过surql查询pe数据
 pub async fn get_pe(refno: RefU64) -> anyhow::Result<Option<SPdmsElement>> {
@@ -113,4 +125,20 @@ pub async fn get_children_refnos(refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         .map(|s| s.as_str().into())
         .collect();
     Ok(refnos)
+}
+
+///按cata_hash 分组获得不同的参考号类型
+pub async fn query_group_by_cata_hash(refnos: &[RefU64]) -> anyhow::Result<IndexMap<String, Vec<RefU64>>> {
+    let keys = refnos.iter().map(|x| x.to_pe_thing()).collect::<Vec<_>>();
+    let mut response = SUL_DB
+        .query(include_str!("../../schemas/group_by_cata_hash.surql"))
+        .bind(("refnos", keys))
+        .await?;
+    let d: Vec<KV<String, Vec<String>>> = response.take(1)?;
+    let map = d.into_iter().map(|kv| {
+        let v: Vec<RefU64> = kv.v.iter().map(|s| s.as_str().into()).collect();
+        let k = kv.k;
+        (k, v)
+    }).collect();
+    Ok(map)
 }

@@ -1,12 +1,8 @@
-use std::fmt::format;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::surreal_service;
 use std::sync::Arc;
-use aios_core::orm::pdms_element;
 use aios_core::RefU64;
 use glam::Vec3;
-use surrealdb::sql::Thing;
 use crate::surreal_service::SUL_DB;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 
@@ -49,7 +45,7 @@ async fn test_query_wtrans_by_refno() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_query_att_by_refno() {
     super::init_test_surreal().await;
-    let attmap = surreal_service::get_named_attmap("17496_105912".into()).await;
+    let attmap = surreal_service::get_named_attmap("15302_2194".into()).await;
     dbg!(attmap);
 }
 
@@ -86,10 +82,10 @@ async fn test_query_custom() -> anyhow::Result<()> {
 async fn test_query_cata() -> anyhow::Result<()> {
     super::init_test_surreal().await;
 
-    let cat_refno = surreal_service::get_cat_refno("17496_105912".into()).await.unwrap();
+    let cat_refno = surreal_service::get_cat_refno("15302/2194".into()).await.unwrap();
     dbg!(cat_refno);
     // get_cat_attmap
-    let cat_attmap = surreal_service::get_cat_attmap("17496_105912".into()).await.unwrap();
+    let cat_attmap = surreal_service::get_cat_attmap("15302/2194".into()).await.unwrap();
     dbg!(cat_attmap);
     Ok(())
 }

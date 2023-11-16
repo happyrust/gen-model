@@ -2,13 +2,15 @@ use crate::cata::resolve::{resolve_axis_params, resolve_gms};
 use crate::data_interface::interface::PdmsDataInterface;
 // use crate::defines::CACHED_SCOM_INFO_MAP;
 use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
+use crate::surreal_service;
 use aios_core::data_center::AttrValue;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{AxisParam, GmParam, PlinParam, ScomInfo};
-use aios_core::types::AttrVal::IntArrayType;
 use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::db1_dehash;
+use aios_core::types::AttrVal::IntArrayType;
+use aios_core::{AttrMap, NamedAttrValue};
 use anyhow::anyhow;
 use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
@@ -16,9 +18,7 @@ use glam::Vec3;
 use log::{error, info};
 use sled::pin;
 use std::collections::{BTreeMap, HashMap};
-use aios_core::{AttrMap, NamedAttrValue};
 use tokio::sync::RwLock;
-use crate::surreal_service;
 
 use super::resolve::CataContext;
 
@@ -50,8 +50,11 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     // dbg!(scom_ref);
     let scom_info = interface.get_or_create_scom_info(scom_ref).await?;
-    let mut context = interface.get_or_create_cata_context(desi_refno, desi_axis_map).await?;
-    
+    // dbg!(&scom_info);
+    let mut context = interface
+        .get_or_create_cata_context(desi_refno, desi_axis_map)
+        .await?;
+
     let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(interface), Some(context));
     // dbg!(&geom_info.as_ref().unwrap().n_geometries);
     if geom_info.is_err() {
@@ -61,19 +64,17 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     geom_info
 }
 
-
 ///查询 Axis 参数
-pub async fn query_axis_params(
-    attr_map: &NamedAttrMap,
-) -> anyhow::Result<BTreeMap<i32, AxisParam>> {
+pub async fn query_axis_params(refno: RefU64) -> anyhow::Result<BTreeMap<i32, AxisParam>> {
     // 查找ptse
     let mut map = BTreeMap::new();
-    let refno = attr_map.get_refno().unwrap_or_default();
     let children = surreal_service::get_children_named_attmaps(refno).await?;
 
     for child in children {
         //plin不在收集范围
-        if child.get_type_str() == "PLIN" {  continue; }
+        if child.get_type_str() == "PLIN" {
+            continue;
+        }
         let number = child.get_i32("NUMB").unwrap_or(-1);
         if let Some(axis) = get_axis_param(&child) {
             map.entry(number).or_insert(axis);
@@ -108,7 +109,11 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
         }
         // dbg!(&geo_am);
         let is_spro = geo_am.get_type_str() == "SPRO"; //todo add other types
-        gms.push(query_gm_param(&geo_am, interface, is_spro).await.unwrap_or_default());
+        gms.push(
+            query_gm_param(&geo_am, interface, is_spro)
+                .await
+                .unwrap_or_default(),
+        );
     }
     Ok(gms)
 }
@@ -288,13 +293,21 @@ pub async fn query_gm_param(
     let type_name = a.get_type_str();
     if type_name == "SEXT" || type_name == "NSEX" || type_name == "SREV" || type_name == "NSRE" {
         //先暂时不考虑负实体
-        let children = surreal_service::get_children_named_attmaps(refno).await.ok()?;
+        let children = surreal_service::get_children_named_attmaps(refno)
+            .await
+            .ok()?;
         for child in children {
-            if let Some(r) = child.get_refno() && child.get_type_str() == "SLOO" {
-                for a in surreal_service::get_children_named_attmaps(r).await.unwrap_or_default() {
-                    verts.push([(a.get_as_string("PX").unwrap_or_default()),
+            if let Some(r) = child.get_refno()
+                && child.get_type_str() == "SLOO"
+            {
+                for a in surreal_service::get_children_named_attmaps(r)
+                    .await
+                    .unwrap_or_default()
+                {
+                    verts.push([
+                        (a.get_as_string("PX").unwrap_or_default()),
                         (a.get_as_string("PY").unwrap_or_default()),
-                        (a.get_as_string("PZ").unwrap_or_default())
+                        (a.get_as_string("PZ").unwrap_or_default()),
                     ]);
                     frads.push((a.get_as_string("PRAD").unwrap_or_default()));
                 }
@@ -303,7 +316,11 @@ pub async fn query_gm_param(
     } else {
         let cur_type = interface.get_type_name(refno).await;
         if is_spro && cur_type.as_str() == "SPRO" {
-            for a in surreal_service::get_children_named_attmaps(refno).await.ok().unwrap_or_default() {
+            for a in surreal_service::get_children_named_attmaps(refno)
+                .await
+                .ok()
+                .unwrap_or_default()
+            {
                 verts.push([
                     (a.get_as_string("PX").unwrap_or_default()),
                     (a.get_as_string("PY").unwrap_or_default()),
@@ -354,4 +371,3 @@ pub async fn query_gm_param(
         visible_flag: tube_flag,
     })
 }
-

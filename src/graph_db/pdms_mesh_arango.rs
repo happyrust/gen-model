@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::sync::Arc;
 use std::io::Write;
 use std::mem::take;
@@ -38,7 +39,7 @@ pub fn save_mesh_to_local_db(mgr: &AiosDBManager, mesh_mgr: &PlantMeshesData, re
 
 // todo 需要改成使用保存文件的方式，不要存储在数据库
 ///保存mesh数据到图数据库
-pub async fn save_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &mut PlantMeshesData, replace: bool) -> anyhow::Result<()> {
+pub async fn save_mesh_data(mgr: &AiosDBManager, mesh_mgr: &mut PlantMeshesData, replace: bool) -> anyhow::Result<()> {
     let collection = AQL_PDMS_MESH_COLLECTION;
     let database = mgr.get_arango_db().await?;
     let mut data = vec![];
@@ -47,33 +48,6 @@ pub async fn save_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &mut PlantMes
     //不是replace，需要考虑缓存
     let mut meshes = &mut mesh_mgr.meshes;
     println!("当前mesh数量：{}", meshes.len());
-    if !replace {
-        // let exist_geo_hashs = query_all_geo_hashs(&database).await?;
-        // // dbg!(&exist_geo_hashs);
-        // println!("数据库已经存在的mesh数量：{}", exist_geo_hashs.len());
-        //
-        // println!("当前mesh 数量：{}", meshes.len());
-        // //遍历一遍local db，检查是否有遗漏
-        // let mut iter = aabb_tree.iter();
-        // while let Some(Ok((k, v))) = iter.next() {
-        //     let geo_hash = u64::from_be_bytes(k.as_bytes().try_into().unwrap());
-        //     //如果已经存在，不需要替换
-        //     if exist_geo_hashs.contains(&geo_hash) {
-        //         continue;
-        //     }
-        //     if !meshes.contains_key(&geo_hash) {
-        //         let aabb = Aabb::from_bytes(v.as_bytes())?;
-        //         let mesh = mgr.get_mesh_from_localdb(geo_hash).expect("read mesh from local db error.");
-        //         meshes.insert(geo_hash, PlantGeoData {
-        //             geo_hash,
-        //             mesh: Some(mesh),
-        //             aabb: Some(aabb),
-        //         });
-        //     }
-        // }
-        // println!("合并缓存后mesh数量：{}", meshes.len());
-    }
-
 
     for chunk in &meshes.iter().chunks(1000) {
         for k in chunk {
@@ -98,6 +72,11 @@ pub async fn save_mesh_to_arango_db(mgr: &AiosDBManager, mesh_mgr: &mut PlantMes
                 .bind_var("elements", take(&mut data))
         };
         database.aql_query::<Vec<()>>(aql).await.unwrap();
+    }
+
+    std::fs::create_dir_all("asset/meshes").unwrap();
+    for mesh in meshes{
+        mesh.1.serialize_to_specify_file(&format!("asset/meshes/{}.mesh", mesh.0));
     }
 
     Ok(())

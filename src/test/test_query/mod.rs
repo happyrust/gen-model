@@ -11,7 +11,10 @@ pub mod test_query_regex;
 
 pub mod test_basic_query;
 
+pub mod test_query_group;
+
 pub mod transform;
+
 
 pub async fn init_test_surreal() {
     let s = Config::builder()

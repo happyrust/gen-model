@@ -3,6 +3,7 @@ use crate::api::element::*;
 use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
 use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
+use crate::arangodb::ArPool;
 use crate::cata::consts::*;
 use crate::cata::query_cata::query_gm_param;
 use crate::cata::query_cata::{query_axis_params, resolve_cata_comp};
@@ -13,7 +14,6 @@ use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
-use crate::arangodb::ArPool;
 use crate::graph_db::structs::PdmsEleData;
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::cache::mgr::*;
@@ -27,13 +27,13 @@ use aios_core::pdms_data::GmParam;
 use aios_core::pdms_data::PlinParam;
 use aios_core::pdms_data::PlinParamData;
 use aios_core::pdms_data::ScomInfo;
-use aios_core::types::AttrVal::*;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::tool::math_tool;
 use aios_core::tool::math_tool::quat_to_pdms_ori_str;
+use aios_core::types::AttrVal::*;
 use anyhow::anyhow;
 use approx::abs_diff_eq;
 use async_trait::async_trait;
@@ -49,6 +49,9 @@ use log::error;
 use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
 use pdms_io::watch::PdmsWatcher;
 // use redb::{ReadableTable, TableDefinition};
+use crate::surreal_service;
+use crate::surreal_service::SUL_DB;
+use aios_core::{AttrMap, NamedAttrValue, RefU64Vec};
 use sqlx::{Executor, MySql, Pool, Row};
 use std::boxed::Box;
 use std::cell::OnceCell;
@@ -57,12 +60,9 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use aios_core::{AttrMap, NamedAttrValue, RefU64Vec};
 use surrealdb::engine::local::{File, RocksDb};
 use surrealdb::Surreal;
-use crate::surreal_service::SUL_DB;
 use tokio::sync::RwLock;
-use crate::surreal_service;
 
 #[derive(Clone)]
 pub struct AiosDBManager {
@@ -104,7 +104,6 @@ impl Debug for AiosDBManager {
     }
 }
 
-
 #[async_trait]
 impl PdmsDataInterface for AiosDBManager {
     /// 获得最全的数据
@@ -122,7 +121,9 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     async fn get_type_name(&self, refno: RefU64) -> String {
-        surreal_service::get_type_name(refno).await.unwrap_or_default()
+        surreal_service::get_type_name(refno)
+            .await
+            .unwrap_or_default()
     }
 
     ///获得下一个构件的参考号
@@ -154,7 +155,6 @@ impl PdmsDataInterface for AiosDBManager {
             Ok(children_refnos[pos - 1])
         }
     }
-
 
     /// 从本地数据库获得最全的数据
     fn get_attr_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<AttrMap> {
@@ -241,7 +241,7 @@ impl PdmsDataInterface for AiosDBManager {
             t_types,
             depth,
         )
-            .await;
+        .await;
         t_refnos
     }
 
@@ -428,10 +428,11 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(r)
     }
 
-
     ///获得参考号下的子节点
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
-        surreal_service::get_children_refnos(refno).await.map(|x| x.into())
+        surreal_service::get_children_refnos(refno)
+            .await
+            .map(|x| x.into())
     }
 
     ///获得参考号的name
@@ -484,7 +485,6 @@ impl PdmsDataInterface for AiosDBManager {
         result
     }
 
-
     ///查询哪些有负实体的参考号
     async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
@@ -498,8 +498,8 @@ impl PdmsDataInterface for AiosDBManager {
         return UNIQUE(negatives)
         ",
         )
-            .bind_var("key", refno_url)
-            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        .bind_var("key", refno_url)
+        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self
             .get_arango_db()
             .await?
@@ -579,8 +579,8 @@ impl PdmsDataInterface for AiosDBManager {
                     return distinct parent._key
         "#,
         )
-            .bind_var("keys", refno_urls)
-            .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        .bind_var("keys", refno_urls)
+        .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self.get_arango_db().await?.aql_query::<String>(aql).await?;
         let refnos = refno_strs
             .iter()
@@ -605,8 +605,8 @@ impl PdmsDataInterface for AiosDBManager {
             return UNIQUE(refnos)
         "#,
         )
-            .bind_var("key", refno_url)
-            .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
+        .bind_var("key", refno_url)
+        .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
         let refno_strs = self
             .get_arango_db()
             .await?
@@ -640,8 +640,8 @@ impl PdmsDataInterface for AiosDBManager {
                 ]
         "#,
         )
-            .bind_var("key", refno_url)
-            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+        .bind_var("key", refno_url)
+        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let result: HashMap<RefU64, Vec<RefU64>> = self
             .get_arango_db()
             .await?
@@ -743,13 +743,14 @@ impl PdmsDataInterface for AiosDBManager {
                     // if positions.len() == 2 {
                     //     (Some(positions[0]), Some(positions[1]))
                     // } else {
-                        (None, None)
+                    (None, None)
                     // }
                 } else {
                     (att.get_poss(), att.get_pose())
                 };
-                if let Some(poss) = l_poss &&
-                    let Some(pose) = l_pose {
+                if let Some(poss) = l_poss
+                    && let Some(pose) = l_pose
+                {
                     need_bangle = true;
                     let extru_dir = (pose - poss).normalize();
                     if !extru_dir.is_normalized() {
@@ -763,11 +764,7 @@ impl PdmsDataInterface for AiosDBManager {
                     };
                     let p_axis = ref_axis.cross(extru_dir).normalize();
                     let y_axis = extru_dir.cross(p_axis).normalize();
-                    quat = Quat::from_mat3(&Mat3::from_cols(
-                        p_axis,
-                        y_axis,
-                        extru_dir,
-                    ));
+                    quat = Quat::from_mat3(&Mat3::from_cols(p_axis, y_axis, extru_dir));
                 }
             }
 
@@ -787,9 +784,11 @@ impl PdmsDataInterface for AiosDBManager {
                 has_cut_back = true;
                 cut_dir = att.get_vec3("CUTP").unwrap_or(cut_dir);
                 let cut_len = att.get_f32("CUTB").unwrap_or_default();
-                if c_ref.is_valid() && let Ok(c_att) = surreal_service::get_named_attmap(c_ref).await &&
-                    let Some(poss) = c_att.get_poss() &&
-                    let Some(pose) = c_att.get_pose() {
+                if c_ref.is_valid()
+                    && let Ok(c_att) = surreal_service::get_named_attmap(c_ref).await
+                    && let Some(poss) = c_att.get_poss()
+                    && let Some(pose) = c_att.get_pose()
+                {
                     let c_t = self.get_world_transform(c_ref).await?.unwrap_or_default();
                     let w_poss = c_t.translation;
                     let axis = (pose - poss);
@@ -907,11 +906,7 @@ impl PdmsDataInterface for AiosDBManager {
             if self.db_option.debug_print_world_transform {
                 let rot_mat = Mat3::from_quat(rotation);
                 let ori_str = math_tool::to_pdms_ori_xyz_str(&rot_mat);
-                println!(
-                    "{} : {:?}",
-                    refno.to_refno_str(),
-                    (translation, ori_str)
-                );
+                println!("{} : {:?}", refno.to_refno_str(), (translation, ori_str));
             }
         }
 
@@ -927,7 +922,10 @@ impl PdmsDataInterface for AiosDBManager {
 
     #[inline]
     async fn get_world_transform_or_default(&self, refno: RefU64) -> Transform {
-        self.get_world_transform(refno).await.unwrap_or_default().unwrap_or_default()
+        self.get_world_transform(refno)
+            .await
+            .unwrap_or_default()
+            .unwrap_or_default()
     }
 
     ///获得子节点集合的属性
@@ -940,7 +938,9 @@ impl PdmsDataInterface for AiosDBManager {
         let children =
             query_deep_children_refnos_fuzzy(&self.get_arango_db().await?, &[refno], nouns).await?;
         for child in children {
-            let attr = surreal_service::get_named_attmap(child).await.unwrap_or_default();
+            let attr = surreal_service::get_named_attmap(child)
+                .await
+                .unwrap_or_default();
             r.push(attr);
         }
         Ok(r)
@@ -954,7 +954,8 @@ impl PdmsDataInterface for AiosDBManager {
     ) -> anyhow::Result<Vec<RefU64>> {
         let db = &self.get_arango_db().await?;
         let world_pos = self
-            .get_world_transform(refno).await?
+            .get_world_transform(refno)
+            .await?
             .unwrap_or_default()
             .translation;
         self.get_refnos_within_bound_radius_by_pos(world_pos, distance)
@@ -1033,8 +1034,9 @@ impl PdmsDataInterface for AiosDBManager {
         //考虑sctn这种直接拉升出来的情况
         if paths.is_empty() {
             let att = surreal_service::get_named_attmap(refno).await?;
-            if let Some(poss) = att.get_poss() &&
-                let Some(pose) = att.get_pose() {
+            if let Some(poss) = att.get_poss()
+                && let Some(pose) = att.get_pose()
+            {
                 paths.push(Spine3D {
                     pt0: poss,
                     pt1: pose,
@@ -1106,7 +1108,11 @@ impl PdmsDataInterface for AiosDBManager {
                 continue;
             }
             let is_spro = geo_am.get_type_str() == "SPRO"; //todo add other types
-            gms.push(query_gm_param(&geo_am, self, is_spro).await.unwrap_or_default());
+            gms.push(
+                query_gm_param(&geo_am, self, is_spro)
+                    .await
+                    .unwrap_or_default(),
+            );
         }
         Ok(gms)
     }
@@ -1125,11 +1131,9 @@ impl PdmsDataInterface for AiosDBManager {
             let mut axis_params = vec![];
             let mut axis_param_numbers = vec![];
             if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
-                if let Ok(ptre_am) = surreal_service::get_named_attmap(ptre_refno).await {
-                    if let Ok(axis_param_map) = query_axis_params(&ptre_am).await {
-                        axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
-                        axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
-                    }
+                if let Ok(axis_param_map) = query_axis_params(ptre_refno).await {
+                    axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
+                    axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
                 }
             }
             let gmref_name = match type_noun {
@@ -1224,15 +1228,9 @@ impl PdmsDataInterface for AiosDBManager {
             // let named_att = self
             //     .get_named_attr_from_localdb(desi_refno)
             //     .unwrap_or_default();
-            let named_att = surreal_service::get_named_attmap(desi_refno).await.unwrap_or_default();
-            for (str, v) in named_att.map {
+            for (str, v) in &desi_att.map {
                 let n = if str.starts_with(":") {
-                    // if str.len() < 5 {
-                    // dbg!(&str);
                     str.to_uppercase()
-                    // } else {
-                    //     str[0..5].to_uppercase()
-                    // }
                 } else {
                     str.to_uppercase()
                 };
@@ -1279,11 +1277,13 @@ impl PdmsDataInterface for AiosDBManager {
             // }
 
             context.insert("RS_DES_REFNO".into(), desi_refno.to_refno_str());
+            // dbg!(&desi_refno);
             //添加cata的信息
             if let Some(cata_attmap) = self.get_cat_attmap(desi_refno).await {
+                // dbg!(&cata_attmap);
                 context.insert(
                     "RS_CATR_REFNO".into(),
-                    cata_attmap.get_refno().unwrap().to_refno_str(),
+                    cata_attmap.get_refno_or_default().to_string(),
                 );
                 // dbg!(&cata_attmap);
                 let params = cata_attmap.get_f32_vec("PARA").unwrap_or_default();
@@ -1304,7 +1304,7 @@ impl PdmsDataInterface for AiosDBManager {
                     context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
                 }
                 let mut owner_ref = desi_att.get_owner();
-                // let mut owner_att = surreal_service::get_named_attmap(owner_ref).await.unwrap_or_default();
+                //todo 需要换掉
                 let mut owner_att = surreal_service::get_named_attmap(owner_ref).await?;
                 //todo use a single query to get all the ancestors' attmap
                 while !owner_att.contains_key("GTYP") {
@@ -1318,8 +1318,8 @@ impl PdmsDataInterface for AiosDBManager {
 
                 //dtse 的信息处理
                 let dtre_refno: RefU64 = cata_attmap.get_foreign_refno("DTRE").unwrap_or_default();
-                // let children = surreal_service::get_children_named_attmaps(dtre_refno).await.unwrap_or_default();
                 let children = surreal_service::get_children_named_attmaps(dtre_refno).await?;
+                //如果只查部分数据，可以改一下接口
                 for child in children {
                     if let Some(k) = child.get_as_string("DKEY") {
                         let key = format!("RPRO_{}", &k);
@@ -1383,6 +1383,7 @@ impl PdmsDataInterface for AiosDBManager {
         desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
     ) -> anyhow::Result<CateGeomsInfo> {
         let desi_att = surreal_service::get_named_attmap(desi_refno).await?;
+        // dbg!(&desi_att);
         //todo 改到使用图数据库去查找
         if scom_ref_option.is_none() {
             scom_ref_option = self.get_cat_ref(desi_refno).await;
@@ -1399,12 +1400,14 @@ impl PdmsDataInterface for AiosDBManager {
             );
             return Ok(Default::default());
         }
-        #[cfg(debug_assertions)]
-        dbg!(scom_ref);
+        // #[cfg(debug_assertions)]
+        // dbg!(scom_ref);
         let scom_info = self.get_or_create_scom_info(scom_ref).await?;
-        #[cfg(debug_assertions)]
-        dbg!(&scom_info);
-        let mut context = self.get_or_create_cata_context(desi_refno, desi_axis_map).await?;
+        // #[cfg(debug_assertions)]
+        // dbg!(&scom_info);
+        let mut context = self
+            .get_or_create_cata_context(desi_refno, desi_axis_map)
+            .await?;
 
         let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(self), Some(context));
         if geom_info.is_err() {
