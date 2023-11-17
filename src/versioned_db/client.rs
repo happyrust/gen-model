@@ -144,6 +144,7 @@ pub async fn save_pdms_eles_to_surreal(
                 version_tag: None,
                 e3d_version: att_map.get_e3d_version(),
                 lock: false,
+                deleted: false,
             };
             model_chunk.push(ele);
         }
@@ -165,7 +166,7 @@ pub async fn save_pdms_eles_to_surreal(
         }
         let mut jsons_str = vec![];
         for m in models{
-            jsons_str.push(m.gen_json());
+            jsons_str.push(m.gen_sur_json());
         }
         let sql = format!("INSERT IGNORE INTO pe [{}]", jsons_str.join(","));
         //手动修改，替换掉""

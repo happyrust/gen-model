@@ -63,7 +63,7 @@ pub async fn save_compound_inst_info_to_graph_db(
 }
 
 ///保存instance 数据到数据库
-pub async fn save_instance_to_graph_db(
+pub async fn save_mesh_instance_data(
     mgr: &AiosDBManager,
     inst_mgr: &ShapeInstancesData,
 ) -> anyhow::Result<()> {
@@ -73,11 +73,16 @@ pub async fn save_instance_to_graph_db(
     let mut instances = vec![];
     let mut edges = vec![];
     println!("开始保存instance数据");
+
+    //保存inst geos 数据
+    let mut sur_jsons = vec![];
     for chunk in &inst_mgr.inst_geos_map.iter().chunks(1000) {
         for k in chunk {
             let json = serde_json::to_value(k.1).unwrap();
             instances.push(json);
+            sur_jsons.push(k.1.gen_sur_json());
         }
+        // println!("{}", sur_jsons.join(","));
         let aql = AqlQuery::new(r#"
                     with @@collection
                     LET data = @elements
@@ -106,6 +111,8 @@ pub async fn save_instance_to_graph_db(
         database.aql_query::<Vec<()>>(aql).await?;
     }
 
+    //直接用record link来链接mesh
+    //保存inst info 数据
     let collection = AQL_PDMS_INST_INFO_COLLECTION;
     for chunk in &inst_mgr.inst_info_map.iter().chunks(1000) {
         for k in chunk {
