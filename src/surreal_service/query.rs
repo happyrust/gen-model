@@ -6,15 +6,13 @@ use aios_core::pe::SPdmsElement;
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde::de::DeserializeOwned;
+use surrealdb::sql::Thing;
 
 #[derive(Clone, Debug, Default, Deserialize)]
 struct KV<K, V>{
     k: K,
     v: V,
 }
-
-
-
 
 ///通过surql查询pe数据
 pub async fn get_pe(refno: RefU64) -> anyhow::Result<Option<SPdmsElement>> {
@@ -32,8 +30,8 @@ pub async fn get_ancestor(refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         .query(include_str!("../../schemas/query_ancestor_by_refno.surql"))
         .bind(("refno", refno.to_string()))
         .await?;
-    let s = response.take::<Vec<String>>(1)?;
-    Ok(s.into_iter().map(|s| s.as_str().into()).collect())
+    let s = response.take::<Vec<Thing>>(1)?;
+    Ok(s.into_iter().map(|s| s.into()).collect())
 }
 
 pub async fn get_ancestor_attmaps(refno: RefU64) -> anyhow::Result<Vec<NamedAttrMap>> {
@@ -74,8 +72,8 @@ pub async fn get_cat_refno(refno: RefU64) -> anyhow::Result<Option<RefU64>> {
         .query(include_str!("../../schemas/query_cata_refno.surql"))
         .bind(("refno", refno.to_string()))
         .await?;
-    let o: Option<String> = response.take(1)?;
-    Ok(o.map(|x| x.into()))
+    let r: Option<RefU64> = response.take(1)?;
+    Ok(r)
 }
 
 pub async fn get_cat_attmap(refno: RefU64) -> anyhow::Result<NamedAttrMap> {
@@ -118,12 +116,12 @@ pub async fn get_children_refnos(refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
         .query(include_str!("../../schemas/query_children_by_refno.surql"))
         .bind(("refno", refno.to_string()))
         .await?;
-    // dbg!(&response);
-    let refnos: Vec<RefU64> = response
-        .take::<Vec<String>>(0)?
-        .into_iter()
-        .map(|s| s.as_str().into())
-        .collect();
+    let id: Option<String> = response.take(0)?;
+    // dbg!(&id);
+    if id.is_none() {
+        return Err(anyhow::anyhow!("{refno} not exist"));
+    }
+    let refnos: Vec<RefU64> = response.take(1)?;
     Ok(refnos)
 }
 
@@ -134,10 +132,10 @@ pub async fn query_group_by_cata_hash(refnos: &[RefU64]) -> anyhow::Result<Index
         .query(include_str!("../../schemas/group_by_cata_hash.surql"))
         .bind(("refnos", keys))
         .await?;
-    let d: Vec<KV<String, Vec<String>>> = response.take(1)?;
+    let d: Vec<KV<String, Vec<RefU64>>> = response.take(1)?;
     let map = d.into_iter().map(|kv| {
-        let v: Vec<RefU64> = kv.v.iter().map(|s| s.as_str().into()).collect();
-        let k = kv.k;
+        let k = kv.k.clone();
+        let v: Vec<RefU64> = kv.v;
         (k, v)
     }).collect();
     Ok(map)

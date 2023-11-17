@@ -9,7 +9,8 @@ use crate::test::test_helper::get_test_ams_db_manager_async;
 #[tokio::test]
 async fn test_query_pe_by_refno() -> anyhow::Result<()> {
     super::init_test_surreal().await;
-    let pe = surreal_service::get_pe("17496/254421".into()).await.unwrap();
+    // let pe = surreal_service::get_pe("17496/254421".into()).await.unwrap();
+    let pe = surreal_service::get_pe("17496_266621".into()).await.unwrap();
     dbg!(pe);
     Ok(())
 }
@@ -52,7 +53,9 @@ async fn test_query_att_by_refno() {
 #[tokio::test]
 async fn test_query_children() {
     super::init_test_surreal().await;
-    let refnos = surreal_service::get_children_refnos("17496_171555".into()).await;
+    let refnos = surreal_service::get_children_refnos("17496_171189".into()).await;
+    dbg!(refnos);
+    let refnos = surreal_service::get_children_refnos("17496_0".into()).await;
     dbg!(refnos);
 }
 
@@ -82,10 +85,10 @@ async fn test_query_custom() -> anyhow::Result<()> {
 async fn test_query_cata() -> anyhow::Result<()> {
     super::init_test_surreal().await;
 
-    let cat_refno = surreal_service::get_cat_refno("15302/2194".into()).await.unwrap();
+    let cat_refno = surreal_service::get_cat_refno("17496_266621".into()).await.unwrap();
     dbg!(cat_refno);
     // get_cat_attmap
-    let cat_attmap = surreal_service::get_cat_attmap("15302/2194".into()).await.unwrap();
+    let cat_attmap = surreal_service::get_cat_attmap("17496_266621".into()).await.unwrap();
     dbg!(cat_attmap);
     Ok(())
 }

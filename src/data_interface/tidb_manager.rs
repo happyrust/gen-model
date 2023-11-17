@@ -1117,11 +1117,12 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(gms)
     }
 
-    ///收集SCOM的信息
+    ///收集SCOM的信息, 暂时慎用缓存
     async fn get_or_create_scom_info(&self, cata_refno: RefU64) -> anyhow::Result<ScomInfo> {
         let scom_info = if let Some(info) = SCOM_INFO_MAP.get(&cata_refno) {
             info.value().clone()
         } else {
+            // dbg!(cata_refno);
             let attr_map = surreal_service::get_named_attmap(cata_refno).await?;
             let type_noun = attr_map.get_type_str();
             let ptref_name = match type_noun {
