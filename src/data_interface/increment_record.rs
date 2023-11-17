@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::sync::Arc;
 use serde_with::DisplayFromStr;
@@ -19,21 +19,20 @@ pub const INCREMENT_DATA: &'static str = "INCREMENT_DATA";
 #[serde_as]
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct IncrGeoUpdateLog {
-    // pub versions: Vec<>,
     //基本体模型修改了的参考号
-    #[serde_as(as = "Vec<DisplayFromStr>")]
-    pub prim_refnos: Vec<RefU64>,
+    #[serde_as(as = "HashSet<DisplayFromStr>")]
+    pub prim_refnos: HashSet<RefU64>,
     //拉伸体模型修改了的参考号
-    #[serde_as(as = "Vec<DisplayFromStr>")]
-    pub loop_refnos: Vec<RefU64>,
+    #[serde_as(as = "HashSet<DisplayFromStr>")]
+    pub loop_refnos: HashSet<RefU64>,
     //元件库模型的属性修改了的参考号
-    #[serde_as(as = "Vec<DisplayFromStr>")]
-    pub bran_hanger_refnos: Vec<RefU64>,
+    #[serde_as(as = "HashSet<DisplayFromStr>")]
+    pub bran_hanger_refnos: HashSet<RefU64>,
     //元件库模型的属性修改了的参考号
-    #[serde_as(as = "Vec<DisplayFromStr>")]
-    pub basic_cata_refnos: Vec<RefU64>,
+    #[serde_as(as = "HashSet<DisplayFromStr>")]
+    pub basic_cata_refnos: HashSet<RefU64>,
     //删除了的模型
-    pub delete_refnos: Vec<RefU64>,
+    pub delete_refnos: HashSet<RefU64>,
 
     //属性时间戳
     pub att_timestamp: surrealdb::sql::Datetime,

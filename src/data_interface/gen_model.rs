@@ -677,17 +677,7 @@ pub async fn gen_cata_geos(
                                 continue;
                             }
                         };
-
-                        // let Ok(cat_refno) = gen_cata_single_geoms(
-                        //     mgr_clone.clone(),
-                        //     ele_refno,
-                        //     &brep_shapes_map,
-                        //     &refno_ptset_map,
-                        // )
-                        // .await
-                        // else {
-                        //     continue;
-                        // };
+                        dbg!(brep_shapes_map.len());
                         ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
                         for (ele_refno, shapes) in brep_shapes_map {
                             let Ok(Some(mut origin_trans)) =
@@ -1571,7 +1561,7 @@ pub async fn gen_all_geos_data(
         //元件库的模型计算
         {
             let target_bran_hanger_refnos = if is_incr_update {
-                incr_update_log.as_ref().unwrap().bran_hanger_refnos.clone()
+                incr_update_log.as_ref().unwrap().bran_hanger_refnos.iter().cloned().collect()
             } else {
                 mgr.get_gen_model_target_refnos(
                     GeoEnum::CATA_BRAN_AND_HANGER_REUSE,
@@ -1756,10 +1746,7 @@ pub async fn gen_all_geos_data(
 
         if !has_geom_refnos.is_empty() || is_incr_update {
             let target_loop_refnos = if is_incr_update {
-                // update_refnos.iter().filter(|&x| {
-                //     GNERAL_LOOP_NOUN_NAMES.contains(&mgr.get_type_name(*x).as_str())
-                // }).cloned().collect()
-                incr_update_log.as_ref().unwrap().loop_refnos.clone()
+                incr_update_log.as_ref().unwrap().loop_refnos.iter().cloned().collect()
             } else {
                 mgr.get_gen_model_target_refnos(GeoEnum::LOOP_AND_PLOO, &target_dbnos, false)
                     .await?
@@ -1784,11 +1771,7 @@ pub async fn gen_all_geos_data(
 
             ///基本体模型的生成
             let target_prim_refnos = if is_incr_update {
-                // update_refnos.iter().filter(|&x| {
-                //     dbg!(mgr.get_type_name(*x));
-                //     GNERAL_PRIM_NOUN_NAMES.contains(&mgr.get_type_name(*x).as_str())
-                // }).cloned().collect()
-                incr_update_log.as_ref().unwrap().prim_refnos.clone()
+                incr_update_log.as_ref().unwrap().prim_refnos.iter().cloned().collect()
             } else {
                 mgr.get_gen_model_target_refnos(GeoEnum::PRIM, &target_dbnos, false)
                     .await?

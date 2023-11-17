@@ -10,7 +10,7 @@ async fn test_gen_box() {
     init_test_surreal().await;
     let mgr = Arc::new(get_test_ams_db_manager_async().await);
     let mut incr_log = IncrGeoUpdateLog::default();
-    incr_log.prim_refnos.push("17496_171666".into());
+    incr_log.prim_refnos.insert("17496_171666".into());
     gen_all_geos_data(mgr.clone(), Some(incr_log)).await.unwrap();
 }
 
@@ -19,7 +19,7 @@ async fn test_gen_loop() {
     init_test_surreal().await;
     let mgr = Arc::new(get_test_ams_db_manager_async().await);
     let mut incr_log = IncrGeoUpdateLog::default();
-    incr_log.loop_refnos.push("17496_266255".into());
+    incr_log.loop_refnos.insert("17496_266255".into());
     gen_all_geos_data(mgr.clone(), Some(incr_log)).await.unwrap();
 }
 
@@ -28,6 +28,6 @@ async fn test_gen_cata() {
     init_test_surreal().await;
     let mgr = Arc::new(get_test_ams_db_manager_async().await);
     let mut incr_log = IncrGeoUpdateLog::default();
-    incr_log.basic_cata_refnos.push("17496_254421".into());
+    incr_log.basic_cata_refnos.insert("17496_254421".into());
     gen_all_geos_data(mgr.clone(), Some(incr_log)).await.unwrap();
 }

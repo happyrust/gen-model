@@ -130,6 +130,17 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     if db_option.sync_tidb.unwrap_or(false) {
         create_info_database(&default_conn_str, &db_option.project_name).await?;
     }
+    //针对一些特殊的表，需要先创建表，定义索引
+    SUL_DB
+        .query(
+            r#"
+    DEFINE INDEX unique_pe_owner
+    ON TABLE pe_owner
+    COLUMNS in, out UNIQUE;
+    "#,
+        )
+        .await
+        .unwrap();
     let mut create_tables_elapse = 0;
     // 执行多线程解析
     dbg!("执行多线程解析");
@@ -163,17 +174,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             }
         }
     }
-
-    //都结束之后再考虑更新record link，有些外键的type，后面才知道
-    //todo 最后加入index
-    // DEFINE INDEX userNameIndex ON TABLE user COLUMNS name SEARCH ANALYZER ascii BM25 HIGHLIGHTS;
-    // 添加 relate 和 record link
-    // 可以提前把所有的 pe 保存了，再更新属性里的类型？还是直接就通过pe去找到真正的类型
-    // SUL_DB
-    //     .query(include_str!("../schemas/do_relate_pe.surql"))
-    //     .await
-    //     .unwrap();
-
     // 输出创建表所花费的时间
     println!("创建表花费时间: {} ms", create_tables_elapse);
     // 输出初始化数据库所花费的时间
@@ -187,14 +187,13 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
 
 pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
     return match conn.execute(sql).await {
-        Ok(_) => {
-            true
-        }
+        Ok(_) => true,
         Err(e) => {
             match &e {
                 Error::Database(error) => {
                     //index already exist
-                    if error.code() == Some(Cow::from("42000")) {} else {
+                    if error.code() == Some(Cow::from("42000")) {
+                    } else {
                         dbg!(sql);
                     }
                 }
@@ -204,7 +203,7 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
             }
             false
         }
-    }
+    };
 }
 
 #[inline]
@@ -397,18 +396,19 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
                             let mut json_vec = vec![];
                             for refno in refnos {
                                 let att = total_attr_map_arc.get(refno).unwrap();
-                                let Some(json) = att.gen_sur_json() else{
+                                let Some(json) = att.gen_sur_json() else {
                                     continue;
                                 };
                                 json_vec.push(json);
                             }
-                            let sql = format!("INSERT IGNORE INTO {} [{}]", &type_name, json_vec.join(","));
+                            let sql = format!(
+                                "INSERT IGNORE INTO {} [{}]",
+                                &type_name,
+                                json_vec.join(",")
+                            );
                             //使用surreal 保存NamedAttrMap
                             join_set.spawn(async move {
-                                SUL_DB
-                                    .query(sql)
-                                    .await
-                                    .unwrap();
+                                SUL_DB.query(sql).await.unwrap();
                             });
                         }
                     }

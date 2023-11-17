@@ -4,7 +4,7 @@ use aios_core::consts::NAME_HASH;
 use aios_core::helper::qualified_table_name;
 use aios_core::pdms_types::*;
 use anyhow::anyhow;
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use notify::{RecursiveMode, Watcher};
 use pdms_io::io::PdmsIO;
 use pdms_io::watch::PdmsWatcher;
@@ -21,6 +21,7 @@ use futures::{
 };
 // use pdms_io::io::PdmsIO;
 use crate::consts::*;
+use crate::data_interface::gen_model::gen_all_geos_data;
 use crate::data_interface::increment_record::{IncrEleUpdateLog, IncrGeoUpdateLog};
 use crate::defines::CACHED_REFNO_BASIC_MAP;
 use crate::graph_db::pdms_arango::{remove_edges_arangodb, save_arangodb_with_db_option};
@@ -28,15 +29,15 @@ use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge};
 use crate::surreal_service;
 use crate::surreal_service::SUL_DB;
 use aios_core::orm::pdms_element;
+use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::{AttrMap, AttrVal, RefU64Vec};
+use itertools::Itertools;
 use pdms_io::defines::DbPageBasicInfo;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
-use aios_core::pe::SPdmsElement;
 use walkdir::WalkDir;
-use crate::data_interface::gen_model::gen_all_geos_data;
 
 #[derive(Debug, Default, Clone)]
 pub struct IncrementInfo {
@@ -62,10 +63,13 @@ impl AiosDBManager {
         let mut delete_maps: HashMap<RefU64, IncrementInfo> = HashMap::new();
         let mut deleted_refnos_set = HashSet::new();
 
-        let mut pdms_elements = vec![];
         let mut total_add_len = 0;
         let mut total_modify_len = 0;
         let mut total_deleted_len = 0;
+        let mut geo_update_log = IncrGeoUpdateLog::default();
+        let mut owner_children_map = IndexMap::new();
+        let mut deleted_owner_set = IndexSet::new();
+        let mut all_relate_sqls = vec![];
         for (path, (basic_info, last_pageno)) in increment_ranges_map {
             let mut io = PdmsIO::new(path, true);
             io.open()?;
@@ -74,9 +78,15 @@ impl AiosDBManager {
             for ele in eles {
                 let mut attmap: NamedAttrMap = ele.whole_attmap.merge().into();
                 attmap.set_e3d_version(ele.version as _);
+                let owner = attmap.get_owner();
+                let refno = ele.refno;
+                let type_name = attmap.get_type();
+                let type_name = type_name.as_str();
+                // dbg!(ele.refno);
                 // dbg!(&attmap);
                 let mut ele_op = EleOperation::Modified;
                 // 删除只是owner的children变化了，但是需要记录删除的节点
+                // 只要有返回，说明节点存在，返回为空，说明是叶子节点
                 if let Ok(old_refnos) = surreal_service::get_children_refnos(ele.refno).await {
                     //检查是否有删除的
                     old_refnos
@@ -96,12 +106,54 @@ impl AiosDBManager {
                                 children: Default::default(),
                                 operation: EleOperation::Deleted,
                             });
+                            //方便处理删除后模型更新的情况
+                            deleted_owner_set.insert(owner);
+                            // owner_children_map.entry(owner).or_insert_with(HashSet::new).insert(refno);
                         });
                 } else {
                     ele_op = EleOperation::Add;
                 }
+
+                //暂时处理好新增的情况
+                //按照owner 先排序
+                if PRIMITIVE_NOUN_NAMES.contains(&type_name) {
+                    geo_update_log.prim_refnos.insert(refno);
+                } else if GNERAL_LOOP_NOUN_NAMES.contains(&type_name) {
+                    geo_update_log.loop_refnos.insert(refno);
+                } else if CATA_HAS_TUBI_GEO_NAMES.contains(&type_name) {
+                    geo_update_log.bran_hanger_refnos.insert(refno);
+                } else if CATA_GEO_NAMES.contains(&type_name) {
+                    geo_update_log.basic_cata_refnos.insert(refno);
+                    owner_children_map
+                        .entry(attmap.get_owner())
+                        .or_insert_with(HashSet::new)
+                        .insert(refno);
+                }
+
+                //创建relate关系
+                if ele_op == EleOperation::Deleted {
+                    //存储删除的语句
+                } else {
+                    //todo 添加overwrite模式，覆盖之前的数据
+                    //需要添加索引
+                    let relate_sqls = ele
+                        .children
+                        .iter()
+                        .enumerate()
+                        .map(|(i, child)| {
+                            format!(
+                                "RELATE pe:{}->pe_owner->pe:{} set order_num = {}",
+                                child.to_string(),
+                                refno.to_string(),
+                                i
+                            )
+                        })
+                        .collect::<Vec<String>>();
+                    all_relate_sqls.extend_from_slice(&relate_sqls);
+                }
+
                 let increment_info = IncrementInfo {
-                    refno: ele.refno,
+                    refno,
                     db_no: basic_info.pdms_header.db_num,
                     attr: attmap,
                     children: ele.children,
@@ -112,12 +164,13 @@ impl AiosDBManager {
                         .entry(ele.noun)
                         .or_insert(Vec::new())
                         .push(increment_info);
-                }else if ele_op == EleOperation::Add {
+                } else if ele_op == EleOperation::Add {
                     added_type_eles_map
                         .entry(ele.noun)
                         .or_insert(Vec::new())
                         .push(increment_info);
                 }
+
                 match ele_op {
                     EleOperation::None => {}
                     EleOperation::Add => {
@@ -142,44 +195,50 @@ impl AiosDBManager {
             if type_name.is_empty() {
                 continue;
             }
-            let added_pdms_elements = v.iter().map(|k| SPdmsElement {
-                id: k.refno.to_string(),
-                refno: k.refno,
-                owner: k.attr.get_owner(),
-                name: k.attr.get_name_or_default(),
-                noun: k.attr.get_type(),
-                dbnum: k.db_no,
-                e3d_version: k.attr.get_e3d_version(),
-                version_tag: None,
-                status_tag: None,
-                cata_hash: None,
-                lock: false,
-                deleted: false,
-            }).collect::<Vec<SPdmsElement>>();
+            let type_name = type_name.as_str();
+            let mut pe_json_vec = vec![];
+            let mut att_json_vec = vec![];
+            for k in v {
+                let refno = k.refno;
+                let pe = SPdmsElement {
+                    id: refno.to_string(),
+                    refno,
+                    owner: k.attr.get_owner(),
+                    name: k.attr.get_name_or_default(),
+                    noun: k.attr.get_type(),
+                    dbnum: k.db_no,
+                    e3d_version: k.attr.get_e3d_version(),
+                    version_tag: None,
+                    status_tag: None,
+                    cata_hash: k.attr.cal_cata_hash().map(|x| x.to_string()),
+                    lock: false,
+                    deleted: false,
+                };
+
+                pe_json_vec.push(pe.gen_sur_json());
+                if let Some(json) = k.attr.gen_sur_json() {
+                    att_json_vec.push(json);
+                }
+            }
             //对新增的pe处理
-            let pe_json_vec = added_pdms_elements.iter()
-                .map(|x| x.gen_sur_json())
-                .collect::<Vec<_>>();
             let pe_sql = format!("INSERT IGNORE INTO pe [{}]", pe_json_vec.join(","));
             //使用surreal 保存NamedAttrMap
             join_set.spawn(async move {
-                SUL_DB
-                    .query(pe_sql)
-                    .await
-                    .unwrap();
+                SUL_DB.query(pe_sql).await.unwrap();
             });
             //对新增的属性处理
-            let json_vec = v.iter()
-                .filter_map(|x| x.attr.gen_sur_json())
-                .collect::<Vec<_>>();
-            let attmap_sql = format!("INSERT IGNORE INTO {} [{}]", &type_name, json_vec.join(","));
+            let attmap_sql = format!(
+                "INSERT IGNORE INTO {} [{}]",
+                &type_name,
+                att_json_vec.join(",")
+            );
+            // println!("attmap sql: {}", &attmap_sql);
             //使用surreal 保存NamedAttrMap
             join_set.spawn(async move {
-                SUL_DB
-                    .query(attmap_sql)
-                    .await
-                    .unwrap();
+                SUL_DB.query(attmap_sql).await.unwrap();
             });
+
+            //还需要创建relate关系
         }
         //等待保存任务完成
         while let Some(_) = join_set.join_next().await {}
@@ -188,169 +247,97 @@ impl AiosDBManager {
             save_atts_time.elapsed().as_secs_f32()
         );
 
-        //不删除数据，而是设为deleted的标识
-
-
-        // let mut increment_data_record = Vec::new();
-        // for (noun, eles) in &type_eles_map {
-        //     for ele in eles {
-        //         match ele.operation {
-        //             EleOperation::None => { continue; }
-        //             EleOperation::Add => {
-        //                 increment_data_record.push(IncrEleUpdateLog {
-        //                     refno: ele.refno,
-        //                     data_operate: ele.operation,
-        //                     numbdb: ele.db_no,
-        //                     children: Default::default(),
-        //                     old_attr: Default::default(),
-        //                     new_attr: ele.attr.clone(),
-        //                     new_version: 0,
-        //                     old_version: 0,
-        //                     timestamp: timestamp.clone(),
-        //                 });
-        //             }
-        //             EleOperation::Modified => {
-        //                 let Ok(old_attr) = self.get_attr(ele.refno).await else { continue; };
-        //                 increment_data_record.push(IncrEleUpdateLog {
-        //                     refno: ele.refno,
-        //                     data_operate: ele.operation,
-        //                     numbdb: ele.db_no,
-        //                     children: ele.children.clone(),
-        //                     old_attr,
-        //                     new_attr: ele.attr.clone(),
-        //                     new_version: 0,
-        //                     old_version: 0,
-        //                     timestamp: timestamp.clone(),
-        //                 });
-        //             }
-        //             EleOperation::Deleted => { continue; }
-        //         }
-        //     }
-        // }
-        //
-        // 删除做单独处理
-        // for (refno, map) in delete_maps {
-        //     let Ok(old_attr) = self.get_attr(refno).await else { continue; };
-        //     increment_data_record.push(IncrEleUpdateLog {
-        //         refno: map.refno,
-        //         data_operate: map.operation,
-        //         numbdb: map.db_no,
-        //         children: map.children.clone(),
-        //         old_attr,
-        //         new_attr: map.attr,
-        //         new_version: 0,
-        //         old_version: 0,
-        //         timestamp : timestamp.clone(),
-        //     });
-        // }
-        // 暂时都保存到desi项目里面
-        // if let Some(pool) = self.project_map.get(&self.db_option.project_name) {
-        //     let _ = IncrEleUpdateLog::save_increment_data_to_sql(increment_data_record, "default".to_string(), pool.value()).await?;
-        // }
-        ///先更新一遍到本地数据库
-        for (noun, eles) in &modify_type_eles_map {
-            for ele in eles {
-                // let owner = ele.attr.get_owner();
-                // if owner.is_unset() {  continue; }
-                // let mut vec = ele.children.to_bytes()?;
-                // children_db.insert((ele.refno).to_be_bytes().as_slice(), &*vec)?;
-                //
-                // let mut bytes = ele.attr.into_rkyv_compress_bytes();
-                // attmap_db.insert((ele.refno).to_be_bytes().as_slice(), &*bytes)?;
-            }
-        }
-
-        let mut updated_sets = HashSet::new();
-        let mut geo_update_log = IncrGeoUpdateLog::default();
-        for (mut noun, mut incrs) in modify_type_eles_map {
-            while let Some(mut incr) = incrs.pop() {
-                let refno = incr.refno;
-                updated_sets.insert(incr.refno);
-                let owner = incr.attr.get_owner();
-                if owner.is_unset() {
-                    continue;
-                }
-
-                let type_name = incr.attr.get_type_str();
-
-                //还是要查询一下，有可能在子节点里
-                {
-                    if PRIMITIVE_NOUN_NAMES.contains(&type_name) {
-                        geo_update_log.prim_refnos.push(refno);
-                    } else if GNERAL_LOOP_NOUN_NAMES.contains(&type_name) {
-                        geo_update_log.loop_refnos.push(refno);
-                    } else if CATA_HAS_TUBI_GEO_NAMES.contains(&type_name) {
-                        geo_update_log.basic_cata_refnos.push(refno);
-                    } else if CATA_GEO_NAMES.contains(&type_name) {
-                        geo_update_log.basic_cata_refnos.push(refno);
-                    }
-                }
-                let pdms_element = SPdmsElement {
-                    id: refno.to_string(),
-                    refno,
-                    owner,
-                    name: incr.attr.get_string_or_default("NAME"),
-                    noun: db1_dehash(noun),
-                    dbnum: incr.db_no,
-                    e3d_version: incr.attr.get_e3d_version(),
-                    version_tag: None,
-                    status_tag: None,
-                    cata_hash: None,
-                    lock: false,
-                    deleted: false,
-                };
-                pdms_elements.push(pdms_element);
-            }
-        }
-
+        let mut relate_join_set = tokio::task::JoinSet::new();
         let mut time = Instant::now();
-        let mut join_set = tokio::task::JoinSet::new();
-        //更新和插入的处理
-        for eles in pdms_elements.chunks(500) {
-
-            let mut json_strs = Vec::new();
-            for m in eles{
-                json_strs.push(m.gen_sur_json());
-            }
-            let sql = format!("INSERT IGNORE INTO pe [{}]", json_strs.join(","));
-            //手动修改，替换掉""
-            join_set.spawn(async move{
-                SUL_DB
-                    .query(sql)
-                    .await
-                    .unwrap();
+        dbg!(all_relate_sqls.len());
+        let mut chunks = all_relate_sqls.chunks(100);
+        for mut s in chunks {
+            let sql = s.into_iter().join(";");
+            relate_join_set.spawn(async move {
+                SUL_DB.query(sql).await.unwrap();
             });
         }
-        while let Some(_) = join_set.join_next().await {}
+        while let Some(_) = relate_join_set.join_next().await {}
+        println!("Relate pes task costs {} s", time.elapsed().as_secs_f32());
 
-        println!("Save incr pes task costs {} s", time.elapsed().as_secs_f32());
+        //todo 批量查询types
+        for (k, v) in owner_children_map {
+            if let Ok(type_name) = surreal_service::get_type_name(k).await {
+                if type_name == "BRAN" || type_name == "HANG" {
+                    geo_update_log.bran_hanger_refnos.insert(k);
+                }
+            }
+        }
 
-
-        // let database = self.get_arango_db().await?;
-        // for result in pdms_elements.chunks(ARANGODB_SAVE_AMOUNT) {
-        //     let json = serde_json::to_value(result)?;
-        //     save_arangodb_with_db_option(&database, json, AQL_PDMS_ELES_COLLECTION).await?;
+        // let mut updated_sets = HashSet::new();
+        // for (mut noun, mut incrs) in modify_type_eles_map {
+        //     while let Some(mut incr) = incrs.pop() {
+        //         let refno = incr.refno;
+        //         updated_sets.insert(incr.refno);
+        //         let owner = incr.attr.get_owner();
+        //         if owner.is_unset() {
+        //             continue;
+        //         }
+        //
+        //         let type_name = incr.attr.get_type_str();
+        //         if PRIMITIVE_NOUN_NAMES.contains(&type_name) {
+        //             geo_update_log.prim_refnos.push(refno);
+        //         } else if GNERAL_LOOP_NOUN_NAMES.contains(&type_name) {
+        //             geo_update_log.loop_refnos.push(refno);
+        //         } else if CATA_HAS_TUBI_GEO_NAMES.contains(&type_name) {
+        //             geo_update_log.basic_cata_refnos.push(refno);
+        //         } else if CATA_GEO_NAMES.contains(&type_name) {
+        //             geo_update_log.basic_cata_refnos.push(refno);
+        //         }
+        //
+        //         let pdms_element = SPdmsElement {
+        //             id: refno.to_string(),
+        //             refno,
+        //             owner,
+        //             name: incr.attr.get_string_or_default("NAME"),
+        //             noun: db1_dehash(noun),
+        //             dbnum: incr.db_no,
+        //             e3d_version: incr.attr.get_e3d_version(),
+        //             version_tag: None,
+        //             status_tag: None,
+        //             cata_hash: None,
+        //             lock: false,
+        //             deleted: false,
+        //         };
+        //         pdms_elements.push(pdms_element);
+        //     }
         // }
 
-        //删除边
-        // for result in delete_keys.chunks(ARANGODB_SAVE_AMOUNT) {
-        //     // dbg!(result);
-        //     remove_edges_arangodb(&database, result, AQL_PDMS_EDGES_COLLECTION).await;
+        // let mut time = Instant::now();
+        // let mut join_set = tokio::task::JoinSet::new();
+        // //更新和插入的处理
+        // for eles in pdms_elements.chunks(500) {
+        //     let mut json_strs = Vec::new();
+        //     for m in eles {
+        //         json_strs.push(m.gen_sur_json());
+        //     }
+        //     let sql = format!("INSERT IGNORE INTO pe [{}]", json_strs.join(","));
+        //     //手动修改，替换掉""
+        //     join_set.spawn(async move {
+        //         SUL_DB
+        //             .query(sql)
+        //             .await
+        //             .unwrap();
+        //     });
         // }
+        // while let Some(_) = join_set.join_next().await {}
+        // println!("Save incr pes task costs {} s", time.elapsed().as_secs_f32());
 
-        // for edge in edges.chunks(ARANGODB_SAVE_AMOUNT) {
-        //     let json = serde_json::to_value(edge)?;
-        //     save_arangodb_with_db_option(&database, json, AQL_PDMS_EDGES_COLLECTION).await?;
-        // }
-
-        dbg!(geo_update_log.prim_refnos.len());
+        // dbg!(geo_update_log.bran_hanger_refnos.len());
         dbg!(&geo_update_log);
         let r: Vec<IncrGeoUpdateLog> = SUL_DB
             .create("incr_model_log")
             .content(&geo_update_log)
             .await?;
 
-        gen_all_geos_data(Arc::new(self.clone()), Some(geo_update_log)).await.unwrap();
+        gen_all_geos_data(Arc::new(self.clone()), Some(geo_update_log))
+            .await
+            .unwrap();
 
         println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_deleted_len}");
 
