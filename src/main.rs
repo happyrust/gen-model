@@ -36,18 +36,15 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Instant;
+use aios_core::get_db_option;
 use surrealdb::engine::local::RocksDb;
 use surrealdb::engine::remote::ws::Ws;
 use surrealdb::iam::signin::db;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use config::{Config, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
 
+    let db_option: DbOption = get_db_option().clone();
     // 如果启用了日志功能
     if db_option.enable_log {
         let now = Local::now();
