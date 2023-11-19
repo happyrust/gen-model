@@ -9,6 +9,7 @@ use notify::{RecursiveMode, Watcher};
 use pdms_io::io::PdmsIO;
 use pdms_io::watch::PdmsWatcher;
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::PathBuf;
 // use pdms_io::watch::PdmsWatcher;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -37,6 +38,8 @@ use pdms_io::defines::DbPageBasicInfo;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
+use pdms_io::sync::compress::{CompressOptions, execute_compress};
+use tokio::task::JoinSet;
 use walkdir::WalkDir;
 
 #[derive(Debug, Default, Clone)]
@@ -128,13 +131,21 @@ impl AiosDBManager {
                         .entry(attmap.get_owner())
                         .or_insert_with(HashSet::new)
                         .insert(refno);
+                }else{
+                    owner_children_map
+                        .entry(attmap.get_owner())
+                        .or_insert_with(HashSet::new)
+                        .insert(refno);
                 }
 
                 //创建relate关系
                 if ele_op == EleOperation::Deleted {
+                    //如果是负实体这种发生修改，需要更新owner
+                    //如果有cref这些，
                     //存储删除的语句
                 } else {
                     //todo 添加overwrite模式，覆盖之前的数据
+                    //提供一个channel传入，在指定的地方执行
                     //需要添加索引
                     let relate_sqls = ele
                         .children
@@ -347,7 +358,17 @@ impl AiosDBManager {
     pub async fn init_watcher(&self) -> anyhow::Result<()> {
         let mut params = IndexMap::new();
         let mut latest_need_update_headers = IndexMap::new();
+        fs::create_dir_all("asset/archives")?;
+        let mut time = Instant::now();
         for watch_dir in &self.watcher.watch_dirs {
+            let mut join_set = JoinSet::new();
+            //在dir_entry 下创建 cbas目录
+            // let mut cbas_dir = watch_dir.clone();
+            // cbas_dir.push("cbas");
+            // let cbas_dir_path = cbas_dir.to_string_lossy().to_string();
+            // if !cbas_dir.exists() {
+            //     std::fs::create_dir_all(cbas_dir)?;
+            // }
             for entry in WalkDir::new(watch_dir).sort_by(|a, b| {
                 b.path()
                     .metadata()
@@ -357,9 +378,19 @@ impl AiosDBManager {
             }) {
                 let dir_entry = entry.unwrap();
                 let path = dir_entry.path();
-                if path.is_dir() {
+                //只处理0001 结尾的文件
+                let file_name = path.file_stem().unwrap().to_str().unwrap();
+                if path.is_dir() || !file_name.ends_with("0001"){
                     continue;
                 }
+                //初始化CBA的Archive文件，来保证后续增量下载
+                let input= path.to_path_buf();
+                let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
+                join_set.spawn(async move {
+                    let compress_opt = CompressOptions::new(input, output);
+                    execute_compress(compress_opt).await.unwrap();
+                });
+
                 let mut io = PdmsIO::new(path, true);
                 io.open()?;
                 if let Ok(basic_info) = io.get_page_basic_info() {
@@ -368,7 +399,6 @@ impl AiosDBManager {
                         if old.pdms_header.page_no == basic_info.pdms_header.page_no {
                             continue;
                         }
-                        //pdms_header.db_num
                         params.insert(
                             path.to_path_buf(),
                             (basic_info.clone(), old.pdms_header.page_no),
@@ -380,8 +410,12 @@ impl AiosDBManager {
                         self.watcher.headers.insert(path.to_path_buf(), basic_info);
                     }
                 }
+                // break;
             }
+            while let Some(_) = join_set.join_next().await {}
+            // break;
         }
+        println!("初始化增量更新耗时: {} s", time.elapsed().as_secs_f32());
         match self.execute_incr_update(params).await {
             Ok(_) => {
                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
@@ -395,7 +429,7 @@ impl AiosDBManager {
                     }
                 }
                 //now save the watch.json
-                self.watcher.save()?;
+                self.watcher.save(None)?;
                 println!("执行启动后的自动增量完成。")
             }
             Err(e) => {
@@ -432,7 +466,6 @@ impl AiosDBManager {
                                     path.clone(),
                                     (new_header.clone(), old.pdms_header.page_no),
                                 );
-                                // *old.value_mut() = new_header;
                             }
                         }
                         // dbg!(&params);
@@ -450,7 +483,7 @@ impl AiosDBManager {
                                     }
                                 }
                                 //now save the watch.json
-                                self.watcher.save();
+                                self.watcher.save(None);
                             }
                             Err(e) => {
                                 println!("Execute increment update error: {:?}", e);

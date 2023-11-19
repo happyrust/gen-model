@@ -17,6 +17,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use aios_core::file_helper::collect_db_dirs;
+use aios_core::get_db_option;
 use indexmap::IndexMap;
 use itertools::Itertools;
 use crate::api::attr::*;
@@ -67,22 +69,10 @@ static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> 
 });
 
 
-///获得目录下下面的指定project 数据库文件（000结尾）
-#[inline]
-pub fn collect_db_dirs<'a, T: AsRef<Path>>(dir: T, projects: impl IntoIterator<Item=&'a str>) -> Vec<PathBuf> {
-    projects.into_iter().filter_map(|x| {
-        fs::read_dir(dir.as_ref().to_path_buf().join(x))
-            .unwrap()
-            .into_iter()
-            .map(|entry| entry.unwrap().path())
-            .find(|x| x.is_dir() && x.file_name().unwrap().to_str().unwrap().ends_with("000"))
-    }).collect()
-}
-
 impl AiosDBManager {
     /// 从默认配置文件初始化
     pub async fn init_form_config() -> anyhow::Result<Self> {
-        let db_option = Self::get_db_option()?;
+        let db_option = get_db_option();
         let mut mgr = Self::init(&db_option).await?;
         println!("正在初始化uda");
         mgr.init_uda_map().await?;
@@ -93,7 +83,6 @@ impl AiosDBManager {
         //     &db_option.module,
         // ).await?;
         //初始化watcher
-        // mgr.init_watcher().await?;
         //加载空间树
         if db_option.load_spatial_tree {
             mgr.compute_aabb_trees().await?;
@@ -115,13 +104,6 @@ impl AiosDBManager {
     //     });
     //     Ok(())
     // }
-
-
-    ///总的路径-> 查找到所有000文件夹的路径
-    #[inline]
-    pub fn collect_db_dirs(&self) -> Vec<PathBuf> {
-        collect_db_dirs(&self.db_option.project_path, self.projects.iter().map(|x| x.as_ref()))
-    }
 
     pub async fn compute_aabb_trees(&mut self) -> anyhow::Result<bool> {
         //测试分页查询
@@ -325,17 +307,6 @@ impl AiosDBManager {
             .unwrap_or("UNSET".to_string())
     }
 
-    ///获得db option
-    #[inline]
-    pub fn get_db_option() -> anyhow::Result<DbOption> {
-        use config::{Config, ConfigError, Environment, File};
-        let s = Config::builder()
-            .add_source(File::with_name("DbOption"))
-            .build()?;
-        s.try_deserialize::<DbOption>()
-            .map_err(|x| anyhow::anyhow!(x.to_string()))
-    }
-
     ///获得默认的连接字符串
     #[inline]
     pub fn get_default_conn_str(d: &DbOption) -> String {
@@ -482,7 +453,7 @@ impl AiosDBManager {
     pub async fn init(db_option: &DbOption) -> anyhow::Result<Self> {
         let dir = db_option.project_path.to_string();
         let mut project_map = DashMap::new();
-        let db_option = Self::get_db_option()?;
+        let db_option = get_db_option().clone();
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         for project in &db_option.included_projects {
             if db_option.use_tidb.unwrap_or(false) {
@@ -505,7 +476,7 @@ impl AiosDBManager {
 
         let db_paths = collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref()));
         dbg!(&db_paths);
-        let mut watcher = PdmsWatcher::load_from_json().unwrap_or(PdmsWatcher::new(db_paths));
+        let mut watcher = PdmsWatcher::load_from_json(None).unwrap_or(PdmsWatcher::new(db_paths));
 
         Ok(Self {
             project_map,
