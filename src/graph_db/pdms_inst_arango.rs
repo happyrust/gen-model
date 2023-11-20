@@ -76,11 +76,14 @@ pub async fn save_mesh_instance_data(
 
     //保存inst geos 数据
     let mut sur_jsons = vec![];
-    for chunk in &inst_mgr.inst_geos_map.iter().chunks(1000) {
-        for k in chunk {
-            let json = serde_json::to_value(k.1).unwrap();
+    // for chunk in &inst_mgr.inst_geos_map.iter().chunks(1000) {
+    let keys = inst_mgr.inst_geos_map.keys().collect::<Vec<_>>();
+    for chunk in keys.chunks(1000) {
+        for &k in chunk {
+            let v = inst_mgr.inst_geos_map.get(k).unwrap();
+            let json = serde_json::to_value(v).unwrap();
             instances.push(json);
-            sur_jsons.push(k.1.gen_sur_json());
+            sur_jsons.push(v.gen_sur_json());
         }
         // println!("{}", sur_jsons.join(","));
         let aql = AqlQuery::new(r#"
@@ -95,9 +98,13 @@ pub async fn save_mesh_instance_data(
 
     //保存tubi的数据
     let collection = AQL_PDMS_INST_TUBI_COLLECTION;
-    for chunk in &inst_mgr.inst_tubi_map.iter().chunks(1000) {
-        for (_, k) in chunk {
-            let json = serde_json::to_value(k).unwrap();
+    let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
+    for chunk in keys.chunks(1000) {
+        for &k in chunk {
+            let v = inst_mgr.inst_tubi_map.get(k).unwrap();
+    // for chunk in &inst_mgr.inst_tubi_map.iter().chunks(1000) {
+    //     for (_, k) in chunk {
+            let json = serde_json::to_value(v).unwrap();
             instances.push(json);
         }
         let aql = AqlQuery::new(r#"
@@ -114,14 +121,18 @@ pub async fn save_mesh_instance_data(
     //直接用record link来链接mesh
     //保存inst info 数据
     let collection = AQL_PDMS_INST_INFO_COLLECTION;
-    for chunk in &inst_mgr.inst_info_map.iter().chunks(1000) {
-        for k in chunk {
-            let json = serde_json::to_value(k.1).unwrap();
+    let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
+    for chunk in keys.chunks(1000) {
+        for &k in chunk {
+            let v = inst_mgr.inst_info_map.get(k).unwrap();
+    // for chunk in &inst_mgr.inst_info_map.iter().chunks(1000) {
+    //     for k in chunk {
+            let json = serde_json::to_value(v).unwrap();
             instances.push(json);
             let edge = PdmsInstanceGraphEdge {
                 _key: "".to_string(),
-                _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.0.to_url_refno()),
-                _to: format!("{}/{}", collection, k.0.to_url_refno()),
+                _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.to_url_refno()),
+                _to: format!("{}/{}", collection, k.to_url_refno()),
             };
             edges.push(serde_json::to_value(&edge).unwrap());
         }
@@ -145,9 +156,13 @@ pub async fn save_mesh_instance_data(
 
     let collection = AQL_PDMS_COMPOUND_INST_INFO_COLLECTION;
     println!("开始保存负实体instance数据");
-    for chunk in &inst_mgr.compound_inst_info_map.iter().chunks(1000) {
-        for k in chunk {
-            let json = serde_json::to_value(k.1).unwrap();
+    let keys = inst_mgr.compound_inst_info_map.keys().collect::<Vec<_>>();
+    for chunk in keys.chunks(1000) {
+        for &k in chunk {
+            let v = inst_mgr.compound_inst_info_map.get(k).unwrap();
+    // for chunk in &inst_mgr.compound_inst_info_map.iter().chunks(1000) {
+    //     for k in chunk {
+            let json = serde_json::to_value(v).unwrap();
             instances.push(json);
         }
         let aql = AqlQuery::new(r#"
@@ -161,9 +176,13 @@ pub async fn save_mesh_instance_data(
     }
 
     let collection = AQL_PDMS_NGMS_INST_INFO_COLLECTION;
-    for chunk in &inst_mgr.ngmr_inst_info_map.iter().chunks(1000) {
-        for k in chunk {
-            let json = serde_json::to_value(k.1).unwrap();
+    let keys = inst_mgr.ngmr_inst_info_map.keys().collect::<Vec<_>>();
+    for chunk in keys.chunks(1000) {
+        for &k in chunk {
+            let v = inst_mgr.ngmr_inst_info_map.get(k).unwrap();
+    // for chunk in &inst_mgr.ngmr_inst_info_map.iter().chunks(1000) {
+    //     for k in chunk {
+            let json = serde_json::to_value(v).unwrap();
             instances.push(json);
         }
         let aql = AqlQuery::new(r#"
