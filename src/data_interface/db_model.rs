@@ -16,11 +16,12 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use aios_core::file_helper::collect_db_dirs;
 use aios_core::get_db_option;
 use indexmap::IndexMap;
 use itertools::Itertools;
+use pdms_io::sync::clone::{CloneOptions, execute_clone};
 use crate::api::attr::*;
 use crate::api::element::*;
 use crate::api::refno_info::*;
@@ -97,13 +98,63 @@ impl AiosDBManager {
         Ok(())
     }
 
-    // pub async fn spawn_exec_watcher(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
-    //     tokio::spawn(async move {
-    //         mgr.init_watcher().await.unwrap();
-    //         mgr.async_watch().await.unwrap();
-    //     });
-    //     Ok(())
-    // }
+    //开启定时同步更新任务
+    pub async fn loop_e3d_clone_task(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
+
+        dbg!("定时同步数据任务开启");
+        let forever = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            let mgr_clone = mgr.clone();
+            loop {
+                interval.tick().await;
+                let new_mgr_clone = mgr_clone.clone();
+                Self::exec_delta_clone_remotes(new_mgr_clone).await.unwrap();
+            }
+        });
+        // Ok(())
+        forever.await?
+    }
+
+    //增量从服务器里的数据clone到本地
+    pub async fn exec_delta_clone_remotes(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
+        // mgr.init_watcher().await.unwrap();
+        // mgr.async_watch().await.unwrap();
+        // 遍历watch里面的files
+        // 暂时做成一个定时任务, todo 使用event触发
+        println!("Start delta clone db data");
+        let mut total_time = std::time::Instant::now();
+
+        let db_option = &mgr.db_option;
+        for remote_url in &db_option.remote_file_hosts {
+            for kv in &mgr.watcher.file_name_full_path_map {
+                let file_name = kv.key();
+                let pb = kv.value();
+                let url = format!("{}/{}.cba", remote_url, file_name);
+                let e3d_file: PathBuf = pb.into();
+                let mut clone_time = Instant::now();
+                let remote_clone_opt = CloneOptions::new_remote(
+                    url.as_str(),
+                    e3d_file);
+                // dbg!(&compress_opt);
+                if let Ok(r) =  execute_clone(remote_clone_opt).await{
+                    if r {
+                        println!("Clone {} cost: {:?}s", file_name, clone_time.elapsed().as_secs_f64());
+                    }
+                }
+                // break;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn spawn_exec_watcher(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
+        let f = tokio::spawn(async move {
+            mgr.init_watcher().await.unwrap();
+            mgr.async_watch().await.unwrap();
+        });
+        Ok(f.await?)
+    }
 
     pub async fn compute_aabb_trees(&mut self) -> anyhow::Result<bool> {
         //测试分页查询

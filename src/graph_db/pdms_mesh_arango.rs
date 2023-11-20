@@ -46,12 +46,16 @@ pub async fn save_mesh_data(mgr: &AiosDBManager, mesh_mgr: &mut PlantMeshesData,
     println!("开始保存mesh数据");
 
     //不是replace，需要考虑缓存
-    let mut meshes = &mut mesh_mgr.meshes;
-    println!("当前mesh数量：{}", meshes.len());
+    let mut meshes_map = &mut mesh_mgr.meshes;
+    println!("当前mesh数量：{}", meshes_map.len());
 
-    for chunk in &meshes.iter().chunks(1000) {
-        for k in chunk {
-            let json = serde_json::to_value(k.1).unwrap();
+    let keys = meshes_map.keys().collect::<Vec<_>>();
+    for chunk in keys.chunks(1000) {
+        for &k in chunk {
+            let v = meshes_map.get(k).unwrap();
+    // for chunk in &meshes.iter().chunks(1000) {
+    //     for k in chunk {
+            let json = serde_json::to_value(v).unwrap();
             data.push(json);
         }
         let aql = if replace {
@@ -75,7 +79,7 @@ pub async fn save_mesh_data(mgr: &AiosDBManager, mesh_mgr: &mut PlantMeshesData,
     }
 
     std::fs::create_dir_all("asset/meshes").unwrap();
-    for mesh in meshes{
+    for mesh in meshes_map {
         mesh.1.serialize_to_specify_file(&format!("asset/meshes/{}.mesh", mesh.0));
     }
 

@@ -383,6 +383,7 @@ impl AiosDBManager {
                 if path.is_dir() || !file_name.ends_with("0001"){
                     continue;
                 }
+                self.watcher.file_name_full_path_map.insert(file_name.to_owned(), path.to_path_buf());
                 //初始化CBA的Archive文件，来保证后续增量下载
                 let input= path.to_path_buf();
                 let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
@@ -473,13 +474,25 @@ impl AiosDBManager {
                             Ok(_) => {
                                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
                                 for (path, new_header) in new_headers {
+                                    let file_name = path.file_stem().unwrap().to_str().unwrap();
+                                    dbg!(&file_name);
+                                    if path.is_dir() || !file_name.ends_with("0001"){
+                                        continue;
+                                    }
                                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
                                         //未发生修改，直接跳过
-                                        if old.pdms_header.page_no == new_header.pdms_header.page_no
-                                        {
+                                        if old.pdms_header.page_no >= new_header.pdms_header.page_no {
                                             continue;
                                         }
                                         *old.value_mut() = new_header;
+
+                                        //发生修改的文件，重新生成archive
+                                        dbg!(&path);
+                                        let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
+                                        dbg!(&output);
+                                        let compress_opt = CompressOptions::new(path, output);
+                                        //todo spawn a new task
+                                        execute_compress(compress_opt).await.unwrap();
                                     }
                                 }
                                 //now save the watch.json

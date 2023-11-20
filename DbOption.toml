@@ -55,6 +55,8 @@ v_port = "8001"
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"
 
+#暂时做分离，可以使用axum的分享文件夹
+remote_file_hosts = ["http://50c170h624.zicp.vip:56785/asset/archives"]
 
 #调试选项
 replace_mesh = true
