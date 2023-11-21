@@ -42,7 +42,7 @@ pub async fn get_versioned_client(project: &str) -> TDBClient {
 }
 
 // const SQL_CHUNK_COUNT: usize = 1000;
-const SQL_CHUNK_COUNT: usize = 300;
+// const SQL_CHUNK_COUNT: usize = 10_000;
 // const SQL_CHUNK_COUNT: usize = 300;
 const JSON_CHUNK_COUNT: usize = 10_000;
 
@@ -126,7 +126,7 @@ pub async fn save_pdms_eles_to_surreal(
     //         DEFINE FIELD owner ON {0} TYPE option<record<{0}>>;
     //     "#, "pe"))
     //     .await.unwrap();
-    for chunk in &total_attr_map.into_iter().chunks(SQL_CHUNK_COUNT) {
+    for chunk in &total_attr_map.into_iter().chunks(JSON_CHUNK_COUNT) {
         let mut model_chunk = vec![];
         for kv in chunk {
             let att_map = kv.value();
@@ -205,7 +205,7 @@ pub async fn save_pdms_eles_to_surreal(
             .collect::<Vec<String>>();
         all_relate_sqls.extend_from_slice(&relate_sqls);
     }
-    let mut chunks = all_relate_sqls.chunks(SQL_CHUNK_COUNT);
+    let mut chunks = all_relate_sqls.chunks(JSON_CHUNK_COUNT);
     for mut s in chunks{
         let sql =  s.into_iter().join(";");
         relate_join_set.spawn(async move {

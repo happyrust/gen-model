@@ -383,7 +383,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
                     )
                     .await?;
                     dbg!("开始保存属性数据");
-                    const ATTS_CHUNK_COUNT: usize = 500;
+                    const ATTS_CHUNK_COUNT: usize = 1000;
                     let mut join_set = tokio::task::JoinSet::new();
                     let mut save_atts_time = Instant::now();
                     for kv in type_ele_map.iter() {
