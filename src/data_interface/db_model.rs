@@ -100,48 +100,39 @@ impl AiosDBManager {
     }
 
     //开启定时同步更新任务
-    pub async fn loop_e3d_clone_task(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
+    pub async fn run_e3d_clone_bg_task(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
         dbg!("定时同步数据任务开启");
         let forever = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
-            let mgr_clone = mgr.clone();
+            //10分钟强制刷一遍
+            let mut interval = tokio::time::interval(Duration::from_secs(60 * 10));
             loop {
                 interval.tick().await;
-                let new_mgr_clone = mgr_clone.clone();
-                Self::exec_delta_clone_remotes(new_mgr_clone).await.unwrap();
+                //todo，需要配置各个db对应的映射, 不同区域对应不同的db
+                // Self::exec_delta_clone_remotes(&mgr.watcher, &[]).await.unwrap();
             }
         });
-        // Ok(())
         forever.await?
     }
 
     //增量从服务器里的数据clone到本地
-    pub async fn exec_delta_clone_remotes(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
-        // mgr.init_watcher().await.unwrap();
-        // mgr.async_watch().await.unwrap();
-        // 遍历watch里面的files
-        // 暂时做成一个定时任务, todo 使用event触发
-        println!("Start delta clone db data");
-        let mut total_time = std::time::Instant::now();
-
-        let db_option = &mgr.db_option;
-        for remote_url in &db_option.remote_file_server_hosts {
-            for kv in &mgr.watcher.file_name_full_path_map {
-                let file_name = kv.key();
-                let pb = kv.value();
-                let url = format!("{}/{}.cba", remote_url, file_name);
-                let e3d_file: PathBuf = pb.into();
-                let mut clone_time = Instant::now();
-                let remote_clone_opt = CloneOptions::new_remote(
-                    url.as_str(),
-                    e3d_file);
-                // dbg!(&compress_opt);
-                if let Ok(r) = execute_clone(remote_clone_opt).await {
-                    if r {
-                        println!("Clone {} cost: {:?}s", file_name, clone_time.elapsed().as_secs_f64());
-                    }
+    pub async fn exec_delta_clone_remotes(watcher: &PdmsWatcher, sync_msg: SyncE3dFileMsg) -> anyhow::Result<()> {
+        println!("Start delta clone db files num: {}", sync_msg.file_names.len());
+        let remote_url = sync_msg.file_server_host.as_str();
+        for file_name in &sync_msg.file_names {
+            let url = format!("{}/{}.cba", remote_url, file_name);
+            //todo 如果没有需要新加数据
+            let Some(pb) = watcher.file_name_full_path_map.get(file_name) else {
+                continue;
+            };
+            let e3d_file: PathBuf = pb.value().clone();
+            let mut clone_time = Instant::now();
+            let remote_clone_opt = CloneOptions::new_remote(
+                url.as_str(),
+                e3d_file);
+            if let Ok(r) = execute_clone(remote_clone_opt).await {
+                if r {
+                    println!("Clone {} cost: {:?}s", file_name, clone_time.elapsed().as_secs_f64());
                 }
-                // break;
             }
         }
 
@@ -161,7 +152,7 @@ impl AiosDBManager {
     //         //     .await
     //         //     .unwrap();
 
-    pub async fn demo_mqtt_requests()  {
+    pub async fn demo_mqtt_requests() {
         let mut mqtt_inst = new_mqtt_inst("test-1");
         let client = mqtt_inst.client.clone();
         let f = tokio::spawn(async move {
@@ -189,10 +180,11 @@ impl AiosDBManager {
         f.await.expect("demo_mqtt_requests panic");
     }
 
+    ///另外将里面可能有关联的db，也要同步检查后一下？？
     ///处理mqtt的消息, 通知需要处理的db 文件名，然后对应的归属地也需要发送
-    pub async fn poll_mqtt_events() {
+    pub async fn poll_sync_e3d_mqtt_events(watcher: Arc<PdmsWatcher>) {
         let db_option = get_db_option();
-        let id = db_option.location.clone();
+        let location = db_option.location.clone();
         let f = tokio::spawn(async move {
             //订阅消息处理更新
             let mut mqtt_inst = new_mqtt_inst(&format!("{}-{}-sub", db_option.location.as_str(),
@@ -205,8 +197,13 @@ impl AiosDBManager {
                     Ok(v) => {
                         match v {
                             Incoming(Packet::Publish(p)) => {
-                                let payload = SyncE3dFileMsg::from(p.payload.to_vec());
-                                println!("payload = {:?}", &payload);
+                                let sync_e3d = SyncE3dFileMsg::from(p.payload.to_vec());
+                                println!("payload = {:?}", &sync_e3d);
+                                //检查是否和本地的location一致，如果一致，就不用更新
+                                if sync_e3d.location != location {
+                                    //执行指定文件的clone
+                                    Self::exec_delta_clone_remotes(&watcher, sync_e3d).await.unwrap();
+                                }
                             }
                             _ => {
                                 // dbg!(v);

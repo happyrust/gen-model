@@ -65,8 +65,8 @@ pub fn new_mqtt_inst(id: &str) -> MqttInstance {
     let mut mqttoptions = MqttOptions::new(id,
                                            db_option.mqtt_host.as_str(), db_option.mqtt_port);
     mqttoptions.set_clean_session(false);
-    mqttoptions.set_keep_alive(Duration::from_secs(50));
-    let (client, el) = AsyncClient::new(mqttoptions, 50);
+    mqttoptions.set_keep_alive(Duration::from_secs(500));
+    let (client, el) = AsyncClient::new(mqttoptions, 5000);
     MqttInstance {
         client,
         el,
