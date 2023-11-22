@@ -47,16 +47,16 @@ sql_threads_number = 50
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
 #版本数据库服务配置
-v_ip = "localhost"
+v_ip = "50c170h624.zicp.vip"
 v_user = "root"
 v_password = ""
-v_port = "8001"
+v_port = "38389"
 
 #mqtt 事件 ip
 mqtt_host = "50c170h624.zicp.vip"
 mqtt_port = 41761
 
-location = "BJ"
+location = "SJZ"
 
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"
