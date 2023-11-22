@@ -1,5 +1,5 @@
 #同步文件配置false
-total_sync = true
+total_sync = false
 enable_log = false
 sync_graph_db = false
 sync_versioned = false
@@ -46,11 +46,15 @@ port = "3306"
 sql_threads_number = 50
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
-#版本服务配置
+#版本数据库服务配置
 v_ip = "localhost"
 v_user = "root"
 v_password = ""
 v_port = "8001"
+
+#mqtt 事件 ip
+mqtt_host = "localhost"
+mqtt_port = 1883
 
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"

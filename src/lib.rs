@@ -55,7 +55,8 @@ pub mod data_state;
 
 pub mod arangodb;
 pub mod versioned_db;
-// pub mod surreal_db;
+
+pub mod mqtt_service;
 
 pub mod surreal_service;
 

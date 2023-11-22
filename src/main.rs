@@ -37,9 +37,7 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Instant;
 use aios_core::get_db_option;
-use surrealdb::engine::local::RocksDb;
 use surrealdb::engine::remote::ws::Ws;
-use surrealdb::iam::signin::db;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -132,8 +130,10 @@ async fn main() -> anyhow::Result<()> {
 
     //是否需要重构下面的这行代码？
     tokio::join!(
-        AiosDBManager::loop_e3d_clone_task(mgr.clone()),
-        AiosDBManager::spawn_exec_watcher(mgr.clone())
+        // AiosDBManager::loop_e3d_clone_task(mgr.clone()),
+        // AiosDBManager::spawn_exec_watcher(mgr.clone()),
+        AiosDBManager::poll_mqtt_events(),
+        AiosDBManager::demo_mqtt_requests(),
     );
 
     Ok(())

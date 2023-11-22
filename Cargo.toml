@@ -52,7 +52,7 @@ arangors_lite = { path = "../new-crates/arangors-lite"}
 #heed = {path = "../new-crates/heed/heed"}
 bb8-arangodb = { path = "../new-crates/bb8-arangodb" }
 bb8 = "0.8.1"
-termnius-client = { path = "../terminusdb-rs" }
+#termnius-client = { path = "../terminusdb-rs" }
 
 
 clap = { version = "4.3.5", features = ["derive"] }
@@ -77,9 +77,9 @@ notify = "6.1.1"
 walkdir = "2.3.3"
 num_enum = "0.7.0"
 jsonxf = "1.1.1"
-sea-orm = {version = "0.12.4", features = ["sqlx-all", "runtime-async-std"]}
+sea-orm = {version = "0.12.6", features = ["sqlx-mysql", "runtime-async-std"]}
 #surrealdb = { version = "1.0.0", features = ["kv-rocksdb"] }
-surrealdb = { path = "../surrealdb/lib", features = ["kv-rocksdb"] }
+surrealdb = { path = "../surrealdb/lib" }
 async-once-cell = "0.5.3"
 
 [build-dependencies]
