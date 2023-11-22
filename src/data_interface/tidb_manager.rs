@@ -44,7 +44,7 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use glam::{Mat3, Quat, Vec3};
 use itertools::Itertools;
-use lazy_static::lazy_static;
+use std::boxed::Box;
 use log::error;
 use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
 use pdms_io::watch::PdmsWatcher;
@@ -53,16 +53,14 @@ use crate::surreal_service;
 use crate::surreal_service::SUL_DB;
 use aios_core::{AttrMap, NamedAttrValue, RefU64Vec};
 use sqlx::{Executor, MySql, Pool, Row};
-use std::boxed::Box;
-use std::cell::OnceCell;
 use std::collections::BTreeMap;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use surrealdb::engine::local::{File, RocksDb};
-use surrealdb::Surreal;
+use rumqttc::{AsyncClient, EventLoop};
 use tokio::sync::RwLock;
+use crate::mqtt_service::MqttInstance;
 
 #[derive(Clone)]
 pub struct AiosDBManager {
@@ -82,6 +80,8 @@ pub struct AiosDBManager {
     pub arango_pool: ArPool,
 
     pub watcher: Arc<PdmsWatcher>,
+
+    pub mqtt_client: Arc<AsyncClient>,
 
     ///所有元素的tree
     pub rtree: Option<AccelerationTree>,

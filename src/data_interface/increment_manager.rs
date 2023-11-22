@@ -39,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
 use pdms_io::sync::compress::{CompressOptions, execute_compress};
+use rumqttc::QoS;
 use tokio::task::JoinSet;
 use walkdir::WalkDir;
 
@@ -364,13 +365,6 @@ impl AiosDBManager {
         let mut time = Instant::now();
         for watch_dir in &self.watcher.watch_dirs {
             let mut join_set = JoinSet::new();
-            //在dir_entry 下创建 cbas目录
-            // let mut cbas_dir = watch_dir.clone();
-            // cbas_dir.push("cbas");
-            // let cbas_dir_path = cbas_dir.to_string_lossy().to_string();
-            // if !cbas_dir.exists() {
-            //     std::fs::create_dir_all(cbas_dir)?;
-            // }
             for entry in WalkDir::new(watch_dir).sort_by(|a, b| {
                 b.path()
                     .metadata()
@@ -472,6 +466,7 @@ impl AiosDBManager {
                             }
                         }
                         // dbg!(&params);
+                        let mut notify_paths = vec![];
                         match self.execute_incr_update(params).await {
                             Ok(_) => {
                                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
@@ -488,6 +483,7 @@ impl AiosDBManager {
                                         }
                                         *old.value_mut() = new_header;
 
+                                        notify_paths.push(file_name.to_owned());
                                         //发生修改的文件，重新生成archive
                                         dbg!(&path);
                                         let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
@@ -495,6 +491,7 @@ impl AiosDBManager {
                                         let compress_opt = CompressOptions::new(path, output);
                                         //todo spawn a new task
                                         execute_compress(compress_opt).await.unwrap();
+
                                     }
                                 }
                                 //now save the watch.json
@@ -504,6 +501,11 @@ impl AiosDBManager {
                                 println!("Execute increment update error: {:?}", e);
                             }
                         }
+
+                        //publish notify db file updates
+                        self.mqtt_client.clone().publish("Sync/E3d",
+                                                 QoS::ExactlyOnce, true, notify_paths.join(",")).await.unwrap();
+
                     }
                 }
                 Err(e) => println!("watch error: {:?}", e),

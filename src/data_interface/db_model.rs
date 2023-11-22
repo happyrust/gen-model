@@ -21,6 +21,7 @@ use aios_core::file_helper::collect_db_dirs;
 use aios_core::get_db_option;
 use indexmap::IndexMap;
 use itertools::Itertools;
+use log::{error, info};
 use pdms_io::sync::clone::{CloneOptions, execute_clone};
 use crate::api::attr::*;
 use crate::api::element::*;
@@ -39,11 +40,11 @@ use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
 use crate::graph_db::structs::{PdmsEleEdge, PdmsEleData, PdmsMdbEdge};
 use crate::surreal_service;
 use pdms_io::watch::PdmsWatcher;
-// use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
-use surrealdb::engine::local::RocksDb;
-use surrealdb::Surreal;
+use rumqttc::{Client, ConnectionError, Event, MqttOptions, Packet, QoS};
+use rumqttc::Event::Incoming;
 use crate::arangodb::ArDatabase;
+use crate::mqtt_service::{new_mqtt_inst, SyncE3dFileMsg};
 
 pub const TUBI_TOL: f32 = 10.0f32;
 
@@ -100,7 +101,6 @@ impl AiosDBManager {
 
     //开启定时同步更新任务
     pub async fn loop_e3d_clone_task(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
-
         dbg!("定时同步数据任务开启");
         let forever = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
@@ -136,7 +136,7 @@ impl AiosDBManager {
                     url.as_str(),
                     e3d_file);
                 // dbg!(&compress_opt);
-                if let Ok(r) =  execute_clone(remote_clone_opt).await{
+                if let Ok(r) = execute_clone(remote_clone_opt).await {
                     if r {
                         println!("Clone {} cost: {:?}s", file_name, clone_time.elapsed().as_secs_f64());
                     }
@@ -154,6 +154,71 @@ impl AiosDBManager {
             mgr.async_watch().await.unwrap();
         });
         Ok(f.await?)
+    }
+
+    //// mqtt_client
+    //         //     .subscribe("Sync/E3d", QoS::AtMostOnce)
+    //         //     .await
+    //         //     .unwrap();
+
+    pub async fn demo_mqtt_requests()  {
+        let mut mqtt_inst = new_mqtt_inst("test-1");
+        let client = mqtt_inst.client.clone();
+        let f = tokio::spawn(async move {
+            for i in 1..=10000 {
+                let test_data = SyncE3dFileMsg {
+                    file_names: vec![format!("Hello-{}", i)],
+                    file_server_host: "http://50c170h624.zicp.vip:56785/asset/archives".to_string(),
+                    location: "bj".to_string(),
+                };
+                let _ = client
+                    .publish("Sync/E3d", QoS::ExactlyOnce, false, test_data)
+                    .await.unwrap();
+
+                dbg!(i);
+
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            // tokio::time::sleep(Duration::from_secs(120)).await;
+        });
+
+        loop {
+            let event = mqtt_inst.el.poll().await;
+        }
+
+        f.await.expect("demo_mqtt_requests panic");
+    }
+
+    ///处理mqtt的消息, 通知需要处理的db 文件名，然后对应的归属地也需要发送
+    pub async fn poll_mqtt_events() {
+        let f = tokio::spawn(async move {
+            let mut mqtt_inst = new_mqtt_inst("test-2");
+            mqtt_inst.client.subscribe("Sync/E3d", QoS::ExactlyOnce).await.unwrap();
+            mqtt_inst.el.network_options.set_connection_timeout(10000);
+            dbg!(mqtt_inst.el.mqtt_options.clean_session());
+            loop {
+                let event = mqtt_inst.el.poll().await;
+                match &event {
+                    Ok(v) => {
+                        match v {
+                            Incoming(Packet::Publish(p)) => {
+                                let payload = SyncE3dFileMsg::from(p.payload.to_vec());
+                                println!("payload = {:?}", &payload);
+                            }
+                            _ => {
+                                // dbg!(v);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("Error = {e:?}");
+                        // return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+        });
+        f.await.expect("demo_mqtt_requests panic");
     }
 
     pub async fn compute_aabb_trees(&mut self) -> anyhow::Result<bool> {
@@ -529,6 +594,34 @@ impl AiosDBManager {
         dbg!(&db_paths);
         let mut watcher = PdmsWatcher::load_from_json(None).unwrap_or(PdmsWatcher::new(db_paths));
 
+        let mut mqtt_inst = new_mqtt_inst(&format!("BJ-{}", db_option.project_code));
+        let mqtt_client = Arc::new(mqtt_inst.client);
+        // tokio::task::spawn(async move {
+        //     loop {
+        //         let event = mqtt_inst.el.poll().await;
+        //         match event {
+        //             Ok(event) => match event {
+        //                 rumqttc::Event::Incoming(Incoming::Publish(_)) => {
+        //                     // Currently unused, but we can subscribe to topics to get messages here
+        //                 }
+        //                 rumqttc::Event::Incoming(Incoming::ConnAck(_)) => {
+        //                     // Connection was established. Notify the client to send all discovery messages
+        //                     info!("Connected to MQTT broker.");
+        //                     // let _ = connection_notify_tx.send(());
+        //                 }
+        //                 _ => {}
+        //             },
+        //             Err(e) => {
+        //                 error!("MQTT Connection error encountered: {}", e);
+        //                 tokio::time::sleep(Duration::from_secs(1)).await;
+        //             }
+        //         }
+        //     }
+        // });
+        // mqtt_client
+        //     .subscribe("Sync/E3d", QoS::AtMostOnce)
+        //     .await
+        //     .unwrap();
         Ok(Self {
             project_map,
             projects,
@@ -538,6 +631,7 @@ impl AiosDBManager {
             cached_mesh_mgr: Arc::new(Default::default()),
             arango_pool,
             watcher: Arc::new(watcher),
+            mqtt_client,
             rtree: None,
             room_panels_rtree: None,
             room_info_map: Default::default(),
