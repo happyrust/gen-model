@@ -53,8 +53,8 @@ v_password = ""
 v_port = "8001"
 
 #mqtt 事件 ip
-mqtt_host = "localhost"
-mqtt_port = 1883
+mqtt_host = "50c170h624.zicp.vip"
+mqtt_port = 41761
 
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"

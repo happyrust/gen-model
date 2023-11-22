@@ -81,6 +81,7 @@ sea-orm = {version = "0.12.6", features = ["sqlx-mysql", "runtime-async-std"]}
 #surrealdb = { version = "1.0.0", features = ["kv-rocksdb"] }
 surrealdb = { path = "../surrealdb/lib" }
 async-once-cell = "0.5.3"
+rumqttc = "0.23.0"
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
