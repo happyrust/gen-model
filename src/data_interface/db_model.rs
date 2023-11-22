@@ -125,7 +125,7 @@ impl AiosDBManager {
         let mut total_time = std::time::Instant::now();
 
         let db_option = &mgr.db_option;
-        for remote_url in &db_option.remote_file_hosts {
+        for remote_url in &db_option.remote_file_server_hosts {
             for kv in &mgr.watcher.file_name_full_path_map {
                 let file_name = kv.key();
                 let pb = kv.value();
@@ -191,11 +191,14 @@ impl AiosDBManager {
 
     ///处理mqtt的消息, 通知需要处理的db 文件名，然后对应的归属地也需要发送
     pub async fn poll_mqtt_events() {
+        let db_option = get_db_option();
+        let id = db_option.location.clone();
         let f = tokio::spawn(async move {
-            let mut mqtt_inst = new_mqtt_inst("test-2");
+            //订阅消息处理更新
+            let mut mqtt_inst = new_mqtt_inst(&format!("{}-{}-sub", db_option.location.as_str(),
+                                                       db_option.project_code));
             mqtt_inst.client.subscribe("Sync/E3d", QoS::ExactlyOnce).await.unwrap();
             mqtt_inst.el.network_options.set_connection_timeout(10000);
-            dbg!(mqtt_inst.el.mqtt_options.clean_session());
             loop {
                 let event = mqtt_inst.el.poll().await;
                 match &event {
@@ -594,34 +597,31 @@ impl AiosDBManager {
         dbg!(&db_paths);
         let mut watcher = PdmsWatcher::load_from_json(None).unwrap_or(PdmsWatcher::new(db_paths));
 
-        let mut mqtt_inst = new_mqtt_inst(&format!("BJ-{}", db_option.project_code));
+        let mut mqtt_inst = new_mqtt_inst(&format!("{}-{}-pub", db_option.location.as_str(),
+                                                   db_option.project_code));
         let mqtt_client = Arc::new(mqtt_inst.client);
-        // tokio::task::spawn(async move {
-        //     loop {
-        //         let event = mqtt_inst.el.poll().await;
-        //         match event {
-        //             Ok(event) => match event {
-        //                 rumqttc::Event::Incoming(Incoming::Publish(_)) => {
-        //                     // Currently unused, but we can subscribe to topics to get messages here
-        //                 }
-        //                 rumqttc::Event::Incoming(Incoming::ConnAck(_)) => {
-        //                     // Connection was established. Notify the client to send all discovery messages
-        //                     info!("Connected to MQTT broker.");
-        //                     // let _ = connection_notify_tx.send(());
-        //                 }
-        //                 _ => {}
-        //             },
-        //             Err(e) => {
-        //                 error!("MQTT Connection error encountered: {}", e);
-        //                 tokio::time::sleep(Duration::from_secs(1)).await;
-        //             }
-        //         }
-        //     }
-        // });
-        // mqtt_client
-        //     .subscribe("Sync/E3d", QoS::AtMostOnce)
-        //     .await
-        //     .unwrap();
+        tokio::task::spawn(async move {
+            loop {
+                let event = mqtt_inst.el.poll().await;
+                match event {
+                    Ok(event) => match event {
+                        rumqttc::Event::Incoming(Packet::Publish(_)) => {
+                            // Currently unused, but we can subscribe to topics to get messages here
+                        }
+                        rumqttc::Event::Incoming(Packet::ConnAck(_)) => {
+                            // Connection was established. Notify the client to send all discovery messages
+                            info!("Connected to MQTT broker.");
+                            // let _ = connection_notify_tx.send(());
+                        }
+                        _ => {}
+                    },
+                    Err(e) => {
+                        // error!("MQTT Connection error encountered: {}", e);
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                }
+            }
+        });
         Ok(Self {
             project_map,
             projects,
