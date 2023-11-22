@@ -131,9 +131,9 @@ async fn main() -> anyhow::Result<()> {
     //是否需要重构下面的这行代码？
     tokio::join!(
         // AiosDBManager::loop_e3d_clone_task(mgr.clone()),
-        // AiosDBManager::spawn_exec_watcher(mgr.clone()),
+        AiosDBManager::spawn_exec_watcher(mgr.clone()),
         AiosDBManager::poll_mqtt_events(),
-        AiosDBManager::demo_mqtt_requests(),
+        // AiosDBManager::demo_mqtt_requests(),
     );
 
     Ok(())

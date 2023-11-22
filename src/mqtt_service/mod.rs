@@ -13,6 +13,16 @@ pub struct SyncE3dFileMsg{
     pub location: String, //bj, sjz, zz
 }
 
+impl SyncE3dFileMsg{
+    pub fn new(file_names: Vec<String>) -> Self{
+        Self{
+            file_names,
+            file_server_host: get_db_option().file_server_host.clone(),
+            location: get_db_option().location.clone(),
+        }
+    }
+}
+
 impl Into<Vec<u8>> for SyncE3dFileMsg {
     fn into(self) -> Vec<u8> {
         serde_json::to_vec(&self).unwrap()

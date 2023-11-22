@@ -42,6 +42,7 @@ use pdms_io::sync::compress::{CompressOptions, execute_compress};
 use rumqttc::QoS;
 use tokio::task::JoinSet;
 use walkdir::WalkDir;
+use crate::mqtt_service::SyncE3dFileMsg;
 
 #[derive(Debug, Default, Clone)]
 pub struct IncrementInfo {
@@ -479,7 +480,7 @@ impl AiosDBManager {
                                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
                                         //未发生修改，直接跳过
                                         if old.pdms_header.page_no >= new_header.pdms_header.page_no {
-                                            continue;
+                                            // continue;
                                         }
                                         *old.value_mut() = new_header;
 
@@ -503,8 +504,10 @@ impl AiosDBManager {
                         }
 
                         //publish notify db file updates
+                        dbg!(&notify_paths);
+                        let payload = SyncE3dFileMsg::new(notify_paths);
                         self.mqtt_client.clone().publish("Sync/E3d",
-                                                 QoS::ExactlyOnce, true, notify_paths.join(",")).await.unwrap();
+                                                 QoS::ExactlyOnce, true, payload).await.unwrap();
 
                     }
                 }
