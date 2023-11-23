@@ -100,7 +100,7 @@ impl AiosDBManager {
                     old_refnos
                         .iter()
                         .filter(|x| !ele.children.contains(*x))
-                        .for_each(|x| {
+                        .for_each(|&x| {
                             deleted_set.insert((x, ele.owner));
                             //执行的是父节点的操作
                             ele_op = EleOperation::Deleted;
