@@ -47,23 +47,23 @@ sql_threads_number = 50
 batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
 #版本数据库服务配置
-v_ip = "50c170h624.zicp.vip"
+v_ip = "localhost"
 v_user = "root"
 v_password = ""
-v_port = "38389"
+v_port = "8000"
 
 #mqtt 事件 ip
 mqtt_host = "50c170h624.zicp.vip"
 mqtt_port = 41761
 
-location = "SJZ"
+location = "SJZ1"
 
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"
 
-#暂时做分离，可以使用axum的分享文件夹
 remote_file_server_hosts = ["http://50c170h624.zicp.vip:56785/asset/archives"]
-file_server_host = "http://localhost:9010/asset/archives"
+file_server_host = "http://50c170h624.zicp.vip:56785/asset/archives"
+
 
 #调试选项
 replace_mesh = true

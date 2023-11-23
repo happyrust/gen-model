@@ -133,7 +133,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::join!(
         // AiosDBManager::run_e3d_clone_bg_task(mgr.clone()),
         AiosDBManager::spawn_exec_watcher(mgr.clone()),
-        AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
+        // AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
         // AiosDBManager::demo_mqtt_requests(),
     );
 
