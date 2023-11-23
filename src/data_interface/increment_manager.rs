@@ -100,15 +100,15 @@ impl AiosDBManager {
                     old_refnos
                         .iter()
                         .filter(|x| !ele.children.contains(*x))
-                        .for_each(|x| {
+                        .for_each(|&x| {
                             let key = x.hash_with_another_refno(ele.refno);
                             delete_keys.push(key.to_string());
-                            deleted_refnos_set.insert(*x);
+                            deleted_refnos_set.insert(x);
                             //执行的是父节点的操作
                             ele_op = EleOperation::Deleted;
-                            dbg!(*x);
-                            delete_maps.entry(*x).or_insert(IncrementInfo {
-                                refno: *x,
+                            dbg!(x);
+                            delete_maps.entry(x).or_insert(IncrementInfo {
+                                refno: x,
                                 db_no: basic_info.pdms_header.db_num,
                                 attr: Default::default(),
                                 children: Default::default(),
@@ -172,7 +172,7 @@ impl AiosDBManager {
                     refno,
                     db_no: basic_info.pdms_header.db_num,
                     attr: attmap,
-                    children: ele.children,
+                    children: ele.children.clone(),
                     operation: ele_op,
                 };
                 if ele_op == EleOperation::Modified {
@@ -190,12 +190,14 @@ impl AiosDBManager {
                 match ele_op {
                     EleOperation::None => {}
                     EleOperation::Add => {
+                        dbg!(ele.refno);
                         total_add_len += 1;
                     }
                     EleOperation::Modified => {
                         total_modify_len += 1;
                     }
                     EleOperation::Deleted => {
+                        dbg!(ele.refno);
                         total_deleted_len += 1;
                     }
                 }
@@ -502,7 +504,8 @@ impl AiosDBManager {
                                         //数据库里不存在这个file hash的记录，才需要
                                         let mut response  = SUL_DB
                                             // .query("select * from e3d_sync where location == $loc and $hash in file_hashes order by timestamp desc limit 1")
-                                            .query("select value id from (select * from e3d_sync where location = $loc and $name in file_names order by timestamp desc limit 1) where $hash in file_hashes")
+                                            // .query("select value id from (select * from e3d_sync where location != $loc and $name in file_names order by timestamp desc limit 1) where $hash in file_hashes")
+                                            .query("select value id from (select * from e3d_sync where location != $loc and $name in file_names order by timestamp desc) where $hash in file_hashes")
                                             .bind(("loc", get_db_option().location.as_str()))
                                             .bind(("hash", &file_hash))
                                             .bind(("name", file_name))
