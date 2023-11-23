@@ -32,7 +32,7 @@ use crate::surreal_service::SUL_DB;
 use aios_core::orm::pdms_element;
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
-use aios_core::{AttrMap, AttrVal, RefU64Vec};
+use aios_core::{AttrMap, AttrVal, get_db_option, RefU64Vec};
 use itertools::Itertools;
 use pdms_io::defines::DbPageBasicInfo;
 use serde::{Deserialize, Serialize};
@@ -40,6 +40,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use pdms_io::sync::compress::{CompressOptions, execute_compress};
 use rumqttc::QoS;
+use surrealdb::sql::Thing;
 use tokio::task::JoinSet;
 use walkdir::WalkDir;
 use crate::mqtt_service::SyncE3dFileMsg;
@@ -392,8 +393,8 @@ impl AiosDBManager {
                 let input= path.to_path_buf();
                 let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
                 join_set.spawn(async move {
-                    let compress_opt = CompressOptions::new(input, output);
-                    execute_compress(compress_opt).await.unwrap();
+                    // let compress_opt = CompressOptions::new(input, output);
+                    // execute_compress(compress_opt).await.unwrap();
                 });
 
                 let mut io = PdmsIO::new(path, true);
@@ -457,6 +458,10 @@ impl AiosDBManager {
         while let Some(res) = rx.next().await {
             match res {
                 Ok(event) => {
+                    //跳过只是meta data变动的情况
+                    if matches!(event.kind, notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))) {
+                        continue;
+                    }
                     // println!("changed: {:?}", &event);
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(event.paths) {
                         // dbg!(&new_headers);
@@ -474,32 +479,47 @@ impl AiosDBManager {
                             }
                         }
                         // dbg!(&params);
-                        let mut notify_paths = vec![];
+                        let mut notify_file_names = vec![];
+                        let mut notify_file_hashes = vec![];
+
                         match self.execute_incr_update(params).await {
                             Ok(_) => {
                                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
                                 for (path, new_header) in new_headers {
                                     let file_name = path.file_stem().unwrap().to_str().unwrap();
-                                    dbg!(&file_name);
+                                    // dbg!(&file_name);
                                     if path.is_dir() || !file_name.ends_with("0001"){
                                         continue;
                                     }
                                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
                                         //未发生修改，直接跳过
                                         if old.pdms_header.page_no >= new_header.pdms_header.page_no {
-                                            // continue;
+                                            continue;
                                         }
                                         *old.value_mut() = new_header;
 
-                                        notify_paths.push(file_name.to_owned());
                                         //发生修改的文件，重新生成archive
-                                        dbg!(&path);
+                                        // dbg!(&path);
                                         let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
-                                        dbg!(&output);
-                                        let compress_opt = CompressOptions::new(path, output);
+                                        // dbg!(&output);
+                                        let compress_opt = CompressOptions::new(path.clone(), output);
                                         //todo spawn a new task
-                                        execute_compress(compress_opt).await.unwrap();
+                                        let file_hash = execute_compress(compress_opt).await.unwrap().to_string();
 
+                                        //数据库里不存在这个file hash的记录，才需要
+                                        let mut response  = SUL_DB
+                                            // .query("select * from e3d_sync where location == $loc and $hash in file_hashes order by timestamp desc limit 1")
+                                            .query("select value id from (select * from e3d_sync where location = $loc and $name in file_names order by timestamp desc limit 1) where $hash in file_hashes")
+                                            .bind(("loc", get_db_option().location.as_str()))
+                                            .bind(("hash", &file_hash))
+                                            .bind(("name", file_name))
+                                            .await.unwrap();
+                                        let id = response.take::<Option<String>>("id").unwrap();
+                                        dbg!(&id);
+                                        if id.is_none() {
+                                            notify_file_hashes.push(file_hash);
+                                            notify_file_names.push(file_name.to_owned());
+                                        }
                                     }
                                 }
                                 //now save the watch.json
@@ -509,10 +529,14 @@ impl AiosDBManager {
                                 println!("Execute increment update error: {:?}", e);
                             }
                         }
-
                         //publish notify db file updates
-                        dbg!(&notify_paths);
-                        let payload = SyncE3dFileMsg::new(notify_paths);
+                        dbg!(&notify_file_names);
+                        let payload = SyncE3dFileMsg::new(notify_file_names, notify_file_hashes);
+                        //自己本地也要保存, todo 后续还是要配置哪些dbs，哪个地方能修改，哪个地方是不能改的
+                        SUL_DB.query(format!("INSERT INTO e3d_sync {} "
+                                             , serde_json::to_string(&payload).unwrap())).await.unwrap();
+                        //todo 检查是否只是发生了claim page的变化，如果只是claim修改，是需要每次都同步？
+                        //会导致出现循环
                         self.mqtt_client.clone().publish("Sync/E3d",
                                                  QoS::ExactlyOnce, true, payload).await.unwrap();
 

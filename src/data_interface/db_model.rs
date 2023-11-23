@@ -45,6 +45,7 @@ use rumqttc::{Client, ConnectionError, Event, MqttOptions, Packet, QoS};
 use rumqttc::Event::Incoming;
 use crate::arangodb::ArDatabase;
 use crate::mqtt_service::{new_mqtt_inst, SyncE3dFileMsg};
+use crate::surreal_service::SUL_DB;
 
 pub const TUBI_TOL: f32 = 10.0f32;
 
@@ -131,6 +132,7 @@ impl AiosDBManager {
                 e3d_file);
             if let Ok(r) = execute_clone(remote_clone_opt).await {
                 if r {
+                    //需要保存更新记录
                     println!("Clone {} cost: {:?}s", file_name, clone_time.elapsed().as_secs_f64());
                 }
             }
@@ -159,8 +161,10 @@ impl AiosDBManager {
             for i in 1..=10000 {
                 let test_data = SyncE3dFileMsg {
                     file_names: vec![format!("Hello-{}", i)],
+                    file_hashes: vec![],
                     file_server_host: "http://50c170h624.zicp.vip:56785/asset/archives".to_string(),
                     location: "bj".to_string(),
+                    timestamp: Default::default(),
                 };
                 let _ = client
                     .publish("Sync/E3d", QoS::ExactlyOnce, false, test_data)
@@ -201,6 +205,9 @@ impl AiosDBManager {
                                 println!("payload = {:?}", &sync_e3d);
                                 //检查是否和本地的location一致，如果一致，就不用更新
                                 if sync_e3d.location != location {
+                                    //自己本地也要保存, todo 后续还是要配置哪些dbs，哪个地方能修改，哪个地方是不能改的
+                                    SUL_DB.query(format!("INSERT INTO e3d_sync {} "
+                                                         , serde_json::to_string(&sync_e3d).unwrap())).await.unwrap();
                                     //执行指定文件的clone
                                     Self::exec_delta_clone_remotes(&watcher, sync_e3d).await.unwrap();
                                 }
@@ -211,8 +218,9 @@ impl AiosDBManager {
                         }
                     }
                     Err(e) => {
-                        println!("Error = {e:?}");
+                        // println!("Error = {e:?}");
                         // return Ok(());
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                     _ => {}
                 }
