@@ -8,17 +8,24 @@ use serde::{Deserialize, Serialize};
 //更新e3d文件的消息
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct SyncE3dFileMsg{
+    //后续还需需要加入唯一id，如果开启数据同步？ CDC
     pub file_names: Vec<String>,
+    //还需要加入checkhash, 用于校验文件是否正确
+    pub file_hashes: Vec<String>,
     pub file_server_host: String,
     pub location: String, //bj, sjz, zz
+    //加入时间戳, 或者这里开启索引
+    pub timestamp: surrealdb::sql::Datetime,
 }
 
 impl SyncE3dFileMsg{
-    pub fn new(file_names: Vec<String>) -> Self{
+    pub fn new(file_names: Vec<String>, file_hashes: Vec<String>) -> Self{
         Self{
             file_names,
+            file_hashes,
             file_server_host: get_db_option().file_server_host.clone(),
             location: get_db_option().location.clone(),
+            timestamp: Default::default(),
         }
     }
 }
