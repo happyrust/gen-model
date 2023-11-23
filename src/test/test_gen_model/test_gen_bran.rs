@@ -11,7 +11,7 @@ async fn test_gen_bran() {
     let mgr = Arc::new(get_test_ams_db_manager_async().await);
     let mut incr_log = IncrGeoUpdateLog::default();
     //17496_171190
-    incr_log.bran_hanger_refnos.insert("17496_266755".into());
+    incr_log.bran_hanger_refnos.insert("17496/171134".into());
     // incr_log.bran_hanger_refnos.insert("17496_266620".into());
     gen_all_geos_data(mgr.clone(), Some(incr_log))
         .await
@@ -25,7 +25,7 @@ async fn test_gen_ele_of_bran() {
     let mut incr_log = IncrGeoUpdateLog::default();
     // incr_log.basic_cata_refnos.insert("17496/266632".into());
     // incr_log.basic_cata_refnos.insert("17496/266621".into());
-    incr_log.basic_cata_refnos.insert("17496/171191".into());
+    incr_log.basic_cata_refnos.insert("17496_266828".into());
     gen_all_geos_data(mgr.clone(), Some(incr_log))
         .await
         .unwrap();

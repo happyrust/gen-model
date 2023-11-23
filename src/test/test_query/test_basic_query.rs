@@ -64,7 +64,11 @@ async fn test_query_children() {
 #[tokio::test]
 async fn test_query_children_att() {
     super::init_test_surreal().await;
-    let children_atts = surreal_service::get_children_named_attmaps("17496_171555".into()).await;
+    // let children_atts = surreal_service::get_children_named_attmaps("17496_171555".into()).await;
+    // dbg!(children_atts);
+    // let children_pes = surreal_service::get_children_pes("17496_171555".into()).await;
+    // dbg!(children_pes);
+    let children_atts = surreal_service::get_children_named_attmaps("15192_338265".into()).await.unwrap();
     dbg!(children_atts);
 }
 

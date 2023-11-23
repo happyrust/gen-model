@@ -383,7 +383,7 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
                     )
                     .await?;
                     dbg!("开始保存属性数据");
-                    const ATTS_CHUNK_COUNT: usize = 1000;
+                    const ATTS_CHUNK_COUNT: usize = 300;
                     let mut join_set = tokio::task::JoinSet::new();
                     let mut save_atts_time = Instant::now();
                     for kv in type_ele_map.iter() {
@@ -399,6 +399,9 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
                                 let Some(json) = att.gen_sur_json() else {
                                     continue;
                                 };
+                                if refno.get_1() == 338266 {
+                                    dbg!(&json);
+                                }
                                 json_vec.push(json);
                             }
                             let sql = format!(
