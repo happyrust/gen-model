@@ -53,7 +53,9 @@ async fn test_query_att_by_refno() {
 #[tokio::test]
 async fn test_query_children() {
     super::init_test_surreal().await;
-    let refnos = surreal_service::get_children_refnos("17496_171189".into()).await;
+    let refnos = surreal_service::get_children_refnos("17496_171104".into()).await;
+    dbg!(refnos);
+    let refnos = surreal_service::get_children_refnos("17496_171188".into()).await;
     dbg!(refnos);
     let refnos = surreal_service::get_children_refnos("17496_0".into()).await;
     dbg!(refnos);

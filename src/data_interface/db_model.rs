@@ -202,12 +202,13 @@ impl AiosDBManager {
                         match v {
                             Incoming(Packet::Publish(p)) => {
                                 let sync_e3d = SyncE3dFileMsg::from(p.payload.to_vec());
-                                println!("payload = {:?}", &sync_e3d);
+                                // println!("payload = {:?}", &sync_e3d);
                                 //检查是否和本地的location一致，如果一致，就不用更新
                                 if sync_e3d.location != location {
                                     //自己本地也要保存, todo 后续还是要配置哪些dbs，哪个地方能修改，哪个地方是不能改的
-                                    SUL_DB.query(format!("INSERT INTO e3d_sync {} "
+                                    let r = SUL_DB.query(format!("INSERT INTO e3d_sync {} "
                                                          , serde_json::to_string(&sync_e3d).unwrap())).await.unwrap();
+                                    // dbg!(&r);
                                     //执行指定文件的clone
                                     Self::exec_delta_clone_remotes(&watcher, sync_e3d).await.unwrap();
                                 }

@@ -23,7 +23,7 @@ pub async fn init_test_surreal() {
         .unwrap();
     let db_option: DbOption = s.try_deserialize().unwrap();
     SUL_DB
-        .connect::<Ws>("localhost:8001")
+        .connect::<Ws>(db_option.get_version_db_conn_str())
         .with_capacity(1000)
         .await
         .unwrap();
