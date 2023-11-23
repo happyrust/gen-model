@@ -34,24 +34,9 @@ pub fn resolve_axis_params<T: PdmsDataInterface>(
     interface: &T,
 ) -> BTreeMap<i32, CateAxisParam> {
     let mut map = BTreeMap::new();
-    // dbg!(&scom.axis_params);
     for i in 0..scom.axis_params.len() {
-        // if scom.axis_params[i].direction.is_empty() {
-        //     dbg!(&scom.axis_params[i]);
-        //     let refno = scom.axis_params[i].refno;
-        //     let att = surreal_service::get_named_attmap(refno).await.unwrap_or_default();
-        //     dbg!(att);
-        // }
         let axis = resolve_axis_param(&scom.axis_params[i], scom, context, Some(interface));
-        // {
-        //     Ok(axis) => {
-        // dbg!(&axis);
         map.insert(scom.axis_param_numbers[i], axis);
-        //     }
-        //     Err(e) => {
-        //         println!("{} resolve_axis_params 出错： {:?}", refno, &e);
-        //     }
-        // }
     }
     map
 }
@@ -62,7 +47,7 @@ pub fn resolve_gms<T: PdmsDataInterface>(
     gmse_raw_paras: &[GmParam],
     jusl_param: &Option<PlinParam>,
     context: &CataContext,
-    axis_params: &BTreeMap<i32, CateAxisParam>,
+    axis_param_map: &BTreeMap<i32, CateAxisParam>,
     interface: Option<&T>,
 ) -> Vec<CateGeoParam> {
     gmse_raw_paras
@@ -74,7 +59,7 @@ pub fn resolve_gms<T: PdmsDataInterface>(
                     return None;
                 }
                 let r = resolve_paragon_gm_params(des_refno, &g,
-                                                  jusl_param, context, axis_params, interface);
+                                                  jusl_param, context, axis_param_map, interface);
                 return match r {
                     Ok(v) => {
                         Some(v)
@@ -98,10 +83,10 @@ pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
     gm_param: &GmParam,
     jusl_param: &Option<PlinParam>,
     context: &CataContext,
-    axis_params: &BTreeMap<i32, CateAxisParam>,
+    axis_param_map: &BTreeMap<i32, CateAxisParam>,
     interface: Option<&T>,
 ) -> anyhow::Result<CateGeoParam> {
-    match resolve_gmse_params(gm_param, jusl_param, context, axis_params, interface) {
+    match resolve_gmse_params(gm_param, jusl_param, context, axis_param_map, interface) {
         Ok(gm_data) => {
             panic::catch_unwind(|| {
                 resolve_to_cate_geo_params(&gm_data)
@@ -301,6 +286,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
                     }));
                 } else {
                     paxises.push(None);
+                    dbg!(&gm);
                     println!("Axis: '{axis_str}' index not exist");
                 }
             }

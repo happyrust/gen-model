@@ -677,7 +677,7 @@ pub async fn gen_cata_geos(
                                 continue;
                             }
                         };
-                        dbg!(brep_shapes_map.len());
+                        // dbg!(brep_shapes_map.len());
                         ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
                         for (ele_refno, shapes) in brep_shapes_map {
                             let Ok(Some(mut origin_trans)) =
@@ -1116,23 +1116,9 @@ pub async fn gen_cata_geos(
         let shape_insts_data = main_instance_mgr.read().await;
         let branch_refno = *b.key();
         // dbg!(branch_refno);
-        let Ok(children_refnos) = surreal_service::get_children_refnos(branch_refno).await else {
+        let Ok(children) = surreal_service::get_children_pes(branch_refno).await else {
             continue;
         };
-        // dbg!(&children_refnos);
-        let mut children = vec![];
-        //排一下顺序，后面这个element也是要存在本地
-        children_refnos.into_iter().for_each(|x| {
-            for c in b.value() {
-                //atta 的方向是要考虑的，所以不能直接过滤
-                if c.refno == x
-                /*&& c.get_type_name() != "ATTA" */
-                {
-                    children.push(c);
-                }
-            }
-        });
-        // dbg!(&children);
         let Ok(branch_att) = surreal_service::get_named_attmap(branch_refno).await else {
             continue;
         };

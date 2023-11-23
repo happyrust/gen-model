@@ -68,6 +68,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
 pub async fn query_axis_params(refno: RefU64) -> anyhow::Result<BTreeMap<i32, AxisParam>> {
     // 查找ptse
     let mut map = BTreeMap::new();
+    // dbg!(refno);
     let children = surreal_service::get_children_named_attmaps(refno).await?;
 
     for child in children {
@@ -75,6 +76,7 @@ pub async fn query_axis_params(refno: RefU64) -> anyhow::Result<BTreeMap<i32, Ax
         if child.get_type_str() == "PLIN" {
             continue;
         }
+        // dbg!(&child);
         let number = child.get_i32("NUMB").unwrap_or(-1);
         if let Some(axis) = get_axis_param(&child) {
             map.entry(number).or_insert(axis);
@@ -130,8 +132,8 @@ pub fn resolve_cata_comp<T: PdmsDataInterface>(
     let mut cur_context = context.unwrap_or_default();
     let cat_ref = scom_info.attr_map.get_refno().unwrap_or_default();
 
-    let axis_map = resolve_axis_params(des_refno, scom_info, &cur_context, interface);
-    // dbg!(&axis_map);
+    let axis_param_map = resolve_axis_params(des_refno, scom_info, &cur_context, interface);
+    // dbg!(&axis_param_map);
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
         if scom_info.plin_map.contains_key(plin.as_str()) {
             Some(scom_info.plin_map.get(plin.as_str()).unwrap().clone())
@@ -148,7 +150,7 @@ pub fn resolve_cata_comp<T: PdmsDataInterface>(
         &scom_info.gm_params,
         &jusl_param,
         &cur_context,
-        &axis_map,
+        &axis_param_map,
         Some(interface),
     );
     let n_geometries = resolve_gms(
@@ -156,14 +158,14 @@ pub fn resolve_cata_comp<T: PdmsDataInterface>(
         &scom_info.ngm_params,
         &jusl_param,
         &cur_context,
-        &axis_map,
+        &axis_param_map,
         Some(interface),
     );
     Ok(CateGeomsInfo {
         refno: cat_ref,
         geometries,
         n_geometries,
-        axis_map,
+        axis_map: axis_param_map,
     })
 }
 

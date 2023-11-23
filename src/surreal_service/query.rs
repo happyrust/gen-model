@@ -105,9 +105,21 @@ pub async fn get_children_named_attmaps(refno: RefU64) -> anyhow::Result<Vec<Nam
         .bind(("refno", refno.to_string()))
         .await?;
     let o: SurlValue = response.take(0)?;
+    // dbg!(&o);
     let os: Vec<SurlValue> = o.try_into().unwrap();
     let named_attmaps: Vec<NamedAttrMap> = os.into_iter().map(|x| x.into()).collect();
     Ok(named_attmaps)
+}
+
+pub async fn get_children_pes(refno: RefU64) -> anyhow::Result<Vec<SPdmsElement>> {
+    let mut response = SUL_DB
+        .query(include_str!(
+            "../../schemas/query_children_pes_by_refno.surql"
+        ))
+        .bind(("refno", refno.to_string()))
+        .await?;
+    let pes: Vec<SPdmsElement> = response.take(0)?;
+    Ok(pes)
 }
 
 ///获得children
