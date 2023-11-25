@@ -498,12 +498,10 @@ impl AiosDBManager {
                                         let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
                                         // dbg!(&output);
                                         let compress_opt = CompressOptions::new(path.clone(), output);
-                                        //todo spawn a new task
                                         let file_hash = execute_compress(compress_opt).await.unwrap().to_string();
 
                                         //数据库里不存在这个file hash的记录，才需要
                                         let mut response  = SUL_DB
-                                            // .query("select * from e3d_sync where location == $loc and $hash in file_hashes order by timestamp desc limit 1")
                                             // .query("select value id from (select * from e3d_sync where location != $loc and $name in file_names order by timestamp desc limit 1) where $hash in file_hashes")
                                             .query("select value id from (select * from e3d_sync where location != $loc and $name in file_names order by timestamp desc) where $hash in file_hashes")
                                             .bind(("loc", get_db_option().location.as_str()))

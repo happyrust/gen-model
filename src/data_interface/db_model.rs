@@ -149,10 +149,6 @@ impl AiosDBManager {
         Ok(f.await?)
     }
 
-    //// mqtt_client
-    //         //     .subscribe("Sync/E3d", QoS::AtMostOnce)
-    //         //     .await
-    //         //     .unwrap();
 
     pub async fn demo_mqtt_requests() {
         let mut mqtt_inst = new_mqtt_inst("test-1");
@@ -206,9 +202,8 @@ impl AiosDBManager {
                                 //检查是否和本地的location一致，如果一致，就不用更新
                                 if sync_e3d.location != location {
                                     //自己本地也要保存, todo 后续还是要配置哪些dbs，哪个地方能修改，哪个地方是不能改的
-                                    let r = SUL_DB.query(format!("INSERT INTO e3d_sync {} "
+                                    SUL_DB.query(format!("INSERT INTO e3d_sync {} "
                                                          , serde_json::to_string(&sync_e3d).unwrap())).await.unwrap();
-                                    // dbg!(&r);
                                     //执行指定文件的clone
                                     Self::exec_delta_clone_remotes(&watcher, sync_e3d).await.unwrap();
                                 }
