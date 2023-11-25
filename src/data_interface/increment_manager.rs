@@ -54,7 +54,7 @@ pub struct IncrementInfo {
     pub operation: EleOperation,
 }
 
-
+const JSON_CHUNK_COUNT: usize = 200;
 
 impl AiosDBManager {
     ///执行增量更新
@@ -145,6 +145,8 @@ impl AiosDBManager {
 
                 //创建relate关系
                 if ele_op == EleOperation::Deleted {
+                    //todo 模型可以不删，只有负实体的依赖需要更新模型
+                    //todo 模型压缩处理
                     //如果是负实体这种发生修改，需要更新owner
                     //如果有cref这些，
                     //存储删除的语句
@@ -206,64 +208,105 @@ impl AiosDBManager {
 
         //可以采用channel模式，发送更新的数据，然后更新数据
         //保存新增数据
-        let mut join_set = tokio::task::JoinSet::new();
-        let mut save_atts_time = Instant::now();
-        for (&noun, v) in added_type_eles_map.iter() {
+        let mut total_time = Instant::now();
+        let mut add_join_set = tokio::task::JoinSet::new();
+        //新增模型的处理
+        for (noun, v) in added_type_eles_map {
             let type_name = db1_dehash(noun as _);
             if type_name.is_empty() {
                 continue;
             }
             let type_name = type_name.as_str();
-            let mut pe_json_vec = vec![];
-            let mut att_json_vec = vec![];
-            for k in v {
-                let refno = k.refno;
-                let pe = SPdmsElement {
-                    id: refno.to_string(),
-                    refno,
-                    owner: k.attr.get_owner(),
-                    name: k.attr.get_name_or_default(),
-                    noun: k.attr.get_type(),
-                    dbnum: k.db_no,
-                    e3d_version: k.attr.get_e3d_version(),
-                    version_tag: None,
-                    status_tag: None,
-                    cata_hash: k.attr.cal_cata_hash().map(|x| x.to_string()),
-                    lock: false,
-                    deleted: false,
-                };
 
-                pe_json_vec.push(pe.gen_sur_json());
-                if let Some(json) = k.attr.gen_sur_json() {
-                    att_json_vec.push(json);
+            for chunk in v.chunks(JSON_CHUNK_COUNT) {
+                let mut pe_json_vec = vec![];
+                let mut att_json_vec = vec![];
+                for k in chunk {
+                    let refno = k.refno;
+                    let pe = SPdmsElement {
+                        id: refno.to_string(),
+                        refno,
+                        owner: k.attr.get_owner(),
+                        name: k.attr.get_name_or_default(),
+                        noun: k.attr.get_type(),
+                        dbnum: k.db_no,
+                        e3d_version: k.attr.get_e3d_version(),
+                        version_tag: None,
+                        status_tag: None,
+                        cata_hash: k.attr.cal_cata_hash().map(|x| x.to_string()),
+                        lock: false,
+                        deleted: false,
+                    };
+
+                    pe_json_vec.push(pe.gen_sur_json());
+                    if let Some(json) = k.attr.gen_sur_json() {
+                        att_json_vec.push(json);
+                    }
                 }
-            }
-            //对新增的pe处理
-            let pe_sql = format!("INSERT IGNORE INTO pe [{}]", pe_json_vec.join(","));
-            //使用surreal 保存NamedAttrMap
-            join_set.spawn(async move {
-                SUL_DB.query(pe_sql).await.unwrap();
-            });
-            //对新增的属性处理
-            let attmap_sql = format!(
-                "INSERT IGNORE INTO {} [{}]",
-                &type_name,
-                att_json_vec.join(",")
-            );
-            // println!("attmap sql: {}", &attmap_sql);
-            //使用surreal 保存NamedAttrMap
-            join_set.spawn(async move {
-                SUL_DB.query(attmap_sql).await.unwrap();
-            });
+                //对新增的pe处理
+                let pe_sql = format!("INSERT IGNORE INTO pe [{}]", pe_json_vec.join(","));
+                //使用surreal 保存NamedAttrMap
+                add_join_set.spawn(async move {
+                    SUL_DB.query(pe_sql).await.unwrap();
+                });
 
-            //还需要创建relate关系
+                //对新增的属性处理
+                let attmap_sql = format!(
+                    "INSERT IGNORE INTO {} [{}]",
+                    &type_name,
+                    att_json_vec.join(",")
+                );
+                // println!("attmap sql: {}", &attmap_sql);
+                //使用surreal 保存NamedAttrMap
+                add_join_set.spawn(async move {
+                    SUL_DB.query(attmap_sql).await.unwrap();
+                });
+            }
         }
         //等待保存任务完成
-        while let Some(_) = join_set.join_next().await {}
-        println!(
-            "保存新增属性数据完成，耗时: {} s",
-            save_atts_time.elapsed().as_secs_f32()
-        );
+        while let Some(_) = add_join_set.join_next().await {}
+
+        let mut del_join_set = tokio::task::JoinSet::new();
+        //删除模型的处理
+        for chunk in &deleted_refnos_set.iter().chunks(JSON_CHUNK_COUNT){
+            let mut del_sqls = chunk.into_iter().map(|k| format!("update pe:{} set deleted = true;", k))
+                .collect::<Vec<_>>();
+            dbg!(&del_sqls);
+            del_join_set.spawn(async move {
+                SUL_DB.query(del_sqls.join(";")).await.unwrap();
+            });
+        }
+        while let Some(_) = del_join_set.join_next().await {}
+
+        let mut modify_join_set = tokio::task::JoinSet::new();
+        //修改模型的处理
+        for (noun, v) in modify_type_eles_map {
+            let type_name = db1_dehash(noun as _);
+            if type_name.is_empty() {
+                continue;
+            }
+            let type_name = type_name.as_str();
+
+            for chunk in v.chunks(JSON_CHUNK_COUNT) {
+                let mut update_vec = vec![];
+                for k in chunk {
+                    let refno = k.refno;
+                    update_vec.push(format!("update pe:{} set name = '{}'", refno, k.attr.get_name_or_default()));
+                    if let Some(json) = k.attr.gen_sur_json_exclude(&["id"]) {
+                        println!("{}", &json);
+                        update_vec.push(format!("update {}:{} content {}", k.attr.get_type_str()
+                                                , refno, json));
+                    }
+                }
+                // dbg!(&update_vec);
+                //使用surreal 保存NamedAttrMap
+                modify_join_set.spawn(async move {
+                    SUL_DB.query(update_vec.join(";")).await.unwrap();
+                });
+            }
+        }
+        //等待保存任务完成
+        while let Some(_) = modify_join_set.join_next().await {}
 
         let mut relate_join_set = tokio::task::JoinSet::new();
         let mut time = Instant::now();
@@ -347,7 +390,7 @@ impl AiosDBManager {
         // println!("Save incr pes task costs {} s", time.elapsed().as_secs_f32());
 
         // dbg!(geo_update_log.bran_hanger_refnos.len());
-        dbg!(&geo_update_log);
+        // dbg!(&geo_update_log);
         let r: Vec<IncrGeoUpdateLog> = SUL_DB
             .create("incr_model_log")
             .content(&geo_update_log)
@@ -356,6 +399,7 @@ impl AiosDBManager {
         gen_all_geos_data(Arc::new(self.clone()), Some(geo_update_log))
             .await
             .unwrap();
+
 
         println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_deleted_len}");
 
@@ -477,6 +521,7 @@ impl AiosDBManager {
                         let mut notify_file_names = vec![];
                         let mut notify_file_hashes = vec![];
 
+                        //如果数据没有发生变化，则不需要推出变化，不需要执行增量
                         match self.execute_incr_update(params).await {
                             Ok(_) => {
                                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
@@ -486,6 +531,8 @@ impl AiosDBManager {
                                     if path.is_dir() || !file_name.ends_with("0001"){
                                         continue;
                                     }
+                                    //这个地方是不是需要直接去读取文件，然后更新headers，不能太依赖json数据
+                                    //或者每次启动都重新更新这个文件？
                                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
                                         //未发生修改，直接跳过
                                         if old.pdms_header.page_no >= new_header.pdms_header.page_no {
