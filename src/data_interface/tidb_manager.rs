@@ -44,23 +44,23 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use glam::{Mat3, Quat, Vec3};
 use itertools::Itertools;
-use std::boxed::Box;
 use log::error;
 use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
 use pdms_io::watch::PdmsWatcher;
+use std::boxed::Box;
 // use redb::{ReadableTable, TableDefinition};
+use crate::mqtt_service::MqttInstance;
 use crate::surreal_service;
-use crate::surreal_service::SUL_DB;
+use aios_core::SUL_DB;
 use aios_core::{AttrMap, NamedAttrValue, RefU64Vec};
+use rumqttc::{AsyncClient, EventLoop};
 use sqlx::{Executor, MySql, Pool, Row};
 use std::collections::BTreeMap;
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use rumqttc::{AsyncClient, EventLoop};
 use tokio::sync::RwLock;
-use crate::mqtt_service::MqttInstance;
 
 #[derive(Clone)]
 pub struct AiosDBManager {
@@ -1401,11 +1401,11 @@ impl PdmsDataInterface for AiosDBManager {
             );
             return Ok(Default::default());
         }
-        // #[cfg(debug_assertions)]
-        // dbg!(scom_ref);
+        #[cfg(debug_assertions)]
+        dbg!(scom_ref);
         let scom_info = self.get_or_create_scom_info(scom_ref).await?;
         // #[cfg(debug_assertions)]
-        // dbg!(&scom_info);
+        // // dbg!(&scom_info);
         let mut context = self
             .get_or_create_cata_context(desi_refno, desi_axis_map)
             .await?;

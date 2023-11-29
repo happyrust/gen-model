@@ -1,23 +1,22 @@
-use std::collections::BTreeMap;
-use std::fs;
-use std::io::{Read, Write};
-use aios_core::consts::EXPR_ATT_SET;
-use aios_core::{AttrMap, AttrVal, PdmsDatabaseInfo};
-use aios_core::pdms_types::*;
-use aios_core::tool::db_tool::db1_hash;
-use dashmap::DashMap;
-use lazy_static::lazy_static;
-use memchr::memmem::{find_iter, rfind_iter};
-use smol_str::SmolStr;
-use serde::{Serialize, Deserialize};
 use crate::cata::resolve::parse_to_u64;
 use crate::data_to_file::modify::data_page::get_latest_data_page;
 use crate::data_to_file::modify::modify::ModifyNewData;
 use crate::data_to_file::modify::session_page::get_latest_session_page;
 use crate::data_to_file::OldDataPage;
+use aios_core::consts::EXPR_ATT_SET;
+use aios_core::pdms_types::*;
+use aios_core::tool::db_tool::db1_hash;
+use aios_core::{AttrMap, AttrVal, PdmsDatabaseInfo};
+use dashmap::DashMap;
 use dashmap::DashSet;
+use lazy_static::lazy_static;
+use memchr::memmem::{find_iter, rfind_iter};
 use nalgebra::inf;
-use parse_pdms_db::test_cases::convert_str_to_bytes;
+use serde::{Deserialize, Serialize};
+use smol_str::SmolStr;
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::{Read, Write};
 
 lazy_static! {
     /// attr_map 中不需要转为 bytes的属性
@@ -49,15 +48,20 @@ impl DataPageIncrement {
         // 获得最新得参考号
         let refno = RefU64(parse_to_u64(&self.old_file[0x80C..0x814]));
         // 找到 owner 的数据页
-        let owner_data_page = get_latest_data_page(&self.old_file, self.owner_refno, &self.owner_type);
-        if owner_data_page.is_none() { return None; }
+        let owner_data_page =
+            get_latest_data_page(&self.old_file, self.owner_refno, &self.owner_type);
+        if owner_data_page.is_none() {
+            return None;
+        }
         let owner_data_page = owner_data_page.unwrap();
         // 修改 owner 新增变化的数据(主要是children)
         let data_page = change_owner_data(owner_data_page, self.order, refno);
         let owner_data_bytes = data_page.turn_self_into_vec();
         // 生成新节点的数据
         let new_node_bytes = convert_data_by_attr(self, refno);
-        if new_node_bytes.is_none() { return None; }
+        if new_node_bytes.is_none() {
+            return None;
+        }
         let new_node_bytes = new_node_bytes.unwrap();
         // 将两个bytes合并成 data_page
         let mut new_data_page = vec![0; 0x800];
@@ -80,9 +84,14 @@ fn change_owner_data(mut owner_data: OldDataPage, order: usize, refno: RefU64) -
         owner_data.children = [before_refno_bytes, refno_bytes, after_bytes].concat();
     } else {
         // 在最后插入数据
-        owner_data.children.append(&mut refno.0.to_be_bytes()[..8].to_vec());
+        owner_data
+            .children
+            .append(&mut refno.0.to_be_bytes()[..8].to_vec());
     }
-    owner_data.children.splice(2..4, ((owner_data.children.len() / 4) as u16).to_be_bytes()[..2].to_vec());
+    owner_data.children.splice(
+        2..4,
+        ((owner_data.children.len() / 4) as u16).to_be_bytes()[..2].to_vec(),
+    );
     owner_data
 }
 
@@ -119,25 +128,46 @@ pub fn convert_new_node_data_explicit(refno: RefU64, default_map: AttrMap, b_f64
     r.push([refno.0.to_be_bytes()[..8].to_vec(), vec![0; 8]].concat());
     // 将显示属性的值转换为 bytes
     for (noun, val) in default_map.map {
-        if ATT_BYTES_SET.contains(&noun) { continue; }
+        if ATT_BYTES_SET.contains(&noun) {
+            continue;
+        }
         let noun_hash_bytes = noun.to_be_bytes()[..4].to_vec();
         match val {
             AttrVal::IntegerType(v) => {
-                r.push(ModifyNewData::convert_explicit_data_to_bytes(noun_hash_bytes, vec![0xC, 0, 0, 1], None, v.to_be_bytes()[..4].to_vec()));
+                r.push(ModifyNewData::convert_explicit_data_to_bytes(
+                    noun_hash_bytes,
+                    vec![0xC, 0, 0, 1],
+                    None,
+                    v.to_be_bytes()[..4].to_vec(),
+                ));
             }
             AttrVal::WordType(v) => {
                 if v != SmolStr::new("unset") {
                     let v = db1_hash(v.as_str()).to_be_bytes().to_vec();
-                    r.push(ModifyNewData::convert_explicit_data_to_bytes(noun_hash_bytes, vec![0xC, 0, 0, 1], None, v));
+                    r.push(ModifyNewData::convert_explicit_data_to_bytes(
+                        noun_hash_bytes,
+                        vec![0xC, 0, 0, 1],
+                        None,
+                        v,
+                    ));
                 }
             }
             AttrVal::StringType(v) => {
                 if v != SmolStr::new("unset") {
                     let v = v.as_bytes();
                     let len = v.len() as f32;
-                    let mut l = [vec![0x3C, 0], (((len / 4.0).ceil() + 1.0) as u16).to_be_bytes().to_vec()].concat();
+                    let mut l = [
+                        vec![0x3C, 0],
+                        (((len / 4.0).ceil() + 1.0) as u16).to_be_bytes().to_vec(),
+                    ]
+                    .concat();
                     let len = (len as u32).to_be_bytes().to_vec();
-                    r.push(ModifyNewData::convert_explicit_data_to_bytes(noun_hash_bytes, l, Some(len), v.to_vec()));
+                    r.push(ModifyNewData::convert_explicit_data_to_bytes(
+                        noun_hash_bytes,
+                        l,
+                        Some(len),
+                        v.to_vec(),
+                    ));
                 }
             }
             // bool 先不管
@@ -151,7 +181,12 @@ pub fn convert_new_node_data_explicit(refno: RefU64, default_map: AttrMap, b_f64
             AttrVal::DoubleType(v) => {
                 if let [a, b, c, d, e, f, g, h] = v.to_be_bytes() {
                     let value = vec![e, f, g, h, a, b, c, d];
-                    r.push(ModifyNewData::convert_explicit_data_to_bytes(noun_hash_bytes, vec![8, 0, 0, 2], None, value));
+                    r.push(ModifyNewData::convert_explicit_data_to_bytes(
+                        noun_hash_bytes,
+                        vec![8, 0, 0, 2],
+                        None,
+                        value,
+                    ));
                 }
             }
             AttrVal::DoubleArrayType(values) => {
@@ -174,7 +209,12 @@ pub fn convert_new_node_data_explicit(refno: RefU64, default_map: AttrMap, b_f64
                 l = [vec![0x18, 0], l].concat();
                 let len = (value.len() as u32).to_be_bytes()[..4].to_vec();
                 let value = value.into_iter().flatten().collect();
-                r.push(ModifyNewData::convert_explicit_data_to_bytes(noun_hash_bytes, l, Some(len), value));
+                r.push(ModifyNewData::convert_explicit_data_to_bytes(
+                    noun_hash_bytes,
+                    l,
+                    Some(len),
+                    value,
+                ));
             }
             AttrVal::Vec3Type(values) => {
                 let mut value = vec![];
@@ -195,7 +235,12 @@ pub fn convert_new_node_data_explicit(refno: RefU64, default_map: AttrMap, b_f64
 
                 l = [vec![0x18, 0], l].concat();
                 let value = value.into_iter().flatten().collect();
-                r.push(ModifyNewData::convert_explicit_data_to_bytes(noun_hash_bytes, l, Some(vec![0, 0, 0, 3]), value));
+                r.push(ModifyNewData::convert_explicit_data_to_bytes(
+                    noun_hash_bytes,
+                    l,
+                    Some(vec![0, 0, 0, 3]),
+                    value,
+                ));
             }
             AttrVal::IntArrayType(values) => {
                 let mut value = vec![];
@@ -203,9 +248,18 @@ pub fn convert_new_node_data_explicit(refno: RefU64, default_map: AttrMap, b_f64
                     value.push(v.to_be_bytes().to_vec());
                 }
                 let len = (value.len() as u32).to_be_bytes().to_vec();
-                let l = [vec![0x0, 0], ((value.len() + 1) as u16).to_be_bytes()[..2].to_vec()].concat(); // 还没找到pdms文件中的IntArrayType数据
+                let l = [
+                    vec![0x0, 0],
+                    ((value.len() + 1) as u16).to_be_bytes()[..2].to_vec(),
+                ]
+                .concat(); // 还没找到pdms文件中的IntArrayType数据
                 let value = value.into_iter().flatten().collect::<Vec<u8>>();
-                r.push(ModifyNewData::convert_explicit_data_to_bytes(noun_hash_bytes, l, Some(len), value));
+                r.push(ModifyNewData::convert_explicit_data_to_bytes(
+                    noun_hash_bytes,
+                    l,
+                    Some(len),
+                    value,
+                ));
             }
             _ => {}
         }
@@ -214,10 +268,15 @@ pub fn convert_new_node_data_explicit(refno: RefU64, default_map: AttrMap, b_f64
 }
 
 /// 将隐式属性转换为 bytes
-pub fn convert_new_node_data_implicit(attr_map: BTreeMap<u32, (NounHash, AttrVal)>, _b_f64: bool) -> Vec<u8> {
+pub fn convert_new_node_data_implicit(
+    attr_map: BTreeMap<u32, (NounHash, AttrVal)>,
+    _b_f64: bool,
+) -> Vec<u8> {
     let mut values = vec![];
     for (_, (noun, val)) in attr_map {
-        if ATT_BYTES_SET.contains(&noun) { continue; }
+        if ATT_BYTES_SET.contains(&noun) {
+            continue;
+        }
         match &val {
             AttrVal::IntegerType(val) => {
                 values.push(val.to_be_bytes()[..4].to_vec());
@@ -230,7 +289,9 @@ pub fn convert_new_node_data_implicit(attr_map: BTreeMap<u32, (NounHash, AttrVal
                     let len = (len as u32).to_be_bytes().to_vec();
                     values.push([len, l, v].concat());
                 } else {
-                    values.push(vec![0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+                    values.push(vec![
+                        0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    ]);
                 }
             }
             AttrVal::DoubleType(v) => {
@@ -301,10 +362,17 @@ pub fn convert_new_node_data_implicit(attr_map: BTreeMap<u32, (NounHash, AttrVal
     values.into_iter().flatten().collect()
 }
 
-
 /// 生成新增节点的参考号 + 版本号
-fn convert_first_version_page_increment(input: &[u8], owner_refno: RefU64, refno: RefU64, version: u32) -> Option<Vec<u8>> {
-    let version_start = &[0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x2];
+fn convert_first_version_page_increment(
+    input: &[u8],
+    owner_refno: RefU64,
+    refno: RefU64,
+    version: u32,
+) -> Option<Vec<u8>> {
+    let version_start = &[
+        0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2, 0x0,
+        0x0, 0x0, 0x2,
+    ];
     let mut iter = rfind_iter(input, version_start);
     while let Some(pos) = iter.next() {
         let mut version_page = vec![0u8; 0x800];

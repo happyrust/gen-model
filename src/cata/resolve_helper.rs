@@ -1,8 +1,10 @@
+use super::resolve::CataContext;
 use crate::aql_api::children::query_pre_or_next_node;
 use crate::cata::direction_parse::parse_expr_to_dir;
 use crate::cata::polish_notation::Stack;
 use crate::cata::resolve::resolve_axis_param;
 use crate::data_interface::interface::PdmsDataInterface;
+use crate::surreal_service;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::parsed_data::*;
 use aios_core::pdms_data::{AxisParam, ScomInfo};
@@ -19,8 +21,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::{mem, panic};
 use tokio::runtime::Runtime;
-use crate::surreal_service;
-use super::resolve::CataContext;
 
 #[test]
 fn test_exp() {
@@ -203,7 +203,6 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
             //     }
             // }
             //
-
         }
     }
 
@@ -221,7 +220,11 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
                 let default_key: String = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
                 let key_type: String = format!("{}_{}_type", &caps[1], &caps[2]).into();
                 //if not same type, or doesn't exist, just return error
-                if context.get(&key_type).map(|x| x.as_str() != dtse_unit).unwrap_or(false)  {
+                if context
+                    .get(&key_type)
+                    .map(|x| x.as_str() != dtse_unit)
+                    .unwrap_or(false)
+                {
                     found_dtse_mismatch = true;
                 }
                 let v = context
@@ -289,7 +292,10 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
                 //todo 需要弄清楚，直接整体返回0.0， 不用坐特殊处理？ 是否可行
                 {
                     // return Ok(0.0);
-                    return Err(anyhow::anyhow!(format!("{input_expr}:： {} not found.", &k)));
+                    return Err(anyhow::anyhow!(format!(
+                        "{input_expr}:： {} not found.",
+                        &k
+                    )));
                 }
                 println!("{input_expr}： {} not found, use 0.", &k);
                 result_exp = result_exp.replace(s, " 0");
@@ -413,7 +419,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
                 )))
             } else {
                 println!("输入表达式 : {}", &input_expr);
-                // dbg!(&context);
+                dbg!(&context);
                 // println!("计算后表达式 : {}", &result_string);
                 // let refno_str = context.get("RS_CATR_REFNO").unwrap().as_str();
                 // let refno = RefU64::from_refno_str(refno_str)?;
@@ -802,7 +808,7 @@ pub fn parse_str_axis_to_vec3_or_default<T: PdmsDataInterface>(
     pdir: &str,
     context: &CataContext,
     interface: Option<&T>,
-) -> Vec3{
+) -> Vec3 {
     parse_str_axis_to_vec3(pdir, context, interface).unwrap_or(Vec3::Y)
 }
 
@@ -824,11 +830,13 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(
         for cap in re.captures_iter(&dir_str) {
             if cap.len() == 6 {
                 let val_str = cap[2].to_string();
-                let val_result = eval_str_to_f64(&val_str, context, interface, true, "AXIS")?.to_string();
+                let val_result =
+                    eval_str_to_f64(&val_str, context, interface, true, "AXIS")?.to_string();
                 new_dir_str = dir_str.replace(&val_str, &val_result);
 
                 let val_str = cap[4].to_string();
-                let val_result = eval_str_to_f64(&val_str, context, interface, true, "AXIS")?.to_string();
+                let val_result =
+                    eval_str_to_f64(&val_str, context, interface, true, "AXIS")?.to_string();
                 new_dir_str = new_dir_str.replace(&val_str, &val_result);
                 is_three = true;
             }
@@ -841,7 +849,8 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(
                 if cap.len() == 4 {
                     let val_str = cap[2].to_string();
                     // dbg!(&val_str);
-                    let val_result = eval_str_to_f64(&val_str, context, interface, true, "AXIS")?.to_string();
+                    let val_result =
+                        eval_str_to_f64(&val_str, context, interface, true, "AXIS")?.to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                     // dbg!(&new_dir_str);
                 }

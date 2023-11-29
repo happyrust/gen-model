@@ -28,7 +28,6 @@ use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::graph_db::ParaDocument;
-use crate::surreal_service::{SUL_DB, SUL_DB_ASYNC};
 use crate::tables;
 use crate::tables::*;
 use crate::versioned_db::client::*;
@@ -37,6 +36,7 @@ use aios_core::helper::table::{qualified_column_name, qualified_table_name};
 use aios_core::options::DbOption;
 use aios_core::pdms_data::ATTR_INFO_MAP;
 use aios_core::AttrVal::StringType;
+use aios_core::SUL_DB;
 use aios_core::{get_default_pdms_db_info, orm};
 use bevy_reflect::DynamicStruct;
 use parry3d::utils::hashmap::FxHasher32;
@@ -131,22 +131,22 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         create_info_database(&default_conn_str, &db_option.project_name).await?;
     }
     //针对一些特殊的表，需要先创建表，定义索引
-    SUL_DB
-        .query(
-            r#"
-    DEFINE INDEX unique_pe_owner
-    ON TABLE pe_owner
-    COLUMNS in, out UNIQUE;
-    "#,
-        )
-        .await
-        .unwrap();
+    // SUL_DB
+    //     .query(
+    //         r#"
+    // DEFINE INDEX unique_pe_owner
+    // ON TABLE pe_owner
+    // COLUMNS in, out UNIQUE;
+    // "#,
+    //     )
+    //     .await
+    //     .unwrap();
     let mut create_tables_elapse = 0;
     // 执行多线程解析
     dbg!("执行多线程解析");
     // 遍历所有包含的项目
     for project in &db_option.included_projects {
-        if db_option.sync_versioned.unwrap_or(true) {
+        if db_option.sync_tidb.unwrap_or(false) {
             let db = sea_orm::Database::connect(&default_conn_str).await.unwrap();
             let backend = db.get_database_backend();
             let schema = Schema::new(backend);
@@ -163,7 +163,19 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 project_db.execute_unprepared(&x).await.unwrap();
             }
         }
-        match sync_total_async_threaded(&db_option, project).await {
+
+        match sync_total_async_threaded(&db_option, project, &["DICT", "SYST"], false).await {
+            Ok(_) => {
+                // 同步数据成功
+                println!("同步UDA和SYS数据成功。");
+            }
+            Err(e) => {
+                // 同步数据失败，打印错误信息
+                println!("{}", e.to_string());
+            }
+        }
+
+        match sync_total_async_threaded(&db_option, project, &["DESI", "CATA"], true).await {
             Ok(_) => {
                 // 同步数据成功
                 println!("同步数据成功。");
@@ -225,8 +237,14 @@ pub fn gen_uda_attr_value_sql(att: &WholeAttMap) -> String {
     table_vals_sql
 }
 
+//分成两部分，一部分先保存UDA 和 SYS 这些数据
 ///多线程同步数据，包括增量同步
-pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> anyhow::Result<()> {
+pub async fn sync_total_async_threaded(
+    db_option: &DbOption,
+    project: &str,
+    db_types: &[&str],
+    debug_need: bool,
+) -> anyhow::Result<()> {
     let mut data_dir = Path::new(&db_option.project_path); // 创建一个Path对象，表示数据目录的路径
     let need_parsed_files = &db_option.included_db_files; // 获取需要解析的数据库文件列表
     let project_dir = data_dir.join(&project); // 创建一个Path对象，表示项目目录的路径
@@ -262,8 +280,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
             .collect::<Vec<PathBuf>>()
     };
     // 先解析一遍uda
-    // dbg!("解析uda文件");
-    // let _ = parse_uda_file(project, children_files.clone(), &need_parsed_files).await;
     // 正式解析
     let project = Arc::new(project.to_string()); // 创建一个Arc对象，表示项目名称
     let db_option = Arc::new(db_option.clone()); // 创建一个Arc对象，表示数据库选项
@@ -283,28 +299,28 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
 
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string(); // 获取文件名
-        if file_name.ends_with("com") || file_name.ends_with("mis") {
-            continue; // 如果文件名以 "com" 或 "mis" 结尾，则跳过循环
-        }
-        if only_sync_sys {
-            if !file_name.ends_with("sys") {
-                continue; // 如果仅同步系统表，并且文件名不以 "sys" 结尾，则跳过循环
+        {
+            let mut file = File::open(&path).unwrap();
+            let mut buf = vec![0u8; 60];
+            file.read_exact(&mut buf)?;
+            let (db_type, file_version, db_no) = parse_file_basic_info(&buf);
+            if !db_types.contains(&db_type.as_str()) {
+                continue;
             }
+            // dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
         }
 
-        if need_parsed_files.is_none() || need_parsed_files.as_ref().unwrap().contains(&file_name) {
+        if !debug_need
+            || need_parsed_files.is_none()
+            || need_parsed_files.as_ref().unwrap().contains(&file_name)
+        {
             // 如果需要解析的文件列表为空或包含当前文件名，则执行以下代码块
             println!("path={:?}", &file_name); // 打印文件路径
             let project_clone = project.clone(); // 创建项目名称的克隆
             let project_name = project.as_str().to_string(); // 获取项目名称的字符串
-            let mut children_map = parse_file_children_map(
-                &path,
-                &None,
-                &file_name,
-                project_name.clone().as_str(),
-                "",
-            )
-            .unwrap_or_default();
+            let mut children_map =
+                parse_file_children_map(&path, &None, &file_name, project_name.clone().as_str())
+                    .unwrap_or_default();
             dbg!(children_map.len());
             let all_refnos = children_map.keys().cloned().collect::<Vec<_>>();
             let children_map_clone = Arc::new(children_map);
@@ -324,26 +340,22 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
                 let file_name_clone = file_name.clone();
                 let chunk_refnos_clone = chunk_refnos.to_vec();
                 let project_name_clone = project_name.clone();
-                if let Ok(Ok(PdmsDbData {
+                if let Ok(PdmsDbData {
                     total_attr_map,
                     type_ele_map,
                     refno_info_map,
                     db_type,
                     db_no,
                     version,
-                    room_code_map,
                     foreign_refnos_map,
                     ..
-                })) = tokio::task::spawn_blocking(move || {
-                    parse_file_with_chunk(
-                        &path_clone,
-                        &None,
-                        &file_name_clone,
-                        project_name_clone.as_str(),
-                        "",
-                        &chunk_refnos_clone,
-                    )
-                })
+                }) = parse_file_with_chunk(
+                    &path_clone,
+                    &None,
+                    &file_name_clone,
+                    project_name_clone.as_str(),
+                    &chunk_refnos_clone,
+                )
                 .await
                 {
                     println!("Processing {} chunk index: {chunk_index}", &file_name);
@@ -399,9 +411,6 @@ pub async fn sync_total_async_threaded(db_option: &DbOption, project: &str) -> a
                                 let Some(json) = att.gen_sur_json() else {
                                     continue;
                                 };
-                                if refno.get_1() == 338266 {
-                                    dbg!(&json);
-                                }
                                 json_vec.push(json);
                             }
                             let sql = format!(
@@ -499,73 +508,6 @@ fn set_uda_attr(
     //         }
     //     }
     // }
-    Ok(())
-}
-
-/// 将部分type的数据单独保存到图数据库中
-async fn save_plin_attr_arangodb(
-    database: &ArDatabase,
-    type_ele_map: &DashMap<u32, HashSet<RefU64>>,
-    total_attr_map: &DashMap<RefU64, WholeAttMap>,
-) -> anyhow::Result<()> {
-    let mut refno_attrs = vec![];
-    if let Some(refnos) = &type_ele_map.get(&db1_hash("PLIN")) {
-        for refno in refnos.value() {
-            let whole_attr = total_attr_map.get(refno);
-            if whole_attr.is_none() {
-                continue;
-            }
-            // 暂时只要 p_key 和 plaxis
-            refno_attrs.push(PdmsPLINAttrAql {
-                _key: refno.to_url_refno(),
-                attr: whole_attr.unwrap().merge(),
-            })
-        }
-        if refno_attrs.len() > 0 {
-            let json = serde_json::to_value(&take(&mut refno_attrs))?;
-            save_arangodb_with_db_option(database, json, "plin_eles").await?;
-        }
-    }
-    Ok(())
-}
-
-async fn save_paras_into_arangodb(
-    database: &ArDatabase,
-    total_attr_map: &DashMap<RefU64, WholeAttMap>,
-) -> anyhow::Result<()> {
-    let mut para_map = Vec::new();
-    let mut des_para_map = Vec::new();
-    for v in total_attr_map.iter() {
-        // para 和 des_para 都存在显示属性里
-        let explicit_map = &v.explicit_attmap;
-        if let Some(para) = explicit_map.get_val("PARA") {
-            let paras = para.dvec_value();
-            if paras.is_none() {
-                continue;
-            }
-            para_map.push(ParaDocument {
-                _key: v.key().to_url_refno(),
-                para: paras.unwrap(),
-            })
-        } else if let Some(des_para) = explicit_map.get_val("DESP") {
-            let paras = des_para.dvec_value();
-            if paras.is_none() {
-                continue;
-            }
-            des_para_map.push(ParaDocument {
-                _key: v.key().to_url_refno(),
-                para: paras.unwrap(),
-            })
-        }
-    }
-    for para in para_map.chunks(ARANGODB_SAVE_AMOUNT) {
-        let para_json = serde_json::to_value(para)?;
-        save_arangodb_with_db_option(database, para_json, "para_eles").await?;
-    }
-    for des_para in des_para_map.chunks(ARANGODB_SAVE_AMOUNT) {
-        let des_para_json = serde_json::to_value(des_para)?;
-        save_arangodb_with_db_option(database, des_para_json, "despara_eles").await?;
-    }
     Ok(())
 }
 

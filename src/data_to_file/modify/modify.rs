@@ -1,38 +1,51 @@
-use std::{env, fs};
-use std::fs::File;
-use std::io::{Read, Write};
-use std::mem::take;
-use aios_core::{AttrVal, PdmsDatabaseInfo};
+use crate::api::children::query_owner_till_type;
+use crate::api::element::query_owner_from_id;
+use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::data_to_file::modify::claim_page::ClaimPageModify;
+use crate::data_to_file::modify::data_page::DataPageModify;
+use crate::data_to_file::modify::index_page::IndexPage;
+use crate::data_to_file::modify::name_page::NamePageModify;
+use crate::data_to_file::modify::session_page::{get_latest_session_page, SessionPageModify};
+use crate::data_to_file::{get_latest_page, NewPage, OldDataPage};
 use aios_core::get_default_pdms_db_info;
 use aios_core::helper::{parse_to_i32, parse_to_u16, parse_to_u32};
-use aios_core::pdms_types::*;
 use aios_core::pdms_types::DbAttributeType::Vec3Type;
+use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::{db1_hash, read_attr_info_config_from_json};
+use aios_core::{AttrVal, PdmsDatabaseInfo};
 use bitvec::field::BitField;
 use bitvec::prelude::Lsb0;
 use bitvec::view::BitView;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
 use memchr::memmem::{find_iter, rfind_iter};
-use parse_pdms_db::test_cases::convert_str_to_bytes;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
 use sqlx::{MySql, Pool};
-use crate::api::children::query_owner_till_type;
-use crate::api::element::query_owner_from_id;
-use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::data_to_file::{OldDataPage, NewPage, get_latest_page};
-use crate::data_to_file::modify::claim_page::ClaimPageModify;
-use crate::data_to_file::modify::data_page::DataPageModify;
-use crate::data_to_file::modify::index_page::IndexPage;
-use crate::data_to_file::modify::name_page::NamePageModify;
-use crate::data_to_file::modify::session_page::{get_latest_session_page, SessionPageModify};
+use std::fs::File;
+use std::io::{Read, Write};
+use std::mem::take;
+use std::{env, fs};
 
-const FIRST_VERSION_PAGE: [u8; 20] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x2];
-const SECOND_VERSION_PAGE: [u8; 20] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x2];
-const FIRST_CHANGE_TIMES_PAGE: [u8; 20] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0x74, 0x3F, 0x49, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x2];
-const SECOND_CHANGE_TIMES_PAGE: [u8; 20] = [0x0u8, 0x0, 0x0, 0x5, 0x0, 0x74, 0x3F, 0x49, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0, 0x0, 0x2];
-const CONVERSION_PAGE: [u8; 12] = [0x0u8, 0x0, 0x0, 0x2, 0x61, 0x64, 0x6D, 0x69, 0x6E, 0x0, 0x0, 0x0];
+const FIRST_VERSION_PAGE: [u8; 20] = [
+    0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0,
+    0x0, 0x2,
+];
+const SECOND_VERSION_PAGE: [u8; 20] = [
+    0x0u8, 0x0, 0x0, 0x5, 0x0, 0xCC, 0x47, 0xDF, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0,
+    0x0, 0x2,
+];
+const FIRST_CHANGE_TIMES_PAGE: [u8; 20] = [
+    0x0u8, 0x0, 0x0, 0x5, 0x0, 0x74, 0x3F, 0x49, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0,
+    0x0, 0x2,
+];
+const SECOND_CHANGE_TIMES_PAGE: [u8; 20] = [
+    0x0u8, 0x0, 0x0, 0x5, 0x0, 0x74, 0x3F, 0x49, 0x0, 0x0, 0x0, 0x1, 0x0, 0x0, 0x0, 0x2, 0x0, 0x0,
+    0x0, 0x2,
+];
+const CONVERSION_PAGE: [u8; 12] = [
+    0x0u8, 0x0, 0x0, 0x2, 0x61, 0x64, 0x6D, 0x69, 0x6E, 0x0, 0x0, 0x0,
+];
 
 lazy_static! {
     // 用于写入中 修改次数页
@@ -89,7 +102,12 @@ impl ModifyNewData {
     }
 
     /// 将显示属性转换成pdms格式
-    pub(crate) fn convert_explicit_data_to_bytes(mut noun_hash: Vec<u8>, mut type_len: Vec<u8>, len: Option<Vec<u8>>, mut data: Vec<u8>) -> Vec<u8> {
+    pub(crate) fn convert_explicit_data_to_bytes(
+        mut noun_hash: Vec<u8>,
+        mut type_len: Vec<u8>,
+        len: Option<Vec<u8>>,
+        mut data: Vec<u8>,
+    ) -> Vec<u8> {
         noun_hash.append(&mut type_len);
         if let Some(mut len) = len {
             noun_hash.append(&mut len);
@@ -158,31 +176,58 @@ impl ModifyNewData {
     pub fn convert_explicit_data_to_vec(&self, b_f64: bool) -> Vec<u8> {
         let mut noun_hash = self.get_noun_hash_vec();
         match self.data.clone() {
-            AttrVal::IntegerType(v) => {
-                ModifyNewData::convert_explicit_data_to_bytes(noun_hash, vec![0xC, 0, 0, 1], None, v.to_be_bytes()[..4].to_vec())
-            }
+            AttrVal::IntegerType(v) => ModifyNewData::convert_explicit_data_to_bytes(
+                noun_hash,
+                vec![0xC, 0, 0, 1],
+                None,
+                v.to_be_bytes()[..4].to_vec(),
+            ),
             AttrVal::WordType(v) => {
                 let v = db1_hash(v.as_str()).to_be_bytes().to_vec();
-                ModifyNewData::convert_explicit_data_to_bytes(noun_hash, vec![0xC, 0, 0, 1], None, v)
+                ModifyNewData::convert_explicit_data_to_bytes(
+                    noun_hash,
+                    vec![0xC, 0, 0, 1],
+                    None,
+                    v,
+                )
             }
             AttrVal::StringType(v) => {
                 let v = v.as_bytes();
                 let len = v.len() as f32;
-                let mut l = [vec![0x3C, 0], (((len / 4.0).ceil() + 1.0) as u16).to_be_bytes().to_vec()].concat();
+                let mut l = [
+                    vec![0x3C, 0],
+                    (((len / 4.0).ceil() + 1.0) as u16).to_be_bytes().to_vec(),
+                ]
+                .concat();
                 let len = (len as u32).to_be_bytes().to_vec();
                 ModifyNewData::convert_explicit_data_to_bytes(noun_hash, l, Some(len), v.to_vec())
             }
             AttrVal::BoolType(v) => {
                 if v {
-                    ModifyNewData::convert_explicit_data_to_bytes(noun_hash, vec![0x14, 0, 0, 1], None, vec![0, 0, 0, 1])
+                    ModifyNewData::convert_explicit_data_to_bytes(
+                        noun_hash,
+                        vec![0x14, 0, 0, 1],
+                        None,
+                        vec![0, 0, 0, 1],
+                    )
                 } else {
-                    ModifyNewData::convert_explicit_data_to_bytes(noun_hash, vec![0x14, 0, 0, 1], None, vec![0, 0, 0, 0])
+                    ModifyNewData::convert_explicit_data_to_bytes(
+                        noun_hash,
+                        vec![0x14, 0, 0, 1],
+                        None,
+                        vec![0, 0, 0, 0],
+                    )
                 }
             }
             AttrVal::DoubleType(v) => {
                 if let [a, b, c, d, e, f, g, h] = v.to_be_bytes() {
                     let value = vec![e, f, g, h, a, b, c, d];
-                    ModifyNewData::convert_explicit_data_to_bytes(noun_hash, vec![8, 0, 0, 2], None, value)
+                    ModifyNewData::convert_explicit_data_to_bytes(
+                        noun_hash,
+                        vec![8, 0, 0, 2],
+                        None,
+                        value,
+                    )
                 } else {
                     vec![]
                 }
@@ -228,7 +273,12 @@ impl ModifyNewData {
 
                 l = [vec![0x18, 0], l].concat();
                 let value = value.into_iter().flatten().collect();
-                ModifyNewData::convert_explicit_data_to_bytes(noun_hash, l, Some(vec![0, 0, 0, 3]), value)
+                ModifyNewData::convert_explicit_data_to_bytes(
+                    noun_hash,
+                    l,
+                    Some(vec![0, 0, 0, 3]),
+                    value,
+                )
             }
             AttrVal::IntArrayType(values) => {
                 let mut value = vec![];
@@ -236,7 +286,11 @@ impl ModifyNewData {
                     value.push(v.to_be_bytes().to_vec());
                 }
                 let len = (value.len() as u32).to_be_bytes().to_vec();
-                let l = [vec![0x0, 0], ((value.len() + 1) as u16).to_be_bytes()[..2].to_vec()].concat(); // 还没找到pdms文件中的IntArrayType数据
+                let l = [
+                    vec![0x0, 0],
+                    ((value.len() + 1) as u16).to_be_bytes()[..2].to_vec(),
+                ]
+                .concat(); // 还没找到pdms文件中的IntArrayType数据
                 let value = value.into_iter().flatten().collect::<Vec<u8>>();
                 ModifyNewData::convert_explicit_data_to_bytes(noun_hash, l, Some(len), value)
             }
@@ -273,9 +327,15 @@ pub fn change_origin_file(path: &str) -> (u32, Vec<u8>) {
 /// 传入 refno + type 返回该数据在pdms文件中的位置
 pub fn find_data_in_origin_file(input: &[u8], buf: &[u8]) -> Option<OldDataPage> {
     if let Some(pos) = rfind_iter(&input, buf).next() {
-        let implicit_data_len = (u32::from_be_bytes(input[pos - 4..pos].try_into().unwrap()) * 4 - 4) as usize;
-        let implicit_data = [vec![0x0, 0x0, 0x0, 0x7], input[pos - 4..pos + implicit_data_len].to_vec()].concat();
-        let (children_data, explicit_data) = get_origin_children_and_explicit_data(&input, pos + implicit_data_len);
+        let implicit_data_len =
+            (u32::from_be_bytes(input[pos - 4..pos].try_into().unwrap()) * 4 - 4) as usize;
+        let implicit_data = [
+            vec![0x0, 0x0, 0x0, 0x7],
+            input[pos - 4..pos + implicit_data_len].to_vec(),
+        ]
+        .concat();
+        let (children_data, explicit_data) =
+            get_origin_children_and_explicit_data(&input, pos + implicit_data_len);
         return Some(OldDataPage {
             implicit_data,
             children: children_data,
@@ -286,7 +346,12 @@ pub fn find_data_in_origin_file(input: &[u8], buf: &[u8]) -> Option<OldDataPage>
 }
 
 /// 将修改的值写入到 DataPage中
-pub fn convert_new_data_page(mut page: OldDataPage, data: ModifyNewData, pdms_database_info: &PdmsDatabaseInfo, latest_page_no: u32) -> Option<Vec<u8>> {
+pub fn convert_new_data_page(
+    mut page: OldDataPage,
+    data: ModifyNewData,
+    pdms_database_info: &PdmsDatabaseInfo,
+    latest_page_no: u32,
+) -> Option<Vec<u8>> {
     // let mut new_data = vec![];
     // let attr_type = data.get_type_hash_u32();
     // let noun = data.get_noun_hash_u32();
@@ -359,7 +424,11 @@ pub fn convert_new_data_page(mut page: OldDataPage, data: ModifyNewData, pdms_da
 }
 
 #[inline]
-fn check_b_implicit_data(map: &DashMap<i32, DashMap<i32, AttrInfo>>, attr_type: i32, noun_hash: i32) -> Option<(usize, u32)> {
+fn check_b_implicit_data(
+    map: &DashMap<i32, DashMap<i32, AttrInfo>>,
+    attr_type: i32,
+    noun_hash: i32,
+) -> Option<(usize, u32)> {
     if let Some(info_map) = map.get(&attr_type) {
         if let Some(info) = info_map.get(&noun_hash) {
             if info.offset != 0 {
@@ -371,7 +440,11 @@ fn check_b_implicit_data(map: &DashMap<i32, DashMap<i32, AttrInfo>>, attr_type: 
 }
 
 /// 检测该type中是否存在某属性
-fn check_b_type_value(map: &DashMap<i32, DashMap<i32, AttrInfo>>, attr_type: i32, noun_hash: i32) -> bool {
+fn check_b_type_value(
+    map: &DashMap<i32, DashMap<i32, AttrInfo>>,
+    attr_type: i32,
+    noun_hash: i32,
+) -> bool {
     if let Some(info_map) = map.get(&attr_type) {
         return info_map.get(&noun_hash).is_some();
     }
@@ -414,9 +487,12 @@ pub fn convert_first_version_page(input: &[u8], refno: &[u8], version: u32) -> O
     None
 }
 
-
 /// 修改次数页
-pub async fn convert_change_times_page(input: &[u8], refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>> {
+pub async fn convert_change_times_page(
+    input: &[u8],
+    refno: RefU64,
+    pool: &Pool<MySql>,
+) -> anyhow::Result<Option<(Vec<u8>, Vec<u8>)>> {
     let start = &FIRST_CHANGE_TIMES_PAGE;
     // 找到修改次数页，需要修改的是该参考号的owner
     if let Ok(Some(owner)) = query_owner_from_id(refno, &pool).await {
@@ -426,7 +502,9 @@ pub async fn convert_change_times_page(input: &[u8], refno: RefU64, pool: &Pool<
             let owner_bytes = &owner.0.to_be_bytes()[..8];
             let mut change_times_page = input[pos..pos + 0x800].to_vec();
             if let Some(ref_pos) = find_iter(&change_times_page, owner_bytes).next() {
-                let change_times = &(parse_to_i32(&change_times_page[ref_pos + 12..ref_pos + 16]) + 1).to_be_bytes()[..4];
+                let change_times = &(parse_to_i32(&change_times_page[ref_pos + 12..ref_pos + 16])
+                    + 1)
+                .to_be_bytes()[..4];
                 change_times_page.splice(ref_pos + 12..ref_pos + 16, change_times.to_vec());
                 // 如果修改次数页有第二页，也需要加上
                 // todo 修改次数页第二页 变化的参考号和本参考号看起来毫无相关
@@ -441,7 +519,11 @@ pub async fn convert_change_times_page(input: &[u8], refno: RefU64, pool: &Pool<
 }
 
 /// 会话页
-pub fn convert_conversation_page(input: &[u8], version: u32, change_times: &[u8]) -> Option<Vec<u8>> {
+pub fn convert_conversation_page(
+    input: &[u8],
+    version: u32,
+    change_times: &[u8],
+) -> Option<Vec<u8>> {
     let v = &CONVERSION_PAGE;
 
     let mut new_version = version.to_be_bytes()[..4].to_vec();
@@ -495,7 +577,6 @@ pub enum GlobalPage {
     None,
 }
 
-
 impl ModifyData {
     pub fn convert_new_modify_data(self) -> Option<Vec<u8>> {
         // 读取info文件
@@ -516,7 +597,9 @@ impl ModifyData {
             data: self.data.clone(),
         };
         let data_page = data_page.convert_new_data_page_modify(&self.old_file);
-        if data_page.is_none() { return None; }
+        if data_page.is_none() {
+            return None;
+        }
         current_page_num += 1;
 
         // 生成 index_page
@@ -525,7 +608,9 @@ impl ModifyData {
             data_page_num: current_page_num,
         };
         let index_page = index_page.convert_new_index_page(&self.old_file);
-        if index_page.is_none() { return None; }
+        if index_page.is_none() {
+            return None;
+        }
         let index_page = index_page.unwrap();
         current_page_num += (index_page.len() / 0x800) as u32; // index_page 是两页或三页
         let current_index_page = current_page_num;
@@ -557,7 +642,9 @@ impl ModifyData {
             index_page_num: current_page_num + 1,
         };
         let claim_page = claim_page.convert_new_claim_page(&self.old_file);
-        if claim_page.is_none() { return None; }
+        if claim_page.is_none() {
+            return None;
+        }
         let claim_page = claim_page.unwrap();
         current_page_num += (claim_page.len() / 0x800) as u32;
         let current_claim_page = current_page_num;
@@ -577,13 +664,23 @@ impl ModifyData {
         // 修改文件头上的page_num
         let mut new_file = self.old_file;
         new_file.splice(40..44, (current_page_num + 1).to_be_bytes()[..4].to_vec());
-        Some([new_file, data_page.unwrap(), index_page, global_page, claim_page, session_page].concat())
+        Some(
+            [
+                new_file,
+                data_page.unwrap(),
+                index_page,
+                global_page,
+                claim_page,
+                session_page,
+            ]
+            .concat(),
+        )
     }
 
     fn check_b_global_page(&self, current_page_num: u32) -> GlobalPage {
         match self.noun_type.as_str() {
-            "NAME" => { GlobalPage::NamePage(current_page_num) }
-            _ => { GlobalPage::None }
+            "NAME" => GlobalPage::NamePage(current_page_num),
+            _ => GlobalPage::None,
         }
     }
 }

@@ -2,7 +2,6 @@ use crate::api::project_mdb::query_db_nums_of_mdb;
 use crate::aql_api::children::query_children_order_aql;
 use crate::cata::query_cata::resolve_desi_comp;
 use crate::cata::sctn::geo::create_profile_geos;
-use crate::consts::*;
 use crate::data_interface::db_manager::GeoEnum;
 use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
@@ -11,13 +10,13 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::save_arangodb_doc;
 use crate::graph_db::pdms_inst_arango::*;
 use crate::graph_db::pdms_mesh_arango::{save_mesh_data, save_mesh_to_local_db};
+use crate::{consts::*, surreal_service};
 #[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::{BoxImplied, TubeImplied};
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::ScomInfo;
-use aios_core::pdms_types::*;
 use aios_core::prim_geo::category::{convert_to_brep_shapes, CateBrepShape};
 use aios_core::prim_geo::cylinder::SCylinder;
 use aios_core::prim_geo::extrusion::Extrusion;
@@ -28,6 +27,7 @@ use aios_core::prim_geo::tubing::{PdmsTubing, TubiEdge, TubiSize};
 use aios_core::prim_geo::*;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use aios_core::tool::hash_tool::hash_two_str;
+use aios_core::{pdms_types::*, RefU64};
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use glam::{DMat4, Mat4, Vec3};
@@ -39,6 +39,7 @@ use rayon::iter::ParallelIterator;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::mem::take;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
@@ -616,6 +617,7 @@ pub async fn gen_cata_geos(
             .map(|x| x.cata_hash.clone())
             .collect::<Vec<_>>(),
     );
+    dbg!(&all_unique_keys);
     if !all_unique_keys.is_empty() {
         for i in 0..batch_chunks_cnt as usize {
             let mgr_clone = mgr.clone();
@@ -633,9 +635,7 @@ pub async fn gen_cata_geos(
                 }
                 println!("当前范围: {start_idx} ~ {end_idx}");
                 for j in start_idx..end_idx {
-                    let Some(cata_hash) = all_unique_keys[j].clone() else {
-                        continue;
-                    };
+                    let cata_hash = all_unique_keys[j].clone();
                     if cata_hash == "0" {
                         continue;
                     }
@@ -709,22 +709,28 @@ pub async fn gen_cata_geos(
                                 }
                             }
 
-                            let cat_attmap =
-                                mgr_clone.get_attr(cat_refno).await.unwrap_or_default();
-                            // dbg!(&cat_attmap);
-                            let gmse_refno = cat_attmap.get_foreign_refno("GMRE").unwrap_or(
-                                cat_attmap.get_foreign_refno("GSTR").unwrap_or_default(),
-                            );
+                            let Ok(Some(gmse_refno)) = surreal_service::query_single_map_by_paths(
+                                cat_refno,
+                                &["->GMRE", "->GSTR"],
+                                &["refno"],
+                            )
+                            .await
+                            .map(|x| x.get_refno_lossy()) else {
+                                continue;
+                            };
+                            dbg!(gmse_refno);
 
                             //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
-                            let pos_neg_map = if gmse_refno.is_valid() {
-                                mgr_clone
-                                    .query_refnos_has_pos_neg_map(&[gmse_refno])
-                                    .await
-                                    .unwrap_or_default()
-                            } else {
-                                HashMap::new()
-                            };
+                            let pos_neg_map: HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)> =
+                                if gmse_refno.is_valid() {
+                                    // mgr_clone
+                                    //     .query_refnos_has_pos_neg_map(&[gmse_refno])
+                                    //     .await
+                                    //     .unwrap_or_default()
+                                    HashMap::new()
+                                } else {
+                                    HashMap::new()
+                                };
                             let mut neg_own_pos_map: HashMap<RefU64, RefU64> = pos_neg_map
                                 .iter()
                                 .map(|(k, (poss, negs))| negs.iter().map(|x| (*x, *k)))
@@ -769,8 +775,6 @@ pub async fn gen_cata_geos(
                                     is_ngmr,
                                     ..
                                 } = shape;
-                                // #[cfg(debug_assertions)]
-                                // dbg!(&brep_shape);
                                 if !brep_shape.check_valid() {
                                     continue;
                                 }
@@ -792,7 +796,6 @@ pub async fn gen_cata_geos(
                                     };
                                     aabb
                                 };
-                                // dbg!(geo_aabb);
                                 let rot = transform.rotation;
                                 let translation =
                                     transform.translation + transform.rotation * trans.translation;
@@ -1433,9 +1436,9 @@ pub async fn gen_cata_geos(
 }
 
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
-use crate::surreal_service;
 use aios_core::consts::NGMR_OWN_TYPES;
 use aios_core::tool::math_tool::*;
+use aios_core::SUL_DB;
 use num_enum::IntoPrimitive;
 use num_enum::TryFromPrimitive;
 use std::convert::TryFrom;
@@ -1479,19 +1482,31 @@ pub async fn gen_all_geos_data(
     let db_option = &mgr.db_option;
     let project = &mgr.db_option.project_name;
     let mdb = &mgr.db_option.mdb_name;
+    let mut debug_root_refnos = mgr
+        .db_option
+        .debug_root_refnos
+        .as_ref()
+        .map(|x| {
+            x.iter()
+                .map(|x| RefU64::from_str(x).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let is_debug = debug_root_refnos.len() > 0;
     let mut db_nos = mgr.db_option.manual_db_nums.clone().unwrap_or_default();
 
-    if !is_incr_update && db_nos.is_empty() {
-        let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
-        let pool = AiosDBManager::get_db_pool(&url, project).await?;
-        //todo 通过图数据库查询db_nos
-        db_nos = query_db_nums_of_mdb(mdb, &mgr.db_option.module, &pool).await?;
-        db_nos.sort();
-        println!("当前mdb的所有dbnos: {:?}", db_nos);
-    }
+    // if !is_incr_update && db_nos.is_empty() {
+    //     let url = AiosDBManager::get_default_conn_str(&mgr.db_option);
+    //     let pool = AiosDBManager::get_db_pool(&url, project).await?;
+    //     //todo 通过图数据库查询db_nos
+    //     db_nos = query_db_nums_of_mdb(mdb, &mgr.db_option.module, &pool).await?;
+    //     db_nos.sort();
+    //     println!("当前mdb的所有dbnos: {:?}", db_nos);
+    // }
     // dbg!(&db_nos);
     let replace_mesh = mgr.db_option.replace_mesh;
-    if is_incr_update {
+    if is_incr_update || is_debug {
+        //处理增量更新，不需要使用db_nos
         db_nos = vec![0];
     }
 
@@ -1501,6 +1516,8 @@ pub async fn gen_all_geos_data(
                 "开始处理更新模型数量: {}",
                 incr_update_log.as_ref().unwrap().count()
             );
+        } else if is_debug {
+            println!("开始调试模型: {:?}", &debug_root_refnos);
         } else {
             println!("开始处理db: {db_no}");
         }
@@ -1515,7 +1532,7 @@ pub async fn gen_all_geos_data(
         let target_dbnos = [db_no];
         let mut root_refnos = vec![];
         // dbg!(&root_refnos);
-        if !is_incr_update {
+        if !is_incr_update && !is_debug {
             root_refnos = mgr.get_gen_model_root_refnos(&target_dbnos).await?;
             println!("输入的调试参考号或者db号不正确");
             continue;
@@ -1523,7 +1540,8 @@ pub async fn gen_all_geos_data(
 
         //提前缓存ploo
         let loop_sjus_map = DashMap::new();
-        if is_incr_update {
+        if !is_incr_update {
+            //todo 区别，一个是从db nums 里获取，一个是从增量更新数据，debug数据里获取
             let target_ploo_refnos = mgr
                 .get_gen_model_target_refnos(GeoEnum::PLOO, &target_dbnos, false)
                 .await?;
@@ -1547,7 +1565,30 @@ pub async fn gen_all_geos_data(
         //元件库的模型计算
         {
             let target_bran_hanger_refnos = if is_incr_update {
-                incr_update_log.as_ref().unwrap().bran_hanger_refnos.iter().cloned().collect()
+                incr_update_log
+                    .as_ref()
+                    .unwrap()
+                    .bran_hanger_refnos
+                    .iter()
+                    .cloned()
+                    .collect()
+            } else if is_debug {
+                //thing的处理，现在还不是特别友好
+                let mut response = SUL_DB
+                    .query(format!(
+                        "select value refno from [{}] where noun = 'BRAN' or noun = 'HANG'",
+                        debug_root_refnos
+                            .iter()
+                            .map(|x| x.to_pe_key())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ))
+                    .await
+                    .unwrap();
+                let r: Vec<RefU64> = response.take(0)?;
+                debug_root_refnos.retain_mut(|x| !r.contains(x));
+                dbg!(&r);
+                r
             } else {
                 mgr.get_gen_model_target_refnos(
                     GeoEnum::CATA_BRAN_AND_HANGER_REUSE,
@@ -1577,7 +1618,8 @@ pub async fn gen_all_geos_data(
                 branch_refnos_map.insert(*refno, children);
             }
             ///获取重用的信息
-            let target_bran_reuse_cata_map = if is_incr_update {
+            dbg!(&target_bran_hanger_refnos);
+            let target_bran_reuse_cata_map = if is_incr_update || is_debug {
                 let map = surreal_service::query_group_by_cata_hash(&target_bran_hanger_refnos)
                     .await
                     .unwrap_or_default()
@@ -1586,7 +1628,7 @@ pub async fn gen_all_geos_data(
                         (
                             k.clone(),
                             CataHashRefnoKV {
-                                cata_hash: Some(k),
+                                cata_hash: k,
                                 exist_geo: None,
                                 group_refnos: v,
                             },
@@ -1613,16 +1655,14 @@ pub async fn gen_all_geos_data(
                     let Ok(Some(att)) = surreal_service::get_pe(*r).await else {
                         continue;
                     };
-                    if let Some(hash) = att.cata_hash {
-                        cata_map.insert(
-                            hash.clone(),
-                            CataHashRefnoKV {
-                                cata_hash: Some(hash),
-                                exist_geo: None,
-                                group_refnos: vec![*r],
-                            },
-                        );
-                    }
+                    cata_map.insert(
+                        att.cata_hash.clone(),
+                        CataHashRefnoKV {
+                            cata_hash: att.cata_hash,
+                            exist_geo: None,
+                            group_refnos: vec![*r],
+                        },
+                    );
                 }
                 cata_map
             } else {
@@ -1721,18 +1761,24 @@ pub async fn gen_all_geos_data(
             }
         }
 
-        let mut has_geom_refnos = vec![];
+        let mut has_geom_refnos: Vec<RefU64> = vec![];
         if !is_incr_update {
-            for root_refno in root_refnos.clone() {
-                let refnos = mgr.query_refnos_has_geos(root_refno).await?;
-                has_geom_refnos.extend_from_slice(&refnos);
-            }
+            // for root_refno in root_refnos.clone() {
+            //     let refnos = mgr.query_refnos_has_geos(root_refno).await?;
+            //     has_geom_refnos.extend_from_slice(&refnos);
+            // }
             dbg!(has_geom_refnos.len());
         }
 
         if !has_geom_refnos.is_empty() || is_incr_update {
             let target_loop_refnos = if is_incr_update {
-                incr_update_log.as_ref().unwrap().loop_refnos.iter().cloned().collect()
+                incr_update_log
+                    .as_ref()
+                    .unwrap()
+                    .loop_refnos
+                    .iter()
+                    .cloned()
+                    .collect()
             } else {
                 mgr.get_gen_model_target_refnos(GeoEnum::LOOP_AND_PLOO, &target_dbnos, false)
                     .await?
@@ -1757,7 +1803,13 @@ pub async fn gen_all_geos_data(
 
             ///基本体模型的生成
             let target_prim_refnos = if is_incr_update {
-                incr_update_log.as_ref().unwrap().prim_refnos.iter().cloned().collect()
+                incr_update_log
+                    .as_ref()
+                    .unwrap()
+                    .prim_refnos
+                    .iter()
+                    .cloned()
+                    .collect()
             } else {
                 mgr.get_gen_model_target_refnos(GeoEnum::PRIM, &target_dbnos, false)
                     .await?

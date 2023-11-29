@@ -2,7 +2,7 @@ use aios_core::options::DbOption;
 use config::{Config, File};
 use surrealdb::engine::remote::ws::Ws;
 
-use crate::surreal_service::SUL_DB;
+use aios_core::SUL_DB;
 
 pub mod test_mdb;
 pub mod test_query_fuzzy;
@@ -14,7 +14,6 @@ pub mod test_basic_query;
 pub mod test_query_group;
 
 pub mod transform;
-
 
 pub async fn init_test_surreal() {
     let s = Config::builder()

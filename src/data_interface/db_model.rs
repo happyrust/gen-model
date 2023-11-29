@@ -1,34 +1,10 @@
-use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
-use aios_core::options::DbOption;
-use aios_core::pdms_types::*;
-use aios_core::tool::db_tool::{GLOBAL_UDA_NAME_MAP, GLOBAL_UDA_UKEY_MAP};
-use arangors_lite::AqlQuery;
-use dashmap::DashMap;
-use futures::StreamExt;
-use glam::Vec3;
-use once_cell::sync::Lazy;
-use parry3d::bounding_volume::{Aabb, BoundingVolume};
-use parry3d::math::Vector;
-use parry3d::query::{Ray, RayCast};
-use sqlx::pool::PoolOptions;
-use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use aios_core::file_helper::collect_db_dirs;
-use aios_core::get_db_option;
-use indexmap::IndexMap;
-use itertools::Itertools;
-use log::{error, info};
-use pdms_io::sync::clone::{CloneOptions, execute_clone};
 use crate::api::attr::*;
 use crate::api::element::*;
 use crate::api::refno_info::*;
 use crate::aql_api::children::query_deep_children_refnos_fuzzy;
 use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
+use crate::arangodb::ArDatabase;
 use crate::cata::resolve_helper::eval_str_to_f32;
 use crate::consts::*;
 use crate::consts::*;
@@ -37,15 +13,39 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
 use crate::graph_db::pdms_arango::{connect_arangodb, save_arangodb_with_db_option};
 use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
-use crate::graph_db::structs::{PdmsEleEdge, PdmsEleData, PdmsMdbEdge};
+use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge, PdmsMdbEdge};
+use crate::mqtt_service::{new_mqtt_inst, SyncE3dFileMsg};
 use crate::surreal_service;
+use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
+use aios_core::file_helper::collect_db_dirs;
+use aios_core::get_db_option;
+use aios_core::options::DbOption;
+use aios_core::pdms_types::*;
+use aios_core::SUL_DB;
+use aios_core::tool::db_tool::{GLOBAL_UDA_NAME_MAP, GLOBAL_UDA_UKEY_MAP};
+use arangors_lite::AqlQuery;
+use dashmap::DashMap;
+use futures::StreamExt;
+use glam::Vec3;
+use indexmap::IndexMap;
+use itertools::Itertools;
+use log::{error, info};
+use once_cell::sync::Lazy;
+use parry3d::bounding_volume::{Aabb, BoundingVolume};
+use parry3d::math::Vector;
+use parry3d::query::{Ray, RayCast};
+use pdms_io::sync::clone::{execute_clone, CloneOptions};
 use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
-use rumqttc::{Client, ConnectionError, Event, MqttOptions, Packet, QoS};
 use rumqttc::Event::Incoming;
-use crate::arangodb::ArDatabase;
-use crate::mqtt_service::{new_mqtt_inst, SyncE3dFileMsg};
-use crate::surreal_service::SUL_DB;
+use rumqttc::{Client, ConnectionError, Event, MqttOptions, Packet, QoS};
+use sqlx::pool::PoolOptions;
+use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub const TUBI_TOL: f32 = 10.0f32;
 
@@ -71,15 +71,12 @@ static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> 
     m
 });
 
-
 impl AiosDBManager {
     /// 从默认配置文件初始化
     pub async fn init_form_config() -> anyhow::Result<Self> {
         let db_option = get_db_option();
         let mut mgr = Self::init(&db_option).await?;
         println!("正在初始化uda");
-        mgr.init_uda_map().await?;
-        println!("uda初始化完成");
         // mgr.init_mdb(
         //     &db_option.project_name,
         //     &db_option.mdb_name,
@@ -116,8 +113,14 @@ impl AiosDBManager {
     }
 
     //增量从服务器里的数据clone到本地
-    pub async fn exec_delta_clone_remotes(watcher: &PdmsWatcher, sync_msg: SyncE3dFileMsg) -> anyhow::Result<()> {
-        println!("Start delta clone db files num: {}", sync_msg.file_names.len());
+    pub async fn exec_delta_clone_remotes(
+        watcher: &PdmsWatcher,
+        sync_msg: SyncE3dFileMsg,
+    ) -> anyhow::Result<()> {
+        println!(
+            "Start delta clone db files num: {}",
+            sync_msg.file_names.len()
+        );
         let remote_url = sync_msg.file_server_host.as_str();
         for file_name in &sync_msg.file_names {
             let url = format!("{}/{}.cba", remote_url, file_name);
@@ -127,13 +130,15 @@ impl AiosDBManager {
             };
             let e3d_file: PathBuf = pb.value().clone();
             let mut clone_time = Instant::now();
-            let remote_clone_opt = CloneOptions::new_remote(
-                url.as_str(),
-                e3d_file);
+            let remote_clone_opt = CloneOptions::new_remote(url.as_str(), e3d_file);
             if let Ok(r) = execute_clone(remote_clone_opt).await {
                 if r {
                     //需要保存更新记录
-                    println!("Clone {} cost: {:?}s", file_name, clone_time.elapsed().as_secs_f64());
+                    println!(
+                        "Clone {} cost: {:?}s",
+                        file_name,
+                        clone_time.elapsed().as_secs_f64()
+                    );
                 }
             }
         }
@@ -149,7 +154,6 @@ impl AiosDBManager {
         Ok(f.await?)
     }
 
-
     pub async fn demo_mqtt_requests() {
         let mut mqtt_inst = new_mqtt_inst("test-1");
         let client = mqtt_inst.client.clone();
@@ -164,7 +168,8 @@ impl AiosDBManager {
                 };
                 let _ = client
                     .publish("Sync/E3d", QoS::ExactlyOnce, false, test_data)
-                    .await.unwrap();
+                    .await
+                    .unwrap();
 
                 dbg!(i);
 
@@ -187,9 +192,16 @@ impl AiosDBManager {
         let location = db_option.location.clone();
         let f = tokio::spawn(async move {
             //订阅消息处理更新
-            let mut mqtt_inst = new_mqtt_inst(&format!("{}-{}-sub", db_option.location.as_str(),
-                                                       db_option.project_code));
-            mqtt_inst.client.subscribe("Sync/E3d", QoS::ExactlyOnce).await.unwrap();
+            let mut mqtt_inst = new_mqtt_inst(&format!(
+                "{}-{}-sub",
+                db_option.location.as_str(),
+                db_option.project_code
+            ));
+            mqtt_inst
+                .client
+                .subscribe("Sync/E3d", QoS::ExactlyOnce)
+                .await
+                .unwrap();
             mqtt_inst.el.network_options.set_connection_timeout(10000);
             loop {
                 let event = mqtt_inst.el.poll().await;
@@ -202,10 +214,17 @@ impl AiosDBManager {
                                 //检查是否和本地的location一致，如果一致，就不用更新
                                 if sync_e3d.location != location {
                                     //自己本地也要保存, todo 后续还是要配置哪些dbs，哪个地方能修改，哪个地方是不能改的
-                                    SUL_DB.query(format!("INSERT INTO e3d_sync {} "
-                                                         , serde_json::to_string(&sync_e3d).unwrap())).await.unwrap();
+                                    SUL_DB
+                                        .query(format!(
+                                            "INSERT INTO e3d_sync {} ",
+                                            serde_json::to_string(&sync_e3d).unwrap()
+                                        ))
+                                        .await
+                                        .unwrap();
                                     //执行指定文件的clone
-                                    Self::exec_delta_clone_remotes(&watcher, sync_e3d).await.unwrap();
+                                    Self::exec_delta_clone_remotes(&watcher, sync_e3d)
+                                        .await
+                                        .unwrap();
                                 }
                             }
                             _ => {
@@ -244,8 +263,8 @@ impl AiosDBManager {
                 ]
         "#,
             )
-                .bind_var("offset", offset)
-                .bind_var("batch_size", 5000);
+            .bind_var("offset", offset)
+            .bind_var("batch_size", 5000);
             offset += 5000;
             if let Ok(refno_aabbs) = database.aql_query::<(String, Aabb)>(aql).await {
                 if refno_aabbs.is_empty() {
@@ -383,7 +402,7 @@ impl AiosDBManager {
                 &room_panels,
                 Some(&[GeoBasicType::Pos, GeoBasicType::Compound]),
             )
-                .await?;
+            .await?;
             for (panel_refno, info) in &inst_data.inst_info_map {
                 let Some(inst_geos) = inst_data.get_inst_geos(info) else {
                     continue;
@@ -594,12 +613,16 @@ impl AiosDBManager {
         println!("正在创建图数据库连接");
         let arango_pool = connect_arangodb(&db_option).await?;
 
-        let db_paths = collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref()));
+        let db_paths =
+            collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref()));
         dbg!(&db_paths);
         let mut watcher = PdmsWatcher::load_from_json(None).unwrap_or(PdmsWatcher::new(db_paths));
 
-        let mut mqtt_inst = new_mqtt_inst(&format!("{}-{}-pub", db_option.location.as_str(),
-                                                   db_option.project_code));
+        let mut mqtt_inst = new_mqtt_inst(&format!(
+            "{}-{}-pub",
+            db_option.location.as_str(),
+            db_option.project_code
+        ));
         let mqtt_client = Arc::new(mqtt_inst.client);
         tokio::task::spawn(async move {
             loop {
@@ -641,29 +664,6 @@ impl AiosDBManager {
         })
     }
 
-    /// 初始化 uda_map
-    pub async fn init_uda_map(&self) -> anyhow::Result<()> {
-        // 按照 include 顺序存放uda，排除uda冲突的情况
-        for project in &self.db_option.included_projects {
-            let Some(pool) = &self.project_map.get(project) else { continue; };
-            if let Ok(uda_map) = query_uda_ukey_udna_all(pool.value()).await {
-                for (ukey, udna) in uda_map {
-                    let udna = format!(":{}", udna);
-                    GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna.clone());
-                    GLOBAL_UDA_UKEY_MAP.entry(udna).or_insert(ukey);
-                }
-            }
-            if let Ok(uda_map) = query_uda_ukey_udet_all(pool.value()).await {
-                for (ukey, udna) in uda_map {
-                    let udna = format!(":{}", udna);
-                    GLOBAL_UDA_NAME_MAP.entry(ukey).or_insert(udna.clone());
-                    GLOBAL_UDA_UKEY_MAP.entry(udna).or_insert(ukey);
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// 根据project获取连接池
     #[inline]
     pub fn get_project_pool(&self, project: &str) -> Option<Pool<MySql>> {
@@ -673,9 +673,10 @@ impl AiosDBManager {
     /// 根据project获取连接池
     #[inline]
     pub fn get_cur_project_pool(&self) -> Option<Pool<MySql>> {
-        self.project_map.get(self.get_cur_project()).map(|x| x.value().clone())
+        self.project_map
+            .get(self.get_cur_project())
+            .map(|x| x.value().clone())
     }
-
 
     ///获得project 的db
     #[inline]
@@ -716,14 +717,13 @@ impl AiosDBManager {
             r#"SELECT DB_TYPE, PROJECT  FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {}"#,
             db_num
         ));
-        let result = sqlx::query(&sql)
-            .fetch_all(pool)
-            .await?;
+        let result = sqlx::query(&sql).fetch_all(pool).await?;
         for v in result {
             if let project = v.get::<String, _>(1) {
                 dbg!(&project);
-                let Some(project_pool) = self
-                    .get_project_pool(&project) else { continue; };
+                let Some(project_pool) = self.get_project_pool(&project) else {
+                    continue;
+                };
                 if let Some(world_refno) = query_world_refno_by_dbno(db_num, &project_pool).await? {
                     let db_type = v.get::<String, _>(0);
                     return Ok(Some(DbQuickInfo {
@@ -758,7 +758,9 @@ impl AiosDBManager {
                 // dbg!(&dbs);
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
-                    let att = surreal_service::get_named_attmap(*db_refno).await.unwrap_or_default();
+                    let att = surreal_service::get_named_attmap(*db_refno)
+                        .await
+                        .unwrap_or_default();
                     let Some(db_num) = att.get_i32("NUMBDB") else {
                         continue;
                     };
@@ -781,15 +783,15 @@ impl AiosDBManager {
 
     fn match_stype(input: i32) -> String {
         match input {
-            1 => { "DESI".to_string() }
-            2 => { "CATA".to_string() }
-            4 => { "PROP".to_string() }
-            6 => { "ISOD".to_string() }
-            7 => { "PADD".to_string() }
-            8 => { "DICT".to_string() }
-            9 => { "ENGI".to_string() }
-            14 => { "SCHE".to_string() }
-            _ => { "".to_string() }
+            1 => "DESI".to_string(),
+            2 => "CATA".to_string(),
+            4 => "PROP".to_string(),
+            6 => "ISOD".to_string(),
+            7 => "PADD".to_string(),
+            8 => "DICT".to_string(),
+            9 => "ENGI".to_string(),
+            14 => "SCHE".to_string(),
+            _ => "".to_string(),
         }
     }
 
@@ -800,7 +802,10 @@ impl AiosDBManager {
         info_pool: &Pool<MySql>,
     ) -> anyhow::Result<()> {
         //直接保存到图数据库，不要放在tidb里了
-        let mdbs = self.query_ele_nodes_by_expression(r#"v.noun == "MDB""#).await.unwrap();
+        let mdbs = self
+            .query_ele_nodes_by_expression(r#"v.noun == "MDB""#)
+            .await
+            .unwrap();
         //直接在这里把mdb的信息加进去，创建这个节点
         let mut mdb_edges_map = IndexMap::new();
         let mut mdb_dbnums_map = IndexMap::new();
@@ -814,7 +819,9 @@ impl AiosDBManager {
             let name = mdb_attr.get_name_or_default();
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 for (i, db_refno) in dbs.into_iter().enumerate() {
-                    let att = surreal_service::get_named_attmap(db_refno).await.unwrap_or_default();
+                    let att = surreal_service::get_named_attmap(db_refno)
+                        .await
+                        .unwrap_or_default();
                     let Some(db_num) = att.get_i32("NUMBDB") else {
                         continue;
                     };
@@ -832,7 +839,10 @@ impl AiosDBManager {
                         db_type,
                     };
                     mdb_edges_map.insert(db_num, mdb_edge);
-                    mdb_dbnums_map.entry(mdb_refno).or_insert(Vec::new()).push(db_num);
+                    mdb_dbnums_map
+                        .entry(mdb_refno)
+                        .or_insert(Vec::new())
+                        .push(db_num);
                 }
             }
             mdb_names_map.entry(mdb_refno).or_insert(name);
@@ -847,14 +857,20 @@ impl AiosDBManager {
         dbg!(&string);
         dbg!("hello");
         if let Ok(mut ele_nodes) = self.query_ele_nodes_by_expression(&string).await {
-            if ele_nodes.is_empty() { return Ok(()); }
+            if ele_nodes.is_empty() {
+                return Ok(());
+            }
             let database = self.get_arango_db().await?;
 
             for (k, (mdb_refno, dbnums)) in mdb_dbnums_map.into_iter().enumerate() {
-                if dbnums.is_empty() { continue; }
+                if dbnums.is_empty() {
+                    continue;
+                }
                 let root_dbnum = dbnums[0];
                 dbg!(root_dbnum);
-                if !mdb_edges_map.contains_key(&root_dbnum) { continue; }
+                if !mdb_edges_map.contains_key(&root_dbnum) {
+                    continue;
+                }
                 let Some(root_world) = ele_nodes.iter().find(|x| x.dbnum == root_dbnum) else {
                     continue;
                 };
@@ -863,7 +879,10 @@ impl AiosDBManager {
                 if let Some(mdb_data) = mdb_edges_map.get(&root_dbnum) {
                     let mdb_name = mdb_names_map.get(&mdb_refno).unwrap();
                     let edge = PdmsEleEdge {
-                        key: root_world.refno.hash_with_another_refno(mdb_refno).to_string(),
+                        key: root_world
+                            .refno
+                            .hash_with_another_refno(mdb_refno)
+                            .to_string(),
                         refno: root_world.refno,
                         owner: mdb_refno,
                         order: k as _,
@@ -878,8 +897,12 @@ impl AiosDBManager {
                     let Some(world) = ele_nodes.iter().find(|x| x.dbnum == dbnum) else {
                         continue;
                     };
-                    mdb_edges_map.entry(dbnum).and_modify(|x| x.world_refno = world.refno);
-                    let site_refnos = surreal_service::get_children_refnos(world.refno).await.unwrap_or_default();
+                    mdb_edges_map
+                        .entry(dbnum)
+                        .and_modify(|x| x.world_refno = world.refno);
+                    let site_refnos = surreal_service::get_children_refnos(world.refno)
+                        .await
+                        .unwrap_or_default();
                     let Some(mdb_data) = mdb_edges_map.get(&dbnum) else {
                         continue;
                     };
@@ -887,7 +910,9 @@ impl AiosDBManager {
                     for site_refno in site_refnos.into_iter() {
                         {
                             let edge = PdmsEleEdge {
-                                key: site_refno.hash_with_another_refno(root_world.refno).to_string(),
+                                key: site_refno
+                                    .hash_with_another_refno(root_world.refno)
+                                    .to_string(),
                                 refno: site_refno,
                                 owner: root_world.refno,
                                 order: order as _,
@@ -901,23 +926,35 @@ impl AiosDBManager {
                 }
             }
 
-            for result in mdb_edges_map.values().into_iter().collect::<Vec<_>>().chunks(ARANGODB_SAVE_AMOUNT) {
+            for result in mdb_edges_map
+                .values()
+                .into_iter()
+                .collect::<Vec<_>>()
+                .chunks(ARANGODB_SAVE_AMOUNT)
+            {
                 let json = serde_json::to_value(result)?;
-                save_arangodb_with_db_option(&database, json, AQL_PDMS_MDBS_EDGES_COLLECTION).await?;
+                save_arangodb_with_db_option(&database, json, AQL_PDMS_MDBS_EDGES_COLLECTION)
+                    .await?;
             }
             for edge in pdms_edges.chunks(ARANGODB_SAVE_AMOUNT) {
                 let json = serde_json::to_value(edge)?;
-                save_arangodb_with_db_option(&database, json, AQL_PDMS_EDGES_COLLECTION).await.unwrap();
+                save_arangodb_with_db_option(&database, json, AQL_PDMS_EDGES_COLLECTION)
+                    .await
+                    .unwrap();
             }
         };
 
         Ok(())
     }
 
+    //todo 获取类型直接采用edge上的查询
     ///获得参考号对应的一般类型
     pub async fn get_generic_type(&self, refno: RefU64) -> PdmsGenericType {
         let mut cur_refno = refno;
         while let Ok(b) = surreal_service::get_named_attmap(cur_refno).await {
+            if b.is_empty() {
+                break;
+            }
             let type_name = b.get_type_str();
             if PDMS_GNERAL_TYPE_NAMES_MAP.contains_key(&type_name) {
                 return *PDMS_GNERAL_TYPE_NAMES_MAP.get(type_name).unwrap();
@@ -926,7 +963,6 @@ impl AiosDBManager {
         }
         PdmsGenericType::UNKOWN
     }
-
 
     /// 通用的解析表达式的方法, 解析desi参考号下的 表达式值
     /// 如果 desi_refno 为空，代表design的数据不需要参与计算
@@ -946,9 +982,9 @@ impl AiosDBManager {
         let aql = AqlQuery::new(
             r#"
             with pdms_eles
-                return document(pdms_eles, @id)"#
+                return document(pdms_eles, @id)"#,
         )
-            .bind_var("id", id);
+        .bind_var("id", id);
         let mut r = arango_db
             .aql_query::<PdmsEleData>(aql)
             .await
@@ -968,12 +1004,13 @@ impl AiosDBManager {
     }
 
     ///获得当前mdb下的site参考号
-    pub async fn get_site_refnos(
-        &self,
-    ) -> anyhow::Result<Vec<RefU64>> {
+    pub async fn get_site_refnos(&self) -> anyhow::Result<Vec<RefU64>> {
         let world_refno = self.get_desi_world().await?.refno;
-        let r = self.get_cached_site_nodes(world_refno).await?
-            .unwrap_or_default().iter()
+        let r = self
+            .get_cached_site_nodes(world_refno)
+            .await?
+            .unwrap_or_default()
+            .iter()
             .map(|x| x.refno)
             .collect();
         Ok(r)

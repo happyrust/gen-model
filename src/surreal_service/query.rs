@@ -1,15 +1,15 @@
-use std::collections::HashMap;
-use crate::surreal_service::{SUL_DB, SUL_DB_ASYNC};
+use aios_core::pe::SPdmsElement;
 use aios_core::types::*;
 use aios_core::{NamedAttrMap, RefU64};
-use aios_core::pe::SPdmsElement;
+use aios_core::{SurlValue, SUL_DB};
 use indexmap::IndexMap;
-use serde::{Deserialize, Deserializer, Serialize};
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::HashMap;
 use surrealdb::sql::Thing;
 
 #[derive(Clone, Debug, Default, Deserialize)]
-struct KV<K, V>{
+struct KV<K, V> {
     k: K,
     v: V,
 }
@@ -34,6 +34,7 @@ pub async fn get_ancestor(refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
     Ok(s.into_iter().map(|s| s.into()).collect())
 }
 
+///查询到祖先节点属性数据
 pub async fn get_ancestor_attmaps(refno: RefU64) -> anyhow::Result<Vec<NamedAttrMap>> {
     let mut response = SUL_DB
         .query(include_str!(
@@ -138,17 +139,75 @@ pub async fn get_children_refnos(refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
 }
 
 ///按cata_hash 分组获得不同的参考号类型
-pub async fn query_group_by_cata_hash(refnos: &[RefU64]) -> anyhow::Result<IndexMap<String, Vec<RefU64>>> {
+pub async fn query_group_by_cata_hash(
+    refnos: &[RefU64],
+) -> anyhow::Result<IndexMap<String, Vec<RefU64>>> {
     let keys = refnos.iter().map(|x| x.to_pe_thing()).collect::<Vec<_>>();
     let mut response = SUL_DB
         .query(include_str!("../../schemas/group_by_cata_hash.surql"))
         .bind(("refnos", keys))
         .await?;
     let d: Vec<KV<String, Vec<RefU64>>> = response.take(1)?;
-    let map = d.into_iter().map(|kv| {
-        let k = kv.k.clone();
-        let v: Vec<RefU64> = kv.v;
-        (k, v)
-    }).collect();
+    let map = d
+        .into_iter()
+        .map(|kv| {
+            let k = kv.k.clone();
+            let v: Vec<RefU64> = kv.v;
+            (k, v)
+        })
+        .collect();
     Ok(map)
+}
+
+//后面可以写一个map的语法
+//沿着path，找到目标refno，如果没有就是None
+// pub async fn query_by_path<T: DeserializeOwned>(
+//     refno: RefU64,
+//     path: &str,
+// ) -> anyhow::Result<Option<T>> {
+//     let mut p = path.replace("->", ".refno.");
+//     let str = if p.starts_with(".") {
+//         &p[1..]
+//     } else {
+//         p.as_str()
+//     };
+//     let sql = format!(
+//         r#"select value {} from only type::thing("pe", $refno)"#,
+//         str
+//     );
+//     let mut response = SUL_DB.query(sql).bind(("refno", refno.to_string())).await?;
+//     let r: Option<T> = response.take(0)?;
+//     Ok(r)
+// }
+
+pub async fn query_single_map_by_paths(
+    refno: RefU64,
+    paths: &[&str],
+    fields: &[&str],
+) -> anyhow::Result<NamedAttrMap> {
+    let mut ps = vec![];
+    for &path in paths {
+        let p = path.replace("->", ".refno.");
+        let str = if p.starts_with(".") {
+            p[1..].to_owned()
+        } else {
+            p
+        };
+        ps.push(str);
+    }
+    let select_fieds = if fields.is_empty() {
+        "*".to_string()
+    } else {
+        fields.join(",")
+    };
+    let sql = format!(
+        r#"(select {} from (select value [{}] from only type::thing("pe", $refno)) where id != none)[0]"#,
+        select_fieds,
+        ps.join(",")
+    );
+    #[cfg(debug_assertions)]
+    println!("Sql is {}", sql);
+    let mut response = SUL_DB.query(sql).bind(("refno", refno.to_string())).await?;
+    let r: Option<NamedAttrMap> = response.take(0)?;
+    Ok(r.unwrap_or_default())
 }
