@@ -15,7 +15,7 @@ use crate::graph_db::pdms_arango::{connect_arangodb, save_arangodb_with_db_optio
 use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
 use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge, PdmsMdbEdge};
 use crate::mqtt_service::{new_mqtt_inst, SyncE3dFileMsg};
-use crate::surreal_service;
+
 use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
 use aios_core::file_helper::collect_db_dirs;
 use aios_core::get_db_option;
@@ -750,7 +750,7 @@ impl AiosDBManager {
         let mdbs = query_types_refnos(&vec!["MDB"], project_pool, &[]).await?;
         dbg!(&mdbs);
         for mdb_refno in mdbs {
-            let Ok(mdb_attr) = surreal_service::get_named_attmap(mdb_refno).await else {
+            let Ok(mdb_attr) = aios_core::get_named_attmap(mdb_refno).await else {
                 continue;
             };
             let mdb_name = mdb_attr.get_name_or_default();
@@ -758,7 +758,7 @@ impl AiosDBManager {
                 // dbg!(&dbs);
                 let mut map = HashMap::new();
                 for (i, db_refno) in dbs.iter().enumerate() {
-                    let att = surreal_service::get_named_attmap(*db_refno)
+                    let att = aios_core::get_named_attmap(*db_refno)
                         .await
                         .unwrap_or_default();
                     let Some(db_num) = att.get_i32("NUMBDB") else {
@@ -813,13 +813,13 @@ impl AiosDBManager {
 
         for mdb in &mdbs {
             let mdb_refno = mdb.refno;
-            let Ok(mdb_attr) = surreal_service::get_named_attmap(mdb_refno).await else {
+            let Ok(mdb_attr) = aios_core::get_named_attmap(mdb_refno).await else {
                 continue;
             };
             let name = mdb_attr.get_name_or_default();
             if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
                 for (i, db_refno) in dbs.into_iter().enumerate() {
-                    let att = surreal_service::get_named_attmap(db_refno)
+                    let att = aios_core::get_named_attmap(db_refno)
                         .await
                         .unwrap_or_default();
                     let Some(db_num) = att.get_i32("NUMBDB") else {
@@ -891,7 +891,7 @@ impl AiosDBManager {
                     };
                     pdms_edges.push(edge);
                 }
-                // let children = surreal_service::get_children_refnos(root_world.refno).unwrap_or_default();
+                // let children = aios_core::get_children_refnos(root_world.refno).unwrap_or_default();
                 let mut order = 0;
                 for dbnum in dbnums {
                     let Some(world) = ele_nodes.iter().find(|x| x.dbnum == dbnum) else {
@@ -900,7 +900,7 @@ impl AiosDBManager {
                     mdb_edges_map
                         .entry(dbnum)
                         .and_modify(|x| x.world_refno = world.refno);
-                    let site_refnos = surreal_service::get_children_refnos(world.refno)
+                    let site_refnos = aios_core::get_children_refnos(world.refno)
                         .await
                         .unwrap_or_default();
                     let Some(mdb_data) = mdb_edges_map.get(&dbnum) else {
@@ -951,7 +951,7 @@ impl AiosDBManager {
     ///获得参考号对应的一般类型
     pub async fn get_generic_type(&self, refno: RefU64) -> PdmsGenericType {
         let mut cur_refno = refno;
-        while let Ok(b) = surreal_service::get_named_attmap(cur_refno).await {
+        while let Ok(b) = aios_core::get_named_attmap(cur_refno).await {
             if b.is_empty() {
                 break;
             }

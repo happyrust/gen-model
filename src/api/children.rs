@@ -24,7 +24,7 @@ use crate::aql_api::children::query_owner_with_type_aql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::defines::{RString, CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
 use crate::arangodb::ArDatabase;
-use crate::surreal_service;
+
 
 /// 遍历该节点下的 children (包含自己)
 pub async fn travel_children_eles(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<Vec<RefU64>> {
@@ -265,7 +265,7 @@ impl AiosDBManager {
         let mut target = None;
         let mut index: usize = 0;
         if foreigns.is_empty() { return None; }
-        while let Ok(att) = surreal_service::get_named_attmap(refno).await  {
+        while let Ok(att) = aios_core::get_named_attmap(refno).await  {
             let key = foreigns.get(0).unwrap_or(foreigns.last().unwrap());
             if func(refno) {
                 break;

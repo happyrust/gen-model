@@ -4,7 +4,7 @@ use crate::cata::direction_parse::parse_expr_to_dir;
 use crate::cata::polish_notation::Stack;
 use crate::cata::resolve::resolve_axis_param;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::surreal_service;
+
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::parsed_data::*;
 use aios_core::pdms_data::{AxisParam, ScomInfo};
@@ -149,7 +149,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
             //         RefU64::from_str(refno_str).map_err(|_| anyhow!("wrong refno in of expr"))?
             //     }
             // };
-            // let target_att = surreal_service::get_named_attmap(target_refno).await?;
+            // let target_att = aios_core::get_named_attmap(target_refno).await?;
 
             // dbg!(&target_refno);
             // if let Some(value) = target_att.get_as_string(c1) {
@@ -423,7 +423,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
                 // println!("计算后表达式 : {}", &result_string);
                 // let refno_str = context.get("RS_CATR_REFNO").unwrap().as_str();
                 // let refno = RefU64::from_refno_str(refno_str)?;
-                // dbg!(interface.unwrap().surreal_service::get_named_attmap(refno).await.unwrap());
+                // dbg!(interface.unwrap().aios_core::get_named_attmap(refno).await.unwrap());
                 Err(anyhow::anyhow!(format!("求解失败 {}", &input_expr)))
             };
         }

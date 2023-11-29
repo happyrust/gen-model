@@ -1,44 +1,13 @@
-use crate::graph_db::structs::PdmsEleDataVersioned;
-use aios_core::options::DbOption;
-use aios_core::orm::pdms_element;
-use aios_core::orm::pdms_element::Model;
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::SUL_DB;
 use dashmap::DashMap;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use itertools::Itertools;
 use sea_orm::entity::prelude::*;
-use serde::Deserialize;
-use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
-use surrealdb::dbs::Response;
-use surrealdb::sql::Thing;
-use tokio::task::JoinHandle;
 
-// pub async fn get_versioned_client(project: &str) -> TDBClient {
-//     let mut client = termnius_client::client::TDBClientBuilder::default()
-//         // .server_url("http://192.168.31.179:6363".to_string())
-//         .server_url("http://localhost:6363".to_string())
-//         .auth_info(termnius_client::client::AuthInfo::new())
-//         .session_info(termnius_client::client::SessionInfo::new())
-//         .repo_info(termnius_client::client::RepoInfo {
-//             team: "admin".to_string(),
-//             db: project.to_string(),
-//             branch: "main".to_string(),
-//             ref_val: None,
-//             repo: "local".to_string(),
-//             db_info: Default::default(),
-//             author: "".to_string(),
-//         })
-//         .build()
-//         .unwrap();
-//
-//     client
-// }
 
 const JSON_CHUNK_COUNT: usize = 10_000;
 

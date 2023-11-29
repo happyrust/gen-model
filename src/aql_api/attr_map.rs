@@ -25,7 +25,7 @@ use std::str::FromStr;
 use aios_core::NamedAttrValue;
 use aios_core::pdms_pluggin::heat_dissipation::InstPointMap;
 use crate::graph_db::structs::{PdmsEleEdge, PdmsEleData, PdmsMdbEdge};
-use crate::surreal_service;
+
 
 pub type IndexNamedAttMap = IndexMap<String, NamedAttrValue>;
 
@@ -71,7 +71,7 @@ impl AiosDBManager {
         // let target_refnos: Vec<RefU64> = if get_children {
         //     let mut t_refnos = vec![];
         //     for &refno in refnos  {
-        //         t_refnos.extend_from_slice(&surreal_service::get_children_refnos(refno).await
+        //         t_refnos.extend_from_slice(&aios_core::get_children_refnos(refno).await
         //             .unwrap_or_default()
         //             // .into_iter()
         //             // .filter(|x|
@@ -84,7 +84,7 @@ impl AiosDBManager {
         //     // refnos
         //     //     .into_iter()
         //     //     .map(|x|
-        //     //         // surreal_service::get_children_refnos(*x).unwrap_or_default().0
+        //     //         // aios_core::get_children_refnos(*x).unwrap_or_default().0
         //     //
         //     //     )
         //     //     .flatten()
@@ -99,7 +99,7 @@ impl AiosDBManager {
         // };
         // for refno in target_refnos {
         //     let mut attr_values = IndexNamedAttMap::new();
-        //     let Ok(attr) = surreal_service::get_named_attmap(refno).await else {
+        //     let Ok(attr) = aios_core::get_named_attmap(refno).await else {
         //         result.push(attr_values);
         //         continue;
         //     };

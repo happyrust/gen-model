@@ -10,7 +10,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::save_arangodb_doc;
 use crate::graph_db::pdms_inst_arango::*;
 use crate::graph_db::pdms_mesh_arango::{save_mesh_data, save_mesh_to_local_db};
-use crate::{consts::*, surreal_service};
+use crate::consts::*;
 #[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::{BoxImplied, TubeImplied};
@@ -95,8 +95,8 @@ pub async fn gen_prim_geos(
                 let mut geo_insts = vec![];
                 let mut item_trans = Transform::IDENTITY;
 
-                // let attr = mgr_clone.surreal_service::get_named_attmap(refno).await.unwrap_or_default();
-                let attr = surreal_service::get_named_attmap(refno)
+                // let attr = mgr_clone.aios_core::get_named_attmap(refno).await.unwrap_or_default();
+                let attr = aios_core::get_named_attmap(refno)
                     .await
                     .unwrap_or_default();
                 let mut geos_info = EleGeosInfo {
@@ -133,7 +133,7 @@ pub async fn gen_prim_geos(
                     // let pgo_refnos = mgr_clone
                     //     .get_children_from_localdb(refno)
                     //     .unwrap_or_default();
-                    let pgo_refnos = surreal_service::get_children_refnos(refno)
+                    let pgo_refnos = aios_core::get_children_refnos(refno)
                         .await
                         .unwrap_or_default();
                     let mut polygons = vec![];
@@ -142,7 +142,7 @@ pub async fn gen_prim_geos(
                         // let v_att = mgr_clone.get_children_attrs(pgo_refno).unwrap_or_default();
                         //todo 改成只获取需要的数据
                         //使用macro 也可以
-                        let v_att = surreal_service::get_children_named_attmaps(pgo_refno)
+                        let v_att = aios_core::get_children_named_attmaps(pgo_refno)
                             .await
                             .unwrap_or_default();
                         for v in v_att {
@@ -276,18 +276,18 @@ pub async fn gen_loop_geos(
             let mut shape_insts_data = instance_mgr.write().await;
             for j in start_idx..end_idx {
                 let loop_refno = all_loop_refnos[j];
-                let Ok(Some(ce_pe)) = surreal_service::get_pe(loop_refno).await else {
+                let Ok(Some(ce_pe)) = aios_core::get_pe(loop_refno).await else {
                     continue;
                 };
                 // let parent_basic = mgr.get_owner_ref_basic(loop_refno).unwrap();
                 let parent_refno = ce_pe.get_owner();
-                let Ok(Some(owner_pe)) = surreal_service::get_pe(parent_refno).await else {
+                let Ok(Some(owner_pe)) = aios_core::get_pe(parent_refno).await else {
                     continue;
                 };
                 //todo get bacsic type
                 let target_type = owner_pe.get_type_str();
                 let cur_type = ce_pe.get_type_str();
-                let mut parent_att = surreal_service::get_named_attmap(parent_refno)
+                let mut parent_att = aios_core::get_named_attmap(parent_refno)
                     .await
                     .unwrap_or_default();
                 let Ok(Some(mut trans_origin)) = mgr.get_world_transform(loop_refno).await else {
@@ -311,7 +311,7 @@ pub async fn gen_loop_geos(
                 let mut fradius_vec: Vec<f32> = vec![];
 
                 if let Ok(children_atts) =
-                    surreal_service::get_children_named_attmaps(loop_refno).await
+                    aios_core::get_children_named_attmaps(loop_refno).await
                 {
                     for a in children_atts {
                         let pt = a.get_position().unwrap_or_default();
@@ -331,7 +331,7 @@ pub async fn gen_loop_geos(
                 }
 
                 let mut children_attmaps =
-                    surreal_service::get_children_named_attmaps(parent_refno)
+                    aios_core::get_children_named_attmaps(parent_refno)
                         .await
                         .unwrap_or_default();
                 let cur_sibling_index = children_attmaps
@@ -391,12 +391,12 @@ pub async fn gen_loop_geos(
                     }
                     //todo 关于justline，可能需要jusline的信息才能判断中心点
                     "AEXTR" | "NXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
-                        let loop_attr = surreal_service::get_named_attmap(loop_refno)
+                        let loop_attr = aios_core::get_named_attmap(loop_refno)
                             .await
                             .unwrap_or_default();
                         //不是第一个loop，需要取第一个的loop的height
                         let mut height = if cur_sibling_index > 0 {
-                            surreal_service::get_named_attmap(
+                            aios_core::get_named_attmap(
                                 children_attmaps[0].get_refno_or_default(),
                             )
                             .await
@@ -520,7 +520,7 @@ pub async fn gen_cata_single_geoms(
     brep_shape_map: &CateBrepShapeMap,
     refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
 ) -> anyhow::Result<RefU64> {
-    let desi_att = surreal_service::get_named_attmap(design_refno).await?;
+    let desi_att = aios_core::get_named_attmap(design_refno).await?;
     let type_name = desi_att.get_type_str();
     let owner = desi_att.get_owner();
     if !owner.is_valid() {
@@ -657,7 +657,7 @@ pub async fn gen_cata_geos(
                         *processed_cnt.lock().await -= 1;
                         //在这里直接处理完所有需要处理的transform
                         let brep_shapes_map = CateBrepShapeMap::new();
-                        let current_att = surreal_service::get_named_attmap(ele_refno)
+                        let current_att = aios_core::get_named_attmap(ele_refno)
                             .await
                             .unwrap_or_default();
                         let mut refno_ptset_map = DashMap::new();
@@ -686,7 +686,7 @@ pub async fn gen_cata_geos(
                                 continue;
                             };
 
-                            let Ok(ele_att) = surreal_service::get_named_attmap(ele_refno).await
+                            let Ok(ele_att) = aios_core::get_named_attmap(ele_refno).await
                             else {
                                 continue;
                             };
@@ -709,7 +709,7 @@ pub async fn gen_cata_geos(
                                 }
                             }
 
-                            let Ok(Some(gmse_refno)) = surreal_service::query_single_map_by_paths(
+                            let Ok(Some(gmse_refno)) = aios_core::query_single_map_by_paths(
                                 cat_refno,
                                 &["->GMRE", "->GSTR"],
                                 &["refno"],
@@ -1046,7 +1046,7 @@ pub async fn gen_cata_geos(
                         };
 
                         let mut flow_pt_indexs = vec![];
-                        let attr = surreal_service::get_named_attmap(ele_refno)
+                        let attr = aios_core::get_named_attmap(ele_refno)
                             .await
                             .unwrap_or_default();
                         if let Some(sjus) = attr.get_str("SJUS") {
@@ -1119,10 +1119,10 @@ pub async fn gen_cata_geos(
         let shape_insts_data = main_instance_mgr.read().await;
         let branch_refno = *b.key();
         // dbg!(branch_refno);
-        let Ok(children) = surreal_service::get_children_pes(branch_refno).await else {
+        let Ok(children) = aios_core::get_children_pes(branch_refno).await else {
             continue;
         };
-        let Ok(branch_att) = surreal_service::get_named_attmap(branch_refno).await else {
+        let Ok(branch_att) = aios_core::get_named_attmap(branch_refno).await else {
             continue;
         };
         // dbg!(&branch_att);
@@ -1146,7 +1146,7 @@ pub async fn gen_cata_geos(
             .unwrap_or_default();
 
         let bran_name = branch_att.get_name_or_default();
-        let tubi_att = surreal_service::get_named_attmap(h_ref)
+        let tubi_att = aios_core::get_named_attmap(h_ref)
             .await
             .unwrap_or_default();
         // dbg!(&tubi_att);
@@ -1326,11 +1326,11 @@ pub async fn gen_cata_geos(
                 }
 
                 let l_pos = world_trans.transform_point(axis_map[&leave].pt);
-                let att_map = surreal_service::get_named_attmap(refno)
+                let att_map = aios_core::get_named_attmap(refno)
                     .await
                     .unwrap_or_default();
                 let lstube_ref = att_map.get_foreign_refno("LSTU").unwrap_or_default();
-                let lstube_cat_ref = surreal_service::get_named_attmap(lstube_ref)
+                let lstube_cat_ref = aios_core::get_named_attmap(lstube_ref)
                     .await
                     .unwrap_or_default()
                     .get_foreign_refno("CATR")
@@ -1546,7 +1546,7 @@ pub async fn gen_all_geos_data(
                 .get_gen_model_target_refnos(GeoEnum::PLOO, &target_dbnos, false)
                 .await?;
             for r in target_ploo_refnos {
-                let Ok(loop_att) = surreal_service::get_named_attmap(r).await else {
+                let Ok(loop_att) = aios_core::get_named_attmap(r).await else {
                     continue;
                 };
                 let owner = loop_att.get_owner();
@@ -1605,7 +1605,7 @@ pub async fn gen_all_geos_data(
             let mut branch_refnos_map = DashMap::new();
             let mut bran_comp_eles = vec![];
             for refno in &target_bran_hanger_refnos {
-                let att = surreal_service::get_named_attmap(*refno)
+                let att = aios_core::get_named_attmap(*refno)
                     .await
                     .unwrap_or_default();
                 //必须按照顺序
@@ -1620,7 +1620,7 @@ pub async fn gen_all_geos_data(
             ///获取重用的信息
             dbg!(&target_bran_hanger_refnos);
             let target_bran_reuse_cata_map = if is_incr_update || is_debug {
-                let map = surreal_service::query_group_by_cata_hash(&target_bran_hanger_refnos)
+                let map = aios_core::query_group_by_cata_hash(&target_bran_hanger_refnos)
                     .await
                     .unwrap_or_default()
                     .into_iter()
@@ -1652,7 +1652,7 @@ pub async fn gen_all_geos_data(
                 let cata_refnos = &incr_update_log.as_ref().unwrap().basic_cata_refnos;
                 //直接使用group的办法，按cata_hash 进行分组
                 for r in cata_refnos {
-                    let Ok(Some(att)) = surreal_service::get_pe(*r).await else {
+                    let Ok(Some(att)) = aios_core::get_pe(*r).await else {
                         continue;
                     };
                     cata_map.insert(
@@ -1868,7 +1868,7 @@ pub async fn gen_all_geos_data(
 
                         // let Ok(children_refnos) = mgr.get_children_from_localdb(comp_refno)
                         let Ok(children_refnos) =
-                            surreal_service::get_children_refnos(comp_refno).await
+                            aios_core::get_children_refnos(comp_refno).await
                         else {
                             continue;
                         };
@@ -2127,7 +2127,7 @@ pub async fn gen_all_geos_data(
                     else {
                         continue;
                     };
-                    let att = surreal_service::get_named_attmap(refno)
+                    let att = aios_core::get_named_attmap(refno)
                         .await
                         .unwrap_or_default();
                     let c_ref = att.get_foreign_refno("CREF");
@@ -2144,7 +2144,7 @@ pub async fn gen_all_geos_data(
                     let mut own_pos_map = HashMap::new();
                     for g in &mut geos_data.insts {
                         let ngmr_geo_refno = g.refno;
-                        let geo_att = surreal_service::get_named_attmap(ngmr_geo_refno)
+                        let geo_att = aios_core::get_named_attmap(ngmr_geo_refno)
                             .await
                             .unwrap_or_default();
                         // dbg!(&geo_att);
@@ -2473,7 +2473,7 @@ pub async fn query_tubi_size(
     }
     // use default
     {
-        if let Ok(cat_att) = surreal_service::get_named_attmap(tubi_cat_ref).await {
+        if let Ok(cat_att) = aios_core::get_named_attmap(tubi_cat_ref).await {
             let params = cat_att.get_f32_vec("PARA").unwrap_or_default();
             if params.len() >= 2 {
                 let tubi_bore = params[if is_hang { 0 } else { 1 }] as f32;

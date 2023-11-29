@@ -58,8 +58,6 @@ pub mod versioned_db;
 
 pub mod mqtt_service;
 
-pub mod surreal_service;
-
 #[macro_use]
 extern crate derive_more;
 

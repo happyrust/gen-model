@@ -28,8 +28,7 @@ use crate::defines::CACHED_REFNO_BASIC_MAP;
 use crate::graph_db::pdms_arango::{remove_edges_arangodb, save_arangodb_with_db_option};
 use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge};
 use crate::mqtt_service::SyncE3dFileMsg;
-use crate::surreal_service;
-use aios_core::orm::pdms_element;
+
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::SUL_DB;
@@ -97,7 +96,7 @@ impl AiosDBManager {
                 let mut ele_op = EleOperation::Modified;
                 // 删除只是owner的children变化了，但是需要记录删除的节点
                 // 只要有返回，说明节点存在，返回为空，说明是叶子节点
-                if let Ok(old_refnos) = surreal_service::get_children_refnos(ele.refno).await {
+                if let Ok(old_refnos) = aios_core::get_children_refnos(ele.refno).await {
                     //检查是否有删除的
                     old_refnos
                         .iter()
@@ -335,7 +334,7 @@ impl AiosDBManager {
 
         //todo 批量查询types
         for (k, v) in owner_children_map {
-            if let Ok(type_name) = surreal_service::get_type_name(k).await {
+            if let Ok(type_name) = aios_core::get_type_name(k).await {
                 if type_name == "BRAN" || type_name == "HANG" {
                     geo_update_log.bran_hanger_refnos.insert(k);
                 }

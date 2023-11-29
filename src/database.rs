@@ -6,18 +6,13 @@ use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
-
-use aios_core::consts::*;
-use aios_core::orm::*;
 use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
-use aios_core::tool::float_tool::f64_round_3;
 use aios_core::types::*;
 use dashmap::{DashMap, DashSet};
 use itertools::Itertools;
 use parse_pdms_db::parse::*;
 use sea_orm::{ConnectionTrait, Schema, Statement};
-use sqlx::pool::PoolConnection;
 use sqlx::{Connection, MySql, MySqlPool, Pool};
 use sqlx::{Error, Executor};
 
@@ -27,19 +22,11 @@ use crate::arangodb::{ArDatabase, ArPool};
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
-use crate::graph_db::ParaDocument;
-use crate::tables;
 use crate::tables::*;
 use crate::versioned_db::client::*;
-use aios_core::cache::mgr::BytesTrait;
-use aios_core::helper::table::{qualified_column_name, qualified_table_name};
 use aios_core::options::DbOption;
-use aios_core::pdms_data::ATTR_INFO_MAP;
-use aios_core::AttrVal::StringType;
 use aios_core::SUL_DB;
-use aios_core::{get_default_pdms_db_info, orm};
-use bevy_reflect::DynamicStruct;
-use parry3d::utils::hashmap::FxHasher32;
+use aios_core::{get_default_pdms_db_info};
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 
@@ -158,10 +145,10 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             let project_db = sea_orm::Database::connect(&db_option.get_mysql_project_db_conn_str())
                 .await
                 .unwrap();
-            let mut create_table_sqls = orm::sql::get_all_create_table_sqls().unwrap();
-            for x in create_table_sqls {
-                project_db.execute_unprepared(&x).await.unwrap();
-            }
+            // let mut create_table_sqls = orm::sql::get_all_create_table_sqls().unwrap();
+            // for x in create_table_sqls {
+            //     project_db.execute_unprepared(&x).await.unwrap();
+            // }
         }
 
         match sync_total_async_threaded(&db_option, project, &["DICT", "SYST"], false).await {

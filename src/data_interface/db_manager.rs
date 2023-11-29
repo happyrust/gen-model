@@ -7,7 +7,7 @@ use crate::aql_api::children::{
 };
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::surreal_service;
+
 use bitflags::bitflags;
 use dashmap::DashMap;
 
@@ -174,7 +174,7 @@ impl AiosDBManager {
                 == 0;
             let mut check_parent = is_parent;
             if is_leaf {
-                if let Some(k) = surreal_service::get_pe(root_refno).await? {
+                if let Some(k) = aios_core::get_pe(root_refno).await? {
                     let mut add = false;
 
                     if let Some(owner_ele) = self.query_element(k.owner).await? {

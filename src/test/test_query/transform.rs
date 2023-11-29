@@ -1,6 +1,6 @@
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::surreal_service;
+
 use crate::test::test_helper::get_test_ams_db_manager_async;
 use aios_core::RefU64;
 use aios_core::SUL_DB;
@@ -15,7 +15,7 @@ async fn test_query_transform() -> anyhow::Result<()> {
     let transform = mgr.get_world_transform(refno).await.unwrap().unwrap();
     dbg!(&transform);
 
-    let pe = surreal_service::get_pe("17496_107068".into())
+    let pe = aios_core::get_pe("17496_107068".into())
         .await
         .unwrap();
     dbg!(pe);

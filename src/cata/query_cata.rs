@@ -2,7 +2,7 @@ use crate::cata::resolve::{resolve_axis_params, resolve_gms};
 use crate::data_interface::interface::PdmsDataInterface;
 // use crate::defines::CACHED_SCOM_INFO_MAP;
 use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
-use crate::surreal_service;
+
 use aios_core::data_center::AttrValue;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
@@ -31,7 +31,7 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
 ) -> anyhow::Result<CateGeomsInfo> {
     let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
-    let desi_att = surreal_service::get_named_attmap(desi_refno).await?;
+    let desi_att = aios_core::get_named_attmap(desi_refno).await?;
     //todo 改到使用图数据库去查找
     if scom_ref_option.is_none() {
         scom_ref_option = interface.get_cat_ref(desi_refno).await;
@@ -69,7 +69,7 @@ pub async fn query_axis_params(refno: RefU64) -> anyhow::Result<BTreeMap<i32, Ax
     // 查找ptse
     let mut map = BTreeMap::new();
     // dbg!(refno);
-    let children = surreal_service::get_children_named_attmaps(refno).await?;
+    let children = aios_core::get_children_named_attmaps(refno).await?;
 
     for child in children {
         //plin不在收集范围
@@ -94,11 +94,11 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
     let mut gms = vec![];
     let refno = attr_map.get_refno().unwrap_or_default();
     let mut children = vec![];
-    for c in surreal_service::get_children_named_attmaps(refno).await? {
+    for c in aios_core::get_children_named_attmaps(refno).await? {
         if TOTAL_CATA_GEO_NOUN_NAMES.contains(&c.get_type_str()) {
             children.push(c.clone());
         } else {
-            for cc in surreal_service::get_children_named_attmaps(c.get_refno_or_default()).await? {
+            for cc in aios_core::get_children_named_attmaps(c.get_refno_or_default()).await? {
                 if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type_str()) {
                     children.push(cc.clone());
                 }
@@ -295,14 +295,14 @@ pub async fn query_gm_param(
     let type_name = a.get_type_str();
     if type_name == "SEXT" || type_name == "NSEX" || type_name == "SREV" || type_name == "NSRE" {
         //先暂时不考虑负实体
-        let children = surreal_service::get_children_named_attmaps(refno)
+        let children = aios_core::get_children_named_attmaps(refno)
             .await
             .ok()?;
         for child in children {
             if let Some(r) = child.get_refno()
                 && child.get_type_str() == "SLOO"
             {
-                for a in surreal_service::get_children_named_attmaps(r)
+                for a in aios_core::get_children_named_attmaps(r)
                     .await
                     .unwrap_or_default()
                 {
@@ -318,7 +318,7 @@ pub async fn query_gm_param(
     } else {
         let cur_type = interface.get_type_name(refno).await;
         if is_spro && cur_type.as_str() == "SPRO" {
-            for a in surreal_service::get_children_named_attmaps(refno)
+            for a in aios_core::get_children_named_attmaps(refno)
                 .await
                 .ok()
                 .unwrap_or_default()

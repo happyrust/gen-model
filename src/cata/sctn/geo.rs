@@ -1,6 +1,6 @@
 use std::default;
 use std::f32::consts::PI;
-use crate::surreal_service;
+
 use std::vec::Vec;
 use aios_core::AttrMap;
 use aios_core::parsed_data::{CateProfileParam, CateGeomsInfo};
@@ -42,23 +42,23 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
     let parent_refno = att.get_owner();
     let mut spine_paths = if type_name == "GENSEC" || type_name == "WALL" {
         // let children_refs = interface.get_children_from_localdb(refno)?;
-        let children_refs = surreal_service::get_children_refnos(refno).await.unwrap_or_default();
+        let children_refs = aios_core::get_children_refnos(refno).await.unwrap_or_default();
         let mut paths = vec![];
         for x in children_refs.iter() {
             let type_name = interface.get_type_name(*x).await;
             if type_name != "SPINE" {
                 continue;
             }
-            let spine_att = surreal_service::get_named_attmap(*x).await?;
+            let spine_att = aios_core::get_named_attmap(*x).await?;
             drns = spine_att.get_vec3("DRNS").unwrap_or_default();
             drne = spine_att.get_vec3("DRNE").unwrap_or_default();
             // let ch_refs = interface.get_children_from_localdb(*x)?;
-            let ch_refs = surreal_service::get_children_refnos(*x).await.unwrap_or_default();
+            let ch_refs = aios_core::get_children_refnos(*x).await.unwrap_or_default();
             if (ch_refs.len() - 1) % 2 == 0 {
                 for i in 0..(ch_refs.len() - 1) / 2 {
-                    let att1 = surreal_service::get_named_attmap(ch_refs[2 * i]).await?;
-                    let att2 = surreal_service::get_named_attmap(ch_refs[2 * i + 1]).await?;
-                    let att3 = surreal_service::get_named_attmap(ch_refs[2 * i + 2]).await?;
+                    let att1 = aios_core::get_named_attmap(ch_refs[2 * i]).await?;
+                    let att2 = aios_core::get_named_attmap(ch_refs[2 * i + 1]).await?;
+                    let att3 = aios_core::get_named_attmap(ch_refs[2 * i + 2]).await?;
                     let pt0 = att1.get_position().unwrap_or_default();
                     let pt1 = att3.get_position().unwrap_or_default();
                     let mid_pt = att2.get_position().unwrap_or_default();
@@ -80,8 +80,8 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                     });
                 }
             } else if ch_refs.len() == 2 {
-                let att1 = surreal_service::get_named_attmap(ch_refs[0]).await?;
-                let att2 = surreal_service::get_named_attmap(ch_refs[1]).await?;
+                let att1 = aios_core::get_named_attmap(ch_refs[0]).await?;
+                let att2 = aios_core::get_named_attmap(ch_refs[1]).await?;
                 let pt0 = att1.get_position().unwrap_or_default();
                 let pt1 = att2.get_position().unwrap_or_default();
                 if att1.get_type_str() == "POINSP" && att2.get_type_str() == "POINSP" {

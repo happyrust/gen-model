@@ -50,7 +50,7 @@ use pdms_io::watch::PdmsWatcher;
 use std::boxed::Box;
 // use redb::{ReadableTable, TableDefinition};
 use crate::mqtt_service::MqttInstance;
-use crate::surreal_service;
+
 use aios_core::SUL_DB;
 use aios_core::{AttrMap, NamedAttrValue, RefU64Vec};
 use rumqttc::{AsyncClient, EventLoop};
@@ -112,7 +112,7 @@ impl PdmsDataInterface for AiosDBManager {
             let k = PDMS_ATT_MAP_CACHE.get(&refno).unwrap();
             Ok(k.value().clone())
         } else {
-            let attr = surreal_service::get_named_attmap(refno).await?;
+            let attr = aios_core::get_named_attmap(refno).await?;
             PDMS_ATT_MAP_CACHE
                 .insert(refno, &attr)
                 .expect("PDMS_ATT_MAP_CACHE save error.");
@@ -121,7 +121,7 @@ impl PdmsDataInterface for AiosDBManager {
     }
 
     async fn get_type_name(&self, refno: RefU64) -> String {
-        surreal_service::get_type_name(refno)
+        aios_core::get_type_name(refno)
             .await
             .unwrap_or_default()
     }
@@ -129,7 +129,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///获得下一个构件的参考号
     async fn get_next(&self, refno: RefU64) -> anyhow::Result<RefU64> {
         let owner = self.get_owner(refno);
-        let children_refnos = surreal_service::get_children_refnos(owner).await?;
+        let children_refnos = aios_core::get_children_refnos(owner).await?;
         let pos = children_refnos
             .iter()
             .position(|x| *x == refno)
@@ -144,7 +144,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///获得上一个构件的参考号
     async fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64> {
         let owner = self.get_owner(refno);
-        let children_refnos = surreal_service::get_children_refnos(owner).await?;
+        let children_refnos = aios_core::get_children_refnos(owner).await?;
         let pos = children_refnos
             .iter()
             .position(|x| *x == refno)
@@ -430,7 +430,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获得参考号下的子节点
     async fn get_children_refs(&self, refno: RefU64) -> anyhow::Result<RefU64Vec> {
-        surreal_service::get_children_refnos(refno)
+        aios_core::get_children_refnos(refno)
             .await
             .map(|x| x.into())
     }
@@ -686,7 +686,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///使用cache，需要从db manager里移除出来
     ///获得世界坐标系, 需要缓存数据，如果已经存在数据了，直接获取
     async fn get_world_transform(&self, refno: RefU64) -> anyhow::Result<Option<Transform>> {
-        let mut ancestors = surreal_service::get_ancestor_attmaps(refno).await?;
+        let mut ancestors = aios_core::get_ancestor_attmaps(refno).await?;
         ancestors.reverse();
         // dbg!(&ancestors);
         let mut rotation = Quat::IDENTITY;
@@ -726,13 +726,13 @@ impl PdmsDataInterface for AiosDBManager {
                     //todo fix
                     //找到spine，获取spine的两个顶点
                     // let mut positions: Vec<Vec3> =
-                    //     surreal_service::get_children_named_attmaps(ref_basic.owner)
+                    //     aios_core::get_children_named_attmaps(ref_basic.owner)
                     //         .await
                     //         .unwrap_or_default()
                     //         .into_iter()
                     //         .find(|x| x.get_type_str() == "SPINE")
                     //         .map(|x| async {
-                    //             surreal_service::get_children_named_attmaps(x.get_refno().unwrap_or_default())
+                    //             aios_core::get_children_named_attmaps(x.get_refno().unwrap_or_default())
                     //                 .await
                     //                 .unwrap_or_default()
                     //                 .into_iter()
@@ -785,7 +785,7 @@ impl PdmsDataInterface for AiosDBManager {
                 cut_dir = att.get_vec3("CUTP").unwrap_or(cut_dir);
                 let cut_len = att.get_f32("CUTB").unwrap_or_default();
                 if c_ref.is_valid()
-                    && let Ok(c_att) = surreal_service::get_named_attmap(c_ref).await
+                    && let Ok(c_att) = aios_core::get_named_attmap(c_ref).await
                     && let Some(poss) = c_att.get_poss()
                     && let Some(pose) = c_att.get_pose()
                 {
@@ -830,7 +830,7 @@ impl PdmsDataInterface for AiosDBManager {
             //         }
             //         // dbg!(plin_owner);
             //         // dbg!(pos_line);
-            //         target_own_att = surreal_service::get_named_attmap(plin_owner).await.unwrap_or_default();
+            //         target_own_att = aios_core::get_named_attmap(plin_owner).await.unwrap_or_default();
             //         let own_pos_line = target_own_att.get_str_or_default("JUSL");
             //         // dbg!(own_pos_line);
             //         cur_plin_param = self.query_pline(plin_owner, pos_line).await?;
@@ -938,7 +938,7 @@ impl PdmsDataInterface for AiosDBManager {
         let children =
             query_deep_children_refnos_fuzzy(&self.get_arango_db().await?, &[refno], nouns).await?;
         for child in children {
-            let attr = surreal_service::get_named_attmap(child)
+            let attr = aios_core::get_named_attmap(child)
                 .await
                 .unwrap_or_default();
             r.push(attr);
@@ -980,15 +980,15 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获取对应的截面sweep 线，包含了sctn的处理情况
     async fn get_spline_path(&self, refno: RefU64) -> anyhow::Result<Vec<Spine3D>> {
-        let children_refs = surreal_service::get_children_refnos(refno).await?;
+        let children_refs = aios_core::get_children_refnos(refno).await?;
         let mut paths = vec![];
         for x in children_refs {
             let type_name = self.get_type_name(x).await;
             if type_name != "SPINE" {
                 continue;
             }
-            let spine_att = surreal_service::get_named_attmap(x).await?;
-            let children_atts = surreal_service::get_children_named_attmaps(x).await?;
+            let spine_att = aios_core::get_named_attmap(x).await?;
+            let children_atts = aios_core::get_children_named_attmaps(x).await?;
             if (children_atts.len() - 1) % 2 == 0 {
                 for i in 0..(children_atts.len() - 1) / 2 {
                     let att1 = &(children_atts[2 * i]);
@@ -1033,7 +1033,7 @@ impl PdmsDataInterface for AiosDBManager {
 
         //考虑sctn这种直接拉升出来的情况
         if paths.is_empty() {
-            let att = surreal_service::get_named_attmap(refno).await?;
+            let att = aios_core::get_named_attmap(refno).await?;
             if let Some(poss) = att.get_poss()
                 && let Some(pose) = att.get_pose()
             {
@@ -1053,7 +1053,7 @@ impl PdmsDataInterface for AiosDBManager {
     ///获得外键的属性
     #[inline]
     async fn get_foreign_refno(&self, refno: RefU64, foreign: &str) -> Option<RefU64> {
-        let att = surreal_service::get_named_attmap(refno).await.ok()?;
+        let att = aios_core::get_named_attmap(refno).await.ok()?;
         att.get_foreign_refno(foreign)
     }
 
@@ -1061,7 +1061,7 @@ impl PdmsDataInterface for AiosDBManager {
     #[inline]
     async fn get_foreign_attrmap(&self, refno: RefU64, foreign: &str) -> Option<NamedAttrMap> {
         if let Some(f) = self.get_foreign_refno(refno, foreign).await {
-            surreal_service::get_named_attmap(f).await.ok()
+            aios_core::get_named_attmap(f).await.ok()
         } else {
             None
         }
@@ -1077,25 +1077,25 @@ impl PdmsDataInterface for AiosDBManager {
     ///获得元件库的catr参考号
     #[inline]
     async fn get_cat_ref(&self, refno: RefU64) -> Option<RefU64> {
-        surreal_service::get_cat_refno(refno).await.ok().flatten()
+        aios_core::get_cat_refno(refno).await.ok().flatten()
     }
 
     ///获得元件库的catr属性数据
     #[inline]
     async fn get_cat_attmap(&self, refno: RefU64) -> Option<NamedAttrMap> {
-        surreal_service::get_cat_attmap(refno).await.ok()
+        aios_core::get_cat_attmap(refno).await.ok()
     }
 
     ///收集几何参数
     async fn query_gm_params(&self, refno: RefU64) -> anyhow::Result<Vec<GmParam>> {
         let mut gms = vec![];
         let mut children = vec![];
-        for c in surreal_service::get_children_named_attmaps(refno).await? {
+        for c in aios_core::get_children_named_attmaps(refno).await? {
             if TOTAL_CATA_GEO_NOUN_NAMES.contains(&c.get_type_str()) {
                 children.push(c.clone());
             }
             //有可能嵌套负实体
-            for cc in surreal_service::get_children_named_attmaps(c.get_refno_or_default()).await? {
+            for cc in aios_core::get_children_named_attmaps(c.get_refno_or_default()).await? {
                 if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type_str()) {
                     children.push(cc.clone());
                 }
@@ -1123,7 +1123,7 @@ impl PdmsDataInterface for AiosDBManager {
             info.value().clone()
         } else {
             // dbg!(cata_refno);
-            let attr_map = surreal_service::get_named_attmap(cata_refno).await?;
+            let attr_map = aios_core::get_named_attmap(cata_refno).await?;
             let type_noun = attr_map.get_type_str();
             let ptref_name = match type_noun {
                 "SPRF" => "PSTR",
@@ -1153,7 +1153,7 @@ impl PdmsDataInterface for AiosDBManager {
 
             let mut plin_map = HashMap::new();
             if let Some(pstr_refno) = attr_map.get_foreign_refno("PSTR") {
-                let pstr_am = surreal_service::get_children_named_attmaps(pstr_refno).await?;
+                let pstr_am = aios_core::get_children_named_attmaps(pstr_refno).await?;
                 for a in pstr_am {
                     if let Some(k) = a.get_as_string("PKEY") {
                         plin_map.insert(
@@ -1202,7 +1202,7 @@ impl PdmsDataInterface for AiosDBManager {
         let cata_context = if let Some(cata) = CATA_CONTEXT_MAP.get(&desi_refno) {
             cata.value().clone()
         } else {
-            let desi_att = surreal_service::get_named_attmap(desi_refno).await?;
+            let desi_att = aios_core::get_named_attmap(desi_refno).await?;
             let mut context = CataContext::default();
             if let Some(v) = desi_att.get_as_string("JUSL") {
                 context.insert("JUSL".into(), v.into());
@@ -1306,20 +1306,20 @@ impl PdmsDataInterface for AiosDBManager {
                 }
                 let mut owner_ref = desi_att.get_owner();
                 //todo 需要换掉
-                let mut owner_att = surreal_service::get_named_attmap(owner_ref).await?;
+                let mut owner_att = aios_core::get_named_attmap(owner_ref).await?;
                 //todo use a single query to get all the ancestors' attmap
                 while !owner_att.contains_key("GTYP") {
                     if owner_att.get_refno().is_none() || owner_att.get_type_str() == "ZONE" {
                         break;
                     }
                     owner_ref = owner_att.get_owner();
-                    // owner_att = surreal_service::get_named_attmap(owner_ref).await.unwrap_or_default();
-                    owner_att = surreal_service::get_named_attmap(owner_ref).await?;
+                    // owner_att = aios_core::get_named_attmap(owner_ref).await.unwrap_or_default();
+                    owner_att = aios_core::get_named_attmap(owner_ref).await?;
                 }
 
                 //dtse 的信息处理
                 let dtre_refno: RefU64 = cata_attmap.get_foreign_refno("DTRE").unwrap_or_default();
-                let children = surreal_service::get_children_named_attmaps(dtre_refno).await?;
+                let children = aios_core::get_children_named_attmaps(dtre_refno).await?;
                 //如果只查部分数据，可以改一下接口
                 for child in children {
                     if let Some(k) = child.get_as_string("DKEY") {
@@ -1383,7 +1383,7 @@ impl PdmsDataInterface for AiosDBManager {
         //传入额外的参数进来，用于解析轴线参数
         desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
     ) -> anyhow::Result<CateGeomsInfo> {
-        let desi_att = surreal_service::get_named_attmap(desi_refno).await?;
+        let desi_att = aios_core::get_named_attmap(desi_refno).await?;
         // dbg!(&desi_att);
         //todo 改到使用图数据库去查找
         if scom_ref_option.is_none() {

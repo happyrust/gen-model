@@ -1,5 +1,5 @@
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::surreal_service;
+
 use crate::test::test_helper::get_test_ams_db_manager_async;
 use aios_core::SUL_DB;
 use aios_core::{NamedAttrMap, RefU64};
@@ -9,8 +9,8 @@ use std::sync::Arc;
 #[tokio::test]
 async fn test_query_pe_by_refno() -> anyhow::Result<()> {
     super::init_test_surreal().await;
-    // let pe = surreal_service::get_pe("17496/254421".into()).await.unwrap();
-    let pe = surreal_service::get_pe("17496_266621".into())
+    // let pe = aios_core::get_pe("17496/254421".into()).await.unwrap();
+    let pe = aios_core::get_pe("17496_266621".into())
         .await
         .unwrap();
     dbg!(pe);
@@ -21,15 +21,15 @@ async fn test_query_pe_by_refno() -> anyhow::Result<()> {
 async fn test_query_ancestor_by_refno() -> anyhow::Result<()> {
     super::init_test_surreal().await;
     let refno: RefU64 = "17496_107068".into();
-    let type_name = surreal_service::get_type_name(refno)
+    let type_name = aios_core::get_type_name(refno)
         .await
         .unwrap_or_default();
     dbg!(&type_name);
-    let ancestor = surreal_service::get_ancestor("17496_107068".into())
+    let ancestor = aios_core::get_ancestor("17496_107068".into())
         .await
         .unwrap();
     dbg!(ancestor);
-    let ancestor_maps = surreal_service::get_ancestor_attmaps("17496_107068".into())
+    let ancestor_maps = aios_core::get_ancestor_attmaps("17496_107068".into())
         .await
         .unwrap();
     dbg!(ancestor_maps);
@@ -60,29 +60,29 @@ async fn test_query_wtrans_by_refno() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_query_att_by_refno() {
     super::init_test_surreal().await;
-    let attmap = surreal_service::get_named_attmap("15302_2194".into()).await;
+    let attmap = aios_core::get_named_attmap("15302_2194".into()).await;
     dbg!(attmap);
 }
 
 #[tokio::test]
 async fn test_query_children() {
     super::init_test_surreal().await;
-    let refnos = surreal_service::get_children_refnos("17496_171104".into()).await;
+    let refnos = aios_core::get_children_refnos("17496_171104".into()).await;
     dbg!(refnos);
-    let refnos = surreal_service::get_children_refnos("17496_171188".into()).await;
+    let refnos = aios_core::get_children_refnos("17496_171188".into()).await;
     dbg!(refnos);
-    let refnos = surreal_service::get_children_refnos("17496_0".into()).await;
+    let refnos = aios_core::get_children_refnos("17496_0".into()).await;
     dbg!(refnos);
 }
 
 #[tokio::test]
 async fn test_query_children_att() {
     super::init_test_surreal().await;
-    // let children_atts = surreal_service::get_children_named_attmaps("17496_171555".into()).await;
+    // let children_atts = aios_core::get_children_named_attmaps("17496_171555".into()).await;
     // dbg!(children_atts);
-    // let children_pes = surreal_service::get_children_pes("17496_171555".into()).await;
+    // let children_pes = aios_core::get_children_pes("17496_171555".into()).await;
     // dbg!(children_pes);
-    let children_atts = surreal_service::get_children_named_attmaps("15192_338265".into())
+    let children_atts = aios_core::get_children_named_attmaps("15192_338265".into())
         .await
         .unwrap();
     dbg!(children_atts);
@@ -107,12 +107,12 @@ async fn test_query_custom() -> anyhow::Result<()> {
 async fn test_query_cata() -> anyhow::Result<()> {
     super::init_test_surreal().await;
 
-    let cat_refno = surreal_service::get_cat_refno("17496_266621".into())
+    let cat_refno = aios_core::get_cat_refno("17496_266621".into())
         .await
         .unwrap();
     dbg!(cat_refno);
     // get_cat_attmap
-    let cat_attmap = surreal_service::get_cat_attmap("17496_266621".into())
+    let cat_attmap = aios_core::get_cat_attmap("17496_266621".into())
         .await
         .unwrap();
     dbg!(cat_attmap);
@@ -123,7 +123,7 @@ async fn test_query_cata() -> anyhow::Result<()> {
 async fn test_query_path() -> anyhow::Result<()> {
     super::init_test_surreal().await;
     let cat_refno =
-        surreal_service::query_single_map_by_paths("15194/5835".into(), &["->GMRE"], &[])
+        aios_core::query_single_map_by_paths("15194/5835".into(), &["->GMRE"], &[])
             .await
             .unwrap();
     dbg!(cat_refno);
@@ -133,7 +133,7 @@ async fn test_query_path() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_query_paths() -> anyhow::Result<()> {
     super::init_test_surreal().await;
-    let cat_refno = surreal_service::query_single_map_by_paths(
+    let cat_refno = aios_core::query_single_map_by_paths(
         "15194/5835".into(),
         &["->GMRE", "->GMSR"],
         &["id"],

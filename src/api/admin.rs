@@ -16,7 +16,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::consts::TEAM_DATA_TABLE;
 use aios_core::pdms_user::PdmsElementWithUser;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::surreal_service;
+
 
 ///管理员信息
 #[derive(Default, Debug, Serialize, Deserialize)]
@@ -39,7 +39,7 @@ pub async fn sync_system_db(mgr: &AiosDBManager) -> anyhow::Result<()> {
         let all_db_refnos = query_all_db_refnos(project_db.value()).await?;
         for db_refno in all_db_refnos {
             // let db_attr = mgr.get_attr(db_refno).await;
-            let Ok(db_attr) = surreal_service::get_named_attmap(db_refno).await else{
+            let Ok(db_attr) = aios_core::get_named_attmap(db_refno).await else{
                 continue;
             };
             let team_refno = query_ancestor_till_types_aql(&database, db_refno, vec!["TEAM"]).await?;
