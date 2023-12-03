@@ -1,11 +1,3 @@
-use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs;
-use std::fs::File;
-use std::mem::take;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Instant;
 use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::types::*;
@@ -15,6 +7,15 @@ use parse_pdms_db::parse::*;
 use sea_orm::{ConnectionTrait, Schema, Statement};
 use sqlx::{Connection, MySql, MySqlPool, Pool};
 use sqlx::{Error, Executor};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs;
+use std::fs::File;
+use std::mem::take;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Instant;
 
 use crate::api::element::*;
 use crate::aql_api::PdmsPLINAttrAql;
@@ -24,9 +25,9 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::tables::*;
 use crate::versioned_db::client::*;
+use aios_core::get_default_pdms_db_info;
 use aios_core::options::DbOption;
 use aios_core::SUL_DB;
-use aios_core::{get_default_pdms_db_info};
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 
@@ -286,6 +287,9 @@ pub async fn sync_total_async_threaded(
 
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string(); // 获取文件名
+        // if !file_name.contains("amssys") {
+        //     continue;
+        // }
         {
             let mut file = File::open(&path).unwrap();
             let mut buf = vec![0u8; 60];
@@ -391,24 +395,46 @@ pub async fn sync_total_async_threaded(
                         if type_name.is_empty() {
                             continue;
                         }
+                        //UDA 还是要单独存，不然数据很容易混乱
                         for refnos in &kv.value().iter().chunks(ATTS_CHUNK_COUNT) {
                             let mut json_vec = vec![];
+                            let mut uda_json_vec = vec![];
                             for refno in refnos {
                                 let att = total_attr_map_arc.get(refno).unwrap();
+                                if *refno == RefU64::from_str("24575/1475").unwrap() {
+                                    dbg!(att.value());
+                                }
                                 let Some(json) = att.gen_sur_json() else {
                                     continue;
                                 };
                                 json_vec.push(json);
+                                let Some(json) = att.gen_sur_json_uda(&[]) else {
+                                    continue;
+                                };
+                                uda_json_vec.push(json);
                             }
-                            let sql = format!(
-                                "INSERT IGNORE INTO {} [{}]",
-                                &type_name,
-                                json_vec.join(",")
-                            );
-                            //使用surreal 保存NamedAttrMap
-                            join_set.spawn(async move {
-                                SUL_DB.query(sql).await.unwrap();
-                            });
+                            if !json_vec.is_empty() {
+                                let sql = format!(
+                                    "INSERT IGNORE INTO {} [{}]",
+                                    &type_name,
+                                    json_vec.join(",")
+                                );
+                                //使用surreal 保存NamedAttrMap
+                                join_set.spawn(async move {
+                                    SUL_DB.query(sql).await.unwrap();
+                                });
+                            }
+
+                            if !uda_json_vec.is_empty() {
+                                let sql = format!(
+                                    "INSERT IGNORE INTO ATT_UDA [{}]",
+                                    uda_json_vec.join(",")
+                                );
+                                //使用surreal 保存NamedAttrMap
+                                join_set.spawn(async move {
+                                    SUL_DB.query(sql).await.unwrap();
+                                });
+                            }
                         }
                     }
                     //等待保存任务完成
