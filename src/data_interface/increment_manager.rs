@@ -66,8 +66,9 @@ impl AiosDBManager {
         }
         let mut modify_type_eles_map = HashMap::new();
         let mut added_type_eles_map = HashMap::new();
+        let mut delete_keys = vec![];
         let mut delete_maps: HashMap<RefU64, IncrementInfo> = HashMap::new();
-        let mut deleted_set = HashSet::new();
+        let mut deleted_refnos_set = HashSet::new();
 
         let mut total_add_len = 0;
         let mut total_modify_len = 0;
@@ -76,7 +77,6 @@ impl AiosDBManager {
         let mut owner_children_map = IndexMap::new();
         let mut deleted_owner_set = IndexSet::new();
         let mut all_relate_sqls = vec![];
-        // let mut all_relate_sqls = vec![];
         for (path, (basic_info, last_pageno)) in increment_ranges_map {
             let mut io = PdmsIO::new(path, true);
             io.open()?;
@@ -102,7 +102,9 @@ impl AiosDBManager {
                         .iter()
                         .filter(|x| !ele.children.contains(*x))
                         .for_each(|&x| {
-                            deleted_set.insert((x, ele.owner));
+                            let key = x.hash_with_another_refno(ele.refno);
+                            delete_keys.push(key.to_string());
+                            deleted_refnos_set.insert(x);
                             //执行的是父节点的操作
                             ele_op = EleOperation::Deleted;
                             dbg!(x);
@@ -149,15 +151,6 @@ impl AiosDBManager {
                     //如果是负实体这种发生修改，需要更新owner
                     //如果有cref这些，
                     //存储删除的语句
-                    //一般的正实体，都可以不用管这个，但是要跟新pe的信息，设为deleted
-                    let relate_sqls = deleted_set.iter().map(|&(x, o)| {
-                        format!(
-                            "DELETE pe:{}->pe_owner WHERE out=pe:{}",
-                            x.to_string(),
-                            o.to_string()
-                        )
-                    }).collect::<Vec<String>>();
-                    all_relate_sqls.extend_from_slice(&relate_sqls);
                 } else {
                     //todo 添加overwrite模式，覆盖之前的数据
                     //提供一个channel传入，在指定的地方执行
