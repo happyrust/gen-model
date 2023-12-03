@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use aios_core::options::DbOption;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::arangodb::ArDatabase;
-use crate::surreal_service;
+
 
 macro_rules! find_f32_min_value {
     ($collection:expr, $field:ident) => {
@@ -874,7 +874,7 @@ impl AiosDBManager {
         //     .into_iter()
         //     .map(|x| {
         //         (*x, {
-        //             let children = surreal_service::get_children_refnos(*x).unwrap_or_default();
+        //             let children = aios_core::get_children_refnos(*x).unwrap_or_default();
         //             if children.is_empty() {
         //                 vec![*x]
         //             } else {
@@ -1331,7 +1331,7 @@ impl AiosDBManager {
         //         .filter(|x| self.get_type_name(*x) == "PLOO")
         //         .collect::<Vec<_>>();
         //     if ploo.is_empty() { continue; };
-        //     let Ok(ploo_attr) = surreal_service::get_named_attmap(ploo[0]) else { continue; };
+        //     let Ok(ploo_attr) = aios_core::get_named_attmap(ploo[0]) else { continue; };
         //     let Some(AttrVal::DoubleType(height)) = ploo_attr.get_val("HEIG") else { continue; };
         //     let result = ((distance - *height as f32) * 100.0).round() / 100.0;
         //     if result < 0.0 { continue; };
@@ -1365,7 +1365,7 @@ impl AiosDBManager {
         own_filter_types: &[&str],
         intersect_method: IntersectMethod,
     ) -> anyhow::Result<Vec<SpatialQueryResult>> {
-        let mut children_refnos = surreal_service::get_children_refnos(refno).await?;
+        let mut children_refnos = aios_core::get_children_refnos(refno).await?;
         let mut result: Vec<SpatialQueryResult> = Vec::new();
         for r in children_refnos {
             let around = self

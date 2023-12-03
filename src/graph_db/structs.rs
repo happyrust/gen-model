@@ -1,20 +1,20 @@
-use std::collections::HashMap;
-use std::fmt::format;
 use aios_core::pdms_types::RefU64;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use serde_with::serde_as;
-use serde_with::DisplayFromStr;
-use std::str::FromStr;
 use parry2d::simba::scalar::SupersetOf;
 use serde::ser::SerializeStruct;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::json;
+use serde_with::serde_as;
+use serde_with::DisplayFromStr;
+use std::collections::HashMap;
+use std::fmt::format;
+use std::str::FromStr;
 
 ///版本数据库里存储的索引值
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(tag = "@type", rename = "PdmsElement")]
 pub struct PdmsEleDataVersioned {
-    #[serde(rename="@id")]
+    #[serde(rename = "@id")]
     pub id: String,
     #[serde_as(as = "DisplayFromStr")]
     pub refno: RefU64,
@@ -40,14 +40,14 @@ fn is_zero(refno: &RefU64) -> bool {
 }
 
 pub fn ser_refno_as_ref_type<S>(refno: &RefU64, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer {
+where
+    S: Serializer,
+{
     // let mut r = s.serialize_struct("PdmsElementData", 1)?;
     // r.serialize_field("@ref", &format!("PdmsElement/{}", refno.to_string()) )?;
     // r.end()
     s.serialize_str(&format!("PdmsElement/{}", refno.to_string()))
 }
-
 
 impl PdmsEleDataVersioned {
     //"@class": "PdmsElement",
@@ -70,14 +70,13 @@ impl PdmsEleDataVersioned {
         "status_tag": {
             "@class": "xsd:string",
             "@type": "Optional"
-        }, 
+        },
         "cata_hash": {
             "@class": "xsd:string",
             "@type": "Optional"}
         }"#
     }
 }
-
 
 #[serde_as]
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -93,9 +92,8 @@ pub struct PdmsEleData {
     pub order: u32,
     pub dbnum: i32,
     #[serde(default)]
-    pub cata_hash: Option<String>,
+    pub cata_hash: String,
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct PdmsEleGraphEdge {
@@ -142,16 +140,17 @@ pub struct PdmsInstanceGraphEdge {
     pub _to: String,
 }
 
-
 pub fn ser_refno_as_ele_edge<S>(refno: &RefU64, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer {
+where
+    S: Serializer,
+{
     s.serialize_str(format!("pdms_eles/{}", refno.to_string()).as_str())
 }
 
 pub fn de_refno_as_edge<'de, D>(deserializer: D) -> Result<RefU64, D::Error>
-    where
-        D: Deserializer<'de> {
+where
+    D: Deserializer<'de>,
+{
     if let Some(s) = String::deserialize(deserializer)?.split("/").skip(1).next() {
         Ok(RefU64::from_str(s).unwrap_or_default())
     } else {

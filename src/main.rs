@@ -10,20 +10,19 @@ extern crate nom;
 
 use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
+use aios_core::SUL_DB;
 use aios_database::api::admin::sync_system_db;
 use aios_database::data_interface::interface::PdmsDataInterface;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::database::*;
-use aios_database::ssc::{
-    get_room_info_from_excel_refactor, insert_ssc_room_node_refactor, save_ssc_level_excel,
-};
-use aios_database::surreal_service::SUL_DB;
+use aios_database::ssc::*;
 use chrono::{Datelike, Local, Timelike};
 use futures::StreamExt;
 use itertools::Itertools;
 use nom::Parser;
 use nom_derive::Parse;
 // use regex::internal::Input;
+use aios_core::get_db_option;
 use aios_core::options::DbOption;
 use aios_core::tool::direction_parse::parse_expr_to_dir;
 use aios_core::tool::math_tool::{cal_mat3_by_zdir, to_pdms_ori_str};
@@ -36,12 +35,10 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Instant;
-use aios_core::get_db_option;
 use surrealdb::engine::remote::ws::Ws;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-
     let db_option: DbOption = get_db_option().clone();
     // 如果启用了日志功能
     if db_option.enable_log {
@@ -95,14 +92,14 @@ async fn main() -> anyhow::Result<()> {
     /// 创建db manager
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
 
-    // #[cfg(feature = "gen_model")]
-    // if db_option.gen_model {
-    //     println!("正在生成模型");
-    //     let mut time = Instant::now();
-    //     gen_all_geos_data(mgr.clone(), None).await?;
-    //     println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
-    // }
-    //
+    #[cfg(feature = "gen_model")]
+    if db_option.gen_model {
+        println!("正在生成模型");
+        let mut time = Instant::now();
+        gen_all_geos_data(mgr.clone(), None).await?;
+        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+    }
+
     // ///生成ssc 树
     // /// 需要 resource 下文档 ssc_level.xlsx  ssc_room.xlsx 专业分类.xlsx
     // if db_option.rebuild_ssc_tree {

@@ -7,6 +7,7 @@ use crate::aql_api::children::{
 };
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
+
 use bitflags::bitflags;
 use dashmap::DashMap;
 
@@ -31,29 +32,15 @@ bitflags! {
 }
 
 impl AiosDBManager {
+    ///获得db number 对应的site参考号
     pub async fn get_gen_model_root_refnos(&self, db_nos: &[i32]) -> anyhow::Result<Vec<RefU64>> {
         let db_option = &self.db_option;
         let mut target_refnos = vec![];
-        let mut is_debug = false;
-        if db_option.debug_root_refnos.is_some() {
-            //是否是叶子节点
-            for str in db_option.debug_root_refnos.as_ref().unwrap() {
-                is_debug = true;
-                if let Ok(root_refno) = RefU64::from_refno_str(str) {
-                    if crate::surreal_service::get_named_attmap(root_refno).await.is_ok() {
-                        target_refnos.push(root_refno);
-                    }
-                }
-            }
-        }
-
-        if !is_debug {
-            for &db_no in db_nos {
-                let refnos = self
-                    .get_refnos_by_types(db_option.project_name.as_str(), &["SITE"], &[db_no])
-                    .await?;
-                target_refnos.extend_from_slice(&refnos);
-            }
+        for &db_no in db_nos {
+            let refnos = self
+                .get_refnos_by_types(db_option.project_name.as_str(), &["SITE"], &[db_no])
+                .await?;
+            target_refnos.extend_from_slice(&refnos);
         }
 
         Ok(target_refnos)
@@ -91,15 +78,17 @@ impl AiosDBManager {
                     let Ok(name) = self.get_name(root_refno).await else {
                         continue;
                     };
-                    let is_leaf = self.get_children_refs(root_refno).await.unwrap_or_default().len() == 0;
+                    let is_leaf = self
+                        .get_children_refs(root_refno)
+                        .await
+                        .unwrap_or_default()
+                        .len()
+                        == 0;
                     if is_leaf {
                         if let Some(k) = self.query_element(root_refno).await? {
                             let mut add = false;
 
-                            if let Some(owner_ele) = self
-                                .query_element(k.owner)
-                                .await?
-                            {
+                            if let Some(owner_ele) = self.query_element(k.owner).await? {
                                 if CATA_HAS_TUBI_GEO_NAMES.contains(&owner_ele.noun.as_str())
                                     || CATA_HAS_TUBI_GEO_NAMES.contains(&k.noun.as_str())
                                 {
@@ -177,16 +166,18 @@ impl AiosDBManager {
             let Ok(name) = self.get_name(root_refno).await else {
                 continue;
             };
-            let is_leaf = self.get_children_refs(root_refno).await.unwrap_or_default().len() == 0;
+            let is_leaf = self
+                .get_children_refs(root_refno)
+                .await
+                .unwrap_or_default()
+                .len()
+                == 0;
             let mut check_parent = is_parent;
             if is_leaf {
-                if let Some(k) = self.query_element(root_refno).await? {
+                if let Some(k) = aios_core::get_pe(root_refno).await? {
                     let mut add = false;
 
-                    if let Some(owner_ele) = self
-                        .query_element(k.owner)
-                        .await?
-                    {
+                    if let Some(owner_ele) = self.query_element(k.owner).await? {
                         if owner_ele.noun.as_str() == "BRAN" || owner_ele.noun.as_str() == "HANG" {
                             add = geo_type == GeoEnum::CATA_BRAN_AND_HANGER_REUSE;
                         } else if CATA_SINGLE_REUSE_GEO_NAMES.contains(&k.noun.as_str()) {
@@ -196,16 +187,14 @@ impl AiosDBManager {
                         }
                     }
                     if add {
-                        if let Some(r) = k.cata_hash.clone() {
-                            target_refnos_map.insert(
-                                r.clone(),
-                                CataHashRefnoKV {
-                                    cata_hash: Some(r),
-                                    exist_geo: None,
-                                    group_refnos: vec![root_refno],
-                                },
-                            );
-                        }
+                        target_refnos_map.insert(
+                            k.cata_hash.clone(),
+                            CataHashRefnoKV {
+                                cata_hash: k.cata_hash,
+                                exist_geo: None,
+                                group_refnos: vec![root_refno],
+                            },
+                        );
                     }
                 }
             } else {
@@ -219,7 +208,7 @@ impl AiosDBManager {
                 .await?;
                 // dbg!(s.len());
                 for k in s {
-                    target_refnos_map.insert(k.cata_hash.clone().unwrap_or_default(), k);
+                    target_refnos_map.insert(k.cata_hash.clone(), k);
                 }
             }
         }

@@ -1,44 +1,13 @@
-use crate::graph_db::structs::PdmsEleDataVersioned;
-use crate::surreal_service::SUL_DB;
-use aios_core::options::DbOption;
-use aios_core::orm::pdms_element;
-use aios_core::orm::pdms_element::Model;
 use aios_core::pdms_types::*;
+use aios_core::pe::SPdmsElement;
+use aios_core::SUL_DB;
 use dashmap::DashMap;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use itertools::Itertools;
 use sea_orm::entity::prelude::*;
-use serde::Deserialize;
-use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Instant;
-use aios_core::pe::SPdmsElement;
-use surrealdb::dbs::Response;
-use surrealdb::sql::Thing;
-use tokio::task::JoinHandle;
 
-// pub async fn get_versioned_client(project: &str) -> TDBClient {
-//     let mut client = termnius_client::client::TDBClientBuilder::default()
-//         // .server_url("http://192.168.31.179:6363".to_string())
-//         .server_url("http://localhost:6363".to_string())
-//         .auth_info(termnius_client::client::AuthInfo::new())
-//         .session_info(termnius_client::client::SessionInfo::new())
-//         .repo_info(termnius_client::client::RepoInfo {
-//             team: "admin".to_string(),
-//             db: project.to_string(),
-//             branch: "main".to_string(),
-//             ref_val: None,
-//             repo: "local".to_string(),
-//             db_info: Default::default(),
-//             author: "".to_string(),
-//         })
-//         .build()
-//         .unwrap();
-//
-//     client
-// }
 
 const JSON_CHUNK_COUNT: usize = 10_000;
 
@@ -99,7 +68,6 @@ const JSON_CHUNK_COUNT: usize = 10_000;
 //     Ok(())
 // }
 
-
 /// 保存element数据到版本管理
 /// todo 后续再考虑 record links
 // 先暂时使用relate的方式
@@ -130,7 +98,7 @@ pub async fn save_pdms_eles_to_surreal(
                 name: att_map.get_string_or_default("NAME"),
                 noun: att_map.get_type(),
                 dbnum: db_num,
-                cata_hash: att_map.cal_cata_hash().map(|x| x.to_string()),
+                cata_hash: att_map.cal_cata_hash(),
                 status_tag: None,
                 version_tag: None,
                 e3d_version: att_map.get_e3d_version(),
@@ -156,16 +124,13 @@ pub async fn save_pdms_eles_to_surreal(
             // break;
         }
         let mut jsons_str = vec![];
-        for m in models{
+        for m in models {
             jsons_str.push(m.gen_sur_json());
         }
         let sql = format!("INSERT IGNORE INTO pe [{}]", jsons_str.join(","));
         //手动修改，替换掉""
-        join_set.spawn(async move{
-            SUL_DB
-                .query(sql)
-                .await
-                .unwrap();
+        join_set.spawn(async move {
+            SUL_DB.query(sql).await.unwrap();
         });
     }
     while let Some(_) = join_set.join_next().await {}
@@ -197,8 +162,8 @@ pub async fn save_pdms_eles_to_surreal(
         all_relate_sqls.extend_from_slice(&relate_sqls);
     }
     let mut chunks = all_relate_sqls.chunks(JSON_CHUNK_COUNT);
-    for mut s in chunks{
-        let sql =  s.into_iter().join(";");
+    for mut s in chunks {
+        let sql = s.into_iter().join(";");
         relate_join_set.spawn(async move {
             SUL_DB.query(sql).await.unwrap();
         });

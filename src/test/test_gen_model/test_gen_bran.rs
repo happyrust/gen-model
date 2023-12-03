@@ -1,6 +1,6 @@
 use crate::data_interface::gen_model::gen_all_geos_data;
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
-use crate::surreal_service;
+
 use crate::test::test_helper::get_test_ams_db_manager_async;
 use crate::test::test_query::init_test_surreal;
 use std::sync::Arc;

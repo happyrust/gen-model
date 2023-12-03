@@ -94,7 +94,7 @@ pub async fn save_pdms_element_to_arango(
         let name = cal_default_name(refno, &whole_attr, children_map);
         let noun = whole_attr.get_type_str();
         let order = get_order(refno, &whole_attr, &children_map) as u32;
-        let cata_hash = whole_attr.cal_cata_hash().map(|x| x.to_string());
+        let cata_hash = whole_attr.cal_cata_hash();
         let pdms_element = PdmsEleData {
             refno,
             owner,

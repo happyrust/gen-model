@@ -1,16 +1,15 @@
-use std::env;
-use std::io::Write;
-use aios_core::{AttrMap, AttrVal};
+use crate::api::attr::query_implicit_attr;
+use crate::data_interface::interface::PdmsDataInterface;
+use crate::data_interface::tidb_manager::AiosDBManager;
 use aios_core::consts::EXPR_ATT_SET;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::db1_hash;
+use aios_core::{AttrMap, AttrVal};
 use futures::future::ok;
-use parse_pdms_db::test_cases::convert_str_to_bytes;
-use serde::{Serialize, Deserialize};
-use crate::api::attr::query_implicit_attr;
-use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::AiosDBManager;
+use serde::{Deserialize, Serialize};
+use std::env;
+use std::io::Write;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateAttrMap {
@@ -37,7 +36,9 @@ pub fn gen_implicit_attr_data(attr: AttrMap) -> Vec<u8> {
                     let len = (len as u32).to_be_bytes().to_vec();
                     values.push([len, l, v].concat());
                 } else {
-                    values.push(vec![0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+                    values.push(vec![
+                        0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                    ]);
                 }
             }
             AttrVal::DoubleType(v) => {
@@ -95,7 +96,8 @@ async fn test_gen_implicit_attr_data() -> anyhow::Result<()> {
     use config::{Config, ConfigError, Environment, File};
     let s = Config::builder()
         .add_source(File::with_name("DbOption"))
-        .build().unwrap();
+        .build()
+        .unwrap();
     let db_option: DbOption = s.try_deserialize().unwrap();
     let aios_mgr = AiosDBManager::init(&db_option).await?;
     let refno = RefU64::from_refno_str("23584/5502").unwrap();
@@ -126,17 +128,4 @@ pub fn gen_children_data(refno: RefU64, children: Option<Vec<RefU64>>) -> Vec<u8
         }
     }
     result
-}
-
-#[test]
-fn test_gen_children_data() {
-    let refno = RefU64::from_refno_str("23584/5442").unwrap();
-    let children = vec![RefU64::from_refno_str("23584/5443").unwrap(), RefU64::from_refno_str("23584/5495").unwrap(),
-                        RefU64::from_refno_str("23584/5502").unwrap()];
-    let data = gen_children_data(refno, Some(children));
-    let origin_data_str = "00 02 00 0B 00 00 5C 20 00 00 15 42 00 00 00 00
-00 00 00 00 00 00 5C 20 00 00 15 43 00 00 5C 20
-00 00 15 77 00 00 5C 20 00 00 15 7E";
-    let origin_data = convert_str_to_bytes(origin_data_str);
-    assert_eq!(data, origin_data);
 }

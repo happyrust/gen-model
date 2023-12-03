@@ -27,23 +27,22 @@ use crate::data_interface::increment_record::{IncrEleUpdateLog, IncrGeoUpdateLog
 use crate::defines::CACHED_REFNO_BASIC_MAP;
 use crate::graph_db::pdms_arango::{remove_edges_arangodb, save_arangodb_with_db_option};
 use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge};
-use crate::surreal_service;
-use crate::surreal_service::SUL_DB;
-use aios_core::orm::pdms_element;
+use crate::mqtt_service::SyncE3dFileMsg;
+
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
-use aios_core::{AttrMap, AttrVal, get_db_option, RefU64Vec};
+use aios_core::SUL_DB;
+use aios_core::{get_db_option, AttrMap, AttrVal, RefU64Vec};
 use itertools::Itertools;
 use pdms_io::defines::DbPageBasicInfo;
+use pdms_io::sync::compress::{execute_compress, CompressOptions};
+use rumqttc::QoS;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
-use pdms_io::sync::compress::{CompressOptions, execute_compress};
-use rumqttc::QoS;
 use surrealdb::sql::Thing;
 use tokio::task::JoinSet;
 use walkdir::WalkDir;
-use crate::mqtt_service::SyncE3dFileMsg;
 
 #[derive(Debug, Default, Clone)]
 pub struct IncrementInfo {
@@ -81,7 +80,9 @@ impl AiosDBManager {
         for (path, (basic_info, last_pageno)) in increment_ranges_map {
             let mut io = PdmsIO::new(path, true);
             io.open()?;
-            let eles = io.collect_increment_eles(&basic_info, Some(last_pageno))?;
+            let eles = io
+                .collect_increment_eles(&basic_info, Some(last_pageno))
+                .await?;
             dbg!(eles.len());
             for ele in eles {
                 let mut attmap: NamedAttrMap = ele.whole_attmap.merge().into();
@@ -95,7 +96,7 @@ impl AiosDBManager {
                 let mut ele_op = EleOperation::Modified;
                 // 删除只是owner的children变化了，但是需要记录删除的节点
                 // 只要有返回，说明节点存在，返回为空，说明是叶子节点
-                if let Ok(old_refnos) = surreal_service::get_children_refnos(ele.refno).await {
+                if let Ok(old_refnos) = aios_core::get_children_refnos(ele.refno).await {
                     //检查是否有删除的
                     old_refnos
                         .iter()
@@ -134,7 +135,7 @@ impl AiosDBManager {
                         .entry(attmap.get_owner())
                         .or_insert_with(HashSet::new)
                         .insert(refno);
-                }else{
+                } else {
                     owner_children_map
                         .entry(attmap.get_owner())
                         .or_insert_with(HashSet::new)
@@ -240,7 +241,7 @@ impl AiosDBManager {
                         e3d_version: k.attr.get_e3d_version(),
                         version_tag: None,
                         status_tag: None,
-                        cata_hash: k.attr.cal_cata_hash().map(|x| x.to_string()),
+                        cata_hash: k.attr.cal_cata_hash(),
                         lock: false,
                         deleted: false,
                     };
@@ -275,8 +276,10 @@ impl AiosDBManager {
 
         let mut del_join_set = tokio::task::JoinSet::new();
         //删除模型的处理
-        for chunk in &deleted_refnos_set.iter().chunks(JSON_CHUNK_COUNT){
-            let mut del_sqls = chunk.into_iter().map(|k| format!("update pe:{} set deleted = true;", k))
+        for chunk in &deleted_refnos_set.iter().chunks(JSON_CHUNK_COUNT) {
+            let mut del_sqls = chunk
+                .into_iter()
+                .map(|k| format!("update pe:{} set deleted = true;", k))
                 .collect::<Vec<_>>();
             dbg!(&del_sqls);
             del_join_set.spawn(async move {
@@ -298,11 +301,19 @@ impl AiosDBManager {
                 let mut update_vec = vec![];
                 for k in chunk {
                     let refno = k.refno;
-                    update_vec.push(format!("update pe:{} set name = '{}'", refno, k.attr.get_name_or_default()));
+                    update_vec.push(format!(
+                        "update pe:{} set name = '{}'",
+                        refno,
+                        k.attr.get_name_or_default()
+                    ));
                     if let Some(json) = k.attr.gen_sur_json_exclude(&["id"]) {
                         println!("{}", &json);
-                        update_vec.push(format!("update {}:{} content {}", k.attr.get_type_str()
-                                                , refno, json));
+                        update_vec.push(format!(
+                            "update {}:{} content {}",
+                            k.attr.get_type_str(),
+                            refno,
+                            json
+                        ));
                     }
                 }
                 // dbg!(&update_vec);
@@ -330,7 +341,7 @@ impl AiosDBManager {
 
         //todo 批量查询types
         for (k, v) in owner_children_map {
-            if let Ok(type_name) = surreal_service::get_type_name(k).await {
+            if let Ok(type_name) = aios_core::get_type_name(k).await {
                 if type_name == "BRAN" || type_name == "HANG" {
                     geo_update_log.bran_hanger_refnos.insert(k);
                 }
@@ -407,7 +418,6 @@ impl AiosDBManager {
             .await
             .unwrap();
 
-
         println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_deleted_len}");
 
         Ok(true)
@@ -431,12 +441,14 @@ impl AiosDBManager {
                 let path = dir_entry.path();
                 //只处理0001 结尾的文件
                 let file_name = path.file_stem().unwrap().to_str().unwrap();
-                if path.is_dir() || !file_name.ends_with("0001"){
+                if path.is_dir() || !file_name.ends_with("0001") {
                     continue;
                 }
-                self.watcher.file_name_full_path_map.insert(file_name.to_owned(), path.to_path_buf());
+                self.watcher
+                    .file_name_full_path_map
+                    .insert(file_name.to_owned(), path.to_path_buf());
                 //初始化CBA的Archive文件，来保证后续增量下载
-                let input= path.to_path_buf();
+                let input = path.to_path_buf();
                 let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
                 join_set.spawn(async move {
                     // let compress_opt = CompressOptions::new(input, output);
@@ -505,7 +517,10 @@ impl AiosDBManager {
             match res {
                 Ok(event) => {
                     //跳过只是meta data变动的情况
-                    if matches!(event.kind, notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))) {
+                    if matches!(
+                        event.kind,
+                        notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
+                    ) {
                         continue;
                     }
                     // println!("changed: {:?}", &event);
@@ -535,24 +550,30 @@ impl AiosDBManager {
                                 for (path, new_header) in new_headers {
                                     let file_name = path.file_stem().unwrap().to_str().unwrap();
                                     // dbg!(&file_name);
-                                    if path.is_dir() || !file_name.ends_with("0001"){
+                                    if path.is_dir() || !file_name.ends_with("0001") {
                                         continue;
                                     }
                                     //这个地方是不是需要直接去读取文件，然后更新headers，不能太依赖json数据
                                     //或者每次启动都重新更新这个文件？
                                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
                                         //未发生修改，直接跳过
-                                        if old.pdms_header.page_no >= new_header.pdms_header.page_no {
+                                        if old.pdms_header.page_no >= new_header.pdms_header.page_no
+                                        {
                                             continue;
                                         }
                                         *old.value_mut() = new_header;
 
                                         //发生修改的文件，重新生成archive
                                         // dbg!(&path);
-                                        let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
+                                        let output: PathBuf =
+                                            format!("asset/archives/{}.cba", file_name).into();
                                         // dbg!(&output);
-                                        let compress_opt = CompressOptions::new(path.clone(), output);
-                                        let file_hash = execute_compress(compress_opt).await.unwrap().to_string();
+                                        let compress_opt =
+                                            CompressOptions::new(path.clone(), output);
+                                        let file_hash = execute_compress(compress_opt)
+                                            .await
+                                            .unwrap()
+                                            .to_string();
 
                                         //数据库里不存在这个file hash的记录，才需要
                                         let mut response  = SUL_DB
@@ -581,13 +602,20 @@ impl AiosDBManager {
                         dbg!(&notify_file_names);
                         let payload = SyncE3dFileMsg::new(notify_file_names, notify_file_hashes);
                         //自己本地也要保存, todo 后续还是要配置哪些dbs，哪个地方能修改，哪个地方是不能改的
-                        SUL_DB.query(format!("INSERT INTO e3d_sync {} "
-                                             , serde_json::to_string(&payload).unwrap())).await.unwrap();
+                        SUL_DB
+                            .query(format!(
+                                "INSERT INTO e3d_sync {} ",
+                                serde_json::to_string(&payload).unwrap()
+                            ))
+                            .await
+                            .unwrap();
                         //todo 检查是否只是发生了claim page的变化，如果只是claim修改，是需要每次都同步？
                         //会导致出现循环
-                        self.mqtt_client.clone().publish("Sync/E3d",
-                                                 QoS::ExactlyOnce, true, payload).await.unwrap();
-
+                        self.mqtt_client
+                            .clone()
+                            .publish("Sync/E3d", QoS::ExactlyOnce, true, payload)
+                            .await
+                            .unwrap();
                     }
                 }
                 Err(e) => println!("watch error: {:?}", e),
