@@ -125,7 +125,7 @@ pub async fn get_inst_equi_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -
 //         .build()?;
 //     let db_option: DbOption = s.try_deserialize().unwrap();
 //     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-//     let refno = RefU64::from_refno_str("24381/104050").unwrap();
+//     let refno = RefU64::from_str("24381/104050").unwrap();
 //     let data = get_inst_data(refno, &database).await;
 //     let mut file = fs::File::create("仪控.json")?;
 //     let data = serde_json::to_string(&data).unwrap();

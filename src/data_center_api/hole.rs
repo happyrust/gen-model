@@ -154,7 +154,7 @@ async fn gen_stucj_data(id: u32, pool: &Pool<MySql>) -> Vec<DataCenterAttr> {
         for i in 0..33 {
             let name = format!("STUCJ{}", i);
             let value = stucj_data_map.get(&name);
-            if value.is_none() { continue; }
+            if value.is_err() { continue; }
             let value = value.unwrap();
             result.push(DataCenterAttr {
                 attribute_model_code: name,
@@ -171,7 +171,7 @@ async fn gen_stucj_data_aql(hole_data: VirtualHoleGraphNode) -> Vec<DataCenterAt
         for i in 0..33 {
             let name = format!("STUCJ{}", i);
             let value = stucj_data_map.get(&name);
-            if value.is_none() { continue; }
+            if value.is_err() { continue; }
             let value = value.unwrap();
             result.push(DataCenterAttr {
                 attribute_model_code: name,
@@ -188,7 +188,7 @@ async fn gen_stucg_data(id: u32, pool: &Pool<MySql>) -> Vec<DataCenterAttr> {
         for i in 0..33 {
             let name = format!("STUCG{}", i);
             let value = stucj_data_map.get(&name);
-            if value.is_none() { continue; }
+            if value.is_err() { continue; }
             let value = value.unwrap();
             result.push(DataCenterAttr {
                 attribute_model_code: name,
@@ -205,7 +205,7 @@ async fn gen_stucg_data_aql(hole_data: VirtualHoleGraphNode) -> Vec<DataCenterAt
         for i in 0..33 {
             let name = format!("STUCG{}", i);
             let value = stucj_data_map.get(&name);
-            if value.is_none() { continue; }
+            if value.is_err() { continue; }
             let value = value.unwrap();
             result.push(DataCenterAttr {
                 attribute_model_code: name,
@@ -223,7 +223,7 @@ async fn gen_stuch_data(id: u32, pool: &Pool<MySql>) -> Vec<DataCenterAttr> {
         for i in 0..33 {
             let name = format!("STUCH{}", i);
             let value = stucj_data_map.get(&name);
-            if value.is_none() { continue; }
+            if value.is_err() { continue; }
             let value = value.unwrap();
             result.push(DataCenterAttr {
                 attribute_model_code: name,
@@ -240,7 +240,7 @@ async fn gen_stuch_data_aql(hole_data: VirtualHoleGraphNode) -> Vec<DataCenterAt
         for i in 0..33 {
             let name = format!("STUCH{}", i);
             let value = stucj_data_map.get(&name);
-            if value.is_none() { continue; }
+            if value.is_err() { continue; }
             let value = value.unwrap();
             result.push(DataCenterAttr {
                 attribute_model_code: name,
@@ -834,7 +834,7 @@ pub async fn replace_hole_data_to_arangodb(datas: Vec<VirtualHoleGraphNode>, dat
 async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArDatabase) -> anyhow::Result<()> {
     let mut edges = Vec::new();
     for d in data {
-        let refno = RefU64::from_refno_str(&d.rely_item_ref);
+        let refno = RefU64::from_str(&d.rely_item_ref);
         if refno.is_err() { continue; }
         let refno = refno.unwrap();
         let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
@@ -856,7 +856,7 @@ async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArDa
 async fn replace_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArDatabase) -> anyhow::Result<()> {
     let mut edges = Vec::new();
     for d in data {
-        let refno = RefU64::from_refno_str(&d.rely_item_ref);
+        let refno = RefU64::from_str(&d.rely_item_ref);
         if refno.is_err() { continue; }
         let refno = refno.unwrap();
         let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
@@ -1023,7 +1023,7 @@ async fn test_gen_stucj_data() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
-    // let refno = RefU64::from_refno_str("24383/101196").unwrap();
+    // let refno = RefU64::from_str("24383/101196").unwrap();
     let mut instances = Vec::new();
     for i in 0..40 {
         if let Some(r) = query_hole_data_tidb(i, &pool).await {

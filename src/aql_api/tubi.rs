@@ -1,21 +1,17 @@
 use std::sync::Arc;
 use aios_core::data_center::TubiData;
-// use aios_core::data_center::TubiData;
-use aios_core::pdms_types::RefU64;
 use aios_core::prim_geo::tubing::TubiEdge;
 use bb8_arangodb::arangors_lite::{AqlQuery, Database};
-
 use dashmap::DashMap;
 use glam::Vec3;
-
-
-use smol_str::SmolStr;
+use std::str::FromStr;
+use aios_core::RefU64;
 use sqlx::{Executor, MySql, Pool};
 use crate::api::element::query_name;
 use crate::aql_api::children::query_travel_children_with_type_aql;
 use crate::aql_api::foreign_refnos::{query_foreign_name_aql, query_foreign_refno_aql};
 use crate::arangodb::ArDatabase;
-use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_ELES_COLLECTION, AQL_TUBI_EDGES_COLLECTION};
+use crate::consts::*;
 use crate::data_interface::db_model::TUBI_TOL;
 
 /// 找到某个节点下所有的 bran 中的 tubi
@@ -29,8 +25,8 @@ pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<
             if distance >= TUBI_TOL {
                 let from_refno = tubi._from.split("/").collect::<Vec<_>>();
                 if from_refno.is_empty() { continue; }
-                let from_refno = RefU64::from_url_refno(from_refno.last().unwrap());
-                if from_refno.is_none() { continue; }
+                let from_refno = RefU64::from_str(from_refno.last().unwrap());
+                if from_refno.is_err() { continue; }
                 let from_refno = from_refno.unwrap();
                 // 如果是 tubi 在 bran 的第一个，取 bran 的 hstu
                 let spre = if from_refno == bran.refno {
@@ -162,7 +158,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArD
 //     let mut mgr = AiosDBManager::init_form_config().await;
 //     let database = mgr.as_ref().expect("REASON").get_arangodb_conn().await.unwrap().clone();
 //     let mut pos_vec = Vec::new();
-//     let refno = RefU64::from_refno_str("24381/147719").unwrap();
+//     let refno = RefU64::from_str("24381/147719").unwrap();
 //     // 取arrive，leave
 //     let data = query_bran_info(refno, &database).await.unwrap();
 //     //取hpos,取tpos
@@ -176,7 +172,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArD
 //         if i.att_type == "ELBO" || i.att_type == "BEND" {
 //             let refno: Vec<&str> = i._to.split("/").collect();
 //             let refno = refno[1];
-//             let result = mgr.as_ref().unwrap().get_world_transform(RefU64::from_url_refno(refno).unwrap()).unwrap().unwrap().clone().await;
+//             let result = mgr.as_ref().unwrap().get_world_transform(RefU64::from_str(refno).unwrap()).unwrap().unwrap().clone().await;
 //             pos_vec.push(result.translation);
 //         }
 //     }
@@ -283,8 +279,8 @@ pub async fn query_tubi_lstu(bran_refno: RefU64, database: &ArDatabase) -> anyho
     let mut result = Vec::new();
     let tubis = query_tubi_from_bran_filter_atta(bran_refno, &database).await?;
     for tubi in tubis {
-        let from_refno = RefU64::from_arangodb_refno_str(&tubi._from);
-        if from_refno.is_none() { continue; }
+        let from_refno = RefU64::from_str(&tubi._from);
+        if from_refno.is_err() { continue; }
         let from_refno = from_refno.unwrap();
         // bran下面的 tubi应该取hstu
         let lstu = if bran_refno == from_refno {
@@ -311,7 +307,7 @@ async fn test_query_tubi_from_bran_filter_atta() -> anyhow::Result<()> {
     //     .build()?;
     // let db_option: DbOption = s.try_deserialize().unwrap();
     // let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    // let refno = RefU64::from_refno_str("23584/5443").unwrap();
+    // let refno = RefU64::from_str("23584/5443").unwrap();
     // let results = query_tubi_lstu(refno, &database).await?;
     // dbg!(&results);
     Ok(())

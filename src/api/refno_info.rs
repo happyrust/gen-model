@@ -11,10 +11,8 @@ use bb8_arangodb::arangors_lite::Database;
 use crate::consts::*;
 use dashmap::DashMap;
 use sqlx::{Error, MySql, Pool, Row};
-use sqlx::mysql::MySqlRow;
 use crate::api::attr::query_explicit_attr;
 use crate::api::element::query_types_refnos;
-use crate::aql_api::plin_attr::query_plin_attrs;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::defines::CACHED_REFNO_BASIC_MAP;
 use crate::arangodb::ArDatabase;
@@ -102,20 +100,6 @@ pub async fn sync_refno_basic_map(pool: &Pool<MySql>) -> anyhow::Result<bool> {
     Ok(true)
 }
 
-pub async fn cache_plin_plax(pool: &Pool<MySql>, dbnos: &[i32], arango_db: &ArDatabase) -> anyhow::Result<DashMap<RefU64, String>> {
-    let mut fitt_map = vec![];
-    let fitt_refnos = query_types_refnos(&vec!["FITT"], pool, dbnos).await?;
-    if fitt_refnos.len() == 0 { return Ok(DashMap::new()); }
-    let sql = gen_query_refnos_implicit_string_attr("FITT", vec!["POSL"], fitt_refnos);
-    let results = sqlx::query(&sql).fetch_all(pool).await?;
-    for result in results {
-        let refno = RefU64(result.get::<i64, _>("ID") as u64);
-        let pos_line = result.get::<String, _>("POSL");
-        fitt_map.push((refno, pos_line));
-    }
-    let result = query_plin_attrs(fitt_map, arango_db).await.unwrap_or_default();
-    Ok(result)
-}
 
 /// 通过uda，获取设备的底标高
 pub async fn query_refno_height_position(refno: RefU64, pool: &Pool<MySql>) -> anyhow::Result<String> {

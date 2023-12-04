@@ -49,7 +49,7 @@ pub fn get_latest_data_page(input: &[u8], refno: RefU64, att_type: &str) -> Opti
 //
 //     let data_page = DataPageModify {
 //         last_page_no: 0xF29,
-//         refno: RefU64::from_refno_str("23584/5931").unwrap(),
+//         refno: RefU64::from_str("23584/5931").unwrap(),
 //         attr_type: "STWALL".to_string(),
 //         noun_type: "POS".to_string(),
 //         data: AttrVal::Vec3Type([13898.39, -1534.99, 0.0]),
@@ -71,7 +71,7 @@ pub fn get_latest_data_page(input: &[u8], refno: RefU64, att_type: &str) -> Opti
 //
 //     let data_page = DataPageModify {
 //         last_page_no: 0xF29,
-//         refno: RefU64::from_refno_str("23584/5931").unwrap(),
+//         refno: RefU64::from_str("23584/5931").unwrap(),
 //         attr_type: "STWALL".to_string(),
 //         noun_type: "DRGP".to_string(),
 //         data: AttrVal::IntegerType(100),

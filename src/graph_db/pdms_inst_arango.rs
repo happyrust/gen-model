@@ -2,6 +2,7 @@ use aios_core::geom_types::RvmGeoInfo;
 use std::collections::HashMap;
 use std::mem::take;
 use aios_core::pdms_types::*;
+use aios_core::SUL_DB;
 use bb8_arangodb::arangors_lite::AqlQuery;
 use bevy_transform::prelude::Transform;
 use glam::{Mat3, Quat, Vec3};
@@ -70,20 +71,20 @@ pub async fn save_mesh_instance_data(
     let collection = AQL_PDMS_INST_GEO_COLLECTION;
     let edge_collection = "instance_edges";
     let database = mgr.get_arango_db().await?;
-    let mut instances = vec![];
-    let mut edges = vec![];
+
     println!("开始保存instance数据");
 
     //保存inst geos 数据
-    let mut sur_jsons = vec![];
-    // for chunk in &inst_mgr.inst_geos_map.iter().chunks(1000) {
     let keys = inst_mgr.inst_geos_map.keys().collect::<Vec<_>>();
+    let mut join_set = tokio::task::JoinSet::new();
     for chunk in keys.chunks(1000) {
+        let mut instances = vec![];
+        let mut json_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_geos_map.get(k).unwrap();
             let json = serde_json::to_value(v).unwrap();
             instances.push(json);
-            sur_jsons.push(v.gen_sur_json());
+            json_vec.push(v.gen_sur_json());
         }
         // println!("{}", sur_jsons.join(","));
         let aql = AqlQuery::new(r#"
@@ -94,16 +95,30 @@ pub async fn save_mesh_instance_data(
             .bind_var("@collection", collection)
             .bind_var("elements", take(&mut instances));
         database.aql_query::<Vec<()>>(aql).await?;
+
+        if !json_vec.is_empty() {
+            let sql = format!(
+                "INSERT IGNORE INTO {} [{}]",
+                stringify!(inst_geos),
+                json_vec.join(",")
+            );
+            //使用surreal 保存NamedAttrMap
+            join_set.spawn(async move {
+                SUL_DB.query(sql).await.unwrap();
+            });
+        }
     }
+    while let Some(_) = join_set.join_next().await {}
 
     //保存tubi的数据
+    let mut join_set = tokio::task::JoinSet::new();
     let collection = AQL_PDMS_INST_TUBI_COLLECTION;
     let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
     for chunk in keys.chunks(1000) {
+        let mut instances = vec![];
+        let mut json_vec: Vec<String> = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_tubi_map.get(k).unwrap();
-    // for chunk in &inst_mgr.inst_tubi_map.iter().chunks(1000) {
-    //     for (_, k) in chunk {
             let json = serde_json::to_value(v).unwrap();
             instances.push(json);
         }
@@ -113,20 +128,33 @@ pub async fn save_mesh_instance_data(
                     FOR d IN data
                         INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
             .bind_var("@collection", collection)
-            .bind_var("elements", take(&mut instances))
-            ;
+            .bind_var("elements", take(&mut instances));
         database.aql_query::<Vec<()>>(aql).await?;
+
+        if !json_vec.is_empty() {
+            let sql = format!(
+                "INSERT IGNORE INTO {} [{}]",
+                stringify!(inst_geos),
+                json_vec.join(",")
+            );
+            //使用surreal 保存NamedAttrMap
+            join_set.spawn(async move {
+                SUL_DB.query(sql).await.unwrap();
+            });
+        }
     }
 
     //直接用record link来链接mesh
     //保存inst info 数据
     let collection = AQL_PDMS_INST_INFO_COLLECTION;
     let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
+    let mut join_set = tokio::task::JoinSet::new();
     for chunk in keys.chunks(1000) {
+        let mut instances = vec![];
+        let mut edges = vec![];
+        let mut json_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_info_map.get(k).unwrap();
-    // for chunk in &inst_mgr.inst_info_map.iter().chunks(1000) {
-    //     for k in chunk {
             let json = serde_json::to_value(v).unwrap();
             instances.push(json);
             let edge = PdmsInstanceGraphEdge {
@@ -135,6 +163,7 @@ pub async fn save_mesh_instance_data(
                 _to: format!("{}/{}", collection, k.to_url_refno()),
             };
             edges.push(serde_json::to_value(&edge).unwrap());
+            json_vec.push(v.gen_sur_json());
         }
         let aql = AqlQuery::new(r#"
         with @@collection
@@ -152,16 +181,28 @@ pub async fn save_mesh_instance_data(
             .bind_var("@collection", edge_collection)
             .bind_var("edges", take(&mut edges));
         database.aql_query::<Vec<()>>(aql).await?;
+
+        if !json_vec.is_empty() {
+            let sql = format!(
+                "INSERT IGNORE INTO {} [{}]",
+                stringify!(inst_info),
+                json_vec.join(",")
+            );
+            //使用surreal 保存NamedAttrMap
+            join_set.spawn(async move {
+                SUL_DB.query(sql).await.unwrap();
+            });
+        }
     }
+    while let Some(_) = join_set.join_next().await {}
 
     let collection = AQL_PDMS_COMPOUND_INST_INFO_COLLECTION;
     println!("开始保存负实体instance数据");
     let keys = inst_mgr.compound_inst_info_map.keys().collect::<Vec<_>>();
     for chunk in keys.chunks(1000) {
+        let mut instances = vec![];
         for &k in chunk {
             let v = inst_mgr.compound_inst_info_map.get(k).unwrap();
-    // for chunk in &inst_mgr.compound_inst_info_map.iter().chunks(1000) {
-    //     for k in chunk {
             let json = serde_json::to_value(v).unwrap();
             instances.push(json);
         }
@@ -178,10 +219,9 @@ pub async fn save_mesh_instance_data(
     let collection = AQL_PDMS_NGMS_INST_INFO_COLLECTION;
     let keys = inst_mgr.ngmr_inst_info_map.keys().collect::<Vec<_>>();
     for chunk in keys.chunks(1000) {
+        let mut instances = vec![];
         for &k in chunk {
             let v = inst_mgr.ngmr_inst_info_map.get(k).unwrap();
-    // for chunk in &inst_mgr.ngmr_inst_info_map.iter().chunks(1000) {
-    //     for k in chunk {
             let json = serde_json::to_value(v).unwrap();
             instances.push(json);
         }

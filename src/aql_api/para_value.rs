@@ -40,7 +40,7 @@ async fn test_query_para_from_desi_refno() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let result = query_para_from_desi_refno(RefU64::from_refno_str("23584/5931").unwrap(), &database).await?;
+    let result = query_para_from_desi_refno(RefU64::from_str("23584/5931").unwrap(), &database).await?;
     dbg!(&result);
     Ok(())
 }

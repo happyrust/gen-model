@@ -33,12 +33,12 @@ pub async fn get_plugging_material_datas(select_refno: Vec<RefU64>, database: &A
     // 通过实体孔洞的name找到refno
     let hole_name_refnos = query_refno_from_names_under_select_refno(select_refno, hole_names, database).await?;
     let hole_refno_map = hole_name_refnos.clone().into_iter()
-        .filter(|x| RefU64::from_url_refno(&x.refno).is_some())
-        .map(|x| (x.name, RefU64::from_url_refno(&x.refno).unwrap()))
+        .filter(|x| RefU64::from_str(&x.refno).is_some())
+        .map(|x| (x.name, RefU64::from_str(&x.refno).unwrap()))
         .collect::<HashMap<String, RefU64>>();
     // 计算孔洞两边的房间
     let hole_refnos = hole_name_refnos.into_iter()
-        .filter_map(|h| RefU64::from_url_refno(&h.refno))
+        .filter_map(|h| RefU64::from_str(&h.refno))
         .collect::<Vec<_>>();
     let room_map = aios_mgr.query_through_element_room_nums(&hole_refnos, Some(&vec![Neg, CateNeg, CateCrossNeg])).await.unwrap_or_default();
     compute_hole_instance_data_from_virtual(&database, holes, hole_refno_map, room_map).await
@@ -423,7 +423,7 @@ async fn test_query_hole_data_status_by_key() -> anyhow::Result<()> {
     let mgr = get_test_ams_db_manager_async().await;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refno = RefU64::from_refno_str("17496/108516").unwrap();
+    let refno = RefU64::from_str("17496/108516").unwrap();
     let result = get_plugging_material_datas(vec![refno], &database,&mgr).await?;
     dbg!(&result);
     Ok(())

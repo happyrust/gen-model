@@ -60,7 +60,7 @@ pub async fn get_data_center_cap_attr(refno: PdmsElement, bran_name: &str, room_
 async fn test_get_data_center_cap_attr() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let database = aios_mgr.get_arango_db().await?;
-    let tee_refno = RefU64::from_refno_str("24383/66752").unwrap();
+    let tee_refno = RefU64::from_str("24383/66752").unwrap();
     let pool = aios_mgr.get_project_pool_by_refno(tee_refno).await.unwrap();
     let tee_node = query_ele_node(tee_refno, &pool.1).await.unwrap();
     let owner_name = query_name(tee_node.owner, &pool.1).await.unwrap();

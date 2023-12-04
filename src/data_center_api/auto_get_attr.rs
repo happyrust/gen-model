@@ -461,7 +461,7 @@ async fn test_read_data_center_metadata_excel() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let path = "./resource/附录I-工艺布置管件类元数据.xlsx";
     let result = read_data_center_metadata_excel(path).unwrap();
-    let refno = RefU64::from_refno_str("24383/66509")?;
+    let refno = RefU64::from_str("24383/66509")?;
     get_datacenter_bran_data(&aios_mgr, refno, &result).await?;
     Ok(())
 }

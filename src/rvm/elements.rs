@@ -26,6 +26,7 @@ use crate::arangodb::ArDatabase;
 use crate::graph_db::pdms_inst_arango::*;
 use crate::rvm::data_api::*;
 use crate::rvm::head::{create_head_data, create_tail_data};
+use std::str::FromStr;
 
 pub async fn create_rvm_file(refno: RefU64, aios_mgr: &AiosDBManager) -> anyhow::Result<Vec<u8>> {
     let mut data = vec![];
@@ -72,8 +73,8 @@ async fn create_ancestor_data(refno: RefU64, ancestor: Vec<PdmsRefnoNameAql>, ai
     let mut data = vec![];
     let mut current_position = Vec3::ZERO;
     for refno_name in ancestor.into_iter().rev() {
-        let ancestor_refno = RefU64::from_url_refno(&refno_name.refno);
-        if ancestor_refno.is_none() { continue; }
+        let ancestor_refno = RefU64::from_str(&refno_name.refno);
+        if ancestor_refno.is_err() { continue; }
         let ancestor_refno = ancestor_refno.unwrap();
         if ancestor_refno == refno { continue; }
         let pos = query_position_from_id(ancestor_refno, aios_mgr).await?.unwrap_or(Vec3::ZERO);
@@ -372,7 +373,7 @@ pub(crate) fn gen_ancestor_data_str(name: &str, pos: Vec3) -> Vec<u8> {
 #[tokio::test]
 async fn test_create_rvm_file() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    let refno = RefU64::from_refno_str("23584/5417").unwrap();
+    let refno = RefU64::from_str("23584/5417").unwrap();
     let data = create_rvm_file(refno, &mgr).await?;
     let mut file = std::fs::File::create("test_rvm.rvm").unwrap();
     file.write_all(&data).unwrap();
@@ -382,7 +383,7 @@ async fn test_create_rvm_file() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_create_owner_data() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    let refno = RefU64::from_refno_str("23584/5495").unwrap();
+    let refno = RefU64::from_str("23584/5495").unwrap();
     let database = mgr.get_arango_db().await?;
     let data = create_owner_data(refno, &mgr, &database).await?;
     let mut file = std::fs::File::create("test_rvm.txt").unwrap();
@@ -394,7 +395,7 @@ async fn test_create_owner_data() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_cylinder_height() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    let refno = RefU64::from_refno_str("23584/107").unwrap();
+    let refno = RefU64::from_str("23584/107").unwrap();
     let data = create_rvm_file(refno, &mgr).await?;
     let mut file = std::fs::File::create("test_rvm.rvm").unwrap();
     file.write_all(&data).unwrap();
@@ -406,7 +407,7 @@ async fn test_cylinder_height() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_cata_aabb() -> anyhow::Result<()> {
     let mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    let refno = RefU64::from_refno_str("23584/5515").unwrap();
+    let refno = RefU64::from_str("23584/5515").unwrap();
     let data = create_rvm_file(refno, &mgr).await?;
     let mut file = std::fs::File::create("test_rvm.rvm").unwrap();
     file.write_all(&data).unwrap();

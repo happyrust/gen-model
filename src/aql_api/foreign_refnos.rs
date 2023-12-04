@@ -7,6 +7,7 @@ use crate::consts::{AQL_PDMS_ELES_COLLECTION, PDMS_ELEMENTS_TABLE};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::arangodb::ArDatabase;
 use crate::consts::AQL_FOREIGN_EDGES_COLLECTION;
+use std::str::FromStr;
 
 ///可选的去过滤查询, start_types 和 endtypes，都是外键的类型
 pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], start_types: &[&[&str]], end_types: &[&str], t_types: &[&str], depth: u32) -> anyhow::Result<Vec<RefU64>> {
@@ -62,7 +63,7 @@ pub async fn query_foreign_refno_aql(arango_database: &ArDatabase, refno: RefU64
         .bind_var("@foreign_edges", AQL_FOREIGN_EDGES_COLLECTION);
     let results: Vec<String> = arango_database.aql_query(aql).await?;
     for result in results {
-        if let Some(refno) = RefU64::from_url_refno(&result) {
+        if let Ok(refno) = RefU64::from_str(&result) {
             return Ok(Some(refno));
         }
     }

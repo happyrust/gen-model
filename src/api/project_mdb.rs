@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::hash::{Hash, Hasher};
-
+use std::str::FromStr;
 use aios_core::pdms_types::RefU64;
 use anyhow::Result;
 use dashmap::DashMap;
@@ -10,11 +10,9 @@ use lazy_static::lazy_static;
 use parry3d::utils::hashmap::FxHasher32;
 use sqlx::{MySql, Pool, Row};
 use sqlx::Executor;
-
-use crate::api::children::query_db_num_by_refno;
 use crate::api::element::{DbQuickInfo, MdbQuickInfoMap};
-use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::consts::*;
 
 lazy_static! {
     pub static ref MDB_MODULE_NUMBDBS: Vec<i32> = {
@@ -32,8 +30,8 @@ pub async fn query_db_quick_info(mdb: &str, module: &str, pool: &Pool<MySql>) ->
     let mut vec = vec![];
     for r in result {
         vec.push(DbQuickInfo{
-            refno: RefU64::from_refno_str(&r.get::<String, _>("REFNO")).unwrap(),
-            world_refno: RefU64::from_refno_str(&r.get::<String, _>("WORLD_REFNO")).unwrap(),
+            refno: RefU64::from_str(&r.get::<String, _>("REFNO")).unwrap(),
+            world_refno: RefU64::from_str(&r.get::<String, _>("WORLD_REFNO")).unwrap(),
             db_num: r.get::<i32, _>("DB_NUM"),
             db_type: r.get::<String, _>("DB_TYPE"),
             project: r.get::<String, _>("PROJECT"),
@@ -51,7 +49,7 @@ pub async fn query_world_refnos(mdb: &str, module: &str, pool: &Pool<MySql>) -> 
     let result = sqlx::query(&sql).fetch_all(pool).await?;
     let mut vec = vec![];
     for r in result {
-        vec.push(RefU64::from_refno_str(&r.get::<String, _>(0)).unwrap() );
+        vec.push(RefU64::from_str(&r.get::<String, _>(0)).unwrap() );
     }
     Ok(vec)
 }

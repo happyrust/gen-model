@@ -175,9 +175,9 @@ pub async fn gen_prim_geos(
                     let tmp_tol = if attr.is_neg() { tol_ratio } else { tol_ratio };
                     let Some((_, aabb)) =
                         cached_mesh_mgr.gen_plant_data(brep_shape, replace_mesh, tmp_tol)
-                    else {
-                        continue;
-                    };
+                        else {
+                            continue;
+                        };
                     aabb
                 };
                 // dbg!(&attr);
@@ -381,9 +381,9 @@ pub async fn gen_loop_geos(
                                     };
                                     let Some((_, aabb)) =
                                         cached_mesh_mgr.gen_plant_data(revo, replace_mesh, tmp_tol)
-                                    else {
-                                        continue;
-                                    };
+                                        else {
+                                            continue;
+                                        };
                                     Some(aabb)
                                 };
                             }
@@ -399,10 +399,10 @@ pub async fn gen_loop_geos(
                             aios_core::get_named_attmap(
                                 children_attmaps[0].get_refno_or_default(),
                             )
-                            .await
-                            .unwrap_or_default()
-                            .get_f32("HEIG")
-                            .unwrap_or_default()
+                                .await
+                                .unwrap_or_default()
+                                .get_f32("HEIG")
+                                .unwrap_or_default()
                         } else {
                             loop_attr
                                 .get_f32("HEIG")
@@ -440,9 +440,9 @@ pub async fn gen_loop_geos(
                         geo_aabb = {
                             let Some((_, aabb)) =
                                 cached_mesh_mgr.gen_plant_data(extrusion, replace_mesh, tol_ratio)
-                            else {
-                                continue;
-                            };
+                                else {
+                                    continue;
+                                };
                             Some(aabb)
                         };
                     }
@@ -527,16 +527,14 @@ pub async fn gen_cata_single_geoms(
         return Ok(RefU64::default());
     }
     let geoms_info = mgr.resolve_desi_comp(design_refno, None, None).await?;
-    if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL"
-    {
+    if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" {
         create_profile_geos(
             design_refno,
             &desi_att,
             &geoms_info,
             &brep_shape_map,
             mgr.as_ref(),
-        )
-        .await?;
+        ).await?;
         return Ok(geoms_info.refno);
     } else {
         let CateGeomsInfo {
@@ -617,7 +615,7 @@ pub async fn gen_cata_geos(
             .map(|x| x.cata_hash.clone())
             .collect::<Vec<_>>(),
     );
-    dbg!(&all_unique_keys);
+    dbg!(&all_unique_keys.len());
     if !all_unique_keys.is_empty() {
         for i in 0..batch_chunks_cnt as usize {
             let mgr_clone = mgr.clone();
@@ -669,7 +667,7 @@ pub async fn gen_cata_geos(
                             &brep_shapes_map,
                             &refno_ptset_map,
                         )
-                        .await;
+                            .await;
                         let cat_refno = match r {
                             Ok(cat_refno) => cat_refno,
                             Err(e) => {
@@ -677,19 +675,19 @@ pub async fn gen_cata_geos(
                                 continue;
                             }
                         };
-                        // dbg!(brep_shapes_map.len());
+                        dbg!(brep_shapes_map.len());
                         ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
                         for (ele_refno, shapes) in brep_shapes_map {
                             let Ok(Some(mut origin_trans)) =
                                 mgr_clone.get_world_transform(ele_refno).await
-                            else {
-                                continue;
-                            };
+                                else {
+                                    continue;
+                                };
 
                             let Ok(ele_att) = aios_core::get_named_attmap(ele_refno).await
-                            else {
-                                continue;
-                            };
+                                else {
+                                    continue;
+                                };
 
                             if let Some(sjus) = ele_att.get_str("SJUS") {
                                 let parent = ele_att.get_owner();
@@ -709,13 +707,13 @@ pub async fn gen_cata_geos(
                                 }
                             }
 
-                            let Ok(Some(gmse_refno)) = aios_core::query_single_map_by_paths(
+                            let Ok(Some(gmse_refno)) = aios_core::query_single_by_paths(
                                 cat_refno,
                                 &["->GMRE", "->GSTR"],
                                 &["refno"],
                             )
-                            .await
-                            .map(|x| x.get_refno_lossy()) else {
+                                .await
+                                .map(|x| x.get_refno_lossy()) else {
                                 continue;
                             };
                             dbg!(gmse_refno);
@@ -812,8 +810,8 @@ pub async fn gen_cata_geos(
                                         rotation: rot,
                                         scale,
                                     }
-                                    .compute_matrix()
-                                    .as_dmat4();
+                                        .compute_matrix()
+                                        .as_dmat4();
                                     let Some(aabb) = cached_mesh_mgr.get_aabb(geo_hash) else {
                                         continue;
                                     };
@@ -1041,9 +1039,9 @@ pub async fn gen_cata_geos(
                         );
                         let Ok(Some(mut origin_trans)) =
                             mgr_clone.get_world_transform(ele_refno).await
-                        else {
-                            continue;
-                        };
+                            else {
+                                continue;
+                            };
 
                         let mut flow_pt_indexs = vec![];
                         let attr = aios_core::get_named_attmap(ele_refno)
@@ -1125,7 +1123,7 @@ pub async fn gen_cata_geos(
         let Ok(branch_att) = aios_core::get_named_attmap(branch_refno).await else {
             continue;
         };
-        // dbg!(&branch_att);
+        // dbg!(&children);
         //可能只有branch 元素需要做一遍求解
         let Ok(Some(branch_transform)) = mgr.get_world_transform(branch_refno).await else {
             continue;
@@ -1587,7 +1585,7 @@ pub async fn gen_all_geos_data(
                     .unwrap();
                 let r: Vec<RefU64> = response.take(0)?;
                 debug_root_refnos.retain_mut(|x| !r.contains(x));
-                dbg!(&r);
+                // dbg!(&r);
                 r
             } else {
                 mgr.get_gen_model_target_refnos(
@@ -1595,7 +1593,7 @@ pub async fn gen_all_geos_data(
                     &target_dbnos,
                     false,
                 )
-                .await?
+                    .await?
             };
             println!(
                 "使用管道或者支吊架元件库数量: {}",
@@ -1645,14 +1643,15 @@ pub async fn gen_all_geos_data(
                     true,
                     false,
                 )
-                .await?
+                    .await?
             };
+
             let target_single_cata_map = if is_incr_update {
                 let cata_map = DashMap::new();
                 let cata_refnos = &incr_update_log.as_ref().unwrap().basic_cata_refnos;
                 //直接使用group的办法，按cata_hash 进行分组
-                for r in cata_refnos {
-                    let Ok(Some(att)) = aios_core::get_pe(*r).await else {
+                for &r in cata_refnos {
+                    let Ok(Some(att)) = aios_core::get_pe(r).await else {
                         continue;
                     };
                     cata_map.insert(
@@ -1660,10 +1659,43 @@ pub async fn gen_all_geos_data(
                         CataHashRefnoKV {
                             cata_hash: att.cata_hash,
                             exist_geo: None,
-                            group_refnos: vec![*r],
+                            group_refnos: vec![r],
                         },
                     );
                 }
+                cata_map
+            }else if is_debug {
+                //暂时写的重复，后续再修改
+                let mut response = SUL_DB
+                    .query(format!(
+                        "select value refno from [{}] where owner.noun in ['BRAN', 'HANG'] or noun in $nouns ",
+                        debug_root_refnos
+                            .iter()
+                            .map(|x| x.to_pe_key())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ))
+                    .bind(("nouns", CATA_WITHOUT_REUSE_GEO_NAMES))
+                    .await
+                    .unwrap();
+                let cata_refnos: Vec<RefU64> = response.take(0)?;
+                dbg!(&cata_refnos);
+                let cata_map = DashMap::new();
+                //直接使用group的办法，按cata_hash 进行分组
+                for r in cata_refnos {
+                    let Ok(Some(att)) = aios_core::get_pe(r).await else {
+                        continue;
+                    };
+                    cata_map.insert(
+                        att.cata_hash.clone(),
+                        CataHashRefnoKV {
+                            cata_hash: att.cata_hash,
+                            exist_geo: None,
+                            group_refnos: vec![r],
+                        },
+                    );
+                }
+                // dbg!(&cata_map);
                 cata_map
             } else {
                 //相当于在group
@@ -1673,7 +1705,7 @@ pub async fn gen_all_geos_data(
                     false,
                     false,
                 )
-                .await?
+                    .await?
             };
             #[cfg(debug_assertions)]
             {
@@ -1700,33 +1732,12 @@ pub async fn gen_all_geos_data(
                             Arc::new(branch_refnos_map),
                             sjus_map_clone,
                         )
-                        .await
-                        .unwrap();
+                            .await
+                            .unwrap();
                     });
                     has_run_cata = true;
                     handles.push(handle);
                 }
-
-                ///需要重用的类型
-                // if !target_single_reuse_cata_map.is_empty() {
-                //     let mgr_clone = mgr.clone();
-                //     let instance_mgr_clone = instance_mgr.clone();
-                //     let sjus_map_clone = loop_sjus_map_arc.clone();
-                //     let handle = tokio::spawn(async move {
-                //         gen_cata_geos(
-                //             mgr_clone,
-                //             instance_mgr_clone,
-                //             // scom_info_map_clone,
-                //             Arc::new(target_single_reuse_cata_map),
-                //             Arc::new(Default::default()),
-                //             sjus_map_clone,
-                //         )
-                //             .await
-                //             .unwrap();
-                //     });
-                //     has_run_cata = true;
-                //     handles.push(handle);
-                // }
 
                 //不能重用的类型
                 if !target_single_cata_map.is_empty() {
@@ -1741,8 +1752,8 @@ pub async fn gen_all_geos_data(
                             Arc::new(Default::default()),
                             sjus_map_clone,
                         )
-                        .await
-                        .unwrap();
+                            .await
+                            .unwrap();
                     });
                     has_run_cata = true;
                     handles.push(handle);
@@ -1795,8 +1806,8 @@ pub async fn gen_all_geos_data(
                         &target_loop_refnos,
                         sjus_map_clone,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
             }
@@ -1824,8 +1835,8 @@ pub async fn gen_all_geos_data(
                         instance_mgr_clone.clone(),
                         target_prim_refnos.as_slice(),
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
             }
@@ -1869,9 +1880,9 @@ pub async fn gen_all_geos_data(
                         // let Ok(children_refnos) = mgr.get_children_from_localdb(comp_refno)
                         let Ok(children_refnos) =
                             aios_core::get_children_refnos(comp_refno).await
-                        else {
-                            continue;
-                        };
+                            else {
+                                continue;
+                            };
                         let mut neg_refnos = vec![];
                         children_refnos.iter().for_each(|x| {
                             for c in &origin_neg_refnos {
@@ -1894,9 +1905,9 @@ pub async fn gen_all_geos_data(
                         pos_refnos.push(comp_refno);
                         // dbg!(&pos_refnos);
                         let Some(w_trans) = trans_map.get(&comp_refno).map(|x| x.value().clone())
-                        else {
-                            continue;
-                        };
+                            else {
+                                continue;
+                            };
                         // #[cfg(debug_assertions)]
                         // {
                         //     dbg!(w_trans);
@@ -1919,9 +1930,9 @@ pub async fn gen_all_geos_data(
                                 continue;
                             };
                             let Some(inst_geos) = inst_data.get_inst_geos_data_mut(&geos_info)
-                            else {
-                                continue;
-                            };
+                                else {
+                                    continue;
+                                };
                             let mut pos_aabb = Aabb::new_invalid();
                             let pos_refno = pos_refnos[0];
                             for geo_inst in &mut inst_geos.insts {
@@ -2124,9 +2135,9 @@ pub async fn gen_all_geos_data(
                 ///查找是否是某些参考号的子节点
                 for (refno, geos_info) in shape_insts_data.ngmr_inst_info_map.clone() {
                     let Some(geos_data) = shape_insts_data.get_inst_geos_data_mut(&geos_info)
-                    else {
-                        continue;
-                    };
+                        else {
+                            continue;
+                        };
                     let att = aios_core::get_named_attmap(refno)
                         .await
                         .unwrap_or_default();
@@ -2297,14 +2308,14 @@ pub async fn gen_all_geos_data(
                 println!("开始处理ngmr的负实体模型");
                 for (parent, ngmr_map) in boolean_ngmr_map {
                     let Some(parent_geos_info) = shape_insts_data.get_final_inst_info(parent)
-                    else {
-                        continue;
-                    };
+                        else {
+                            continue;
+                        };
                     let Some(parent_geos_data) =
                         shape_insts_data.get_inst_geos_data(parent_geos_info)
-                    else {
-                        continue;
-                    };
+                        else {
+                            continue;
+                        };
                     if parent_geos_data.insts.is_empty() {
                         continue;
                     }

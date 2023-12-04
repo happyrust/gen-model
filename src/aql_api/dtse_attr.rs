@@ -139,7 +139,7 @@ async fn test_query_dtse_ppro_from_catr_refno() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refno = RefU64::from_refno_str("15193/14606").unwrap();
+    let refno = RefU64::from_str("15193/14606").unwrap();
     let result = query_dtse_ppro_from_catr_refno(refno, &database).await?;
     dbg!(&result);
     Ok(())
@@ -148,7 +148,7 @@ async fn test_query_dtse_ppro_from_catr_refno() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_query_ipara_from_bran() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
-    let bran_refno = RefU64::from_url_refno("24383_74374").unwrap();
+    let bran_refno = RefU64::from_str("24383_74374").unwrap();
     let result = aios_mgr.query_ipara_from_bran(bran_refno).await?;
     dbg!(&result);
     Ok(())

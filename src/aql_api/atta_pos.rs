@@ -5,7 +5,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use std::sync::Arc;
 use aios_core::create_attas_structs::{ATTAPos, ATTAPosVec};
 use glam::Vec3;
-
+use std::str::FromStr;
 
 
 pub async fn get_atta_pos(brans: Vec<(RefU64, f32)>, mgr: Arc<AiosDBManager>) -> anyhow::Result<ATTAPosVec> {
@@ -26,8 +26,8 @@ pub async fn get_atta_pos(brans: Vec<(RefU64, f32)>, mgr: Arc<AiosDBManager>) ->
             if i.att_type == "ELBO" || i.att_type == "BEND" {
                 let refno: Vec<&str> = i._to.split("/").collect();
                 let refno = refno[1];
-                // let result = mgr.as_ref().expect("REASON").get_world_transform(RefU64::from_url_refno(refno).unwrap()).unwrap().unwrap().clone().await;
-                let result = mgr.get_world_transform(RefU64::from_url_refno(refno).unwrap()).await.unwrap().unwrap().clone();
+                // let result = mgr.as_ref().expect("REASON").get_world_transform(RefU64::from_str(refno).unwrap()).unwrap().unwrap().clone().await;
+                let result = mgr.get_world_transform(RefU64::from_str(refno).unwrap()).await.unwrap().unwrap().clone();
                 pos_vec.push(result.translation);
             }
         }

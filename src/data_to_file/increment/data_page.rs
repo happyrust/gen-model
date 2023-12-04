@@ -17,6 +17,7 @@ use smol_str::SmolStr;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
+use std::str::FromStr;
 
 lazy_static! {
     /// attr_map 中不需要转为 bytes的属性
@@ -346,7 +347,7 @@ pub fn convert_new_node_data_implicit(
             }
             // ElementType除了是refno，忘了还可能是什么情况，暂时只考虑了refno的情况
             AttrVal::ElementType(value) => {
-                if let Ok(refno) = RefU64::from_refno_string(value.to_string()) {
+                if let Ok(refno) = RefU64::from_str(&value.to_string()) {
                     values.push(refno.0.to_be_bytes().to_vec());
                 } else {
                     values.push(vec![0; 8]);
@@ -407,7 +408,7 @@ fn convert_first_version_page_increment(
 //     let increment_new_data = DataPageIncrement {
 //         old_file: input,
 //         attr_type: "ELBO".to_string(),
-//         owner_refno: RefU64::from_refno_str("23584/16355").unwrap(),
+//         owner_refno: RefU64::from_str("23584/16355").unwrap(),
 //         owner_type: "BRAN".to_string(),
 //         attr,
 //         info_map: info,

@@ -12,7 +12,7 @@ use serde::{Serialize, Deserialize};
 use sqlx::{MySql, Pool, Row};
 use crate::consts::{AQL_PDMS_EDGES_COLLECTION, AQL_PDMS_MESH_COLLECTION, PDMS_MESH};
 use crate::arangodb::ArDatabase;
-use crate::graph_db::pdms_inst_arango::*;
+use std::str::FromStr;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
@@ -70,8 +70,8 @@ pub async fn query_refno_meshes_aql(refno: RefU64, database: &ArDatabase) -> any
             for result in results {
                 let r = hex::decode(result.data)?;
                 if let Ok(mesh) = PlantMesh::from_compress_bytes(&r) {
-                    let refno = RefU64::from_url_refno(&result.refno);
-                    if refno.is_none() { continue; }
+                    let refno = RefU64::from_str(&result.refno);
+                    if refno.is_err() { continue; }
                     let refno = refno.unwrap();
                     map.entry(refno).or_insert(mesh);
                 }
@@ -104,7 +104,7 @@ pub async fn query_refnos_meshes_aql(refnos: Vec<RefU64>, database: &ArDatabase)
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     if let Ok(results) = database.aql_query::<PdmsMeshWorldTransformAql>(aql).await {
         for result in results {
-            let Some(refno) = RefU64::from_url_refno(&result.refno) else { continue; };
+            let Ok(refno) = RefU64::from_str(&result.refno) else { continue; };
             let r = hex::decode(result.data)?;
             let Ok(mesh) = PlantMesh::from_compress_bytes(&r) else { continue; };
             map.entry(refno).or_insert((result.trans, mesh));
@@ -219,11 +219,11 @@ pub async fn query_pdms_mesh_from_hash_str_aql(database: &ArDatabase, hash_strs:
 //     let results: Vec<NegativeEles> = database.aql_query(aql).await?;
 //     let mut cache_mgr = PlantMeshesData::default();
 //     for r in results {
-//         let refno = RefU64::from_url_refno(&r._key);
-//         if refno.is_none() { continue; }
+//         let refno = RefU64::from_str(&r._key);
+//         if refno.is_err() { continue; }
 //         let refno = refno.unwrap();
 //         let mesh = PlantMesh::from_compress_bytes(&hex::decode(r.mesh)?);
-//         if mesh.is_none() { continue; }
+//         if mesh.is_err() { continue; }
 //         let mesh = mesh.unwrap();
 //         cache_mgr.meshes.entry(refno.0).or_insert(mesh);
 //     }
@@ -277,7 +277,7 @@ async fn test_query_pdms_instance_mesh_from_refno() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refno = RefU64::from_refno_str("24383/69713").unwrap();
+    let refno = RefU64::from_str("24383/69713").unwrap();
     let result = query_refno_transform(refno, &database).await?;
     Ok(())
 }

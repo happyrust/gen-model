@@ -100,7 +100,7 @@ async fn test_gen_implicit_attr_data() -> anyhow::Result<()> {
         .unwrap();
     let db_option: DbOption = s.try_deserialize().unwrap();
     let aios_mgr = AiosDBManager::init(&db_option).await?;
-    let refno = RefU64::from_refno_str("23584/5502").unwrap();
+    let refno = RefU64::from_str("23584/5502").unwrap();
     if let Some(refno_basic) = aios_mgr.get_refno_basic(refno) {
         let implicit_map = query_implicit_attr(refno, refno_basic.value(), &pool, None).await?;
         let mut data = gen_implicit_attr_data(implicit_map);

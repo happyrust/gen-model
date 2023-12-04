@@ -693,7 +693,7 @@ fn test_convert_new_modify_data() {
 
     let modify_data = ModifyData {
         old_file: input,
-        refno: RefU64::from_refno_str("23584/5931").unwrap(),
+        refno: RefU64::from_str("23584/5931").unwrap(),
         attr_type: "STWALL".to_string(),
         noun_type: "POSS".to_string(),
         data: AttrVal::Vec3Type([13898.39, -1534.99, 0.0]),
@@ -715,7 +715,7 @@ fn test_convert_new_modify_data_explict_data() {
 
     let modify_data = ModifyData {
         old_file: input,
-        refno: RefU64::from_refno_str("23584/5931").unwrap(),
+        refno: RefU64::from_str("23584/5931").unwrap(),
         attr_type: "STWALL".to_string(),
         noun_type: "DRGP".to_string(),
         data: AttrVal::IntegerType(100),
@@ -737,7 +737,7 @@ fn test_convert_new_modify_name_data() {
 
     let modify_data = ModifyData {
         old_file: input,
-        refno: RefU64::from_refno_str("23584/5931").unwrap(),
+        refno: RefU64::from_str("23584/5931").unwrap(),
         attr_type: "STWALL".to_string(),
         noun_type: "NAME".to_string(),
         data: AttrVal::StringType("/Test/WALL/Write".to_string()),

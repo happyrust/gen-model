@@ -578,7 +578,7 @@ async fn test_query_rvm_tubi_instances_aql() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refnos = vec![RefU64::from_refno_str("24383/73930").unwrap()];
+    let refnos = vec![RefU64::from_str("24383/73930").unwrap()];
     let tubi = query_rvm_tubi_instances_aql(refnos, &database).await?;
     dbg!(&tubi);
     Ok(())
@@ -592,8 +592,8 @@ async fn test_query_rvm_geo_instance_aql() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refnos = RefU64::from_refno_str("17496/118446").unwrap();
-    // let refnos = vec![RefU64::from_refno_str("24381/100681").unwrap()];
+    let refnos = RefU64::from_str("17496/118446").unwrap();
+    // let refnos = vec![RefU64::from_str("24381/100681").unwrap()];
     // let mut refnos = query_children_order_aql(&database, refnos[0]).await?
     //     .into_iter().map(|refno| refno.refno).collect::<Vec<_>>();
     let result = create_refnos_rvm_data(vec![refnos], &db_option, &database).await?;

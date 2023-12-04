@@ -141,7 +141,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
             let c1 = caps.get(1).map_or("", |m| m.as_str());
             let c2 = caps.get(2).map_or("", |m| m.as_str());
             let refno_str = context.get("RS_DES_REFNO").unwrap().as_str();
-            let refno = RefU64::from_refno_str(refno_str)?;
+            let refno = RefU64::from_str(refno_str).unwrap();
             // let target_refno = match c2 {
             //     "PREV" => interface.get_prev(refno)?,
             //     "NEXT" => interface.get_next(refno)?,
@@ -422,7 +422,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
                 dbg!(&context);
                 // println!("计算后表达式 : {}", &result_string);
                 // let refno_str = context.get("RS_CATR_REFNO").unwrap().as_str();
-                // let refno = RefU64::from_refno_str(refno_str)?;
+                // let refno = RefU64::from_str(refno_str)?;
                 // dbg!(interface.unwrap().aios_core::get_named_attmap(refno).await.unwrap());
                 Err(anyhow::anyhow!(format!("求解失败 {}", &input_expr)))
             };

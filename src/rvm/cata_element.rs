@@ -166,7 +166,7 @@ pub async fn create_cata_element_data(refno: RefU64, desi_instance: RvmGeoInfo, 
 //         .build().unwrap();
 //     let db_option: DbOption = s.try_deserialize().unwrap();
 //     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await.unwrap();
-//     let refno = RefU64::from_refno_str("23584/209").unwrap();
+//     let refno = RefU64::from_str("23584/209").unwrap();
 //     let result = query_rvm_geo_infos_aql(refno, &database).await.unwrap().unwrap();
 //     dbg!(&result);
 // }

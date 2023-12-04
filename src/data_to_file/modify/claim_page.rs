@@ -70,7 +70,7 @@ fn test_convert_new_claim_page() {
 
     let data = ClaimPageModify {
         last_page_no: 0x25,
-        refno: RefU64::from_refno_str("23584/5931").unwrap(),
+        refno: RefU64::from_str("23584/5931").unwrap(),
         world_claim_page_num: 0xF2B,
         index_page_num: 0xF33,
     };

@@ -1,4 +1,3 @@
-use std::result;
 use aios_core::pdms_types::RefU64;
 use crate::version_management::{RefnoStatusDifference};
 use aios_core::data_state::RefnoStatusInfo;
@@ -6,7 +5,7 @@ use sqlx::{Executor, MySql, Pool, Row};
 use crate::aql_api::children::query_travel_children_aql;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::arangodb::ArDatabase;
-
+use std::str::FromStr;
 
 /// 查询该节点所有的数据状态,只返回状态信息，不返回attrmap
 ///
@@ -64,7 +63,7 @@ pub async fn query_all_version(pool: &Pool<MySql>, refno: String) -> anyhow::Res
                 let user = val.get::<String, _>("user");
                 let time = val.get::<String, _>("time");
                 let note = val.get::<String, _>("note");
-                let refno = RefU64::from_url_refno(&refno).unwrap_or_default();
+                let refno = RefU64::from_str(&refno).unwrap_or_default();
                 result.push(RefnoStatusInfo {
                     refno,
                     status,

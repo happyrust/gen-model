@@ -70,8 +70,8 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
         let bran = bran_refnos.iter().map(|r| r.0).collect::<Vec<RefU64>>();
         let Ok(room_map) = query_room_codes_from_owners(bran, &database).await else { continue; };
         let room_map = room_map.into_iter()
-            .filter(|x| RefU64::from_url_refno(&x.refno).is_some())
-            .map(|x| (RefU64::from_url_refno(&x.refno).unwrap(), x))
+            .filter(|x| RefU64::from_str(&x.refno).is_some())
+            .map(|x| (RefU64::from_str(&x.refno).unwrap(), x))
             .collect::<HashMap<RefU64, PdmsRoomNameAql>>();
         // 查询不到房间号的，通过uda来查询,并判断他是否为反应堆厂房
         let mut uda_room_map = HashMap::new();
@@ -140,7 +140,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
         // 只考虑工艺管道
         match &tubi.tubi_size {
             TubiSize::BoreSize(data) => {
-                let Some(from_refno) = RefU64::from_arangodb_refno_str(&tubi._from) else { continue; };
+                let Some(from_refno) = RefU64::from_str(&tubi._from) else { continue; };
                 length_map.push(HeatDissipationData {
                     refno: from_refno,
                     att_type: "TUBI".to_string(),
@@ -302,7 +302,7 @@ fn get_outside_diameter_from_bore(bore: f32) -> Option<f32> {
 async fn test_get_heat_dissipation_data() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let database = aios_mgr.get_arango_db().await?;
-    let bran_refno = RefU64::from_refno_str("24383/66521").unwrap();
+    let bran_refno = RefU64::from_str("24383/66521").unwrap();
     get_heat_dissipation_data(bran_refno, &database, &aios_mgr).await?;
     Ok(())
 }

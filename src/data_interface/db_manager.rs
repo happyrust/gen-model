@@ -1,6 +1,7 @@
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use std::collections::HashMap;
+use std::str::FromStr;
 // use bevy::utils::HashMap;
 use crate::aql_api::children::{
     query_travel_children_with_types_and_cata_hash, query_travel_children_with_types_aql,
@@ -74,7 +75,7 @@ impl AiosDBManager {
             //是否是叶子节点
             for str in db_option.debug_root_refnos.as_ref().unwrap() {
                 is_debug = true;
-                if let Ok(root_refno) = RefU64::from_refno_str(str) {
+                if let Ok(root_refno) = RefU64::from_str(str) {
                     let Ok(name) = self.get_name(root_refno).await else {
                         continue;
                     };
@@ -152,7 +153,7 @@ impl AiosDBManager {
 
         let mut root_refnos = if let Some(d) = &db_option.debug_root_refnos {
             d.iter()
-                .map(|x| RefU64::from_refno_str(x).unwrap_or_default())
+                .map(|x| RefU64::from_str(x).unwrap_or_default())
                 .collect::<Vec<_>>()
         } else {
             self.get_refnos_by_types(db_option.project_name.as_str(), &["SITE"], db_nos)

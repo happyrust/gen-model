@@ -491,7 +491,7 @@ pub async fn replace_embed_data_to_arangodb(datas: Vec<VirtualEmbedGraphNode>, d
 async fn create_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &ArDatabase) -> anyhow::Result<()> {
     let mut edges = Vec::new();
     for d in data {
-        let refno = RefU64::from_refno_str(&d.rely_item_ref);
+        let refno = RefU64::from_str(&d.rely_item_ref);
         if refno.is_err() { continue; }
         let refno = refno.unwrap();
         let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
@@ -513,7 +513,7 @@ async fn create_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &Ar
 async fn replace_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &ArDatabase) -> anyhow::Result<()> {
     let mut edges = Vec::new();
     for d in data {
-        let refno = RefU64::from_refno_str(&d.rely_item_ref);
+        let refno = RefU64::from_str(&d.rely_item_ref);
         if refno.is_err() { continue; }
         let refno = refno.unwrap();
         let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());

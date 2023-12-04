@@ -17,7 +17,7 @@ async fn test_query_travel_children_filter_negative_sibl_nodes() -> anyhow::Resu
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refno = RefU64::from_refno_str("31896/10042").unwrap();
+    let refno = RefU64::from_str("31896/10042").unwrap();
     let result = query_travel_children_filter_negative_sibl_nodes(refno, &database).await?;
     dbg!(&result);
     Ok(())
@@ -46,8 +46,8 @@ async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
     // let result = interface.query_refnos_has_neg_pos_map(refno).await?;
     // dbg!(&result);
     // query_refnos_has_neg_map
-    // let refno = RefU64::from_refno_str("17496/169987").unwrap();
-    // // let refno = RefU64::from_refno_str("24381/101405").unwrap();
+    // let refno = RefU64::from_str("17496/169987").unwrap();
+    // // let refno = RefU64::from_str("24381/101405").unwrap();
     // let result = interface.query_refnos_has_pos_neg_map(&[refno]).await?;
     // dbg!(&result);
     Ok(())

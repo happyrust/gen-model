@@ -16,7 +16,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 ///  测试获取有负实体的parent
 #[tokio::test]
 async fn test_query_refnos_has_neg_geom() -> anyhow::Result<()> {
-    let test_room_refno = RefU64::from_refno_str("24381/35621").unwrap();
+    let test_room_refno = RefU64::from_str("24381/35621").unwrap();
     // let mgr = get_test_ams_db_manager_async().await;
     // let result = interface.query_refnos_has_neg_pos_map(refno).await?;
     // let arango_db = get_arangodb_conn_from_db_option_for_test();
@@ -114,7 +114,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
 // #[tokio::test]
 // async fn test_query_through_element_rooms_3() -> anyhow::Result<()> {
 //     //测试样例3
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83694").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_83694").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R610".to_string(), "R661".to_string())));
 //
 //     Ok(())
@@ -123,7 +123,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
 // #[tokio::test]
 // async fn test_query_through_element_rooms_4() -> anyhow::Result<()> {
 //     //测试样例4
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83561").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_83561").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R610".to_string(), "R661".to_string())));
 //     Ok(())
 // }
@@ -131,7 +131,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
 // #[tokio::test]
 // async fn test_query_through_element_rooms_5() -> anyhow::Result<()> {
 //     //测试样例5
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83697").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_83697").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R310".to_string(), "R361".to_string())));
 //     Ok(())
 // }
@@ -139,14 +139,14 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
 // #[tokio::test]
 // async fn test_query_through_element_rooms_6() -> anyhow::Result<()> {
 //     //测试样例6
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_84009").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_84009").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R310".to_string(), "R361".to_string())));
 //     Ok(())
 // }
 // #[tokio::test]
 // async fn test_query_through_element_rooms_7() -> anyhow::Result<()> {
 //     //测试样例7
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83974").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_83974").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R310".to_string(), "R361".to_string())));
 //     Ok(())
 // }
@@ -154,7 +154,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
 // #[tokio::test]
 // async fn test_query_through_element_rooms_8() -> anyhow::Result<()> {
 //     //测试样例8
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83939").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_83939").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R430".to_string(), "R461".to_string())));
 //
 //     Ok(())
@@ -163,7 +163,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
 // #[tokio::test]
 // async fn test_query_through_element_rooms_9() -> anyhow::Result<()> {
 //     //测试样例9
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83869").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_83869").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R430".to_string(), "R461".to_string())));
 //     Ok(())
 // }
@@ -171,7 +171,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
 // #[tokio::test]
 // async fn test_query_through_element_rooms_10() -> anyhow::Result<()> {
 //     //测试样例10
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83995").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_83995").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R510".to_string(), "R562".to_string())));
 //     Ok(())
 // }
@@ -180,7 +180,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
 // #[tokio::test]
 // async fn test_query_through_element_rooms_11() -> anyhow::Result<()> {
 //     //测试样例11
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83729").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_83729").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R530".to_string(), "R561".to_string())));
 //     Ok(())
 // }
@@ -188,7 +188,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
 // #[tokio::test]
 // async fn test_query_through_element_rooms_12() -> anyhow::Result<()> {
 //     //测试样例12
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_84079").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_84079").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R630".to_string(), "R663".to_string())));
 //     Ok(())
 // }
@@ -196,7 +196,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
 // #[tokio::test]
 // async fn test_query_through_element_rooms_13() -> anyhow::Result<()> {
 //     //测试样例13
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83596").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_83596").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R610".to_string(), "R661".to_string())));
 //     Ok(())
 // }
@@ -205,7 +205,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
 // #[tokio::test]
 // async fn test_query_through_element_rooms_14() -> anyhow::Result<()> {
 //     //测试样例14
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83708").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_83708").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R710".to_string(), "R761".to_string())));
 //     Ok(())
 // }
@@ -213,7 +213,7 @@ async fn test_query_through_element_rooms_2() -> anyhow::Result<()> {
 // #[tokio::test]
 // async fn test_query_through_element_rooms_15() -> anyhow::Result<()> {
 //     //测试样例15
-//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_url_refno("24383_83813").unwrap()).await;
+//     let room_number = pdms_room::query_through_element_rooms(RefU64::from_str("24383_83813").unwrap()).await;
 //     assert_eq!(room_number.unwrap(), Some(("R710".to_string(), "R761".to_string())));
 //     Ok(())
 // }
@@ -228,7 +228,7 @@ async fn test_query_refno_belong_rooms() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refno = RefU64::from_url_refno("24383_68084").unwrap();
+    let refno = RefU64::from_str("24383_68084").unwrap();
     let name = pdms_room::query_refno_belong_rooms(refno, &database).await?;
     dbg!(&name);
     Ok(())
@@ -244,7 +244,7 @@ async fn test_query_room_info_from_refno() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let mgr = get_test_ams_db_manager_async().await;
-    let refno = RefU64::from_url_refno("24381_178638").unwrap();
+    let refno = RefU64::from_str("24381_178638").unwrap();
     let name = mgr
         .query_room_names_of_ele(refno)
         .await?

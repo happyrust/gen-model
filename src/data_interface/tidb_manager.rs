@@ -14,7 +14,7 @@ use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
-use crate::graph_db::structs::PdmsEleData;
+use std::str::FromStr;
 use aios_core::accel_tree::acceleration_tree::AccelerationTree;
 use aios_core::cache::mgr::*;
 use aios_core::cache::refno::*;
@@ -278,7 +278,7 @@ impl PdmsDataInterface for AiosDBManager {
             .bind_var("t_types", t_types);
         let results: Vec<String> = self.get_arango_db().await?.aql_query(aql).await?;
         for result in results {
-            if let Some(refno) = RefU64::from_url_refno(&result) {
+            if let Ok(refno) = RefU64::from_str(&result) {
                 return Ok(Some(refno));
             }
         }
@@ -508,7 +508,7 @@ impl PdmsDataInterface for AiosDBManager {
         let refnos = refno_strs
             .iter()
             .flatten()
-            .map(|x| RefU64::from_url_refno(x).unwrap())
+            .map(|x| RefU64::from_str(x).unwrap())
             .collect();
         Ok(refnos)
     }
@@ -584,7 +584,7 @@ impl PdmsDataInterface for AiosDBManager {
         let refno_strs = self.get_arango_db().await?.aql_query::<String>(aql).await?;
         let refnos = refno_strs
             .iter()
-            .map(|x| RefU64::from_url_refno(x).unwrap())
+            .map(|x| RefU64::from_str(x).unwrap())
             .collect();
         Ok(refnos)
     }
@@ -615,7 +615,7 @@ impl PdmsDataInterface for AiosDBManager {
         let refnos = refno_strs
             .iter()
             .flatten()
-            .map(|x| RefU64::from_url_refno(x).unwrap())
+            .map(|x| RefU64::from_str(x).unwrap())
             .collect();
         Ok(refnos)
     }
@@ -1405,7 +1405,7 @@ impl PdmsDataInterface for AiosDBManager {
         dbg!(scom_ref);
         let scom_info = self.get_or_create_scom_info(scom_ref).await?;
         // #[cfg(debug_assertions)]
-        // // dbg!(&scom_info);
+        dbg!(&scom_info);
         let mut context = self
             .get_or_create_cata_context(desi_refno, desi_axis_map)
             .await?;

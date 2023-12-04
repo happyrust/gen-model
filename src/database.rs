@@ -45,8 +45,8 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-    .execute(&pool)
-    .await?;
+        .execute(&pool)
+        .await?;
     Ok(())
 }
 
@@ -58,9 +58,9 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
             "CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};",
             project_name
         )
-        .as_str(),
+            .as_str(),
     )
-    .await?;
+        .await?;
 
     //todo 改成一对多的实现
     let mut pool =
@@ -119,16 +119,19 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         create_info_database(&default_conn_str, &db_option.project_name).await?;
     }
     //针对一些特殊的表，需要先创建表，定义索引
-    // SUL_DB
-    //     .query(
-    //         r#"
-    // DEFINE INDEX unique_pe_owner
-    // ON TABLE pe_owner
-    // COLUMNS in, out UNIQUE;
-    // "#,
-    //     )
-    //     .await
-    //     .unwrap();
+    if !db_option.incr_sync {
+        SUL_DB
+            .query(
+                r#"
+    DEFINE INDEX unique_pe_owner
+    ON TABLE pe_owner
+    COLUMNS in, out UNIQUE;
+    "#,
+            )
+            .await
+            .unwrap();
+    }
+
     let mut create_tables_elapse = 0;
     // 执行多线程解析
     dbg!("执行多线程解析");
@@ -142,7 +145,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 backend.clone(),
                 format!("CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8;"),
             ))
-            .await?;
+                .await?;
             let project_db = sea_orm::Database::connect(&db_option.get_mysql_project_db_conn_str())
                 .await
                 .unwrap();
@@ -192,8 +195,7 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
             match &e {
                 Error::Database(error) => {
                     //index already exist
-                    if error.code() == Some(Cow::from("42000")) {
-                    } else {
+                    if error.code() == Some(Cow::from("42000")) {} else {
                         dbg!(sql);
                     }
                 }
@@ -332,22 +334,22 @@ pub async fn sync_total_async_threaded(
                 let chunk_refnos_clone = chunk_refnos.to_vec();
                 let project_name_clone = project_name.clone();
                 if let Ok(PdmsDbData {
-                    total_attr_map,
-                    type_ele_map,
-                    refno_info_map,
-                    db_type,
-                    db_no,
-                    version,
-                    foreign_refnos_map,
-                    ..
-                }) = parse_file_with_chunk(
+                              total_attr_map,
+                              type_ele_map,
+                              refno_info_map,
+                              db_type,
+                              db_no,
+                              version,
+                              foreign_refnos_map,
+                              ..
+                          }) = parse_file_with_chunk(
                     &path_clone,
                     &None,
                     &file_name_clone,
                     project_name_clone.as_str(),
                     &chunk_refnos_clone,
                 )
-                .await
+                    .await
                 {
                     println!("Processing {} chunk index: {chunk_index}", &file_name);
 
@@ -371,7 +373,7 @@ pub async fn sync_total_async_threaded(
                                 &children_map_arc,
                                 db_no as i32,
                             )
-                            .await?;
+                                .await?;
                             save_foreign_refno_edges_in_sync(&database, foreign_refnos_map).await?;
                         }
                         println!("图数据库保存完成");
@@ -384,7 +386,7 @@ pub async fn sync_total_async_threaded(
                         db_no as i32,
                         &children_map_clone,
                     )
-                    .await?;
+                        .await?;
                     dbg!("开始保存属性数据");
                     const ATTS_CHUNK_COUNT: usize = 300;
                     let mut join_set = tokio::task::JoinSet::new();
@@ -401,9 +403,9 @@ pub async fn sync_total_async_threaded(
                             let mut uda_json_vec = vec![];
                             for refno in refnos {
                                 let att = total_attr_map_arc.get(refno).unwrap();
-                                if *refno == RefU64::from_str("24575/1475").unwrap() {
-                                    dbg!(att.value());
-                                }
+                                // if *refno == RefU64::from_str("24575/1475").unwrap() {
+                                //     dbg!(att.value());
+                                // }
                                 let Some(json) = att.gen_sur_json() else {
                                     continue;
                                 };

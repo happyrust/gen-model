@@ -682,7 +682,7 @@ pub async fn get_refnos_major_map(refnos: Vec<RefU64>, database: &ArDatabase) ->
     let refnos_major = query_refnos_belong_major(refnos, database).await?;
     let mut major_map = HashMap::new();
     for major in refnos_major {
-        let Ok(refno) = RefU64::from_refno_str(&major.refno) else { continue; };
+        let Ok(refno) = RefU64::from_str(&major.refno) else { continue; };
         major_map.entry(refno).or_insert(major);
     }
     Ok(major_map)
@@ -697,7 +697,7 @@ pub(crate) fn take_off_name_first_char(name: &str) -> String {
 #[tokio::test]
 async fn test_get_inst_data_from_inst_major() -> anyhow::Result<()> {
     let mgr = AiosDBManager::init_form_config().await?;
-    let refno = RefU64::from_refno_str("24381/103249").unwrap();
+    let refno = RefU64::from_str("24381/103249").unwrap();
     let data = get_inst_data_from_inst_major(refno, &mgr).await?;
     dbg!(data);
     Ok(())

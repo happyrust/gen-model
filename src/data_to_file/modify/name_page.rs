@@ -82,7 +82,7 @@ fn test_convert_new_name_page() {
     let mut input = vec![];
     file.read_to_end(&mut input).unwrap();
     let name_page = NamePageModify {
-        refno: RefU64::from_refno_str("23584/5931").unwrap(),
+        refno: RefU64::from_str("23584/5931").unwrap(),
         old_name: "/Test/WALL".to_string(),
         new_name: "/Test/WALL/Write".to_string(),
         latest_page_num: 0,

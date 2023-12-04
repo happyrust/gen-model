@@ -89,7 +89,7 @@ fn test_convert_new_index_page() {
     file.read_to_end(&mut input).unwrap();
 
     let data = IndexPage {
-        refno: RefU64::from_refno_str("23584/5931").unwrap(),
+        refno: RefU64::from_str("23584/5931").unwrap(),
         data_page_num: 0xF30,
     };
     let result = data.convert_new_index_page(&input).unwrap();

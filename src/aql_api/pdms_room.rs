@@ -5,7 +5,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::graph_db::pdms_arango::*;
-use crate::graph_db::pdms_inst_arango::{query_insts_shape_data, query_rvm_instance_data_from_owner_aql};
+use crate::graph_db::pdms_inst_arango::*;
 use aios_core::pdms_types::*;
 use aios_core::pdms_types::*;
 use bb8_arangodb::arangors_lite::AqlQuery;
@@ -25,6 +25,7 @@ use std::collections::{HashMap, HashSet};
 use aios_core::options::DbOption;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::arangodb::ArDatabase;
+use std::str::FromStr;
 
 
 macro_rules! find_f32_min_value {
@@ -313,7 +314,7 @@ pub async fn get_room_infos_from_owner(
     if !room_codes.is_empty() {
         for code in room_codes {
             if !info_map.contains_key(&code.name) {
-                let Some(refno) = RefU64::from_url_refno(&code.refno) else { continue; };
+                let Ok(refno) = RefU64::from_str(&code.refno) else { continue; };
                 let world_pos = aios_mgr.get_world_transform(refno).await.unwrap_or(None);
                 let translation = world_pos.unwrap_or_default().translation;
                 info_map.entry(code.name).or_insert(translation);
@@ -1254,7 +1255,7 @@ impl AiosDBManager {
         if r.is_none() { return Ok(None); };
         // 找到最低点所属的房间
         let geo_info = r.unwrap().clone();
-        let room_transform = query_room_name_aabb_from_refno(vec![RefU64::from_url_refno(&geo_info._key).unwrap()],
+        let room_transform = query_room_name_aabb_from_refno(vec![RefU64::from_str(&geo_info._key).unwrap()],
                                                              &database).await?;
         // 找到设备最底端的坐标
         let mut aabb = None;
@@ -1738,7 +1739,7 @@ pub async fn query_bran_through_rooms_aql(bran_refnos: Vec<RefU64>, database: &A
     let result = database.aql_query::<BranThroughRooms>(aql).await?;
     let mut map = HashMap::new();
     for r in result {
-        let Some(refno) = RefU64::from_arangodb_refno_str(&r.key) else { continue; };
+        let Ok(refno) = RefU64::from_str(&r.key) else { continue; };
         map.entry(refno).or_insert(r.rooms);
     }
     Ok(map)

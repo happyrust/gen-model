@@ -89,7 +89,7 @@ async fn get_bran_data(bran_refnos: &Vec<PdmsElement>, aios_mgr: &AiosDBManager)
     for bran_refno in bran_refnos {
         let bran_refno = bran_refno.refno;
         let pool = aios_mgr.get_project_pool_by_refno(bran_refno).await;
-        if pool.is_none() { continue; }
+        if pool.is_err() { continue; }
         let (_, pool) = pool.unwrap();
         let basic = aios_mgr.get_refno_basic(bran_refno);
         if basic.is_none() { return Ok((map, ref_map)); }
@@ -130,7 +130,7 @@ async fn get_instances_data(compute_refnos: HashMap<String, HashSet<RefU64>>, me
             // bran 的 instance_code 是 name ，其他的是 refno
             let instance_code = if b_bran { query_name(refno, pool).await? } else { refno.to_refno_string() };
             let instance = get_instance_data_element(&metadata_map, refno, &att_type, instance_code);
-            if instance.is_none() { continue; }
+            if instance.is_err() { continue; }
             let instance = instance.unwrap();
             instances.insert(refno, instance);
             // 将 bran 下得元件放进去
@@ -141,11 +141,11 @@ async fn get_instances_data(compute_refnos: HashMap<String, HashSet<RefU64>>, me
                     // 放入元件数据
                     let bran_element = &bran_elements[idx];
                     let from_refno = &bran_element._from;
-                    let from_refno = RefU64::from_arangodb_refno_str(&from_refno);
-                    if from_refno.is_none() { continue; }
+                    let from_refno = RefU64::from_str(&from_refno);
+                    if from_refno.is_err() { continue; }
                     let from_refno = from_refno.unwrap();
                     bran_children_map.entry(refno).or_insert_with(Vec::new).push(from_refno);
-                    if let Some(to_refno) = RefU64::from_arangodb_refno_str(&bran_element._to) {
+                    if let Some(to_refno) = RefU64::from_str(&bran_element._to) {
                         if bran_children.contains(&to_refno) {
                             let element_type = &bran_element.att_type;
                             if let Some(instance) = get_instance_data_element(&metadata_map, to_refno, &element_type, to_refno.to_refno_string()) {
@@ -166,16 +166,16 @@ async fn get_instances_data(compute_refnos: HashMap<String, HashSet<RefU64>>, me
                     // 将 tube 的数据放进去
                     if distance >= TUBI_TOL {
                         // tube_refno 用 from 的 refno 和 to 的 refno 做一个 hash
-                        let from_refno = RefU64::from_arangodb_refno_str(&bran_elements[tubi_from_idx]._from);
-                        let to_refno = RefU64::from_arangodb_refno_str(&bran_elements[tubi_to_idx]._to);
-                        if from_refno.is_none() || to_refno.is_none() { continue; }
+                        let from_refno = RefU64::from_str(&bran_elements[tubi_from_idx]._from);
+                        let to_refno = RefU64::from_str(&bran_elements[tubi_to_idx]._to);
+                        if from_refno.is_none() || to_refno.is_err() { continue; }
                         let from_refno = from_refno.unwrap();
                         let to_refno = to_refno.unwrap();
                         let tube_refno = RefU64(from_refno.hash_with_another_refno(to_refno));
                         let tube_code = tube_refno.to_refno_string();
                         // let tube_code = format!("from:{} / to:{}", from_refno.to_refno_string(), to_refno.to_refno_string());
                         let instance = get_instance_data_element(&metadata_map, tube_refno, "TUBE", tube_code);
-                        if instance.is_none() { continue; }
+                        if instance.is_err() { continue; }
                         let instance = instance.unwrap();
 
                         bran_relations_map.entry(from_refno).or_insert_with(Vec::new).push(tube_refno);
@@ -204,7 +204,7 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
         let end_refno = bran_infos[i + 1].refno;
         let start_instance = instance_map.get(&start_refno);
         let end_instance = instance_map.get(&end_refno);
-        if start_instance.is_none() || end_instance.is_none() { continue; }
+        if start_instance.is_none() || end_instance.is_err() { continue; }
         let start_instance = start_instance.unwrap();
         let end_instance = end_instance.unwrap();
 
@@ -222,16 +222,16 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
     // 存 bran 与 元件之间的关系
     for (bran_refno, bran_children) in &bran_children_map {
         let bran_instances = instance_map.get(&bran_refno);
-        if bran_instances.is_none() { continue; }
+        if bran_instances.is_err() { continue; }
         let bran_instances = bran_instances.unwrap();
         // 包含 tube
         for child in bran_children {
             let elements = element_map.get(child);
-            if elements.is_none() { continue; }
+            if elements.is_err() { continue; }
             let elements = elements.unwrap();
             for element in elements {
                 let child_instance = instance_map.get(element);
-                if child_instance.is_none() { continue; }
+                if child_instance.is_err() { continue; }
                 let child_instance = child_instance.unwrap();
 
                 relations.push(DataCenterRelations {
@@ -252,16 +252,16 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
     for (bran_refno, _bran_children) in &bran_children_map {
         // 获取 bran 的 href 和 tref
         let result = ref_map.get(bran_refno);
-        if result.is_none() { continue; }
+        if result.is_err() { continue; }
         let (href, tref) = result.unwrap();
         let href_instance = instance_map.get(href);
         let tref_instance = instance_map.get(tref);
-        if href_instance.is_none() || tref_instance.is_none() { continue; }
+        if href_instance.is_none() || tref_instance.is_err() { continue; }
         let href_instance = href_instance.unwrap();
         let tref_instance = tref_instance.unwrap();
         // 获取 bran 的 children
         let children = bran_children_map.get(bran_refno);
-        if children.is_none() { continue; }
+        if children.is_err() { continue; }
         let children = children.unwrap();
         let mut first_idx = 0;
         let mut last_idx = children.len() - 1;
@@ -324,7 +324,7 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
         // 将一个参考号有多个element数据先提出来(tubi)
         for child in &children {
             let element = element_map.get(child);
-            if element.is_none() { continue; }
+            if element.is_err() { continue; }
             let elements = element.unwrap();
             if elements.len() <= 1 { continue; }
             let start_element = elements[0];
@@ -332,7 +332,7 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
 
             let start_instance = instance_map.get(&start_element);
             let end_instance = instance_map.get(&end_element);
-            if start_instance.is_none() || end_instance.is_none() { continue; }
+            if start_instance.is_none() || end_instance.is_err() { continue; }
             let start_instance = start_instance.unwrap();
             let end_instance = end_instance.unwrap();
 
@@ -354,7 +354,7 @@ fn get_relations_data(bran_infos: &Vec<PdmsElement>, instance_map: &HashMap<RefU
         for idx in 0..children.len() - 1 {
             let start_element = &children.get(start);
             let end_element = &children.get(end);
-            if start_element.is_none() || end_element.is_none() { continue; }
+            if start_element.is_none() || end_element.is_err() { continue; }
             let start_element = start_element.unwrap();
             let end_element = end_element.unwrap();
             let start_element = element_map.get(start_element);
@@ -453,8 +453,8 @@ async fn test_get_all_metadata_pipe() {
 
 #[tokio::test]
 async fn test_get_data_center_from_pipe() -> anyhow::Result<()> {
-    // let pipe_refno = RefU64::from_refno_str("24383/67155")?;
-    let pipe_refno = RefU64::from_refno_str("23584/5730")?;
+    // let pipe_refno = RefU64::from_str("24383/67155")?;
+    let pipe_refno = RefU64::from_str("23584/5730")?;
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     get_data_center_from_pipe(&mgr, pipe_refno).await?;
     Ok(())

@@ -3,6 +3,7 @@ use aios_core::pdms_types::*;
 use serde::{Serialize, Deserialize};
 use serde_with::serde_as;
 use serde_with::DisplayFromStr;
+use std::str::FromStr;
 
 pub mod attr_map;
 pub mod children;
@@ -75,7 +76,7 @@ pub struct PdmsRefnoTypeAql {
 pub fn convert_refno_vec_from_vec_string(string_vec: Vec<String>) -> Vec<RefU64> {
     let mut result = vec![];
     for v in string_vec {
-        if let Some(refno) = RefU64::from_url_refno(&v) {
+        if let Ok(refno) = RefU64::from_str(&v) {
             result.push(refno);
         }
     }

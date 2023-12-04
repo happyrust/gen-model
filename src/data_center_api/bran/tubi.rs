@@ -33,8 +33,8 @@ pub async fn get_data_center_tubi_attr(bran_refno: RefU64,bran_name:&str, databa
                                         ("ITEMAA5".to_string(), "Diameter".to_string()),
                                         ("ITEMAA7".to_string(), "Link".to_string())];
     for (idx, tubi) in tubis.into_iter().enumerate() {
-        let Some(from) = RefU64::from_arangodb_refno_str(&tubi._from) else { continue; };
-        let Some(to) = RefU64::from_arangodb_refno_str(&tubi._to) else { continue; };
+        let Some(from) = RefU64::from_str(&tubi._from) else { continue; };
+        let Some(to) = RefU64::from_str(&tubi._to) else { continue; };
         let mut result = Vec::new();
         result.push(DataCenterAttr {
             attribute_model_code: "ITEM1".to_string(),
@@ -151,7 +151,7 @@ pub async fn get_data_center_tubi_attr(bran_refno: RefU64,bran_name:&str, databa
 async fn test_get_data_center_tubi_attr() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
     let database = aios_mgr.get_arango_db().await?;
-    let bran_refno = RefU64::from_refno_str("24383/66761").unwrap();
+    let bran_refno = RefU64::from_str("24383/66761").unwrap();
     let result = get_data_center_tubi_attr(bran_refno,"/1WCC0578-21.3-NACJ-R54-R220",&database,&aios_mgr).await;
     let mut file = std::fs::File::create("tubi.json")?;
     let json = serde_json::to_vec(&result)?;

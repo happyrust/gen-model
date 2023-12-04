@@ -374,7 +374,7 @@ fn test_contains_s1_to_s17() {
 #[tokio::test]
 async fn test_get_dq_support_data() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
-    let refnos = vec![RefU64::from_refno_str("24383/86099").unwrap()];
+    let refnos = vec![RefU64::from_str("24383/86099").unwrap()];
     let result = get_dq_support_data(refnos, &aios_mgr).await?;
     let mut file = std::fs::File::create("data_center_test/ERECAB.json")?;
     let json = serde_json::to_vec(&result)?;

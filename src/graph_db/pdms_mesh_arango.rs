@@ -11,7 +11,7 @@ use log::{error, info};
 use nom::AsBytes;
 use parry3d::bounding_volume::Aabb;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::{connect_arangodb, create_arango_document, save_arangodb_doc};
+use crate::graph_db::pdms_arango::*;
 use serde::{Serialize, Deserialize};
 use crate::aql_api::pdms_mesh::query_all_geo_hashs;
 use crate::consts::AQL_PDMS_MESH_COLLECTION;
@@ -53,8 +53,6 @@ pub async fn save_mesh_data(mgr: &AiosDBManager, mesh_mgr: &mut PlantMeshesData,
     for chunk in keys.chunks(1000) {
         for &k in chunk {
             let v = meshes_map.get(k).unwrap();
-    // for chunk in &meshes.iter().chunks(1000) {
-    //     for k in chunk {
             let json = serde_json::to_value(v).unwrap();
             data.push(json);
         }
@@ -79,8 +77,17 @@ pub async fn save_mesh_data(mgr: &AiosDBManager, mesh_mgr: &mut PlantMeshesData,
     }
 
     std::fs::create_dir_all("asset/meshes").unwrap();
-    for mesh in meshes_map {
-        mesh.1.serialize_to_specify_file(&format!("asset/meshes/{}.mesh", mesh.0));
+    for (hash, p) in meshes_map {
+        // mesh.1.serialize_to_specify_file(&format!("asset/meshes/{}.mesh", mesh.0));
+        if let Some(mesh) = &mut p.mesh {
+            // let file_path = format!("asset/meshes/{}.mesh", hash);
+            //todo change back
+            let file_path = format!("E:/work/rs-plant3-d/assets/meshes/{}.mesh", hash);
+            //跳过重复的保存
+            if replace || !std::path::Path::new(&file_path).exists() {
+                p.serialize_to_specify_file(&file_path);
+            }
+        }
     }
 
     Ok(())

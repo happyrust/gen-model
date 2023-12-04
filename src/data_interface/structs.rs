@@ -45,7 +45,7 @@ pub struct RefnoHasNegInfoTuple(
 fn de_refno_from_vec_str<'de, D>(deserializer: D) -> Result<Vec<RefU64>, D::Error>
     where D: Deserializer<'de> {
     let s = Vec::<String>::deserialize(deserializer)?;
-    Ok(s.iter().map(|x| RefU64::from_url_refno(x).unwrap()).collect())
+    Ok(s.iter().map(|x| RefU64::from_str(x).unwrap()).collect())
 }
 
 // #[derive(Debug, Serialize, Deserialize, Default)]

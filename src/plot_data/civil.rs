@@ -12,7 +12,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::{create_arango_document, save_arangodb_doc};
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 use crate::consts::*;
-
+use std::str::FromStr;
 /// 土建出图轴网需要的数据
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct AxisData {
@@ -80,7 +80,7 @@ async fn save_axis_data(sbfr_refno: RefU64, axis_data: Vec<AxisData>, database: 
     let mut edges = vec![];
     let sbfr_refno_url = sbfr_refno.to_url_refno();
     for axis in axis_data {
-        let axis_refno = RefU64::from_url_refno(&axis._key).unwrap();
+        let axis_refno = RefU64::from_str(&axis._key).unwrap();
         let key = sbfr_refno.hash_with_another_refno(axis_refno);
         edges.push(AxisEdge {
             _key: key.to_string(),
@@ -104,7 +104,7 @@ async fn test_query_axis_from_sbfr() -> anyhow::Result<()> {
     let _ = create_arango_document(&database, axis_edge_collection, Edge).await;
 
     // 暂时只测这一个轴网
-    let refno = RefU64::from_refno_str("23584/56802").unwrap();
+    let refno = RefU64::from_str("23584/56802").unwrap();
     let result = query_axis_from_sbfr(refno, &database, &mgr).await?;
     dbg!(&result.len());
     save_axis_data(refno, result, &database).await?;
@@ -119,7 +119,7 @@ async fn test_query_axis_from_sbfr_aql() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refno = RefU64::from_refno_str("23584/56802").unwrap();
+    let refno = RefU64::from_str("23584/56802").unwrap();
     let result = query_axis_from_sbfr_aql(refno,&database).await?;
     dbg!(&result);
     Ok(())

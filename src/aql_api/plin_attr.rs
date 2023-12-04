@@ -15,61 +15,9 @@ use crate::consts::AQL_PLIN_ELES_COLLECTION;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::arangodb::ArDatabase;
-
+use std::str::FromStr;
 use crate::test::common::get_arangodb_conn_from_db_option_for_test;
 
-#[derive(Debug, Default)]
-pub struct PlinAxis {
-    pub axis: Vec2,
-    pub origin: Vec2,
-    pub offset: Vec2,
-}
-
-/// 传入desi的参考号，返回该参考号对应的plin attr_map 和 wall 引用的 NA 等对应的数值
-/// 将所有有形集的信息提前缓存到图数据里,要不要缓存，不缓存就做插件处理，如果有desp这些还是需要做计算处理的
-/// 获取所有型集的信息
-pub async fn query_plin_attrs(refnos: Vec<(RefU64, String)>, database: &ArDatabase) -> anyhow::Result<DashMap<RefU64, String>> {
-    let mut result = DashMap::new();
-    // 存 wall下的所有p_key以及对应的值
-    let mut wall_map: DashMap<RefU64, DashMap<String, String>> = DashMap::new();
-    let mut owner_map = DashMap::new();
-    for (refno, _) in &refnos {
-        let owner = query_owner_with_type_aql(database, *refno).await?;
-        if owner.is_none() { continue; }
-        let owner = owner.unwrap().0;
-        owner_map.insert(*refno, owner);
-        dbg!(owner);
-        if wall_map.contains_key(&owner) { continue; }
-        let pstr = query_foreign_refno_aql(&database, owner, &["SPRE", "PSTR"]).await?;
-        if pstr.is_none() { continue; }
-        let pstr_children = query_children_eles(&database, pstr.unwrap()).await?;
-        let mut children = vec![];
-        pstr_children.into_iter().for_each(|ele| {
-            children.push(ele.refno);
-        });
-        let plin_attrs = query_plin_attrs_with_refnos(children, &database).await?;
-        for plin_attr in plin_attrs {
-            let plin_refno = RefU64::from_url_refno(&plin_attr._key);
-            if plin_refno.is_none() { continue; }
-            let attr = plin_attr.attr;
-            let p_key = attr.get_val("PKEY");
-            let plax = attr.get_val("PLAX");
-            if p_key.is_none() || plax.is_none() { continue; }
-            wall_map.entry(owner).or_insert_with(DashMap::new)
-                .entry(p_key.unwrap().string_value()).or_insert(plax.unwrap().string_value());
-        }
-    }
-    for (refno, pos_line) in refnos {
-        let owner = owner_map.get(&refno);
-        if owner.is_none() { continue; }
-        let plin_map = wall_map.get(&owner.unwrap());
-        if plin_map.is_none() { continue; }
-        if let Some(value) = plin_map.unwrap().value().get(&pos_line) {
-            result.entry(refno).or_insert(value.value().to_string());
-        }
-    }
-    Ok(result)
-}
 
 
 impl AiosDBManager {
@@ -165,33 +113,3 @@ pub fn match_jusline_attr(exp: String, para: Vec<f64>) -> f64 {
         _ => 0.0,
     }
 }
-
-#[tokio::test]
-async fn test_query_plin_attrs() -> anyhow::Result<()> {
-    use config::{Config, ConfigError, Environment, File};
-    let s = Config::builder()
-        .add_source(File::with_name("DbOption"))
-        .build()?;
-    let db_option: DbOption = s.try_deserialize().unwrap();
-    let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    // let request = vec![(RefU64::from_refno_str("23584/5934").unwrap(), "IBOW".to_string()),
-    //                    (RefU64::from_refno_str("23584/5935").unwrap(), "IBOW".to_string()),
-    //                    (RefU64::from_refno_str("23584/5936").unwrap(), "OBOW".to_string())];
-    let request = vec![(RefU64::from_refno_str("17496/145248").unwrap(), "OBOW".to_string())];
-    let result = query_plin_attrs(request, &database).await?;
-    dbg!(&result);
-    Ok(())
-}
-
-// #[tokio::test]
-// async fn test_query_wall_jusl_value() -> anyhow::Result<()> {
-//     use config::{Config, ConfigError, Environment, File};
-//     let s = Config::builder()
-//         .add_source(File::with_name("DbOption"))
-//         .build()?;
-//     let db_option: DbOption = s.try_deserialize().unwrap();
-//     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-//     let result = query_pline_value(&database, RefU64::from_refno_str("23584/5931").unwrap(), "NA").await?;
-//     dbg!(&result);
-//     Ok(())
-// }

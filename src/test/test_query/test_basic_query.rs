@@ -123,7 +123,7 @@ async fn test_query_cata() -> anyhow::Result<()> {
 async fn test_query_path() -> anyhow::Result<()> {
     super::init_test_surreal().await;
     let cat_refno =
-        aios_core::query_single_map_by_paths("15194/5835".into(), &["->GMRE"], &[])
+        aios_core::query_single_by_paths("15194/5835".into(), &["->GMRE"], &[])
             .await
             .unwrap();
     dbg!(cat_refno);
@@ -133,7 +133,7 @@ async fn test_query_path() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_query_paths() -> anyhow::Result<()> {
     super::init_test_surreal().await;
-    let cat_refno = aios_core::query_single_map_by_paths(
+    let cat_refno = aios_core::query_single_by_paths(
         "15194/5835".into(),
         &["->GMRE", "->GMSR"],
         &["id"],

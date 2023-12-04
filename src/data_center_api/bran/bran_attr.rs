@@ -399,8 +399,8 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
             let bran_refnos = bran_children.iter().map(|child| child.refno).collect::<Vec<RefU64>>();
             let bran_children_spre = query_foreign_refnos_aql(&database, bran_refnos, vec!["SPRE".to_string(), "SPRE".to_string()]).await?;
             let children_spre_map = bran_children_spre.into_iter()
-                .filter(|c| RefU64::from_url_refno(&c.refno).is_some())
-                .map(|e| (RefU64::from_url_refno(&e.refno).unwrap(), e.name))
+                .filter(|c| RefU64::from_str(&c.refno).is_some())
+                .map(|e| (RefU64::from_str(&e.refno).unwrap(), e.name))
                 .collect::<HashMap<RefU64, String>>();
             let regex = Regex::new(r"(\d+):")?; // 判断字符串是否包含有多个数字加一个:
             for child in bran_children {
@@ -824,7 +824,7 @@ fn test_float_eq() {
 #[tokio::test]
 async fn test_query_gy_bran_data_datacenter() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
-    let tee_refno = RefU64::from_refno_str("24383/66761").unwrap();
+    let tee_refno = RefU64::from_str("24383/66761").unwrap();
     let result = query_gy_bran_data_datacenter(&[tee_refno], &aios_mgr).await?;
     let mut file = std::fs::File::create("bran.json")?;
     let json = serde_json::to_vec(&result)?;
@@ -835,7 +835,7 @@ async fn test_query_gy_bran_data_datacenter() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_query_dq_bran_data_datacenter() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
-    let bran_refno = vec![RefU64::from_refno_str("24383/84157").unwrap()];
+    let bran_refno = vec![RefU64::from_str("24383/84157").unwrap()];
     let result = get_dq_bran_data(&bran_refno, &aios_mgr).await?;
     let mut file = std::fs::File::create("data_center_test/dq_bran.json")?;
     let json = serde_json::to_vec(&result)?;
@@ -851,11 +851,11 @@ async fn test_match_ftub_between_elbo() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refno = RefU64::from_refno_str("24383/84088").unwrap();
+    let refno = RefU64::from_str("24383/84088").unwrap();
     let children = query_children_order_aql(&database, refno).await?;
     let ftub = match_ftub_between_elbo(&children);
     dbg!(&ftub);
-    let error_refno = RefU64::from_refno_str("24383/84151").unwrap();
+    let error_refno = RefU64::from_str("24383/84151").unwrap();
     let children = query_children_order_aql(&database, error_refno).await?;
     let ftub = match_ftub_between_elbo(&children);
     dbg!(&ftub);
@@ -865,7 +865,7 @@ async fn test_match_ftub_between_elbo() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_world_transform() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
-    let refno = RefU64::from_refno_str("17496/163520").unwrap();
+    let refno = RefU64::from_str("17496/163520").unwrap();
     let transform = aios_mgr.get_world_transform(refno).await?.unwrap_or_default();
     dbg!(&transform.translation);
     Ok(())

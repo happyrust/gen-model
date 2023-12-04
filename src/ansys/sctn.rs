@@ -197,13 +197,13 @@ async fn test_query_single_sctn_ansys_data() -> anyhow::Result<()> {
     let url = env::var("DATABASE_URL")?;
     let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
     let cata_pool = AiosDBManager::get_db_pool(&url, "zdj").await?;
-    let refno = RefU64::from_refno_str("24383/69687").unwrap();
+    let refno = RefU64::from_str("24383/69687").unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let children = query_children_order_aql(&database, refno).await?;
     let mut sctns = Vec::new();
     for child in children {
         let sctn = query_single_sctn_ansys_data_test(child.refno, &pool, &cata_pool, &database).await?;
-        if sctn.is_none() { continue; }
+        if sctn.is_err() { continue; }
         sctns.push(sctn.unwrap());
     }
     let data = SctnAnsysData::create_many_sctn_ansys_file(sctns);

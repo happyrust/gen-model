@@ -1,4 +1,4 @@
-use crate::api::attr::*;
+use std::str::FromStr;
 use crate::api::element::*;
 use crate::api::refno_info::*;
 use crate::aql_api::children::query_deep_children_refnos_fuzzy;
@@ -272,7 +272,7 @@ impl AiosDBManager {
                 }
                 for (refno_str, aabb) in refno_aabbs {
                     if aabb.extents().magnitude().is_finite() {
-                        let refno = RefU64::from_url_refno(&refno_str).unwrap();
+                        let refno = RefU64::from_str(&refno_str).unwrap();
                         rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, refno));
                     }
                 }
@@ -390,7 +390,7 @@ impl AiosDBManager {
         let mut room_eles_map: HashMap<RefU64, (Aabb, Vec<RefU64>)> = HashMap::new();
         let mut room_panels_map: HashMap<RefU64, Vec<RoomPanelElement>> = HashMap::new();
         for r in room_root_refnos {
-            let Ok(room_root_refno) = RefU64::from_refno_str(r) else {
+            let Ok(room_root_refno) = RefU64::from_str(r) else {
                 continue;
             };
             let room_panels =

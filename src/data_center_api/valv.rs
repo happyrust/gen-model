@@ -133,7 +133,7 @@ async fn test_valv() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refno = RefU64::from_refno_str("24383/67619").unwrap();
+    let refno = RefU64::from_str("24383/67619").unwrap();
     let pool = AiosDBManager::get_db_pool(&url, "avevamarinesample").await?;
     let data = get_valv_data(vec![refno], &database, &pool).await.unwrap();
     let mut file = fs::File::create("阀门.json")?;

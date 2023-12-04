@@ -79,7 +79,7 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
                         if bran_infos[tubi_end_index].att_type == "ATTA" { tubi_end_index += 1; } else { break; }
                     }
                 }
-                let from_refno = RefU64::from_arangodb_refno_str(&bran_infos[i]._from);
+                let from_refno = RefU64::from_str(&bran_infos[i]._from);
                 let mut tubi_data = gen_tubi_data(bran_infos[i].start_pt, bran_infos[tubi_end_index].end_pt,
                                                   bran_infos[tubi_end_index].tubi_size, &bran_attr, from_refno,
                                                   &mut materials, &pipe_thickness_data, aios_mgr).await;
@@ -89,7 +89,7 @@ pub async fn get_bran_name_and_children(refno: RefU64, aios_mgr: &AiosDBManager,
         // 生成 bran 元件数据
         if i == bran_infos.len() - 1 { continue; }
         let refno = convert_refno_from_edge_str(&bran_infos[i]._to);
-        if refno.is_none() { continue; }
+        if refno.is_err() { continue; }
         let refno = refno.unwrap();
         if gen_node_basic_data(refno, &mut data, &mut materials, &bran_attr,
                                &bran_infos[i], thickness_map, &bran_infos[i + 1],
@@ -154,17 +154,17 @@ async fn gen_material_data(materials: Vec<(RefU64, String)>, aios_mgr: &AiosDBMa
     for (spre_refno, spre_name) in materials {
         data.push(gen_item_code_data_name(&spre_name));
         let spre_cache = aios_mgr.get_refno_basic(spre_refno);
-        if spre_cache.is_none() { continue; }
+        if spre_cache.is_err() { continue; }
         let spre_cache = spre_cache.unwrap();
         let spre_attr = query_implicit_attr(spre_refno, spre_cache.value(), pool, Some(vec!["DETR"])).await;
         if spre_attr.is_err() { continue; }
         let spre_attr = spre_attr.unwrap();
         let detr_refno = spre_attr.get_refu64("DETR");
-        if detr_refno.is_none() { continue; }
+        if detr_refno.is_err() { continue; }
         let detr_refno = detr_refno.unwrap();
         // dbg!(&detr_refno);
         let detr_cache = aios_mgr.get_refno_basic(detr_refno);
-        if detr_cache.is_none() { continue; }
+        if detr_cache.is_err() { continue; }
         let detr_cache = detr_cache.unwrap();
         let detr_attr = query_explicit_attr(detr_refno, pool).await;
         if detr_attr.is_err() { continue; }
@@ -263,7 +263,7 @@ fn convert_refno_from_edge_str(refno_str: &str) -> Option<RefU64> {
     let refno_str = refno_str.split("/").collect::<Vec<_>>();
     if refno_str.len() <= 1 { return None; }
     let refno_str = refno_str[1];
-    RefU64::from_url_refno(refno_str)
+    RefU64::from_str(refno_str)
 }
 
 

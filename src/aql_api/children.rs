@@ -24,7 +24,6 @@ use std::str::FromStr;
 use aios_core::AttrMap;
 use aios_core::tool::db_tool::{db1_dehash, db1_dehash_const, db1_hash, db1_hash_const};
 use crate::data_interface::interface::PdmsDataInterface;
-
 pub async fn query_children_eles(
     arango_db: &ArDatabase,
     refno: RefU64,
@@ -145,7 +144,7 @@ pub async fn query_children_with_name_aql(
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<PdmsRefnoNameAql> = arango_database.aql_query(aql).await?;
     for v in result {
-        if let Some(refno) = RefU64::from_url_refno(&v.refno) {
+        if let Ok(refno) = RefU64::from_str(&v.refno) {
             r.push((refno, v.name));
         }
     }
@@ -173,7 +172,7 @@ pub async fn query_owner_with_type_aql(
         .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<PdmsRefnoTypeAql> = arango_database.aql_query(aql).await?;
     for v in result {
-        if let Some(refno) = RefU64::from_url_refno(&v.refno) {
+        if let Ok(refno) = RefU64::from_str(&v.refno) {
             r.push((refno, v.noun));
         }
     }
@@ -868,7 +867,7 @@ pub async fn query_travel_children_with_types_aql(
 /// 遍历refno只获取指定类型的refno
 /// refno: 指定该参考号下面所有的节点来进行过滤
 /// att_type: 需要查找的类型
-/// 实例  : query_travel_children_with_type_aql(&database,RefU64::from_refno_str("23584/107").unwrap(),"BRAN" )
+/// 实例  : query_travel_children_with_type_aql(&database,RefU64::from_str("23584/107").unwrap(),"BRAN" )
 pub async fn query_travel_children_with_type_aql(
     arango_database: &ArDatabase,
     refno: RefU64,
@@ -1144,7 +1143,7 @@ pub async fn filter_negative_sibl_from_refnos(
     let result = database.aql_query::<String>(aql).await?;
     Ok(result
         .into_iter()
-        .filter_map(|r| RefU64::from_arangodb_refno_str(&r))
+        .filter_map(|r| RefU64::from_str(&r).ok())
         .collect::<Vec<_>>())
 }
 
@@ -1256,7 +1255,7 @@ pub async fn vague_query_refnos_user_set_aql(
     let mut r = Vec::new();
     let result: Vec<PdmsRefnoNameAql> = database.aql_query(aql).await?;
     for v in result {
-        if let Some(refno) = RefU64::from_url_refno(&v.refno) {
+        if let Ok(refno) = RefU64::from_str(&v.refno) {
             r.push((refno, v.name));
         }
     }
@@ -1557,8 +1556,8 @@ async fn test_vague_query_refnos_user_set_aql() -> anyhow::Result<()> {
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
     let request = VagueSearchRequest {
         filter_refnos: vec![
-            RefU64::from_refno_str("24383/66456").unwrap(),
-            RefU64::from_refno_str("24381/100675").unwrap(),
+            RefU64::from_str("24383/66456").unwrap(),
+            RefU64::from_str("24381/100675").unwrap(),
         ],
         filter_condition: vec![
             ("MAJOR".to_string(), (And, "T".to_string())),
@@ -1588,7 +1587,7 @@ async fn test_query_refnos_from_names() -> anyhow::Result<()> {
 #[tokio::test]
 async fn test_get_uda_type_refnos_from_select_refnos() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await?;
-    let select_refnos = vec![RefU64::from_url_refno("9304_2").unwrap()];
+    let select_refnos = vec![RefU64::from_str("9304_2").unwrap()];
     let refnos = get_uda_type_refnos_from_select_refnos(select_refnos, "STDMODELITEM", "ZONE", &aios_mgr).await?;
     dbg!(&refnos);
     Ok(())
@@ -1616,7 +1615,7 @@ async fn test_query_first_children() -> anyhow::Result<()> {
         .build()?;
     let db_option: DbOption = s.try_deserialize().unwrap();
     let database = get_arangodb_conn_from_db_option_for_test(&db_option).await?;
-    let refnos = vec![RefU64::from_refno_str("24383/66687").unwrap()];
+    let refnos = vec![RefU64::from_str("24383/66687").unwrap()];
     let result = query_first_children(refnos.clone(), "VALV", &database).await?;
     dbg!(&result);
     let result = query_first_children(refnos.clone(), "!ATTA", &database).await?;

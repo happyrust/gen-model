@@ -204,7 +204,7 @@ fn test_log() {
 #[tokio::test]
 async fn test_db1_dehash() {
     let mgr = AiosDBManager::init_form_config().await.unwrap();
-    let refno = RefU64::from_refno_str("24383/91850").unwrap();
+    let refno = RefU64::from_str("24383/91850").unwrap();
     let children = mgr
         .get_children_within_project(refno, "AvevaMarineSample")
         .unwrap();

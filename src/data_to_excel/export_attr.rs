@@ -83,7 +83,7 @@ use crate::data_to_excel::export_csv::create_csv_file;
 async fn test_get_attrs_to_csv() -> anyhow::Result<()> {
     let aios_mgr = AiosDBManager::init_form_config().await.unwrap();
     let database = aios_mgr.get_arango_db().await?;
-    let children = query_children_order_aql(&database,RefU64::from_refno_str("24383/66748").unwrap()).await?;
+    let children = query_children_order_aql(&database,RefU64::from_str("24383/66748").unwrap()).await?;
     // let mut refnos = children.into_iter().map(|x| x.refno).collect();
     // push spre 和 catr
     // get_attrs_to_csv(refnos,&aios_mgr).await
