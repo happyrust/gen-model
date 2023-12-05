@@ -33,12 +33,24 @@ use env_logger::{fmt::Target, Builder};
 use log::{error, LevelFilter};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 use surrealdb::engine::remote::ws::Ws;
 
+use std::time::Duration;
+use tracing_subscriber::fmt;
+use tracing_subscriber::fmt::format::FmtSpan;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+
+    fmt::fmt()
+    .with_span_events(FmtSpan::CLOSE)
+    .with_target(false)
+    .with_level(false)
+    .init();
+
     let db_option: DbOption = get_db_option().clone();
     // 如果启用了日志功能
     if db_option.enable_log {
@@ -129,7 +141,9 @@ async fn main() -> anyhow::Result<()> {
     //是否需要重构下面的这行代码？
     tokio::join!(
         // AiosDBManager::run_e3d_clone_bg_task(mgr.clone()),
-        AiosDBManager::spawn_exec_watcher(mgr.clone()),
+
+        // AiosDBManager::spawn_exec_watcher(mgr.clone()),
+
         // AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
         // AiosDBManager::demo_mqtt_requests(),
     );

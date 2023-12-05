@@ -10,6 +10,7 @@ use futures::future::ok;
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::io::Write;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateAttrMap {

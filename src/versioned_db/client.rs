@@ -1,13 +1,28 @@
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
+use aios_core::tool::db_tool::db1_dehash;
+use aios_core::tool::db_tool::db1_hash;
 use aios_core::SUL_DB;
+use config::File;
 use dashmap::DashMap;
+use dashmap::DashSet;
 use futures::StreamExt;
 use itertools::Itertools;
+use petgraph::Directed;
+use petgraph::Undirected;
+use petgraph::algo::all_simple_paths;
+use petgraph::graph::Graph;
+use petgraph::graph::NodeIndex;
+use petgraph::graphmap::GraphMap;
+use petgraph::graphmap::UnGraphMap;
+use petgraph::prelude::DiGraphMap;
+use petgraph::visit::IntoEdgesDirected;
+use rayon::prelude::*;
 use sea_orm::entity::prelude::*;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Instant;
-
+use std::sync::Arc;
 
 const JSON_CHUNK_COUNT: usize = 10_000;
 
@@ -71,32 +86,46 @@ const JSON_CHUNK_COUNT: usize = 10_000;
 /// 保存element数据到版本管理
 /// todo 后续再考虑 record links
 // 先暂时使用relate的方式
+// #[tracing::instrument]
 pub async fn save_pdms_eles_to_surreal(
     total_attr_map: &DashMap<RefU64, NamedAttrMap>,
     db_num: i32,
     children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
 ) -> anyhow::Result<()> {
     use itertools::Itertools;
-    let mut model_chunks: Vec<Vec<SPdmsElement>> = vec![];
-    //是否需要定义SCHEMA
-    // SUL_DB
-    //     .query(format!(r#"
-    //         DEFINE TABLE {0} SCHEMALESS;
-    //         DEFINE FIELD owner ON {0} TYPE option<record<{0}>>;
-    //     "#, "pe"))
-    //     .await.unwrap();
-    for chunk in &total_attr_map.into_iter().chunks(JSON_CHUNK_COUNT) {
+    // let mut model_chunks: Vec<Vec<SPdmsElement>> = vec![];
+    //加载，然后生成所有的noun的graph，通过graph，来快速定位
+    //如果这个文件已经存在，这里相当于是追加
+
+    // let graph_file = std::fs::File::open("./noun_graph.json").unwrap();
+    // let mut graph: GraphMap<u32, i32, Directed> = serde_json::from_reader(graph_file).unwrap_or(DiGraphMap::new());
+    let noun_map: Arc<DashMap<u32, DashSet<u32>>> = Arc::new(DashMap::new());
+
+    let keys = total_attr_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
+    let mut model_chunks = keys.par_chunks(JSON_CHUNK_COUNT).map(|chunk| {
         let mut model_chunk = vec![];
-        for kv in chunk {
-            let att_map = kv.value();
+        let noun_map_clone = noun_map.clone();
+        for &refno in chunk {
+            let att_map = total_attr_map.get(&refno).unwrap();
             let owner = att_map.get_refno_by_att_or_default("OWNER");
-            let refno = *kv.key();
+            let noun = att_map.get_type();
+            let owner_noun = total_attr_map
+                .get(&owner)
+                .map(|m| m.get_type())
+                .unwrap_or_default();
+            //可以提前准备，是固定好的，根据测试项目固定下来，下次可以不用，现在是调试用
+            //添加到noun_map
+            // noun_map_clone
+            //     .entry(db1_hash(&noun))
+            //     .or_insert(DashSet::new())
+            //     .insert(db1_hash(&owner_noun));
+
             let ele = pe::SPdmsElement {
                 id: refno.to_string(),
                 refno,
                 owner,
                 name: att_map.get_string_or_default("NAME"),
-                noun: att_map.get_type(),
+                noun,
                 dbnum: db_num,
                 cata_hash: att_map.cal_cata_hash(),
                 status_tag: None,
@@ -105,10 +134,55 @@ pub async fn save_pdms_eles_to_surreal(
                 lock: false,
                 deleted: false,
             };
+
             model_chunk.push(ele);
         }
-        model_chunks.push(model_chunk);
-    }
+        // model_chunks.push(model_chunk);
+        model_chunk
+    }).collect::<Vec<_>>();
+
+    // for kv in noun_map.iter() {
+    //     let k = *kv.key();
+    //     let v = kv.iter().map(|x| *x).collect::<Vec<_>>();
+    //     graph.add_node(k);
+    //     graph.extend(v.iter().map(|&x| (k, x)));
+    // }
+
+    // let start_node = graph.add_node(db1_hash("CATA"));
+    // let end_node = graph.add_node(db1_hash("GMSE"));
+
+    // // dbg!((start_node, end_node));
+    // dbg!(graph.edges_directed(start_node, petgraph::Direction::Outgoing).count());
+
+    // //使用 all_simple_paths 函数找到所有路径
+    // let paths =
+    //     all_simple_paths::<Vec<_>, _>(&graph, start_node, end_node, 0, None).collect::<Vec<_>>();
+
+    // dbg!(paths.len());
+
+    // 遍历路径并计算距离
+    // for path in paths {
+    //     // let distance: i32 = path
+    //     //     .windows(2)
+    //     //     .map(|window| {
+    //     //         graph
+    //     //             .edge_weight(graph.find_edge(window[0], window[1]).unwrap())
+    //     //             .unwrap()
+    //     //     })
+    //     //     .sum();
+    //     let path_nouns = path.iter().map(|&x| db1_dehash(x)).collect::<Vec<_>>();
+    //     println!("Path: {:?}", &path_nouns);
+    // }
+
+    // {
+    //     //保存graph 到json文件
+    //     // 保存graph 到json文件
+    //     let graph_file = std::fs::File::create("./noun_graph.json").unwrap();
+    //     serde_json::to_writer(graph_file, &graph).unwrap();
+    // }
+
+    // return Ok(());
+
     let mut time = Instant::now();
     let mut join_set = tokio::task::JoinSet::new();
     for models in model_chunks {

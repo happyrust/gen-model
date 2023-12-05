@@ -155,17 +155,19 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             // }
         }
 
-        match sync_total_async_threaded(&db_option, project, &["DICT", "SYST"], false).await {
-            Ok(_) => {
-                // 同步数据成功
-                println!("同步UDA和SYS数据成功。");
-            }
-            Err(e) => {
-                // 同步数据失败，打印错误信息
-                println!("{}", e.to_string());
+        if !db_option.incr_sync{
+            match sync_total_async_threaded(&db_option, project, &["DICT", "SYST"], false).await {
+                Ok(_) => {
+                    // 同步数据成功
+                    println!("同步UDA和SYS数据成功。");
+                }
+                Err(e) => {
+                    // 同步数据失败，打印错误信息
+                    println!("{}", e.to_string());
+                }
             }
         }
-
+       
         match sync_total_async_threaded(&db_option, project, &["DESI", "CATA"], true).await {
             Ok(_) => {
                 // 同步数据成功
@@ -387,6 +389,8 @@ pub async fn sync_total_async_threaded(
                         &children_map_clone,
                     )
                         .await?;
+                    //temp
+                    continue;
                     dbg!("开始保存属性数据");
                     const ATTS_CHUNK_COUNT: usize = 300;
                     let mut join_set = tokio::task::JoinSet::new();

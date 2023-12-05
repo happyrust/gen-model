@@ -25,6 +25,7 @@ use sqlx::{MySql, Pool};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::mem::take;
+use std::str::FromStr;
 use std::{env, fs};
 
 const FIRST_VERSION_PAGE: [u8; 20] = [

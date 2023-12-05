@@ -1,5 +1,6 @@
 use std::env;
 use std::io::Write;
+use std::str::FromStr;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use bb8_arangodb::arangors_lite::Database;
@@ -203,7 +204,7 @@ async fn test_query_single_sctn_ansys_data() -> anyhow::Result<()> {
     let mut sctns = Vec::new();
     for child in children {
         let sctn = query_single_sctn_ansys_data_test(child.refno, &pool, &cata_pool, &database).await?;
-        if sctn.is_err() { continue; }
+        if sctn.is_none() { continue; }
         sctns.push(sctn.unwrap());
     }
     let data = SctnAnsysData::create_many_sctn_ansys_file(sctns);

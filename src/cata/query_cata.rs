@@ -272,6 +272,7 @@ pub async fn query_gm_param(
     interface: &dyn PdmsDataInterface,
     is_spro: bool,
 ) -> Option<GmParam> {
+    // dbg!(a);
     let mut paxises = a.get_attr_strings_without_default(&["PAXI", "PAAX", "PBAX", "PCAX"]);
     if let Some(val) = a.get_val("PTS") {
         match val {
@@ -302,10 +303,11 @@ pub async fn query_gm_param(
             if let Some(r) = child.get_refno()
                 && child.get_type_str() == "SLOO"
             {
-                for a in aios_core::get_children_named_attmaps(r)
+                let vert_atts = aios_core::get_children_named_attmaps(r)
                     .await
-                    .unwrap_or_default()
-                {
+                    .unwrap_or_default();
+                // dbg!(&vert_atts);
+                for a in vert_atts{
                     verts.push([
                         (a.get_as_string("PX").unwrap_or_default()),
                         (a.get_as_string("PY").unwrap_or_default()),

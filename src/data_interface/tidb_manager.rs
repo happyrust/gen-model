@@ -98,6 +98,9 @@ pub struct AiosDBManager {
     pub plin_params_map: DashMap<RefU64, DashMap<String, PlinParamData>>,
 }
 
+/// Implements the `Debug` trait for `AiosDBManager`.
+///
+/// This allows `AiosDBManager` instances to be formatted using the `fmt` method from the `Debug` trait.
 impl Debug for AiosDBManager {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "db manager project is {}", &self.project_path)
@@ -1101,6 +1104,7 @@ impl PdmsDataInterface for AiosDBManager {
                 }
             }
         }
+        // dbg!(&children);
         for geo_am in children {
             //todo visible 不应该在这里执行过滤
             //后续如果需要使用这些不同等级的模型，需要切换
@@ -1114,6 +1118,7 @@ impl PdmsDataInterface for AiosDBManager {
                     .unwrap_or_default(),
             );
         }
+        // dbg!(&gms);
         Ok(gms)
     }
 
@@ -1405,12 +1410,13 @@ impl PdmsDataInterface for AiosDBManager {
         dbg!(scom_ref);
         let scom_info = self.get_or_create_scom_info(scom_ref).await?;
         // #[cfg(debug_assertions)]
-        dbg!(&scom_info);
+        // dbg!(&scom_info);
         let mut context = self
             .get_or_create_cata_context(desi_refno, desi_axis_map)
             .await?;
 
         let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(self), Some(context));
+        // dbg!(&geom_info);
         if geom_info.is_err() {
             error!("{:?}", geom_info.as_ref().err());
             error!("{:?}", &desi_att);
