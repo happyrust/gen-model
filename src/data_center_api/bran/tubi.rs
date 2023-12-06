@@ -38,7 +38,7 @@ pub async fn get_data_center_tubi_attr(bran_refno: RefU64,bran_name:&str, databa
         let mut result = Vec::new();
         result.push(DataCenterAttr {
             attribute_model_code: "ITEM1".to_string(),
-            value: AttrString(from.to_refno_string()).into(),
+            value: AttrString(from.to_string()).into(),
         });
         let item_1 = DataCenterAttr {
             attribute_model_code: "ITEMA1".to_string(),
@@ -139,7 +139,7 @@ pub async fn get_data_center_tubi_attr(bran_refno: RefU64,bran_name:&str, databa
         instances.push(DataCenterInstance {
             object_model_code: "ITEMAA".to_string(),
             project_code: aios_mgr.db_option.project_code.to_string(),
-            instance_code: from.to_refno_string(),
+            instance_code: from.to_string(),
             version: get_refno_latest_version(),
             attributes: result,
         });

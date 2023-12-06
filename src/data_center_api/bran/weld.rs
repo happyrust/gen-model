@@ -18,7 +18,7 @@ pub async fn get_data_center_weld_attr(refno: PdmsElement, bran_name: &str, room
     let mut result = Vec::new();
     let item_1 = DataCenterAttr {
         attribute_model_code: "ITEM1".to_string(),
-        value: AttrString(refno.refno.to_refno_string()).into(),
+        value: AttrString(refno.refno.to_string()).into(),
     };
     result.push(item_1);
     let item_2 = DataCenterAttr {

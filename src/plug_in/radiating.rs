@@ -97,13 +97,13 @@ pub async fn get_pipe_heat_dissipation(requests: Vec<GetPipeHeatDissipationReque
                 if let Some(room) = uda_room_map.get(&bran) {
                     if let Some(site) = uda_room_site_map.get(room) {
                         PdmsRoomNameAql {
-                            refno: bran.to_url_refno(),
+                            refno: bran.to_string(),
                             room_name: room.to_string(),
                             b_rs: site.contains("RS"),
                         }
                     } else {
                         PdmsRoomNameAql {
-                            refno: bran.to_url_refno(),
+                            refno: bran.to_string(),
                             room_name: room.to_string(),
                             b_rs: false,
                         }
@@ -252,7 +252,7 @@ pub async fn get_heat_dissipation_data(bran_refno: RefU64, database: &ArDatabase
 
 /// 查询bran下面所有元件的点集(除去atta)
 async fn query_bran_point_map(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<InstPointMap>> {
-    let id = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, bran_refno.to_url_refno());
+    let id = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, bran_refno.to_string());
     let aql = AqlQuery::new("
     with @@pdms_eles,@@pdms_edges,@@pdms_inst_infos,@@pdms_inst_geos
     for v in 1 inbound @id @@pdms_edges

@@ -86,7 +86,7 @@ pub fn convert_refno_vec_from_vec_string(string_vec: Vec<String>) -> Vec<RefU64>
 pub fn change_vec_refnos_into_vec_string(refnos: Vec<RefU64>) -> Vec<String> {
     let mut children = vec![];
     refnos.into_iter().for_each(|refno| {
-        children.push(RefU64::to_url_refno(&refno))
+        children.push(refno.to_string())
     });
     children
 }

@@ -197,8 +197,8 @@ pub async fn save_foreign_refno_edges_in_sync(
             let key = refno.hash_with_another_refno(foreign_refno);
             foreign_edges.push(ForeignEdges {
                 _key: key.to_string(),
-                _from: format!("{}/{}", "pdms_eles", refno.to_url_refno()),
-                _to: format!("{}/{}", "pdms_eles", foreign_refno.to_url_refno()),
+                _from: format!("{}/{}", "pdms_eles", refno.to_string()),
+                _to: format!("{}/{}", "pdms_eles", foreign_refno.to_string()),
                 foreign_type,
             })
         }
@@ -275,8 +275,8 @@ async fn set_level_edges(
         let to_refno = (eles[i - 1].refno);
         let edge = PdmsEleGraphEdge {
             _key: from_refno.hash_with_another_refno(to_refno).to_string(),
-            _from: format!("{}/{}", "pdms_eles", from_refno.to_url_refno()),
-            _to: format!("{}/{}", "pdms_eles", to_refno.to_url_refno()),
+            _from: format!("{}/{}", "pdms_eles", from_refno.to_string()),
+            _to: format!("{}/{}", "pdms_eles", to_refno.to_string()),
         };
         edges.push(edge);
     }
@@ -307,8 +307,8 @@ pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::
                 // spre 到 catr 的边
                 spre_edges.push(ForeignEdges {
                     _key: spre.hash_with_another_refno(catr).to_string(),
-                    _from: format!("{}/{}", collection, spre.to_url_refno()),
-                    _to: format!("{}/{}", collection, catr.to_url_refno()),
+                    _from: format!("{}/{}", collection, spre.to_string()),
+                    _to: format!("{}/{}", collection, catr.to_string()),
                     foreign_type: "CATR".to_string(),
                 });
                 spre_set.insert(spre);
@@ -333,8 +333,8 @@ pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::
                                 }
                                 spre_edges.push(ForeignEdges {
                                     _key: catr.hash_with_another_refno(ptre_refno).to_string(),
-                                    _from: format!("{}/{}", collection, catr.to_url_refno()),
-                                    _to: format!("{}/{}", collection, ptre_refno.to_url_refno()),
+                                    _from: format!("{}/{}", collection, catr.to_string()),
+                                    _to: format!("{}/{}", collection, ptre_refno.to_string()),
                                     foreign_type: catr_foreign_type.to_string(),
                                 });
                             }
@@ -376,7 +376,7 @@ pub async fn save_dtse_value_to_arangodb(
                 continue;
             }
             result.push(DataDocument {
-                _key: data_refno.to_url_refno(),
+                _key: data_refno.to_string(),
                 dkey: d_key.unwrap().to_string(),
                 ppro: ppro.unwrap().to_string(),
                 dpro: dpro.unwrap().to_string(),
@@ -493,7 +493,7 @@ pub async fn remove_arangodb_with_refno_key(
 ) -> anyhow::Result<bool> {
     let keys = refnos
         .into_iter()
-        .map(|refno| refno.to_url_refno())
+        .map(|refno| refno.to_string())
         .collect::<Vec<_>>();
     dbg!(&keys);
     let aql = AqlQuery::new(

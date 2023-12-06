@@ -36,7 +36,7 @@ pub async fn get_dq_fixing_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -
         fixing_attrs.push(DataCenterAttr {
             //fixing类型元数据的PART1参数都是引用号，统一处理
             attribute_model_code: "PART1".to_string(),
-            value: AttrValue::AttrString(fixing.refno.to_refno_str()).into(),
+            value: AttrValue::AttrString(fixing.refno.to_string()).into(),
         });
         //根据参考号，循环查找父节点，知道节点类型为STRU
         let owner_refno = aios_mgr.get_ancestor_refno_till_type(fixing.refno, &vec!["STRU"]);
@@ -129,7 +129,7 @@ pub async fn get_dq_fixing_data(refnos: Vec<RefU64>, aios_mgr: &AiosDBManager) -
         result.push(DataCenterInstance {
             object_model_code: object_code,//对象代码，对应类型
             project_code: aios_mgr.db_option.project_code.to_string(),//项目代码
-            instance_code: fixing.refno.to_refno_str(),//句柄，对应引用号
+            instance_code: fixing.refno.to_string(),//句柄，对应引用号
             version: get_refno_latest_version(),//版本号
             attributes: fixing_attrs,//属性及值
         });
@@ -529,7 +529,7 @@ fn get_dq_finxing_mgb(refno: RefU64, spre_name: &str,
 /// 获取电气圆板的数据
 async fn query_dq_circular_plate(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<EleNodeWithSpreName>> {
     let id = refnos.into_iter()
-        .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()))
+        .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string()))
         .collect::<Vec<_>>();
     let aql = AqlQuery::new("
         with @@pdms_edges,@@pdms_eles,@@foreign_edges

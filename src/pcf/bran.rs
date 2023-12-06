@@ -251,11 +251,11 @@ pub fn gen_item_code_data_name(spre_name: &str) -> Vec<u8> {
 
 /// 生成 ID-REF-NO 的数据
 pub fn gen_refno_data(refno: RefU64) -> Vec<u8> {
-    format!("        ID-REF-NO    {}\r\n", refno.to_refno_string()).into_bytes()
+    format!("        ID-REF-NO    {}\r\n", refno.to_string()).into_bytes()
 }
 
 pub fn gen_refno_data_pipe(refno: RefU64) -> Vec<u8> {
-    format!("        ID-REF-NO    {}-1\r\n", refno.to_refno_string()).into_bytes()
+    format!("        ID-REF-NO    {}-1\r\n", refno.to_string()).into_bytes()
 }
 
 /// 从图数据库的 edge 的 _from / _to 数据转换成 RefU64

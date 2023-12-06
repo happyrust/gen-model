@@ -78,7 +78,7 @@ pub async fn get_inst_data_from_inst_major(
             room_code = room_name.room_name;
         }
         result.push(InstPositionData {
-            refno: ele.refno.to_refno_string(),
+            refno: ele.refno.to_string(),
             room_code,
             elevation: pos,
         })
@@ -103,7 +103,7 @@ pub(crate) async fn get_bran_itema_attr(
 ) {
     let item_1 = DataCenterAttr {
         attribute_model_code: "ITEM1".to_string(),
-        value: AttrString(refno.refno.to_refno_string()).into(),
+        value: AttrString(refno.refno.to_string()).into(),
     };
     result.push(item_1);
     let item_2 = DataCenterAttr {
@@ -239,7 +239,7 @@ pub async fn get_valv_data_from_pipe_major(
             room_code = room_name.room_name;
         }
         result.push(PipeRoomCodeData {
-            refno: ele.refno.to_refno_string(),
+            refno: ele.refno.to_string(),
             room_code,
         })
     }
@@ -287,7 +287,7 @@ pub async fn get_equi_data_from_electric_major(
             room_code = room_name.room_name;
         }
         result.push(InstPositionData {
-            refno: ele.refno.to_refno_string(),
+            refno: ele.refno.to_string(),
             room_code,
             elevation: pos,
         });

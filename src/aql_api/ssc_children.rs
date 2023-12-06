@@ -6,7 +6,7 @@ use crate::arangodb::ArDatabase;
 /// 通过图数据库查询 children
 pub async fn query_ssc_children_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
-    let refno_aql = format!("{AQL_SSC_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_SSC_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new("\
     With @@ssc_eles,@@ssc_edges
     FOR z in 1 INBOUND @id ssc_edges

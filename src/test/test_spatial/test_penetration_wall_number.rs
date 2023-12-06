@@ -6,7 +6,7 @@ use crate::test::test_helper::get_test_ams_db_manager_async;
 pub async fn query_refno_belong_rooms(
     refno: RefU64,
 ) -> (String, String) {
-    let refno = &refno.to_refno_str() as &str;
+    let refno = &refno.to_string() as &str;
     match refno {
         "24383/83722" => {
             return ("24381/180994".to_string(), "".to_string());

@@ -97,7 +97,11 @@ puhua_database_user = ""
 puhua_database_password = ""
 
 #debug_root_refnos = ["17496/171190"]
-debug_root_refnos = ["17496/171238"]
+# debug_root_refnos = ["17496/171188"]
+
+#test wall
+debug_root_refnos = ["17496/171396"]
+
 # debug_root_refnos = ["17496/171191"]
 
 #joint还有问题，方位对齐的问题

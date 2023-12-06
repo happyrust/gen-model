@@ -136,7 +136,7 @@ fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncrEleUpdateLog>, s
         let local: DateTime<Local> = Local::now();
         let dbnum = increment_data.numbdb;
         let refno = increment_data.refno;
-        let refno_str = refno.to_refno_string();
+        let refno_str = refno.to_string();
         let time = format!("{}-{}-{} {}:{}:{}", local.year(), local.month(), local.day(),
                            local.hour().to_string(), local.minute(), local.second());
         sql.push_str(&format!("('{}',{},'{refno_str}',{owner},{},{},{dbnum},'{time}',0x{},0x{},0x{},'{}') ,"

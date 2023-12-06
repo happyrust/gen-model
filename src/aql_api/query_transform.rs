@@ -47,7 +47,7 @@ pub async fn query_cylinder_transform(mgr: &AiosDBManager, refno: RefU64) -> any
             let ori_up = world_transform.transform_point(Vec3::new(0.0, 0.0, 1.0)).normalize();
             let ori_down = world_transform.transform_point(Vec3::new(0.0, 0.0, -1.0)).normalize();
             let cylinder_transform = CylinderTransform {
-                refno: child_refno.to_refno_string(),
+                refno: child_refno.to_string(),
                 pos_up,
                 pos_down,
                 ori_up,

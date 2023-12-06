@@ -148,8 +148,8 @@ impl AiosDBManager {
                 let hash = refno.hash_with_another_refno(target_refno);
                 room_edges_json.push(RoomEdge {
                     _key: hash.to_string(),
-                    _from: format!("room_eles/{}", refno.to_url_refno()),
-                    _to: format!("{AQL_PDMS_ELES_COLLECTION}/{}", target_refno.to_url_refno()),
+                    _from: format!("room_eles/{}", refno.to_string()),
+                    _to: format!("{AQL_PDMS_ELES_COLLECTION}/{}", target_refno.to_string()),
                     major,
                 })
             }
@@ -190,7 +190,7 @@ pub async fn query_room_name_from_refno_aql(
     refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Option<String>> {
-    let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@room_edges,@@room_eles
@@ -215,7 +215,7 @@ pub async fn query_room_code_from_owner(
     owner_refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Option<String>> {
-    let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", owner_refno.to_url_refno());
+    let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", owner_refno.to_string());
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@pdms_edges,@@room_edges,@@room_eles
@@ -244,7 +244,7 @@ pub async fn query_room_codes_from_owners(
     owner_refno: Vec<RefU64>,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<PdmsRoomNameAql>> {
-    let ids = owner_refno.into_iter().map(|id| id.to_url_refno()).collect::<Vec<_>>();
+    let ids = owner_refno.into_iter().map(|id| id.to_string()).collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@pdms_edges,@@room_edges,@@room_eles
@@ -280,7 +280,7 @@ pub async fn query_room_codes_from_owner(
     owner_refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<PdmsRefnoNameAql>> {
-    let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", owner_refno.to_url_refno());
+    let refno = format!("{AQL_PDMS_ELES_COLLECTION}/{}", owner_refno.to_string());
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@pdms_edges,@@room_edges,@@room_eles
@@ -341,7 +341,7 @@ pub async fn query_room_name_from_refnos_aql(
     refnos: Vec<RefU64>,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<PdmsNodeBelongRoomName>> {
-    let refnos = refnos.into_iter().map(|r| r.to_url_refno()).collect::<Vec<_>>();
+    let refnos = refnos.into_iter().map(|r| r.to_string()).collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@room_edges,@@room_eles
@@ -373,7 +373,7 @@ pub async fn query_room_name_from_owner_aql(
 ) -> anyhow::Result<Vec<PdmsNodeBelongRoomName>> {
     let refnos = refnos
         .into_iter()
-        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string()))
         .collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "
@@ -509,7 +509,7 @@ impl AiosDBManager {
         &self,
         refno: RefU64,
     ) -> anyhow::Result<HashMap<RefU64, RoomElement>> {
-        let refno_str = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let refno_str = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
         let aql = AqlQuery::new(
             "
         With @@pdms_eles, room_edges
@@ -532,7 +532,7 @@ impl AiosDBManager {
     }
 
     pub async fn query_room_refno_of_ele(&self, refno: RefU64) -> anyhow::Result<HashSet<RefU64>> {
-        let refno_str = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let refno_str = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
         let aql = AqlQuery::new(
             "
         With @@pdms_eles, room_edges
@@ -556,7 +556,7 @@ impl AiosDBManager {
     }
 
     pub async fn query_room_names_of_ele(&self, refno: RefU64) -> anyhow::Result<HashSet<String>> {
-        let refno_str = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let refno_str = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
         let aql = AqlQuery::new(
             "
         With @@pdms_eles, room_edges
@@ -612,7 +612,7 @@ pub async fn query_room_refnos_aql(
     filter_major: Option<UdaMajorType>,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<RefU64>> {
-    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = if filter_major.is_none() {
         AqlQuery::new(
             "
@@ -675,7 +675,7 @@ pub async fn query_rooms_refnos_aql(
                 result_map
                     .entry(data.room_name)
                     .or_insert_with(Vec::new)
-                    .push(data.refno.to_refno_string());
+                    .push(data.refno.to_string());
             }
             Ok(result_map
                 .into_iter()
@@ -694,7 +694,7 @@ pub async fn query_room_refno_from_room_refno_aql(
     room_refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<RefU64>> {
-    let id = format!("{}/{}", AQL_ROOM_ELES_COLLECTION, room_refno.to_url_refno());
+    let id = format!("{}/{}", AQL_ROOM_ELES_COLLECTION, room_refno.to_string());
     let aql = AqlQuery::new(
         "
     With @@room_eles, @@room_edges,@@pdms_eles
@@ -717,7 +717,7 @@ pub async fn query_room_pdms_elements_aql(
     filter_major: Option<UdaMajorType>,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<PdmsElement>> {
-    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = if filter_major.is_none() {
         AqlQuery::new("
         With @@pdms_eles,@@pdms_edges,@@room_eles,@@room_edges
@@ -774,7 +774,7 @@ pub async fn query_refno_belong_rooms(
 ) -> anyhow::Result<Vec<PdmsElement>> {
     let mut set = HashSet::new();
     let mut r = Vec::new();
-    let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@pdms_edges,@@room_eles,@@room_edges

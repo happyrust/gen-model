@@ -85,7 +85,7 @@ pub fn gen_insert_project_mdb_sql(map: &MdbQuickInfoMap) -> String {
                 d.db_num.hash(&mut s);
                 let id = s.finish();
                 sql.push_str(&format!("({}, {} , '{}', '{}', '{}', '{}', '{}', {}),",
-                                      id , d.db_num, name, &d.refno.to_refno_str(), &d.project, &d.world_refno.to_refno_str(), db_type, d.order_number));
+                                      id , d.db_num, name, &d.refno.to_string(), &d.project, &d.world_refno.to_string(), db_type, d.order_number));
             }
         }
     }

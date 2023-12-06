@@ -28,7 +28,7 @@ pub async fn query_children_eles(
     arango_db: &ArDatabase,
     refno: RefU64,
 ) -> anyhow::Result<Vec<PdmsElement>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "\
     With @@pdms_eles, @@pdms_edges
@@ -55,7 +55,7 @@ pub async fn query_children_order_aql(
     adb: &ArDatabase,
     refno: RefU64,
 ) -> anyhow::Result<Vec<PdmsElement>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "\
     WITH @@pdms_eles,@@pdms_edges,@@sibl_edges
@@ -99,7 +99,7 @@ pub async fn query_children_refnos(
     arango_database: &ArDatabase,
     refno: RefU64,
 ) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "\
     With @@pdms_eles, @@pdms_edges
@@ -128,7 +128,7 @@ pub async fn query_children_with_name_aql(
     refno: RefU64,
 ) -> anyhow::Result<Vec<(RefU64, String)>> {
     let mut r = vec![];
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "\
     With @@pdms_eles,@@pdms_edges
@@ -157,7 +157,7 @@ pub async fn query_owner_with_type_aql(
     refno: RefU64,
 ) -> anyhow::Result<Option<(RefU64, String)>> {
     let mut r = vec![];
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@pdms_edges
@@ -189,7 +189,7 @@ pub async fn query_ancestor_till_type_aql(
     refno: RefU64,
     att_type: &str,
 ) -> anyhow::Result<Option<Vec<RefU64>>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@pdms_edges
@@ -215,7 +215,7 @@ pub async fn query_ancestor_till_types_aql(
     refno: RefU64,
     att_types: Vec<&str>,
 ) -> anyhow::Result<Option<PdmsElement>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@pdms_edges
@@ -250,7 +250,7 @@ pub async fn query_refnos_ancestor_till_types_aql(
 ) -> anyhow::Result<Vec<PdmsElement>> {
     let refnos = refnos
         .into_iter()
-        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string()))
         .collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "
@@ -281,7 +281,7 @@ pub async fn query_ancestor_with_name_till_type_aql(
     refno: RefU64,
     att_type: &str,
 ) -> anyhow::Result<Vec<PdmsRefnoNameAql>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "
     With @@pdms_eles,@@pdms_edges
@@ -306,7 +306,7 @@ pub async fn query_ancestor_name_of_type_aql(
     refno: RefU64,
     att_type: &str,
 ) -> anyhow::Result<Option<String>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "
     With @@pdms_eles, @@pdms_edges
@@ -327,7 +327,7 @@ pub async fn query_ancestor_name_of_type_aql(
 
 /// 获取多个节点向上遍历到指定类型的参考号和name
 pub async fn query_refnos_ancestor_with_name_till_type_aql(arango_database: &ArDatabase, refnos: Vec<RefU64>, att_types: Vec<String>) -> anyhow::Result<Vec<PdmsOwnerNameAql>> {
-    let refno_aql = refnos.into_iter().map(|refno| refno.to_url_refno()).collect::<Vec<_>>();
+    let refno_aql = refnos.into_iter().map(|refno| refno.to_string()).collect::<Vec<_>>();
     let aql = AqlQuery::new("
     With @@pdms_eles,@@pdms_edges
     for refno in @refnos
@@ -349,7 +349,7 @@ pub async fn query_refnos_ancestor_with_name_till_type_aql(arango_database: &ArD
 
 /// 查询多个refno对应的owner的name,refno，type
 pub async fn query_refnos_owner_with_name_till_type_aql(arango_database: &ArDatabase, refnos: Vec<RefU64>) -> anyhow::Result<Vec<PdmsOwnerNameAql>> {
-    let refno_aql = refnos.into_iter().map(|refno| refno.to_url_refno()).collect::<Vec<_>>();
+    let refno_aql = refnos.into_iter().map(|refno| refno.to_string()).collect::<Vec<_>>();
     let aql = AqlQuery::new("
     With @@pdms_eles,@@pdms_edges
     for refno in @refnos
@@ -613,7 +613,7 @@ pub async fn search_refnos_along_path_arango(
 ) -> anyhow::Result<SearchAlongResult> {
     let ids = refnos
         .into_iter()
-        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_string()))
         .collect::<Vec<_>>();
 
     let aql = AqlQuery::new(
@@ -688,7 +688,7 @@ pub async fn query_travel_children_aql(
     arango_database: &ArDatabase,
     refno: RefU64,
 ) -> anyhow::Result<Vec<PdmsElement>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "\
     With @@pdms_eles,@@pdms_edges
@@ -714,7 +714,7 @@ pub async fn query_travel_children_refnos_aql(
     refno: Vec<RefU64>,
 ) -> anyhow::Result<Vec<RefU64>> {
     let ids = refno.into_iter()
-        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_string()))
         .collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "\
@@ -735,7 +735,7 @@ pub async fn query_travel_children_with_out_leaf_aql(
     arango_database: &ArDatabase,
     refno: RefU64,
 ) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "\
     With @@pdms_eles,@@pdms_edges
@@ -762,7 +762,7 @@ pub async fn query_travel_children_with_types_and_cata_hash(
     skip_exist: bool,
 ) -> anyhow::Result<Vec<CataHashRefnoKV>> {
     // let mut r = vec![];
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = if check_parent {
         AqlQuery::new(
             "\
@@ -822,7 +822,7 @@ pub async fn query_travel_children_with_types_aql(
     is_parent: bool,
 ) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = if is_parent {
         AqlQuery::new(
             "\
@@ -874,7 +874,7 @@ pub async fn query_travel_children_with_type_aql(
     att_type: &str,
 ) -> anyhow::Result<Vec<EleTreeNode>> {
     let mut r = vec![];
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = AqlQuery::new(
         "\
     With @@pdms_eles,@@pdms_edges
@@ -914,7 +914,7 @@ pub async fn query_refnos_travel_children_with_type_aql(
     let mut r = vec![];
     let refno_aql = refnos
         .into_iter()
-        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_string()))
         .collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "\
@@ -999,7 +999,7 @@ pub async fn query_sibl_level_refnos(
     refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<RefU64>> {
-    let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     // in 是该 refno 下面
     let aql_in = AqlQuery::new(
         r"
@@ -1038,7 +1038,7 @@ pub async fn query_pre_or_next_node(
     database: &ArDatabase,
     aios_mgr: &AiosDBManager,
 ) -> anyhow::Result<Option<AttrMap>> {
-    let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let aql = if b_pre {
         AqlQuery::new(
             "\
@@ -1081,7 +1081,7 @@ pub async fn query_travel_children_filter_negative_sibl_nodes(
     refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<HashMap<RefU64, Vec<PdmsElement>>> {
-    let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     // todo negatives并没有去掉同层级的其他节点，同层级的所有节点都查询了一遍，应该一层只用查询一遍
     let aql = AqlQuery::new(
         "\
@@ -1123,7 +1123,7 @@ pub async fn filter_negative_sibl_from_refnos(
 ) -> anyhow::Result<Vec<RefU64>> {
     let keys = refnos
         .into_iter()
-        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string()))
         .collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "\
@@ -1155,7 +1155,7 @@ pub async fn vague_query_refnos_user_set_aql(
     let mut keys = request
         .filter_refnos
         .into_iter()
-        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string()))
         .collect::<Vec<_>>();
     let mut condition_map = HashSet::new();
     request.filter_condition.iter().for_each(|x| {
@@ -1269,7 +1269,7 @@ pub async fn query_refnos_belong_major(
 ) -> anyhow::Result<Vec<RefnoMajor>> {
     let ids = refnos
         .into_iter()
-        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string()))
         .collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "
@@ -1303,13 +1303,13 @@ pub async fn query_refnos_belong_major(
         } else {
             if &r.noun == "SITE" {
                 majors.entry(r.refno).or_insert(RefnoMajor {
-                    refno: r.refno.to_refno_str(),
+                    refno: r.refno.to_string(),
                     major: r.major,
                     major_classify: "".to_string(),
                 });
             } else {
                 majors.entry(r.refno).or_insert(RefnoMajor {
-                    refno: r.refno.to_refno_str(),
+                    refno: r.refno.to_string(),
                     major: "".to_string(),
                     major_classify: r.major,
                 });
@@ -1329,7 +1329,7 @@ pub async fn query_refnos_belong_level_aql(
 ) -> anyhow::Result<Vec<VagueSearchExportAqlData>> {
     let refnos = refno
         .into_iter()
-        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+        .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_string()))
         .collect::<Vec<String>>();
     let aql = AqlQuery::new(
         "
@@ -1496,7 +1496,7 @@ pub async fn query_room_belong_site_name(rooms: Vec<String>, database: &ArDataba
 ///
 /// filter_noun 找到第一个 att_type为 filter_noun 的数据
 pub async fn query_first_children(refnos: Vec<RefU64>, filter_noun: &str, database: &ArDatabase) -> anyhow::Result<Vec<PdmsElement>> {
-    let ids = refnos.into_iter().map(|refno| refno.to_url_refno()).collect::<Vec<String>>();
+    let ids = refnos.into_iter().map(|refno| refno.to_string()).collect::<Vec<String>>();
     // 若 filter_noun 以 ! 开头 则排除某类型后，取第一个 例如 "!ATTA"
     let filter_str = if filter_noun.starts_with("!") {
         format!("filter c.noun != '{}'", &filter_noun[1..])

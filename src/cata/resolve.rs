@@ -95,7 +95,7 @@ pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
                 .map_err(|e| anyhow::anyhow!("元件库求解失败."))
         }
         Err(e) => {
-            Err(anyhow::anyhow!(format!("几何数据解析失败: {:?}, 原因：{}", des_refno.to_refno_string(), &e)))
+            Err(anyhow::anyhow!(format!("几何数据解析失败: {:?}, 原因：{}", des_refno.to_string(), &e)))
         }
     }
 }

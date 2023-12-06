@@ -336,11 +336,11 @@ fn gen_pipeline_spec_str(pspe_name: &str) -> Vec<u8> {
 }
 
 fn gen_pipeline_href_str(href: RefU64) -> Vec<u8> {
-    format!("        ID-HREF    {}\r\n", href.to_refno_string()).into_bytes()
+    format!("        ID-HREF    {}\r\n", href.to_string()).into_bytes()
 }
 
 fn gen_pipeline_tref_str(tref: RefU64) -> Vec<u8> {
-    format!("        ID-TREF    {}\r\n", tref.to_refno_string()).into_bytes()
+    format!("        ID-TREF    {}\r\n", tref.to_string()).into_bytes()
 }
 
 fn gen_tee_item_code_bran_data_str(pspe_name: &str) -> Vec<u8> {

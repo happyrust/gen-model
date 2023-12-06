@@ -63,7 +63,7 @@ fn gen_query_room_code_with_refnos_sql(refnos: Vec<RefU64>) -> String {
     let mut refno_str = String::new();
     let is_empty = refnos.is_empty();
     for refno in refnos {
-        refno_str.push_str(&format!("{} ,", refno.to_refno_str()));
+        refno_str.push_str(&format!("{} ,", refno.to_string()));
     }
     if !is_empty {
         refno_str.remove(refno_str.len() - 1);

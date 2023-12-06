@@ -131,7 +131,7 @@ async fn get_dq_support_sctn_gtype_box_data(
         .unwrap_or("".to_string());
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART1".to_string(),
-        value: AttrValue::AttrString(refno.refno.to_refno_str()).into(),
+        value: AttrValue::AttrString(refno.refno.to_string()).into(),
     });
     let mut stru_desc = "".to_string();
     let owner_refno = aios_mgr.get_ancestor_refno_till_type(refno.refno, &vec!["STRU"]);
@@ -316,7 +316,7 @@ async fn get_dq_support_sctn_gtype_beam_data(
         .unwrap_or("".to_string());
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART1".to_string(),
-        value: AttrValue::AttrString(refno.refno.to_refno_str()).into(),
+        value: AttrValue::AttrString(refno.refno.to_string()).into(),
     });
     let owner_refno = aios_mgr.get_ancestor_refno_till_type(refno.refno, &vec!["STRU"]);
     // 往上找到STRU的NAME
@@ -590,7 +590,7 @@ async fn get_dq_support_sctn_spre_s10_data(
         .unwrap_or("".to_string());
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART1".to_string(),
-        value: AttrValue::AttrString(refno.refno.to_refno_str()).into(),
+        value: AttrValue::AttrString(refno.refno.to_string()).into(),
     });
     let owner_refno = aios_mgr.get_ancestor_refno_till_type(refno.refno, &vec!["STRU"]);
     // 往上找到STRU的NAME
@@ -694,7 +694,7 @@ async fn get_dq_support_sctn_spre_s11_data(
         .unwrap_or("".to_string());
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART1".to_string(),
-        value: AttrValue::AttrString(refno.refno.to_refno_str()).into(),
+        value: AttrValue::AttrString(refno.refno.to_string()).into(),
     });
     let owner_refno = aios_mgr.get_ancestor_refno_till_type(refno.refno, &vec!["STRU"]);
     // 往上找到STRU的NAME
@@ -803,7 +803,7 @@ pub struct EleNodeWithSpreName {
 /// 获取电气圆板的数据
 async fn query_dq_circular_plate(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<EleNodeWithSpreName>> {
     let id = refnos.into_iter()
-        .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()))
+        .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string()))
         .collect::<Vec<_>>();
     let aql = AqlQuery::new("
         with @@pdms_edges,@@pdms_eles,@@foreign_edges

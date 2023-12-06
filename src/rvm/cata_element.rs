@@ -145,7 +145,7 @@ pub async fn create_cata_element_data(refno: RefU64, desi_instance: RvmGeoInfo, 
 // }
 //
 // async fn query_rvm_geo_infos_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<GeomsInfoAql>> {
-//     let key = refno.to_url_refno();
+//     let key = refno.to_string();
 //     let aql = AqlQuery::new(
 //         "\
 //         return document('geo_infos',@key)

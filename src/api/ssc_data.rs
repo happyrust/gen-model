@@ -46,14 +46,14 @@ pub struct SscEleNode {
 /// 通过指定包围盒计算包围盒中的房间的所有节点
 pub async fn get_room_refnos_from_spa_tree_aql(room_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<RefU64>> {
     let mut room_map = vec![];
-    let refno = format!("room_eles/{}", room_refno.to_url_refno());
+    let refno = format!("room_eles/{}", room_refno.to_string());
     let aql = AqlQuery::new("\
     for v in 1 outbound @id room_edges
         filter v != null
         return {
             'refno':v._key,
         }").bind_var("id", refno)
-        .bind_var("id", room_refno.to_url_refno())
+        .bind_var("id", room_refno.to_string())
         ;
     let results: Vec<String> = database.aql_query(aql).await?;
     let results = convert_refno_vec_from_vec_string(results);

@@ -494,7 +494,7 @@ async fn create_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &Ar
         let refno = RefU64::from_str(&d.rely_item_ref);
         if refno.is_err() { continue; }
         let refno = refno.unwrap();
-        let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
+        let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string());
         let to = format!("{}/{}", AQL_EMBED_DATA_COLLECTION, d._key);
         let hash = hash_two_str(&from, &to);
         edges.push(NegativeEdges {
@@ -516,7 +516,7 @@ async fn replace_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &A
         let refno = RefU64::from_str(&d.rely_item_ref);
         if refno.is_err() { continue; }
         let refno = refno.unwrap();
-        let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
+        let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string());
         let to = format!("{}/{}", AQL_EMBED_DATA_COLLECTION, d._key);
         let hash = hash_two_str(&from, &to);
         edges.push(NegativeEdges {
@@ -534,7 +534,7 @@ async fn replace_embed_data_edge(data: &Vec<VirtualEmbedGraphNode>, database: &A
 
 /// 通过埋件依附的墙或板来查询这个墙上所有的埋件数据
 pub async fn query_embed_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualEmbedGraphNodeQuery>> {
-    let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
+    let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string())).collect::<Vec<_>>();
     let aql = AqlQuery::new("\
     with @@pdms_eles,@@embed_edge,@@embed_data
     for key in @keys
@@ -551,7 +551,7 @@ pub async fn query_embed_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase
 
 ///查询现在可进行提资的埋件
 pub async fn query_available_embed_data(rely_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualEmbedGraphNodeQuery>> {
-    let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
+    let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string())).collect::<Vec<_>>();
     let aql = AqlQuery::new("\
     with @@pdms_eles,@@embed_edge,@@embed_data
     for key in @keys

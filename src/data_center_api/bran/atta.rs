@@ -24,7 +24,7 @@ pub async fn get_data_center_atta_attr(pe: PdmsElement, bran_name: &str, room_co
     let mut result = Vec::new();
     let item_1 = DataCenterAttr {
         attribute_model_code: "ITEM1".to_string(),
-        value: AttrString(pe.refno.to_refno_string()).into(),
+        value: AttrString(pe.refno.to_string()).into(),
     };
     result.push(item_1);
     let item_2 = DataCenterAttr {
@@ -115,7 +115,7 @@ pub async fn get_dq_atta_data(refno: &PdmsElement, bran_name: &str, spre_name: &
     let mut data_center_attr = Vec::new();
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART1".to_string(),
-        value: AttrValue::AttrString(refno.refno.to_refno_str()).into(),
+        value: AttrValue::AttrString(refno.refno.to_string()).into(),
     });
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART2".to_string(),

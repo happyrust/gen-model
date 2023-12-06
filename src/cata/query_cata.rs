@@ -38,13 +38,13 @@ pub async fn resolve_desi_comp<T: PdmsDataInterface>(
     }
     let scom_ref = scom_ref_option.ok_or(anyhow::anyhow!(format!(
         "SCOM not exist in element: {}",
-        desi_refno.to_refno_str()
+        desi_refno.to_string()
     )))?;
     if !scom_ref.is_valid() {
         println!(
             "{} 的CAT引用不存在，为 {}",
-            desi_refno.to_refno_str(),
-            scom_ref.to_refno_str()
+            desi_refno.to_string(),
+            scom_ref.to_string()
         );
         return Ok(Default::default());
     }

@@ -278,7 +278,7 @@ pub async fn get_dq_bran_data(refnos: &[RefU64], aios_mgr: &AiosDBManager) -> an
                 value: AttrValue::AttrString(desc).into(),
             });
 
-            let major_info = major_map.get(&bran.refno.to_refno_string()).map_or(RefnoMajor::default(), |x| x.clone());
+            let major_info = major_map.get(&bran.refno.to_string()).map_or(RefnoMajor::default(), |x| x.clone());
             erecb_attr.push(DataCenterAttr {
                 attribute_model_code: "ERECB9".to_string(),
                 value: AttrValue::AttrString(major_info.major.to_string()).into(),
@@ -706,7 +706,7 @@ async fn get_data_center_bran_single_attr(bran: &PdmsElement, room_code: &str, a
     let mut data_center_attr = Vec::new();
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "ITEM1".to_string(),
-        value: AttrString(bran.refno.to_refno_str()).into(),
+        value: AttrString(bran.refno.to_string()).into(),
     });
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "ITEMA1".to_string(),
@@ -790,7 +790,7 @@ async fn get_data_center_bran_single_attr(bran: &PdmsElement, room_code: &str, a
     // [入口refno,出口refno,第三点refno]
     let href = bran_attr.get_refu64("HREF").unwrap_or(RefU64(0));
     let tref = bran_attr.get_refu64("TREF").unwrap_or(RefU64(0));
-    let connect_str = format!("[{},{},{}]", href.to_refno_str(), tref.to_refno_str(), bran.refno.to_refno_str());
+    let connect_str = format!("[{},{},{}]", href.to_string(), tref.to_string(), bran.refno.to_string());
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "ITEMA23".to_string(),
         value: AttrString(connect_str).into(),

@@ -837,7 +837,7 @@ async fn create_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArDa
         let refno = RefU64::from_str(&d.rely_item_ref);
         if refno.is_err() { continue; }
         let refno = refno.unwrap();
-        let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
+        let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string());
         let to = format!("{}/{}", AQL_HOLE_DATA_COLLECTION, d._key);
         let hash = hash_two_str(&from, &to);
         edges.push(NegativeEdges {
@@ -859,7 +859,7 @@ async fn replace_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArD
         let refno = RefU64::from_str(&d.rely_item_ref);
         if refno.is_err() { continue; }
         let refno = refno.unwrap();
-        let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
+        let from = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string());
         let to = format!("{}/{}", AQL_HOLE_DATA_COLLECTION, d._key);
         let hash = hash_two_str(&from, &to);
         edges.push(NegativeEdges {
@@ -878,7 +878,7 @@ async fn replace_hole_data_edge(data: &Vec<VirtualHoleGraphNode>, database: &ArD
 
 /// 通过孔洞依附的墙或板来查询这个墙上所有的孔洞数据
 pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
-    let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
+    let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string())).collect::<Vec<_>>();
     let aql = AqlQuery::new("
     with @@pdms_eles,@@hole_edge,@@hole_data
     for key in @keys
@@ -895,7 +895,7 @@ pub async fn query_hole_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase)
 
 /// 获得当前可提资的所有孔洞
 pub async fn query_available_hole_data_aql(rely_refno: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNodeQuery>> {
-    let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
+    let keys = rely_refno.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string())).collect::<Vec<_>>();
     let aql = AqlQuery::new("
     with @@pdms_eles,@@hole_edge,@@hole_data
     for key in @keys
@@ -915,7 +915,7 @@ pub async fn query_available_hole_data_aql(rely_refno: Vec<RefU64>, database: &A
 
 /// 查询虚拟孔洞数据中已经转为实体的孔洞数据
 pub async fn query_entity_hole_data(rely_refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<VirtualHoleGraphNode>> {
-    let keys = rely_refnos.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno())).collect::<Vec<_>>();
+    let keys = rely_refnos.into_iter().map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string())).collect::<Vec<_>>();
     let aql = AqlQuery::new("
     with @@pdms_eles,@@hole_edge,@@hole_data
     for key in @keys

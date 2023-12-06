@@ -50,7 +50,7 @@ pub async fn query_all_tubi_from_node(refno: RefU64, tubi_map: &mut Arc<DashMap<
 
 /// 找到 bran 下所有的 tubi
 pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<TubiEdge>> {
-    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_string());
     let aql = AqlQuery::new("
     With @@pdms_eles,@@tubi_edges,@@pdms_edges
     for v in 0..1 inbound @id @@pdms_edges
@@ -83,7 +83,7 @@ pub async fn query_tubi_from_bran(bran_refno: RefU64, database: &ArDatabase) -> 
 /// 找到 bran 下所有的 tubi ，并过滤掉 atta
 pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<TubiEdge>> {
     let mut tubi = Vec::new();
-    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_string());
     let aql = AqlQuery::new("
     With @@pdms_eles,@@tubi_edges
     let bran_name = ( return document(@@pdms_eles,@bran_refno).name )
@@ -103,7 +103,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArD
         'bore': e.bore
     }")
         .bind_var("id", key)
-        .bind_var("bran_refno", bran_refno.to_url_refno())
+        .bind_var("bran_refno", bran_refno.to_string())
         .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
         .bind_var("@tubi_edges",AQL_TUBI_EDGES_COLLECTION);
     let results: Vec<TubiEdge> = database.aql_query(aql).await?;
@@ -228,7 +228,7 @@ pub async fn query_tubi_from_bran_filter_atta(bran_refno: RefU64, database: &ArD
 
 /// 获取 bran 所有的 tubi_edge 的信息
 pub async fn query_bran_info(bran_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<TubiEdge>> {
-    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", bran_refno.to_string());
     let aql = AqlQuery::new("
     With @@pdms_eles,@@tubi_edges
     let bran_name = ( return document(@@pdms_eles,@bran_refno).name )
@@ -248,7 +248,7 @@ pub async fn query_bran_info(bran_refno: RefU64, database: &ArDatabase) -> anyho
         'bore': e.bore
     }")
         .bind_var("id", key)
-        .bind_var("bran_refno", bran_refno.to_url_refno())
+        .bind_var("bran_refno", bran_refno.to_string())
         .bind_var("@pdms_eles",AQL_PDMS_ELES_COLLECTION)
         .bind_var("@tubi_edges",AQL_TUBI_EDGES_COLLECTION);
     let results: Vec<TubiEdge> = database.aql_query(aql).await?;
@@ -261,7 +261,7 @@ pub async fn insert_tubi_value(tubi_map: DashMap<(RefU64, String), f32>, pool: &
     for tubi in tubi_map.into_iter() {
         let refno = tubi.0.0;
         let spre_name = tubi.0.1;
-        sql.push_str(&format!("( '{}' ,'{}','TUBI','{}' ),", refno.to_refno_str(), spre_name, tubi.1.to_string()));
+        sql.push_str(&format!("( '{}' ,'{}','TUBI','{}' ),", refno.to_string(), spre_name, tubi.1.to_string()));
     }
     if !b_empty {
         sql.remove(sql.len() - 1);

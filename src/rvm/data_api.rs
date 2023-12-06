@@ -177,7 +177,7 @@ pub async fn create_refnos_rvm_data(select_refno: Vec<RefU64>, db_option: &DbOpt
         // cntb
         info_vec.append(&mut gen_cntb_data());
         // name
-        let mut name = gen_name_position_data(&info.refno.to_url_refno(), insts.world_transform.translation);
+        let mut name = gen_name_position_data(&info.refno.to_string(), insts.world_transform.translation);
         info_vec.append(&mut name);
         // prim
         let mut insts = insts.clone();
@@ -207,7 +207,7 @@ pub async fn create_refnos_rvm_data(select_refno: Vec<RefU64>, db_option: &DbOpt
         // cntb
         info_vec.append(&mut gen_cntb_data());
         // name
-        let mut name = gen_name_position_data(&info.refno.to_url_refno(), info.world_transform.translation);
+        let mut name = gen_name_position_data(&info.refno.to_string(), info.world_transform.translation);
         info_vec.append(&mut name);
         // prim
         let mut prim_vec = Vec::new();
@@ -227,7 +227,7 @@ pub async fn create_refnos_rvm_data(select_refno: Vec<RefU64>, db_option: &DbOpt
         // cntb
         file_data.push(gen_cntb_data());
         // name
-        let name = gen_name_position_data(&tubi.refno.to_url_refno(), tubi.world_transform.translation);
+        let name = gen_name_position_data(&tubi.refno.to_string(), tubi.world_transform.translation);
         file_data.push(name);
         // prim
         let mut prim_data = Vec::new();
@@ -248,7 +248,7 @@ pub async fn create_refnos_rvm_data(select_refno: Vec<RefU64>, db_option: &DbOpt
 /// 从inst中查询rvm需要的数据
 pub async fn query_rvm_geo_instance_aql(database: &ArDatabase, refnos: Vec<RefU64>) -> anyhow::Result<Vec<RvmGeoInfos>> {
     let refnos = refnos.into_iter()
-        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string()))
         .collect::<Vec<_>>();
     // pub geo_type: GeoBasicType,
     let aql = AqlQuery::new("
@@ -286,7 +286,7 @@ pub async fn query_rvm_geo_instance_aql(database: &ArDatabase, refnos: Vec<RefU6
 
 pub async fn query_single_rvm_geo_instance_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<RvmGeoInfos>> {
     let refnos = refnos.into_iter()
-        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string()))
         .collect::<Vec<_>>();
     // pub geo_type: GeoBasicType,
     let aql = AqlQuery::new("
@@ -326,7 +326,7 @@ pub async fn query_single_rvm_geo_instance_aql(refnos: Vec<RefU64>, database: &A
 
 pub async fn query_rvm_tubi_instances_aql(refnos: Vec<RefU64>, database: &ArDatabase) -> anyhow::Result<Vec<RvmGeoInfos>> {
     let refnos = refnos.into_iter()
-        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno()))
+        .map(|refno| format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string()))
         .collect::<Vec<_>>();
     let aql = AqlQuery::new("
     With @@pdms_eles,@@pdms_edges,@@pdms_inst_tubis,@@pdms_inst_geos

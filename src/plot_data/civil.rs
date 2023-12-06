@@ -32,7 +32,7 @@ pub struct AxisEdge {
 
 /// 将提前存好的轴网数据从图数据库取出来
 pub async fn query_axis_from_sbfr_aql(sbfr_refno: RefU64, database: &ArDatabase) -> anyhow::Result<Vec<AxisData>> {
-    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", sbfr_refno.to_url_refno());
+    let key = format!("{AQL_PDMS_ELES_COLLECTION}/{}", sbfr_refno.to_string());
     let aql = AqlQuery::new("\
     with axis_edge
     for v in 1 outbound @id axis_edge
@@ -63,7 +63,7 @@ pub async fn query_axis_from_sbfr(sbfr_refno: RefU64, database: &ArDatabase, aio
         let poss = poss.unwrap();
         let pose = pose.unwrap();
         result.push(AxisData {
-            _key: refno.to_url_refno(),
+            _key: refno.to_string(),
             gtype: gtype.to_string(),
             description: desc.to_string(),
             poss,
@@ -78,14 +78,14 @@ async fn save_axis_data(sbfr_refno: RefU64, axis_data: Vec<AxisData>, database: 
     let axis_edge_collection = "axis_edge";
     let eles_json = serde_json::to_value(&axis_data)?;
     let mut edges = vec![];
-    let sbfr_refno_url = sbfr_refno.to_url_refno();
+    let sbfr_refno_url = sbfr_refno.to_string();
     for axis in axis_data {
         let axis_refno = RefU64::from_str(&axis._key).unwrap();
         let key = sbfr_refno.hash_with_another_refno(axis_refno);
         edges.push(AxisEdge {
             _key: key.to_string(),
             _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", &sbfr_refno_url),
-            _to: format!("{}/{}", axis_eles_collection, axis_refno.to_url_refno()),
+            _to: format!("{}/{}", axis_eles_collection, axis_refno.to_string()),
         })
     }
     let edge_json = serde_json::to_value(&edges)?;

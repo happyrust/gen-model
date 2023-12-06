@@ -944,7 +944,7 @@ pub async fn query_refnos_belong_zones(
 ) -> anyhow::Result<Vec<PdmsNodeMajor>> {
     let refnos = refnos
         .into_iter()
-        .map(|x| x.to_url_refno())
+        .map(|x| x.to_string())
         .collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "
@@ -1272,7 +1272,7 @@ pub fn gen_insert_ssc_node_sql(
     order_num: usize,
 ) -> (RefU64, String) {
     let mut sql = String::new();
-    let refno_str = refno.to_refno_str().to_string();
+    let refno_str = refno.to_string().to_string();
     sql.push_str(&format!(
         "({},'{refno_str}','{type_name}',{},'{name}',{},{order_num}),",
         refno.0, owner.0, real_pdms_refno.0
@@ -1290,7 +1290,7 @@ pub fn gen_insert_ssc_node_sql_with_pdms_refno(
     order_num: usize,
 ) -> (RefU64, String) {
     let mut sql = String::new();
-    let refno_str = refno.to_refno_str().to_string();
+    let refno_str = refno.to_string().to_string();
     sql.push_str(&format!(
         "({},'{refno_str}','{type_name}',{},'{name}',{},{order_num}),",
         refno.0, pdms_real_refno.0, owner.0
@@ -1322,7 +1322,7 @@ fn gen_insert_room_level_node_sql(
     let mut sql = String::new();
     let mut site_order = 0;
     for (site, zones) in level {
-        let refno_str = refno.to_refno_str();
+        let refno_str = refno.to_string();
         sql.push_str(&format!(
             "({},'{refno_str}','{}',{},'{site}',{site_order}),",
             refno.0, "SITE", site_owner.0
@@ -1334,7 +1334,7 @@ fn gen_insert_room_level_node_sql(
         site_order += 1;
 
         for zone in zones {
-            let refno_str = refno.to_refno_str();
+            let refno_str = refno.to_string();
             sql.push_str(&format!(
                 "({},'{refno_str}','{}',{},'{}',{zone_order}),",
                 refno.0,
@@ -1574,7 +1574,7 @@ pub async fn set_pdms_major_from_excel(
         let update_site_aql = format!(
             "With {AQL_PDMS_ELES_COLLECTION}
         update {{'_key':'{}' , 'major': '{}'}} in {}",
-            site_refno.to_url_refno(),
+            site_refno.to_string(),
             contains_key[0].site_code,
             AQL_PDMS_ELES_COLLECTION
         );
@@ -1586,7 +1586,7 @@ pub async fn set_pdms_major_from_excel(
                 With {AQL_PDMS_ELES_COLLECTION},{AQL_PDMS_EDGES_COLLECTION}
                 let zones = ( for v in 1 inbound '{}/{}' pdms_edges return v ) ",
                     AQL_PDMS_ELES_COLLECTION,
-                    site_refno.to_url_refno()
+                    site_refno.to_string()
                 );
                 update_zone_aql.push_str(&format!("for zone in zones "));
                 update_zone_aql.push_str(&format!("filter zone.major !like '%{}%' ", zone_name));
@@ -1601,7 +1601,7 @@ pub async fn set_pdms_major_from_excel(
                 With {AQL_PDMS_ELES_COLLECTION},{AQL_PDMS_EDGES_COLLECTION}
                 let zones = ( for v in 1 inbound '{}/{}' pdms_edges return v ) ",
                     AQL_PDMS_ELES_COLLECTION,
-                    site_refno.to_url_refno()
+                    site_refno.to_string()
                 );
                 update_zone_aql.push_str(&format!("for zone in zones "));
                 update_zone_aql.push_str(&format!("filter zone.name like '%{}%' ", zone_name));
@@ -1675,8 +1675,8 @@ pub async fn save_ssc_level_excel(database: &ArDatabase) -> anyhow::Result<()> {
 
             edge_results.push(AqlEdge {
                 _key: refno.hash_with_another_refno(owner).to_string(),
-                _from: format!("{}/{}", AQL_SSC_ELES_COLLECTION, refno.to_url_refno()),
-                _to: format!("{}/{}", AQL_SSC_ELES_COLLECTION, owner.to_url_refno()),
+                _from: format!("{}/{}", AQL_SSC_ELES_COLLECTION, refno.to_string()),
+                _to: format!("{}/{}", AQL_SSC_ELES_COLLECTION, owner.to_string()),
             });
             idx += 1;
         }
@@ -1707,7 +1707,7 @@ fn gen_replace_room_refno_sql(room_name: &str, refno: RefU64, old_refno: RefU64)
     sql.push_str(&format!(
         "UPDATE {PDMS_SSC_ELEMENTS_TABLE} SET ID = {} , REFNO = '{}' WHERE NAME = '{}' ;",
         refno.0,
-        refno.to_refno_str(),
+        refno.to_string(),
         room_name
     ));
     sql.push_str(&format!(

@@ -19,8 +19,8 @@ pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &ArDatabas
             let owner = RefU64(val.get::<i64, _>("OWNER") as u64);
             let name = val.get::<String, _>("NAME");
             let type_name = val.get::<String, _>("TYPE");
-            let refno_str = RefU64::to_refno_normal_string(&refno);
-            let owner_str = RefU64::to_refno_normal_string(&owner);
+            let refno_str = RefU64::to_string(&refno);
+            let owner_str = RefU64::to_string(&owner);
             let ssc_ele = SSCEleGraphNode {
                 _key: refno_str.clone(),
                 owner: owner_str.clone(),
@@ -62,7 +62,7 @@ pub async fn set_arangodb_all_ssc_nodes(pool: &Pool<MySql>, database: &ArDatabas
 
 /// 传入ssc参考号，返回该参考号下面的模型数据
 pub async fn query_ssc_instance_with_refno_in_arangodb(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Vec<EleGeosInfo>>> {
-    let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("ssc_eles/{}", refno.to_string());
     let pdms_inst_infos = AQL_PDMS_INST_INFO_COLLECTION;
     let aql = AqlQuery::new("
     FOR c IN 0..10 inbound @refno ssc_edges

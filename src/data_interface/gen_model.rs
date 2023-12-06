@@ -86,7 +86,7 @@ pub async fn gen_prim_geos(
                 println!(
                     "正在处理基本体的模型，索引：{}, 当前参考号：{}, 剩余: {}",
                     j,
-                    refno.to_refno_string(),
+                    refno.to_string(),
                     processed_cnt.lock().await.to_owned()
                 );
                 *processed_cnt.lock().await -= 1;
@@ -209,7 +209,7 @@ pub async fn gen_prim_geos(
                 if geo_insts.len() > 0 {
                     shape_insts_data.insert_info(refno, geos_info);
                     shape_insts_data.insert_geos_data(
-                        refno.to_url_refno(),
+                        refno.to_string(),
                         EleInstGeosData {
                             inst_key: refno.to_string(),
                             refno,
@@ -275,10 +275,12 @@ pub async fn gen_loop_geos(
             let mut shape_insts_data = instance_mgr.write().await;
             for j in start_idx..end_idx {
                 let loop_refno = all_loop_refnos[j];
+                if loop_refno.get_1() == 171403{
+                    continue;
+                }
                 let Ok(Some(ce_pe)) = aios_core::get_pe(loop_refno).await else {
                     continue;
                 };
-                // let parent_basic = mgr.get_owner_ref_basic(loop_refno).unwrap();
                 let parent_refno = ce_pe.get_owner();
                 let Ok(Some(owner_pe)) = aios_core::get_pe(parent_refno).await else {
                     continue;
@@ -302,7 +304,7 @@ pub async fn gen_loop_geos(
                 println!(
                     "正在处理loops类型的模型，索引：{}, 当前参考号：{}, 剩余: {}",
                     j,
-                    parent_refno.to_refno_string(),
+                    parent_refno.to_string(),
                     processed_cnt.lock().await.to_owned()
                 );
                 *processed_cnt.lock().await -= 1;
@@ -323,6 +325,7 @@ pub async fn gen_loop_geos(
                         }
                     }
                 }
+                dbg!(&loop_verts);
                 if loop_verts.is_empty() {
                     continue;
                 }
@@ -330,6 +333,7 @@ pub async fn gen_loop_geos(
                 let mut children_attmaps = aios_core::get_children_named_attmaps(parent_refno)
                     .await
                     .unwrap_or_default();
+                //处理相邻的情况，第一个loop是正实体，后面的为负实体
                 let cur_sibling_index = children_attmaps
                     .iter()
                     .filter(|&x| x.get_type_str() == "PLOO")
@@ -402,6 +406,7 @@ pub async fn gen_loop_geos(
                                 .get_f32("HEIG")
                                 .unwrap_or(parent_att.get_f32("HEIG").unwrap_or_default())
                         };
+                        dbg!(height);
                         if height < f32::EPSILON {
                             println!("{}： 的height太小为: {}", parent_refno, height);
                             continue;
@@ -439,15 +444,17 @@ pub async fn gen_loop_geos(
                             };
                             Some(aabb)
                         };
+                        dbg!(&geo_aabb);
                     }
                     _ => {}
                 }
                 let Some(mut geo_aabb) = geo_aabb else {
-                    println!("LOOP 有问题：{} ", loop_refno.to_refno_string());
+                    println!("LOOP 有问题：{} ", loop_refno.to_string());
                     continue;
                 };
                 let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
                 geos_info.visible = visible;
+                dbg!(item_trans);
                 if item_trans.is_nan() {
                     continue;
                 }
@@ -473,9 +480,9 @@ pub async fn gen_loop_geos(
                 geos_info.aabb = Some(aabb_apply_transform(&ele_aabb, &trans_origin));
                 shape_insts_data.insert_info(parent_refno, geos_info.clone());
                 shape_insts_data.insert_geos_data(
-                    parent_refno.to_url_refno(),
+                    parent_refno.to_string(),
                     EleInstGeosData {
-                        inst_key: parent_refno.to_url_refno(),
+                        inst_key: parent_refno.to_string(),
                         refno: parent_refno,
                         insts: vec![geom_inst.clone()],
                         aabb: Some(ele_aabb),
@@ -513,12 +520,12 @@ pub async fn gen_cata_single_geoms(
     design_refno: RefU64,
     brep_shape_map: &CateBrepShapeMap,
     refno_ptset_map: &DashMap<RefU64, AIOSAxisMap>,
-) -> anyhow::Result<RefU64> {
+) -> anyhow::Result<bool> {
     let desi_att = aios_core::get_named_attmap(design_refno).await?;
     let type_name = desi_att.get_type_str();
     let owner = desi_att.get_owner();
     if !owner.is_valid() {
-        return Ok(RefU64::default());
+        return Ok(false);
     }
     let geoms_info = mgr.resolve_desi_comp(design_refno, None, None).await?;
     if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL"
@@ -531,7 +538,7 @@ pub async fn gen_cata_single_geoms(
             mgr.as_ref(),
         )
         .await?;
-        return Ok(geoms_info.refno);
+        return Ok(true);
     } else {
         let CateGeomsInfo {
             refno,
@@ -557,7 +564,7 @@ pub async fn gen_cata_single_geoms(
             }
         }
         refno_ptset_map.insert(design_refno, axis_map);
-        return Ok(refno);
+        return Ok(true);
     }
 }
 
@@ -645,10 +652,14 @@ pub async fn gen_cata_geos(
                         println!(
                             "正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}",
                             j,
-                            ele_refno.to_refno_string(),
+                            ele_refno.to_string(),
                             processed_cnt.lock().await.to_owned()
                         );
                         *processed_cnt.lock().await -= 1;
+                        let Ok(Some(cat_refno)) = aios_core::get_cat_refno(ele_refno).await else{
+                            println!("{ele_refno} 的元件库引用为空，跳过");
+                            continue;
+                        };
                         //在这里直接处理完所有需要处理的transform
                         let brep_shapes_map = CateBrepShapeMap::new();
                         let current_att = aios_core::get_named_attmap(ele_refno)
@@ -664,8 +675,8 @@ pub async fn gen_cata_geos(
                             &refno_ptset_map,
                         )
                         .await;
-                        let cat_refno = match r {
-                            Ok(cat_refno) => cat_refno,
+                        match r {
+                            Ok(_) => {},
                             Err(e) => {
                                 println!("生成元件库模型失败: {:?}", e);
                                 continue;
@@ -714,6 +725,7 @@ pub async fn gen_cata_geos(
                             dbg!(gmse_refno);
 
                             //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
+                            //反过来查询负实体，然后查询它的owner，来找到相邻的正实体
                             let pos_neg_map: HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)> =
                                 if gmse_refno.is_valid() {
                                     // mgr_clone
@@ -967,7 +979,7 @@ pub async fn gen_cata_geos(
                                     for (k, v) in final_compounds_map {
                                         //组合成新的hash
                                         let geo_hash =
-                                            hash_two_str(&inst_key.to_string(), &k.to_url_refno());
+                                            hash_two_str(&inst_key.to_string(), &k.to_string());
                                         let mesh: PlantMesh = (v.clone()).into();
                                         let aabb = mesh.cal_aabb();
                                         cached_mesh_mgr.insert(
@@ -1030,7 +1042,7 @@ pub async fn gen_cata_geos(
                         }
                         println!(
                             "正在处理同类元件库的模型当前参考号：{}",
-                            ele_refno.to_refno_string(),
+                            ele_refno.to_string(),
                         );
                         let Ok(Some(mut origin_trans)) =
                             mgr_clone.get_world_transform(ele_refno).await
@@ -1196,11 +1208,11 @@ pub async fn gen_cata_geos(
                             _key: key.to_string(),
                             _from: format!(
                                 "{AQL_PDMS_ELES_COLLECTION}/{}",
-                                current_tubing.leave_refno.to_url_refno()
+                                current_tubing.leave_refno.to_string()
                             ),
                             _to: format!(
                                 "{AQL_PDMS_ELES_COLLECTION}/{}",
-                                current_tubing.arrive_refno.to_url_refno()
+                                current_tubing.arrive_refno.to_string()
                             ),
                             start_pt: current_tubing.start_pt,
                             end_pt: current_tubing.end_pt,
@@ -1211,7 +1223,7 @@ pub async fn gen_cata_geos(
                         });
                     }
                 } else {
-                    println!("{} 的直段方向有问题", branch_refno.to_refno_string());
+                    println!("{} 的直段方向有问题", branch_refno.to_string());
                 }
             }
             continue;
@@ -1232,7 +1244,7 @@ pub async fn gen_cata_geos(
                 dbg!(inst_info);
                 continue;
             };
-            println!("正在处理直段{}: {}", cur_type, refno.to_refno_string());
+            println!("正在处理直段{}: {}", cur_type, refno.to_string());
             let world_trans = inst_info.world_transform;
             let axis_map = &inst_geos_data.ptset_map;
             let arrive = inst_info.flow_pt_indexs[0];
@@ -1275,11 +1287,11 @@ pub async fn gen_cata_geos(
                                 _key: key.to_string(),
                                 _from: format!(
                                     "{AQL_PDMS_ELES_COLLECTION}/{}",
-                                    current_tubing.leave_refno.to_url_refno()
+                                    current_tubing.leave_refno.to_string()
                                 ),
                                 _to: format!(
                                     "{AQL_PDMS_ELES_COLLECTION}/{}",
-                                    current_tubing.arrive_refno.to_url_refno()
+                                    current_tubing.arrive_refno.to_string()
                                 ),
                                 start_pt: current_tubing.start_pt,
                                 end_pt: current_tubing.end_pt,
@@ -1294,7 +1306,7 @@ pub async fn gen_cata_geos(
                         dbg!(&current_tubing);
                         dbg!(to_pdms_vec_str(&current_tubing.desire_arrive_dir));
                         dbg!(to_pdms_vec_str(&current_tubing.desire_leave_dir));
-                        println!("{} 的直段方向有问题", refno.to_refno_string());
+                        println!("{} 的直段方向有问题", refno.to_string());
                     }
                 }
             }
@@ -1375,11 +1387,11 @@ pub async fn gen_cata_geos(
                                 _key: key.to_string(),
                                 _from: format!(
                                     "{AQL_PDMS_ELES_COLLECTION}/{}",
-                                    current_tubing.leave_refno.to_url_refno()
+                                    current_tubing.leave_refno.to_string()
                                 ),
                                 _to: format!(
                                     "{AQL_PDMS_ELES_COLLECTION}/{}",
-                                    current_tubing.arrive_refno.to_url_refno()
+                                    current_tubing.arrive_refno.to_string()
                                 ),
                                 start_pt: current_tubing.start_pt,
                                 end_pt: current_tubing.end_pt,
@@ -1391,7 +1403,7 @@ pub async fn gen_cata_geos(
                         }
                     } else {
                         dbg!(current_tubing.desire_arrive_dir);
-                        println!("{} 的直段方向有问题", refno.to_refno_string());
+                        println!("{} 的直段方向有问题", refno.to_string());
                     }
                 }
             }
@@ -1642,14 +1654,13 @@ pub async fn gen_all_geos_data(
                 //需要使用层级展开，graph的方式去查询
                 let mut response = SUL_DB
                     .query(format!(
-                        "select value refno from [{}] where owner.noun in ['BRAN', 'HANG'] or noun in $nouns ",
+                        "select value refno from [{}] where owner.noun in ['BRAN', 'HANG']",
                         debug_root_refnos
                             .iter()
                             .map(|x| x.to_pe_key())
                             .collect::<Vec<_>>()
                             .join(",")
                     ))
-                    .bind(("nouns", CATA_WITHOUT_REUSE_GEO_NAMES))
                     .await
                     .unwrap();
                 let bran_children_refnos: Vec<RefU64> = response.take(0)?;
@@ -1753,16 +1764,8 @@ pub async fn gen_all_geos_data(
             }
         }
 
-        let mut has_geom_refnos: Vec<RefU64> = vec![];
-        if !is_incr_update {
-            // for root_refno in root_refnos.clone() {
-            //     let refnos = mgr.query_refnos_has_geos(root_refno).await?;
-            //     has_geom_refnos.extend_from_slice(&refnos);
-            // }
-            dbg!(has_geom_refnos.len());
-        }
-
-        if !has_geom_refnos.is_empty() || is_incr_update {
+        //loop 和 基本体的处理
+        {
             let target_loop_refnos = if is_incr_update {
                 incr_update_log
                     .as_ref()
@@ -1771,7 +1774,15 @@ pub async fn gen_all_geos_data(
                     .iter()
                     .cloned()
                     .collect()
-            } else {
+            } else if is_debug{
+                let mut loop_refnos = aios_core::query_refnos_deep_children(
+                    &debug_root_refnos,
+                    &GNERAL_LOOP_NOUN_NAMES,
+                )
+                .await?;
+                dbg!(&loop_refnos); 
+                loop_refnos.into_iter().collect()
+            }else {
                 mgr.get_gen_model_target_refnos(GeoEnum::LOOP_AND_PLOO, &target_dbnos, false)
                     .await?
             };
@@ -1802,7 +1813,15 @@ pub async fn gen_all_geos_data(
                     .iter()
                     .cloned()
                     .collect()
-            } else {
+            } else if is_debug{
+                let mut prim_refnos = aios_core::query_refnos_deep_children(
+                    &debug_root_refnos,
+                    &GNERAL_PRIM_NOUN_NAMES,
+                )
+                .await?;
+                dbg!(&prim_refnos); 
+                prim_refnos.into_iter().collect()
+            }else {
                 mgr.get_gen_model_target_refnos(GeoEnum::PRIM, &target_dbnos, false)
                     .await?
             };
@@ -2042,7 +2061,7 @@ pub async fn gen_all_geos_data(
                             geo_type: GeoBasicType::Compound,
                         };
 
-                        let inst_key = hash_two_str(&comp_refno.to_url_refno(), "compound");
+                        let inst_key = hash_two_str(&comp_refno.to_string(), "compound");
                         let mut comp_geos_info = EleGeosInfo {
                             refno: comp_refno,
                             visible: true,
@@ -2098,9 +2117,7 @@ pub async fn gen_all_geos_data(
             } else {
                 println!("当前节点下面没有需要参与负实体计算的几何体");
             }
-        } else {
-            println!("当前节点下面没有要继续生成的基本体几何节点");
-        }
+        } 
 
         {
             let mut shape_insts_data = instance_mgr.write().await;
@@ -2381,7 +2398,7 @@ pub async fn gen_all_geos_data(
                     //相当于更新
                     let mut new_geos_info = parent_geos_info.clone();
                     //如果和ngmr发生相减后， 没有复用了
-                    new_geos_info.update_to_compound(Some(parent.to_url_refno().as_str()));
+                    new_geos_info.update_to_compound(Some(parent.to_string().as_str()));
                     let mut mesh: PlantMesh = (final_manifold.clone()).into();
                     let geo_hash = new_geos_info.get_inst_key_u64();
                     let new_inst = EleInstGeo {

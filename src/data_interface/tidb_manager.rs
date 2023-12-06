@@ -256,7 +256,7 @@ impl PdmsDataInterface for AiosDBManager {
         end_types: &[&str],
         t_types: &[&str],
     ) -> anyhow::Result<Option<RefU64>> {
-        let id = format!("{}/{}", "pdms_eles", refno.to_url_refno());
+        let id = format!("{}/{}", "pdms_eles", refno.to_string());
         let aql = AqlQuery::new(r#"
             with pdms_eles, pdms_edges, foreign_edges
             FOR v,e,p in 1..15 OUTBOUND @id pdms_edges
@@ -490,7 +490,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///查询哪些有负实体的参考号
     async fn query_refnos_has_neg_geom(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
-        let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
         let aql = AqlQuery::new(
             "\
         with pdms_edges, pdms_eles
@@ -524,7 +524,7 @@ impl PdmsDataInterface for AiosDBManager {
     ) -> anyhow::Result<HashMap<RefU64, (Vec<RefU64>, Vec<RefU64>)>> {
         let refno_urls = refnos
             .iter()
-            .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+            .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_string()))
             .collect::<Vec<_>>();
         let aql = AqlQuery::new(
             r#"
@@ -569,7 +569,7 @@ impl PdmsDataInterface for AiosDBManager {
     ) -> anyhow::Result<Vec<RefU64>> {
         let refno_urls = refnos
             .iter()
-            .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_url_refno()))
+            .map(|x| format!("{AQL_PDMS_ELES_COLLECTION}/{}", x.to_string()))
             .collect::<Vec<_>>();
         let aql = AqlQuery::new(
             r#"
@@ -594,7 +594,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///查询refno下是否有几何体
     async fn query_refnos_has_geos(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
-        let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
         let aql = AqlQuery::new(
             r#"
             with pdms_edges, pdms_eles
@@ -628,7 +628,7 @@ impl PdmsDataInterface for AiosDBManager {
         &self,
         refno: RefU64,
     ) -> anyhow::Result<HashMap<RefU64, Vec<RefU64>>> {
-        let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+        let refno_url = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
         let aql = AqlQuery::new(
             r#"
             with pdms_edges, pdms_eles
@@ -909,7 +909,7 @@ impl PdmsDataInterface for AiosDBManager {
             if self.db_option.debug_print_world_transform {
                 let rot_mat = Mat3::from_quat(rotation);
                 let ori_str = math_tool::to_pdms_ori_xyz_str(&rot_mat);
-                println!("{} : {:?}", refno.to_refno_str(), (translation, ori_str));
+                println!("{} : {:?}", refno.to_string(), (translation, ori_str));
             }
         }
 
@@ -1212,7 +1212,7 @@ impl PdmsDataInterface for AiosDBManager {
             if let Some(v) = desi_att.get_as_string("JUSL") {
                 context.insert("JUSL".into(), v.into());
             }
-            context.insert("DESI_REFNO".into(), desi_refno.to_refno_str());
+            context.insert("DESI_REFNO".into(), desi_refno.to_string());
             let mut desp = desi_att.get_f32_vec("DESP").unwrap_or_default();
             for i in 0..desp.len() {
                 context.insert(format!("DESI{}", i + 1).into(), desp[i].to_string().into());
@@ -1282,7 +1282,7 @@ impl PdmsDataInterface for AiosDBManager {
             //     context.insert(format!("IPARM{}", i + 1).into(), iparams[i].to_string().into());
             // }
 
-            context.insert("RS_DES_REFNO".into(), desi_refno.to_refno_str());
+            context.insert("RS_DES_REFNO".into(), desi_refno.to_string());
             // dbg!(&desi_refno);
             //添加cata的信息
             if let Some(cata_attmap) = self.get_cat_attmap(desi_refno).await {
@@ -1396,13 +1396,13 @@ impl PdmsDataInterface for AiosDBManager {
         }
         let scom_ref = scom_ref_option.ok_or(anyhow::anyhow!(format!(
             "SCOM not exist in element: {}",
-            desi_refno.to_refno_str()
+            desi_refno.to_string()
         )))?;
         if !scom_ref.is_valid() {
             println!(
                 "{} 的CAT引用不存在，为 {}",
-                desi_refno.to_refno_str(),
-                scom_ref.to_refno_str()
+                desi_refno.to_string(),
+                scom_ref.to_string()
             );
             return Ok(Default::default());
         }

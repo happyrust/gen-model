@@ -40,7 +40,7 @@ pub async fn query_foreign_refnos_fuzzy(adb: &ArDatabase, refnos: &[RefU64], sta
         .bind_var("end_types", end_types)
         .bind_var("t_types", t_types);
     let results: Vec<String> = adb.aql_query(aql).await?;
-    let refnos = results.iter().map(|x| RefU64::from_url_refno_default(x)).collect::<Vec<_>>();
+    let refnos = results.iter().filter_map(|x| RefU64::from_str(x).ok() ).collect::<Vec<_>>();
     Ok(refnos)
 }
 
@@ -73,7 +73,7 @@ pub async fn query_foreign_refno_aql(arango_database: &ArDatabase, refno: RefU64
 /// 查询多个参考号的外键引用 返回他的参考号和 name
 pub async fn query_foreign_refnos_aql(arango_database: &ArDatabase, refnos: Vec<RefU64>, foreign_types: Vec<String>) -> anyhow::Result<Vec<PdmsSpreNameAql>> {
     let ids = refnos.into_iter()
-        .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()))
+        .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string()))
         .collect::<Vec<_>>();
     if foreign_types.len() < 2 { return Ok(vec![]); }
     let aql = AqlQuery::new("\
@@ -99,7 +99,7 @@ pub async fn query_foreign_refnos_aql(arango_database: &ArDatabase, refnos: Vec<
 
 /// 查询外键对应的 name
 pub async fn query_foreign_name_aql(refno: RefU64, foreign_types: Vec<&str>, arango_database: &ArDatabase) -> anyhow::Result<Option<String>> {
-    let id = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
+    let id = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string());
     if foreign_types.len() <= 1 { return Ok(None); }
     let aql = AqlQuery::new("\
     WITH @@pdms_eles,@@foreign_edges

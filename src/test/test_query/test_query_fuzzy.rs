@@ -11,7 +11,7 @@ async fn test_query_support_arms() -> anyhow::Result<()> {
     let mgr = get_test_ams_db_manager_async().await;
     let mut tmp = mgr.query_foreign_refnos(&[gensec_refno], &[&["SPRE", "CATR"]],
                                         &["PSTR", "PTSS"], &[], 4).await?;
-    assert_eq!(tmp.pop().unwrap().to_refno_str(), "21438/2368");
+    assert_eq!(tmp.pop().unwrap().to_string(), "21438/2368");
 
     Ok(())
 }

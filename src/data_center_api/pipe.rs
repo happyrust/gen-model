@@ -128,7 +128,7 @@ async fn get_instances_data(compute_refnos: HashMap<String, HashSet<RefU64>>, me
         if att_type.as_str() == "BRAN" { b_bran = true; }
         for (index, refno) in refnos.into_iter().enumerate() {
             // bran 的 instance_code 是 name ，其他的是 refno
-            let instance_code = if b_bran { query_name(refno, pool).await? } else { refno.to_refno_string() };
+            let instance_code = if b_bran { query_name(refno, pool).await? } else { refno.to_string() };
             let instance = get_instance_data_element(&metadata_map, refno, &att_type, instance_code);
             if instance.is_err() { continue; }
             let instance = instance.unwrap();
@@ -148,7 +148,7 @@ async fn get_instances_data(compute_refnos: HashMap<String, HashSet<RefU64>>, me
                     if let Some(to_refno) = RefU64::from_str(&bran_element._to) {
                         if bran_children.contains(&to_refno) {
                             let element_type = &bran_element.att_type;
-                            if let Some(instance) = get_instance_data_element(&metadata_map, to_refno, &element_type, to_refno.to_refno_string()) {
+                            if let Some(instance) = get_instance_data_element(&metadata_map, to_refno, &element_type, to_refno.to_string()) {
                                 bran_relations_map.entry(to_refno).or_insert_with(Vec::new).push(to_refno);
                                 instances.insert(to_refno, instance);
                             }
@@ -172,8 +172,8 @@ async fn get_instances_data(compute_refnos: HashMap<String, HashSet<RefU64>>, me
                         let from_refno = from_refno.unwrap();
                         let to_refno = to_refno.unwrap();
                         let tube_refno = RefU64(from_refno.hash_with_another_refno(to_refno));
-                        let tube_code = tube_refno.to_refno_string();
-                        // let tube_code = format!("from:{} / to:{}", from_refno.to_refno_string(), to_refno.to_refno_string());
+                        let tube_code = tube_refno.to_string();
+                        // let tube_code = format!("from:{} / to:{}", from_refno.to_string(), to_refno.to_string());
                         let instance = get_instance_data_element(&metadata_map, tube_refno, "TUBE", tube_code);
                         if instance.is_err() { continue; }
                         let instance = instance.unwrap();

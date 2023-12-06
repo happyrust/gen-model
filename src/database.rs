@@ -221,7 +221,7 @@ pub fn gen_uda_attr_value_sql(att: &WholeAttMap) -> String {
     // table_vals_sql.push_str(&format!(
     //     r#"({}, '{}', '{}', {}, 0x{}),"#, // 插入语句模板
     //     refno.0,                          // 引用号的第一个元素
-    //     refno.to_refno_str(),             // 引用号的字符串表示
+    //     refno.to_string(),             // 引用号的字符串表示
     //     type_name,                        // 类型名称
     //     owner.0,                          // 所有者的第一个元素
     //     data                              // 数据

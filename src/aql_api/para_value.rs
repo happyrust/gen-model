@@ -19,7 +19,7 @@ pub async fn query_para_value(refno: RefU64, database: &ArDatabase) -> anyhow::R
     With @@collection
     return document(@@collection,@refno).para")
         .bind_var("@collection", AQL_PARA_ELES_COLLECTION)
-        .bind_var("refno", refno.to_url_refno());
+        .bind_var("refno", refno.to_string());
     let mut result: Vec<Vec<f64>> = database.aql_query(aql).await?;
     return if result.len() == 0 { Ok(None) } else { Ok(Some(result.remove(0))) };
 }
@@ -29,7 +29,7 @@ pub async fn query_des_para_value(refno: RefU64, database: &ArDatabase) -> anyho
     With @@collection
     return document(@@collection,@refno).para")
         .bind_var("@collection", AQL_DESPARA_ELES_COLLECTION)
-        .bind_var("refno", refno.to_url_refno());
+        .bind_var("refno", refno.to_string());
     let mut result: Vec<Vec<f64>> = database.aql_query(aql).await?;
     return if result.len() == 0 { Ok(None) } else { Ok(Some(result.remove(0))) };
 }

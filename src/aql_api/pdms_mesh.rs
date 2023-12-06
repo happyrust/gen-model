@@ -47,7 +47,7 @@ struct PdmsMeshQueryData {
 
 pub async fn query_refno_meshes_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<DashMap<RefU64, PlantMesh>> {
     let mut map = DashMap::new();
-    let key = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
+    let key = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string());
     let aql = AqlQuery::new("\
     With @@pdms_eles,@@pdms_edges
     let refnos = (for v,e,p in 0..10 inbound @id @@pdms_edges
@@ -115,7 +115,7 @@ pub async fn query_refnos_meshes_aql(refnos: Vec<RefU64>, database: &ArDatabase)
 
 pub async fn query_catr_refnos_meshes_aql(refno: RefU64, database: &ArDatabase) -> anyhow::Result<DashMap<RefU64, PlantMesh>> {
     let mut map = DashMap::new();
-    let key = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
+    let key = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string());
     let aql = AqlQuery::new("\
     With @@pdms_eles,@@pdms_edges
     let refnos = (for v,e,p in 0..10 inbound @id @@pdms_edges
@@ -207,7 +207,7 @@ pub async fn query_pdms_mesh_from_hash_str_aql(database: &ArDatabase, hash_strs:
 
 //
 // pub async fn query_pdms_negative_mesh_from_refno(refno: RefU64, database: &ArDatabase) -> anyhow::Result<PlantMeshesData> {
-//     let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+//     let id = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
 //     let aql = AqlQuery::new("
 //     for v in 0..5 inbound @id pdms_edges
 //         let r = document('negative_eles',v._key)
@@ -233,7 +233,7 @@ pub async fn query_pdms_mesh_from_hash_str_aql(database: &ArDatabase, hash_strs:
 
 pub async fn query_refno_transform(refno: RefU64, database: &ArDatabase) -> anyhow::Result<Option<Transform>> {
     let aql = AqlQuery::new("return document('pdms_inst_infos',@key).world_transform")
-        .bind_var("key", refno.to_url_refno());
+        .bind_var("key", refno.to_string());
     let result: Vec<(Quat, Vec3, Vec3)> = database.aql_query(aql).await?;
     if result.is_empty() { return Ok(None); }
     let result = result.first().unwrap();

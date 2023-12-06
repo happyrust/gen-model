@@ -24,7 +24,7 @@ pub async fn get_dq_bend_data(refno: &PdmsElement, bran_name: &str, spre_name: &
     let mut data_center_attr = Vec::new();
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART1".to_string(),
-        value: AttrValue::AttrString(refno.refno.to_refno_str()).into(),
+        value: AttrValue::AttrString(refno.refno.to_string()).into(),
     });
 
     data_center_attr.push(DataCenterAttr {
@@ -180,7 +180,7 @@ pub async fn get_gy_bend_data(refno: &PdmsElement, bran_name: &str, room_code: S
                                         ("ITEMAA7".to_string(), "Link".to_string())];
     result.push(DataCenterAttr {
         attribute_model_code: "ITEM1".to_string(),
-        value: AttrString(refno.refno.to_refno_string()).into(),
+        value: AttrString(refno.refno.to_string()).into(),
     });
     let item_1 = DataCenterAttr {
         attribute_model_code: "ITEMA1".to_string(),
@@ -282,7 +282,7 @@ pub async fn get_dq_bend_angle_data(refno: &PdmsElement, bran_name: &str, spre_n
     let mut data_center_attr = Vec::new();
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART1".to_string(),
-        value: AttrValue::AttrString(refno.refno.to_refno_str()).into(),
+        value: AttrValue::AttrString(refno.refno.to_string()).into(),
     });
 
     data_center_attr.push(DataCenterAttr {

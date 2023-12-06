@@ -63,10 +63,10 @@ pub async fn query_hole_instance(holes: &Vec<PdmsElement>, database: &ArDatabase
     for hole in holes {
         match hole.noun.as_str() {
             "JLDATUM" | "CMFI" | "CMPF" => {
-                gtypes.push(format!("{}/{}", AQL_PDMS_ELES_COLLECTION, hole.refno.to_url_refno()));
+                gtypes.push(format!("{}/{}", AQL_PDMS_ELES_COLLECTION, hole.refno.to_string()));
             }
             _ => {
-                fitts.push(format!("{}", hole.refno.to_url_refno()));
+                fitts.push(format!("{}", hole.refno.to_string()));
             }
         }
     }
@@ -289,7 +289,7 @@ pub fn compute_rectangle_data(points: [Vec3; 4]) -> Option<(f32, f32)> {
 /// 生成查询pdms实体孔洞的aql语句
 fn gen_query_pdms_hole_aql<'a>(refnos: Vec<RefU64>) -> AqlQuery<'a> {
     let ids = refnos.into_iter()
-        .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno()))
+        .map(|refno| format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string()))
         .collect::<Vec<_>>();
     AqlQuery::new("
     With @@pdms_eles,@@pdms_edges

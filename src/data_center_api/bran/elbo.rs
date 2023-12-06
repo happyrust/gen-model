@@ -118,7 +118,7 @@ pub async fn get_dq_elbo_spre_data(pe: &PdmsElement, bran_name: &str, spre_name:
     let mut data_center_attr = Vec::new();
     data_center_attr.push(DataCenterAttr {
         attribute_model_code: "PART1".to_string(),
-        value: AttrValue::AttrString(pe.refno.to_refno_str()).into(),
+        value: AttrValue::AttrString(pe.refno.to_string()).into(),
     });
 
     data_center_attr.push(DataCenterAttr {

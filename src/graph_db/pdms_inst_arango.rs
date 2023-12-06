@@ -40,8 +40,8 @@ pub async fn save_compound_inst_info_to_graph_db(
             instances.push(json);
             // let edge = PdmsInstanceGraphEdge {
             //     _key: "".to_string(),
-            //     _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.0.to_url_refno()),
-            //     _to: format!("{}/{}", collection, k.0.to_url_refno()),
+            //     _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.0.to_string()),
+            //     _to: format!("{}/{}", collection, k.0.to_string()),
             // };
             // edges.push(serde_json::to_value(&edge).unwrap());
         }
@@ -159,8 +159,8 @@ pub async fn save_mesh_instance_data(
             instances.push(json);
             let edge = PdmsInstanceGraphEdge {
                 _key: "".to_string(),
-                _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.to_url_refno()),
-                _to: format!("{}/{}", collection, k.to_url_refno()),
+                _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.to_string()),
+                _to: format!("{}/{}", collection, k.to_string()),
             };
             edges.push(serde_json::to_value(&edge).unwrap());
             json_vec.push(v.gen_sur_json());
@@ -250,7 +250,7 @@ pub async fn query_insts_shape_data(
     if new_refnos.is_empty() { return Ok(Default::default()); }
     let refno_strs = new_refnos
         .iter()
-        .map(|x| x.to_url_refno())
+        .map(|x| x.to_string())
         .collect::<Vec<_>>();
     let include_compound = filter.contains(&GeoBasicType::Compound);
     //如果单独拖入负实体，允许把负实体显示出来
@@ -312,12 +312,12 @@ pub async fn query_insts_shape_data(
     let mut inst_tubi_map = HashMap::new();
     let mut all_refnos = inst_info_map
         .keys()
-        .map(|x| x.to_url_refno())
+        .map(|x| x.to_string())
         .collect::<Vec<_>>();
     //这里需要直接通过这个查询下面的所有的branch那些
     let branch_refnos =
         query_deep_children_refnos_fuzzy(&database, &new_refnos, &CATA_HAS_TUBI_GEO_NAMES).await?;
-    all_refnos.extend(branch_refnos.iter().map(|x| x.to_url_refno()));
+    all_refnos.extend(branch_refnos.iter().map(|x| x.to_string()));
     let aql = AqlQuery::new(
         r#"
             With @@pdms_inst_tubis
@@ -348,7 +348,7 @@ pub async fn query_instance_level_with_refno_in_arangodb(
     refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_url_refno());
+    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
     let pdms_inst_infos = AQL_PDMS_INST_INFO_COLLECTION;
     let aql = AqlQuery::new(
         "
@@ -375,7 +375,7 @@ pub async fn query_instance_level_with_ssc_refno_in_arangodb(
     refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aql = format!("ssc_eles/{}", refno.to_url_refno());
+    let refno_aql = format!("ssc_eles/{}", refno.to_string());
     let pdms_inst_infos = AQL_PDMS_INST_INFO_COLLECTION;
     let aql = AqlQuery::new(
         "
@@ -401,7 +401,7 @@ pub async fn query_rvm_instance_data_from_refno_aql(
     refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Option<RvmGeoInfo>> {
-    let refno_aql = refno.to_url_refno();
+    let refno_aql = refno.to_string();
     let aql = AqlQuery::new(
         "
     With @@pdms_inst_infos
@@ -430,7 +430,7 @@ pub async fn query_rvm_instance_data_from_owner_aql(
     refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<RvmGeoInfo>> {
-    let refno_aql = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_url_refno());
+    let refno_aql = format!("{}/{}", AQL_PDMS_ELES_COLLECTION, refno.to_string());
     let aql = AqlQuery::new(
         "
     With @@pdms_inst_infos,@@pdms_eles,@@pdms_edges
@@ -456,7 +456,7 @@ pub async fn query_compound_inst_hashes_aql(
 ) -> anyhow::Result<Vec<EleGeosInfo>> {
     let ids = refnos
         .into_iter()
-        .map(|x| x.to_url_refno())
+        .map(|x| x.to_string())
         .collect::<Vec<_>>();
     let aql = AqlQuery::new(
         "\
