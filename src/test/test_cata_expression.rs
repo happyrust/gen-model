@@ -3,6 +3,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::test::test_helper::get_test_ams_db_manager;
 use aios_core::pdms_types::*;
 use aios_core::tiny_expr::expr_eval::interp;
+use dashmap::DashMap;
 use regex::Regex;
 use std::collections::BTreeMap;
 use crate::cata::resolve::CataContext;
@@ -11,7 +12,7 @@ use crate::cata::resolve::CataContext;
 #[test]
 fn test_parse_param_with_point_digit() {
     let input_exp = "( ( ( -  DESI[1.1]/2 ) - DESI[0.2] ) )";
-    let mut context: BTreeMap<String, String> = BTreeMap::new();
+    let mut context: DashMap<String, String> = DashMap::new();
     context.insert("DESI1".into(), "30.0".into());
     context.insert("DESI0".into(), "40.0".into());
     let cata_context = CataContext {
@@ -25,7 +26,7 @@ fn test_parse_param_with_point_digit() {
 #[test]
 fn test_parse_design_param() {
     let input_exp = "-0.5 TIMES  DESIGN PARAM 1";
-    let mut context: BTreeMap<String, String> = BTreeMap::new();
+    let mut context:DashMap<String, String> = DashMap::new();
     context.insert("DESI1".into(), "30.0".into());
     let cata_context = CataContext {
         context,
@@ -40,7 +41,7 @@ fn test_parse_design_param() {
 fn test_parse_param_with_of_operator() {
     let input_exp = "LBOR OF PREV";
     let input_exp = "LBOR OF 24381/88991";
-    let mut context: BTreeMap<String, String> = BTreeMap::new();
+    let mut context:DashMap<String, String> = DashMap::new();
     let interface = get_test_ams_db_manager();
     let cata_context = CataContext {
         context,
@@ -56,7 +57,7 @@ fn parse_3_axis() {
     //
     // let str = "X ( 45 )  Y ( 35 ) Z";
     //-X (DESIGN PARAM 14 ) -Y
-    let mut context: BTreeMap<String, String> = BTreeMap::new();
+    let mut context:DashMap<String, String> = DashMap::new();
     context.insert("DESI14".into(), "30.0".into());
     context.insert("DESI13".into(), "30.0".into());
     context.insert("DDANGLE".into(), "45.0".into());
@@ -120,7 +121,7 @@ fn test_rpro() {
 #[test]
 fn test_math_exp() {
     let expr = "MAX ( ( ( - 31 ) + 60 ), 29.2 )";
-    let mut context: BTreeMap<String, String> = BTreeMap::new();
+    let mut context:DashMap<String, String> = DashMap::new();
     let cata_context = CataContext {
         context,
     };

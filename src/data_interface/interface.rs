@@ -39,16 +39,6 @@ pub trait PdmsDataInterface: Send + Sync {
 
     async fn get_prev(&self, refno: RefU64) -> anyhow::Result<RefU64>;
 
-    fn get_attr_within_project(&self, refno: RefU64, project: &str) -> anyhow::Result<AttrMap>;
-
-    fn get_children_within_project(
-        &self,
-        refno: RefU64,
-        project: &str,
-    ) -> anyhow::Result<RefU64Vec>;
-
-    ///获得包含UDA的属性
-    async fn get_attr_with_uda(&self, refno: RefU64) -> anyhow::Result<NamedAttrMap>;
 
     ///获得参考号的Owner
     fn get_owner(&self, refno: RefU64) -> RefU64;
@@ -207,15 +197,12 @@ pub trait PdmsDataInterface: Send + Sync {
 
     async fn get_or_create_scom_info(&self, cata_refno: RefU64) -> anyhow::Result<ScomInfo>;
 
-    async fn get_or_create_cata_context(&self, desi_refno: RefU64,
-                                        extra_axis_map: Option<&BTreeMap<i32, CateAxisParam>>) -> anyhow::Result<CataContext>;
+    async fn get_or_create_cata_context(&self, desi_refno: RefU64) -> anyhow::Result<CataContext>;
 
     async fn resolve_desi_comp(
         &self,
         desi_refno: RefU64,
         scom_ref_option: Option<RefU64>,
-        //传入额外的参数进来，用于解析轴线参数
-        desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
     ) -> anyhow::Result<CateGeomsInfo>;
 
     async fn resolve_axis_params(

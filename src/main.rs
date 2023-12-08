@@ -215,14 +215,4 @@ fn test_log() {
     error!("Some error");
 }
 
-#[tokio::test]
-async fn test_db1_dehash() {
-    let mgr = AiosDBManager::init_form_config().await.unwrap();
-    let refno = RefU64::from_str("24383/91850").unwrap();
-    let children = mgr
-        .get_children_within_project(refno, "AvevaMarineSample")
-        .unwrap();
-    dbg!(&children);
-    let hash = db1_hash(":STACbeam");
-    dbg!(&hash);
-}
+

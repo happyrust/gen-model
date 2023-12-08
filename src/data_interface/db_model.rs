@@ -971,7 +971,7 @@ impl AiosDBManager {
         expr: &str,
         desi_refno: RefU64,
     ) -> anyhow::Result<f32> {
-        let context = self.get_or_create_cata_context(desi_refno, None).await?;
+        let context = self.get_or_create_cata_context(desi_refno).await?;
         eval_str_to_f32(expr, &context, Some(self), "DIST")
     }
 

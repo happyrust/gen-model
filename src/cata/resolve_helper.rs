@@ -3,14 +3,15 @@ use crate::aql_api::children::query_pre_or_next_node;
 use crate::cata::direction_parse::parse_expr_to_dir;
 use crate::cata::polish_notation::Stack;
 use crate::cata::resolve::resolve_axis_param;
+use crate::data_interface::gen_model::HASH_PSEUDO_ATT_MAPS;
 use crate::data_interface::interface::PdmsDataInterface;
 
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
-use aios_core::parsed_data::*;
 use aios_core::pdms_data::{AxisParam, ScomInfo};
 use aios_core::pdms_types::RefU64;
 use aios_core::tiny_expr::expr_eval::interp;
 use aios_core::tool::float_tool::*;
+use aios_core::{parsed_data::*, NamedAttrMap, NamedAttrValue};
 use anyhow::anyhow;
 use glam::{Mat3, Quat, Vec2, Vec3};
 use itertools::any;
@@ -140,69 +141,39 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
             let s = &caps[0];
             let c1 = caps.get(1).map_or("", |m| m.as_str());
             let c2 = caps.get(2).map_or("", |m| m.as_str());
-            let refno_str = context.get("RS_DES_REFNO").unwrap().as_str();
-            let refno = RefU64::from_str(refno_str).unwrap();
-            // let target_refno = match c2 {
-            //     "PREV" => interface.get_prev(refno)?,
-            //     "NEXT" => interface.get_next(refno)?,
-            //     refno_str => {
-            //         RefU64::from_str(refno_str).map_err(|_| anyhow!("wrong refno in of expr"))?
-            //     }
-            // };
+            let refno_str = context.get("RS_DES_REFNO").unwrap();
+            let refno = RefU64::from_str(refno_str.as_str()).unwrap();
+            let expr_val = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(async move {
+                    let target_refno = match c2 {
+                        "PREV" => aios_core::get_next_prev(refno, false).await.unwrap_or_default(),
+                        "NEXT" => aios_core::get_next_prev(refno, true).await.unwrap_or_default(),
+                        refno_str => {
+                            refno_str.into()
+                        }
+                    };
+                    // dbg!(target_refno);
+                    let pe = aios_core::get_pe(target_refno).await.unwrap_or_default().unwrap_or_default();
+                    let pseudo_map = HASH_PSEUDO_ATT_MAPS.read().await;
+                    //判断target_refno是否在pseudo_map，如果有，取出这里的值
+                    if let Some(am) = pseudo_map.get(&pe.cata_hash){
+                        if let Some(v) = am.map.get(c1) {
+                            // dbg!(v);
+                            return v.get_val_as_string();
+                        }
+                    }
+                    "0".to_owned()
+                })
+            });
+            // dbg!(&expr_val);
+            new_exp = new_exp.replace(s, expr_val.as_str());
+            // dbg!(&new_exp);
+            // maybe need?
             // let target_att = aios_core::get_named_attmap(target_refno).await?;
-
             // dbg!(&target_refno);
             // if let Some(value) = target_att.get_as_string(c1) {
             //     new_exp = new_exp.replace(s, value.as_str());
-            // } else {
-            //     match c1 {
-            //         // "ABOR" | "ARRWID" | "ARRHEI" => {
-            //         //     let axis_map = interface.resolve_axis_params(target_refno)?;
-            //         //     let index = target_att.get_i32("LEAV").unwrap_or_default();
-            //         //     if axis_map.contains_key(&index) {
-            //         //         let v = axis_map.get(&index).unwrap();
-            //         //         if c1 == "ARRWID" {
-            //         //             new_exp = new_exp.replace(s, v.pwidth.to_string().as_str());
-            //         //         }else if c1 == "ARRHEI"{
-            //         //             new_exp = new_exp.replace(s, v.pheight.to_string().as_str());
-            //         //         }else if c1 == "ABOR"{
-            //         //             new_exp = new_exp.replace(s, v.pbore.to_string().as_str());
-            //         //         }
-            //         //         dbg!(&new_exp);
-            //         //     }
-            //         // }
-            //         "LBOR" | "LEAWID" | "LEAHEI" => {
-            //             // let axis_map = interface.resolve_axis_params(target_refno, None).await?;
-            //             // // dbg!(&target_att);
-            //             // let index = target_att.get_i32("LEAV").unwrap_or_default();
-            //             // let res = if index == 0 {
-            //             //     target_att.get_f32("HBOR").unwrap_or_default()
-            //             // } else if axis_map.contains_key(&index) {
-            //             //     let v = axis_map.get(&index).unwrap();
-            //             //     if c1 == "LEAWID" {
-            //             //         v.pwidth
-            //             //     } else if c1 == "LEAHEI" {
-            //             //         v.pheight
-            //             //     } else if c1 == "LBOR" {
-            //             //         v.pbore
-            //             //     } else {
-            //             //         return Err(anyhow!("{input_expr} not support."));
-            //             //     }
-            //             // } else {
-            //             //     return Err(anyhow!("{input_expr} not support."));
-            //             // };
-            //             // // dbg!(res);
-            //             // new_exp = new_exp.replace(s, res.to_string().as_str());
-            //         }
-            //         _ => {
-            //             // else if let Some(v) = context.get(c1) {
-            //             //     new_exp = new_exp.replace(s, v.as_str());
-            //             //     dbg!(&new_exp);
-            //             // }else
-            //         }
-            //     }
             // }
-            //
         }
     }
 
@@ -257,6 +228,8 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
     let mut found_replaced = false;
     let para_name_re =
         Regex::new(r"(DESI(GN)?\s+)?([I|C|O|A)]?PARA?M?)|DESP|(O|A|W|D)DESP?").unwrap();
+    let mut uda_context_added = false;
+    let mut uda_context = HashMap::new();
     for _ in 0..100 {
         for caps in re.captures_iter(&new_exp) {
             let s = caps[0].trim();
@@ -283,11 +256,64 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
                     .unwrap_or_default()
             )
             .into();
+            let is_uda = k.starts_with(":");
+            let refno_str = context.get("RS_DES_REFNO").unwrap();
+            let refno = RefU64::from_str(refno_str.as_str()).unwrap();
+            if is_uda && !uda_context_added {
+                // dbg!(&k);
+                let uda_map = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async move {
+                        let d = aios_core::get_named_attmap_with_uda(refno, false)
+                            .await
+                            .unwrap_or_default();
+                        // dbg!(&d);
+                        d
+                    })
+                });
+                for (kk, vv) in uda_map.map{
+                    if kk.starts_with({":"}) {
+                        match vv {
+                            NamedAttrValue::F32Type(d) => {
+                                let short_name = if kk.len() >= 5{
+                                    kk[..5].to_uppercase()
+                                }else{
+                                    kk.to_uppercase()
+                                };
+                                uda_context.insert(short_name, d.to_string());
+                                uda_context.insert(kk, d.to_string());
+                            }
+                            NamedAttrValue::F32VecType(ds) => {
+                                let short_name = if kk.len() >= 5{
+                                    kk[..5].to_uppercase()
+                                }else{
+                                    kk.to_uppercase()
+                                };
+                                for (i, d) in ds.into_iter().enumerate() {
+                                    // dbg!(format!("{}{}", &short_name, i+1));
+                                    uda_context.insert(format!("{}{}", &short_name, i + 1), d.to_string());
+                                    uda_context.insert(format!("{}{}", &kk, i + 1), d.to_string());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                uda_context_added = true;
+            }
 
             if context.contains_key(&k) {
-                result_exp = result_exp.replace(s, &context[&k]);
+                result_exp = result_exp.replace(s, &context.get(&k).unwrap());
+                if is_uda{
+                    dbg!(&result_exp);
+                }
                 found_replaced = true;
-            } else if is_some_param {
+            } else if is_uda && uda_context.contains_key(&k) {
+                result_exp = result_exp.replace(s, &uda_context.get(&k).unwrap());
+                // if is_uda{
+                //     dbg!(&result_exp);
+                // }
+                found_replaced = true;
+            }else if is_some_param {
                 //if !replace_err_by_zero
                 //todo 需要弄清楚，直接整体返回0.0， 不用坐特殊处理？ 是否可行
                 {
@@ -301,6 +327,9 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
                 result_exp = result_exp.replace(s, " 0");
                 found_replaced = true;
             }
+            // if is_uda {
+            //     dbg!(&result_exp);
+            // }
         }
         //如果有RPRO 需要执行两次处理
         result_exp = result_exp.replace("ATTRIB", "");
@@ -344,9 +373,9 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
         match upper_s.as_str() {
             "TIMES" | "MULT" => p_vals.push("*".to_string()),
             "DIV" => p_vals.push("/".to_string()),
-            "DDHEIGHT" => p_vals.push(context["DDHEIGHT"].to_string()),
-            "DDRADIUS" => p_vals.push(context["DDRADIUS"].to_string()),
-            "DDANGLE" => p_vals.push(context["DDANGLE"].to_string()),
+            "DDHEIGHT" => p_vals.push(context.get("DDHEIGHT").unwrap().to_string()),
+            "DDRADIUS" => p_vals.push(context.get("DDRADIUS").unwrap().to_string()),
+            "DDANGLE" => p_vals.push(context.get("DDANGLE").unwrap().to_string()),
             _ => {
                 if upper_s.ends_with("mm") {
                     p_vals.push(upper_s[..upper_s.len() - 2].to_string());
@@ -419,7 +448,7 @@ pub fn eval_str_to_f64<T: PdmsDataInterface>(
                 )))
             } else {
                 println!("输入表达式 : {}", &input_expr);
-                dbg!(&context);
+                // dbg!(&context);
                 // println!("计算后表达式 : {}", &result_string);
                 // let refno_str = context.get("RS_CATR_REFNO").unwrap().as_str();
                 // let refno = RefU64::from_str(refno_str)?;

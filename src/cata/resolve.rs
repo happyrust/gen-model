@@ -103,7 +103,7 @@ pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
 /// 元件库表达式相关的参数
 #[derive(Debug, Default, Clone, Deref, DerefMut)]
 pub struct CataContext {
-    pub context: BTreeMap<String, String>,
+    pub context: DashMap<String, String>,
 }
 
 // impl CataExprContext {
@@ -132,7 +132,7 @@ pub struct CataContext {
 //     }
 //     //需要获取design的数据
 //     pub async fn build(&self, mgr: &AiosDBManager, des_refno: RefU64) -> BTreeMap<String, String> {
-//         let mut context: BTreeMap<String, String> = Default::default();
+//         let mut context: DashMap<String, String> = Default::default();
 //         if let Ok(attr_map) = mgr.get_attr(des_refno).await {
 //             let mut desp = attr_map.get_f32_vec("DESP").unwrap_or_default();
 //             for i in 0..desp.len() {
@@ -201,9 +201,9 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
     axis_param_map: &BTreeMap<i32, CateAxisParam>,
     interface: Option<&T>,
 ) -> anyhow::Result<GmseParamData> {
-    let angle = context[DDANGLE_STR].parse::<f32>().unwrap_or(0.0).to_radians();
-    let radius = context[DDRADIUS_STR].parse::<f32>().unwrap_or(0.0);
-    let height = context[DDHEIGHT_STR].parse::<f32>().unwrap_or(0.0);
+    let angle = context.get(DDANGLE_STR).unwrap().parse::<f32>().unwrap_or(0.0).to_radians();
+    let radius = context.get(DDRADIUS_STR).unwrap().parse::<f32>().unwrap_or(0.0);
+    let height = context.get(DDHEIGHT_STR).unwrap().parse::<f32>().unwrap_or(0.0);
     // dbg!(&gm.diameters);
     let diameters = gm.diameters
         .iter()
@@ -355,7 +355,7 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
 ) -> CateAxisParam {
     let key: String = axis_param.pconnect.replace("\n", "").replace(" ", "").into();
     let pconnect = if context.contains_key(&key) {
-        let tmp = context[&key].parse::<u32>().unwrap_or(0u32);
+        let tmp = context.get(&key).unwrap().parse::<u32>().unwrap_or(0u32);
         db1_dehash(tmp)
     } else {
         key.clone()

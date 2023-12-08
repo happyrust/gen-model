@@ -45,8 +45,8 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-        .execute(&pool)
-        .await?;
+    .execute(&pool)
+    .await?;
     Ok(())
 }
 
@@ -58,9 +58,9 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
             "CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};",
             project_name
         )
-            .as_str(),
+        .as_str(),
     )
-        .await?;
+    .await?;
 
     //todo 改成一对多的实现
     let mut pool =
@@ -107,6 +107,26 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
     Ok(())
 }
 
+///创建索引
+pub async fn create_index(db_option: &DbOption) -> anyhow::Result<()> {
+    SUL_DB
+        .query(" DEFINE INDEX unique_inst_relate ON TABLE inst_relate COLUMNS in, out UNIQUE")
+        .await
+        .unwrap();
+
+    SUL_DB
+        .query(" DEFINE INDEX unique_geo_relate ON TABLE geo_relate COLUMNS in, geom_refno UNIQUE")
+        .await
+        .unwrap();
+
+    SUL_DB
+        .query(" DEFINE INDEX unique_tubi_relate ON TABLE tubi_relate COLUMNS from, to UNIQUE")
+        .await
+        .unwrap();
+
+    Ok(())
+}
+
 /// 初始化同步pdms数据到数据
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     // 开始同步pdms/E3D项目的数据
@@ -118,6 +138,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     if db_option.sync_tidb.unwrap_or(false) {
         create_info_database(&default_conn_str, &db_option.project_name).await?;
     }
+
+    create_index(db_option).await.unwrap();
+
     //针对一些特殊的表，需要先创建表，定义索引
     if !db_option.incr_sync {
         SUL_DB
@@ -145,7 +168,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 backend.clone(),
                 format!("CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8;"),
             ))
-                .await?;
+            .await?;
             let project_db = sea_orm::Database::connect(&db_option.get_mysql_project_db_conn_str())
                 .await
                 .unwrap();
@@ -155,7 +178,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             // }
         }
 
-        if !db_option.incr_sync{
+        if !db_option.incr_sync {
             match sync_total_async_threaded(&db_option, project, &["DICT", "SYST"], false).await {
                 Ok(_) => {
                     // 同步数据成功
@@ -167,7 +190,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 }
             }
         }
-       
+
         match sync_total_async_threaded(&db_option, project, &["DESI", "CATA"], true).await {
             Ok(_) => {
                 // 同步数据成功
@@ -197,7 +220,8 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
             match &e {
                 Error::Database(error) => {
                     //index already exist
-                    if error.code() == Some(Cow::from("42000")) {} else {
+                    if error.code() == Some(Cow::from("42000")) {
+                    } else {
                         dbg!(sql);
                     }
                 }
@@ -291,9 +315,9 @@ pub async fn sync_total_async_threaded(
 
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string(); // 获取文件名
-        // if !file_name.contains("amssys") {
-        //     continue;
-        // }
+                                                                                 // if !file_name.contains("amssys") {
+                                                                                 //     continue;
+                                                                                 // }
         {
             let mut file = File::open(&path).unwrap();
             let mut buf = vec![0u8; 60];
@@ -336,22 +360,22 @@ pub async fn sync_total_async_threaded(
                 let chunk_refnos_clone = chunk_refnos.to_vec();
                 let project_name_clone = project_name.clone();
                 if let Ok(PdmsDbData {
-                              total_attr_map,
-                              type_ele_map,
-                              refno_info_map,
-                              db_type,
-                              db_no,
-                              version,
-                              foreign_refnos_map,
-                              ..
-                          }) = parse_file_with_chunk(
+                    total_attr_map,
+                    type_ele_map,
+                    refno_info_map,
+                    db_type,
+                    db_no,
+                    version,
+                    foreign_refnos_map,
+                    ..
+                }) = parse_file_with_chunk(
                     &path_clone,
                     &None,
                     &file_name_clone,
                     project_name_clone.as_str(),
                     &chunk_refnos_clone,
                 )
-                    .await
+                .await
                 {
                     println!("Processing {} chunk index: {chunk_index}", &file_name);
 
@@ -375,7 +399,7 @@ pub async fn sync_total_async_threaded(
                                 &children_map_arc,
                                 db_no as i32,
                             )
-                                .await?;
+                            .await?;
                             save_foreign_refno_edges_in_sync(&database, foreign_refnos_map).await?;
                         }
                         println!("图数据库保存完成");
@@ -388,9 +412,7 @@ pub async fn sync_total_async_threaded(
                         db_no as i32,
                         &children_map_clone,
                     )
-                        .await?;
-                    //temp
-                    continue;
+                    .await?;
                     dbg!("开始保存属性数据");
                     const ATTS_CHUNK_COUNT: usize = 300;
                     let mut join_set = tokio::task::JoinSet::new();

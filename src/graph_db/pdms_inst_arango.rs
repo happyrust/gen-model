@@ -1,22 +1,24 @@
 use aios_core::geom_types::RvmGeoInfo;
-use std::collections::HashMap;
-use std::mem::take;
 use aios_core::pdms_types::*;
+use aios_core::types::*;
 use aios_core::SUL_DB;
 use bb8_arangodb::arangors_lite::AqlQuery;
 use bevy_transform::prelude::Transform;
 use glam::{Mat3, Quat, Vec3};
 use itertools::Itertools;
 use sqlx::Row;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::mem::take;
 
 use crate::aql_api::children::query_deep_children_refnos_fuzzy;
 use crate::aql_api::convert_refno_vec_from_vec_string;
+use crate::arangodb::ArDatabase;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::structs::*;
 use dashmap::DashMap;
-use crate::arangodb::ArDatabase;
 
 ///保存instance 数据到数据库
 pub async fn save_compound_inst_info_to_graph_db(
@@ -77,14 +79,48 @@ pub async fn save_mesh_instance_data(
     //保存inst geos 数据
     let keys = inst_mgr.inst_geos_map.keys().collect::<Vec<_>>();
     let mut join_set = tokio::task::JoinSet::new();
-    for chunk in keys.chunks(1000) {
+    let mut aabb_map: HashMap<u64, String> = HashMap::new();
+    let mut transform_map: HashMap<u64, String> = HashMap::new();
+    let mut param_map = HashMap::new();
+    let chunk_size = 300;
+    for chunk in keys.chunks(chunk_size) {
         let mut instances = vec![];
         let mut json_vec = vec![];
+        let mut geo_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_geos_map.get(k).unwrap();
             let json = serde_json::to_value(v).unwrap();
             instances.push(json);
-            json_vec.push(v.gen_sur_json());
+            for inst in &v.insts {
+                let aabb_hash = gen_bytes_hash::<_, 64>(&inst.aabb);
+                let tansform_hash = gen_bytes_hash::<_, 64>(&inst.transform);
+                //如果aabb已经保存到map了，直接跳过，否则插入
+                if !aabb_map.contains_key(&aabb_hash) {
+                    aabb_map.insert(aabb_hash, serde_json::to_string(&inst.aabb).unwrap());
+                }
+                if !transform_map.contains_key(&tansform_hash) {
+                    transform_map.insert(
+                        tansform_hash,
+                        serde_json::to_string(&inst.transform).unwrap(),
+                    );
+                }
+                let param_hash = gen_bytes_hash::<_, 64>(&inst.geo_param);
+                if !param_map.contains_key(&param_hash) {
+                    param_map.insert(param_hash, serde_json::to_string(&inst.geo_param).unwrap());
+                }
+                //还需要加入geo_param的指向，param 是否填原始参数？ param=param:{}
+                //使用cata_key -> inst_geos
+                geo_relate_vec.push(format!(
+                    "relate inst_info:{}->geo_relate->inst_geo:⟨{}⟩ set trans=trans:⟨{}⟩, geom_refno=pe:{}, param=param:{}",
+                    v.inst_key,
+                    inst.geo_hash,
+                    tansform_hash,
+                    inst.refno,
+                    param_hash
+                ));
+                // dbg!(&geo_relate_vec[0]);
+                json_vec.push(inst.gen_geo_sur_json());
+            }
         }
         // println!("{}", sur_jsons.join(","));
         let aql = AqlQuery::new(r#"
@@ -99,28 +135,51 @@ pub async fn save_mesh_instance_data(
         if !json_vec.is_empty() {
             let sql = format!(
                 "INSERT IGNORE INTO {} [{}]",
-                stringify!(inst_geos),
+                stringify!(inst_geo),
                 json_vec.join(",")
             );
             //使用surreal 保存NamedAttrMap
             join_set.spawn(async move {
                 SUL_DB.query(sql).await.unwrap();
             });
+
+            //保存relate 关系
+            if !geo_relate_vec.is_empty() {
+                //使用surreal 保存NamedAttrMap
+                // dbg!(&geo_relate_vec);
+                join_set.spawn(async move {
+                    SUL_DB.query(geo_relate_vec.join(";")).await.unwrap();
+                });
+            }
         }
     }
     while let Some(_) = join_set.join_next().await {}
 
     //保存tubi的数据
-    let mut join_set = tokio::task::JoinSet::new();
+    // let mut join_set = tokio::task::JoinSet::new();
     let collection = AQL_PDMS_INST_TUBI_COLLECTION;
     let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
-    for chunk in keys.chunks(1000) {
+    for chunk in keys.chunks(chunk_size) {
         let mut instances = vec![];
-        let mut json_vec: Vec<String> = vec![];
+        // let mut tubi_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_tubi_map.get(k).unwrap();
             let json = serde_json::to_value(v).unwrap();
             instances.push(json);
+
+            //更新aabb 和 transform，保存relate已经在别的地方加了，这里后面需要重构
+            let aabb = v.aabb.unwrap();
+            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
+            let tansform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
+            if !aabb_map.contains_key(&aabb_hash) {
+                aabb_map.insert(aabb_hash, serde_json::to_string(&aabb).unwrap());
+            }
+            if !transform_map.contains_key(&tansform_hash) {
+                transform_map.insert(
+                    tansform_hash,
+                    serde_json::to_string(&v.world_transform).unwrap(),
+                );
+            }
         }
         let aql = AqlQuery::new(r#"
         with @@collection
@@ -130,18 +189,6 @@ pub async fn save_mesh_instance_data(
             .bind_var("@collection", collection)
             .bind_var("elements", take(&mut instances));
         database.aql_query::<Vec<()>>(aql).await?;
-
-        if !json_vec.is_empty() {
-            let sql = format!(
-                "INSERT IGNORE INTO {} [{}]",
-                stringify!(inst_geos),
-                json_vec.join(",")
-            );
-            //使用surreal 保存NamedAttrMap
-            join_set.spawn(async move {
-                SUL_DB.query(sql).await.unwrap();
-            });
-        }
     }
 
     //直接用record link来链接mesh
@@ -149,12 +196,16 @@ pub async fn save_mesh_instance_data(
     let collection = AQL_PDMS_INST_INFO_COLLECTION;
     let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
     let mut join_set = tokio::task::JoinSet::new();
-    for chunk in keys.chunks(1000) {
+    for chunk in keys.chunks(chunk_size) {
         let mut instances = vec![];
         let mut edges = vec![];
         let mut json_vec = vec![];
+        let mut inst_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_info_map.get(k).unwrap();
+            if v.aabb.is_none() {
+                continue;
+            }
             let json = serde_json::to_value(v).unwrap();
             instances.push(json);
             let edge = PdmsInstanceGraphEdge {
@@ -164,6 +215,25 @@ pub async fn save_mesh_instance_data(
             };
             edges.push(serde_json::to_value(&edge).unwrap());
             json_vec.push(v.gen_sur_json());
+
+            let aabb = v.aabb.unwrap();
+            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
+            let tansform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
+            if !aabb_map.contains_key(&aabb_hash) {
+                aabb_map.insert(aabb_hash, serde_json::to_string(&aabb).unwrap());
+            }
+            if !transform_map.contains_key(&tansform_hash) {
+                transform_map.insert(
+                    tansform_hash,
+                    serde_json::to_string(&v.world_transform).unwrap(),
+                );
+            }
+            inst_relate_vec.push(format!(
+                "relate pe:{k}->inst_relate->inst_info:{} set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩",
+                v.id(),
+                aabb_hash,
+                tansform_hash,
+            ));
         }
         let aql = AqlQuery::new(r#"
         with @@collection
@@ -193,13 +263,20 @@ pub async fn save_mesh_instance_data(
                 SUL_DB.query(sql).await.unwrap();
             });
         }
+        if !inst_relate_vec.is_empty() {
+            //使用surreal 保存NamedAttrMap
+            // dbg!(&inst_relate_vec);
+            join_set.spawn(async move {
+                SUL_DB.query(inst_relate_vec.join(";")).await.unwrap();
+            });
+        }
     }
     while let Some(_) = join_set.join_next().await {}
 
     let collection = AQL_PDMS_COMPOUND_INST_INFO_COLLECTION;
     println!("开始保存负实体instance数据");
     let keys = inst_mgr.compound_inst_info_map.keys().collect::<Vec<_>>();
-    for chunk in keys.chunks(1000) {
+    for chunk in keys.chunks(chunk_size) {
         let mut instances = vec![];
         for &k in chunk {
             let v = inst_mgr.compound_inst_info_map.get(k).unwrap();
@@ -218,7 +295,7 @@ pub async fn save_mesh_instance_data(
 
     let collection = AQL_PDMS_NGMS_INST_INFO_COLLECTION;
     let keys = inst_mgr.ngmr_inst_info_map.keys().collect::<Vec<_>>();
-    for chunk in keys.chunks(1000) {
+    for chunk in keys.chunks(chunk_size) {
         let mut instances = vec![];
         for &k in chunk {
             let v = inst_mgr.ngmr_inst_info_map.get(k).unwrap();
@@ -235,6 +312,59 @@ pub async fn save_mesh_instance_data(
         database.aql_query::<Vec<()>>(aql).await?;
     }
 
+    let mut join_set = tokio::task::JoinSet::new();
+    //保存aabb
+    if !aabb_map.is_empty() {
+        let keys = aabb_map.keys().collect::<Vec<_>>();
+        for chunk in keys.chunks(100) {
+            let mut jsons = vec![];
+            for &&k in chunk {
+                let v = aabb_map.get(&k).unwrap();
+                let json = format!("{{'id':aabb:⟨{}⟩, 'd':{}}}", k, v);
+                jsons.push(json);
+            }
+            let sql = format!("INSERT IGNORE INTO aabb [{}]", jsons.join(","));
+            join_set.spawn(async move {
+                SUL_DB.query(sql).await.unwrap();
+            });
+        }
+    }
+    //保存transform
+    if !transform_map.is_empty() {
+        let keys = transform_map.keys().collect::<Vec<_>>();
+        for chunk in keys.chunks(100) {
+            let mut jsons = vec![];
+            for &&k in chunk {
+                let v = transform_map.get(&k).unwrap();
+                let json = format!("{{'id':trans:⟨{}⟩, 'd':{}}}", k, v);
+                jsons.push(json);
+            }
+            let sql = format!("INSERT IGNORE INTO trans [{}]", jsons.join(","));
+            join_set.spawn(async move {
+                SUL_DB.query(sql).await.unwrap();
+            });
+        }
+    }
+
+    //保存param_map数据
+    if !param_map.is_empty() {
+        let keys = param_map.keys().collect::<Vec<_>>();
+        for chunk in keys.chunks(100) {
+            let mut jsons = vec![];
+            for &&k in chunk {
+                let v = param_map.get(&k).unwrap();
+                let json = format!("{{'id':param:⟨{}⟩, 'd':{}}}", k, v);
+                jsons.push(json);
+            }
+            let sql = format!("INSERT IGNORE INTO param [{}]", jsons.join(","));
+            join_set.spawn(async move {
+                SUL_DB.query(sql).await.unwrap();
+            });
+        }
+    }
+
+    while let Some(_) = join_set.join_next().await {}
+
     Ok(())
 }
 
@@ -242,16 +372,15 @@ pub async fn save_mesh_instance_data(
 /// 默认直接优先取负实体的数据
 pub async fn query_insts_shape_data(
     database: &ArDatabase,
-    refnos: impl IntoIterator<Item=&RefU64>,
+    refnos: impl IntoIterator<Item = &RefU64>,
     geo_type_filter: Option<&[GeoBasicType]>,
 ) -> anyhow::Result<ShapeInstancesData> {
     let filter = geo_type_filter.unwrap_or(&[GeoBasicType::Compound, GeoBasicType::Pos]);
     let new_refnos = refnos.into_iter().cloned().collect::<Vec<_>>();
-    if new_refnos.is_empty() { return Ok(Default::default()); }
-    let refno_strs = new_refnos
-        .iter()
-        .map(|x| x.to_string())
-        .collect::<Vec<_>>();
+    if new_refnos.is_empty() {
+        return Ok(Default::default());
+    }
+    let refno_strs = new_refnos.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     let include_compound = filter.contains(&GeoBasicType::Compound);
     //如果单独拖入负实体，允许把负实体显示出来
     let aql = AqlQuery::new(
@@ -266,10 +395,10 @@ pub async fn query_insts_shape_data(
                     return distinct d
             "#,
     )
-        .bind_var("refnos", refno_strs.clone())
-        .bind_var("include_compound", include_compound)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
+    .bind_var("refnos", refno_strs.clone())
+    .bind_var("include_compound", include_compound)
+    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+    .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
     let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     let mut inst_info_map = HashMap::new();
     //过滤不需要的geo inst，比如排除neg的等等
@@ -302,8 +431,8 @@ pub async fn query_insts_shape_data(
                 }
             "#,
     )
-        .bind_var("inst_keys", inst_keys)
-        .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
+    .bind_var("inst_keys", inst_keys)
+    .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
     let inst_geos: Vec<EleInstGeosData> = database.aql_query(aql).await.unwrap();
     for g in inst_geos {
         inst_geos_map.insert(g.inst_key.clone(), g);
@@ -327,8 +456,8 @@ pub async fn query_insts_shape_data(
                 return f
             "#,
     )
-        .bind_var("refnos", all_refnos)
-        .bind_var("@pdms_inst_tubis", AQL_PDMS_INST_TUBI_COLLECTION);
+    .bind_var("refnos", all_refnos)
+    .bind_var("@pdms_inst_tubis", AQL_PDMS_INST_TUBI_COLLECTION);
     let inst_tubi: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
     for g in inst_tubi {
         inst_tubi_map.insert(g.refno, g);
@@ -359,10 +488,10 @@ pub async fn query_instance_level_with_refno_in_arangodb(
         let f = document(@@collection,c._key)
         return f._key",
     )
-        .bind_var("refno", refno_aql)
-        .bind_var("@collection", pdms_inst_infos)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
+    .bind_var("refno", refno_aql)
+    .bind_var("@collection", pdms_inst_infos)
+    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
     let result: Vec<String> = database.aql_query(aql).await.unwrap();
     if result.is_empty() {
         return Ok(vec![]);
@@ -384,9 +513,9 @@ pub async fn query_instance_level_with_ssc_refno_in_arangodb(
         // Filter document(@collection,c._key) != null
         return c._key",
     )
-        .bind_var("refno", refno_aql)
-        .bind_var("@ssc_eles", AQL_SSC_ELES_COLLECTION)
-        .bind_var("@ssc_edges", AQL_SSC_EDGE_COLLECTION);
+    .bind_var("refno", refno_aql)
+    .bind_var("@ssc_eles", AQL_SSC_ELES_COLLECTION)
+    .bind_var("@ssc_edges", AQL_SSC_EDGE_COLLECTION);
     // .bind_var("collection", pdms_inst_infos);
     let result: Vec<String> = database.aql_query(aql).await?;
     if result.is_empty() {
@@ -413,8 +542,8 @@ pub async fn query_rvm_instance_data_from_refno_aql(
         'world_transform':r.world_transform
     }",
     )
-        .bind_var("key", refno_aql)
-        .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
+    .bind_var("key", refno_aql)
+    .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
     let result = database.aql_query::<RvmGeoInfo>(aql).await;
     if result.is_err() {
         return Ok(None);
@@ -442,10 +571,12 @@ pub async fn query_rvm_instance_data_from_owner_aql(
         'aabb':r.aabb,
         'data':[],
         'world_transform':r.world_transform
-    }", ).bind_var("key", refno_aql)
-        .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-        .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
-        .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
+    }",
+    )
+    .bind_var("key", refno_aql)
+    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
+    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION)
+    .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
     let result = database.aql_query::<RvmGeoInfo>(aql).await?;
     Ok(result)
 }
@@ -467,11 +598,11 @@ pub async fn query_compound_inst_hashes_aql(
     return compound_inst
     ",
     )
-        .bind_var("ids", ids)
-        .bind_var(
-            "@pdms_compound_inst_infos",
-            AQL_PDMS_COMPOUND_INST_INFO_COLLECTION,
-        );
+    .bind_var("ids", ids)
+    .bind_var(
+        "@pdms_compound_inst_infos",
+        AQL_PDMS_COMPOUND_INST_INFO_COLLECTION,
+    );
     let result = database.aql_query::<EleGeosInfo>(aql).await?;
     Ok(result)
 }

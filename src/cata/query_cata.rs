@@ -1,6 +1,5 @@
 use crate::cata::resolve::{resolve_axis_params, resolve_gms};
 use crate::data_interface::interface::PdmsDataInterface;
-// use crate::defines::CACHED_SCOM_INFO_MAP;
 use crate::cata::consts::{DDANGLE_STR, DDHEIGHT_STR, DDRADIUS_STR};
 
 use aios_core::data_center::AttrValue;
@@ -18,51 +17,10 @@ use glam::Vec3;
 use log::{error, info};
 use sled::pin;
 use std::collections::{BTreeMap, HashMap};
+use std::f32::consts::E;
 use tokio::sync::RwLock;
 
 use super::resolve::CataContext;
-
-///求解design component
-pub async fn resolve_desi_comp<T: PdmsDataInterface>(
-    interface: Option<&T>,
-    desi_refno: RefU64,
-    mut scom_ref_option: Option<RefU64>,
-    //传入额外的参数进来，用于解析轴线参数
-    desi_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
-) -> anyhow::Result<CateGeomsInfo> {
-    let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
-    let desi_att = aios_core::get_named_attmap(desi_refno).await?;
-    //todo 改到使用图数据库去查找
-    if scom_ref_option.is_none() {
-        scom_ref_option = interface.get_cat_ref(desi_refno).await;
-    }
-    let scom_ref = scom_ref_option.ok_or(anyhow::anyhow!(format!(
-        "SCOM not exist in element: {}",
-        desi_refno.to_string()
-    )))?;
-    if !scom_ref.is_valid() {
-        println!(
-            "{} 的CAT引用不存在，为 {}",
-            desi_refno.to_string(),
-            scom_ref.to_string()
-        );
-        return Ok(Default::default());
-    }
-    // dbg!(scom_ref);
-    let scom_info = interface.get_or_create_scom_info(scom_ref).await?;
-    // dbg!(&scom_info);
-    let mut context = interface
-        .get_or_create_cata_context(desi_refno, desi_axis_map)
-        .await?;
-
-    let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(interface), Some(context));
-    // dbg!(&geom_info.as_ref().unwrap().n_geometries);
-    if geom_info.is_err() {
-        error!("{:?}", geom_info.as_ref().err());
-        error!("{:?}", &desi_att);
-    }
-    geom_info
-}
 
 ///查询 Axis 参数
 pub async fn query_axis_params(refno: RefU64) -> anyhow::Result<BTreeMap<i32, AxisParam>> {
@@ -133,6 +91,7 @@ pub fn resolve_cata_comp<T: PdmsDataInterface>(
     let cat_ref = scom_info.attr_map.get_refno().unwrap_or_default();
 
     let axis_param_map = resolve_axis_params(des_refno, scom_info, &cur_context, interface);
+
     // dbg!(&axis_param_map);
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
         if scom_info.plin_map.contains_key(plin.as_str()) {
@@ -296,9 +255,7 @@ pub async fn query_gm_param(
     let type_name = a.get_type_str();
     if type_name == "SEXT" || type_name == "NSEX" || type_name == "SREV" || type_name == "NSRE" {
         //先暂时不考虑负实体
-        let children = aios_core::get_children_named_attmaps(refno)
-            .await
-            .ok()?;
+        let children = aios_core::get_children_named_attmaps(refno).await.ok()?;
         for child in children {
             if let Some(r) = child.get_refno()
                 && child.get_type_str() == "SLOO"
@@ -307,7 +264,7 @@ pub async fn query_gm_param(
                     .await
                     .unwrap_or_default();
                 // dbg!(&vert_atts);
-                for a in vert_atts{
+                for a in vert_atts {
                     verts.push([
                         (a.get_as_string("PX").unwrap_or_default()),
                         (a.get_as_string("PY").unwrap_or_default()),
