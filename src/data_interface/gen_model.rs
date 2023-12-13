@@ -5,7 +5,8 @@ use std::mem::take;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-
+use crate::consts::*;
+use std::boxed::Box;
 use aios_core::{pdms_types::*, RefU64};
 use aios_core::{NamedAttrValue, prim_geo::*};
 use aios_core::consts::NGMR_OWN_TYPES;
@@ -1663,7 +1664,6 @@ pub async fn gen_all_geos_data(
 
         let target_dbnos = [db_no];
         let mut root_refnos = vec![];
-        // dbg!(&root_refnos);
         if !is_incr_update && !is_debug {
             root_refnos = mgr.get_gen_model_root_refnos(&target_dbnos).await?;
             println!("输入的调试参考号或者db号不正确");
@@ -1682,6 +1682,8 @@ pub async fn gen_all_geos_data(
             root_refnos.extend(incr_update_log.as_ref().unwrap().loop_refnos.clone());
             root_refnos.extend(incr_update_log.as_ref().unwrap().prim_refnos.clone());
         }
+
+        dbg!(root_refnos.len());
 
         //Step 1、提前缓存ploo, 得到对齐方式的偏移
         let loop_sjus_map = DashMap::new();
@@ -1986,11 +1988,6 @@ pub async fn gen_all_geos_data(
             }
 
             println!("开始处理负实体计算");
-            //todo make it by using surreal
-            // let has_pos_neg_map = mgr
-            //     .query_refnos_has_pos_neg_map(&root_refnos)
-            //     .await
-            //     .unwrap_or_default();
             let has_pos_neg_map =
                 aios_core::query_refnos_has_pos_neg_map(&root_refnos, Some(false))
                     .await
