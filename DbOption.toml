@@ -1,12 +1,13 @@
 #同步文件配置
 total_sync = false 
+#增量同步，避免重新创建重复的索引和uda、sys
+incr_sync = true
 # total_sync = false
 enable_log = false
-sync_graph_db = false
+sync_graph_db = true
 sync_versioned = false
 sync_tidb = false
 sync_localdb = false
-incr_sync = true
 replace_dbs = true
 sync_chunk_size = 100_0000
 
@@ -19,7 +20,7 @@ project_name = "AvevaMarineSample"
 project_code = 1516
 module = "DESI"
 #是否生成模型数据
-gen_model = true
+gen_model = false
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树
@@ -37,6 +38,7 @@ arangodb_database = "ams"
 multi_threads = false
 only_sync_sys = false
 arangodb_url = "http://127.0.0.1:8529"
+# arangodb_url = "http://50c170h624.zicp.vip:15830"
 rebuild_ssc_tree = false
 arangodb_user = "root"
 arangodb_password = ""
@@ -52,9 +54,10 @@ batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
 #版本数据库服务配置
 v_ip = "localhost"
+v_port = "8003"
 v_user = "root"
 v_password = ""
-v_port = "8003"
+
 
 #mqtt 事件 ip
 mqtt_host = "50c170h624.zicp.vip"
@@ -65,8 +68,12 @@ location = "SJZ1"
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"
 
-remote_file_server_hosts = ["http://50c170h624.zicp.vip:56785/asset/archives"]
-file_server_host = "http://50c170h624.zicp.vip:56785/asset/archives"
+# remote_file_server_hosts = ["http://50c170h624.zicp.vip:56785/asset/archives"]
+# file_server_host = "http://50c170h624.zicp.vip:56785/asset/archives"
+
+# hash文件的站点
+remote_file_server_hosts = []
+file_server_host = "http://192.168.31.38:8100/asset/archives"
 
 
 #调试选项
@@ -83,8 +90,8 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #included_db_files = ["ams7351_0001", "ams7353_0001", "ams7741_0001", "ams7998_0001", ]
 #included_db_files = ["ams7353_0001", "ams7741_0001", "ams7998_0001"]
 #included_db_files = ["ams1112_0001", "ams5052_0001", "ams7000_0001", "ams5053_0001"]
-included_db_files = ["acp7002_0001"]
-# included_db_files = ["ams1112_0001"]
+# included_db_files = ["acp7002_0001", "ams7997_0001", "ams1112_0001"]
+# included_db_files = ["acp7002_0001"]
 #included_db_files = ["ams7000_0001", "ams5053_0001"]
 # included_db_files = ["ams1112_0001", "ams7997_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
@@ -105,8 +112,29 @@ puhua_database_password = ""
 
 #test HVAC
 # debug_root_refnos = ["24381/57495"]
-debug_root_refnos = ["24383/68046"]
-# debug_root_refnos = ["24381/57505"]
+# debug_root_refnos = ["17496/172286"]
+
+#TEST-1 测试穹顶被负实体消去的情况, revolution 点在axis上的情况
+# debug_root_refnos = ["24381/36945"]
+
+#TEST-2 测试revolution 点不在axis上的情况
+
+#TEST-3 测试mgre为空,但是Ngmr不为空的情况
+# debug_root_refnos = ["25688/7959"]
+
+#TEST-3 测试风管有问题的情况
+# debug_root_refnos = ["24381/57574"]
+
+#SSLC的问题
+debug_root_refnos = ["24381/76698"]
+
+#风管直段问题
+# debug_root_refnos = ["24381/58708"]
+
+
+
+
+# debug_root_refnos = ["25688/7958"]
 
 # debug_root_refnos = ["17496/171191"]
 

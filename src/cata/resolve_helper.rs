@@ -1,27 +1,17 @@
-use super::resolve::CataContext;
-use crate::aql_api::children::query_pre_or_next_node;
-use crate::cata::direction_parse::parse_expr_to_dir;
-use crate::cata::polish_notation::Stack;
-use crate::cata::resolve::resolve_axis_param;
-use crate::data_interface::gen_model::HASH_PSEUDO_ATT_MAPS;
-use crate::data_interface::interface::PdmsDataInterface;
+use std::{mem, panic};
+use std::collections::HashMap;
 
+use aios_core::*;
+use aios_core::parsed_data::*;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
 use aios_core::pdms_data::{AxisParam, ScomInfo};
-use aios_core::pdms_types::RefU64;
-use aios_core::tiny_expr::expr_eval::interp;
-use aios_core::tool::float_tool::*;
-use aios_core::{parsed_data::*, NamedAttrMap, NamedAttrValue};
-use anyhow::anyhow;
 use glam::{Mat3, Quat, Vec2, Vec3};
-use itertools::any;
 use nom::Parser;
-use regex::{Captures, NoExpand, Regex};
-use std::collections::{BTreeMap, HashMap};
-use std::str::FromStr;
-use std::sync::Arc;
-use std::{mem, panic};
-use tokio::runtime::Runtime;
+use regex::Regex;
+
+use crate::cata::direction_parse::parse_expr_to_dir;
+use crate::cata::resolve::resolve_axis_param;
+use crate::data_interface::interface::PdmsDataInterface;
 
 #[test]
 fn test_exp() {
@@ -79,24 +69,8 @@ fn test_expression_regex() {
     }
 }
 
-pub fn eval_str_to_f32<T: PdmsDataInterface>(
-    input_expr: impl AsRef<str>,
-    context: &CataContext,
-    interface: Option<&T>,
-    dtse_unit: &str,
-) -> anyhow::Result<f32> {
-    let input_expr = input_expr.as_ref().trim().to_uppercase();
-    eval_str_to_f64(&input_expr, context, interface, true, dtse_unit).map(|x| x as f32)
-}
 
-pub fn eval_str_to_f32_or_default<T: PdmsDataInterface>(
-    input_expr: impl AsRef<str>,
-    context: &CataContext,
-    interface: Option<&T>,
-    dtse_unit: &str,
-) -> f32 {
-    eval_str_to_f32(input_expr, context, interface, dtse_unit).unwrap_or(0.0)
-}
+
 
 //  SIN  00 00 03 85
 //  COS  00 00 03 86
@@ -121,343 +95,6 @@ pub const INTERNAL_PDMS_EXPRESS: [&'static str; 22] = [
     "ATAN2", "ASIN", "INT", "OF", "MOD", "NEGATE", "SUM", "TANF", "TAN",
 ];
 
-///评估表达式的值
-pub fn eval_str_to_f64<T: PdmsDataInterface>(
-    input_expr: &str,
-    context: &CataContext,
-    interface: Option<&T>,
-    replace_err_by_zero: bool,
-    dtse_unit: &str,
-) -> anyhow::Result<f64> {
-    if input_expr.is_empty() || input_expr == "UNSET" {
-        return Ok(0.0);
-    }
-    //处理引用的情况 OF 的情况, 如果需要获取 att value，还是需要用数据库去获取值
-    let mut new_exp = input_expr.replace("ATTRIB", "");
-    if input_expr.contains(" OF ") {
-        let re = Regex::new(r"([A-Z\s]+) OF (PREV|NEXT|\d+/\d+)").unwrap();
-        let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
-        for caps in re.captures_iter(&input_expr) {
-            let s = &caps[0];
-            let c1 = caps.get(1).map_or("", |m| m.as_str());
-            let c2 = caps.get(2).map_or("", |m| m.as_str());
-            let refno_str = context.get("RS_DES_REFNO").unwrap();
-            let refno = RefU64::from_str(refno_str.as_str()).unwrap();
-            let expr_val = tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async move {
-                    let target_refno = match c2 {
-                        "PREV" => aios_core::get_next_prev(refno, false).await.unwrap_or_default(),
-                        "NEXT" => aios_core::get_next_prev(refno, true).await.unwrap_or_default(),
-                        refno_str => {
-                            refno_str.into()
-                        }
-                    };
-                    // dbg!(target_refno);
-                    let pe = aios_core::get_pe(target_refno).await.unwrap_or_default().unwrap_or_default();
-                    let pseudo_map = HASH_PSEUDO_ATT_MAPS.read().await;
-                    //判断target_refno是否在pseudo_map，如果有，取出这里的值
-                    if let Some(am) = pseudo_map.get(&pe.cata_hash){
-                        if let Some(v) = am.map.get(c1) {
-                            // dbg!(v);
-                            return v.get_val_as_string();
-                        }
-                    }
-                    "0".to_owned()
-                })
-            });
-            // dbg!(&expr_val);
-            new_exp = new_exp.replace(s, expr_val.as_str());
-            // dbg!(&new_exp);
-            // maybe need?
-            // let target_att = aios_core::get_named_attmap(target_refno).await?;
-            // dbg!(&target_refno);
-            // if let Some(value) = target_att.get_as_string(c1) {
-            //     new_exp = new_exp.replace(s, value.as_str());
-            // }
-        }
-    }
-
-    //说明：匹配带小数的情况 PARA[1.1]
-    let re =
-        Regex::new(r"(:?[A-Z_]+[0-9]*)(\s*\[?\s*(([1-9]\d*\.?\d*)|(0\.\d*[1-9]))\s*\]?)?").unwrap();
-    // 将NEXT PREV 的值统一换成参考号，然后 context_params 要存储 参考号对应的 attr，要是它这个值没有求解，
-    // 相当于要递归去求值
-    let rpro_re = Regex::new(r"(RPRO)\s+([a-zA-Z0-9]+)").unwrap();
-    if new_exp.contains("RPRO") {
-        let mut found_dtse_mismatch = false;
-        new_exp = rpro_re
-            .replace_all(&new_exp, |caps: &Captures| {
-                let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
-                let default_key: String = format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
-                let key_type: String = format!("{}_{}_type", &caps[1], &caps[2]).into();
-                //if not same type, or doesn't exist, just return error
-                if context
-                    .get(&key_type)
-                    .map(|x| x.as_str() != dtse_unit)
-                    .unwrap_or(false)
-                {
-                    found_dtse_mismatch = true;
-                }
-                let v = context
-                    .get(&key)
-                    .map(|x| x.to_string())
-                    .unwrap_or("0".to_string());
-                if let Ok(t) = eval_str_to_f64(&v, &context, interface, false, "DIST") {
-                    t.to_string()
-                } else {
-                    //use default value
-                    context
-                        .get(&default_key)
-                        .map(|x| x.to_string())
-                        .unwrap_or("0".to_string())
-                }
-            })
-            .trim()
-            .to_string();
-
-        if found_dtse_mismatch {
-            return Err(anyhow::anyhow!("DTSE 表达式有问题，可能单位不一致"));
-        }
-    }
-
-    let mut new_exp = new_exp
-        .replace("DESIGN PARAM", "DESP")
-        .replace("DESIGN PARA", "DESP");
-    let mut result_exp = new_exp.clone();
-    //默认两次
-    let mut found_replaced = false;
-    let para_name_re =
-        Regex::new(r"(DESI(GN)?\s+)?([I|C|O|A)]?PARA?M?)|DESP|(O|A|W|D)DESP?").unwrap();
-    let mut uda_context_added = false;
-    let mut uda_context = HashMap::new();
-    for _ in 0..100 {
-        for caps in re.captures_iter(&new_exp) {
-            let s = caps[0].trim();
-            if INTERNAL_PDMS_EXPRESS.contains(&s) {
-                continue;
-            }
-            let mut para_name = caps.get(1).map_or("", |m| m.as_str());
-            let c2 = caps.get(2).map_or("", |m| m.as_str());
-            let c3 = caps.get(3).map_or("", |m| m.as_str());
-
-            //处理掉PARA 和 PARAM的区别
-            let is_some_param = para_name_re.is_match(para_name);
-            if is_some_param {
-                if para_name.ends_with("M") {
-                    para_name = &para_name[0..para_name.len() - 1];
-                }
-            }
-            // 小数向下取整
-            let mut k: String = format!(
-                "{}{}",
-                para_name,
-                c3.parse::<f32>()
-                    .map(|x| x.floor().to_string())
-                    .unwrap_or_default()
-            )
-            .into();
-            let is_uda = k.starts_with(":");
-            let refno_str = context.get("RS_DES_REFNO").unwrap();
-            let refno = RefU64::from_str(refno_str.as_str()).unwrap();
-            if is_uda && !uda_context_added {
-                // dbg!(&k);
-                let uda_map = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async move {
-                        let d = aios_core::get_named_attmap_with_uda(refno, false)
-                            .await
-                            .unwrap_or_default();
-                        // dbg!(&d);
-                        d
-                    })
-                });
-                for (kk, vv) in uda_map.map{
-                    if kk.starts_with({":"}) {
-                        match vv {
-                            NamedAttrValue::F32Type(d) => {
-                                let short_name = if kk.len() >= 5{
-                                    kk[..5].to_uppercase()
-                                }else{
-                                    kk.to_uppercase()
-                                };
-                                uda_context.insert(short_name, d.to_string());
-                                uda_context.insert(kk, d.to_string());
-                            }
-                            NamedAttrValue::F32VecType(ds) => {
-                                let short_name = if kk.len() >= 5{
-                                    kk[..5].to_uppercase()
-                                }else{
-                                    kk.to_uppercase()
-                                };
-                                for (i, d) in ds.into_iter().enumerate() {
-                                    // dbg!(format!("{}{}", &short_name, i+1));
-                                    uda_context.insert(format!("{}{}", &short_name, i + 1), d.to_string());
-                                    uda_context.insert(format!("{}{}", &kk, i + 1), d.to_string());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                uda_context_added = true;
-            }
-
-            if context.contains_key(&k) {
-                result_exp = result_exp.replace(s, &context.get(&k).unwrap());
-                if is_uda{
-                    dbg!(&result_exp);
-                }
-                found_replaced = true;
-            } else if is_uda && uda_context.contains_key(&k) {
-                result_exp = result_exp.replace(s, &uda_context.get(&k).unwrap());
-                // if is_uda{
-                //     dbg!(&result_exp);
-                // }
-                found_replaced = true;
-            }else if is_some_param {
-                //if !replace_err_by_zero
-                //todo 需要弄清楚，直接整体返回0.0， 不用坐特殊处理？ 是否可行
-                {
-                    // return Ok(0.0);
-                    return Err(anyhow::anyhow!(format!(
-                        "{input_expr}:： {} not found.",
-                        &k
-                    )));
-                }
-                println!("{input_expr}： {} not found, use 0.", &k);
-                result_exp = result_exp.replace(s, " 0");
-                found_replaced = true;
-            }
-            // if is_uda {
-            //     dbg!(&result_exp);
-            // }
-        }
-        //如果有RPRO 需要执行两次处理
-        result_exp = result_exp.replace("ATTRIB", "");
-        if result_exp.contains("RPRO") {
-            result_exp = rpro_re
-                .replace_all(&result_exp, |caps: &Captures| {
-                    let key: String = format!("{}_{}", &caps[1], &caps[2]).into();
-                    let default_key: String =
-                        format!("{}_{}_default_expr", &caps[1], &caps[2]).into();
-
-                    context.get(&key).map(|x| x.to_string()).unwrap_or(
-                        context
-                            .get(&default_key)
-                            .map(|x| x.to_string())
-                            .unwrap_or("0".to_string()),
-                    )
-                })
-                .trim()
-                .to_string();
-            found_replaced = true;
-        }
-        // dbg!(&result_exp);
-        new_exp = result_exp.clone();
-        if !found_replaced {
-            break;
-        }
-        found_replaced = false;
-    }
-    // dbg!(&result_exp);
-    let seg_strs: Vec<String> = result_exp
-        .split_whitespace()
-        .map(|x| x.trim().into())
-        .collect::<Vec<_>>();
-    if seg_strs.len() == 0 {
-        return Ok(0.0);
-    }
-    let mut result_string = String::new();
-    let mut p_vals = vec![];
-    for s in seg_strs {
-        let upper_s = s.to_uppercase();
-        match upper_s.as_str() {
-            "TIMES" | "MULT" => p_vals.push("*".to_string()),
-            "DIV" => p_vals.push("/".to_string()),
-            "DDHEIGHT" => p_vals.push(context.get("DDHEIGHT").unwrap().to_string()),
-            "DDRADIUS" => p_vals.push(context.get("DDRADIUS").unwrap().to_string()),
-            "DDANGLE" => p_vals.push(context.get("DDANGLE").unwrap().to_string()),
-            _ => {
-                if upper_s.ends_with("mm") {
-                    p_vals.push(upper_s[..upper_s.len() - 2].to_string());
-                } else {
-                    p_vals.push(upper_s.to_string())
-                }
-            }
-        }
-    }
-    let mut i = 0;
-    let mut new_vals = vec![];
-    while i < p_vals.len() {
-        if p_vals[i] == "TWICE" {
-            if i + 1 < p_vals.len() {
-                if let Ok(val) = p_vals[i + 1].parse::<f64>() {
-                    let v = val * 2.0f64;
-                    new_vals.push(v.to_string());
-                }
-            }
-            i += 2;
-        } else if p_vals[i] == "TANF" {
-            if i + 2 < p_vals.len() {
-                if let Ok(val) = p_vals[i + 1].parse::<f64>() {
-                    if let Ok(angle) = p_vals[i + 2].parse::<f64>() {
-                        {
-                            let v = val * ((angle / 2.0).to_radians() as f64).tan();
-                            new_vals.push(v.to_string());
-                        }
-                    }
-                }
-            }
-            i += 3;
-        } else {
-            new_vals.push(p_vals[i].clone());
-            i += 1;
-        }
-    }
-    let mut i = 0;
-    while i < new_vals.len() {
-        if (new_vals[i] == "SUM" || new_vals[i] == "DIFFERENCE") && i < new_vals.len() - 2 {
-            if new_vals[i] == "SUM" {
-                result_string.push_str(&format!(
-                    "({} {} {})",
-                    new_vals[i + 1],
-                    "+",
-                    new_vals[i + 2]
-                ));
-            } else {
-                result_string.push_str(&format!(
-                    "({} {} {})",
-                    new_vals[i + 1],
-                    "-",
-                    new_vals[i + 2]
-                ));
-            }
-            i += 3;
-        } else {
-            result_string.push_str(new_vals[i].as_str());
-            i += 1;
-        }
-        result_string.push_str(" ");
-    }
-    match interp(&result_string.to_lowercase()) {
-        Ok(val) => Ok(f64_round_3(val).into()),
-        Err(_) => {
-            return if let Ok(mut stack) = Stack::init(&result_string) {
-                stack.eval().ok_or(anyhow::anyhow!(format!(
-                    "后缀表达式求解失败 {}",
-                    &input_expr
-                )))
-            } else {
-                println!("输入表达式 : {}", &input_expr);
-                // dbg!(&context);
-                // println!("计算后表达式 : {}", &result_string);
-                // let refno_str = context.get("RS_CATR_REFNO").unwrap().as_str();
-                // let refno = RefU64::from_str(refno_str)?;
-                // dbg!(interface.unwrap().aios_core::get_named_attmap(refno).await.unwrap());
-                Err(anyhow::anyhow!(format!("求解失败 {}", &input_expr)))
-            };
-        }
-    }
-}
 
 /// 解析成不同的几何体参数
 pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGeoParam> {
@@ -860,12 +497,12 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(
             if cap.len() == 6 {
                 let val_str = cap[2].to_string();
                 let val_result =
-                    eval_str_to_f64(&val_str, context, interface, true, "AXIS")?.to_string();
+                    eval_str_to_f64(&val_str, context,  true, "AXIS")?.to_string();
                 new_dir_str = dir_str.replace(&val_str, &val_result);
 
                 let val_str = cap[4].to_string();
                 let val_result =
-                    eval_str_to_f64(&val_str, context, interface, true, "AXIS")?.to_string();
+                    eval_str_to_f64(&val_str, context,  true, "AXIS")?.to_string();
                 new_dir_str = new_dir_str.replace(&val_str, &val_result);
                 is_three = true;
             }
@@ -879,7 +516,7 @@ pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(
                     let val_str = cap[2].to_string();
                     // dbg!(&val_str);
                     let val_result =
-                        eval_str_to_f64(&val_str, context, interface, true, "AXIS")?.to_string();
+                        eval_str_to_f64(&val_str, context,  true, "AXIS")?.to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                     // dbg!(&new_dir_str);
                 }

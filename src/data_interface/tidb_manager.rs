@@ -1,67 +1,54 @@
+use std::collections::{HashMap, VecDeque};
+use std::collections::BTreeMap;
+use std::default::Default;
+use std::fmt::{Debug, Formatter};
+use std::str::FromStr;
+use std::sync::Arc;
+
+use aios_core::{AttrMap, RefU64Vec};
+use aios_core::accel_tree::acceleration_tree::AccelerationTree;
+use aios_core::cache::refno::*;
+use aios_core::CataContext;
+use aios_core::options::DbOption;
+use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
+use aios_core::parsed_data::geo_params_data::CateGeoParam::*;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
+use aios_core::pdms_data::GmParam;
+use aios_core::pdms_data::PlinParam;
+use aios_core::pdms_data::ScomInfo;
+use aios_core::pdms_types::*;
+use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
+use aios_core::types::AttrVal::*;
+use anyhow::anyhow;
+use async_trait::async_trait;
+use bb8_arangodb::arangors_lite::AqlQuery;
+use bevy_transform::prelude::Transform;
+use dashmap::DashMap;
+use dashmap::mapref::one::Ref;
+use futures::StreamExt;
+use glam::Vec3;
+use itertools::Itertools;
+use parry3d::bounding_volume::BoundingVolume;
+use pdms_io::watch::PdmsWatcher;
+use rumqttc::AsyncClient;
+use sqlx::{MySql, Pool, Row};
+use tokio::sync::RwLock;
+
 use crate::api::attr::*;
 use crate::api::element::*;
 use crate::aql_api::children::*;
 use crate::aql_api::foreign_refnos::query_foreign_refnos_fuzzy;
 use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 use crate::arangodb::ArPool;
-use crate::cata::consts::*;
-use crate::cata::query_cata::query_gm_param;
 use crate::cata::query_cata::{query_axis_params, resolve_cata_comp};
-use crate::cata::resolve::{resolve_axis_param, CataContext};
-use crate::cata::resolve::{CATA_CONTEXT_MAP, SCOM_INFO_MAP};
+use crate::cata::query_cata::query_gm_param;
+use crate::cata::resolve::resolve_axis_param;
+use crate::cata::resolve::SCOM_INFO_MAP;
 use crate::consts::*;
 use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
-use crate::data_interface::gen_model::HASH_PSEUDO_ATT_MAPS;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
-use aios_core::accel_tree::acceleration_tree::AccelerationTree;
-use aios_core::cache::mgr::*;
-use aios_core::cache::refno::*;
-use aios_core::consts::{HAS_PLIN_TYPES, WORD_HASH};
-use aios_core::options::DbOption;
-use aios_core::parsed_data::geo_params_data::CateGeoParam::*;
-use aios_core::parsed_data::geo_params_data::PdmsGeoParam::*;
-use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
-use aios_core::pdms_data::GmParam;
-use aios_core::pdms_data::PlinParam;
-use aios_core::pdms_data::PlinParamData;
-use aios_core::pdms_data::ScomInfo;
-use aios_core::pdms_types::*;
-use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
-use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::tool::db_tool::{db1_dehash, db1_hash};
-use aios_core::tool::math_tool;
-use aios_core::tool::math_tool::quat_to_pdms_ori_str;
-use aios_core::types::AttrVal::*;
-use anyhow::anyhow;
-use approx::abs_diff_eq;
-use async_trait::async_trait;
-use bb8_arangodb::arangors_lite::AqlQuery;
-use bevy_transform::prelude::Transform;
-use dashmap::mapref::one::Ref;
-use dashmap::DashMap;
-use futures::StreamExt;
-use glam::{Mat3, Quat, Vec3};
-use itertools::Itertools;
-use log::error;
-use parry3d::bounding_volume::{aabb::Aabb, BoundingVolume};
-use pdms_io::watch::PdmsWatcher;
-use std::boxed::Box;
-use std::str::FromStr;
-// use redb::{ReadableTable, TableDefinition};
-use crate::mqtt_service::MqttInstance;
-
-use aios_core::SUL_DB;
-use aios_core::{AttrMap, NamedAttrValue, RefU64Vec};
-use rumqttc::{AsyncClient, EventLoop};
-use sqlx::{Executor, MySql, Pool, Row};
-use std::collections::BTreeMap;
-use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::default::Default;
-use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct AiosDBManager {
@@ -95,8 +82,6 @@ pub struct AiosDBManager {
 
     ///room panel对应的信息
     pub room_panel_info_map: HashMap<RefU64, RoomPanelElement>,
-
-    pub plin_params_map: DashMap<RefU64, DashMap<String, PlinParamData>>,
 }
 
 /// Implements the `Debug` trait for `AiosDBManager`.
@@ -329,22 +314,6 @@ impl PdmsDataInterface for AiosDBManager {
         if GLOBAL_MDB_WORLD_MAP.contains_key(&hash_name) {
             Ok(GLOBAL_MDB_WORLD_MAP.get(&hash_name).unwrap().clone())
         } else {
-            // let string = format!(
-            //     "v.mdb_name==\"/{}\" and v.db_type==\"{}\"",
-            //     mdb_name, module
-            // );
-            // let mut ele_nodes = self.query_ele_edges_by_expression(&string).await?;
-            // //从mdb 开始往下找，找到world
-            // if let Some(node) = ele_nodes.pop() {
-            //     let mut children = self
-            //         .query_children_eles_order(node.owner, &[], &[module])
-            //         .await?;
-            //     if let Some(ele) = children.pop() {
-            //         GLOBAL_MDB_WORLD_MAP.insert(hash_name, ele.clone());
-            //         return Ok(ele);
-            //     }
-            // }
-
             // 通过 fulltext在数据库中查询
             let database = self.get_arango_db().await?;
             let ele = query_mdb_world_fulltext(mdb_name, module, &database).await?;
@@ -909,162 +878,6 @@ impl PdmsDataInterface for AiosDBManager {
         Ok(scom_info)
     }
 
-    ///创建desi参考号的元件库计算上下文
-    async fn get_or_create_cata_context(
-        &self,
-        desi_refno: RefU64,
-        // extra_axis_map: Option<&BTreeMap<i32, CateAxisParam>>,
-    ) -> anyhow::Result<CataContext> {
-        let cata_context = if let Some(cata) = CATA_CONTEXT_MAP.get(&desi_refno) {
-            cata.value().clone()
-        } else {
-            let desi_att = aios_core::get_named_attmap(desi_refno).await?;
-            let mut context = CataContext::default();
-            if let Some(v) = desi_att.get_as_string("JUSL") {
-                context.insert("JUSL".into(), v.into());
-            }
-            context.insert("DESI_REFNO".into(), desi_refno.to_string());
-            let mut desp = desi_att.get_f32_vec("DESP").unwrap_or_default();
-            for i in 0..desp.len() {
-                context.insert(format!("DESI{}", i + 1).into(), desp[i].to_string().into());
-                context.insert(format!("DESP{}", i + 1).into(), desp[i].to_string().into());
-            }
-            let mut ddesp = desi_att.get_ddesp().unwrap_or_default();
-            // dbg!(&ddesp);
-            for i in 0..ddesp.len() {
-                context.insert(format!("DDES{}", i + 1).into(), ddesp[i].to_string().into());
-            }
-
-            let height = desi_att.get_as_string("HEIG").unwrap_or("0.0".into());
-            context.insert(DDHEIGHT_STR.into(), (height.clone()));
-            let angle = desi_att.get_as_string("ANGL").unwrap_or("0.0".into());
-            context.insert(DDANGLE_STR.into(), (angle.clone()));
-            let radi = desi_att.get_as_string("RADI").unwrap_or("0.0".into());
-            context.insert(DDRADIUS_STR.into(), (radi.clone()));
-
-            for (str, v) in &desi_att.map {
-                let is_uda = str.starts_with(":");
-                let n = str.to_uppercase();
-                match v {
-                    NamedAttrValue::F32Type(d) => {
-                        if is_uda {
-                            dbg!((&n, d));
-                        }
-                        context.insert(n, d.to_string());
-                    }
-                    NamedAttrValue::F32VecType(ds) => {
-                        for (i, d) in ds.into_iter().enumerate() {
-                            context.insert(format!("{}{}", &n, i + 1), d.to_string());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            //todo 保温层厚度参数
-            // let iparams = self.query_ipara_from_ele(desi_refno).unwrap_or_default();
-            // for i in 0..iparams.len() {
-            //     context.insert(format!("IPAR{}", i + 1).into(), iparams[i].to_string().into());
-            //     context.insert(format!("IPARM{}", i + 1).into(), iparams[i].to_string().into());
-            // }
-
-            context.insert("RS_DES_REFNO".into(), desi_refno.to_string());
-            // dbg!(&desi_refno);
-            //添加cata的信息
-            if let Some(cata_attmap) = self.get_cat_attmap(desi_refno).await {
-                // dbg!(&cata_attmap);
-                context.insert(
-                    "RS_CATR_REFNO".into(),
-                    cata_attmap.get_refno_or_default().to_string(),
-                );
-                // dbg!(&cata_attmap);
-                let params = cata_attmap.get_f32_vec("PARA").unwrap_or_default();
-                for i in 0..params.len() {
-                    context.insert(
-                        format!("CPAR{}", i + 1).into(),
-                        params[i].to_string().into(),
-                    );
-                    context.insert(
-                        format!("PARA{}", i + 1).into(),
-                        params[i].to_string().into(),
-                    );
-                    context.insert(
-                        format!("PARAM{}", i + 1).into(),
-                        params[i].to_string().into(),
-                    );
-                    context.insert(format!("IPARA{}", i + 1).into(), "0".to_string().into());
-                    context.insert(format!("IPAR{}", i + 1).into(), "0".to_string().into());
-                }
-                let mut owner_ref = desi_att.get_owner();
-                //todo 需要换掉
-                let mut owner_att = aios_core::get_named_attmap(owner_ref).await?;
-                //todo use a single query to get all the ancestors' attmap
-                while !owner_att.contains_key("GTYP") {
-                    if owner_att.get_refno().is_none() || owner_att.get_type_str() == "ZONE" {
-                        break;
-                    }
-                    owner_ref = owner_att.get_owner();
-                    // owner_att = aios_core::get_named_attmap(owner_ref).await.unwrap_or_default();
-                    owner_att = aios_core::get_named_attmap(owner_ref).await?;
-                }
-
-                //dtse 的信息处理
-                let dtre_refno: RefU64 = cata_attmap.get_foreign_refno("DTRE").unwrap_or_default();
-                let children = aios_core::get_children_named_attmaps(dtre_refno).await?;
-                //如果只查部分数据，可以改一下接口
-                for child in children {
-                    if let Some(k) = child.get_as_string("DKEY") {
-                        let key = format!("RPRO_{}", &k);
-                        let exp = child.get_as_string("PPRO").unwrap_or_default();
-                        let default_key = format!("{}_default_expr", key);
-                        let default_expr = child.get_as_string("DPRO").unwrap_or_default();
-                        let type_key = format!("{}_default_type", key);
-                        let type_value = child.get_as_string("PTYP").unwrap_or_default();
-
-                        context.insert(key, exp);
-                        context.insert(default_key, default_expr);
-                        context.insert(type_key, type_value);
-                    }
-                }
-
-                let desp = owner_att.get_f32_vec("DESP").unwrap_or_default();
-                for i in 0..desp.len() {
-                    context.insert(format!("ODES{}", i + 1).into(), desp[i].to_string().into());
-                }
-                //找到owner 参考号，再找到它的元件库params
-                if let Some(parent_cat_am) = self.get_cat_attmap(owner_ref).await {
-                    let params = parent_cat_am.get_f32_vec("PARA").unwrap_or_default();
-                    for i in 0..params.len() {
-                        context.insert(
-                            format!("OPAR{}", i + 1).into(),
-                            params[i].to_string().into(),
-                        );
-                    }
-                }
-
-                if let Some(c_att) = self.get_foreign_attrmap(desi_refno, "CREF").await {
-                    let desp = c_att.get_f32_vec("DESP").unwrap_or_default();
-                    for i in 0..desp.len() {
-                        context.insert(format!("ADES{}", i + 1).into(), desp[i].to_string().into());
-                    }
-                    let c_refno = c_att.get_refno().unwrap_or_default();
-
-                    if let Some(attach_cat_am) = self.get_cat_attmap(c_refno).await {
-                        let params = attach_cat_am.get_f32_vec("PARA").unwrap_or_default();
-                        for i in 0..params.len() {
-                            context.insert(
-                                format!("APAR{}", i + 1).into(),
-                                params[i].to_string().into(),
-                            );
-                        }
-                    }
-                }
-            }
-
-            context
-        };
-        Ok(cata_context)
-    }
 
     ///求解design component
     async fn resolve_desi_comp(
@@ -1096,9 +909,7 @@ impl PdmsDataInterface for AiosDBManager {
         let scom_info = self.get_or_create_scom_info(scom_ref).await?;
         // #[cfg(debug_assertions)]
         // dbg!(&scom_info);
-        let mut context = self
-            .get_or_create_cata_context(desi_refno)
-            .await.unwrap();
+        let mut context = aios_core::get_or_create_cata_context(desi_refno).await.unwrap();
 
         let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(self), Some(context));
         if let Ok(g) = geom_info {
@@ -1120,7 +931,7 @@ impl PdmsDataInterface for AiosDBManager {
             return Ok(Default::default());
         }
         let scom = self.get_or_create_scom_info(scom_refno).await?;
-        let context = context.unwrap_or(self.get_or_create_cata_context(refno).await?);
+        let context = context.unwrap_or(aios_core::get_or_create_cata_context(refno).await?);
         for i in 0..scom.axis_params.len() {
             // dbg!(&scom.axis_params[i]);
             let axis = resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self));

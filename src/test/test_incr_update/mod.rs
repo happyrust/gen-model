@@ -1,9 +1,8 @@
 use std::sync::Arc;
-use crate::data_interface::gen_model::gen_all_geos_data;
+
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::test::test_helper::get_test_ams_db_manager_async;
 use crate::test::test_query::init_test_surreal;
-
 
 #[tokio::test]
 async fn test_watch_update() {

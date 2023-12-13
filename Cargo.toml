@@ -1,11 +1,15 @@
 [package]
 name = "aios-database"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [features]
-default = ["gen_model"] #
+default = ["gen_model", "ws", "mqtt"] #
 truck = []
+local=[]
+ws=[]
+debug_obj_export = []
+mqtt=[]
 viewer = []  #是否开启视图
 gen_model = ["aios_core/gen_model"]
 opencascade_rs = ["aios_core/opencascade_rs", "dep:opencascade"]
@@ -79,7 +83,7 @@ num_enum = "0.7.0"
 jsonxf = "1.1.1"
 sea-orm = {version = "0.12.6", features = ["sqlx-mysql", "runtime-async-std"]}
 #surrealdb = { version = "1.0.0", features = ["kv-rocksdb"] }
-surrealdb = { path = "../surrealdb/lib" }
+surrealdb = { path = "../surrealdb/lib", features = ["kv-rocksdb"] }
 async-once-cell = "0.5.3"
 rumqttc = "0.23.0"
 petgraph = {version = "0.6.4", features = ["serde-1"]}

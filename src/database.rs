@@ -1,5 +1,19 @@
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::fs::File;
+use std::hash::Hash;
+use std::io::Read;
+use std::mem::take;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
+
+use aios_core::get_default_pdms_db_info;
+use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
-use aios_core::tool::db_tool::{db1_dehash, db1_hash};
+use aios_core::SUL_DB;
+use aios_core::tool::db_tool::db1_dehash;
 use aios_core::types::*;
 use dashmap::{DashMap, DashSet};
 use itertools::Itertools;
@@ -7,29 +21,12 @@ use parse_pdms_db::parse::*;
 use sea_orm::{ConnectionTrait, Schema, Statement};
 use sqlx::{Connection, MySql, MySqlPool, Pool};
 use sqlx::{Error, Executor};
-use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs;
-use std::fs::File;
-use std::mem::take;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Instant;
 
-use crate::api::element::*;
-use crate::aql_api::PdmsPLINAttrAql;
-use crate::arangodb::{ArDatabase, ArPool};
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
 use crate::tables::*;
 use crate::versioned_db::client::*;
-use aios_core::get_default_pdms_db_info;
-use aios_core::options::DbOption;
-use aios_core::SUL_DB;
-use std::hash::{Hash, Hasher};
-use std::io::Read;
 
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
@@ -107,25 +104,6 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
     Ok(())
 }
 
-///创建索引
-pub async fn create_index(db_option: &DbOption) -> anyhow::Result<()> {
-    SUL_DB
-        .query(" DEFINE INDEX unique_inst_relate ON TABLE inst_relate COLUMNS in, out UNIQUE")
-        .await
-        .unwrap();
-
-    SUL_DB
-        .query(" DEFINE INDEX unique_geo_relate ON TABLE geo_relate COLUMNS in, geom_refno UNIQUE")
-        .await
-        .unwrap();
-
-    SUL_DB
-        .query(" DEFINE INDEX unique_tubi_relate ON TABLE tubi_relate COLUMNS from, to UNIQUE")
-        .await
-        .unwrap();
-
-    Ok(())
-}
 
 /// 初始化同步pdms数据到数据
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
@@ -139,21 +117,8 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         create_info_database(&default_conn_str, &db_option.project_name).await?;
     }
 
-    create_index(db_option).await.unwrap();
-
-    //针对一些特殊的表，需要先创建表，定义索引
-    if !db_option.incr_sync {
-        SUL_DB
-            .query(
-                r#"
-    DEFINE INDEX unique_pe_owner
-    ON TABLE pe_owner
-    COLUMNS in, out UNIQUE;
-    "#,
-            )
-            .await
-            .unwrap();
-    }
+    aios_core::create_owner_index(db_option).await.unwrap();
+    aios_core::create_geom_index().await.unwrap();
 
     let mut create_tables_elapse = 0;
     // 执行多线程解析

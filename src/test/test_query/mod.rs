@@ -1,8 +1,6 @@
 use aios_core::options::DbOption;
-use config::{Config, File};
-use surrealdb::engine::remote::ws::Ws;
-
 use aios_core::SUL_DB;
+use config::{Config, File};
 
 pub mod test_mdb;
 pub mod test_query_fuzzy;
@@ -22,7 +20,7 @@ pub async fn init_test_surreal() {
         .unwrap();
     let db_option: DbOption = s.try_deserialize().unwrap();
     SUL_DB
-        .connect::<Ws>(db_option.get_version_db_conn_str())
+        .connect(db_option.get_version_db_conn_str())
         .with_capacity(1000)
         .await
         .unwrap();

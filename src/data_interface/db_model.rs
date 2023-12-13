@@ -1,12 +1,40 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
+use aios_core::file_helper::collect_db_dirs;
+use aios_core::get_db_option;
+use aios_core::options::DbOption;
+use aios_core::pdms_types::*;
+use aios_core::SUL_DB;
+use arangors_lite::AqlQuery;
+use dashmap::DashMap;
+use futures::StreamExt;
+use glam::Vec3;
+use indexmap::IndexMap;
+use itertools::Itertools;
+use log::info;
+use once_cell::sync::Lazy;
+use parry3d::bounding_volume::{Aabb, BoundingVolume};
+use parry3d::math::Vector;
+use parry3d::query::{Ray, RayCast};
+use pdms_io::sync::clone::{CloneOptions, execute_clone};
+use pdms_io::watch::PdmsWatcher;
+use rayon::prelude::*;
+use rumqttc::{Packet, QoS};
+use rumqttc::Event::Incoming;
+use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
+use sqlx::pool::PoolOptions;
+
 use crate::api::element::*;
 use crate::api::refno_info::*;
 use crate::aql_api::children::query_deep_children_refnos_fuzzy;
 use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
 use crate::arangodb::ArDatabase;
-use crate::cata::resolve_helper::eval_str_to_f32;
-use crate::consts::*;
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -15,37 +43,6 @@ use crate::graph_db::pdms_arango::{connect_arangodb, save_arangodb_with_db_optio
 use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
 use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge, PdmsMdbEdge};
 use crate::mqtt_service::{new_mqtt_inst, SyncE3dFileMsg};
-
-use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
-use aios_core::file_helper::collect_db_dirs;
-use aios_core::get_db_option;
-use aios_core::options::DbOption;
-use aios_core::pdms_types::*;
-use aios_core::SUL_DB;
-use aios_core::tool::db_tool::{GLOBAL_UDA_NAME_MAP, GLOBAL_UDA_UKEY_MAP};
-use arangors_lite::AqlQuery;
-use dashmap::DashMap;
-use futures::StreamExt;
-use glam::Vec3;
-use indexmap::IndexMap;
-use itertools::Itertools;
-use log::{error, info};
-use once_cell::sync::Lazy;
-use parry3d::bounding_volume::{Aabb, BoundingVolume};
-use parry3d::math::Vector;
-use parry3d::query::{Ray, RayCast};
-use pdms_io::sync::clone::{execute_clone, CloneOptions};
-use pdms_io::watch::PdmsWatcher;
-use rayon::prelude::*;
-use rumqttc::Event::Incoming;
-use rumqttc::{Client, ConnectionError, Event, MqttOptions, Packet, QoS};
-use sqlx::pool::PoolOptions;
-use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
-use std::collections::HashMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 
 pub const TUBI_TOL: f32 = 10.0f32;
 
@@ -77,12 +74,6 @@ impl AiosDBManager {
         let db_option = get_db_option();
         let mut mgr = Self::init(&db_option).await?;
         println!("正在初始化uda");
-        // mgr.init_mdb(
-        //     &db_option.project_name,
-        //     &db_option.mdb_name,
-        //     &db_option.module,
-        // ).await?;
-        //初始化watcher
         //加载空间树
         if db_option.load_spatial_tree {
             mgr.compute_aabb_trees().await?;
@@ -116,10 +107,14 @@ impl AiosDBManager {
     pub async fn exec_delta_clone_remotes(
         watcher: &PdmsWatcher,
         sync_msg: SyncE3dFileMsg,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
+        if sync_msg.file_names.is_empty() {
+            return Ok(false);
+        }
         println!(
-            "Start delta clone db files num: {}",
-            sync_msg.file_names.len()
+            "Start delta clone db files num: {} from {}",
+            sync_msg.file_names.len(),
+            sync_msg.file_server_host
         );
         let remote_url = sync_msg.file_server_host.as_str();
         for file_name in &sync_msg.file_names {
@@ -143,7 +138,7 @@ impl AiosDBManager {
             }
         }
 
-        Ok(())
+        Ok(true)
     }
 
     pub async fn spawn_exec_watcher(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
@@ -592,7 +587,6 @@ impl AiosDBManager {
     pub async fn init(db_option: &DbOption) -> anyhow::Result<Self> {
         let dir = db_option.project_path.to_string();
         let mut project_map = DashMap::new();
-        let db_option = get_db_option().clone();
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         for project in &db_option.included_projects {
             if db_option.use_tidb.unwrap_or(false) {
@@ -624,6 +618,7 @@ impl AiosDBManager {
             db_option.project_code
         ));
         let mqtt_client = Arc::new(mqtt_inst.client);
+        #[cfg(feature = "mqtt")]
         tokio::task::spawn(async move {
             loop {
                 let event = mqtt_inst.el.poll().await;
@@ -651,7 +646,7 @@ impl AiosDBManager {
             projects,
             needed_parse_files: None,
             project_path: dir,
-            db_option,
+            db_option: db_option.clone(),
             cached_mesh_mgr: Arc::new(Default::default()),
             arango_pool,
             watcher: Arc::new(watcher),
@@ -660,7 +655,6 @@ impl AiosDBManager {
             room_panels_rtree: None,
             room_info_map: Default::default(),
             room_panel_info_map: Default::default(),
-            plin_params_map: Default::default(),
         })
     }
 
@@ -854,8 +848,6 @@ impl AiosDBManager {
         let string = format!("v.dbnum in [{}] and v.noun== 'WORL'", vec_str);
 
         let mut pdms_edges = vec![];
-        dbg!(&string);
-        dbg!("hello");
         if let Ok(mut ele_nodes) = self.query_ele_nodes_by_expression(&string).await {
             if ele_nodes.is_empty() {
                 return Ok(());
@@ -964,16 +956,6 @@ impl AiosDBManager {
         PdmsGenericType::UNKOWN
     }
 
-    /// 通用的解析表达式的方法, 解析desi参考号下的 表达式值
-    /// 如果 desi_refno 为空，代表design的数据不需要参与计算
-    pub async fn resolve_expression_to_f32(
-        &self,
-        expr: &str,
-        desi_refno: RefU64,
-    ) -> anyhow::Result<f32> {
-        let context = self.get_or_create_cata_context(desi_refno).await?;
-        eval_str_to_f32(expr, &context, Some(self), "DIST")
-    }
 
     ///查询单个element
     pub async fn query_element(&self, refno: RefU64) -> anyhow::Result<Option<PdmsEleData>> {

@@ -34,7 +34,5 @@ pub const JUSLINE_TYPES: [&'static str; 5] = [
     "GWALL",
 ];
 
-pub const DDHEIGHT_STR: &'static str = "DDHEIGHT";
-pub const DDRADIUS_STR: &'static str = "DDRADIUS";
-pub const DDANGLE_STR: &'static str = "DDANGLE";
+
 

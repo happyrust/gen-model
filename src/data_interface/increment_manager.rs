@@ -1,48 +1,33 @@
-use aios_core::cache::mgr::BytesTrait;
-use aios_core::cache::refno::CachedRefBasic;
-use aios_core::consts::NAME_HASH;
-use aios_core::helper::qualified_table_name;
-use aios_core::pdms_types::*;
-use anyhow::anyhow;
-use indexmap::{IndexMap, IndexSet};
-use notify::{RecursiveMode, Watcher};
-use pdms_io::io::PdmsIO;
-use pdms_io::watch::PdmsWatcher;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-// use pdms_io::watch::PdmsWatcher;
-use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::database::sync_total_async_threaded;
-use futures::{
-    channel::mpsc::{channel, Receiver},
-    future::ok,
-    SinkExt, StreamExt,
-};
-// use pdms_io::io::PdmsIO;
-use crate::consts::*;
-use crate::data_interface::gen_model::gen_all_geos_data;
-use crate::data_interface::increment_record::{IncrEleUpdateLog, IncrGeoUpdateLog};
-use crate::defines::CACHED_REFNO_BASIC_MAP;
-use crate::graph_db::pdms_arango::{remove_edges_arangodb, save_arangodb_with_db_option};
-use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge};
-use crate::mqtt_service::SyncE3dFileMsg;
-
-use aios_core::pe::SPdmsElement;
-use aios_core::tool::db_tool::db1_dehash;
-use aios_core::SUL_DB;
-use aios_core::{get_db_option, AttrMap, AttrVal, RefU64Vec};
-use itertools::Itertools;
-use pdms_io::defines::DbPageBasicInfo;
-use pdms_io::sync::compress::{execute_compress, CompressOptions};
-use rumqttc::QoS;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Instant;
+
+use aios_core::{get_db_option, RefU64Vec};
+use aios_core::pdms_types::*;
+use aios_core::pe::SPdmsElement;
+use aios_core::SUL_DB;
+use aios_core::tool::db_tool::db1_dehash;
+use futures::StreamExt;
+use indexmap::{IndexMap, IndexSet};
+use itertools::Itertools;
+use notify::{RecursiveMode, Watcher};
+use pdms_io::defines::DbPageBasicInfo;
+use pdms_io::io::PdmsIO;
+use pdms_io::sync::compress::{CompressOptions, execute_compress};
+use pdms_io::watch::PdmsWatcher;
+use rumqttc::QoS;
 use surrealdb::sql::Thing;
 use tokio::task::JoinSet;
 use walkdir::WalkDir;
+
+use crate::data_interface::gen_model::gen_all_geos_data;
+use crate::data_interface::increment_record::IncrGeoUpdateLog;
+// use pdms_io::watch::PdmsWatcher;
+use crate::data_interface::interface::PdmsDataInterface;
+use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::mqtt_service::SyncE3dFileMsg;
 
 #[derive(Debug, Default, Clone)]
 pub struct IncrementInfo {
@@ -61,8 +46,9 @@ impl AiosDBManager {
         &self,
         increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, u32)>,
     ) -> anyhow::Result<bool> {
+        //没有增量更新的数据，直接返回
         if increment_ranges_map.is_empty() {
-            return Ok(true);
+            return Ok(false);
         }
         let mut modify_type_eles_map = HashMap::new();
         let mut added_type_eles_map = HashMap::new();
@@ -77,6 +63,8 @@ impl AiosDBManager {
         let mut owner_children_map = IndexMap::new();
         let mut deleted_owner_set = IndexSet::new();
         let mut all_relate_sqls = vec![];
+        let mut has_changed = false;
+        //TODO: 如何鉴别只有claim page的变化，没有数据的更新，就不需要执行增量更新
         for (path, (basic_info, last_pageno)) in increment_ranges_map {
             let mut io = PdmsIO::new(path, true);
             io.open()?;
@@ -84,6 +72,9 @@ impl AiosDBManager {
                 .collect_increment_eles(&basic_info, Some(last_pageno))
                 .await?;
             dbg!(eles.len());
+            if eles.is_empty() {
+                continue;
+            }
             for ele in eles {
                 let mut attmap: NamedAttrMap = ele.whole_attmap.merge().into();
                 attmap.set_e3d_version(ele.version as _);
@@ -91,6 +82,7 @@ impl AiosDBManager {
                 let refno = ele.refno;
                 let type_name = attmap.get_type();
                 let type_name = type_name.as_str();
+                has_changed = true;
                 // dbg!(ele.refno);
                 // dbg!(&attmap);
                 let mut ele_op = EleOperation::Modified;
@@ -107,7 +99,7 @@ impl AiosDBManager {
                             deleted_refnos_set.insert(x);
                             //执行的是父节点的操作
                             ele_op = EleOperation::Deleted;
-                            dbg!(x);
+                            // dbg!(x);
                             delete_maps.entry(x).or_insert(IncrementInfo {
                                 refno: x,
                                 db_no: basic_info.pdms_header.db_num,
@@ -206,6 +198,10 @@ impl AiosDBManager {
                 }
             }
         }
+        //如果没有发生变化，直接返回
+        if !has_changed {
+            return Ok(false);
+        }
 
         //可以采用channel模式，发送更新的数据，然后更新数据
         //保存新增数据
@@ -274,7 +270,7 @@ impl AiosDBManager {
                 .into_iter()
                 .map(|k| format!("update pe:{} set deleted = true;", k))
                 .collect::<Vec<_>>();
-            dbg!(&del_sqls);
+            // dbg!(&del_sqls);
             del_join_set.spawn(async move {
                 SUL_DB.query(del_sqls.join(";")).await.unwrap();
             });
@@ -300,7 +296,7 @@ impl AiosDBManager {
                         k.attr.get_name_or_default()
                     ));
                     if let Some(json) = k.attr.gen_sur_json_exclude(&["id"]) {
-                        println!("{}", &json);
+                        // println!("{}", &json);
                         update_vec.push(format!(
                             "update {}:{} content {}",
                             k.attr.get_type_str(),
@@ -340,68 +336,6 @@ impl AiosDBManager {
                 }
             }
         }
-
-        // let mut updated_sets = HashSet::new();
-        // for (mut noun, mut incrs) in modify_type_eles_map {
-        //     while let Some(mut incr) = incrs.pop() {
-        //         let refno = incr.refno;
-        //         updated_sets.insert(incr.refno);
-        //         let owner = incr.attr.get_owner();
-        //         if owner.is_unset() {
-        //             continue;
-        //         }
-        //
-        //         let type_name = incr.attr.get_type_str();
-        //         if PRIMITIVE_NOUN_NAMES.contains(&type_name) {
-        //             geo_update_log.prim_refnos.push(refno);
-        //         } else if GNERAL_LOOP_NOUN_NAMES.contains(&type_name) {
-        //             geo_update_log.loop_refnos.push(refno);
-        //         } else if CATA_HAS_TUBI_GEO_NAMES.contains(&type_name) {
-        //             geo_update_log.basic_cata_refnos.push(refno);
-        //         } else if CATA_GEO_NAMES.contains(&type_name) {
-        //             geo_update_log.basic_cata_refnos.push(refno);
-        //         }
-        //
-        //         let pdms_element = SPdmsElement {
-        //             id: refno.to_string(),
-        //             refno,
-        //             owner,
-        //             name: incr.attr.get_string_or_default("NAME"),
-        //             noun: db1_dehash(noun),
-        //             dbnum: incr.db_no,
-        //             e3d_version: incr.attr.get_e3d_version(),
-        //             version_tag: None,
-        //             status_tag: None,
-        //             cata_hash: None,
-        //             lock: false,
-        //             deleted: false,
-        //         };
-        //         pdms_elements.push(pdms_element);
-        //     }
-        // }
-
-        // let mut time = Instant::now();
-        // let mut join_set = tokio::task::JoinSet::new();
-        // //更新和插入的处理
-        // for eles in pdms_elements.chunks(500) {
-        //     let mut json_strs = Vec::new();
-        //     for m in eles {
-        //         json_strs.push(m.gen_sur_json());
-        //     }
-        //     let sql = format!("INSERT IGNORE INTO pe [{}]", json_strs.join(","));
-        //     //手动修改，替换掉""
-        //     join_set.spawn(async move {
-        //         SUL_DB
-        //             .query(sql)
-        //             .await
-        //             .unwrap();
-        //     });
-        // }
-        // while let Some(_) = join_set.join_next().await {}
-        // println!("Save incr pes task costs {} s", time.elapsed().as_secs_f32());
-
-        // dbg!(geo_update_log.bran_hanger_refnos.len());
-        // dbg!(&geo_update_log);
         let r: Vec<IncrGeoUpdateLog> = SUL_DB
             .create("incr_model_log")
             .content(&geo_update_log)
@@ -440,7 +374,8 @@ impl AiosDBManager {
                 self.watcher
                     .file_name_full_path_map
                     .insert(file_name.to_owned(), path.to_path_buf());
-                //初始化CBA的Archive文件，来保证后续增量下载
+                //初始化CBA的Archive文件，来保证后续增量下载, 后面是否需要加一个环境变量，来控制是否需要重新生成archive文件
+                //是否需要完全初始化
                 let input = path.to_path_buf();
                 let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
                 join_set.spawn(async move {
@@ -474,7 +409,7 @@ impl AiosDBManager {
         }
         println!("初始化增量更新耗时: {} s", time.elapsed().as_secs_f32());
         match self.execute_incr_update(params).await {
-            Ok(_) => {
+            Ok(true) => {
                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
                 for (path, new_header) in latest_need_update_headers {
                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
@@ -488,6 +423,9 @@ impl AiosDBManager {
                 //now save the watch.json
                 self.watcher.save(None)?;
                 println!("执行启动后的自动增量完成。")
+            }
+            Ok(false) => {
+                println!("没有发生增量更新。")
             }
             Err(e) => {
                 println!("Execute increment update error: {:?}", e);
@@ -538,7 +476,7 @@ impl AiosDBManager {
 
                         //如果数据没有发生变化，则不需要推出变化，不需要执行增量
                         match self.execute_incr_update(params).await {
-                            Ok(_) => {
+                            Ok(true) => {
                                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
                                 for (path, new_header) in new_headers {
                                     let file_name = path.file_stem().unwrap().to_str().unwrap();
@@ -576,9 +514,9 @@ impl AiosDBManager {
                                             .bind(("hash", &file_hash))
                                             .bind(("name", file_name))
                                             .await.unwrap();
-                                        let id = response.take::<Option<String>>("id").unwrap();
-                                        dbg!(&id);
-                                        if id.is_none() {
+                                        let id = response.take::<Vec<Thing>>("id").unwrap();
+                                        dbg!(id.len());
+                                        if id.is_empty() {
                                             notify_file_hashes.push(file_hash);
                                             notify_file_names.push(file_name.to_owned());
                                         }
@@ -586,6 +524,10 @@ impl AiosDBManager {
                                 }
                                 //now save the watch.json
                                 self.watcher.save(None);
+                            }
+                            Ok(false) => {
+                                println!("没有发生增量更新。");
+                                continue;
                             }
                             Err(e) => {
                                 println!("Execute increment update error: {:?}", e);

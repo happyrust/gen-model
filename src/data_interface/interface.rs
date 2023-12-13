@@ -1,21 +1,16 @@
-use crate::cata::resolve::CataContext;
-use crate::data_interface::tidb_manager::AiosDBManager;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+
+use aios_core::*;
+use aios_core::{AttrMap, RefU64Vec};
 use aios_core::cache::refno::CachedRefBasic;
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
-use aios_core::pdms_data::{ScomInfo, GmParam};
+use aios_core::pdms_data::{GmParam, ScomInfo};
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::Spine3D;
-use aios_core::shape::pdms_shape::PlantMesh;
 use async_trait::async_trait;
 use bevy_transform::prelude::*;
 use dashmap::mapref::one::Ref;
 use glam::Vec3;
-use id_tree::NodeId;
-use parry3d::bounding_volume::Aabb;
-use smol_str::SmolStr;
-use std::collections::{HashMap, VecDeque, BTreeMap};
-use std::dbg;
-use aios_core::{AttrMap, RefU64Vec};
 
 #[async_trait]
 pub trait PdmsDataInterface: Send + Sync {
@@ -196,8 +191,6 @@ pub trait PdmsDataInterface: Send + Sync {
     async fn query_gm_params(&self, refno: RefU64) -> anyhow::Result<Vec<GmParam>>;
 
     async fn get_or_create_scom_info(&self, cata_refno: RefU64) -> anyhow::Result<ScomInfo>;
-
-    async fn get_or_create_cata_context(&self, desi_refno: RefU64) -> anyhow::Result<CataContext>;
 
     async fn resolve_desi_comp(
         &self,

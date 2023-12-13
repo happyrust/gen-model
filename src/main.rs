@@ -8,39 +8,30 @@ extern crate clap;
 #[macro_use]
 extern crate nom;
 
-use aios_core::pdms_types::*;
-use aios_core::tool::db_tool::{db1_dehash, db1_hash};
-use aios_core::SUL_DB;
-use aios_database::api::admin::sync_system_db;
-use aios_database::data_interface::interface::PdmsDataInterface;
-use aios_database::data_interface::tidb_manager::AiosDBManager;
-use aios_database::database::*;
-use aios_database::ssc::*;
-use chrono::{Datelike, Local, Timelike};
-use futures::StreamExt;
-use itertools::Itertools;
-use nom::Parser;
-use nom_derive::Parse;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::sync::Arc;
+use std::time::Instant;
+
 // use regex::internal::Input;
 use aios_core::get_db_option;
 use aios_core::options::DbOption;
-use aios_core::tool::direction_parse::parse_expr_to_dir;
-use aios_core::tool::math_tool::{cal_mat3_by_zdir, to_pdms_ori_str};
+use aios_core::pdms_types::*;
+use aios_core::SUL_DB;
+use aios_core::tool::db_tool::{db1_dehash, db1_hash};
+use chrono::{Datelike, Local, Timelike};
+use env_logger::{Builder, fmt::Target};
+use futures::StreamExt;
+use itertools::Itertools;
+use log::{error, LevelFilter};
+use tracing_subscriber::fmt;
+use tracing_subscriber::fmt::format::FmtSpan;
+
 use aios_database::arangodb::create::create_arangodb_docs;
 #[cfg(feature = "gen_model")]
 use aios_database::data_interface::gen_model::gen_all_geos_data;
-use env_logger::{fmt::Target, Builder};
-use log::{error, LevelFilter};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Instant;
-use surrealdb::engine::remote::ws::Ws;
-
-use std::time::Duration;
-use tracing_subscriber::fmt;
-use tracing_subscriber::fmt::format::FmtSpan;
+use aios_database::data_interface::tidb_manager::AiosDBManager;
+use aios_database::database::*;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -80,8 +71,14 @@ async fn main() -> anyhow::Result<()> {
         builder.target(Target::Pipe(Box::new(file))).init();
     }
 
+    #[cfg(feature = "local")]
     SUL_DB
-        .connect::<Ws>(db_option.get_version_db_conn_str())
+        .connect(format!("rocksdb://{}.rdb", db_option.project_name))
+        .with_capacity(1000)
+        .await?;
+    #[cfg(feature = "ws")]
+    SUL_DB
+        .connect(db_option.get_version_db_conn_str())
         .with_capacity(1000)
         .await?;
     SUL_DB
@@ -142,9 +139,8 @@ async fn main() -> anyhow::Result<()> {
     tokio::join!(
         // AiosDBManager::run_e3d_clone_bg_task(mgr.clone()),
 
-        // AiosDBManager::spawn_exec_watcher(mgr.clone()),
-
-        // AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
+        AiosDBManager::spawn_exec_watcher(mgr.clone()),
+        AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
         // AiosDBManager::demo_mqtt_requests(),
     );
 
@@ -201,7 +197,7 @@ fn test_turn_bin_into_json() {
 /// This code requires the `env_logger`, `log`, and `tokio` crates to be added as dependencies.
 #[test]
 fn test_log() {
-    use env_logger::{fmt::Target, Builder};
+    use env_logger::{Builder, fmt::Target};
     use log::error;
 
     let file = std::fs::OpenOptions::new()
