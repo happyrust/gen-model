@@ -12,7 +12,7 @@ fn test_parse_param_with_point_digit() {
     let mut context: DashMap<String, String> = DashMap::new();
     context.insert("DESI1".into(), "30.0".into());
     context.insert("DESI0".into(), "40.0".into());
-    let cata_context = CataContext { context };
+    let cata_context = CataContext { context, is_tubi: false };
     let r = eval_str_to_f64(input_exp, &cata_context, true, "DIST");
     dbg!(&r);
     assert_eq!(r.unwrap(), -55.0);
@@ -23,7 +23,7 @@ fn test_parse_design_param() {
     let input_exp = "-0.5 TIMES  DESIGN PARAM 1";
     let mut context: DashMap<String, String> = DashMap::new();
     context.insert("DESP1".into(), "30.0".into());
-    let cata_context = CataContext { context };
+    let cata_context = CataContext { context, is_tubi: false };
     let r = eval_str_to_f64(input_exp, &cata_context, true, "DIST");
     dbg!(&r);
     assert_eq!(r.unwrap(), -15.0);
@@ -36,7 +36,7 @@ fn test_parse_param_with_of_operator() {
     let input_exp = "LBOR OF 24381/88991";
     let mut context: DashMap<String, String> = DashMap::new();
     let interface = get_test_ams_db_manager();
-    let cata_context = CataContext { context };
+    let cata_context = CataContext { context, is_tubi: false };
     // 是提前准备，还是在使用的时候去获取
     let r = eval_str_to_f64(input_exp, &cata_context, true, "DIST");
     dbg!(&r);
@@ -54,7 +54,7 @@ fn parse_3_axis() {
     context.insert("DDANGLE".into(), "45.0".into());
     context.insert("PARAM 2".into(), "30.0".into());
     context.insert("RPRO_CPAR".into(), "DESIGN PARAM 14".into());
-    let cata_context = CataContext { context };
+    let cata_context = CataContext { context, is_tubi: false };
     let str = "X ( RPRO_CPAR )  Y ( DESIGN PARAM 13 ) Z";
     // let str = "X ( DESIGN PARAM 14 )  Y ";
     let str = "X (60.0)  Y ";
@@ -111,7 +111,7 @@ fn test_rpro() {
 fn test_math_exp() {
     let expr = "MAX ( ( ( - 31 ) + 60 ), 29.2 )";
     let mut context: DashMap<String, String> = DashMap::new();
-    let cata_context = CataContext { context };
+    let cata_context = CataContext { context, is_tubi: false };
     dbg!(eval_str_to_f64(expr, &cata_context, true, "DIST")).expect("TODO: panic message");
 }
 

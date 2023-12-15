@@ -883,40 +883,44 @@ impl PdmsDataInterface for AiosDBManager {
     async fn resolve_desi_comp(
         &self,
         desi_refno: RefU64,
-        mut scom_ref_option: Option<RefU64>,
+        mut tubi_scom: Option<RefU64>,
     ) -> anyhow::Result<CateGeomsInfo> {
         let desi_att = aios_core::get_named_attmap(desi_refno).await?;
-        // dbg!(&desi_att);
-        //todo 改到使用图数据库去查找
-        //maybe tubi
-        if scom_ref_option.is_none() {
-            scom_ref_option = self.get_cat_ref(desi_refno).await;
+        let is_tubi = tubi_scom.is_some();
+        if tubi_scom.is_none() {
+            tubi_scom = self.get_cat_ref(desi_refno).await;
         }
-        let scom_ref = scom_ref_option.ok_or(anyhow::anyhow!(format!(
-            "SCOM not exist in element: {}",
-            desi_refno.to_string()
-        )))?;
-        if !scom_ref.is_valid() {
-            println!(
-                "{} 的CAT引用不存在，为 {}",
-                desi_refno.to_string(),
-                scom_ref.to_string()
-            );
-            return Ok(Default::default());
-        }
+
+        let scom_ref = if let Some(scom) = tubi_scom {
+            scom
+        } else {
+            let scom = self.get_cat_ref(desi_refno).await.ok_or(anyhow::anyhow!(format!(
+                "CAT引用不存在: {}",
+                desi_refno.to_string()
+            )))?;
+            tubi_scom = Some(scom);
+            scom
+        };
+
+        // if !scom_ref.is_valid() {
+        //     println!(
+        //         "{} 的CAT引用不存在，为 {}",
+        //         desi_refno.to_string(),
+        //         scom_ref.to_string()
+        //     );
+        //     return Ok(Default::default());
+        // }
+
         #[cfg(debug_assertions)]
         dbg!(scom_ref);
+
         let scom_info = self.get_or_create_scom_info(scom_ref).await?;
         // #[cfg(debug_assertions)]
         // dbg!(&scom_info);
-        let mut context = aios_core::get_or_create_cata_context(desi_refno).await.unwrap();
+        let mut context = aios_core::get_or_create_cata_context(desi_refno, is_tubi).await.unwrap();
 
         let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(self), Some(context));
-        if let Ok(g) = geom_info {
-            Ok(g)
-        }else{
-             Err(anyhow!("resolve_cata_comp failed"))
-        }
+        geom_info.map_err(|_| anyhow!("resolve_cata_comp failed"))
     }
 
     /// 求解axis的数值
@@ -931,7 +935,7 @@ impl PdmsDataInterface for AiosDBManager {
             return Ok(Default::default());
         }
         let scom = self.get_or_create_scom_info(scom_refno).await?;
-        let context = context.unwrap_or(aios_core::get_or_create_cata_context(refno).await?);
+        let context = context.unwrap_or(aios_core::get_or_create_cata_context(refno, false).await?);
         for i in 0..scom.axis_params.len() {
             // dbg!(&scom.axis_params[i]);
             let axis = resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self));

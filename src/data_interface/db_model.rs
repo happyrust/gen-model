@@ -16,18 +16,19 @@ use futures::StreamExt;
 use glam::Vec3;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use log::info;
+use log::{error, info};
 use once_cell::sync::Lazy;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::Vector;
 use parry3d::query::{Ray, RayCast};
-use pdms_io::sync::clone::{CloneOptions, execute_clone};
+use pdms_io::sync::clone::{execute_clone, CloneOptions};
 use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
-use rumqttc::{Packet, QoS};
 use rumqttc::Event::Incoming;
-use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
+use rumqttc::{Packet, QoS};
 use sqlx::pool::PoolOptions;
+use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
+use tokio::sync::Mutex;
 
 use crate::api::element::*;
 use crate::api::refno_info::*;
@@ -68,12 +69,14 @@ static PDMS_GNERAL_TYPE_NAMES_MAP: Lazy<HashMap<&'static str, PdmsGenericType>> 
     m
 });
 
+//创建一个监控mqtt是否连接的全局变量,使用Mutex<bool>
+pub static MQTT_CONNECT_STATUS: Lazy<Mutex<Option<bool>>> = Lazy::new(|| Mutex::new(None));
+
 impl AiosDBManager {
     /// 从默认配置文件初始化
     pub async fn init_form_config() -> anyhow::Result<Self> {
         let db_option = get_db_option();
         let mut mgr = Self::init(&db_option).await?;
-        println!("正在初始化uda");
         //加载空间树
         if db_option.load_spatial_tree {
             mgr.compute_aabb_trees().await?;
@@ -134,6 +137,7 @@ impl AiosDBManager {
                         file_name,
                         clone_time.elapsed().as_secs_f64()
                     );
+                    //clone完了,再执行增量更新
                 }
             }
         }
@@ -611,6 +615,8 @@ impl AiosDBManager {
             collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref()));
         dbg!(&db_paths);
         let mut watcher = PdmsWatcher::load_from_json(None).unwrap_or(PdmsWatcher::new(db_paths));
+        dbg!(watcher.headers.len());
+        dbg!(watcher.file_name_full_path_map.len());
 
         let mut mqtt_inst = new_mqtt_inst(&format!(
             "{}-{}-pub",
@@ -629,13 +635,34 @@ impl AiosDBManager {
                         }
                         rumqttc::Event::Incoming(Packet::ConnAck(_)) => {
                             // Connection was established. Notify the client to send all discovery messages
-                            info!("Connected to MQTT broker.");
-                            // let _ = connection_notify_tx.send(());
+                            // info!("Connected to MQTT broker.");
+
+                            //判断MQTT_CONNECT_STATUS,如果为false,则发送连接成功的消息,修改为true
+                            let mut mqtt_connect_status = MQTT_CONNECT_STATUS.lock().await;
+                            if mqtt_connect_status.is_none() {
+                                *mqtt_connect_status = Some(true);
+                                info!("Init connected to MQTT broker.");
+                            }else{
+                                if !(*mqtt_connect_status).unwrap() {
+                                    *mqtt_connect_status = Some(true);
+                                    info!("Connected to MQTT broker.");
+                                }
+                            }
                         }
                         _ => {}
                     },
                     Err(e) => {
-                        // error!("MQTT Connection error encountered: {}", e);
+                        let mut mqtt_connect_status = MQTT_CONNECT_STATUS.lock().await;
+                        if mqtt_connect_status.is_none() {
+                            *mqtt_connect_status = Some(false);
+                            error!("Init MQTT Connection error encountered: {}", e);
+                        }else {
+                            if (*mqtt_connect_status).unwrap() {
+                                *mqtt_connect_status = Some(false);
+                                error!("MQTT Connection error encountered: {}", e);
+                            }
+                        }
+
                         tokio::time::sleep(Duration::from_secs(1)).await;
                     }
                 }
@@ -955,7 +982,6 @@ impl AiosDBManager {
         }
         PdmsGenericType::UNKOWN
     }
-
 
     ///查询单个element
     pub async fn query_element(&self, refno: RefU64) -> anyhow::Result<Option<PdmsEleData>> {

@@ -91,6 +91,9 @@ pub fn resolve_cata_comp<T: PdmsDataInterface>(
     } else {
         None
     };
+    if des_refno.get_1() == 58721{
+        // dbg!(&scom_info.gm_params);
+    }
     let geometries = resolve_gms(
         des_refno,
         &scom_info.gm_params,

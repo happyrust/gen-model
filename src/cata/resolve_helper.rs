@@ -475,7 +475,7 @@ pub fn parse_str_axis_to_vec3_or_default<T: PdmsDataInterface>(
     context: &CataContext,
     interface: Option<&T>,
 ) -> Vec3 {
-    parse_str_axis_to_vec3(pdir, context, interface).unwrap_or(Vec3::Y)
+    parse_str_axis_to_vec3(pdir, context, interface).unwrap_or(Vec3::ZERO)
 }
 
 ///解析表达式里的axis

@@ -19,6 +19,7 @@ use pdms_io::sync::compress::{CompressOptions, execute_compress};
 use pdms_io::watch::PdmsWatcher;
 use rumqttc::QoS;
 use surrealdb::sql::Thing;
+use tokio::fs::create_dir_all;
 use tokio::task::JoinSet;
 use walkdir::WalkDir;
 
@@ -355,8 +356,9 @@ impl AiosDBManager {
         let mut latest_need_update_headers = IndexMap::new();
         fs::create_dir_all("asset/archives")?;
         let mut time = Instant::now();
+        dbg!(&self.watcher.watch_dirs);
         for watch_dir in &self.watcher.watch_dirs {
-            let mut join_set = JoinSet::new();
+            // let mut join_set = JoinSet::new();
             for entry in WalkDir::new(watch_dir).sort_by(|a, b| {
                 b.path()
                     .metadata()
@@ -366,9 +368,9 @@ impl AiosDBManager {
             }) {
                 let dir_entry = entry.unwrap();
                 let path = dir_entry.path();
-                //只处理0001 结尾的文件
                 let file_name = path.file_stem().unwrap().to_str().unwrap();
-                if path.is_dir() || !file_name.ends_with("0001") {
+                //|| !file_name.ends_with("0001") 
+                if path.is_dir() {
                     continue;
                 }
                 self.watcher
@@ -376,15 +378,15 @@ impl AiosDBManager {
                     .insert(file_name.to_owned(), path.to_path_buf());
                 //初始化CBA的Archive文件，来保证后续增量下载, 后面是否需要加一个环境变量，来控制是否需要重新生成archive文件
                 //是否需要完全初始化
-                let input = path.to_path_buf();
-                let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
-                join_set.spawn(async move {
-                    // let compress_opt = CompressOptions::new(input, output);
-                    // execute_compress(compress_opt).await.unwrap();
-                });
+                // let input = path.to_path_buf();
+                // let output: PathBuf = format!("asset/archives/{}.cba", file_name).into();
+                // join_set.spawn(async move {
+                //     // let compress_opt = CompressOptions::new(input, output);
+                //     // execute_compress(compress_opt).await.unwrap();
+                // });
 
                 let mut io = PdmsIO::new(path, true);
-                io.open()?;
+                io.open().unwrap();
                 if let Ok(basic_info) = io.get_page_basic_info() {
                     if let Some(mut old) = self.watcher.headers.get_mut(&path.to_path_buf()) {
                         //未发生修改，直接跳过
@@ -404,9 +406,10 @@ impl AiosDBManager {
                 }
                 // break;
             }
-            while let Some(_) = join_set.join_next().await {}
+            // while let Some(_) = join_set.join_next().await {}
             // break;
         }
+        self.watcher.save(None).unwrap();
         println!("初始化增量更新耗时: {} s", time.elapsed().as_secs_f32());
         match self.execute_incr_update(params).await {
             Ok(true) => {
@@ -421,7 +424,7 @@ impl AiosDBManager {
                     }
                 }
                 //now save the watch.json
-                self.watcher.save(None)?;
+                self.watcher.save(None).unwrap();
                 println!("执行启动后的自动增量完成。")
             }
             Ok(false) => {
@@ -438,28 +441,35 @@ impl AiosDBManager {
     //开始监测数据文件夹
     pub async fn async_watch(&self) -> notify::Result<()> {
         let (mut watcher, mut rx) = PdmsWatcher::async_watcher()?;
+        dbg!(&self.watcher.watch_dirs);
         self.watcher.watch_dirs.iter().for_each(|x| {
             watcher
                 .watch(x.as_path(), RecursiveMode::NonRecursive)
                 .expect("watch files failed");
         });
 
+        create_dir_all("asset/archives").await.unwrap();
+        create_dir_all("asset/temp").await.unwrap();
         while let Some(res) = rx.next().await {
             match res {
                 Ok(event) => {
+                    // dbg!(&event);
                     //跳过只是meta data变动的情况
-                    if matches!(
-                        event.kind,
-                        notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
-                    ) {
-                        continue;
-                    }
-                    // println!("changed: {:?}", &event);
+                    // if matches!(
+                    //     event.kind,
+                    //     notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
+                    // ) {
+                    //     continue;
+                    // }
+                    //后面用派发任务的方式,不要放在这里阻塞
+                    println!("changed: {:?}", &event);
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(event.paths) {
-                        // dbg!(&new_headers);
                         let mut params = IndexMap::new();
                         for (path, new_header) in &new_headers {
+                            dbg!(new_header.pdms_header.page_no);
                             if let Some(mut old) = self.watcher.headers.get_mut(path) {
+                                dbg!(path);
+                                dbg!(old.pdms_header.page_no);
                                 //未发生修改，直接跳过
                                 if old.pdms_header.page_no == new_header.pdms_header.page_no {
                                     continue;
@@ -470,27 +480,30 @@ impl AiosDBManager {
                                 );
                             }
                         }
-                        // dbg!(&params);
+                        dbg!(&params);
+                        if params.is_empty(){
+                            continue;
+                        }
                         let mut notify_file_names = vec![];
                         let mut notify_file_hashes = vec![];
 
                         //如果数据没有发生变化，则不需要推出变化，不需要执行增量
                         match self.execute_incr_update(params).await {
-                            Ok(true) => {
+                            Ok(_) => {
                                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
                                 for (path, new_header) in new_headers {
                                     let file_name = path.file_stem().unwrap().to_str().unwrap();
-                                    // dbg!(&file_name);
-                                    if path.is_dir() || !file_name.ends_with("0001") {
+                                    if path.is_dir(){
                                         continue;
                                     }
+                                    dbg!(&file_name);
                                     //这个地方是不是需要直接去读取文件，然后更新headers，不能太依赖json数据
                                     //或者每次启动都重新更新这个文件？
                                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
+                                        dbg!((old.pdms_header.page_no, new_header.pdms_header.page_no));
                                         //未发生修改，直接跳过
-                                        if old.pdms_header.page_no >= new_header.pdms_header.page_no
-                                        {
-                                            continue;
+                                        if old.pdms_header.page_no >= new_header.pdms_header.page_no{
+                                            // continue;
                                         }
                                         *old.value_mut() = new_header;
 
@@ -500,21 +513,28 @@ impl AiosDBManager {
                                             format!("asset/archives/{}.cba", file_name).into();
                                         // dbg!(&output);
                                         let compress_opt =
-                                            CompressOptions::new(path.clone(), output);
+                                            CompressOptions::new(path.clone(), output, "asset/temp");
                                         let file_hash = execute_compress(compress_opt)
                                             .await
                                             .unwrap()
                                             .to_string();
+                                        // dbg!(&file_hash);
 
-                                        //数据库里不存在这个file hash的记录，才需要
+                                        //数据库里不存在这个file hash的记录，才需要发送
+                                        //是自己创建的，在记录里还没有的，才能发送消息出去
+                                        //如果是别的创建的，就应该调过
+                                        let sql = format!(
+                                            "select value id from (select * from e3d_sync where location != '{}' and '{}' in file_names and '{}' in file_hashes order by timestamp desc) ",
+                                            get_db_option().location.as_str(),
+                                            file_name,
+                                            &file_hash
+                                        );
+                                        // dbg!(&sql);
                                         let mut response  = SUL_DB
-                                            // .query("select value id from (select * from e3d_sync where location != $loc and $name in file_names order by timestamp desc limit 1) where $hash in file_hashes")
-                                            .query("select value id from (select * from e3d_sync where location != $loc and $name in file_names order by timestamp desc) where $hash in file_hashes")
-                                            .bind(("loc", get_db_option().location.as_str()))
-                                            .bind(("hash", &file_hash))
-                                            .bind(("name", file_name))
+                                            .query(&sql)
                                             .await.unwrap();
-                                        let id = response.take::<Vec<Thing>>("id").unwrap();
+                                        // dbg!(&response);
+                                        let id = response.take::<Vec<String>>(0).unwrap();
                                         dbg!(id.len());
                                         if id.is_empty() {
                                             notify_file_hashes.push(file_hash);
@@ -525,10 +545,10 @@ impl AiosDBManager {
                                 //now save the watch.json
                                 self.watcher.save(None);
                             }
-                            Ok(false) => {
-                                println!("没有发生增量更新。");
-                                continue;
-                            }
+                            // Ok(false) => {
+                            //     println!("没有发生增量更新。");
+                            //     continue;
+                            // }
                             Err(e) => {
                                 println!("Execute increment update error: {:?}", e);
                             }

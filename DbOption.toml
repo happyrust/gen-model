@@ -1,10 +1,10 @@
 #同步文件配置
 total_sync = false 
 #增量同步，避免重新创建重复的索引和uda、sys
-incr_sync = true
+incr_sync = false
 # total_sync = false
 enable_log = false
-sync_graph_db = true
+sync_graph_db = false
 sync_versioned = false
 sync_tidb = false
 sync_localdb = false
@@ -20,7 +20,7 @@ project_name = "AvevaMarineSample"
 project_code = 1516
 module = "DESI"
 #是否生成模型数据
-gen_model = false
+gen_model = true
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树
@@ -60,8 +60,8 @@ v_password = ""
 
 
 #mqtt 事件 ip
-mqtt_host = "50c170h624.zicp.vip"
-mqtt_port = 41761
+mqtt_host = "192.168.31.60"
+mqtt_port = 8883
 
 location = "SJZ1"
 
@@ -92,7 +92,7 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #included_db_files = ["ams1112_0001", "ams5052_0001", "ams7000_0001", "ams5053_0001"]
 # included_db_files = ["acp7002_0001", "ams7997_0001", "ams1112_0001"]
 # included_db_files = ["acp7002_0001"]
-#included_db_files = ["ams7000_0001", "ams5053_0001"]
+# included_db_files = ["ams7000_0001"]
 # included_db_files = ["ams1112_0001", "ams7997_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 #manual_db_nums = [7354]
@@ -126,10 +126,12 @@ puhua_database_password = ""
 # debug_root_refnos = ["24381/57574"]
 
 #SSLC的问题
-debug_root_refnos = ["24381/76698"]
+# debug_root_refnos = ["24381/76698"]
 
 #风管直段问题
 # debug_root_refnos = ["24381/58708"]
+
+debug_root_refnos = ["24381/58482"]
 
 
 
