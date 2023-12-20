@@ -45,7 +45,7 @@ use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
 use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge, PdmsMdbEdge};
 use crate::mqtt_service::{new_mqtt_inst, SyncE3dFileMsg};
 
-pub const TUBI_TOL: f32 = 10.0f32;
+pub const TUBI_TOL: f32 = 0.1f32;
 
 // project + mdb + module
 pub static GLOBAL_MDB_WORLD_MAP: Lazy<DashMap<String, PdmsElement>> = Lazy::new(DashMap::new);

@@ -1340,8 +1340,10 @@ pub async fn gen_cata_geos(
                 // dbg!(axis_map);
                 bran_comp_vec.push(refno);
                 current_tubing.arrive_refno = refno;
-                //ATTA不产生直段
-                if cur_type != "ATTA" && axis_map.contains_key(&arrive) {
+                //ATTA，如果设置成SPKBRK，产生直段，否则不产生直段
+                let skip = (cur_type == "ATTA") &&  !aios_core::get_named_attmap(refno).await?.get_bool_or_default("SPKBRK");
+                dbg!(skip);
+                if !skip && axis_map.contains_key(&arrive) {
                     let a_pos = world_trans.transform_point(axis_map[&arrive].pt);
                     let dir = axis_map[&arrive].dir;
 
@@ -1471,16 +1473,15 @@ pub async fn gen_cata_geos(
                     // let l_ref_dir = ref_dir;
                     // dbg!(to_pdms_vec_xyz_str(&l_ref_dir));
 
-                    if cur_type == "ATTA" {
-                        current_tubing.desire_leave_dir = l_dir;
-                        current_tubing.leave_ref_dir = if l_ref_dir.is_normalized() {
-                            Some(l_ref_dir)
-                        } else {
-                            None
-                        };
+                    if skip {
+                        // current_tubing.desire_leave_dir = l_dir;
+                        // current_tubing.leave_ref_dir = if l_ref_dir.is_normalized() {
+                        //     Some(l_ref_dir)
+                        // } else {
+                        //     None
+                        // };
                     } else {
                         let l_pos = world_trans.transform_point(axis_map[&leave].pt);
-                        // let att_map = aios_core::get_named_attmap(refno).await.unwrap_or_default();
                         current_tubing.start_pt = l_pos;
                         current_tubing.desire_leave_dir = l_dir;
                         current_tubing.leave_ref_dir = if l_ref_dir.is_normalized() {
@@ -1488,7 +1489,6 @@ pub async fn gen_cata_geos(
                         } else {
                             None
                         };
-                        //ATTA cant be tubing leave, but can change the ldir ?
                         current_tubing.leave_refno = refno;
                     }
                 }
@@ -1751,7 +1751,7 @@ pub async fn gen_all_geos_data(
                 )
                     .await?;
                 debug_root_refnos.retain_mut(|x| !r.contains(x));
-                dbg!(&r);
+                // dbg!(&r);
                 r.into_iter().collect()
             } else {
                 mgr.get_gen_model_target_refnos(
@@ -2186,9 +2186,6 @@ pub async fn gen_all_geos_data(
                                     if manifold.num_tri() == 0 {
                                         println!("Found non manifold {}", t_refno);
                                         found_non_manifold = true;
-                                        #[cfg(feature = "debug_obj_export")]
-                                        mesh.export_obj(false, &format!("models/{}.obj", t_refno))
-                                            .expect("TODO: panic message");
                                     } else {
                                         if is_neg {
                                             batch_manifolds.push(manifold);
@@ -2221,9 +2218,12 @@ pub async fn gen_all_geos_data(
                             // dbg!(final_manifold.num_tri());
                             let final_mesh: PlantMesh = final_manifold.clone().into();
                             //todo 使用feature
-                            // final_mesh
-                            //     .export_obj(false, &format!("{}.obj", "final"))
-                            //     .expect("TODO: panic message");
+                            #[cfg(feature = "debug_obj_export")]
+                            {
+                                final_mesh
+                                    .export_obj(false, &format!("{}.obj", "final"))
+                                    .expect("TODO: panic message");
+                            }
                             for m in batch_manifolds {
                                 // #[cfg(target_os = "macos" || target_os = "linux")]
                                 // m.destroy();
