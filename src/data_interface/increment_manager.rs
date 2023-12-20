@@ -455,15 +455,17 @@ impl AiosDBManager {
                 Ok(event) => {
                     // dbg!(&event);
                     //跳过只是meta data变动的情况
-                    // if matches!(
-                    //     event.kind,
-                    //     notify::EventKind::Modify(notify::event::ModifyKind::Metadata(_))
-                    // ) {
-                    //     continue;
-                    // }
+                    let data_changed = matches!(
+                        event.kind,
+                        notify::EventKind::Modify(notify::event::ModifyKind::Data(_)) 
+                        | notify::EventKind::Modify(notify::event::ModifyKind::Any) 
+                        | notify::EventKind::Create(notify::event::CreateKind::File) | notify::EventKind::Remove(notify::event::RemoveKind::File));
+                    if !data_changed{
+                        continue;
+                    }
                     //后面用派发任务的方式,不要放在这里阻塞
                     println!("changed: {:?}", &event);
-                    if let Ok(new_headers) = PdmsWatcher::scan_db_headers(event.paths) {
+                    if let Ok(new_headers) = PdmsWatcher::scan_db_headers(&event.paths) {
                         let mut params = IndexMap::new();
                         for (path, new_header) in &new_headers {
                             dbg!(new_header.pdms_header.page_no);
@@ -480,7 +482,7 @@ impl AiosDBManager {
                                 );
                             }
                         }
-                        dbg!(&params);
+                        // dbg!(&params);
                         if params.is_empty(){
                             continue;
                         }
@@ -489,7 +491,7 @@ impl AiosDBManager {
 
                         //如果数据没有发生变化，则不需要推出变化，不需要执行增量
                         match self.execute_incr_update(params).await {
-                            Ok(_) => {
+                            Ok(true) => {
                                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
                                 for (path, new_header) in new_headers {
                                     let file_name = path.file_stem().unwrap().to_str().unwrap();
@@ -503,7 +505,7 @@ impl AiosDBManager {
                                         dbg!((old.pdms_header.page_no, new_header.pdms_header.page_no));
                                         //未发生修改，直接跳过
                                         if old.pdms_header.page_no >= new_header.pdms_header.page_no{
-                                            // continue;
+                                            continue;
                                         }
                                         *old.value_mut() = new_header;
 
@@ -535,8 +537,9 @@ impl AiosDBManager {
                                             .await.unwrap();
                                         // dbg!(&response);
                                         let id = response.take::<Vec<String>>(0).unwrap();
-                                        dbg!(id.len());
+                                        // dbg!(id.len());
                                         if id.is_empty() {
+                                            println!("发生了增量更新，推送：{}", &file_name);
                                             notify_file_hashes.push(file_hash);
                                             notify_file_names.push(file_name.to_owned());
                                         }
@@ -545,10 +548,10 @@ impl AiosDBManager {
                                 //now save the watch.json
                                 self.watcher.save(None);
                             }
-                            // Ok(false) => {
-                            //     println!("没有发生增量更新。");
-                            //     continue;
-                            // }
+                            Ok(false) => {
+                                println!("{:?} 文件发生修改，但是没有发生增量更新。", &event.paths);
+                                continue;
+                            }
                             Err(e) => {
                                 println!("Execute increment update error: {:?}", e);
                             }

@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync = false 
+total_sync = true 
 #增量同步，避免重新创建重复的索引和uda、sys
 incr_sync = false
 # total_sync = false
@@ -93,7 +93,7 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 # included_db_files = ["acp7002_0001", "ams7997_0001", "ams1112_0001"]
 # included_db_files = ["acp7002_0001"]
 # included_db_files = ["ams7000_0001"]
-# included_db_files = ["ams1112_0001", "ams7997_0001"]
+included_db_files = ["ams1112_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 #manual_db_nums = [7354]
 #manual_db_nums = [1112]  #, 8000
@@ -131,7 +131,8 @@ puhua_database_password = ""
 #风管直段问题
 # debug_root_refnos = ["24381/58708"]
 
-debug_root_refnos = ["24381/58482"]
+# debug_root_refnos = ["24381/58482"]
+debug_root_refnos = ["24381/58338", "24381/58708"]
 
 
 

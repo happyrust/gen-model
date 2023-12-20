@@ -621,7 +621,7 @@ pub async fn gen_cata_geos(
             .map(|x| x.cata_hash.clone())
             .collect::<Vec<_>>(),
     );
-    dbg!(&all_unique_keys.len());
+    // dbg!(&all_unique_keys.len());
     if !all_unique_keys.is_empty() {
         for i in 0..batch_chunks_cnt as usize {
             let mgr_clone = mgr.clone();
@@ -1224,7 +1224,7 @@ pub async fn gen_cata_geos(
         // dbg!(&tubi_cat_ref);
         let mut tubi_size =
             query_tubi_size(&mgr, branch_refno, tubi_cat_ref, is_hang).await?;
-        dbg!(&tubi_size);
+        // dbg!(&tubi_size);
         //todo 其实这里应该待定比较好
         let mut tubi_geo_hash = if matches!(tubi_size, TubiSize::BoxSize(_)) {
             BOXI_GEO_HASH
@@ -1250,7 +1250,7 @@ pub async fn gen_cata_geos(
             .await
             .unwrap_or_default();
         let is_hvac = bran_owner_type == "HVAC";
-        dbg!(is_hvac);
+        // dbg!(is_hvac);
         // 需要求解出 leave bore
         if children.len() == 0 {
             if bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL {
