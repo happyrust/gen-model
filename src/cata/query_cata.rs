@@ -57,7 +57,7 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
         // dbg!(&geo_am);
         let is_spro = geo_am.get_type_str() == "SPRO"; //todo add other types
         gms.push(
-            query_gm_param(&geo_am, interface, is_spro)
+            query_gm_param(&geo_am, is_spro)
                 .await
                 .unwrap_or_default(),
         );
@@ -66,18 +66,16 @@ pub async fn query_gm_params<T: PdmsDataInterface>(
 }
 
 ///对元件库的SCOM Element进行求值计算
-pub fn resolve_cata_comp<T: PdmsDataInterface>(
+pub fn resolve_cata_comp(
     des_att: &NamedAttrMap,
     scom_info: &ScomInfo,
-    interface: Option<&T>,
     context: Option<CataContext>,
 ) -> anyhow::Result<CateGeomsInfo> {
-    let interface = interface.ok_or(anyhow::anyhow!("unknown interface"))?;
     let des_refno = des_att.get_refno().unwrap_or_default();
     let mut cur_context = context.unwrap_or_default();
     let cat_ref = scom_info.attr_map.get_refno().unwrap_or_default();
 
-    let axis_param_map = resolve_axis_params(des_refno, scom_info, &cur_context, interface);
+    let axis_param_map = resolve_axis_params(des_refno, scom_info, &cur_context);
 
     // dbg!(&axis_param_map);
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
@@ -91,16 +89,12 @@ pub fn resolve_cata_comp<T: PdmsDataInterface>(
     } else {
         None
     };
-    if des_refno.get_1() == 58721{
-        // dbg!(&scom_info.gm_params);
-    }
     let geometries = resolve_gms(
         des_refno,
         &scom_info.gm_params,
         &jusl_param,
         &cur_context,
         &axis_param_map,
-        Some(interface),
     );
     let n_geometries = resolve_gms(
         des_refno,
@@ -108,7 +102,6 @@ pub fn resolve_cata_comp<T: PdmsDataInterface>(
         &jusl_param,
         &cur_context,
         &axis_param_map,
-        Some(interface),
     );
     Ok(CateGeomsInfo {
         refno: cat_ref,
@@ -218,7 +211,6 @@ pub fn get_axis_param(attr_map: &NamedAttrMap) -> Option<AxisParam> {
 ///获得gmse的params
 pub async fn query_gm_param(
     a: &NamedAttrMap,
-    interface: &dyn PdmsDataInterface,
     is_spro: bool,
 ) -> Option<GmParam> {
     // dbg!(a);
@@ -265,7 +257,7 @@ pub async fn query_gm_param(
             }
         }
     } else {
-        let cur_type = interface.get_type_name(refno).await;
+        let cur_type = aios_core::get_type_name(refno).await.unwrap_or_default();
         if is_spro && cur_type.as_str() == "SPRO" {
             for a in aios_core::get_children_named_attmaps(refno)
                 .await

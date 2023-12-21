@@ -546,7 +546,6 @@ pub async fn gen_cata_single_geoms(
             n_geometries,
             axis_map,
         } = geoms_info;
-        dbg!(geometries.len());
         for geom in geometries {
             if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
                 brep_shape_map
@@ -555,7 +554,6 @@ pub async fn gen_cata_single_geoms(
                     .push(cate_shape);
             }
         }
-        dbg!(n_geometries.len());
         for geom in n_geometries {
             if let Some(mut cate_shape) = convert_to_brep_shapes(&geom) {
                 cate_shape.is_ngmr = true;
@@ -685,8 +683,8 @@ pub async fn gen_cata_geos(
                                 continue;
                             }
                         };
+                        #[cfg(debug_assertions)]
                         dbg!(brep_shapes_map.len());
-
                         {
                             // 将一些伪属性需要用到的值存下来，后面也要更新维护这些伪属性，避免重复计算
                             let mut lock = HASH_PSEUDO_ATT_MAPS.write().await;
@@ -767,6 +765,7 @@ pub async fn gen_cata_geos(
                                 .map(|x| x.get_refno_lossy().unwrap_or_default()) else {
                                 continue;
                             };
+                            #[cfg(debug_assertions)]
                             dbg!(gmse_refno);
 
                             //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
@@ -1001,6 +1000,7 @@ pub async fn gen_cata_geos(
                                 //要保留POS的部分
                                 target_geo_data_option = Some(origin.clone());
                                 //TODO: 只保留正实体的部分在insts里面，比如FITT的套管，挖空的部分存在另外的地方，type为-1
+                                #[cfg(debug_assertions)]
                                 dbg!(origin.insts.len());
                                 if origin.insts.len() > 0 {
                                     // let lpyra = origin.insts.iter().filter(|x|
@@ -1252,7 +1252,7 @@ pub async fn gen_cata_geos(
         let is_hvac = bran_owner_type == "HVAC";
         // dbg!(is_hvac);
         // 需要求解出 leave bore
-        if children.len() == 0 {
+        if children.len() == 0 && !is_hvac{
             if bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL {
                 current_tubing.arrive_refno = tref;
                 current_tubing.end_pt = bran_ttube_pt;
@@ -1260,9 +1260,7 @@ pub async fn gen_cata_geos(
                 current_tubing.desire_arrive_dir = -current_tubing.get_dir();
                 //检查一下方向是否一致，不一致的，不显示，或者加标记位
                 if current_tubing.is_dir_ok() {
-                    if let Some(t) = current_tubing.get_transform()
-                        && !is_hvac
-                    {
+                    if let Some(t) = current_tubing.get_transform() {
                         let aabb = aabb_apply_transform(&unit_cyli_aabb, &t);
                         inst_tubi_map.insert(
                             branch_refno,
@@ -1342,7 +1340,7 @@ pub async fn gen_cata_geos(
                 current_tubing.arrive_refno = refno;
                 //ATTA，如果设置成SPKBRK，产生直段，否则不产生直段
                 let skip = (cur_type == "ATTA") &&  !aios_core::get_named_attmap(refno).await?.get_bool_or_default("SPKBRK");
-                dbg!(skip);
+                // dbg!(skip);
                 if !skip && axis_map.contains_key(&arrive) {
                     let a_pos = world_trans.transform_point(axis_map[&arrive].pt);
                     let dir = axis_map[&arrive].dir;
@@ -1350,6 +1348,7 @@ pub async fn gen_cata_geos(
                     // dbg!(quat_to_pdms_ori_xyz_str(&world_trans.rotation));
                     let a_dir = world_trans.transform_vec3(dir).normalize_or_zero();
                     let actual_vec = a_pos - current_tubing.start_pt;
+                    // dbg!(actual_vec);
                     let actual_dir = actual_vec.normalize_or_zero();
                     //判断actual_dir 和 a_dir 是否一致，一致的话说明有重叠
                     let same_dir = actual_dir.dot(a_dir) > 0.99;
@@ -1362,6 +1361,7 @@ pub async fn gen_cata_geos(
                         current_tubing.desire_arrive_dir = a_dir;
                         //TODO: 需要弄清楚风管开头的不需要加直段?
                         let is_hvac_start = is_hvac && (index == 0);
+                        //风管开头这样的不需要处理
                         if !is_hvac_start {
                             if current_tubing.is_dir_ok() {
                                 // dbg!(&current_tubing);
@@ -1494,12 +1494,11 @@ pub async fn gen_cata_geos(
                 }
             }
             //有隐含管段
-            //最后一段的管道
-            if index == len - 1 {
+            //最后一段的管道, 风管不需要这么处理？
+            if index == len - 1 && !is_hvac{
                 let last_dist = bran_ttube_pt.distance(current_tubing.start_pt);
                 //TODO: 需要弄清楚，是否是风管的不需要考虑最后一段直段
-                if last_dist > TUBI_TOL && matches!(current_tubing.tubi_size, TubiSize::BoreSize(_))
-                {
+                if last_dist > TUBI_TOL {
                     dbg!(last_dist);
                     //检查是否有一端是世界坐标原点
                     current_tubing.end_pt = bran_ttube_pt;
@@ -1990,6 +1989,7 @@ pub async fn gen_all_geos_data(
                     GNERAL_PRIM_NOUN_NAMES.map(String::from).to_vec(),
                 )
                     .await?;
+                #[cfg(debug_assertions)]
                 dbg!(&prim_refnos);
                 prim_refnos.into_iter().collect()
             } else {

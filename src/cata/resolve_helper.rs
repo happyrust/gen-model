@@ -353,11 +353,10 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
     geo.map_err(|x| anyhow::anyhow!(format!("几何体生成出错, 数据: {:?}", &gmse)))
 }
 
-pub fn resolve_dir_and_pos<T: PdmsDataInterface>(
+pub fn resolve_dir_and_pos(
     axis: &AxisParam,
     scom: &ScomInfo,
     context: &CataContext,
-    interface: Option<&T>,
 ) -> anyhow::Result<(Vec3, Vec3, Vec3)> {
     let mut dir_str = axis.direction.trim();
     let mut ref_dir_str = axis.ref_direction.trim();
@@ -376,7 +375,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(
                 .unwrap_or(-1);
             if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
                 let mut axis =
-                    resolve_axis_param(&scom.axis_params[indx], scom, context, interface);
+                    resolve_axis_param(&scom.axis_params[indx], scom, context, );
                 let flag = if is_neg { -1.0 } else { 1.0 };
                 dir = flag * mem::take(&mut axis.dir);
                 pos = flag * mem::take(&mut axis.pt);
@@ -385,7 +384,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(
             }
         }
     } else {
-        dir = parse_str_axis_to_vec3_or_default(dir_str, context, interface);
+        dir = parse_str_axis_to_vec3_or_default(dir_str, context);
     }
 
     if re.is_match(ref_dir_str) {
@@ -398,7 +397,7 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(
                 .unwrap_or(-1);
             if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
                 let mut axis =
-                    resolve_axis_param(&scom.axis_params[indx], scom, context, interface);
+                    resolve_axis_param(&scom.axis_params[indx], scom, context, );
                 let flag = if is_neg { -1.0 } else { 1.0 };
                 ref_dir = flag * mem::take(&mut axis.dir);
             } else {
@@ -407,17 +406,16 @@ pub fn resolve_dir_and_pos<T: PdmsDataInterface>(
         }
     } else {
         //unset 不存在 ref dir的情况
-        ref_dir = parse_str_axis_to_vec3_or_default(ref_dir_str, context, interface);
+        ref_dir = parse_str_axis_to_vec3_or_default(ref_dir_str, context);
     }
 
     return Ok((dir, ref_dir, pos));
 }
 
 //Y is N and Z is U
-pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(
+pub fn parse_ori_str_to_quat(
     ori_str: &str,
     context: &CataContext,
-    interface: Option<&T>,
 ) -> anyhow::Result<Quat> {
     let dir_strs = ori_str.split(" and ").collect::<Vec<_>>();
     // dbg!(&dir_strs);
@@ -447,7 +445,7 @@ pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(
             .replace("U", "Z")
             .replace("D", "-Z");
         // dbg!(&dir_str);
-        let dir = parse_str_axis_to_vec3_or_default(&dir_str, context, interface);
+        let dir = parse_str_axis_to_vec3_or_default(&dir_str, context);
         // dbg!(dir);
         comb_dir_str.push_str(f.as_str());
         match f.as_str() {
@@ -470,19 +468,17 @@ pub fn parse_ori_str_to_quat<T: PdmsDataInterface>(
     Ok(Quat::from_mat3(&mat))
 }
 
-pub fn parse_str_axis_to_vec3_or_default<T: PdmsDataInterface>(
+pub fn parse_str_axis_to_vec3_or_default(
     pdir: &str,
     context: &CataContext,
-    interface: Option<&T>,
 ) -> Vec3 {
-    parse_str_axis_to_vec3(pdir, context, interface).unwrap_or(Vec3::ZERO)
+    parse_str_axis_to_vec3(pdir, context).unwrap_or(Vec3::ZERO)
 }
 
 ///解析表达式里的axis
-pub fn parse_str_axis_to_vec3<T: PdmsDataInterface>(
+pub fn parse_str_axis_to_vec3(
     pdir: &str,
     context: &CataContext,
-    interface: Option<&T>,
 ) -> anyhow::Result<Vec3> {
     let dir_str = pdir.to_uppercase().replace("AXIS", "");
     let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();

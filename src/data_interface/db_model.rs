@@ -613,11 +613,13 @@ impl AiosDBManager {
 
         let db_paths =
             collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref()));
-        dbg!(&db_paths);
         let mut watcher = PdmsWatcher::load_from_json(None).unwrap_or(PdmsWatcher::new(db_paths));
-        dbg!(watcher.headers.len());
-        dbg!(watcher.file_name_full_path_map.len());
-
+        #[cfg(feature = "debug_watch")]
+        {
+            dbg!(&db_paths);
+            dbg!(watcher.headers.len());
+            dbg!(watcher.file_name_full_path_map.len());
+        }
         let mut mqtt_inst = new_mqtt_inst(&format!(
             "{}-{}-pub",
             db_option.location.as_str(),

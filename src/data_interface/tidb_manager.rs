@@ -173,7 +173,7 @@ impl PdmsDataInterface for AiosDBManager {
             t_types,
             depth,
         )
-        .await;
+            .await;
         t_refnos
     }
 
@@ -414,8 +414,8 @@ impl PdmsDataInterface for AiosDBManager {
         return UNIQUE(negatives)
         ",
         )
-        .bind_var("key", refno_url)
-        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+            .bind_var("key", refno_url)
+            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self
             .get_arango_db()
             .await?
@@ -495,8 +495,8 @@ impl PdmsDataInterface for AiosDBManager {
                     return distinct parent._key
         "#,
         )
-        .bind_var("keys", refno_urls)
-        .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+            .bind_var("keys", refno_urls)
+            .bind_var("neg_geo_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let refno_strs = self.get_arango_db().await?.aql_query::<String>(aql).await?;
         let refnos = refno_strs
             .iter()
@@ -521,8 +521,8 @@ impl PdmsDataInterface for AiosDBManager {
             return UNIQUE(refnos)
         "#,
         )
-        .bind_var("key", refno_url)
-        .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
+            .bind_var("key", refno_url)
+            .bind_var("geo_nouns", TOTAL_GEO_NOUN_NAMES.to_vec());
         let refno_strs = self
             .get_arango_db()
             .await?
@@ -556,8 +556,8 @@ impl PdmsDataInterface for AiosDBManager {
                 ]
         "#,
         )
-        .bind_var("key", refno_url)
-        .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
+            .bind_var("key", refno_url)
+            .bind_var("negative_nouns", GENRAL_NEG_NOUN_NAMES.to_vec());
         let result: HashMap<RefU64, Vec<RefU64>> = self
             .get_arango_db()
             .await?
@@ -793,7 +793,7 @@ impl PdmsDataInterface for AiosDBManager {
             }
             let is_spro = geo_am.get_type_str() == "SPRO"; //todo add other types
             gms.push(
-                query_gm_param(&geo_am, self, is_spro)
+                query_gm_param(&geo_am, is_spro)
                     .await
                     .unwrap_or_default(),
             );
@@ -822,14 +822,23 @@ impl PdmsDataInterface for AiosDBManager {
                     axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
                 }
             }
-            let gmref_name = match type_noun {
-                "SPRF" => "GSTR",
-                _ => "GMRE",
-            };
-            let mut gm_params = vec![];
-            if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
-                gm_params = self.query_gm_params(gmse_refno).await?;
-            }
+            // let gmref_name = match type_noun {
+            //     "SPRF" => "GSTR",
+            //     _ => "GMRE",
+            // };
+            // let mut gm_params = vec![];
+            // if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
+            let gmse_refno = aios_core::query_single_by_paths(
+                cata_refno,
+                &["->GMRE", "->GSTR"],
+                &["refno"],
+            )
+                .await
+                .map(|x| x.get_refno_lossy().unwrap_or_default())?;
+            #[cfg(debug_assertions)]
+            dbg!(gmse_refno);
+            let gm_params = self.query_gm_params(gmse_refno).await?;
+            // }
             let mut ngm_params = vec![];
             //-ve， 和design发生左右的负实体
             if let Some(gmse_refno) = attr_map.get_foreign_refno("NGMR") {
@@ -891,6 +900,11 @@ impl PdmsDataInterface for AiosDBManager {
             tubi_scom = self.get_cat_ref(desi_refno).await;
         }
 
+        #[cfg(debug_assertions)]
+        if is_tubi {
+            dbg!(tubi_scom);
+        }
+
         let scom_ref = if let Some(scom) = tubi_scom {
             scom
         } else {
@@ -901,25 +915,17 @@ impl PdmsDataInterface for AiosDBManager {
             tubi_scom = Some(scom);
             scom
         };
-
-        // if !scom_ref.is_valid() {
-        //     println!(
-        //         "{} 的CAT引用不存在，为 {}",
-        //         desi_refno.to_string(),
-        //         scom_ref.to_string()
-        //     );
-        //     return Ok(Default::default());
-        // }
-
         #[cfg(debug_assertions)]
         dbg!(scom_ref);
 
         let scom_info = self.get_or_create_scom_info(scom_ref).await?;
         // #[cfg(debug_assertions)]
-        // dbg!(&scom_info);
+        // if is_tubi {
+        //     dbg!(&scom_info);
+        // }
         let mut context = aios_core::get_or_create_cata_context(desi_refno, is_tubi).await.unwrap();
 
-        let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(self), Some(context));
+        let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(context));
         geom_info.map_err(|_| anyhow!("resolve_cata_comp failed"))
     }
 
@@ -937,16 +943,8 @@ impl PdmsDataInterface for AiosDBManager {
         let scom = self.get_or_create_scom_info(scom_refno).await?;
         let context = context.unwrap_or(aios_core::get_or_create_cata_context(refno, false).await?);
         for i in 0..scom.axis_params.len() {
-            // dbg!(&scom.axis_params[i]);
-            let axis = resolve_axis_param(&scom.axis_params[i], &scom, &context, Some(self));
-            // {
-            // Ok(axis) => {
+            let axis = resolve_axis_param(&scom.axis_params[i], &scom, &context);
             map.insert(scom.axis_param_numbers[i], axis);
-            // }
-            // Err(e) => {
-            //     println!("{} resolve_axis_params 出错： {:?}", refno, &e);
-            // }
-            // }
         }
         Ok(map)
     }

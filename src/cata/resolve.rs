@@ -19,28 +19,26 @@ pub static SCOM_INFO_MAP: Lazy<DashMap<RefU64, ScomInfo>> = Lazy::new(DashMap::n
 
 
 /// 求解axis的数值
-pub fn resolve_axis_params<T: PdmsDataInterface>(
+pub fn resolve_axis_params(
     refno: RefU64,
     scom: &ScomInfo,
     context: &CataContext,
-    interface: &T,
 ) -> BTreeMap<i32, CateAxisParam> {
     let mut map = BTreeMap::new();
     for i in 0..scom.axis_params.len() {
-        let axis = resolve_axis_param(&scom.axis_params[i], scom, context, Some(interface));
+        let axis = resolve_axis_param(&scom.axis_params[i], scom, context);
         map.insert(scom.axis_param_numbers[i], axis);
     }
     map
 }
 
 ///求解几何体，允许出错的情况，出错的需要跳过
-pub fn resolve_gms<T: PdmsDataInterface>(
+pub fn resolve_gms(
     des_refno: RefU64,
     gmse_raw_paras: &[GmParam],
     jusl_param: &Option<PlinParam>,
     context: &CataContext,
     axis_param_map: &BTreeMap<i32, CateAxisParam>,
-    interface: Option<&T>,
 ) -> Vec<CateGeoParam> {
     gmse_raw_paras
         .iter()
@@ -51,7 +49,7 @@ pub fn resolve_gms<T: PdmsDataInterface>(
                     return None;
                 }
                 let r = resolve_paragon_gm_params(des_refno, &g,
-                                                  jusl_param, context, axis_param_map, interface);
+                                                  jusl_param, context, axis_param_map);
                 return match r {
                     Ok(v) => {
                         Some(v)
@@ -70,15 +68,14 @@ pub fn resolve_gms<T: PdmsDataInterface>(
 }
 
 /// 解析gmes的参数
-pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
+pub fn resolve_paragon_gm_params(
     des_refno: RefU64,
     gm_param: &GmParam,
     jusl_param: &Option<PlinParam>,
     context: &CataContext,
     axis_param_map: &BTreeMap<i32, CateAxisParam>,
-    interface: Option<&T>,
 ) -> anyhow::Result<CateGeoParam> {
-    match resolve_gmse_params(gm_param, jusl_param, context, axis_param_map, interface) {
+    match resolve_gmse_params(gm_param, jusl_param, context, axis_param_map) {
         Ok(gm_data) => {
             panic::catch_unwind(|| {
                 resolve_to_cate_geo_params(&gm_data)
@@ -160,7 +157,7 @@ pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
 //         }
 
 //         //获取DTSE的expression
-//         // process_dtse_params(&scom_info.attr_map, interface, &mut cur_context).await;
+//         // process_dtse_params(&scom_info.attr_map, &mut cur_context).await;
 
 //         //保温层厚度
 //         context.insert("IPARA0".into(), "0".into());
@@ -182,12 +179,11 @@ pub fn resolve_paragon_gm_params<T: PdmsDataInterface>(
 // }
 
 
-pub fn resolve_gmse_params<T: PdmsDataInterface>(
+pub fn resolve_gmse_params(
     gm: &GmParam,
     jusl_param: &Option<PlinParam>,
     context: &CataContext,
     axis_param_map: &BTreeMap<i32, CateAxisParam>,
-    interface: Option<&T>,
 ) -> anyhow::Result<GmseParamData> {
     let angle = context.get(DDANGLE_STR).unwrap().parse::<f32>().unwrap_or(0.0).to_radians();
     let radius = context.get(DDRADIUS_STR).unwrap().parse::<f32>().unwrap_or(0.0);
@@ -279,7 +275,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
                 }
             }
         } else {
-            let dir = parse_str_axis_to_vec3_or_default(axis, context, interface);
+            let dir = parse_str_axis_to_vec3_or_default(axis, context);
             let axis = CateAxisParam {
                 refno: Default::default(),
                 number: 0,
@@ -303,7 +299,7 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
             + Vec2::new(eval_str_to_f32_or_default(&jusl.dxy[0], context,  "DIST"),
                         eval_str_to_f32_or_default(&jusl.dxy[1], context,  "DIST"));
 
-        plin_plax = parse_str_axis_to_vec3_or_default(&jusl.plax, context, interface);
+        plin_plax = parse_str_axis_to_vec3_or_default(&jusl.plax, context);
     }
     let type_name = gm.gm_type.clone();
     Ok(GmseParamData {
@@ -335,11 +331,10 @@ pub fn resolve_gmse_params<T: PdmsDataInterface>(
     })
 }
 
-pub fn resolve_axis_param<T: PdmsDataInterface>(
+pub fn resolve_axis_param(
     axis_param: &AxisParam,
     scom: &ScomInfo,
     context: &CataContext,
-    interface: Option<&T>,
 ) -> CateAxisParam {
     let key: String = axis_param.pconnect.replace("\n", "").replace(" ", "").into();
     let pconnect = if context.contains_key(&key) {
@@ -356,7 +351,7 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
         "PTAX" => {
             let d = eval_str_to_f32_or_default(&axis_param.distance, &context,  "DIST");
             let (dir, ref_dir, pos) =
-                resolve_dir_and_pos(axis_param, scom, context, interface).unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
+                resolve_dir_and_pos(axis_param, scom, context).unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
             CateAxisParam {
                 refno: axis_param.refno,
                 number,
@@ -373,7 +368,7 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
             let x = eval_str_to_f32_or_default(&axis_param.x, &context,  "DIST");
             let y = eval_str_to_f32_or_default(&axis_param.y, &context,  "DIST");
             let z = eval_str_to_f32_or_default(&axis_param.z, &context,  "DIST");
-            let (dir, ref_dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)
+            let (dir, ref_dir, pos) = resolve_dir_and_pos(axis_param, scom, context)
                 .unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
             // dbg!((axis_param.refno, dir));
             CateAxisParam {
@@ -389,7 +384,7 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
             }
         }
         "PTPOS" => {
-            let (dir, ref_dir, pos) = resolve_dir_and_pos(axis_param, scom, context, interface)
+            let (dir, ref_dir, pos) = resolve_dir_and_pos(axis_param, scom, context)
                 .unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
             let mut cate_axis = CateAxisParam {
                 number,
@@ -406,7 +401,7 @@ pub fn resolve_axis_param<T: PdmsDataInterface>(
                 if paras.len() == 2 {
                     let pnt_index = paras[1].parse::<i32>().unwrap_or(i32::MAX);
                     if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_index) {
-                        let axis = resolve_axis_param(&scom.axis_params[indx], scom, context, interface);
+                        let axis = resolve_axis_param(&scom.axis_params[indx], scom, context);
                         cate_axis.refno = axis_param.refno;
                         cate_axis.pt = axis.pt;
                     }
