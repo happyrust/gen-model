@@ -1,3 +1,15 @@
+use aios_core::get_default_pdms_db_info;
+use aios_core::options::DbOption;
+use aios_core::pdms_types::*;
+use aios_core::tool::db_tool::db1_dehash;
+use aios_core::types::*;
+use aios_core::SUL_DB;
+use dashmap::{DashMap, DashSet};
+use itertools::Itertools;
+use parse_pdms_db::parse::*;
+use sea_orm::{ConnectionTrait, Schema, Statement};
+use sqlx::{Connection, MySql, MySqlPool, Pool};
+use sqlx::{Error, Executor};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -6,21 +18,9 @@ use std::hash::Hash;
 use std::io::Read;
 use std::mem::take;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-
-use aios_core::get_default_pdms_db_info;
-use aios_core::options::DbOption;
-use aios_core::pdms_types::*;
-use aios_core::SUL_DB;
-use aios_core::tool::db_tool::db1_dehash;
-use aios_core::types::*;
-use dashmap::{DashMap, DashSet};
-use itertools::Itertools;
-use parse_pdms_db::parse::*;
-use sea_orm::{ConnectionTrait, Schema, Statement};
-use sqlx::{Connection, MySql, MySqlPool, Pool};
-use sqlx::{Error, Executor};
 
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -103,7 +103,6 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
 
     Ok(())
 }
-
 
 /// 初始化同步pdms数据到数据
 pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
@@ -372,6 +371,15 @@ pub async fn sync_total_async_threaded(
                     )
                     .await?;
                     dbg!("开始保存属性数据");
+                    let debug_refnos: Vec<RefU64> = db_option
+                        .debug_root_refnos
+                        .as_ref()
+                        .map(|x| {
+                            x.iter()
+                                .map(|x| RefU64::from_str(x).unwrap())
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
                     let mut join_set = tokio::task::JoinSet::new();
                     let mut save_atts_time = Instant::now();
                     for kv in type_ele_map.iter() {
@@ -386,6 +394,10 @@ pub async fn sync_total_async_threaded(
                             let mut uda_json_vec = vec![];
                             for refno in refnos {
                                 let att = total_attr_map_arc.get(refno).unwrap();
+
+                                if debug_refnos.contains(&att.get_refno().unwrap()) {
+                                    dbg!(&att);
+                                }
                                 let Some(json) = att.gen_sur_json() else {
                                     continue;
                                 };
