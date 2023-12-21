@@ -368,10 +368,10 @@ pub async fn sync_total_async_threaded(
                         &total_attr_map_arc,
                         db_no as i32,
                         &children_map_clone,
+                        &db_option,
                     )
                     .await?;
                     dbg!("开始保存属性数据");
-                    const ATTS_CHUNK_COUNT: usize = 100;
                     let mut join_set = tokio::task::JoinSet::new();
                     let mut save_atts_time = Instant::now();
                     for kv in type_ele_map.iter() {
@@ -381,7 +381,7 @@ pub async fn sync_total_async_threaded(
                             continue;
                         }
                         //UDA 还是要单独存，不然数据很容易混乱
-                        for refnos in &kv.value().iter().chunks(ATTS_CHUNK_COUNT) {
+                        for refnos in &kv.value().iter().chunks(db_option.att_chunk as _) {
                             let mut json_vec = vec![];
                             let mut uda_json_vec = vec![];
                             for refno in refnos {

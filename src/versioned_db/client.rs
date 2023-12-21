@@ -23,8 +23,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::time::Instant;
 use std::sync::Arc;
+use aios_core::options::DbOption;
 
-const JSON_CHUNK_COUNT: usize = 5_000;
+// const JSON_CHUNK_COUNT: usize = 5_000;
 
 // pub async fn save_versioned_pdms_eles(
 //     client: &TDBClient,
@@ -91,29 +92,16 @@ pub async fn save_pdms_eles_to_surreal(
     total_attr_map: &DashMap<RefU64, NamedAttrMap>,
     db_num: i32,
     children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
+    option: &DbOption,
 ) -> anyhow::Result<()> {
     use itertools::Itertools;
-    let noun_map: Arc<DashMap<u32, DashSet<u32>>> = Arc::new(DashMap::new());
-
     let keys = total_attr_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
-    let mut model_chunks = keys.par_chunks(JSON_CHUNK_COUNT).map(|chunk| {
+    let mut model_chunks = keys.par_chunks(option.pe_chunk as _).map(|chunk| {
         let mut model_chunk = vec![];
-        let noun_map_clone = noun_map.clone();
         for &refno in chunk {
             let att_map = total_attr_map.get(&refno).unwrap();
             let owner = att_map.get_refno_by_att_or_default("OWNER");
             let noun = att_map.get_type();
-            let owner_noun = total_attr_map
-                .get(&owner)
-                .map(|m| m.get_type())
-                .unwrap_or_default();
-            //可以提前准备，是固定好的，根据测试项目固定下来，下次可以不用，现在是调试用
-            //添加到noun_map
-            // noun_map_clone
-            //     .entry(db1_hash(&noun))
-            //     .or_insert(DashSet::new())
-            //     .insert(db1_hash(&owner_noun));
-
             let ele = pe::SPdmsElement {
                 id: refno.to_string(),
                 refno,
@@ -131,66 +119,12 @@ pub async fn save_pdms_eles_to_surreal(
 
             model_chunk.push(ele);
         }
-        // model_chunks.push(model_chunk);
         model_chunk
     }).collect::<Vec<_>>();
-
-    // for kv in noun_map.iter() {
-    //     let k = *kv.key();
-    //     let v = kv.iter().map(|x| *x).collect::<Vec<_>>();
-    //     graph.add_node(k);
-    //     graph.extend(v.iter().map(|&x| (k, x)));
-    // }
-
-    // let start_node = graph.add_node(db1_hash("CATA"));
-    // let end_node = graph.add_node(db1_hash("GMSE"));
-
-    // // dbg!((start_node, end_node));
-    // dbg!(graph.edges_directed(start_node, petgraph::Direction::Outgoing).count());
-
-    // //使用 all_simple_paths 函数找到所有路径
-    // let paths =
-    //     all_simple_paths::<Vec<_>, _>(&graph, start_node, end_node, 0, None).collect::<Vec<_>>();
-
-    // dbg!(paths.len());
-
-    // 遍历路径并计算距离
-    // for path in paths {
-    //     // let distance: i32 = path
-    //     //     .windows(2)
-    //     //     .map(|window| {
-    //     //         graph
-    //     //             .edge_weight(graph.find_edge(window[0], window[1]).unwrap())
-    //     //             .unwrap()
-    //     //     })
-    //     //     .sum();
-    //     let path_nouns = path.iter().map(|&x| db1_dehash(x)).collect::<Vec<_>>();
-    //     println!("Path: {:?}", &path_nouns);
-    // }
-
-    // {
-    //     //保存graph 到json文件
-    //     // 保存graph 到json文件
-    //     let graph_file = std::fs::File::create("./noun_graph.json").unwrap();
-    //     serde_json::to_writer(graph_file, &graph).unwrap();
-    // }
-
-    // return Ok(());
 
     let mut time = Instant::now();
     let mut join_set = tokio::task::JoinSet::new();
     for models in model_chunks {
-        //save to sql, todo 保存到tidb
-        if false {
-            // let db = sea_orm::Database::connect(&db_option.get_mysql_db_conn_str(project))
-            //     .await
-            //     .unwrap();
-            // futures.push(tokio::task::spawn(async move {
-            //   let test_models : Vec<Box<dyn ActiveModelTrait>> = vec![];
-            // let _ = aios_core::orm::PdmsElement::insert_many(models).exec(&db).await;
-            // }));
-            // break;
-        }
         let mut jsons_str = vec![];
         for m in models {
             jsons_str.push(m.gen_sur_json());
@@ -229,7 +163,7 @@ pub async fn save_pdms_eles_to_surreal(
             .collect::<Vec<String>>();
         all_relate_sqls.extend_from_slice(&relate_sqls);
     }
-    let mut chunks = all_relate_sqls.chunks(JSON_CHUNK_COUNT);
+    let mut chunks = all_relate_sqls.chunks(option.pe_chunk as _);
     for mut s in chunks {
         let sql = s.into_iter().join(";");
         relate_join_set.spawn(async move {
