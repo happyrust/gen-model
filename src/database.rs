@@ -271,18 +271,11 @@ pub async fn sync_total_async_threaded(
         is_replace = true;
     }
     let mut uda_map: HashMap<i32, AttrMap> = HashMap::new();
-    // let mut version_map = HashMap::new();
-    let only_update_dbinfo = db_option.only_update_dbinfo;
-    let only_sync_sys = db_option.only_sync_sys;
     let chunk_size = db_option.sync_chunk_size.unwrap_or(10_0000) as usize;
-
     let sync_tidb = db_option.sync_tidb.unwrap_or(false);
 
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string(); // 获取文件名
-                                                                                 // if !file_name.contains("amssys") {
-                                                                                 //     continue;
-                                                                                 // }
         {
             let mut file = File::open(&path).unwrap();
             let mut buf = vec![0u8; 60];
@@ -349,7 +342,6 @@ pub async fn sync_total_async_threaded(
                     let children_map_arc = children_map_clone.clone();
                     // 将部分数据保存到图数据库
                     if db_option.sync_graph_db.unwrap_or(true) {
-                        //if db_type == "CATA" || db_type == "DESI"
                         let arango_pool = connect_arangodb(&db_option).await?;
                         {
                             let database = arango_pool
@@ -379,7 +371,7 @@ pub async fn sync_total_async_threaded(
                     )
                     .await?;
                     dbg!("开始保存属性数据");
-                    const ATTS_CHUNK_COUNT: usize = 300;
+                    const ATTS_CHUNK_COUNT: usize = 100;
                     let mut join_set = tokio::task::JoinSet::new();
                     let mut save_atts_time = Instant::now();
                     for kv in type_ele_map.iter() {
@@ -394,9 +386,6 @@ pub async fn sync_total_async_threaded(
                             let mut uda_json_vec = vec![];
                             for refno in refnos {
                                 let att = total_attr_map_arc.get(refno).unwrap();
-                                // if *refno == RefU64::from_str("24575/1475").unwrap() {
-                                //     dbg!(att.value());
-                                // }
                                 let Some(json) = att.gen_sur_json() else {
                                     continue;
                                 };

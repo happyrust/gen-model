@@ -24,7 +24,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 use std::sync::Arc;
 
-const JSON_CHUNK_COUNT: usize = 10_000;
+const JSON_CHUNK_COUNT: usize = 5_000;
 
 // pub async fn save_versioned_pdms_eles(
 //     client: &TDBClient,
@@ -93,12 +93,6 @@ pub async fn save_pdms_eles_to_surreal(
     children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
 ) -> anyhow::Result<()> {
     use itertools::Itertools;
-    // let mut model_chunks: Vec<Vec<SPdmsElement>> = vec![];
-    //加载，然后生成所有的noun的graph，通过graph，来快速定位
-    //如果这个文件已经存在，这里相当于是追加
-
-    // let graph_file = std::fs::File::open("./noun_graph.json").unwrap();
-    // let mut graph: GraphMap<u32, i32, Directed> = serde_json::from_reader(graph_file).unwrap_or(DiGraphMap::new());
     let noun_map: Arc<DashMap<u32, DashSet<u32>>> = Arc::new(DashMap::new());
 
     let keys = total_attr_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
