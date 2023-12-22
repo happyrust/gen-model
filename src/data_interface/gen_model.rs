@@ -770,7 +770,7 @@ pub async fn gen_cata_geos(
                             // todo make it by using surreal
                             let pos_neg_map: HashMap<RefU64, Vec<RefU64>> = if gmse_refno.is_valid()
                             {
-                                aios_core::query_refnos_has_pos_neg_map(&[gmse_refno], Some(false))
+                                aios_core::query_refnos_has_pos_neg_map(&[gmse_refno], Some(true))
                                     .await
                                     .unwrap_or_default()
                             } else {
