@@ -1222,11 +1222,11 @@ pub async fn gen_cata_geos(
         // dbg!(&tubi_att);
         let tubi_cat_ref = tubi_att.get_foreign_refno("CATR").unwrap_or_default();
         // dbg!(&tubi_cat_ref);
-        let mut tubi_size =
+        let mut h_tubi_size =
             query_tubi_size(&mgr, branch_refno, tubi_cat_ref, is_hang).await?;
         // dbg!(&tubi_size);
         //todo 其实这里应该待定比较好
-        let mut tubi_geo_hash = if matches!(tubi_size, TubiSize::BoxSize(_)) {
+        let mut tubi_geo_hash = if matches!(h_tubi_size, TubiSize::BoxSize(_)) {
             BOXI_GEO_HASH
         } else {
             TUBI_GEO_HASH
@@ -1243,7 +1243,7 @@ pub async fn gen_cata_geos(
             desire_leave_dir: hdir,
             leave_ref_dir: None,
             desire_arrive_dir: Default::default(),
-            tubi_size,
+            tubi_size: h_tubi_size,
         };
 
         let bran_owner_type = aios_core::get_type_name(branch_att.get_owner())
@@ -1284,7 +1284,7 @@ pub async fn gen_cata_geos(
                             current_tubing.arrive_refno,
                             gen_bytes_hash::<_, 64>(&aabb),
                             gen_bytes_hash::<_, 64>(&t),
-                            serde_json::to_string(&tubi_size).unwrap_or_default(),
+                            serde_json::to_string(&h_tubi_size).unwrap_or_default(),
                         ));
                         // 将 tubi 数据保存到图数据库
                         let key = h_ref.hash_with_another_refno(tref);
@@ -1305,7 +1305,7 @@ pub async fn gen_cata_geos(
                                 end_pt: current_tubing.end_pt,
                                 att_type: branch_att.get_type_str().to_string(),
                                 extra_type: "".to_string(),
-                                tubi_size,
+                                tubi_size: h_tubi_size,
                                 bran_name: bran_name.clone(),
                             });
                     }
@@ -1316,7 +1316,6 @@ pub async fn gen_cata_geos(
             continue;
         }
 
-        let last_child = children.last().unwrap().clone();
         //不包含atta的元件集合
         let mut bran_comp_vec = vec![];
         //第一遍完成后，然后生成tubing
@@ -1366,17 +1365,24 @@ pub async fn gen_cata_geos(
                             if current_tubing.is_dir_ok() {
                                 // dbg!(&current_tubing);
                                 // 检测到有重叠的情况，就需要忽略
-                                let lstube_cat_ref = aios_core::query_single_by_paths(
-                                    current_tubing.leave_refno,
-                                    &["->LSTU->CATR"],
-                                    &["refno"],
-                                )
-                                    .await
-                                    .map(|x| x.get_refno_lossy().unwrap_or_default()).unwrap_or_default();
-                                dbg!(&lstube_cat_ref);
-                                current_tubing.tubi_size =
-                                    query_tubi_size(&mgr, current_tubing.leave_refno, lstube_cat_ref, is_hang)
-                                        .await?;
+                                //如果 leave 的 还是 bran 的参考号，说明还是要用h_tubi_size
+                                if current_tubing.leave_refno == branch_refno {
+                                    dbg!("管道 bran 开头有个直段.");
+                                    current_tubing.tubi_size = h_tubi_size;
+                                } else {
+                                    //如果不是，就需要重新计算
+                                    let lstube_cat_ref = aios_core::query_single_by_paths(
+                                        current_tubing.leave_refno,
+                                        &["->LSTU->CATR"],
+                                        &["refno"],
+                                    )
+                                        .await
+                                        .map(|x| x.get_refno_lossy().unwrap_or_default()).unwrap_or_default();
+                                    dbg!(&lstube_cat_ref);
+                                    current_tubing.tubi_size =
+                                        query_tubi_size(&mgr, current_tubing.leave_refno, lstube_cat_ref, is_hang)
+                                            .await?;
+                                }
                                 dbg!(&current_tubing.tubi_size);
                                 tubi_geo_hash = if matches!(current_tubing.tubi_size, TubiSize::BoxSize(_)) {
                                     BOXI_GEO_HASH
@@ -1419,7 +1425,7 @@ pub async fn gen_cata_geos(
                                             current_tubing.leave_refno, current_tubing.arrive_refno,
                                             gen_bytes_hash::<_, 64>(&aabb),
                                             gen_bytes_hash::<_, 64>(&t),
-                                            serde_json::to_string(&tubi_size).unwrap_or_default(),
+                                            serde_json::to_string(&h_tubi_size).unwrap_or_default(),
                                         ));
                                     let key = current_tubing
                                         .leave_refno
@@ -1533,7 +1539,7 @@ pub async fn gen_cata_geos(
                                     current_tubing.leave_refno, current_tubing.arrive_refno,
                                     gen_bytes_hash::<_, 64>(&aabb),
                                     gen_bytes_hash::<_, 64>(&t),
-                                    serde_json::to_string(&tubi_size).unwrap_or_default(),
+                                    serde_json::to_string(&h_tubi_size).unwrap_or_default(),
                                 )
                             );
                             let key = current_tubing
@@ -1773,8 +1779,11 @@ pub async fn gen_all_geos_data(
                 //求出元件对应的outside bore
                 branch_refnos_map.insert(refno, children);
             }
-            ///获取重用的信息
-            dbg!(&target_bran_hanger_refnos);
+            //获取重用的信息
+            #[cfg(debug_assertions)]
+            {
+                dbg!(&target_bran_hanger_refnos);
+            }
             let target_bran_reuse_cata_map = if is_incr_update || is_debug {
                 let map = aios_core::query_group_by_cata_hash(&target_bran_hanger_refnos)
                     .await
