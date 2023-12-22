@@ -396,7 +396,7 @@ pub async fn sync_total_async_threaded(
                                 let att = total_attr_map_arc.get(refno).unwrap();
 
                                 if debug_refnos.contains(&att.get_refno().unwrap()) {
-                                    dbg!(&att);
+                                    dbg!(att.value());
                                 }
                                 let Some(json) = att.gen_sur_json() else {
                                     continue;
