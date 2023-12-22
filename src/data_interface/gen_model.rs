@@ -141,9 +141,6 @@ pub async fn gen_prim_geos(
                     let mut polygons = vec![];
                     for pgo_refno in pgo_refnos {
                         let mut verts = vec![];
-                        // let v_att = mgr_clone.get_children_attrs(pgo_refno).unwrap_or_default();
-                        //todo 改成只获取需要的数据
-                        //使用macro 也可以
                         let v_att = aios_core::get_children_named_attmaps(pgo_refno)
                             .await
                             .unwrap_or_default();
@@ -779,6 +776,7 @@ pub async fn gen_cata_geos(
                             } else {
                                 HashMap::new()
                             };
+                            dbg!(&pos_neg_map);
                             let mut neg_own_pos_map: HashMap<RefU64, RefU64> = pos_neg_map
                                 .iter()
                                 .map(|(k, negs)| negs.iter().map(|x| (*x, *k)))
@@ -827,10 +825,6 @@ pub async fn gen_cata_geos(
                                 if !brep_shape.check_valid() {
                                     continue;
                                 }
-                                // if refno == RefU64::from_two_nums(15194, 5799){
-                                //     continue;
-                                // }
-                                // dbg!("shape refno", refno);
                                 let mut trans = brep_shape.get_trans();
                                 let is_neg = neg_own_pos_map.contains_key(&refno);
                                 let geo_hash = brep_shape.hash_unit_mesh_params();
@@ -882,6 +876,13 @@ pub async fn gen_cata_geos(
                                         local_mat = local_mat * t_mat * s_mat * inv_t_mat;
                                     }
                                     let new_mesh = mesh.transform_by(&(local_mat));
+                                    #[cfg(feature = "debug_obj_export")]
+                                    {
+                                        let _ = std::fs::create_dir_all("models");
+                                        new_mesh
+                                            .export_obj(false, &format!("models/{}.obj", refno.to_string()))
+                                            .expect("TODO: panic message");
+                                    }
                                     manifold_map.insert(refno, new_mesh.into());
                                 };
                                 if is_ngmr {
@@ -1003,9 +1004,6 @@ pub async fn gen_cata_geos(
                                 #[cfg(debug_assertions)]
                                 dbg!(origin.insts.len());
                                 if origin.insts.len() > 0 {
-                                    // let lpyra = origin.insts.iter().filter(|x|
-                                    //     matches!(x.geo_param, PdmsGeoParam::PrimLPyramid(_))).collect::<Vec<_>>();
-                                    // dbg!(lpyra);
                                     shape_insts_data.insert_info(ele_refno, geos_info.clone());
                                     shape_insts_data
                                         .insert_geos_data(geos_info.get_inst_key(), origin.clone());
@@ -2188,7 +2186,7 @@ pub async fn gen_all_geos_data(
                                     {
                                         let _ = std::fs::create_dir_all("models");
                                         new_mesh
-                                            .export_obj(false, &format!("models/{}.obj", t_refno))
+                                            .export_obj(false, &format!("models/{}.obj", t_refno.to_string()))
                                             .expect("TODO: panic message");
                                     }
 
@@ -2577,13 +2575,6 @@ pub async fn gen_all_geos_data(
                                 local_mat = local_mat * t_mat * s_mat * inv_t_mat;
                             }
                             local_mat = relative_mat * local_mat;
-                            #[cfg(debug_assertions)]
-                            {
-                                // if refno.get_1() == 209883 {
-                                //     mesh.export_obj(false, &format!("{}.obj", g.refno))
-                                //         .expect("TODO: panic message");
-                                // }
-                            }
                             //todo 负实体，默认去增加一下数据的精度值，而不是盲目缩放，比如round 1， round 2
                             let mut neg_manifold: ManifoldRust = (mesh, &local_mat).into();
                             #[cfg(debug_assertions)]
