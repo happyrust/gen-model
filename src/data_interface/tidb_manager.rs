@@ -792,9 +792,9 @@ impl PdmsDataInterface for AiosDBManager {
             }
             let is_spro = geo_am.get_type_str() == "SPRO"; //todo add other types
             let geom = query_gm_param(&geo_am, is_spro).await.unwrap_or_default();
-            if is_spro {
-                dbg!(&geom);
-            }
+            // if is_spro {
+            //     dbg!(&geom);
+            // }
             gms.push(geom);
         }
         // dbg!(&gms);
@@ -821,12 +821,6 @@ impl PdmsDataInterface for AiosDBManager {
                     axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
                 }
             }
-            // let gmref_name = match type_noun {
-            //     "SPRF" => "GSTR",
-            //     _ => "GMRE",
-            // };
-            // let mut gm_params = vec![];
-            // if let Some(gmse_refno) = attr_map.get_foreign_refno(gmref_name) {
             let gmse_refno =
                 aios_core::query_single_by_paths(cata_refno, &["->GMRE", "->GSTR"], &["refno"])
                     .await
@@ -834,7 +828,6 @@ impl PdmsDataInterface for AiosDBManager {
             #[cfg(debug_assertions)]
             dbg!(gmse_refno);
             let gm_params = self.query_gm_params(gmse_refno).await?;
-            // }
             let mut ngm_params = vec![];
             //-ve， 和design发生左右的负实体
             if let Some(gmse_refno) = attr_map.get_foreign_refno("NGMR") {
