@@ -4,6 +4,7 @@ use std::mem::take;
 use aios_core::geom_types::RvmGeoInfo;
 use aios_core::pdms_types::*;
 use aios_core::SUL_DB;
+use aios_core::shape::pdms_shape::RsVec3;
 use aios_core::types::*;
 use bb8_arangodb::arangors_lite::AqlQuery;
 use bevy_transform::prelude::Transform;
@@ -82,6 +83,7 @@ pub async fn save_mesh_instance_data(
     let mut aabb_map: HashMap<u64, String> = HashMap::new();
     let mut transform_map: HashMap<u64, String> = HashMap::new();
     let mut param_map = HashMap::new();
+    let mut vec3_map = HashMap::new();
     let chunk_size = 300;
     for chunk in keys.chunks(chunk_size) {
         let mut instances = vec![];
@@ -92,7 +94,6 @@ pub async fn save_mesh_instance_data(
             let json = serde_json::to_value(v).unwrap();
             instances.push(json);
             for inst in &v.insts {
-                
                 let aabb_hash = gen_bytes_hash::<_, 64>(&inst.aabb);
                 let tansform_hash = gen_bytes_hash::<_, 64>(&inst.transform);
                 //如果aabb已经保存到map了，直接跳过，否则插入
@@ -109,15 +110,25 @@ pub async fn save_mesh_instance_data(
                 if !param_map.contains_key(&param_hash) {
                     param_map.insert(param_hash, serde_json::to_string(&inst.geo_param).unwrap());
                 }
+                let key_pts = inst.geo_param.key_points();
+                let mut pt_hashes = vec![];
+                for k in key_pts{
+                    let pts_hash = k.gen_hash();
+                    pt_hashes.push(format!("vec3:⟨{}⟩", pts_hash));
+                    if !vec3_map.contains_key(&pts_hash) {
+                        vec3_map.insert(pts_hash, serde_json::to_string(&k).unwrap());
+                    }
+                }
                 //还需要加入geo_param的指向，param 是否填原始参数？ param=param:{}
                 //使用cata_key -> inst_geos
                 let relate_sql = format!(
-                    "relate inst_info:{}->geo_relate->inst_geo:⟨{}⟩ set trans=trans:⟨{}⟩, geom_refno=pe:{}, param=param:⟨{}⟩",
+                    "relate inst_info:{}->geo_relate->inst_geo:⟨{}⟩ set trans=trans:⟨{}⟩, geom_refno=pe:{}, param=param:⟨{}⟩, pts=[{}]",
                     v.inst_key,
                     inst.geo_hash,
                     tansform_hash,
                     inst.refno,
-                    param_hash
+                    param_hash,
+                    pt_hashes.join(",")
                 );
                 // if inst.refno == RefU64::from_two_nums(15194, 4162){
                 //     dbg!(&relate_sql);
@@ -127,7 +138,6 @@ pub async fn save_mesh_instance_data(
                 json_vec.push(inst.gen_geo_sur_json());
             }
         }
-        // println!("{}", sur_jsons.join(","));
         let aql = AqlQuery::new(r#"
                     with @@collection
                     LET data = @elements
@@ -166,7 +176,6 @@ pub async fn save_mesh_instance_data(
     let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
     for chunk in keys.chunks(chunk_size) {
         let mut instances = vec![];
-        // let mut tubi_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_tubi_map.get(k).unwrap();
             let json = serde_json::to_value(v).unwrap();
@@ -233,11 +242,24 @@ pub async fn save_mesh_instance_data(
                     serde_json::to_string(&v.world_transform).unwrap(),
                 );
             }
+            // 变换到世界坐标系中，方便计算
+            let mut pt_hashes: Vec<String> = vec![];
+            for (_, k) in &v.ptset_map{
+                let pts_hash = RsVec3(v.world_transform * k.pt).gen_hash();
+                pt_hashes.push(format!("vec3:⟨{}⟩", pts_hash));
+                if !vec3_map.contains_key(&pts_hash) {
+                    vec3_map.insert(pts_hash, serde_json::to_string(&k).unwrap());
+                }
+            }
+
+            //arrive 和 leave 需要用 index
+            //这里的 pts，存储的时点集信息
             inst_relate_vec.push(format!(
-                "relate pe:{k}->inst_relate->inst_info:{} set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=0",
+                "relate pe:{k}->inst_relate->inst_info:{} set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=0, pts=[{}]",
                 v.id(),
                 aabb_hash,
                 tansform_hash,
+                pt_hashes.join(",")
             ));
         }
         let aql = AqlQuery::new(r#"
@@ -292,6 +314,11 @@ pub async fn save_mesh_instance_data(
             let json = serde_json::to_value(v).unwrap();
             instances.push(json);
             json_vec.push(v.gen_sur_json());
+
+            if v.aabb.is_none() {
+                dbg!(k);
+                continue;
+            }
 
             let aabb = v.aabb.unwrap();
             let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
@@ -452,6 +479,22 @@ pub async fn save_mesh_instance_data(
                 jsons.push(json);
             }
             let sql = format!("INSERT IGNORE INTO param [{}]", jsons.join(","));
+            join_set.spawn(async move {
+                SUL_DB.query(sql).await.unwrap();
+            });
+        }
+    }
+
+    if !vec3_map.is_empty() {
+        let keys = vec3_map.keys().collect::<Vec<_>>();
+        for chunk in keys.chunks(100) {
+            let mut jsons = vec![];
+            for &&k in chunk {
+                let v = vec3_map.get(&k).unwrap();
+                let json = format!("{{'id':vec3:⟨{}⟩, 'd':{}}}", k, v);
+                jsons.push(json);
+            }
+            let sql = format!("INSERT IGNORE INTO vec3 [{}]", jsons.join(","));
             join_set.spawn(async move {
                 SUL_DB.query(sql).await.unwrap();
             });

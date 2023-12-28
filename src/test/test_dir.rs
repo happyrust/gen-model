@@ -22,11 +22,11 @@ fn parse_axis() {
     };
     // context.insert("RPRO_CPAR".into(), "DESIGN PARAM 14".into());
     let str = "AXIS -Y ( ATAN ( ( DESP[2 ] / 2 + DESP[10 ] ) / ( DESP[3 ] / 2 - DESP[11 ] ) ) ) X";
-    let r = parse_str_axis_to_vec3::<AiosDBManager>(str, &cata_context, None);
+    let r = parse_str_axis_to_vec3(str, &cata_context);
     dbg!(r);
     //AXIS -Y ( ATANT ( 0 - DESP[10 ] - ( DESP[4 ] - DESP[5 ] ) / 2 , 0 - DESP[11 ] ) ) -X
     let str = "AXIS -Y (ATANT((DESP[10]-(DESP[4]-DESP[5])/2),(0-DESP[11]))) X";
-    let r = parse_str_axis_to_vec3::<AiosDBManager>(str, &cata_context, None);
+    let r = parse_str_axis_to_vec3(str, &cata_context);
     dbg!(r);
 }
 
@@ -38,7 +38,7 @@ fn parse_ori() {
         context,
         is_tubi: false,
     };
-    let ori = parse_ori_str_to_quat::<AiosDBManager>(str, &cata_context, None);
+    let ori = parse_ori_str_to_quat(str, &cata_context);
     dbg!(ori);
 }
 

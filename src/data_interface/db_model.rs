@@ -79,7 +79,7 @@ impl AiosDBManager {
         let mut mgr = Self::init(&db_option).await?;
         //加载空间树
         if db_option.load_spatial_tree {
-            mgr.compute_aabb_trees().await?;
+            // mgr.compute_aabb_trees().await?;
         }
         Ok(mgr)
     }
@@ -243,199 +243,196 @@ impl AiosDBManager {
         f.await.expect("demo_mqtt_requests panic");
     }
 
-    pub async fn compute_aabb_trees(&mut self) -> anyhow::Result<bool> {
-        //测试分页查询
-        let mut rstar_objs = vec![];
-        let mut offset = 0;
-        let database = self.get_arango_db().await?;
-        loop {
-            //需要排除负实体
-            let aql = AqlQuery::new(
-                r#"
-            with pdms_inst_infos
-            FOR doc IN pdms_inst_infos
-                LIMIT @offset, @batch_size
-                filter doc.aabb != null
-                RETURN [
-                    doc._key,
-                    doc.aabb,
-                ]
-        "#,
-            )
-            .bind_var("offset", offset)
-            .bind_var("batch_size", 5000);
-            offset += 5000;
-            if let Ok(refno_aabbs) = database.aql_query::<(String, Aabb)>(aql).await {
-                if refno_aabbs.is_empty() {
-                    break;
-                }
-                for (refno_str, aabb) in refno_aabbs {
-                    if aabb.extents().magnitude().is_finite() {
-                        let refno = RefU64::from_str(&refno_str).unwrap();
-                        rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, refno));
-                    }
-                }
-            } else {
-                break;
-            }
-        }
+    // pub async fn compute_aabb_trees(&mut self) -> anyhow::Result<bool> {
+    //     //测试分页查询
+    //     let mut rstar_objs = vec![];
+    //     let mut offset = 0;
+    //     let database = self.get_arango_db().await?;
+    //     loop {
+    //         //需要排除负实体
+    //         let aql = AqlQuery::new(
+    //             r#"
+    //         with pdms_inst_infos
+    //         FOR doc IN pdms_inst_infos
+    //             LIMIT @offset, @batch_size
+    //             filter doc.aabb != null
+    //             RETURN [
+    //                 doc._key,
+    //                 doc.aabb,
+    //             ]
+    //     "#,
+    //         )
+    //         .bind_var("offset", offset)
+    //         .bind_var("batch_size", 5000);
+    //         offset += 5000;
+    //         if let Ok(refno_aabbs) = database.aql_query::<(String, Aabb)>(aql).await {
+    //             if refno_aabbs.is_empty() {
+    //                 break;
+    //             }
+    //             for (refno_str, aabb) in refno_aabbs {
+    //                 if aabb.extents().magnitude().is_finite() {
+    //                     let refno = RefU64::from_str(&refno_str).unwrap();
+    //                     rstar_objs.push(RStarBoundingBox::from_aabb(&aabb, refno));
+    //                 }
+    //             }
+    //         } else {
+    //             break;
+    //         }
+    //     }
 
-        dbg!(offset);
-        dbg!(rstar_objs.len());
+    //     dbg!(offset);
+    //     dbg!(rstar_objs.len());
 
-        self.rtree = Some(AccelerationTree::load(rstar_objs));
-        dbg!(self.rtree.as_ref().unwrap().size());
+    //     // 存储在全局变量里
+    //     self.rtree = Some(AccelerationTree::load(rstar_objs));
+    //     dbg!(self.rtree.as_ref().unwrap().size());
 
-        let aql = AqlQuery::new(
-            r#"
-            with room_eles
-            FOR doc IN room_eles
-                filter doc.aabb != null
-                return doc
-                // RETURN [
-                //     doc._key,
-                //     doc.aabb,
-                // ]
-        "#,
-        );
-        let mut room_rstar_objs = vec![];
-        if let Ok(room_eles) = database.aql_query::<RoomElement>(aql).await {
-            for room_ele in room_eles {
-                if room_ele.aabb.is_some() {
-                    for panel in &room_ele.panels {
-                        room_rstar_objs.push(RStarBoundingBox::from_aabb(&panel.aabb, panel.refno));
-                        self.room_panel_info_map.insert(panel.refno, panel.clone());
-                    }
-                }
-                self.room_info_map.insert(room_ele.refno, room_ele);
-            }
-            self.room_panels_rtree = Some(AccelerationTree::load(room_rstar_objs));
-            dbg!(self.room_panels_rtree.as_ref().unwrap().size());
-        }
+    //     let aql = AqlQuery::new(
+    //         r#"
+    //         with room_eles
+    //         FOR doc IN room_eles
+    //             filter doc.aabb != null
+    //             return doc
+    //     "#,
+    //     );
+    //     let mut room_rstar_objs = vec![];
+    //     if let Ok(room_eles) = database.aql_query::<RoomElement>(aql).await {
+    //         for room_ele in room_eles {
+    //             if room_ele.aabb.is_some() {
+    //                 for panel in &room_ele.panels {
+    //                     room_rstar_objs.push(RStarBoundingBox::from_aabb(&panel.aabb, panel.refno));
+    //                     self.room_panel_info_map.insert(panel.refno, panel.clone());
+    //                 }
+    //             }
+    //             self.room_info_map.insert(room_ele.refno, room_ele);
+    //         }
+    //         self.room_panels_rtree = Some(AccelerationTree::load(room_rstar_objs));
+    //         dbg!(self.room_panels_rtree.as_ref().unwrap().size());
+    //     }
 
-        Ok(true)
-    }
+    //     Ok(true)
+    // }
 
-    ///计算房间数据
-    async fn calculate_room(
-        &self,
-        info: &EleGeosInfo,
-        inst_geos: &Vec<EleInstGeo>,
-        rtree: &AccelerationTree,
-    ) -> anyhow::Result<Vec<RefU64>> {
-        let mut withing_room_items = vec![];
-        let room_refno = info.refno;
-        let database = self.get_arango_db().await?;
-        if let Some(room_abb) = info.aabb {
-            withing_room_items = rtree
-                .locate_intersecting_bounds(&room_abb)
-                .collect::<Vec<_>>();
+    //计算房间数据
+    // async fn calculate_room(
+    //     &self,
+    //     info: &EleGeosInfo,
+    //     inst_geos: &Vec<EleInstGeo>,
+    //     rtree: &AccelerationTree,
+    // ) -> anyhow::Result<Vec<RefU64>> {
+    //     let mut withing_room_items = vec![];
+    //     let room_refno = info.refno;
+    //     let database = self.get_arango_db().await?;
+    //     if let Some(room_abb) = info.aabb {
+    //         withing_room_items = rtree
+    //             .locate_intersecting_bounds(&room_abb)
+    //             .collect::<Vec<_>>();
 
-            let hashes = inst_geos.iter().map(|x| x.geo_hash).collect::<Vec<_>>();
-            let room_mesh_mgr = query_pdms_mesh_aql(&database, hashes.iter())
-                .await
-                .unwrap_or_default();
-            for (&hash, geo) in hashes.iter().zip(inst_geos) {
-                if let Some(room_mesh) = room_mesh_mgr.get_mesh(hash) {
-                    let t = info.get_geo_world_transform(geo);
-                    let collider_mesh = room_mesh.get_tri_mesh(t.compute_matrix());
-                    let mut outer_refnos = vec![];
-                    //需要批量去获取数据
+    //         let hashes = inst_geos.iter().map(|x| x.geo_hash).collect::<Vec<_>>();
+    //         let room_mesh_mgr = query_pdms_mesh_aql(&database, hashes.iter())
+    //             .await
+    //             .unwrap_or_default();
+    //         for (&hash, geo) in hashes.iter().zip(inst_geos) {
+    //             if let Some(room_mesh) = room_mesh_mgr.get_mesh(hash) {
+    //                 let t = info.get_geo_world_transform(geo);
+    //                 let collider_mesh = room_mesh.get_tri_mesh(t.compute_matrix());
+    //                 let mut outer_refnos = vec![];
+    //                 //需要批量去获取数据
 
-                    for (refno, aabb) in &withing_room_items {
-                        //检查目标的坐标点不在它自身包围盒的情况，这种就需要用相交的算法去计算
-                        //check 是否包含在房间内
-                        let contain_point = match collider_mesh.cast_local_ray_and_get_normal(
-                            &Ray::new(aabb.center(), Vector::new(0.0, 0.0, 1.0)),
-                            100000.0,
-                            false,
-                        ) {
-                            Some(intersection) => collider_mesh.is_backface(intersection.feature),
-                            None => false,
-                        };
-                        if !contain_point {
-                            outer_refnos.push(*refno);
-                        }
-                        //如果是风管，就需要这么去检测是否发生碰撞
-                        //后续需要用包围盒再去判断一次
-                        // collider_mesh.intersection_with_aabb();
-                    }
+    //                 for (refno, aabb) in &withing_room_items {
+    //                     //检查目标的坐标点不在它自身包围盒的情况，这种就需要用相交的算法去计算
+    //                     //check 是否包含在房间内
+    //                     let contain_point = match collider_mesh.cast_local_ray_and_get_normal(
+    //                         &Ray::new(aabb.center(), Vector::new(0.0, 0.0, 1.0)),
+    //                         100000.0,
+    //                         false,
+    //                     ) {
+    //                         Some(intersection) => collider_mesh.is_backface(intersection.feature),
+    //                         None => false,
+    //                     };
+    //                     if !contain_point {
+    //                         outer_refnos.push(*refno);
+    //                     }
+    //                     //如果是风管，就需要这么去检测是否发生碰撞
+    //                     //后续需要用包围盒再去判断一次
+    //                     // collider_mesh.intersection_with_aabb();
+    //                 }
 
-                    //排除room的类型
-                    withing_room_items
-                        .retain(|(refno, _)| !outer_refnos.contains(refno) && *refno != room_refno);
+    //                 //排除room的类型
+    //                 withing_room_items
+    //                     .retain(|(refno, _)| !outer_refnos.contains(refno) && *refno != room_refno);
 
-                    // dbg!(&withing_room_refnos);
-                }
-            }
-            //再次过滤room，通过判断位置是否在room的mesh里来判断
-        }
+    //                 // dbg!(&withing_room_refnos);
+    //             }
+    //         }
+    //         //再次过滤room，通过判断位置是否在room的mesh里来判断
+    //     }
 
-        return Ok(withing_room_items.iter().map(|x| x.0).collect());
-    }
+    //     return Ok(withing_room_items.iter().map(|x| x.0).collect());
+    // }
 
-    ///计算所有房间包含的其他参考号
-    pub async fn calculate_rooms(&self) -> anyhow::Result<()> {
-        let rtree = self
-            .rtree
-            .as_ref()
-            .ok_or(anyhow::anyhow!("空间树未生成。"))?;
-        let database = self.get_arango_db().await?;
-        //指定哪个site下有房间节点
-        let Some(room_root_refnos) = &self.db_option.room_root_refnos else {
-            return Ok(());
-        };
+    // //计算所有房间包含的其他参考号
+    // pub async fn calculate_rooms(&self) -> anyhow::Result<()> {
+    //     let rtree = self
+    //         .rtree
+    //         .as_ref()
+    //         .ok_or(anyhow::anyhow!("空间树未生成。"))?;
+    //     let database = self.get_arango_db().await?;
+    //     //指定哪个site下有房间节点
+    //     let Some(room_root_refnos) = &self.db_option.room_root_refnos else {
+    //         return Ok(());
+    //     };
 
-        let mut room_eles_map: HashMap<RefU64, (Aabb, Vec<RefU64>)> = HashMap::new();
-        let mut room_panels_map: HashMap<RefU64, Vec<RoomPanelElement>> = HashMap::new();
-        for r in room_root_refnos {
-            let Ok(room_root_refno) = RefU64::from_str(r) else {
-                continue;
-            };
-            let room_panels =
-                query_deep_children_refnos_fuzzy(&database, &[room_root_refno], &["PANE"]).await?;
-            //以panel的owner为房间的参考号
-            println!("房间下的panel数量为: {}", room_panels.len());
-            let inst_data = query_insts_shape_data(
-                &database,
-                &room_panels,
-                Some(&[GeoBasicType::Pos, GeoBasicType::Compound]),
-            )
-            .await?;
-            for (panel_refno, info) in &inst_data.inst_info_map {
-                let Some(inst_geos) = inst_data.get_inst_geos(info) else {
-                    continue;
-                };
-                let Some(aabb) = info.aabb else {
-                    continue;
-                };
-                let r = self.calculate_room(info, inst_geos, rtree).await?;
-                let room_refno = self.get_owner(info.refno);
-                let room_panel_ele = RoomPanelElement {
-                    refno: *panel_refno,
-                    aabb,
-                    inst_geo: inst_geos.first().cloned().unwrap_or_default(),
-                    transform: info.world_transform,
-                };
-                if let Some((room_aabb, refnos)) = room_eles_map.get_mut(&room_refno) {
-                    room_aabb.merge(&aabb);
-                    refnos.extend_from_slice(&r);
-                    room_panels_map
-                        .get_mut(&room_refno)
-                        .unwrap()
-                        .push(room_panel_ele);
-                } else {
-                    room_eles_map.insert(room_refno, (aabb, r));
-                    room_panels_map.insert(room_refno, vec![room_panel_ele]);
-                }
-            }
-            println!("房间内元件的数量为：{}", room_eles_map.len());
-        }
+    //     let mut room_eles_map: HashMap<RefU64, (Aabb, Vec<RefU64>)> = HashMap::new();
+    //     let mut room_panels_map: HashMap<RefU64, Vec<RoomPanelElement>> = HashMap::new();
+    //     for r in room_root_refnos {
+    //         let Ok(room_root_refno) = RefU64::from_str(r) else {
+    //             continue;
+    //         };
+    //         let room_panels =
+    //             query_deep_children_refnos_fuzzy(&database, &[room_root_refno], &["PANE"]).await?;
+    //         //以panel的owner为房间的参考号
+    //         println!("房间下的panel数量为: {}", room_panels.len());
+    //         let inst_data = query_insts_shape_data(
+    //             &database,
+    //             &room_panels,
+    //             Some(&[GeoBasicType::Pos, GeoBasicType::Compound]),
+    //         )
+    //         .await?;
+    //         for (panel_refno, info) in &inst_data.inst_info_map {
+    //             let Some(inst_geos) = inst_data.get_inst_geos(info) else {
+    //                 continue;
+    //             };
+    //             let Some(aabb) = info.aabb else {
+    //                 continue;
+    //             };
+    //             let r = self.calculate_room(info, inst_geos, rtree).await?;
+    //             let room_refno = self.get_owner(info.refno);
+    //             let room_panel_ele = RoomPanelElement {
+    //                 refno: *panel_refno,
+    //                 aabb,
+    //                 inst_geo: inst_geos.first().cloned().unwrap_or_default(),
+    //                 transform: info.world_transform,
+    //             };
+    //             if let Some((room_aabb, refnos)) = room_eles_map.get_mut(&room_refno) {
+    //                 room_aabb.merge(&aabb);
+    //                 refnos.extend_from_slice(&r);
+    //                 room_panels_map
+    //                     .get_mut(&room_refno)
+    //                     .unwrap()
+    //                     .push(room_panel_ele);
+    //             } else {
+    //                 room_eles_map.insert(room_refno, (aabb, r));
+    //                 room_panels_map.insert(room_refno, vec![room_panel_ele]);
+    //             }
+    //         }
+    //         println!("房间内元件的数量为：{}", room_eles_map.len());
+    //     }
 
-        self.save_room_info_to_arangodb(room_eles_map, room_panels_map)
-            .await?;
-        Ok(())
-    }
+    //     self.save_room_info_to_arangodb(room_eles_map, room_panels_map)
+    //         .await?;
+    //     Ok(())
+    // }
 
     ///快速获得table名称
     pub fn get_table_name(&self, refno: RefU64) -> String {

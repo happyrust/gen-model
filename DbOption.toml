@@ -71,9 +71,6 @@ location = "SJZ1"
 #服务器启动配置
 server_release_ip = "127.0.0.1:9099"
 
-# remote_file_server_hosts = ["http://50c170h624.zicp.vip:56785/asset/archives"]
-# file_server_host = "http://50c170h624.zicp.vip:56785/asset/archives"
-
 # hash文件的站点
 remote_file_server_hosts = []
 file_server_host = "http://192.168.31.38:8100/asset/archives"
@@ -99,7 +96,7 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 # included_db_files = ["ams1112_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 #manual_db_nums = [7354]
-#manual_db_nums = [1112]  #, 8000
+manual_db_nums = [7999]  #, 8000
 plat_url = ""
 
 #puhua
@@ -107,7 +104,7 @@ puhua_database_ip = ""
 puhua_database_user = ""
 puhua_database_password = ""
 
-#debug_root_refnos = ["17496/171190"]
+# debug_root_refnos = ["24383/66740"]
 # debug_root_refnos = ["17496/171188"]
 
 #test wall
@@ -129,7 +126,7 @@ puhua_database_password = ""
 # debug_root_refnos = ["24381/57574"]
 
 #SSLC的问题
-debug_root_refnos = ["24381/46972"]
+# debug_root_refnos = ["24381/46972"]
 
 #风管直段问题
 # debug_root_refnos = ["24381/58708"]
