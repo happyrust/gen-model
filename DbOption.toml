@@ -55,7 +55,7 @@ batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
 #版本数据库服务配置
 v_ip = "localhost"
-v_port = "8003"
+v_port = "8002"
 v_user = "root"
 v_password = ""
 pe_chunk = 1000
@@ -96,7 +96,7 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 # included_db_files = ["ams1112_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 #manual_db_nums = [7354]
-manual_db_nums = [7999]  #, 8000
+manual_db_nums = [7999, 1112]  #, 8000
 plat_url = ""
 
 #puhua
@@ -104,7 +104,7 @@ puhua_database_ip = ""
 puhua_database_user = ""
 puhua_database_password = ""
 
-# debug_root_refnos = ["24383/66740"]
+# debug_root_refnos = ["25688/71674"]
 # debug_root_refnos = ["17496/171188"]
 
 #test wall
