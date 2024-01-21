@@ -255,12 +255,14 @@ pub async fn save_mesh_instance_data(
             //arrive 和 leave 需要用 index
             //这里的 pts，存储的时点集信息
             inst_relate_vec.push(format!(
-                "relate pe:{k}->inst_relate->inst_info:{} set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=0, pts=[{}]",
+                "relate pe:{k}->inst_relate->inst_info:{} set aabb=aabb:⟨{}⟩, world_trans=trans:⟨{}⟩, type=0, pts=[{}], generic='{}'",
                 v.id(),
                 aabb_hash,
                 tansform_hash,
-                pt_hashes.join(",")
+                pt_hashes.join(","),
+                v.generic_type.to_string(),
             ));
+            // dbg!(&inst_relate_vec);
         }
         let aql = AqlQuery::new(r#"
         with @@collection
@@ -334,10 +336,11 @@ pub async fn save_mesh_instance_data(
             }
             //暂时使用type作为标记, 1为 compound inst info
             compound_inst_relate_vec.push(format!(
-                "relate pe:{k}->inst_relate->inst_info:{} set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=1",
+                "relate pe:{k}->inst_relate->inst_info:{} set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=1, generic='{}'",
                 v.id(),
                 aabb_hash,
                 tansform_hash,
+                v.generic_type.to_string()
             ));
         }
         let aql = AqlQuery::new(r#"
@@ -398,10 +401,11 @@ pub async fn save_mesh_instance_data(
             }
             //暂时使用type作为标记, -1为 ngmr inst info
             ngmr_inst_relate_vec.push(format!(
-                "relate pe:{k}->inst_relate->inst_info:{} set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=-1",
+                "relate pe:{k}->inst_relate->inst_info:{} set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=-1, generic='{}'",
                 v.id(),
                 aabb_hash,
                 tansform_hash,
+                v.generic_type.to_string()
             ));
         }
         let aql = AqlQuery::new(r#"

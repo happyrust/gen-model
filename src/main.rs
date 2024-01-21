@@ -8,6 +8,11 @@ extern crate clap;
 #[macro_use]
 extern crate nom;
 
+extern crate strum;
+
+#[macro_use]
+extern crate strum_macros;
+
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::sync::Arc;

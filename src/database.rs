@@ -143,7 +143,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         }
 
         if !db_option.incr_sync {
-            match sync_total_async_threaded(&db_option, project, &["DICT", "SYST"], false).await {
+            match sync_total_async_threaded(&db_option, project, &["DICT", "SYST", "GLB"], false).await {
                 Ok(_) => {
                     // 同步数据成功
                     println!("同步UDA和SYS数据成功。");
@@ -198,24 +198,7 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
     };
 }
 
-#[inline]
-pub fn gen_uda_attr_value_sql(att: &WholeAttMap) -> String {
-    let mut table_vals_sql = String::new();
-    // let i_att = &att.implicit_attmap;
-    // let refno = i_att.get_refno().unwrap(); // 获取引用号
-    // let type_name = i_att.get_type_str(); // 获取类型名称
-    // let owner = i_att.get_owner(); // 获取所有者
-    // let data = hex::encode(att.uda_attmap.into_compress_bytes()); // 将uda_attmap转换为压缩字节并进行十六进制编码
-    // table_vals_sql.push_str(&format!(
-    //     r#"({}, '{}', '{}', {}, 0x{}),"#, // 插入语句模板
-    //     refno.0,                          // 引用号的第一个元素
-    //     refno.to_string(),             // 引用号的字符串表示
-    //     type_name,                        // 类型名称
-    //     owner.0,                          // 所有者的第一个元素
-    //     data                              // 数据
-    // ));
-    table_vals_sql
-}
+
 
 //分成两部分，一部分先保存UDA 和 SYS 这些数据
 ///多线程同步数据，包括增量同步
@@ -280,10 +263,10 @@ pub async fn sync_total_async_threaded(
             let mut buf = vec![0u8; 60];
             file.read_exact(&mut buf)?;
             let (db_type, file_version, db_no) = parse_file_basic_info(&buf);
+            dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
             if !db_types.contains(&db_type.as_str()) {
                 continue;
             }
-            // dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
         }
 
         if !debug_need

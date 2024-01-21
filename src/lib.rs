@@ -63,3 +63,6 @@ extern crate derive_more;
 
 #[macro_use]
 extern crate nom;
+
+#[macro_use]
+extern crate strum_macros;

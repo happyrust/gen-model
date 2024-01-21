@@ -1276,9 +1276,8 @@ pub async fn gen_cata_geos(
                             },
                         );
                         tubi_relates.push(format!(
-                            r#"relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩ 
-                                    set from={},to={},aabb=aabb:⟨{}⟩,world_trans= trans:⟨{}⟩,
-                                        bore_size={}"#,
+                            "relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩  \
+                                    set eave=pe:{},arrive=pe:{},,aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}",
                             current_tubing.leave_refno,
                             current_tubing.arrive_refno,
                             gen_bytes_hash::<_, 64>(&aabb),
@@ -1428,14 +1427,15 @@ pub async fn gen_cata_geos(
                                     );
                                     tubi_relates.push(
                                         format!(
-                                            r#"relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩
-                                            set from={},to={},aabb=aabb:⟨{}⟩,world_trans= trans:⟨{}⟩,
-                                                bore_size={}"#,
-                                            current_tubing.leave_refno, current_tubing.arrive_refno,
+                                            "relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩ \
+                                            set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans= trans:⟨{}⟩, bore_size={}",
+                                            current_tubing.leave_refno,
+                                            current_tubing.arrive_refno,
                                             gen_bytes_hash::<_, 64>(&aabb),
                                             gen_bytes_hash::<_, 64>(&t),
                                             serde_json::to_string(&h_tubi_size).unwrap_or_default(),
                                         ));
+                                    // dbg!(t);
                                     let key = current_tubing
                                         .leave_refno
                                         .hash_with_another_refno(current_tubing.arrive_refno);
@@ -1547,10 +1547,9 @@ pub async fn gen_cata_geos(
                             );
                             tubi_relates.push(
                                 format!(
-                                    r#"relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩ 
-                                        set from={},to={},aabb=aabb:⟨{}⟩,world_trans= trans:⟨{}⟩,
-                                            bore_size={}"#,
-                                    current_tubing.leave_refno, current_tubing.arrive_refno,
+                                    "relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩ set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩,bore_size={}",
+                                    current_tubing.leave_refno,
+                                    current_tubing.arrive_refno,
                                     gen_bytes_hash::<_, 64>(&aabb),
                                     gen_bytes_hash::<_, 64>(&t),
                                     serde_json::to_string(&h_tubi_size).unwrap_or_default(),
@@ -1602,6 +1601,7 @@ pub async fn gen_cata_geos(
     //需要在edge上加上对应的参考号，如果是branch，需要加上branch的参考号
     //使用relate创建这个关系，先把relate语句保存到tubi_relate_vec
     if !tubi_relates.is_empty() {
+        // dbg!(tubi_relates.join(";"));
         SUL_DB.query(tubi_relates.join(";")).await.unwrap();
     }
 
@@ -1714,9 +1714,6 @@ pub async fn gen_all_geos_data(
                 ))
                 .await?;
             target_refnos = response.take(0)?;
-            // dbg!(&target_refnos);
-            // println!("输入的调试参考号或者db号不正确");
-            // continue;
         } else if is_debug {
             target_refnos = debug_root_refnos.clone();
         } else if is_incr_update {
