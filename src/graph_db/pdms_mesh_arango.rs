@@ -37,45 +37,13 @@ pub async fn save_mesh_data(
     mesh_mgr: &mut PlantMeshesData,
     replace: bool,
 ) -> anyhow::Result<()> {
-    let collection = AQL_PDMS_MESH_COLLECTION;
-    let database = mgr.get_arango_db().await?;
-    let mut data = vec![];
     println!("开始保存mesh数据");
-
     //不是replace，需要考虑缓存
     let mut meshes_map = &mut mesh_mgr.meshes;
     println!("当前mesh数量：{}", meshes_map.len());
 
-    let keys = meshes_map.keys().collect::<Vec<_>>();
-    for chunk in keys.chunks(1000) {
-        for &k in chunk {
-            let v = meshes_map.get(k).unwrap();
-            let json = serde_json::to_value(v).unwrap();
-            data.push(json);
-        }
-        let aql = if replace {
-            AqlQuery::new(r#"
-            with @@collection
-            LET data = @elements
-                    FOR d IN data
-                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
-                .bind_var("@collection", collection)
-                .bind_var("elements", take(&mut data))
-        } else {
-            AqlQuery::new(r#"
-            with @@collection
-            LET data = @elements
-                    FOR d IN data
-                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "ignore" }"#)
-                .bind_var("@collection", collection)
-                .bind_var("elements", take(&mut data))
-        };
-        database.aql_query::<Vec<()>>(aql).await.unwrap();
-    }
-
     std::fs::create_dir_all("assets/meshes").unwrap();
     for (hash, p) in meshes_map {
-        // mesh.1.serialize_to_specify_file(&format!("asset/meshes/{}.mesh", mesh.0));
         if let Some(mesh) = &mut p.mesh {
             let file_path = format!("assets/meshes/{}.mesh", hash);
             #[cfg(feature = "debug_obj_export")]
@@ -85,8 +53,6 @@ pub async fn save_mesh_data(
                 mesh.export_obj(false, &format!("models/{}.obj", hash))
                     .expect("TODO: panic message");
             }
-            //todo change back
-            // let file_path = format!("E:/work/rs-plant3-d/assets/meshes/{}.mesh", hash);
             //跳过重复的保存
             if replace || !std::path::Path::new(&file_path).exists() {
                 p.serialize_to_specify_file(&file_path);

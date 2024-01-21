@@ -45,9 +45,8 @@ use crate::data_interface::increment_record::IncrGeoUpdateLog;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::{AIOSAxisMap, CateBrepShapeMap};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::save_arangodb_doc;
 use crate::graph_db::pdms_inst_arango::*;
-use crate::graph_db::pdms_mesh_arango::{save_mesh_data, save_mesh_to_local_db};
+use crate::graph_db::pdms_mesh_arango::{save_mesh_data};
 
 /// 生成基本体的几何数据
 pub async fn gen_prim_geos(
@@ -1604,20 +1603,6 @@ pub async fn gen_cata_geos(
         // dbg!(tubi_relates.join(";"));
         SUL_DB.query(tubi_relates.join(";")).await.unwrap();
     }
-
-    let tubis_map = Arc::try_unwrap(tubi_edges).unwrap();
-
-    if !tubis_map.is_empty() {
-        let tubis = tubis_map
-            .into_iter()
-            .map(|x| x.1)
-            .flatten()
-            .collect::<Vec<_>>();
-
-        let conn = mgr.get_arango_db().await?;
-        let json = serde_json::to_value(tubis).unwrap_or_default();
-        save_arangodb_doc(json, "tubi_edges", &conn, mgr.db_option.replace_dbs).await?;
-    }
     println!(
         "处理元件库几何体: {} 花费时间: {} ms",
         unique_cata_cnt,
@@ -2014,12 +1999,6 @@ pub async fn gen_all_geos_data(
                     .await
                     .unwrap_or_default();
             dbg!(has_pos_neg_map.len());
-            //负实体的结果不需要保存到本地
-            {
-                let mesh_mgr = mgr.cached_mesh_mgr.read().await;
-                save_mesh_to_local_db(&mgr, &mesh_mgr, replace_mesh)
-                    .expect("Save mesh to local db failed.");
-            }
 
             //总的负实体计算
             if db_option.apply_boolean_operation && !has_pos_neg_map.is_empty() {

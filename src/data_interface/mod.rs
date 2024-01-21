@@ -1,5 +1,5 @@
 pub mod db_model;
-pub mod spatial_model;
+// pub mod spatial_model;
 pub mod interface;
 pub mod structs;
 pub mod tidb_manager;

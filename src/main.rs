@@ -32,7 +32,6 @@ use log::{error, LevelFilter};
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::format::FmtSpan;
 
-use aios_database::arangodb::create::create_arangodb_docs;
 #[cfg(feature = "gen_model")]
 use aios_database::data_interface::gen_model::gen_all_geos_data;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
@@ -93,12 +92,6 @@ async fn main() -> anyhow::Result<()> {
 
     /// 是否全部同步模型
     if db_option.total_sync {
-        // create_versioned_schemas(&db_option.project_name).await.expect("create versioned docs");
-        if db_option.sync_graph_db.unwrap_or(false) {
-            create_arangodb_docs(&db_option)
-                .await
-                .expect("Failed to create arangodb docs");
-        }
         // 同步pdms数据
         sync_pdms(&db_option).await.unwrap();
         return Ok(());

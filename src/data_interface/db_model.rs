@@ -30,19 +30,13 @@ use sqlx::pool::PoolOptions;
 use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
 use tokio::sync::Mutex;
 
-use crate::api::element::*;
-use crate::api::refno_info::*;
-use crate::aql_api::children::query_deep_children_refnos_fuzzy;
-use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
-use crate::aql_api::pdms_room::{RoomElement, RoomPanelElement};
-use crate::arangodb::ArDatabase;
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
-use crate::graph_db::pdms_arango::{connect_arangodb, save_arangodb_with_db_option};
+// use crate::graph_db::pdms_arango::{connect_arangodb, save_arangodb_with_db_option};
 use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
-use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge, PdmsMdbEdge};
+// use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge, PdmsMdbEdge};
 use crate::mqtt_service::{new_mqtt_inst, SyncE3dFileMsg};
 
 pub const TUBI_TOL: f32 = 0.1f32;
@@ -521,16 +515,6 @@ impl AiosDBManager {
             .map_err({ |x| anyhow::anyhow!(x.to_string()) })
     }
 
-    ///获取图数据库的连接pool
-    #[inline]
-    pub async fn get_arango_db(&self) -> anyhow::Result<ArDatabase> {
-        Ok(self
-            .arango_pool
-            .get()
-            .await?
-            .db(&self.db_option.arangodb_database)
-            .await?)
-    }
 
     ///获得默认的pool
     #[inline]
@@ -542,45 +526,6 @@ impl AiosDBManager {
 
     /// 初始化mdb
     pub async fn init_mdb(&mut self, project: &str, mdb: &str, module: &str) -> anyhow::Result<()> {
-        // let project_pool = self
-        //     .get_project_pool(project)
-        //     .ok_or(anyhow::anyhow!("Unknown project pool"))?;
-        println!("正在初始化mdb: {mdb}");
-        // let mut conn = project_pool;
-        let need_sync_refno_basic = self.db_option.need_sync_refno_basic;
-        if need_sync_refno_basic {
-            for project in &self.db_option.included_projects {
-                if let Some(kv) = self.project_map.get(project) {
-                    sync_refno_basic_map(kv.value()).await.unwrap();
-                }
-                // if let Some(att_db) = self.local_attr_db_map.get(project).map(|x| x.value().clone()){
-                //     sync_local_refno_basic_map();
-                // }
-            }
-        }
-        //todo 调整tidb，暂时不启用
-        // if self.db_option.reset_mdb_project.unwrap_or(false) {
-        // let create_sql = gen_create_project_mdb_sql();
-        // let _ = conn.execute(create_sql.as_str()).await;
-        // println!("正在插入mdb数据");
-        // let _ = self
-        //     .insert_project_mdb(&project_pool, &self.info_pool)
-        //     .await;
-        // }
-        // cache_mdb_site_map(mdb, module, &project_pool).await;
-        // self.mdb_dbnums = query_mdb_all_dbnums(mdb, &project_pool).await?;
-        if need_sync_refno_basic {
-            CACHED_REFNO_BASIC_MAP
-                .save_to_file(stringify!(CACHED_REFNO_BASIC_MAP))
-                .expect("CACHED_REFNO_BASIC_MAP 保存文件失败。");
-        } else {
-            println!("正在加载 CACHED_REFNO_BASIC_MAP");
-            CACHED_REFNO_BASIC_MAP
-                .load_map_from_file(stringify!(CACHED_REFNO_BASIC_MAP))
-                .expect("CACHED_REFNO_BASIC_MAP 文件不存在。");
-        }
-        println!("加载 CACHED_REFNO_BASIC_MAP 成功");
-
         Ok(())
     }
 
@@ -605,8 +550,6 @@ impl AiosDBManager {
             }
         }
         let projects = db_option.included_projects.clone();
-        println!("正在创建图数据库连接");
-        let arango_pool = connect_arangodb(&db_option).await?;
 
         let db_paths =
             collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref()));
@@ -674,13 +617,13 @@ impl AiosDBManager {
             project_path: dir,
             db_option: db_option.clone(),
             cached_mesh_mgr: Arc::new(Default::default()),
-            arango_pool,
+            // arango_pool,
             watcher: Arc::new(watcher),
             mqtt_client,
             rtree: None,
-            room_panels_rtree: None,
-            room_info_map: Default::default(),
-            room_panel_info_map: Default::default(),
+            // room_panels_rtree: None,
+            // room_info_map: Default::default(),
+            // room_panel_info_map: Default::default(),
         })
     }
 
@@ -724,83 +667,6 @@ impl AiosDBManager {
         None
     }
 
-    /// 获得dbnum 对应的 dbtype 和 world refno
-    pub async fn query_quick_info_by_dbno(
-        &self,
-        db_refno: RefU64,
-        db_num: i32,
-        pool: &Pool<MySql>,
-    ) -> anyhow::Result<Option<DbQuickInfo>> {
-        let mut sql = String::new();
-        //todo 参考号相同的情况，导致refno获取出来的不准
-        sql.push_str(&format!(
-            r#"SELECT DB_TYPE, PROJECT  FROM {PDMS_DBNO_INFOS_TABLE} WHERE NUMBDB = {}"#,
-            db_num
-        ));
-        let result = sqlx::query(&sql).fetch_all(pool).await?;
-        for v in result {
-            if let project = v.get::<String, _>(1) {
-                dbg!(&project);
-                let Some(project_pool) = self.get_project_pool(&project) else {
-                    continue;
-                };
-                if let Some(world_refno) = query_world_refno_by_dbno(db_num, &project_pool).await? {
-                    let db_type = v.get::<String, _>(0);
-                    return Ok(Some(DbQuickInfo {
-                        refno: db_refno,
-                        world_refno,
-                        db_num,
-                        db_type,
-                        project,
-                        order_number: 0,
-                    }));
-                }
-            }
-        }
-        Ok(None)
-    }
-
-    /// 获得mdb下所有的world的参考号
-    pub async fn query_mdb_quickinfo_map(
-        &self,
-        project_pool: &Pool<MySql>,
-        info_pool: &Pool<MySql>,
-    ) -> anyhow::Result<MdbQuickInfoMap> {
-        let mut mdb_map = HashMap::new();
-        let mdbs = query_types_refnos(&vec!["MDB"], project_pool, &[]).await?;
-        dbg!(&mdbs);
-        for mdb_refno in mdbs {
-            let Ok(mdb_attr) = aios_core::get_named_attmap(mdb_refno).await else {
-                continue;
-            };
-            let mdb_name = mdb_attr.get_name_or_default();
-            if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
-                // dbg!(&dbs);
-                let mut map = HashMap::new();
-                for (i, db_refno) in dbs.iter().enumerate() {
-                    let att = aios_core::get_named_attmap(*db_refno)
-                        .await
-                        .unwrap_or_default();
-                    let Some(db_num) = att.get_i32("NUMBDB") else {
-                        continue;
-                    };
-                    dbg!(&db_num);
-                    if let Ok(Some(mut quick_info)) = self
-                        .query_quick_info_by_dbno(*db_refno, db_num, info_pool)
-                        .await
-                    {
-                        quick_info.order_number = i as _;
-                        map.entry(quick_info.db_type.clone())
-                            .or_insert_with(Vec::new)
-                            .push(quick_info);
-                    }
-                }
-                mdb_map.entry(mdb_name).or_insert(map);
-            }
-        }
-        Ok(mdb_map)
-    }
-
     fn match_stype(input: i32) -> String {
         match input {
             1 => "DESI".to_string(),
@@ -815,155 +681,6 @@ impl AiosDBManager {
         }
     }
 
-    /// save project mdb info to database
-    pub async fn insert_project_mdb(
-        &self,
-        project_pool: &Pool<MySql>,
-        info_pool: &Pool<MySql>,
-    ) -> anyhow::Result<()> {
-        //直接保存到图数据库，不要放在tidb里了
-        let mdbs = self
-            .query_ele_nodes_by_expression(r#"v.noun == "MDB""#)
-            .await
-            .unwrap();
-        //直接在这里把mdb的信息加进去，创建这个节点
-        let mut mdb_edges_map = IndexMap::new();
-        let mut mdb_dbnums_map = IndexMap::new();
-        let mut mdb_names_map = IndexMap::new();
-
-        for mdb in &mdbs {
-            let mdb_refno = mdb.refno;
-            let Ok(mdb_attr) = aios_core::get_named_attmap(mdb_refno).await else {
-                continue;
-            };
-            let name = mdb_attr.get_name_or_default();
-            if let Some(dbs) = mdb_attr.get_refu64_vec("CURD") {
-                for (i, db_refno) in dbs.into_iter().enumerate() {
-                    let att = aios_core::get_named_attmap(db_refno)
-                        .await
-                        .unwrap_or_default();
-                    let Some(db_num) = att.get_i32("NUMBDB") else {
-                        continue;
-                    };
-                    let stype = att.get_i32("STYP").unwrap_or_default();
-                    let db_type = Self::match_stype(stype);
-                    let key = mdb_refno.hash_with_another_refno(db_refno).to_string();
-                    let mdb_edge = PdmsMdbEdge {
-                        key,
-                        mdb_refno,
-                        world_refno: Default::default(),
-                        name: name.clone(),
-                        order: i as _,
-                        db_num: db_num as _,
-                        db_refno,
-                        db_type,
-                    };
-                    mdb_edges_map.insert(db_num, mdb_edge);
-                    mdb_dbnums_map
-                        .entry(mdb_refno)
-                        .or_insert(Vec::new())
-                        .push(db_num);
-                }
-            }
-            mdb_names_map.entry(mdb_refno).or_insert(name);
-        }
-
-        dbg!(&mdb_names_map);
-
-        let vec_str = mdb_edges_map.values().map(|x| x.db_num).join(",");
-        let string = format!("v.dbnum in [{}] and v.noun== 'WORL'", vec_str);
-
-        let mut pdms_edges = vec![];
-        if let Ok(mut ele_nodes) = self.query_ele_nodes_by_expression(&string).await {
-            if ele_nodes.is_empty() {
-                return Ok(());
-            }
-            let database = self.get_arango_db().await?;
-
-            for (k, (mdb_refno, dbnums)) in mdb_dbnums_map.into_iter().enumerate() {
-                if dbnums.is_empty() {
-                    continue;
-                }
-                let root_dbnum = dbnums[0];
-                dbg!(root_dbnum);
-                if !mdb_edges_map.contains_key(&root_dbnum) {
-                    continue;
-                }
-                let Some(root_world) = ele_nodes.iter().find(|x| x.dbnum == root_dbnum) else {
-                    continue;
-                };
-
-                //将mdb的关系也放入edges
-                if let Some(mdb_data) = mdb_edges_map.get(&root_dbnum) {
-                    let mdb_name = mdb_names_map.get(&mdb_refno).unwrap();
-                    let edge = PdmsEleEdge {
-                        key: root_world
-                            .refno
-                            .hash_with_another_refno(mdb_refno)
-                            .to_string(),
-                        refno: root_world.refno,
-                        owner: mdb_refno,
-                        order: k as _,
-                        mdb_name: Some(mdb_name.clone()),
-                        db_type: Some(mdb_data.db_type.clone()),
-                    };
-                    pdms_edges.push(edge);
-                }
-                // let children = aios_core::get_children_refnos(root_world.refno).unwrap_or_default();
-                let mut order = 0;
-                for dbnum in dbnums {
-                    let Some(world) = ele_nodes.iter().find(|x| x.dbnum == dbnum) else {
-                        continue;
-                    };
-                    mdb_edges_map
-                        .entry(dbnum)
-                        .and_modify(|x| x.world_refno = world.refno);
-                    let site_refnos = aios_core::get_children_refnos(world.refno)
-                        .await
-                        .unwrap_or_default();
-                    let Some(mdb_data) = mdb_edges_map.get(&dbnum) else {
-                        continue;
-                    };
-                    //将site 和 第一个的 world 连在一起，而不是连world
-                    for site_refno in site_refnos.into_iter() {
-                        {
-                            let edge = PdmsEleEdge {
-                                key: site_refno
-                                    .hash_with_another_refno(root_world.refno)
-                                    .to_string(),
-                                refno: site_refno,
-                                owner: root_world.refno,
-                                order: order as _,
-                                mdb_name: None,
-                                db_type: Some(mdb_data.db_type.clone()),
-                            };
-                            pdms_edges.push(edge);
-                        }
-                        order += 1;
-                    }
-                }
-            }
-
-            for result in mdb_edges_map
-                .values()
-                .into_iter()
-                .collect::<Vec<_>>()
-                .chunks(ARANGODB_SAVE_AMOUNT)
-            {
-                let json = serde_json::to_value(result)?;
-                save_arangodb_with_db_option(&database, json, AQL_PDMS_MDBS_EDGES_COLLECTION)
-                    .await?;
-            }
-            for edge in pdms_edges.chunks(ARANGODB_SAVE_AMOUNT) {
-                let json = serde_json::to_value(edge)?;
-                save_arangodb_with_db_option(&database, json, AQL_PDMS_EDGES_COLLECTION)
-                    .await
-                    .unwrap();
-            }
-        };
-
-        Ok(())
-    }
 
     //todo 获取类型直接采用edge上的查询
     ///获得参考号对应的一般类型
@@ -982,45 +699,17 @@ impl AiosDBManager {
         PdmsGenericType::UNKOWN
     }
 
-    ///查询单个element
-    pub async fn query_element(&self, refno: RefU64) -> anyhow::Result<Option<PdmsEleData>> {
-        let arango_db = self.get_arango_db().await?;
-        let id = refno.format_url_name(AQL_PDMS_ELES_COLLECTION);
-        let aql = AqlQuery::new(
-            r#"
-            with pdms_eles
-                return document(pdms_eles, @id)"#,
-        )
-        .bind_var("id", id);
-        let mut r = arango_db
-            .aql_query::<PdmsEleData>(aql)
-            .await
-            .unwrap_or_default();
-        Ok(r.pop())
-    }
-
-    /// 获取缓存好的site
-    pub async fn get_cached_site_nodes(
-        &self,
-        world_refno: RefU64,
-    ) -> anyhow::Result<Option<Vec<PdmsElement>>> {
-        if let Some(k) = CACHED_MDB_SITE_MAP.read().await.get(&world_refno) {
-            return Ok(Some(k.0.clone()));
-        }
-        Ok(None)
-    }
-
     ///获得当前mdb下的site参考号
     pub async fn get_site_refnos(&self) -> anyhow::Result<Vec<RefU64>> {
-        let world_refno = self.get_desi_world().await?.refno;
-        let r = self
-            .get_cached_site_nodes(world_refno)
-            .await?
-            .unwrap_or_default()
-            .iter()
-            .map(|x| x.refno)
-            .collect();
-        Ok(r)
+        // let world_refno = self.get_desi_world().await?.refno;
+        // let r = self
+        //     .get_cached_site_nodes(world_refno)
+        //     .await?
+        //     .unwrap_or_default()
+        //     .iter()
+        //     .map(|x| x.refno)
+        //     .collect();
+        Ok(vec![])
     }
 }
 

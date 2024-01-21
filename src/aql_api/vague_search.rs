@@ -1,7 +1,7 @@
 use aios_core::pdms_types::RefU64;
 use aios_core::three_dimensional_review::VagueSearchExportCsvData;
 use crate::aql_api::children::query_refnos_belong_level_aql;
-use crate::data_to_excel::export_csv::create_csv_file;
+// use crate::data_to_excel::export_csv::create_csv_file;
 use crate::arangodb::ArDatabase;
 
 /// 将查询的结果导出为csv
@@ -18,5 +18,6 @@ pub async fn export_vague_search_result(refnos: Vec<RefU64>, filter_condition: &
             att_type: result.att_type,
         }.into_vec_string());
     }
-    Ok(create_csv_file(vec!["关键词".to_string(), "命中目标".to_string(), "所属层级".to_string(), "目标类型".to_string()], data))
+    Ok(vec![])
+    // Ok(create_csv_file(vec!["关键词".to_string(), "命中目标".to_string(), "所属层级".to_string(), "目标类型".to_string()], data))
 }

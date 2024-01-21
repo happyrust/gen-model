@@ -1,5 +1,5 @@
 #同步文件配置
-total_sync = false
+total_sync = true
 #增量同步，避免重新创建重复的索引和uda、sys
 incr_sync = false
 # total_sync = false
@@ -55,7 +55,7 @@ batch_insert_sql_cnt = 100   #mysql 批量插入的数量
 
 #版本数据库服务配置
 v_ip = "localhost"
-v_port = "8002"
+v_port = "8003"
 v_user = "root"
 v_password = ""
 pe_chunk = 1000

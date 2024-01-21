@@ -2,31 +2,31 @@ use aios_core::pdms_types::*;
 use aios_core::shape::pdms_shape::PlantMesh;
 use bevy_transform::prelude::Transform;
 use parry3d::utils::hashmap::HashMap;
-use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
+// use crate::aql_api::pdms_mesh::query_pdms_mesh_aql;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 impl AiosDBManager {
     ///拉取geo_hashs对应的meshes
     pub async fn cache_plant_meshes(&self, geo_hashes: impl IntoIterator<Item=&u64>, overwrite: bool) -> anyhow::Result<bool> {
-        let new_hashes = {
-            let m = self.cached_mesh_mgr.read().await;
-            if !overwrite {
-                let h = geo_hashes.into_iter()
-                    .filter_map(|x| (!m.contains_key(x)).then(|| Some(*x)))
-                    .map(|s| s.unwrap())
-                    .collect::<Vec<_>>();
-                h
-            } else {
-                geo_hashes.into_iter().cloned().collect::<Vec<_>>()
-            }
-        };
-        if new_hashes.is_empty() { return Ok(true);  }
-        let plant_mesh = query_pdms_mesh_aql(&self.get_arango_db().await?, &new_hashes).await?;
-        let mut cache_mesh_mgr = self.cached_mesh_mgr.write().await;
-        for (k, v) in plant_mesh.meshes {
-            cache_mesh_mgr.insert(k, v);
-        }
+        // let new_hashes = {
+        //     let m = self.cached_mesh_mgr.read().await;
+        //     if !overwrite {
+        //         let h = geo_hashes.into_iter()
+        //             .filter_map(|x| (!m.contains_key(x)).then(|| Some(*x)))
+        //             .map(|s| s.unwrap())
+        //             .collect::<Vec<_>>();
+        //         h
+        //     } else {
+        //         geo_hashes.into_iter().cloned().collect::<Vec<_>>()
+        //     }
+        // };
+        // if new_hashes.is_empty() { return Ok(true);  }
+        // let plant_mesh = query_pdms_mesh_aql(&self.get_arango_db().await?, &new_hashes).await?;
+        // let mut cache_mesh_mgr = self.cached_mesh_mgr.write().await;
+        // for (k, v) in plant_mesh.meshes {
+        //     cache_mesh_mgr.insert(k, v);
+        // }
         Ok(true)
     }
 

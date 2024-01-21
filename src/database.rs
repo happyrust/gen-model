@@ -24,7 +24,7 @@ use std::time::Instant;
 
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::pdms_arango::*;
+// use crate::graph_db::pdms_arango::*;
 use crate::tables::*;
 use crate::versioned_db::client::*;
 
@@ -284,16 +284,6 @@ pub async fn sync_total_async_threaded(
             let all_refnos = children_map.keys().cloned().collect::<Vec<_>>();
             let children_map_clone = Arc::new(children_map);
 
-            if db_option.sync_graph_db.unwrap_or(true) {
-                let arango_pool = connect_arangodb(&db_option).await?;
-                let database = arango_pool
-                    .get()
-                    .await?
-                    .db(&db_option.arangodb_database)
-                    .await?; // 获取ArangoDB数据库连接
-                save_pdms_level_edges_in_sync(&database, &children_map_clone).await?;
-            }
-
             for (chunk_index, chunk_refnos) in all_refnos.chunks(chunk_size).enumerate() {
                 let path_clone = path.clone();
                 let file_name_clone = file_name.clone();
@@ -322,27 +312,6 @@ pub async fn sync_total_async_threaded(
                     //类型暂时不多线程
                     let total_attr_map_arc = Arc::new(total_attr_map);
                     let children_map_arc = children_map_clone.clone();
-                    // 将部分数据保存到图数据库
-                    if db_option.sync_graph_db.unwrap_or(true) {
-                        let arango_pool = connect_arangodb(&db_option).await?;
-                        {
-                            let database = arango_pool
-                                .get()
-                                .await?
-                                .db(&db_option.arangodb_database)
-                                .await?;
-                            // 将 pdms_element 部分数据保存到图数据库中
-                            save_pdms_element_to_arango(
-                                &database,
-                                &total_attr_map_arc,
-                                &children_map_arc,
-                                db_no as i32,
-                            )
-                            .await?;
-                            save_foreign_refno_edges_in_sync(&database, foreign_refnos_map).await?;
-                        }
-                        println!("图数据库保存完成");
-                    }
 
                     //开始执行保存数据
                     dbg!("开始保存pdms_element数据");

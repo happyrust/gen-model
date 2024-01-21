@@ -1,12 +1,8 @@
-use crate::api::attr::{query_foreign_refnos_from_table, query_implicit_attr};
-use crate::api::element::*;
 use crate::arangodb::{ArDatabase, ArPool};
 use crate::consts::AQL_PDMS_EDGES_COLLECTION;
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge, PdmsEleGraphEdge};
-use crate::graph_db::{DataDocument, ForeignEdges};
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::tool::db_tool::db1_hash;
@@ -84,46 +80,6 @@ pub async fn save_pdms_element_to_arango(
     children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
     dbnum: i32,
 ) -> anyhow::Result<()> {
-    let mut elements = Vec::new();
-    let mut edges = Vec::new();
-    for (refno, whole_attr) in total_attr_map.clone() {
-        let owner = whole_attr.get_owner();
-        if owner.is_unset() {
-            continue;
-        }
-        let name = cal_default_name(refno, &whole_attr, children_map);
-        let noun = whole_attr.get_type_str();
-        let order = get_order(refno, &whole_attr, &children_map) as u32;
-        let cata_hash = whole_attr.cal_cata_hash();
-        let pdms_element = PdmsEleData {
-            refno,
-            owner,
-            name,
-            noun: noun.to_string(),
-            order,
-            dbnum,
-            cata_hash,
-            // tag_lock: false,
-        };
-        let key = refno.hash_with_another_refno(owner);
-        let pdms_edges = PdmsEleEdge {
-            key: key.to_string(),
-            refno,
-            owner,
-            order,
-            ..Default::default()
-        };
-        elements.push(pdms_element);
-        edges.push(pdms_edges);
-    }
-    for result in elements.chunks(ARANGODB_SAVE_AMOUNT) {
-        let json = serde_json::to_value(result)?;
-        save_arangodb_with_db_option(database, json, AQL_PDMS_ELES_COLLECTION).await?;
-    }
-    for edge in edges.chunks(ARANGODB_SAVE_AMOUNT) {
-        let json = serde_json::to_value(edge)?;
-        save_arangodb_with_db_option(database, json, AQL_PDMS_EDGES_COLLECTION).await?;
-    }
     Ok(())
 }
 
@@ -150,30 +106,6 @@ pub async fn save_pdms_level_edges_in_sync(
     database: &ArDatabase,
     children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
 ) -> anyhow::Result<()> {
-    let mut results = vec![];
-    for (_refno, children_map) in children_map {
-        if children_map.len() == 0 {
-            continue;
-        }
-        for i in 1..children_map.len() {
-            let from_refno = children_map[i].0;
-            let to_refno = children_map[i - 1].0;
-            let edge = PdmsEleEdge {
-                key: from_refno.hash_with_another_refno(to_refno).to_string(),
-                refno: from_refno,
-                owner: to_refno,
-                order: i as _,
-                ..Default::default()
-            };
-            results.push(edge);
-        }
-    }
-    if !results.is_empty() {
-        for result in results.chunks(ARANGODB_SAVE_AMOUNT) {
-            let json = serde_json::to_value(result)?;
-            save_arangodb_with_db_option(database, json, "sibl_edges").await?;
-        }
-    }
     Ok(())
 }
 
@@ -182,33 +114,6 @@ pub async fn save_foreign_refno_edges_in_sync(
     database: &ArDatabase,
     foreign_refnos_map: DashMap<RefU64, DashMap<String, RefU64>>,
 ) -> anyhow::Result<()> {
-    let mut foreign_edges = vec![];
-    let mut foreign_edges_refnos = DashSet::new(); // 防止edges重复
-    for foreign_refnos in foreign_refnos_map.into_iter() {
-        let refno = foreign_refnos.0;
-        if foreign_edges_refnos.contains(&refno) {
-            continue;
-        }
-        foreign_edges_refnos.insert(refno);
-        for (foreign_type, foreign_refno) in foreign_refnos.1 {
-            if foreign_refno == RefU64(0) {
-                continue;
-            }
-            let key = refno.hash_with_another_refno(foreign_refno);
-            foreign_edges.push(ForeignEdges {
-                _key: key.to_string(),
-                _from: format!("{}/{}", "pdms_eles", refno.to_string()),
-                _to: format!("{}/{}", "pdms_eles", foreign_refno.to_string()),
-                foreign_type,
-            })
-        }
-    }
-    if foreign_edges.len() > 0 {
-        for foreign_edge in foreign_edges.chunks(ARANGODB_SAVE_AMOUNT) {
-            let json = serde_json::to_value(foreign_edge)?;
-            save_arangodb_with_db_option(database, json, "foreign_edges").await?;
-        }
-    }
     Ok(())
 }
 
@@ -265,93 +170,7 @@ pub async fn sync_pdms_level_edges_to_graph_db(mgr: Arc<AiosDBManager>) -> anyho
     Ok(())
 }
 
-/// 将同级 children 赋上连接关系
-async fn set_level_edges(
-    eles: Vec<PdmsElement>,
-    mut edges: &mut Vec<PdmsEleGraphEdge>,
-) -> anyhow::Result<()> {
-    for i in 1..eles.len() {
-        let from_refno = (eles[i].refno);
-        let to_refno = (eles[i - 1].refno);
-        let edge = PdmsEleGraphEdge {
-            _key: from_refno.hash_with_another_refno(to_refno).to_string(),
-            _from: format!("{}/{}", "pdms_eles", from_refno.to_string()),
-            _to: format!("{}/{}", "pdms_eles", to_refno.to_string()),
-        };
-        edges.push(edge);
-    }
-    Ok(())
-}
-
-/// 将pdms spre catr 等外键连接关系保存到图数据库 edges
 pub async fn sync_foreign_refno_to_graph_db(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
-    let mut spre_set = DashSet::new();
-    let mut catr_set: DashSet<RefU64> = DashSet::new();
-    let mut spre_edges = vec![];
-    let mut spre_foreign_refs = vec!["SPRE", "CATR"];
-    let catr_foreign_refs = vec!["PTRE", "GMRE", "DTRE"];
-    let collection = "pdms_eles";
-    let edges_collection = "foreign_edges";
-    for project in &mgr.projects {
-        if let Some(project_db) = mgr.project_map.get(project) {
-            // 找到所有的 spco  自身 refno就是 spre ，另一个返回值就是 catr
-            let results =
-                query_foreign_refnos_from_table("CATR", "SPCO", project_db.value()).await?;
-            for (spre, catr) in results {
-                if *catr == 0 {
-                    continue;
-                }
-                if spre_set.contains(&spre) {
-                    continue;
-                }
-                // spre 到 catr 的边
-                spre_edges.push(ForeignEdges {
-                    _key: spre.hash_with_another_refno(catr).to_string(),
-                    _from: format!("{}/{}", collection, spre.to_string()),
-                    _to: format!("{}/{}", collection, catr.to_string()),
-                    foreign_type: "CATR".to_string(),
-                });
-                spre_set.insert(spre);
-                // 获得 catr 的 ptre gmre dtre
-                if catr_set.contains(&catr) {
-                    continue;
-                }
-                if let Some(refno_basic) = mgr.get_refno_basic(catr) {
-                    if let Some((_, project_db)) = mgr.get_project_pool_by_refno(catr).await {
-                        let att = query_implicit_attr(
-                            catr,
-                            refno_basic.value(),
-                            &project_db,
-                            Some(catr_foreign_refs.clone()),
-                        )
-                        .await?;
-                        for catr_foreign_type in &catr_foreign_refs {
-                            if let Some(ptre) = att.get_val(catr_foreign_type) {
-                                let ptre_refno = ptre.refno_value().unwrap_or(RefU64(0));
-                                if *ptre_refno == 0 {
-                                    continue;
-                                }
-                                spre_edges.push(ForeignEdges {
-                                    _key: catr.hash_with_another_refno(ptre_refno).to_string(),
-                                    _from: format!("{}/{}", collection, catr.to_string()),
-                                    _to: format!("{}/{}", collection, ptre_refno.to_string()),
-                                    foreign_type: catr_foreign_type.to_string(),
-                                });
-                            }
-                        }
-                        catr_set.insert(catr);
-                    }
-                }
-                // 分量保存
-                if spre_edges.len() > 1000 {
-                    let json = serde_json::to_value(&take(&mut spre_edges))?;
-                    save_arangodb(mgr.clone(), json, edges_collection).await?;
-                }
-            }
-        }
-    }
-    let json = serde_json::to_value(&take(&mut spre_edges))?;
-    save_arangodb(mgr.clone(), json, edges_collection).await?;
     Ok(())
 }
 

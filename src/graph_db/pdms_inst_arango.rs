@@ -12,9 +12,6 @@ use dashmap::DashMap;
 use glam::{Mat3, Quat, Vec3};
 use itertools::Itertools;
 use sqlx::Row;
-
-use crate::aql_api::children::query_deep_children_refnos_fuzzy;
-use crate::aql_api::convert_refno_vec_from_vec_string;
 use crate::arangodb::ArDatabase;
 use crate::consts::*;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;
@@ -26,43 +23,6 @@ pub async fn save_compound_inst_info_to_graph_db(
     mgr: &AiosDBManager,
     inst_info_map: &DashMap<RefU64, EleGeosInfo>,
 ) -> anyhow::Result<()> {
-    //将compound数据分开保存
-    let edge_collection = "instance_edges";
-    let database = mgr.get_arango_db().await?;
-    let mut instances = vec![];
-    // let mut edges = vec![];
-    let collection = AQL_PDMS_COMPOUND_INST_INFO_COLLECTION;
-    println!("开始保存负实体instance数据");
-    for chunk in &inst_info_map
-        .iter()
-        .filter(|v| v.is_compound())
-        .chunks(1000)
-    {
-        for k in chunk {
-            let json = serde_json::to_value(k.value()).unwrap();
-            instances.push(json);
-            // let edge = PdmsInstanceGraphEdge {
-            //     _key: "".to_string(),
-            //     _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.0.to_string()),
-            //     _to: format!("{}/{}", collection, k.0.to_string()),
-            // };
-            // edges.push(serde_json::to_value(&edge).unwrap());
-        }
-        let aql = AqlQuery::new(r#"
-                with @@collection
-                LET data = @elements
-                    FOR d IN data
-                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
-            .bind_var("@collection", collection)
-            .bind_var("elements", take(&mut instances));
-        database.aql_query::<Vec<()>>(aql).await?;
-        // let aql = AqlQuery::new(r#"LET data = @edges
-        //             FOR d IN data
-        //                 INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
-        //     .bind_var("@collection", edge_collection)
-        //     .bind_var("edges", take(&mut edges));
-        // database.aql_query::<Vec<()>>(aql).await?;
-    }
     Ok(())
 }
 
@@ -71,10 +31,6 @@ pub async fn save_mesh_instance_data(
     mgr: &AiosDBManager,
     inst_mgr: &ShapeInstancesData,
 ) -> anyhow::Result<()> {
-    let collection = AQL_PDMS_INST_GEO_COLLECTION;
-    let edge_collection = "instance_edges";
-    let database = mgr.get_arango_db().await?;
-
     println!("开始保存instance数据");
 
     //保存inst geos 数据
@@ -86,13 +42,10 @@ pub async fn save_mesh_instance_data(
     let mut vec3_map = HashMap::new();
     let chunk_size = 300;
     for chunk in keys.chunks(chunk_size) {
-        let mut instances = vec![];
         let mut json_vec = vec![];
         let mut geo_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_geos_map.get(k).unwrap();
-            let json = serde_json::to_value(v).unwrap();
-            instances.push(json);
             for inst in &v.insts {
                 let aabb_hash = gen_bytes_hash::<_, 64>(&inst.aabb);
                 let tansform_hash = gen_bytes_hash::<_, 64>(&inst.transform);
@@ -130,22 +83,11 @@ pub async fn save_mesh_instance_data(
                     param_hash,
                     pt_hashes.join(",")
                 );
-                // if inst.refno == RefU64::from_two_nums(15194, 4162){
-                //     dbg!(&relate_sql);
-                // }
                 geo_relate_vec.push(relate_sql);
                 // dbg!(&geo_relate_vec[0]);
                 json_vec.push(inst.gen_geo_sur_json());
             }
         }
-        let aql = AqlQuery::new(r#"
-                    with @@collection
-                    LET data = @elements
-                    FOR d IN data
-                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
-            .bind_var("@collection", collection)
-            .bind_var("elements", take(&mut instances));
-        database.aql_query::<Vec<()>>(aql).await?;
 
         if !json_vec.is_empty() {
             let sql = format!(
@@ -175,11 +117,9 @@ pub async fn save_mesh_instance_data(
     let collection = AQL_PDMS_INST_TUBI_COLLECTION;
     let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
     for chunk in keys.chunks(chunk_size) {
-        let mut instances = vec![];
+        
         for &k in chunk {
             let v = inst_mgr.inst_tubi_map.get(k).unwrap();
-            let json = serde_json::to_value(v).unwrap();
-            instances.push(json);
 
             //更新aabb 和 transform，保存relate已经在别的地方加了，这里后面需要重构
             let aabb = v.aabb.unwrap();
@@ -195,14 +135,6 @@ pub async fn save_mesh_instance_data(
                 );
             }
         }
-        let aql = AqlQuery::new(r#"
-        with @@collection
-        LET data = @elements
-                    FOR d IN data
-                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
-            .bind_var("@collection", collection)
-            .bind_var("elements", take(&mut instances));
-        database.aql_query::<Vec<()>>(aql).await?;
     }
 
     //直接用record link来链接mesh
@@ -211,7 +143,7 @@ pub async fn save_mesh_instance_data(
     let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
     let mut join_set = tokio::task::JoinSet::new();
     for chunk in keys.chunks(chunk_size) {
-        let mut instances = vec![];
+        
         let mut edges = vec![];
         let mut json_vec = vec![];
         let mut inst_relate_vec = vec![];
@@ -220,8 +152,6 @@ pub async fn save_mesh_instance_data(
             if v.aabb.is_none() {
                 continue;
             }
-            let json = serde_json::to_value(v).unwrap();
-            instances.push(json);
             let edge = PdmsInstanceGraphEdge {
                 _key: "".to_string(),
                 _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.to_string()),
@@ -262,24 +192,7 @@ pub async fn save_mesh_instance_data(
                 pt_hashes.join(","),
                 v.generic_type.to_string(),
             ));
-            // dbg!(&inst_relate_vec);
         }
-        let aql = AqlQuery::new(r#"
-        with @@collection
-        LET data = @elements
-                    FOR d IN data
-                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
-            .bind_var("@collection", collection)
-            .bind_var("elements", take(&mut instances));
-        database.aql_query::<Vec<()>>(aql).await?;
-        let aql = AqlQuery::new(r#"
-                with @@collection
-                LET data = @edges
-                    FOR d IN data
-                        INSERT d INTO @@collection OPTIONS { ignoreErrors: true, overwriteMode: "replace" }"#)
-            .bind_var("@collection", edge_collection)
-            .bind_var("edges", take(&mut edges));
-        database.aql_query::<Vec<()>>(aql).await?;
 
         if !json_vec.is_empty() {
             let sql = format!(
@@ -308,13 +221,11 @@ pub async fn save_mesh_instance_data(
     let keys = inst_mgr.compound_inst_info_map.keys().collect::<Vec<_>>();
     let mut join_set = tokio::task::JoinSet::new();
     for chunk in keys.chunks(chunk_size) {
-        let mut instances = vec![];
+        
         let mut json_vec = vec![];
         let mut compound_inst_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.compound_inst_info_map.get(k).unwrap();
-            let json = serde_json::to_value(v).unwrap();
-            instances.push(json);
             json_vec.push(v.gen_sur_json());
 
             if v.aabb.is_none() {
@@ -343,14 +254,7 @@ pub async fn save_mesh_instance_data(
                 v.generic_type.to_string()
             ));
         }
-        let aql = AqlQuery::new(r#"
-        with @@collection
-        LET data = @elements
-                    FOR d IN data
-                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
-            .bind_var("@collection", collection)
-            .bind_var("elements", take(&mut instances));
-        database.aql_query::<Vec<()>>(aql).await?;
+
 
         if !json_vec.is_empty() {
             let sql = format!(
@@ -377,14 +281,11 @@ pub async fn save_mesh_instance_data(
     let keys = inst_mgr.ngmr_inst_info_map.keys().collect::<Vec<_>>();
     let mut join_set = tokio::task::JoinSet::new();
     for chunk in keys.chunks(chunk_size) {
-        let mut instances = vec![];
+        
         let mut json_vec = vec![];
         let mut ngmr_inst_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.ngmr_inst_info_map.get(k).unwrap();
-            let json = serde_json::to_value(v).unwrap();
-            instances.push(json);
-
             json_vec.push(v.gen_sur_json());
 
             let aabb = v.aabb.unwrap();
@@ -408,14 +309,7 @@ pub async fn save_mesh_instance_data(
                 v.generic_type.to_string()
             ));
         }
-        let aql = AqlQuery::new(r#"
-        with @@collection
-        LET data = @elements
-                    FOR d IN data
-                        INSERT d INTO @@collection  OPTIONS { ignoreErrors: true , overwriteMode: "replace" }"#)
-            .bind_var("@collection", collection)
-            .bind_var("elements", take(&mut instances));
-        database.aql_query::<Vec<()>>(aql).await?;
+       
 
         if !json_vec.is_empty() {
             let sql = format!(
@@ -517,154 +411,24 @@ pub async fn query_insts_shape_data(
     refnos: impl IntoIterator<Item = &RefU64>,
     geo_type_filter: Option<&[GeoBasicType]>,
 ) -> anyhow::Result<ShapeInstancesData> {
-    let filter = geo_type_filter.unwrap_or(&[GeoBasicType::Compound, GeoBasicType::Pos]);
-    let new_refnos = refnos.into_iter().cloned().collect::<Vec<_>>();
-    if new_refnos.is_empty() {
-        return Ok(Default::default());
-    }
-    let refno_strs = new_refnos.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-    let include_compound = filter.contains(&GeoBasicType::Compound);
-    //如果单独拖入负实体，允许把负实体显示出来
-    let aql = AqlQuery::new(
-        r#"
-            With @@pdms_eles,@@pdms_inst_infos
-            FOR refno in @refnos
-                FOR c,e,p IN 0..20 inbound CONCAT('pdms_eles/',refno) pdms_edges
-                    let comp_f = document('pdms_compound_inst_infos', c._key)
-                    let f = document('pdms_inst_infos', c._key)
-                    let d = (@include_compound and comp_f != null) ? comp_f : f
-                    filter d != null
-                    return distinct d
-            "#,
-    )
-    .bind_var("refnos", refno_strs.clone())
-    .bind_var("include_compound", include_compound)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
-    let geos_info: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
-    let mut inst_info_map = HashMap::new();
-    //过滤不需要的geo inst，比如排除neg的等等
-    let mut inst_keys = geos_info
-        .iter()
-        .filter(|x| filter.contains(&x.geo_type) || x.geo_type == GeoBasicType::UNKOWN)
-        .map(|x| x.get_inst_key())
-        .collect::<Vec<_>>();
-    for g in geos_info {
-        inst_info_map.insert(g.refno, g);
-    }
 
-    //还有的直段会放在branch上，需要特殊处理
-    // inst_keys.clear();
-    inst_keys.push("1".to_string());
-    inst_keys.push("2".to_string());
-    let mut inst_geos_map = HashMap::new();
-    let aql = AqlQuery::new(
-        r#"
-            With @@pdms_inst_infos
-            FOR inst_key in @inst_keys
-                let f = document('pdms_inst_geos', inst_key)
-                filter f != null
-                return distinct {
-                    _key: f._key,
-                    refno: f.refno,
-                    insts: f.insts,
-                    aabb: f.aabb,
-                    type_name: f.type_name
-                }
-            "#,
-    )
-    .bind_var("inst_keys", inst_keys)
-    .bind_var("@pdms_inst_infos", AQL_PDMS_INST_INFO_COLLECTION);
-    let inst_geos: Vec<EleInstGeosData> = database.aql_query(aql).await.unwrap();
-    for g in inst_geos {
-        inst_geos_map.insert(g.inst_key.clone(), g);
-    }
-
-    let mut inst_tubi_map = HashMap::new();
-    let mut all_refnos = inst_info_map
-        .keys()
-        .map(|x| x.to_string())
-        .collect::<Vec<_>>();
-    //这里需要直接通过这个查询下面的所有的branch那些
-    let branch_refnos =
-        query_deep_children_refnos_fuzzy(&database, &new_refnos, &CATA_HAS_TUBI_GEO_NAMES).await?;
-    all_refnos.extend(branch_refnos.iter().map(|x| x.to_string()));
-    let aql = AqlQuery::new(
-        r#"
-            With @@pdms_inst_tubis
-            FOR r in @refnos
-                let f = document('pdms_inst_tubis', r)
-                filter f != null
-                return f
-            "#,
-    )
-    .bind_var("refnos", all_refnos)
-    .bind_var("@pdms_inst_tubis", AQL_PDMS_INST_TUBI_COLLECTION);
-    let inst_tubi: Vec<EleGeosInfo> = database.aql_query(aql).await.unwrap();
-    for g in inst_tubi {
-        inst_tubi_map.insert(g.refno, g);
-    }
-
-    return Ok(ShapeInstancesData {
-        inst_info_map,
-        inst_tubi_map,
-        inst_geos_map,
-        // compound_refnos_map: Default::default(),
-        compound_inst_info_map: Default::default(),
-        ngmr_inst_info_map: Default::default(),
-    });
+    Ok(Default::default())
 }
 
 pub async fn query_instance_level_with_refno_in_arangodb(
     refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
-    let pdms_inst_infos = AQL_PDMS_INST_INFO_COLLECTION;
-    let aql = AqlQuery::new(
-        "
-    With @@pdms_eles,@@pdms_edges,@@collection
-    FOR c IN 1..15 inbound @refno @@pdms_edges
-        PRUNE document(@@collection,c._key) != null
-        Filter document(@@collection,c._key) != null
-        let f = document(@@collection,c._key)
-        return f._key",
-    )
-    .bind_var("refno", refno_aql)
-    .bind_var("@collection", pdms_inst_infos)
-    .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
-    .bind_var("@pdms_edges", AQL_PDMS_EDGES_COLLECTION);
-    let result: Vec<String> = database.aql_query(aql).await.unwrap();
-    if result.is_empty() {
-        return Ok(vec![]);
-    }
-    let result = convert_refno_vec_from_vec_string(result);
-    Ok(result)
+
+    Ok(Vec::new())
 }
 
 pub async fn query_instance_level_with_ssc_refno_in_arangodb(
     refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<RefU64>> {
-    let refno_aql = format!("ssc_eles/{}", refno.to_string());
-    let pdms_inst_infos = AQL_PDMS_INST_INFO_COLLECTION;
-    let aql = AqlQuery::new(
-        "
-    With @@ssc_eles, @@ssc_edges
-    FOR c IN 0..20 inbound @refno @@ssc_edges
-        // Filter document(@collection,c._key) != null
-        return c._key",
-    )
-    .bind_var("refno", refno_aql)
-    .bind_var("@ssc_eles", AQL_SSC_ELES_COLLECTION)
-    .bind_var("@ssc_edges", AQL_SSC_EDGE_COLLECTION);
-    // .bind_var("collection", pdms_inst_infos);
-    let result: Vec<String> = database.aql_query(aql).await?;
-    if result.is_empty() {
+
         return Ok(vec![]);
-    }
-    let result = convert_refno_vec_from_vec_string(result);
-    Ok(result)
 }
 
 /// 查找基本体得 instance
