@@ -2218,7 +2218,7 @@ pub async fn gen_all_geos_data(
                             refno: pos_refno,
                             owner_pos_refnos: Default::default(),
                             pts: vec![],
-                            aabb: None,
+                            aabb: origin_aabb.clone(),
                             transform: Transform::IDENTITY,
                             geo_param: PdmsGeoParam::CompoundShape,
                             visible: true,
@@ -2231,7 +2231,7 @@ pub async fn gen_all_geos_data(
                             refno: pos_refno,
                             visible: true,
                             generic_type: mgr.get_generic_type(pos_refno).await,
-                            aabb: origin_aabb.clone(),
+                            aabb: origin_aabb.map(|x| aabb_apply_transform(&x, &w_trans)),
                             world_transform: w_trans,
                             //cata hash 用作唯一的标识符就行，后面需要变名称
                             cata_hash: Some(inst_key.to_string()),

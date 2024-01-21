@@ -46,7 +46,12 @@ pub async fn save_mesh_instance_data(
         let mut geo_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_geos_map.get(k).unwrap();
+
             for inst in &v.insts {
+                if inst.aabb.is_none() || inst.transform.is_nan() {
+                    dbg!(&inst);
+                    continue;
+                }
                 let aabb_hash = gen_bytes_hash::<_, 64>(&inst.aabb);
                 let tansform_hash = gen_bytes_hash::<_, 64>(&inst.transform);
                 //如果aabb已经保存到map了，直接跳过，否则插入
@@ -75,8 +80,8 @@ pub async fn save_mesh_instance_data(
                 //还需要加入geo_param的指向，param 是否填原始参数？ param=param:{}
                 //使用cata_key -> inst_geos
                 let relate_sql = format!(
-                    "relate inst_info:{}->geo_relate->inst_geo:⟨{}⟩ set trans=trans:⟨{}⟩, geom_refno=pe:{}, param=param:⟨{}⟩, pts=[{}]",
-                    v.inst_key,
+                    "relate inst_info:⟨{}⟩->geo_relate->inst_geo:⟨{}⟩ set trans=trans:⟨{}⟩, geom_refno=pe:{}, param=param:⟨{}⟩, pts=[{}]",
+                    v.id(),
                     inst.geo_hash,
                     tansform_hash,
                     inst.refno,
@@ -138,13 +143,11 @@ pub async fn save_mesh_instance_data(
     let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
     let mut join_set = tokio::task::JoinSet::new();
     for chunk in keys.chunks(chunk_size) {
-        
-        let mut edges = vec![];
         let mut json_vec = vec![];
         let mut inst_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_info_map.get(k).unwrap();
-            if v.aabb.is_none() {
+            if v.aabb.is_none() || v.world_transform.is_nan()  {
                 continue;
             }
             json_vec.push(v.gen_sur_json());
@@ -174,7 +177,7 @@ pub async fn save_mesh_instance_data(
             //arrive 和 leave 需要用 index
             //这里的 pts，存储的时点集信息
             inst_relate_vec.push(format!(
-                "relate pe:{k}->inst_relate->inst_info:{} set aabb=aabb:⟨{}⟩, world_trans=trans:⟨{}⟩, type=0, pts=[{}], generic='{}'",
+                "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set aabb=aabb:⟨{}⟩, world_trans=trans:⟨{}⟩, type=0, pts=[{}], generic='{}'",
                 v.id(),
                 aabb_hash,
                 tansform_hash,
@@ -189,6 +192,7 @@ pub async fn save_mesh_instance_data(
                 stringify!(inst_info),
                 json_vec.join(",")
             );
+            // dbg!(&json_vec);
             //使用surreal 保存NamedAttrMap
             join_set.spawn(async move {
                 SUL_DB.query(sql).await.unwrap();
@@ -196,7 +200,7 @@ pub async fn save_mesh_instance_data(
         }
         if !inst_relate_vec.is_empty() {
             //使用surreal 保存NamedAttrMap
-            dbg!(&inst_relate_vec);
+            // dbg!(&inst_relate_vec);
             join_set.spawn(async move {
                 SUL_DB.query(inst_relate_vec.join(";")).await.unwrap();
             });
@@ -216,7 +220,7 @@ pub async fn save_mesh_instance_data(
             let v = inst_mgr.compound_inst_info_map.get(k).unwrap();
             json_vec.push(v.gen_sur_json());
 
-            if v.aabb.is_none() {
+            if v.aabb.is_none() || v.world_transform.is_nan() {
                 dbg!(k);
                 continue;
             }
@@ -235,7 +239,7 @@ pub async fn save_mesh_instance_data(
             }
             //暂时使用type作为标记, 1为 compound inst info
             compound_inst_relate_vec.push(format!(
-                "relate pe:{k}->inst_relate->inst_info:{} set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=1, generic='{}'",
+                "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=1, generic='{}'",
                 v.id(),
                 aabb_hash,
                 tansform_hash,
@@ -274,6 +278,10 @@ pub async fn save_mesh_instance_data(
         let mut ngmr_inst_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.ngmr_inst_info_map.get(k).unwrap();
+            if v.aabb.is_none() || v.world_transform.is_nan() {
+                dbg!(k);
+                continue;
+            }
             json_vec.push(v.gen_sur_json());
 
             let aabb = v.aabb.unwrap();
@@ -290,7 +298,7 @@ pub async fn save_mesh_instance_data(
             }
             //暂时使用type作为标记, -1为 ngmr inst info
             ngmr_inst_relate_vec.push(format!(
-                "relate pe:{k}->inst_relate->inst_info:{} set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=-1, generic='{}'",
+                "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=-1, generic='{}'",
                 v.id(),
                 aabb_hash,
                 tansform_hash,
