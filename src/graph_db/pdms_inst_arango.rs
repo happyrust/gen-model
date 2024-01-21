@@ -113,8 +113,6 @@ pub async fn save_mesh_instance_data(
     while let Some(_) = join_set.join_next().await {}
 
     //保存tubi的数据
-    // let mut join_set = tokio::task::JoinSet::new();
-    let collection = AQL_PDMS_INST_TUBI_COLLECTION;
     let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
     for chunk in keys.chunks(chunk_size) {
         
@@ -137,9 +135,6 @@ pub async fn save_mesh_instance_data(
         }
     }
 
-    //直接用record link来链接mesh
-    //保存inst info 数据
-    let collection = AQL_PDMS_INST_INFO_COLLECTION;
     let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
     let mut join_set = tokio::task::JoinSet::new();
     for chunk in keys.chunks(chunk_size) {
@@ -152,12 +147,6 @@ pub async fn save_mesh_instance_data(
             if v.aabb.is_none() {
                 continue;
             }
-            let edge = PdmsInstanceGraphEdge {
-                _key: "".to_string(),
-                _from: format!("{AQL_PDMS_ELES_COLLECTION}/{}", k.to_string()),
-                _to: format!("{}/{}", collection, k.to_string()),
-            };
-            edges.push(serde_json::to_value(&edge).unwrap());
             json_vec.push(v.gen_sur_json());
 
             let aabb = v.aabb.unwrap();
@@ -207,7 +196,7 @@ pub async fn save_mesh_instance_data(
         }
         if !inst_relate_vec.is_empty() {
             //使用surreal 保存NamedAttrMap
-            // dbg!(&inst_relate_vec);
+            dbg!(&inst_relate_vec);
             join_set.spawn(async move {
                 SUL_DB.query(inst_relate_vec.join(";")).await.unwrap();
             });
@@ -216,7 +205,6 @@ pub async fn save_mesh_instance_data(
     while let Some(_) = join_set.join_next().await {}
 
     //保存compound inst info 数据
-    let collection = AQL_PDMS_COMPOUND_INST_INFO_COLLECTION;
     println!("开始保存有负实体的 compound instance数据");
     let keys = inst_mgr.compound_inst_info_map.keys().collect::<Vec<_>>();
     let mut join_set = tokio::task::JoinSet::new();
