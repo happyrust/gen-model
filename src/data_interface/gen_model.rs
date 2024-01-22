@@ -1664,9 +1664,12 @@ pub async fn gen_all_geos_data(
     let mut db_nos = mgr.db_option.manual_db_nums.clone().unwrap_or_default();
 
     let replace_mesh = mgr.db_option.replace_mesh;
-    if is_incr_update || is_debug {
+    if (is_incr_update || is_debug) && db_nos.len() >= 1 {
         //处理增量更新，不需要使用db_nos
         db_nos = vec![0];
+    }else if db_nos.is_empty(){
+        db_nos = aios_core::get_design_dbnos(db_option.mdb_name.clone()).await?;
+        dbg!(&db_nos);
     }
 
     for db_no in db_nos {
