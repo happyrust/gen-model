@@ -2265,9 +2265,9 @@ pub async fn gen_all_geos_data(
 
                 {
                     let mut inst_data = instance_mgr.write().await;
-                    dbg!(compound_inst_geos_result_map.len());
+                    // dbg!(compound_inst_geos_result_map.len());
                     let data = Arc::try_unwrap(compound_inst_geos_result_map).unwrap();
-                    dbg!(data.len());
+                    // dbg!(data.len());
                     for (k, v) in data {
                         inst_data.insert_geos_data(k, v);
                     }

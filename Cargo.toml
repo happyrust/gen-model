@@ -4,7 +4,7 @@ version = "0.1.1"
 edition = "2021"
 
 [features]
-default = ["gen_model", "ws", "mqtt"] #
+default = ["gen_model", "ws"] #
 truck = []
 local=[]
 ws=[]

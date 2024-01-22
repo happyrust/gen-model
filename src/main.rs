@@ -134,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
 
     //todo 如何处理初始化的同步，第一次启动一定要同步一次，首先生成archive文件，然后再同步
     //是否需要重构下面的这行代码？
+    #[cfg(feature = "mqtt")]
     tokio::join!(
         // AiosDBManager::run_e3d_clone_bg_task(mgr.clone()),
 
