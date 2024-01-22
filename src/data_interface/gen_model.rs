@@ -1276,7 +1276,7 @@ pub async fn gen_cata_geos(
                         );
                         tubi_relates.push(format!(
                             "relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                    set eave=pe:{},arrive=pe:{},,aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}",
+                                    set eave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}",
                             current_tubing.leave_refno,
                             current_tubing.arrive_refno,
                             gen_bytes_hash::<_, 64>(&aabb),

@@ -552,7 +552,7 @@ impl AiosDBManager {
         let projects = db_option.included_projects.clone();
 
         let db_paths =
-            collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref()));
+            collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref())).unwrap_or_default();
         let mut watcher = PdmsWatcher::load_from_json(None).unwrap_or(PdmsWatcher::new(db_paths));
         #[cfg(feature = "debug_watch")]
         {
