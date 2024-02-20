@@ -1664,7 +1664,7 @@ pub async fn gen_all_geos_data(
     let mut db_nos = mgr.db_option.manual_db_nums.clone().unwrap_or_default();
 
     let replace_mesh = mgr.db_option.replace_mesh;
-    if (is_incr_update || is_debug) && db_nos.len() >= 1 {
+    if is_incr_update || is_debug{
         //处理增量更新，不需要使用db_nos
         db_nos = vec![0];
     }else if db_nos.is_empty(){
