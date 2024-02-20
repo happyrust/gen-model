@@ -116,8 +116,10 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         create_info_database(&default_conn_str, &db_option.project_name).await?;
     }
 
-    aios_core::create_owner_index(db_option).await.unwrap();
-    aios_core::create_geom_index().await.unwrap();
+    if !db_option.incr_sync.unwrap_or(false) {
+        aios_core::create_owner_index(db_option).await.unwrap();
+        aios_core::create_geom_index().await.unwrap();
+    }
 
     let mut create_tables_elapse = 0;
     // 执行多线程解析
