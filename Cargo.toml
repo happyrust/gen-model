@@ -4,7 +4,7 @@ version = "0.1.1"
 edition = "2021"
 
 [features]
-default = ["gen_model", "ws"] #
+default = ["opencascade_rs", "ws", "gen_model", "manifold"] #
 truck = []
 local=[]
 ws=[]
@@ -13,6 +13,7 @@ mqtt=[]
 viewer = []  #是否开启视图
 gen_model = ["aios_core/gen_model"]
 opencascade_rs = ["aios_core/opencascade_rs", "dep:opencascade"]
+manifold = ["aios_core/manifold"]
 
 [dependencies]
 config = "0.13.1"
@@ -60,12 +61,12 @@ bb8 = "0.8.1"
 
 
 clap = { version = "4.3.5", features = ["derive"] }
-dashmap = { version = "5.4.0", features = ["serde", "rayon"] }
-tokio = { vertion = "1.18.2", features = ["full"] }
+dashmap = { version = "5.5.3", features = ["serde", "rayon"] }
+tokio = { vertion = "1", features = ["full"] }
 serde = { version = "1.0.137", features = ["derive"] }
 id_tree = { version = "1.8.0", features = ["serde_support"] }
 glam = { version = "0.25.0", features = ["rkyv"] }
-cached = "0.46.1"
+cached = "0.49.2"
 rkyv = { version = "0.7.42", features=["hashbrown"] }
 debug_print = "1.0.0"
 
@@ -73,7 +74,6 @@ debug_print = "1.0.0"
 #造型功能，先在database测试
 opencascade = { path = "../new-crates/opencascade-rs/crates/opencascade", optional = true}
 serde_with = "3.3.0"
-tokio-stream = "0.1.14"
 rayon = "1.7.0"
 indexmap = "2.0.0"
 urlencoding = "2.1.3"
@@ -83,7 +83,7 @@ num_enum = "0.7.0"
 jsonxf = "1.1.1"
 sea-orm = {version = "0.12.6", features = ["sqlx-mysql", "runtime-async-std"]}
 #surrealdb = { version = "1.0.0", features = ["kv-rocksdb"] }
-surrealdb = { path = "/Users/dongpengcheng/surreal_db/surrealdb/lib" , default-features = false, features = ["protocol-ws"]}
+surrealdb = { path = "../surrealdb/lib" , default-features = false, features = ["protocol-ws"]}
 async-once-cell = "0.5.3"
 rumqttc = "0.23.0"
 petgraph = {version = "0.6.4", features = ["serde-1"]}

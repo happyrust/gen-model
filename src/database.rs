@@ -116,7 +116,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         create_info_database(&default_conn_str, &db_option.project_name).await?;
     }
 
-    if !db_option.incr_sync.unwrap_or(false) {
+    if !db_option.incr_sync {
         aios_core::create_owner_index(db_option).await.unwrap();
         aios_core::create_geom_index().await.unwrap();
     }
@@ -265,6 +265,7 @@ pub async fn sync_total_async_threaded(
             let mut buf = vec![0u8; 60];
             file.read_exact(&mut buf)?;
             let (db_type, file_version, db_no) = parse_file_basic_info(&buf);
+            #[cfg(debug_assertions)]
             dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
             if !db_types.contains(&db_type.as_str()) {
                 continue;
@@ -334,6 +335,7 @@ pub async fn sync_total_async_threaded(
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
+                    dbg!(&debug_refnos);
                     let mut join_set = tokio::task::JoinSet::new();
                     let mut save_atts_time = Instant::now();
                     for kv in type_ele_map.iter() {

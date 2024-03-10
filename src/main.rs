@@ -91,7 +91,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     /// 是否全部同步模型
-    if db_option.total_sync {
+    if db_option.total_sync || db_option.incr_sync {
         // 同步pdms数据
         sync_pdms(&db_option).await.unwrap();
         return Ok(());

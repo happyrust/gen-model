@@ -83,12 +83,12 @@ pub async fn gen_prim_geos(
                 let mut cached_mesh_mgr = mgr_clone.cached_mesh_mgr.write().await;
                 let mut shape_insts_data = instance_mgr.write().await;
                 let refno = all_refnos[j];
-                println!(
-                    "正在处理基本体的模型，索引：{}, 当前参考号：{}, 剩余: {}",
-                    j,
-                    refno.to_string(),
-                    processed_cnt.lock().await.to_owned()
-                );
+                // println!(
+                //     "正在处理基本体的模型，索引：{}, 当前参考号：{}, 剩余: {}",
+                //     j,
+                //     refno.to_string(),
+                //     processed_cnt.lock().await.to_owned()
+                // );
                 *processed_cnt.lock().await -= 1;
                 let Ok(Some(mut trans_origin)) = mgr_clone.get_world_transform(refno).await else {
                     continue;
@@ -300,12 +300,12 @@ pub async fn gen_loop_geos(
                     let offset = trans_origin.rotation.mul_vec3(sjus_adjust.value().0);
                     trans_origin.translation += offset;
                 }
-                println!(
-                    "正在处理loops类型的模型，索引：{}, 当前参考号：{}, 剩余: {}",
-                    j,
-                    parent_refno.to_string(),
-                    processed_cnt.lock().await.to_owned()
-                );
+                // println!(
+                //     "正在处理loops类型的模型，索引：{}, 当前参考号：{}, 剩余: {}",
+                //     j,
+                //     parent_refno.to_string(),
+                //     processed_cnt.lock().await.to_owned()
+                // );
                 *processed_cnt.lock().await -= 1;
                 let mut loop_verts: Vec<Vec3> = vec![];
                 let mut fradius_vec: Vec<f32> = vec![];
@@ -647,15 +647,15 @@ pub async fn gen_cata_geos(
                         //如果没有已有的，需要生成
                         let ele_refno = target_cata.group_refnos[0];
                         process_refno = Some(ele_refno);
-                        println!(
-                            "正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}",
-                            j,
-                            ele_refno.to_string(),
-                            processed_cnt.lock().await.to_owned()
-                        );
+                        // println!(
+                        //     "正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}",
+                        //     j,
+                        //     ele_refno.to_string(),
+                        //     processed_cnt.lock().await.to_owned()
+                        // );
                         *processed_cnt.lock().await -= 1;
                         let Ok(Some(cata_refno)) = aios_core::get_cat_refno(ele_refno).await else {
-                            println!("{ele_refno} 的元件库引用为空，跳过");
+                            // println!("{ele_refno} 的元件库引用为空，跳过");
                             continue;
                         };
                         //在这里直接处理完所有需要处理的transform
@@ -676,7 +676,7 @@ pub async fn gen_cata_geos(
                         match r {
                             Ok(_) => {}
                             Err(e) => {
-                                println!("生成元件库模型失败: {:?}", e);
+                                // println!("生成元件库模型失败: {:?}", e);
                                 continue;
                             }
                         };
@@ -1107,10 +1107,10 @@ pub async fn gen_cata_geos(
                         if Some(ele_refno) == process_refno {
                             continue;
                         }
-                        println!(
-                            "正在处理同类元件库的模型当前参考号：{}",
-                            ele_refno.to_string(),
-                        );
+                        // println!(
+                        //     "正在处理同类元件库的模型当前参考号：{}",
+                        //     ele_refno.to_string(),
+                        // );
                         let Ok(Some(mut origin_trans)) =
                             mgr_clone.get_world_transform(ele_refno).await
                         else {
@@ -1276,7 +1276,7 @@ pub async fn gen_cata_geos(
                         );
                         tubi_relates.push(format!(
                             "relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                    set eave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}",
+                                    set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}",
                             current_tubing.leave_refno,
                             current_tubing.arrive_refno,
                             gen_bytes_hash::<_, 64>(&aabb),
@@ -1307,7 +1307,7 @@ pub async fn gen_cata_geos(
                             });
                     }
                 } else {
-                    println!("{} 的直段方向有问题", branch_refno.to_string());
+                    // println!("{} 的直段方向有问题", branch_refno.to_string());
                 }
             }
             continue;
@@ -2156,7 +2156,7 @@ pub async fn gen_all_geos_data(
                                     #[cfg(feature = "debug_obj_export")]
                                     {
                                         let _ = std::fs::create_dir_all("models");
-                                        new_mesh
+                                        mesh
                                             .export_obj(
                                                 false,
                                                 &format!("models/{}.obj", t_refno.to_string()),
