@@ -4,7 +4,7 @@ version = "0.1.1"
 edition = "2021"
 
 [features]
-default = ["opencascade_rs", "ws", "gen_model", "manifold"] #
+default = ["occ", "ws", "gen_model", "manifold"] #
 truck = []
 local=[]
 ws=[]
@@ -12,7 +12,7 @@ debug_obj_export = []
 mqtt=[]
 viewer = []  #是否开启视图
 gen_model = ["aios_core/gen_model"]
-opencascade_rs = ["aios_core/opencascade_rs", "dep:opencascade"]
+occ = ["aios_core/occ", "dep:opencascade"]
 manifold = ["aios_core/manifold"]
 
 [dependencies]
