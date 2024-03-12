@@ -275,17 +275,13 @@ pub fn resolve_gmse_params(
                 }
             }
         } else {
-            let dir = parse_str_axis_to_vec3_or_default(axis, context);
+            let dir = parse_str_axis_to_vec3_or_default(axis, context).normalize_or_zero();
             let axis = CateAxisParam {
                 refno: Default::default(),
                 number: 0,
                 pt: Default::default(),
                 dir,
-                pconnect: "".to_string(),
-                pbore: 0.0,
-                pwidth: 0.0,
-                pheight: 0.0,
-                ref_dir: Default::default(),
+                ..Default::default()
             };
             paxises.push(Some(axis));
         }
@@ -362,6 +358,7 @@ pub fn resolve_axis_param(
                 pwidth,
                 pheight,
                 ref_dir,
+                ..Default::default()
             }
         }
         "PTCA" | "PTMI" => {
@@ -371,6 +368,7 @@ pub fn resolve_axis_param(
             let (dir, ref_dir, pos) = resolve_dir_and_pos(axis_param, scom, context)
                 .unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
             // dbg!((axis_param.refno, dir));
+            // dbg!(&axis_param);
             CateAxisParam {
                 refno: axis_param.refno,
                 number,
@@ -381,6 +379,7 @@ pub fn resolve_axis_param(
                 pwidth,
                 pheight,
                 ref_dir,
+                ..Default::default()
             }
         }
         "PTPOS" => {

@@ -367,20 +367,20 @@ pub fn resolve_dir_and_pos(
     let re = Regex::new(r"^(-?)P(\d+)$").unwrap();
     if re.is_match(dir_str) {
         if let Some(cap) = re.captures(dir_str) {
-            let is_neg = cap.get(1).map_or("", |m| m.as_str()) == "-";
-            let pnt_indx = cap
+            let is_neg = cap.get(1).map(|m| m.as_str() == "-").unwrap_or(false);
+            let pnt_index = cap
                 .get(2)
                 .map_or("", |m| m.as_str())
                 .parse::<i32>()
                 .unwrap_or(-1);
-            if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
+            if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_index) {
                 let mut axis =
-                    resolve_axis_param(&scom.axis_params[indx], scom, context, );
+                    resolve_axis_param(&scom.axis_params[indx], scom, context);
                 let flag = if is_neg { -1.0 } else { 1.0 };
                 dir = flag * mem::take(&mut axis.dir);
                 pos = flag * mem::take(&mut axis.pt);
             } else {
-                return Err(anyhow::anyhow!("未找到点索引: {}", pnt_indx));
+                return Err(anyhow::anyhow!("未找到点索引: {}", pnt_index));
             }
         }
     } else {
@@ -409,7 +409,7 @@ pub fn resolve_dir_and_pos(
         ref_dir = parse_str_axis_to_vec3_or_default(ref_dir_str, context);
     }
 
-    return Ok((dir, ref_dir, pos));
+    return Ok((dir.normalize_or_zero(), ref_dir.normalize_or_zero(), pos));
 }
 
 //Y is N and Z is U
@@ -510,11 +510,9 @@ pub fn parse_str_axis_to_vec3(
             for cap in re.captures_iter(&dir_str) {
                 if cap.len() == 4 {
                     let val_str = cap[2].to_string();
-                    // dbg!(&val_str);
                     let val_result =
                         eval_str_to_f64(&val_str, context,  true, "AXIS")?.to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
-                    // dbg!(&new_dir_str);
                 }
             }
         }

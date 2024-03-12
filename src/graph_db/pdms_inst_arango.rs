@@ -154,13 +154,13 @@ pub async fn save_mesh_instance_data(
 
             let aabb = v.aabb.unwrap();
             let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
-            let tansform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
+            let transform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
             if !aabb_map.contains_key(&aabb_hash) {
                 aabb_map.insert(aabb_hash, serde_json::to_string(&aabb).unwrap());
             }
-            if !transform_map.contains_key(&tansform_hash) {
+            if !transform_map.contains_key(&transform_hash) {
                 transform_map.insert(
-                    tansform_hash,
+                    transform_hash,
                     serde_json::to_string(&v.world_transform).unwrap(),
                 );
             }
@@ -180,7 +180,7 @@ pub async fn save_mesh_instance_data(
                 "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set aabb=aabb:⟨{}⟩, world_trans=trans:⟨{}⟩, type=0, pts=[{}], generic='{}'",
                 v.id(),
                 aabb_hash,
-                tansform_hash,
+                transform_hash,
                 pt_hashes.join(","),
                 v.generic_type.to_string(),
             ));

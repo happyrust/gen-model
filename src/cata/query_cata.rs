@@ -104,7 +104,8 @@ pub fn resolve_cata_comp(
         &cur_context,
         &axis_param_map,
     );
-    
+
+    #[cfg(debug_assertions)]
     if get_db_option().debug_root_refnos.is_some(){
         // dbg!(&geometries);
         // dbg!(&n_geometries);
