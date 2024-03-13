@@ -515,6 +515,7 @@ pub fn parse_str_axis_to_vec3(
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                 }
             }
+            // dbg!((pdir, &new_dir_str));
         }
     }
     let dir_str = new_dir_str.replace(" ", "");

@@ -25,10 +25,10 @@ use aios_core::pdms_types::*;
 use aios_core::SUL_DB;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use chrono::{Datelike, Local, Timelike};
-use env_logger::{Builder, fmt::Target};
 use futures::StreamExt;
 use itertools::Itertools;
 use log::{error, LevelFilter};
+use simplelog::*;
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::format::FmtSpan;
 
@@ -40,12 +40,11 @@ use aios_database::database::*;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
 
-    fmt::fmt()
-    .with_span_events(FmtSpan::CLOSE)
-    .with_target(false)
-    .with_level(false)
-    .init();
-
+    // fmt::fmt()
+    // .with_span_events(FmtSpan::CLOSE)
+    // .with_target(false)
+    // .with_level(false)
+    // .init();
     let db_option: DbOption = get_db_option().clone();
     // 如果启用了日志功能
     if db_option.enable_log {
@@ -61,18 +60,14 @@ async fn main() -> anyhow::Result<()> {
         );
 
         // 创建日志文件
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(filename)
-            .unwrap();
+        let file = File::create(filename).unwrap();
 
-        // 配置日志过滤器和输出目标
-        let mut builder = Builder::from_default_env();
-        builder.filter(Some("aios_database"), LevelFilter::Info);
-        builder.filter(Some("aios_core"), LevelFilter::Info);
-        builder.target(Target::Pipe(Box::new(file))).init();
+        CombinedLogger::init(
+            vec![
+                TermLogger::new(LevelFilter::Warn, Config::default(), TerminalMode::Mixed, ColorChoice::Auto),
+                WriteLogger::new(LevelFilter::Info, Config::default(), file),
+            ]
+        ).unwrap();
     }
 
     #[cfg(feature = "local")]

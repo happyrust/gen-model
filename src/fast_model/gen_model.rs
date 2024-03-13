@@ -372,8 +372,8 @@ pub async fn gen_all_geos_data(
                     GNERAL_PRIM_NOUN_NAMES.map(String::from).to_vec(),
                 )
                 .await?;
-                #[cfg(debug_assertions)]
-                dbg!(&prim_refnos);
+                // #[cfg(debug_assertions)]
+                // dbg!(&prim_refnos);
                 prim_refnos.into_iter().collect()
             };
             println!("使用基本体数量: {}", target_prim_refnos.len());

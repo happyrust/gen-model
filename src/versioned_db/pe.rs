@@ -24,65 +24,7 @@ use std::collections::HashSet;
 use std::time::Instant;
 use std::sync::Arc;
 use aios_core::options::DbOption;
-
-// const JSON_CHUNK_COUNT: usize = 5_000;
-
-// pub async fn save_versioned_pdms_eles(
-//     client: &TDBClient,
-//     total_attr_map: &DashMap<RefU64, WholeAttMap>,
-//     db_num: i32,
-//     db_option: &DbOption,
-// ) -> anyhow::Result<()> {
-//     let mut eles = Vec::with_capacity(total_attr_map.len());
-//     for kv in total_attr_map.iter() {
-//         let att_map: NamedAttrMap = kv.value().merge().into();
-//         let ele = PdmsEleDataVersioned {
-//             id: format!("PdmsElement/{}", kv.key().to_string()),
-//             refno: *kv.key(),
-//             owner: att_map.get_refno_by_att_or_default("OWNER"),
-//             name: att_map.get_string_or_default("NAME"),
-//             noun: att_map.get_type(),
-//             dbnum: db_num,
-//             cata_hash: None,
-//             status_tag: None,
-//         };
-//         eles.push(ele);
-//     }
-//
-//     // let mut futures = FuturesUnordered::new();
-//     for result in eles.chunks(JSON_CHUNK_COUNT) {
-//         let json = serde_json::to_string(result)?;
-//
-//         let doc_res = client
-//             .insert_doc(
-//                 json.as_str(),
-//                 "dpc",
-//                 "Add Pdms Elements.",
-//                 false,
-//                 false,
-//                 true,
-//             )
-//             .await
-//             .unwrap_or_default();
-//         dbg!(doc_res);
-//
-//         // let project = db_option.project_name.clone();
-//         // futures.push(tokio::task::spawn(async move {
-//         //     // let mut conn = pool.get_conn().await.unwrap();
-//         //     let mut client = get_versioned_client(&project).await;
-//         //     // let info = client.db_info().await;
-//         //     // dbg!(info);
-//         //     let doc_res = client.insert_doc(json.as_str(), "dpc", "Add Pdms Elements.", false, false, true).await.unwrap_or_default();
-//         //     dbg!(doc_res);
-//         // }));
-//     }
-//
-//
-//
-//     // while let Some(_) = futures.next().await { }
-//
-//     Ok(())
-// }
+use log::{error, info};
 
 /// 保存element数据到版本管理
 /// todo 后续再考虑 record links
@@ -132,9 +74,12 @@ pub async fn save_pdms_eles_to_surreal(
         let sql = format!("INSERT IGNORE INTO pe [{}]", jsons_str.join(","));
         //手动修改，替换掉""
         join_set.spawn(async move {
-            if let Ok(_) = SUL_DB.query(sql.clone()).await{
-            }else{
-                println!("save_pdms_eles_to_surreal error: {}", sql);
+            match SUL_DB.query(sql.clone()).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("save pe to surreal error: {}", e);
+                    error!("{}", sql);
+                }
             }
         });
     }
@@ -170,13 +115,16 @@ pub async fn save_pdms_eles_to_surreal(
     for mut s in chunks {
         let sql = s.into_iter().join(";");
         relate_join_set.spawn(async move {
-                if let Ok(_) = SUL_DB.query(sql.clone()).await{
-                }else{
-                    println!("relate pe error: {}", sql);
+            match SUL_DB.query(sql.clone()).await {
+                Ok(_) => {}
+                Err(e) => {
+                    error!("relate pe to surreal error: {}", e);
+                    error!("{}", sql);
                 }
+            }
         });
     }
     while let Some(_) = relate_join_set.join_next().await {}
-    println!("Relate pes task costs {} s", time.elapsed().as_secs_f32());
+    info!("Relate pes task costs {} s", time.elapsed().as_secs_f32());
     Ok(())
 }

@@ -292,7 +292,7 @@ pub async fn gen_cata_geos(
                                 continue;
                             };
                             #[cfg(debug_assertions)]
-                            dbg!(gmse_refno);
+                            dbg!((ele_refno, gmse_refno));
 
                             //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
                             //反过来查询负实体，然后查询它的owner，来找到相邻的正实体
