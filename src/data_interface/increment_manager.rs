@@ -23,7 +23,7 @@ use tokio::fs::create_dir_all;
 use tokio::task::JoinSet;
 use walkdir::WalkDir;
 
-use crate::data_interface::gen_model::gen_all_geos_data;
+use crate::fast_model::gen_all_geos_data;
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
 // use pdms_io::watch::PdmsWatcher;
 use crate::data_interface::interface::PdmsDataInterface;

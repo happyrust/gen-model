@@ -1,4 +1,4 @@
-use crate::data_interface::gen_model::gen_all_geos_data;
+use crate::fast_model::gen_all_geos_data;
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
 
 use crate::test::test_helper::get_test_ams_db_manager_async;

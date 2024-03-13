@@ -132,7 +132,10 @@ pub async fn save_pdms_eles_to_surreal(
         let sql = format!("INSERT IGNORE INTO pe [{}]", jsons_str.join(","));
         //手动修改，替换掉""
         join_set.spawn(async move {
-            SUL_DB.query(sql).await.unwrap();
+            if let Ok(_) = SUL_DB.query(sql.clone()).await{
+            }else{
+                println!("save_pdms_eles_to_surreal error: {}", sql);
+            }
         });
     }
     while let Some(_) = join_set.join_next().await {}
@@ -167,7 +170,10 @@ pub async fn save_pdms_eles_to_surreal(
     for mut s in chunks {
         let sql = s.into_iter().join(";");
         relate_join_set.spawn(async move {
-            SUL_DB.query(sql).await.unwrap();
+                if let Ok(_) = SUL_DB.query(sql.clone()).await{
+                }else{
+                    println!("relate pe error: {}", sql);
+                }
         });
     }
     while let Some(_) = relate_join_set.join_next().await {}

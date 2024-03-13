@@ -33,7 +33,7 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 #[cfg(feature = "gen_model")]
-use aios_database::data_interface::gen_model::gen_all_geos_data;
+use aios_database::fast_model::gen_all_geos_data;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::database::*;
 
