@@ -13,7 +13,7 @@ sync_chunk_size = 100_0000
 
 #项目设置
 project_path = "D:/AVEVA/Projects/E3D2.1"
-included_projects = ["AvevaMarineSample" , "AvevaCatalogue", "SCB", "ZDJ"]
+included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 
 mdb_name = "ALL"
 project_name = "AvevaMarineSample"
@@ -50,7 +50,7 @@ password = ""
 port = "3306"
 #port = "4000"
 sql_threads_number = 50
-batch_insert_sql_cnt = 100   #mysql 批量插入的数量
+batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 
 #版本数据库服务配置
@@ -80,8 +80,8 @@ file_server_host = "http://192.168.31.38:8100/asset/archives"
 #调试选项
 replace_mesh = true
 save_model_mesh_to_graph_db = true
-need_sync_refno_basic = false  #是否重新生成 refno_basic 缓存
-reset_mdb_project =  false     #是否重新生成 mdb 缓存
+need_sync_refno_basic = false       #是否重新生成 refno_basic 缓存
+reset_mdb_project = false           #是否重新生成 mdb 缓存
 only_update_dbinfo = false
 debug_print_world_transform = false
 only_rebuild_pdms_element = false
@@ -107,8 +107,8 @@ puhua_database_password = ""
 
 #debug_root_refnos = ["24381/58336"]
 #debug_root_refnos = ["17496/172256"]
-debug_root_refnos = ["17496/255909"]
-#debug_root_refnos = ["24381/180844"]
+# debug_root_refnos = ["17496/255909"]
+debug_root_refnos = ["24381/180844"]
 #debug_root_refnos = ["24381/56665"]
 #debug_root_refnos = ["24381/36945"]
 #debug_root_refnos = ["17496/171102"]
@@ -139,8 +139,6 @@ debug_root_refnos = ["17496/255909"]
 
 # debug_root_refnos = ["24381/58482"]
 #debug_root_refnos = ["24381/58338", "24381/58708"]
-
-
 
 
 # debug_root_refnos = ["25688/7958"]
