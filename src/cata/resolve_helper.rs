@@ -353,7 +353,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
     geo.map_err(|x| anyhow::anyhow!(format!("几何体生成出错, 数据: {:?}", &gmse)))
 }
 
-pub fn resolve_dir_and_pos(
+pub fn resolve_axis(
     axis: &AxisParam,
     scom: &ScomInfo,
     context: &CataContext,
@@ -374,11 +374,11 @@ pub fn resolve_dir_and_pos(
                 .parse::<i32>()
                 .unwrap_or(-1);
             if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_index) {
-                let mut axis =
+                let axis =
                     resolve_axis_param(&scom.axis_params[indx], scom, context);
                 let flag = if is_neg { -1.0 } else { 1.0 };
-                dir = flag * mem::take(&mut axis.dir);
-                pos = flag * mem::take(&mut axis.pt);
+                dir = flag *  axis.dir;
+                pos = axis.pt;
             } else {
                 return Err(anyhow::anyhow!("未找到点索引: {}", pnt_index));
             }
@@ -515,7 +515,6 @@ pub fn parse_str_axis_to_vec3(
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                 }
             }
-            // dbg!((pdir, &new_dir_str));
         }
     }
     let dir_str = new_dir_str.replace(" ", "");

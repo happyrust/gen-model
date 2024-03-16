@@ -747,7 +747,6 @@ impl PdmsDataInterface for AiosDBManager {
         self.get_foreign_refno(refno, "SPRE").await
     }
 
-    //todo need some test for this function
     ///获得元件库的catr参考号
     #[inline]
     async fn get_cat_ref(&self, refno: RefU64) -> Option<RefU64> {
@@ -876,9 +875,6 @@ impl PdmsDataInterface for AiosDBManager {
     ) -> anyhow::Result<CateGeomsInfo> {
         let desi_att = aios_core::get_named_attmap(desi_refno).await?;
         let is_tubi = tubi_scom.is_some();
-        if tubi_scom.is_none() {
-            tubi_scom = self.get_cat_ref(desi_refno).await;
-        }
 
         #[cfg(debug_assertions)]
         if is_tubi {
@@ -895,7 +891,6 @@ impl PdmsDataInterface for AiosDBManager {
                     "CAT引用不存在: {}",
                     desi_refno.to_string()
                 )))?;
-            tubi_scom = Some(scom);
             scom
         };
         #[cfg(debug_assertions)]

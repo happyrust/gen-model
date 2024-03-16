@@ -343,15 +343,18 @@ pub fn resolve_axis_param(
     let pbore = eval_str_to_f32_or_default(&axis_param.pbore, &context,  "DIST");
     let pwidth = eval_str_to_f32_or_default(&axis_param.pwidth, &context,  "DIST");
     let pheight = eval_str_to_f32_or_default(&axis_param.pheight, &context,  "DIST");
+    // if axis_param.number == 4 {
+    //     dbg!(&axis_param);
+    // }
     match axis_param.type_name.as_str() {
         "PTAX" => {
             let d = eval_str_to_f32_or_default(&axis_param.distance, &context,  "DIST");
             let (dir, ref_dir, pos) =
-                resolve_dir_and_pos(axis_param, scom, context).unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
+                resolve_axis(axis_param, scom, context).unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
             CateAxisParam {
                 refno: axis_param.refno,
                 number,
-                pt: Vec3::new(d * dir[0] + pos[0], d * dir[1] + pos[1], d * dir[2] + pos[2]),
+                pt: d * dir + pos,
                 dir,
                 pconnect,
                 pbore,
@@ -365,14 +368,12 @@ pub fn resolve_axis_param(
             let x = eval_str_to_f32_or_default(&axis_param.x, &context,  "DIST");
             let y = eval_str_to_f32_or_default(&axis_param.y, &context,  "DIST");
             let z = eval_str_to_f32_or_default(&axis_param.z, &context,  "DIST");
-            let (dir, ref_dir, pos) = resolve_dir_and_pos(axis_param, scom, context)
+            let (dir, ref_dir, pos) = resolve_axis(axis_param, scom, context)
                 .unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
-            // dbg!((axis_param.refno, dir));
-            // dbg!(&axis_param);
             CateAxisParam {
                 refno: axis_param.refno,
                 number,
-                pt: Vec3::new(pos[0] + x, pos[1] + y, pos[2] + z),
+                pt: pos + Vec3::new(x, y, z),
                 dir,
                 pconnect,
                 pbore,
@@ -383,7 +384,7 @@ pub fn resolve_axis_param(
             }
         }
         "PTPOS" => {
-            let (dir, ref_dir, pos) = resolve_dir_and_pos(axis_param, scom, context)
+            let (dir, ref_dir, pos) = resolve_axis(axis_param, scom, context)
                 .unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
             let mut cate_axis = CateAxisParam {
                 number,
