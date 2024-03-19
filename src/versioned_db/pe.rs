@@ -21,16 +21,14 @@ use rayon::prelude::*;
 use sea_orm::entity::prelude::*;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::str::FromStr;
 use std::time::Instant;
 use std::sync::Arc;
 use aios_core::options::DbOption;
 use log::{error, info};
 
 /// 保存element数据到版本管理
-/// todo 后续再考虑 record links
-// 先暂时使用relate的方式
-// #[tracing::instrument]
-pub async fn save_pdms_eles_to_surreal(
+pub async fn save_pe_to_surreal(
     total_attr_map: &DashMap<RefU64, NamedAttrMap>,
     db_num: i32,
     children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
@@ -38,13 +36,26 @@ pub async fn save_pdms_eles_to_surreal(
 ) -> anyhow::Result<()> {
     use itertools::Itertools;
     let keys = total_attr_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
+    let debug_refnos: Vec<RefU64> = option
+        .debug_root_refnos
+        .as_ref()
+        .map(|x| {
+            x.iter()
+                .map(|x| RefU64::from_str(x).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let is_debug = !debug_refnos.is_empty();
     let mut model_chunks = keys.par_chunks(option.pe_chunk as _).map(|chunk| {
         let mut model_chunk = vec![];
         for &refno in chunk {
+            if is_debug && !debug_refnos.contains(&refno) {
+                continue;
+            }
             let att_map = total_attr_map.get(&refno).unwrap();
             let owner = att_map.get_refno_by_att_or_default("OWNER");
             let noun = att_map.get_type();
-            let ele = pe::SPdmsElement {
+            let ele = SPdmsElement {
                 id: refno.to_string(),
                 refno,
                 owner,
@@ -97,6 +108,12 @@ pub async fn save_pdms_eles_to_surreal(
         if children.is_empty() {
             continue;
         }
+        if is_debug{
+            let found = children.iter().any(|(c, _)| debug_refnos.contains(c));
+            if !found {
+                continue;
+            }
+        }
         let relate_sqls = children
             .iter()
             .enumerate()
@@ -111,6 +128,7 @@ pub async fn save_pdms_eles_to_surreal(
             .collect::<Vec<String>>();
         all_relate_sqls.extend_from_slice(&relate_sqls);
     }
+    // dbg!(&all_relate_sqls);
     let mut chunks = all_relate_sqls.chunks(option.pe_chunk as _);
     for mut s in chunks {
         let sql = s.into_iter().join(";");

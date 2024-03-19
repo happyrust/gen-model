@@ -117,8 +117,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     }
 
     if !db_option.incr_sync {
-        aios_core::create_owner_index(db_option).await.unwrap();
+        aios_core::define_owner_index().await.unwrap();
         aios_core::create_geom_index().await.unwrap();
+        aios_core::define_pe_name_index().await.unwrap();
     }
 
     let mut create_tables_elapse = 0;
@@ -145,7 +146,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         }
 
         if !db_option.incr_sync {
-            match sync_total_async_threaded(&db_option, project, &["DICT", "SYST", "GLB"], false).await {
+            match sync_total_async_threaded(&db_option, project, &["DICT", "SYST", "GLB", "GLOB"], false).await {
                 Ok(_) => {
                     // 同步数据成功
                     println!("同步UDA和SYS数据成功。");
@@ -311,14 +312,11 @@ pub async fn sync_total_async_threaded(
                 .await
                 {
                     println!("Processing {} chunk index: {chunk_index}", &file_name);
-
                     //类型暂时不多线程
                     let total_attr_map_arc = Arc::new(total_attr_map);
-                    let children_map_arc = children_map_clone.clone();
-
                     //开始执行保存数据
                     dbg!("开始保存pdms_element数据");
-                    save_pdms_eles_to_surreal(
+                    save_pe_to_surreal(
                         &total_attr_map_arc,
                         db_no as i32,
                         &children_map_clone,
@@ -336,6 +334,7 @@ pub async fn sync_total_async_threaded(
                         })
                         .unwrap_or_default();
                     dbg!(&debug_refnos);
+                    let is_debug = !debug_refnos.is_empty();
                     let mut join_set = tokio::task::JoinSet::new();
                     let mut save_atts_time = Instant::now();
                     for kv in type_ele_map.iter() {
@@ -350,9 +349,13 @@ pub async fn sync_total_async_threaded(
                             let mut uda_json_vec = vec![];
                             for refno in refnos {
                                 let att = total_attr_map_arc.get(refno).unwrap();
-
-                                if debug_refnos.contains(&att.get_refno().unwrap()) {
-                                    dbg!(att.value());
+                                //调试时，只解析这个单独的refno
+                                if is_debug {
+                                    if debug_refnos.contains(&att.get_refno().unwrap()) {
+                                        dbg!(att.value());
+                                    }else{
+                                        continue;
+                                    }
                                 }
                                 let Some(json) = att.gen_sur_json() else {
                                     continue;
