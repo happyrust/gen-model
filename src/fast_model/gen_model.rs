@@ -443,20 +443,10 @@ pub async fn gen_all_geos_data(
                             compound_inst_geos_result_map.clone();
 
                         let mut batch_manifolds = vec![];
-                        //没有正实体的情况，直接跳过
-                        // if neg_refnos.is_empty() {
-                        //     return;
-                        // }
                         let Some(w_trans) = trans_map.get(&pos_refno).map(|x| x.value().clone())
                         else {
                             continue;
                         };
-                        // #[cfg(debug_assertions)]
-                        // {
-                        //     dbg!(w_trans);
-                        //     dbg!(quat_to_pdms_ori_str(&w_trans.rotation));
-                        // }
-                        // dbg!(w_trans);
                         let mut total_refnos = vec![pos_refno];
                         total_refnos.extend_from_slice(&neg_refnos);
                         let inverse_mat = w_trans.compute_matrix().as_dmat4().inverse();
@@ -515,30 +505,6 @@ pub async fn gen_all_geos_data(
                                     }
                                     if is_neg {
                                         geo_inst.owner_pos_refnos = [pos_refno].into();
-                                        //根据类型来考虑是否需要扩大负实体
-                                        // let mut center: Vec3 = aabb.center().into();
-                                        // let t_mat = DMat4::from_translation(center.as_dvec3());
-                                        // let mut s = 1.0;
-                                        // 使用OCC 扫描生成，如果负实体个数比较少时，可以很快生成
-                                        // if matches!(
-                                        //     geo_inst.geo_param,
-                                        //     PdmsGeoParam::PrimRevolution(_)
-                                        // ) {
-                                        //     //如果是旋转体，xy方向都适当放大一点, 旋切的情况处理，因为精度不一样，倒是负实体切割问题
-                                        //     if aabb.contains(&pos_aabb) {
-                                        //         s = 1.03;
-                                        //     }
-                                        //     let s_mat = DMat4::from_scale(DVec3::new(1.0, s, s));
-                                        //     let inv_t_mat =
-                                        //         DMat4::from_translation((-center).as_dvec3());
-                                        //     local_mat = local_mat * t_mat * s_mat * inv_t_mat;
-                                        // } else {
-                                        //     let s_mat =
-                                        //         DMat4::from_scale(DVec3::new(1.003, 1.003, 1.003));
-                                        //     let inv_t_mat =
-                                        //         DMat4::from_translation((-center).as_dvec3());
-                                        //     local_mat = local_mat * t_mat * s_mat * inv_t_mat;
-                                        // };
                                     }
 
                                     #[cfg(debug_assertions)]
