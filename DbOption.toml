@@ -94,7 +94,7 @@ debug_refno_types = ["CATA", "LOOP", "PRIM"]
 # included_db_files = ["acp7002_0001", "ams7997_0001", "ams1112_0001"]
 # included_db_files = ["acp7002_0001"]
 # included_db_files = ["ams7000_0001"]
-included_db_files = ["ams5052_0001"]
+included_db_files = ["ams8000_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 manual_db_nums = [1112]
 # manual_db_nums = [7999, 1112]  #, 8000
@@ -118,7 +118,7 @@ puhua_database_password = ""
 #debug_root_refnos = ["24381/36945"]
 #debug_root_refnos = ["17496/171102"]
 
-debug_root_refnos = ["17496/172806"]
+#debug_root_refnos = ["24381/181248"]
 
 
 #test wall
