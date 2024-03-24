@@ -35,7 +35,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
 // use crate::graph_db::pdms_arango::{connect_arangodb, save_arangodb_with_db_option};
-use crate::graph_db::pdms_inst_arango::query_insts_shape_data;
+use crate::graph_db::pdms_inst::query_insts_shape_data;
 // use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge, PdmsMdbEdge};
 use crate::mqtt_service::{new_mqtt_inst, SyncE3dFileMsg};
 
@@ -616,7 +616,7 @@ impl AiosDBManager {
             needed_parse_files: None,
             project_path: dir,
             db_option: db_option.clone(),
-            cached_mesh_mgr: Arc::new(Default::default()),
+            // cached_mesh_mgr: Arc::new(Default::default()),
             // arango_pool,
             watcher: Arc::new(watcher),
             mqtt_client,

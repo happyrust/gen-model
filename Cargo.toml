@@ -81,7 +81,6 @@ walkdir = "2.3.3"
 num_enum = "0.7.0"
 jsonxf = "1.1.1"
 sea-orm = {version = "0.12.6", features = ["sqlx-mysql", "runtime-async-std"]}
-#surrealdb = { version = "1.0.0", features = ["kv-rocksdb"] }
 surrealdb = { path = "../surrealdb/lib" , default-features = false, features = ["protocol-ws"]}
 async-once-cell = "0.5.3"
 rumqttc = "0.23.0"
@@ -95,6 +94,7 @@ slog-term = "2.9.1"
 slog-scope = "4.4.0"
 slog-stdlog = "4.1.1"
 simplelog = "0.12.2"
+downcast-rs = "1.2.0"
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }

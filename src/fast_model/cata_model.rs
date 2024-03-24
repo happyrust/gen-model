@@ -16,6 +16,7 @@ use nalgebra::Point3;
 use aios_core::tool::hash_tool::hash_two_str;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use std::mem::take;
+use aios_core::geometry::*;
 use aios_core::prim_geo::basic::{BOXI_GEO_HASH, TUBI_GEO_HASH};
 use aios_core::prim_geo::{PdmsTubing, TubiEdge};
 use aios_core::tool::math_tool::to_pdms_vec_str;
@@ -133,10 +134,8 @@ pub async fn gen_cata_geos(
     println!("使用元件库的模型总数：{unique_cata_cnt}, 分块数量: {batch_chunks_cnt}");
     let mut handles = vec![];
     let processed_cnt = Arc::new(Mutex::new(unique_cata_cnt));
-    let mut tubi_edges = Arc::new(DashMap::new());
     let mut tubi_relates = vec![];
     let replace_mesh = mgr.db_option.replace_mesh;
-    let tol_ratio = mgr.db_option.mesh_tol_ratio;
     let multi_threads = mgr.db_option.multi_threads;
 
     let all_unique_keys = Arc::new(
@@ -168,7 +167,6 @@ pub async fn gen_cata_geos(
                         continue;
                     }
                     let target_cata = target_cata_map.get(&cata_hash).unwrap();
-                    let mut cached_mesh_mgr = mgr_clone.cached_mesh_mgr.write().await;
                     let mut shape_insts_data = instance_mgr.write().await;
                     let mut target_geo_data_option = None;
                     let mut process_refno = None;
@@ -176,12 +174,12 @@ pub async fn gen_cata_geos(
                         //如果没有已有的，需要生成
                         let ele_refno = target_cata.group_refnos[0];
                         process_refno = Some(ele_refno);
-                        // println!(
-                        //     "正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}",
-                        //     j,
-                        //     ele_refno.to_string(),
-                        //     processed_cnt.lock().await.to_owned()
-                        // );
+                        println!(
+                            "正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}",
+                            j,
+                            ele_refno.to_string(),
+                            processed_cnt.lock().await.to_owned()
+                        );
                         *processed_cnt.lock().await -= 1;
                         let Ok(Some(cata_refno)) = aios_core::get_cat_refno(ele_refno).await else {
                             // println!("{ele_refno} 的元件库引用为空，跳过");
@@ -287,14 +285,12 @@ pub async fn gen_cata_geos(
                                 geo_type: Default::default(),
                                 cata_refno: Some(cata_refno),
                                 ptset_map: Default::default(),
+                                neg_refnos: vec![],
                             };
 
-                            let mut manifold_map: HashMap<RefU64, ManifoldRust> = HashMap::new();
                             let mut geo_insts = vec![];
                             let mut ngmr_geo_insts = vec![];
                             //将负实体和正实体统计出来
-                            let mut merged_cata_aabb: Option<Aabb> = None;
-                            let mut n_merged_cata_aabb: Option<Aabb> = None;
                             // dbg!(ele_refno);
                             //直接将所有的几何体组合起来
                             for shape in shapes {
@@ -315,78 +311,10 @@ pub async fn gen_cata_geos(
                                 let mut trans = brep_shape.get_trans();
                                 let is_neg = neg_own_pos_map.contains_key(&refno);
                                 let geo_hash = brep_shape.hash_unit_mesh_params();
-                                let mut geo_aabb = {
-                                    let mut tol = if is_neg {
-                                        tol_ratio.unwrap_or(1.0) * 50.0
-                                    } else {
-                                        tol_ratio.unwrap_or(1.0)
-                                    };
-                                    let Some((_, aabb)) = cached_mesh_mgr.gen_plant_data(
-                                        brep_shape.clone(),
-                                        replace_mesh,
-                                        Some(tol),
-                                    ) else {
-                                        continue;
-                                    };
-                                    aabb
-                                };
                                 let rot = transform.rotation;
                                 let translation =
                                     transform.translation + transform.rotation * trans.translation;
                                 let scale = trans.scale;
-                                let tmp_aabb = geo_aabb.scaled(&trans.scale.into());
-                                let transformed_aabb = tmp_aabb.transform_by(&Isometry {
-                                    rotation: rot.into(),
-                                    translation: translation.into(),
-                                });
-
-                                if let Some(mesh) = cached_mesh_mgr.get_mesh(geo_hash) {
-                                    let mut local_mat = Transform {
-                                        translation,
-                                        rotation: rot,
-                                        scale,
-                                    }
-                                    .compute_matrix()
-                                    .as_dmat4();
-                                    let Some(aabb) = cached_mesh_mgr.get_aabb(geo_hash) else {
-                                        continue;
-                                    };
-                                    // dbg!(&aabb);
-                                    //稍微扩张一点
-                                    if is_neg {
-                                        let center: Vec3 = aabb.center().into();
-                                        let mut center = center.as_dvec3();
-                                        let t_mat = DMat4::from_translation(center);
-                                        let mut s = 1.002;
-                                        let s_mat = DMat4::from_scale(DVec3::splat(s));
-                                        let inv_t_mat = DMat4::from_translation(-center);
-                                        local_mat = local_mat * t_mat * s_mat * inv_t_mat;
-                                    }
-                                    let new_mesh = mesh.transform_by(&(local_mat));
-                                    #[cfg(feature = "debug_obj_export")]
-                                    {
-                                        let _ = std::fs::create_dir_all("models");
-                                        mesh.export_obj(
-                                            false,
-                                            &format!("models/{}.obj", refno.to_string()),
-                                        )
-                                        .expect("TODO: panic message");
-                                    }
-                                    manifold_map.insert(refno, new_mesh.into());
-                                };
-                                if is_ngmr {
-                                    if let Some(a) = &mut n_merged_cata_aabb {
-                                        a.merge(&&transformed_aabb);
-                                    } else {
-                                        n_merged_cata_aabb = Some(transformed_aabb);
-                                    }
-                                } else {
-                                    if let Some(a) = &mut merged_cata_aabb {
-                                        a.merge(&transformed_aabb);
-                                    } else {
-                                        merged_cata_aabb = Some(transformed_aabb);
-                                    }
-                                }
                                 let transform = Transform {
                                     translation,
                                     rotation: rot,
@@ -400,7 +328,7 @@ pub async fn gen_cata_geos(
                                     geo_hash,
                                     refno,
                                     pts,
-                                    aabb: Some(geo_aabb),
+                                    aabb: None,
                                     transform,
                                     geo_param: brep_shape
                                         .convert_to_geo_param()
@@ -431,39 +359,23 @@ pub async fn gen_cata_geos(
                                 geo_insts.push(geom_inst);
                                 // break;
                             }
-                            // dbg!(csg_map.len());
-                            if merged_cata_aabb.is_none() {
-                                merged_cata_aabb = n_merged_cata_aabb;
-                            }
-                            //需要变换成世界坐标系下的aabb
-                            if let Some(a) = merged_cata_aabb {
-                                geos_info.aabb =
-                                    Some(shared::aabb_apply_transform(&a, &geos_info.world_transform));
-                            }
-
-                            if let Some(mut aabb) = &mut geos_info.aabb {
-                                if aabb.mins.x.is_infinite() {
-                                    aabb =
-                                        Aabb::new(Point3::new(0., 0., 0.), Point3::new(0., 0., 0.));
-                                }
-                            }
-
                             //保存ngmr的信息
                             // dbg!(&ngmr_geo_insts);
                             if ngmr_geo_insts.len() > 0 {
-                                let mut n_geos_info = geos_info.clone();
-                                n_geos_info.update_to_ngmr(None);
-                                let mut inst_key = n_geos_info.get_inst_key();
-                                let n_origin = EleInstGeosData {
-                                    inst_key: inst_key.clone(),
-                                    refno: ele_refno,
-                                    insts: ngmr_geo_insts,
-                                    aabb: n_merged_cata_aabb,
-                                    type_name: cur_type.to_string(),
-                                    ptset_map: Default::default(),
-                                };
-                                shape_insts_data.insert_ngmr_info(ele_refno, n_geos_info);
-                                shape_insts_data.insert_geos_data(inst_key, n_origin);
+                                // let mut n_geos_info = geos_info.clone();
+                                // n_geos_info.update_to_ngmr(None);
+                                // let mut inst_key = n_geos_info.get_inst_key();
+                                // let n_origin = EleInstGeosData {
+                                //     inst_key: inst_key.clone(),
+                                //     refno: ele_refno,
+                                //     insts: ngmr_geo_insts,
+                                //     aabb: None,
+                                //     type_name: cur_type.to_string(),
+                                //     ptset_map: Default::default(),
+                                //     neg_refnos: vec![],
+                                // };
+                                // shape_insts_data.insert_ngmr_info(ele_refno, n_geos_info);
+                                // shape_insts_data.insert_geos_data(inst_key, n_origin);
                             }
 
                             //将负实体的运算结果，存在另外一个collection
@@ -478,20 +390,18 @@ pub async fn gen_cata_geos(
                                         .filter(|x| x.geo_type == GeoBasicType::Pos)
                                         .cloned()
                                         .collect(),
-                                    aabb: merged_cata_aabb,
+                                    aabb: None,
                                     type_name: cur_type.to_string(),
                                     ptset_map: design_axis_map
                                         .remove(&ele_refno)
                                         .map(|x| x.1)
                                         .unwrap_or_default(),
                                 };
-                                //TODO: 后续只需要存在 info 里，不用存在insts里面
-                                geos_info.ptset_map = origin.ptset_map.clone();
+                                // geos_info.ptset_map = origin.ptset_map.clone();
                                 // dbg!(&geo_insts);
                                 //需要判断是否ngmr是个只有V--的，没有实体的，如果没有实体，就不需要加入到insts里面
                                 //要保留POS的部分
                                 target_geo_data_option = Some(origin.clone());
-                                //TODO: 只保留正实体的部分在insts里面，比如FITT的套管，挖空的部分存在另外的地方，type为-1
                                 #[cfg(debug_assertions)]
                                 dbg!(origin.insts.len());
                                 if origin.insts.len() > 0 {
@@ -501,82 +411,9 @@ pub async fn gen_cata_geos(
                                 }
 
                                 //在这里执行负实体的运算
-                                let mut final_geo_insts = geo_insts;
-                                let mut final_compounds_map = HashMap::new();
-                                let mut total_manifolds = vec![];
-
-                                for (&k, neg_vec) in &pos_neg_map {
-                                    if let Some(src_manifold) = manifold_map.get(&k) {
-                                        let mut neg_ms = vec![];
-                                        for neg in neg_vec {
-                                            if let Some(m) = manifold_map.get(neg) {
-                                                neg_ms.push(m.clone());
-                                            } else {
-                                                continue;
-                                            }
-                                        }
-                                        total_manifolds.extend_from_slice(&neg_ms);
-                                        //元件库实体内的负实体运算
-                                        let final_manifold =
-                                            src_manifold.batch_boolean_subtract(&neg_ms);
-                                        final_compounds_map.insert(k, final_manifold);
-                                        final_geo_insts.retain(|x| x.refno != k);
-                                    } else {
-                                        continue;
-                                    }
-                                }
-                                //元件库内部的负实体计算
-                                if !final_compounds_map.is_empty() {
-                                    final_geo_insts.retain(|x| x.geo_type == GeoBasicType::Pos);
-                                    let mut compound_geos_info = geos_info;
-                                    compound_geos_info.update_to_compound(None);
-                                    let inst_key = compound_geos_info.get_inst_key();
-                                    for (k, v) in final_compounds_map {
-                                        //组合成新的hash
-                                        let geo_hash =
-                                            hash_two_str(&inst_key.to_string(), &k.to_string());
-                                        let mesh: PlantMesh = (v.clone()).into();
-                                        let aabb = mesh.cal_aabb();
-                                        cached_mesh_mgr.insert(
-                                            geo_hash,
-                                            PlantGeoData {
-                                                geo_hash,
-                                                mesh: Some(mesh),
-                                                aabb,
-                                            },
-                                        );
-                                        // result_manifold.destroy();
-                                        let compound_geom_inst = EleInstGeo {
-                                            geo_hash,
-                                            refno: k,
-                                            owner_pos_refnos: Default::default(),
-                                            pts: vec![],
-                                            aabb,
-                                            transform: Transform::IDENTITY,
-                                            geo_param: PdmsGeoParam::CompoundShape,
-                                            visible: true,
-                                            is_tubi: false,
-                                            geo_type: GeoBasicType::Compound,
-                                        };
-                                        final_geo_insts.push(compound_geom_inst);
-                                    }
-                                    //compound 需要建立和 inst info 里的关系，是由inst info 合并出来的，所以需要做个edges的处理
-                                    let compound_geos_data = EleInstGeosData {
-                                        inst_key: inst_key.clone(),
-                                        refno: ele_refno,
-                                        insts: final_geo_insts,
-                                        aabb: origin.aabb.clone(),
-                                        type_name: origin.type_name.clone(),
-                                        ptset_map: origin.ptset_map.clone(),
-                                    };
-                                    shape_insts_data.insert_geos_data(inst_key, compound_geos_data);
-                                    shape_insts_data
-                                        .insert_compound_info(ele_refno, compound_geos_info);
-                                }
-
-                                for t in total_manifolds {
-                                    // t.destroy();
-                                }
+                                // let mut final_geo_insts = geo_insts;
+                                // let mut final_compounds_map = HashMap::new();
+                                // let mut total_manifolds = vec![];
                             }
                             break;
                         }
@@ -584,21 +421,17 @@ pub async fn gen_cata_geos(
                         target_geo_data_option = target_cata.exist_geo.clone();
                     }
 
-                    //排除一些特殊情况
                     let Some(target_geo_insts) = target_geo_data_option else {
                         continue;
                     };
-                    if target_geo_insts.aabb.is_none() {
-                        continue;
-                    }
                     for ele_refno in target_cata.group_refnos.clone() {
                         if Some(ele_refno) == process_refno {
                             continue;
                         }
-                        // println!(
-                        //     "正在处理同类元件库的模型当前参考号：{}",
-                        //     ele_refno.to_string(),
-                        // );
+                        println!(
+                            "正在处理同类元件库的模型当前参考号：{}",
+                            ele_refno.to_string(),
+                        );
                         let Ok(Some(mut origin_trans)) =
                             mgr_clone.get_world_transform(ele_refno).await
                         else {
@@ -623,39 +456,37 @@ pub async fn gen_cata_geos(
                             attr.get_i32("ARRI").unwrap_or(-1),
                             attr.get_i32("LEAV").unwrap_or(-1),
                         ];
-                        let mut geos_info = EleGeosInfo {
+                        let geos_info = EleGeosInfo {
                             refno: ele_refno,
                             cata_hash: Some(cata_hash.clone()),
                             visible: true,
                             generic_type: mgr_clone.get_generic_type(ele_refno).await,
-                            aabb: Some(shared::aabb_apply_transform(
-                                target_geo_insts.aabb.as_ref().unwrap(),
-                                &origin_trans,
-                            )),
+                            aabb: None,
                             world_transform: origin_trans,
                             flow_pt_indexs,
                             geo_type: Default::default(),
                             cata_refno: None,
                             ptset_map: target_geo_insts.ptset_map.clone(),
+                            neg_refnos: vec![],
                         };
-                        shape_insts_data.insert_info(ele_refno, geos_info.clone());
-                        //如果有负实体，需要特殊处理
-                        if target_geo_insts.has_cata_neg() {
-                            let mut compound_geos_info = geos_info.clone();
-                            compound_geos_info.update_to_compound(None);
-                            //为了不覆盖，这里需要动一下
-                            shape_insts_data.insert_compound_info(ele_refno, compound_geos_info);
-                        }
+                        shape_insts_data.insert_info(ele_refno, geos_info);
+                        //TODO 如果有负实体，需要特殊处理
+                        // if target_geo_insts.has_cata_neg() {
+                        //     let mut compound_geos_info = geos_info.clone();
+                        //     compound_geos_info.update_to_compound(None);
+                        //     //为了不覆盖，这里需要动一下
+                        //     shape_insts_data.insert_compound_info(ele_refno, compound_geos_info);
+                        // }
 
                         //如果有ngmr负实体，需要特殊处理
-                        if target_geo_insts.has_ngmr() {
-                            let mut n_geos_info = geos_info.clone();
-                            //更新为ngmr类型
-                            n_geos_info.update_to_ngmr(None);
-                            let geo_hash = n_geos_info.get_inst_key_u64();
-                            //todo 将ngmr的mesh加载到内存，方便后续处理负实体
-                            shape_insts_data.insert_ngmr_info(ele_refno, n_geos_info);
-                        }
+                        // if target_geo_insts.has_ngmr() {
+                        //     let mut n_geos_info = geos_info.clone();
+                        //     //更新为ngmr类型
+                        //     n_geos_info.update_to_ngmr(None);
+                        //     let geo_hash = n_geos_info.get_inst_key_u64();
+                        //     //todo 将ngmr的mesh加载到内存，方便后续处理负实体
+                        //     shape_insts_data.insert_ngmr_info(ele_refno, n_geos_info);
+                        // }
                     }
                 }
             });
@@ -760,6 +591,7 @@ pub async fn gen_cata_geos(
                                 geo_type: Default::default(),
                                 cata_refno: None,
                                 ptset_map: Default::default(),
+                                neg_refnos: vec![],
                             },
                         );
                         tubi_relates.push(format!(
@@ -771,9 +603,6 @@ pub async fn gen_cata_geos(
                             gen_bytes_hash::<_, 64>(&t),
                             serde_json::to_string(&h_tubi_size).unwrap_or_default(),
                         ));
-                        // 将 tubi 数据保存到图数据库
-                        let key = h_ref.hash_with_another_refno(tref);
-
                     }
                 } else {
                     // println!("{} 的直段方向有问题", branch_refno.to_string());
@@ -882,6 +711,7 @@ pub async fn gen_cata_geos(
                                             geo_type: GeoBasicType::Tubi,
                                             cata_refno: None,
                                             ptset_map: Default::default(),
+                                            neg_refnos: vec![],
                                         },
                                     );
                                     println!(
@@ -903,29 +733,6 @@ pub async fn gen_cata_geos(
                                             gen_bytes_hash::<_, 64>(&t),
                                             serde_json::to_string(&h_tubi_size).unwrap_or_default(),
                                         ));
-                                    // dbg!(t);
-                                    let key = current_tubing
-                                        .leave_refno
-                                        .hash_with_another_refno(current_tubing.arrive_refno);
-                                    tubi_edges.entry(branch_refno).or_insert(Vec::new()).push(
-                                        TubiEdge {
-                                            _key: key.to_string(),
-                                            _from: format!(
-                                                "{AQL_PDMS_ELES_COLLECTION}/{}",
-                                                current_tubing.leave_refno.to_string()
-                                            ),
-                                            _to: format!(
-                                                "{AQL_PDMS_ELES_COLLECTION}/{}",
-                                                current_tubing.arrive_refno.to_string()
-                                            ),
-                                            start_pt: current_tubing.start_pt,
-                                            end_pt: current_tubing.end_pt,
-                                            att_type: ele.noun.clone(),
-                                            extra_type: "".to_string(),
-                                            tubi_size: current_tubing.tubi_size,
-                                            bran_name: bran_name.clone(),
-                                        },
-                                    );
                                 }
                             } else {
                                 #[cfg(feature = "debug")]
@@ -1011,6 +818,7 @@ pub async fn gen_cata_geos(
                                     geo_type: GeoBasicType::Tubi,
                                     cata_refno: None,
                                     ptset_map: Default::default(),
+                                    neg_refnos: vec![],
                                 },
                             );
                             tubi_relates.push(
@@ -1023,29 +831,6 @@ pub async fn gen_cata_geos(
                                     serde_json::to_string(&h_tubi_size).unwrap_or_default(),
                                 )
                             );
-                            let key = current_tubing
-                                .leave_refno
-                                .hash_with_another_refno(current_tubing.arrive_refno);
-                            tubi_edges
-                                .entry(branch_refno)
-                                .or_insert(Vec::new())
-                                .push(TubiEdge {
-                                    _key: key.to_string(),
-                                    _from: format!(
-                                        "{AQL_PDMS_ELES_COLLECTION}/{}",
-                                        current_tubing.leave_refno.to_string()
-                                    ),
-                                    _to: format!(
-                                        "{AQL_PDMS_ELES_COLLECTION}/{}",
-                                        current_tubing.arrive_refno.to_string()
-                                    ),
-                                    start_pt: current_tubing.start_pt,
-                                    end_pt: current_tubing.end_pt,
-                                    att_type: ele.noun.clone(),
-                                    extra_type: "".to_string(),
-                                    tubi_size: current_tubing.tubi_size,
-                                    bran_name: bran_name.clone(),
-                                });
                         }
                     } else {
                         dbg!(current_tubing.desire_arrive_dir);

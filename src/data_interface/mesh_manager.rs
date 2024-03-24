@@ -32,16 +32,15 @@ impl AiosDBManager {
 
     ///获取geo_hash 对应的plant mesh数据
     pub async fn get_plant_mesh(&self, geo_hash: u64) -> anyhow::Result<Option<PlantMesh>> {
-        {
-            self.cache_plant_meshes(&[geo_hash], false).await?;
-        }
-        {
-            let m = self.cached_mesh_mgr.read().await;
-            if m.contains_key(&geo_hash) {
-                return Ok(m.get(&geo_hash).map(|x| x.mesh.clone()).unwrap());
-            }
-        };
-
+        // {
+        //     self.cache_plant_meshes(&[geo_hash], false).await?;
+        // }
+        // {
+        //     let m = self.cached_mesh_mgr.read().await;
+        //     if m.contains_key(&geo_hash) {
+        //         return Ok(m.get(&geo_hash).map(|x| x.mesh.clone()).unwrap());
+        //     }
+        // };
         Ok(None)
     }
 

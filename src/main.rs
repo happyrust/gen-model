@@ -36,6 +36,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use aios_database::fast_model::gen_all_geos_data;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::database::*;
+use aios_database::fast_model::process_gen_meshes;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -92,13 +93,12 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     /// 创建db manager
-    let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
 
     #[cfg(feature = "gen_model")]
     if db_option.gen_model {
         println!("正在生成模型");
         let mut time = Instant::now();
-        gen_all_geos_data(mgr.clone(), None).await?;
+        process_gen_meshes(None).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 

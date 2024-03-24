@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::mem::take;
-
+use aios_core::geometry::{EleGeosInfo, GeoBasicType, ShapeInstancesData};
 use aios_core::geom_types::RvmGeoInfo;
 use aios_core::pdms_types::*;
 use aios_core::SUL_DB;
@@ -27,7 +27,7 @@ pub async fn save_compound_inst_info_to_graph_db(
 }
 
 ///保存instance 数据到数据库
-pub async fn save_mesh_instance_data(
+pub async fn save_instance_data(
     mgr: &AiosDBManager,
     inst_mgr: &ShapeInstancesData,
 ) -> anyhow::Result<()> {
@@ -48,7 +48,7 @@ pub async fn save_mesh_instance_data(
             let v = inst_mgr.inst_geos_map.get(k).unwrap();
 
             for inst in &v.insts {
-                if inst.aabb.is_none() || inst.transform.is_nan() {
+                if inst.transform.is_nan() {
                     dbg!(&inst);
                     continue;
                 }
@@ -89,8 +89,8 @@ pub async fn save_mesh_instance_data(
                     pt_hashes.join(",")
                 );
                 geo_relate_vec.push(relate_sql);
-                // dbg!(&geo_relate_vec[0]);
-                json_vec.push(inst.gen_geo_sur_json());
+                //保存 unit shape 的几何参数
+                json_vec.push(inst.gen_unit_geo_sur_json());
             }
         }
 
@@ -147,17 +147,12 @@ pub async fn save_mesh_instance_data(
         let mut inst_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_info_map.get(k).unwrap();
-            if v.aabb.is_none() || v.world_transform.is_nan()  {
+            if v.world_transform.is_nan()  {
                 continue;
             }
             json_vec.push(v.gen_sur_json());
 
-            let aabb = v.aabb.unwrap();
-            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
             let transform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
-            if !aabb_map.contains_key(&aabb_hash) {
-                aabb_map.insert(aabb_hash, serde_json::to_string(&aabb).unwrap());
-            }
             if !transform_map.contains_key(&transform_hash) {
                 transform_map.insert(
                     transform_hash,
@@ -176,14 +171,30 @@ pub async fn save_mesh_instance_data(
 
             //arrive 和 leave 需要用 index
             //这里的 pts，存储的时点集信息
-            inst_relate_vec.push(format!(
-                "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set aabb=aabb:⟨{}⟩, world_trans=trans:⟨{}⟩, type=0, pts=[{}], generic='{}'",
-                v.id(),
-                aabb_hash,
-                transform_hash,
-                pt_hashes.join(","),
-                v.generic_type.to_string(),
-            ));
+            let sql = if v.neg_refnos.is_empty(){
+                format!(
+                    "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩, pts=[{}], generic='{}', geo_type='{}' ",
+                    v.id(),
+                    // aabb_hash,
+                    transform_hash,
+                    pt_hashes.join(","),
+                    v.generic_type.to_string(),
+                    v.geo_type
+                )
+            }else{
+                format!(
+                    "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩, pts=[{}], generic='{}', geo_type='{}', neg_refnos=[{}]",
+                    v.id(),
+                    // aabb_hash,
+                    transform_hash,
+                    pt_hashes.join(","),
+                    v.generic_type.to_string(),
+                    v.geo_type,
+                    v.neg_refnos.iter().map(|x| x.to_pe_key()).join(",")
+                )
+            };
+            // dbg!(&sql);
+            inst_relate_vec.push(sql);
         }
 
         if !json_vec.is_empty() {
@@ -192,7 +203,6 @@ pub async fn save_mesh_instance_data(
                 stringify!(inst_info),
                 json_vec.join(",")
             );
-            // dbg!(&json_vec);
             //使用surreal 保存NamedAttrMap
             join_set.spawn(async move {
                 SUL_DB.query(sql).await.unwrap();
@@ -208,126 +218,7 @@ pub async fn save_mesh_instance_data(
     }
     while let Some(_) = join_set.join_next().await {}
 
-    //保存compound inst info 数据
-    println!("开始保存有负实体的 compound instance数据");
-    let keys = inst_mgr.compound_inst_info_map.keys().collect::<Vec<_>>();
-    let mut join_set = tokio::task::JoinSet::new();
-    for chunk in keys.chunks(chunk_size) {
-        
-        let mut json_vec = vec![];
-        let mut compound_inst_relate_vec = vec![];
-        for &k in chunk {
-            let v = inst_mgr.compound_inst_info_map.get(k).unwrap();
-            json_vec.push(v.gen_sur_json());
-
-            if v.aabb.is_none() || v.world_transform.is_nan() {
-                dbg!(k);
-                continue;
-            }
-
-            let aabb = v.aabb.unwrap();
-            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
-            let tansform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
-            if !aabb_map.contains_key(&aabb_hash) {
-                aabb_map.insert(aabb_hash, serde_json::to_string(&aabb).unwrap());
-            }
-            if !transform_map.contains_key(&tansform_hash) {
-                transform_map.insert(
-                    tansform_hash,
-                    serde_json::to_string(&v.world_transform).unwrap(),
-                );
-            }
-            //暂时使用type作为标记, 1为 compound inst info
-            compound_inst_relate_vec.push(format!(
-                "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=1, generic='{}'",
-                v.id(),
-                aabb_hash,
-                tansform_hash,
-                v.generic_type.to_string()
-            ));
-        }
-
-
-        if !json_vec.is_empty() {
-            let sql = format!(
-                "INSERT IGNORE INTO {} [{}]",
-                stringify!(inst_info),
-                json_vec.join(",")
-            );
-            //使用surreal 保存NamedAttrMap
-            join_set.spawn(async move {
-                SUL_DB.query(sql).await.unwrap();
-            });
-        }
-        if !compound_inst_relate_vec.is_empty() {
-            //使用surreal 保存NamedAttrMap
-            // dbg!(&compound_inst_relate_vec);
-            join_set.spawn(async move {
-                SUL_DB.query(compound_inst_relate_vec.join(";")).await.unwrap();
-            });
-        }
-    }
-    while let Some(_) = join_set.join_next().await {}
-
-    let collection = AQL_PDMS_NGMS_INST_INFO_COLLECTION;
-    let keys = inst_mgr.ngmr_inst_info_map.keys().collect::<Vec<_>>();
-    let mut join_set = tokio::task::JoinSet::new();
-    for chunk in keys.chunks(chunk_size) {
-        
-        let mut json_vec = vec![];
-        let mut ngmr_inst_relate_vec = vec![];
-        for &k in chunk {
-            let v = inst_mgr.ngmr_inst_info_map.get(k).unwrap();
-            if v.aabb.is_none() || v.world_transform.is_nan() {
-                dbg!(k);
-                continue;
-            }
-            json_vec.push(v.gen_sur_json());
-
-            let aabb = v.aabb.unwrap();
-            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
-            let tansform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
-            if !aabb_map.contains_key(&aabb_hash) {
-                aabb_map.insert(aabb_hash, serde_json::to_string(&aabb).unwrap());
-            }
-            if !transform_map.contains_key(&tansform_hash) {
-                transform_map.insert(
-                    tansform_hash,
-                    serde_json::to_string(&v.world_transform).unwrap(),
-                );
-            }
-            //暂时使用type作为标记, -1为 ngmr inst info
-            ngmr_inst_relate_vec.push(format!(
-                "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set aabb=aabb:⟨{}⟩, world_trans= trans:⟨{}⟩, type=-1, generic='{}'",
-                v.id(),
-                aabb_hash,
-                tansform_hash,
-                v.generic_type.to_string()
-            ));
-        }
-       
-
-        if !json_vec.is_empty() {
-            let sql = format!(
-                "INSERT IGNORE INTO {} [{}]",
-                stringify!(inst_info),
-                json_vec.join(",")
-            );
-            //使用surreal 保存NamedAttrMap
-            join_set.spawn(async move {
-                SUL_DB.query(sql).await.unwrap();
-            });
-        }
-        if !ngmr_inst_relate_vec.is_empty() {
-            //使用surreal 保存NamedAttrMap
-            // dbg!(&ngmr_inst_relate_vec);
-            join_set.spawn(async move {
-                SUL_DB.query(ngmr_inst_relate_vec.join(";")).await.unwrap();
-            });
-        }
-    }
-    while let Some(_) = join_set.join_next().await {}
-
+    // let keys = inst_mgr.ngmr_inst_info_map.keys().collect::<Vec<_>>();
     let mut join_set = tokio::task::JoinSet::new();
     //保存aabb
     if !aabb_map.is_empty() {

@@ -58,10 +58,6 @@ pub struct AiosDBManager {
 
     pub db_option: DbOption,
 
-    pub cached_mesh_mgr: Arc<RwLock<PlantMeshesData>>,
-
-    // pub arango_pool: ArPool,
-
     pub watcher: Arc<PdmsWatcher>,
 
     pub mqtt_client: Arc<AsyncClient>,

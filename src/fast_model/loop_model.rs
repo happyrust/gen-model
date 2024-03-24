@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
-use aios_core::pdms_types::{EleGeosInfo, EleInstGeo, EleInstGeosData, GeoBasicType, ShapeInstancesData};
+use aios_core::pdms_types::*;
 use aios_core::RefU64;
 use dashmap::DashMap;
 use glam::Vec3;
@@ -16,6 +16,7 @@ use crate::fast_model::shared;
 use parry3d::bounding_volume::*;
 use parry3d::math::Isometry;
 use crate::consts::*;
+use aios_core::geometry::*;
 
 ///处理带有loop的元件
 pub async fn gen_loop_geos(
@@ -50,24 +51,22 @@ pub async fn gen_loop_geos(
             if end_idx > loop_cnt as usize {
                 end_idx = loop_cnt as usize;
             }
-            let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
+            // let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
             let mut shape_insts_data = instance_mgr.write().await;
             for j in start_idx..end_idx {
                 let loop_refno = all_loop_refnos[j];
-                // if loop_refno.get_1() == 171403{
-                //     continue;
-                // }
                 let Ok(Some(ce_pe)) = aios_core::get_pe(loop_refno).await else {
                     continue;
                 };
-                let parent_refno = ce_pe.get_owner();
-                let Ok(Some(owner_pe)) = aios_core::get_pe(parent_refno).await else {
+                let target_refno = ce_pe.get_owner();
+                // let Ok(Some(owner_pe)) = aios_core::get_pe(parent_refno).await else {
+                //     continue;
+                // };
+                let Ok(target_type) = aios_core::get_type_name(target_refno).await else {
                     continue;
                 };
-                //todo get bacsic type
-                let target_type = owner_pe.get_type_str();
                 let cur_type = ce_pe.get_type_str();
-                let mut parent_att = aios_core::get_named_attmap(parent_refno)
+                let mut target_att = aios_core::get_named_attmap(target_refno)
                     .await
                     .unwrap_or_default();
                 let Ok(Some(mut trans_origin)) = mgr.get_world_transform(loop_refno).await else {
@@ -75,17 +74,17 @@ pub async fn gen_loop_geos(
                 };
                 //判断父节点是否有SJUS，需要调整位置
                 if cur_type == "PLOO"
-                    && let Some(sjus_adjust) = sjus_map_clone.get(&parent_refno)
+                    && let Some(sjus_adjust) = sjus_map_clone.get(&target_refno)
                 {
                     let offset = trans_origin.rotation.mul_vec3(sjus_adjust.value().0);
                     trans_origin.translation += offset;
                 }
-                // println!(
-                //     "正在处理loops类型的模型，索引：{}, 当前参考号：{}, 剩余: {}",
-                //     j,
-                //     parent_refno.to_string(),
-                //     processed_cnt.lock().await.to_owned()
-                // );
+                println!(
+                    "正在处理loops类型的模型，索引：{}, 当前参考号：{}, 剩余: {}",
+                    j,
+                    target_refno.to_string(),
+                    processed_cnt.lock().await.to_owned()
+                );
                 *processed_cnt.lock().await -= 1;
                 let mut loop_verts: Vec<Vec3> = vec![];
                 let mut fradius_vec: Vec<f32> = vec![];
@@ -108,7 +107,7 @@ pub async fn gen_loop_geos(
                     continue;
                 }
 
-                let mut children_attmaps = aios_core::get_children_named_attmaps(parent_refno)
+                let mut children_attmaps = aios_core::get_children_named_attmaps(target_refno)
                     .await
                     .unwrap_or_default();
                 //处理相邻的情况，第一个loop是正实体，后面的为负实体
@@ -117,29 +116,33 @@ pub async fn gen_loop_geos(
                     .filter(|&x| x.get_type_str() == "PLOO")
                     .position(|x| x.get_refno().unwrap_or_default() == loop_refno)
                     .unwrap_or_default();
+                let neg_refnos =
+                    aios_core::query_filter_children(target_refno, &GENRAL_NEG_NOUN_NAMES)
+                        .await
+                        .unwrap_or_default();
                 let mut geos_info = EleGeosInfo {
-                    refno: parent_refno,
+                    refno: target_refno,
                     cata_hash: None,
                     visible: true,
                     world_transform: trans_origin,
-                    generic_type: mgr.get_generic_type(parent_refno).await,
+                    generic_type: mgr.get_generic_type(target_refno).await,
                     aabb: None,
                     flow_pt_indexs: vec![],
-                    geo_type: if parent_att.is_neg() {
+                    geo_type: if target_att.is_neg() {
                         GeoBasicType::Neg
                     } else {
                         GeoBasicType::Pos
                     },
                     cata_refno: None,
                     ptset_map: Default::default(),
+                    neg_refnos,
                 };
                 let mut geo_hash = 0;
-                let mut geo_aabb = None;
                 let mut item_trans = Transform::IDENTITY;
                 let mut geo_param = PdmsGeoParam::Unknown;
-                match target_type {
+                match target_type.as_str() {
                     "NREV" | "REVO" => {
-                        let angle = parent_att.get_f32("ANGL").unwrap_or_default();
+                        let angle = target_att.get_f32("ANGL").unwrap_or_default();
                         if angle.abs() >= f32::EPSILON {
                             let revo = Box::new(Revolution {
                                 verts: loop_verts,
@@ -153,19 +156,6 @@ pub async fn gen_loop_geos(
                                 geo_param =
                                     revo.convert_to_geo_param().unwrap_or(PdmsGeoParam::Unknown);
                                 geo_hash = revo.hash_unit_mesh_params();
-                                geo_aabb = {
-                                    let tmp_tol = if parent_att.is_neg() {
-                                        tol_ratio.map(|x| x * 2.0)
-                                    } else {
-                                        tol_ratio
-                                    };
-                                    let Some((_, aabb)) =
-                                        cached_mesh_mgr.gen_plant_data(revo, replace_mesh, tmp_tol)
-                                    else {
-                                        continue;
-                                    };
-                                    Some(aabb)
-                                };
                             }
                         }
                     }
@@ -184,10 +174,10 @@ pub async fn gen_loop_geos(
                         } else {
                             loop_attr
                                 .get_f32("HEIG")
-                                .unwrap_or(parent_att.get_f32("HEIG").unwrap_or_default())
+                                .unwrap_or(target_att.get_f32("HEIG").unwrap_or_default())
                         };
                         if height < f32::EPSILON {
-                            println!("{}： 的height太小为: {}", parent_refno, height);
+                            println!("{}： 的height太小为: {}", target_refno, height);
                             continue;
                         }
                         if loop_attr.get_type_str() == "NXTR" {
@@ -213,57 +203,42 @@ pub async fn gen_loop_geos(
                             .convert_to_geo_param()
                             .unwrap_or(PdmsGeoParam::Unknown);
                         item_trans = extrusion.get_trans();
-
                         geo_hash = extrusion.hash_unit_mesh_params();
-                        geo_aabb = {
-                            let Some((_, aabb)) =
-                                cached_mesh_mgr.gen_plant_data(extrusion, replace_mesh, tol_ratio)
-                            else {
-                                continue;
-                            };
-                            Some(aabb)
-                        };
                     }
                     _ => {}
                 }
-                let Some(mut geo_aabb) = geo_aabb else {
-                    println!("LOOP 有问题：{} ", loop_refno.to_string());
-                    continue;
-                };
-                let visible = parent_att.is_visible_by_level(None).unwrap_or(true);
+                let visible = target_att.is_visible_by_level(None).unwrap_or(true);
                 geos_info.visible = visible;
                 if item_trans.is_nan() {
                     continue;
                 }
                 let tr: Transform = item_trans;
-                let ele_aabb = shared::aabb_apply_transform(&geo_aabb, &tr);
                 //需要判断多个PLOO、LOOP的情况，第二个开始都是负实体
                 let geom_inst = EleInstGeo {
                     geo_hash,
-                    refno: parent_refno,
+                    refno: target_refno,
                     owner_pos_refnos: Default::default(),
                     pts: Default::default(),
-                    aabb: Some(geo_aabb),
+                    aabb: None,
                     transform: tr,
                     visible,
                     is_tubi: false,
                     geo_param: geo_param.clone(),
-                    geo_type: if parent_att.is_neg() || cur_sibling_index >= 1 {
+                    geo_type: if target_att.is_neg() || cur_sibling_index >= 1 {
                         GeoBasicType::Neg
                     } else {
                         GeoBasicType::Pos
                     },
                 };
-                geos_info.aabb = Some(shared::aabb_apply_transform(&ele_aabb, &trans_origin));
-                shape_insts_data.insert_info(parent_refno, geos_info.clone());
+                shape_insts_data.insert_info(target_refno, geos_info.clone());
                 shape_insts_data.insert_geos_data(
-                    parent_refno.to_string(),
+                    target_refno.to_string(),
                     EleInstGeosData {
-                        inst_key: parent_refno.to_string(),
-                        refno: parent_refno,
+                        inst_key: target_refno.to_string(),
+                        refno: target_refno,
                         insts: vec![geom_inst.clone()],
-                        aabb: Some(ele_aabb),
-                        type_name: parent_att.get_type_str().to_string(),
+                        aabb: None,
+                        type_name: target_att.get_type_str().to_string(),
                         ptset_map: Default::default(),
                     },
                 );

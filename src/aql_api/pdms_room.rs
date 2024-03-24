@@ -4,7 +4,6 @@ use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::graph_db::pdms_arango::*;
-use crate::graph_db::pdms_arango::*;
 use crate::graph_db::pdms_inst_arango::*;
 use aios_core::pdms_types::*;
 use aios_core::pdms_types::*;
