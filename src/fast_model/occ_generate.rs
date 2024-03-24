@@ -8,7 +8,7 @@ use aios_core::test::test_surreal::init_test_surreal;
 use aios_core::{gen_bytes_hash, RefU64, SUL_DB};
 use bevy_transform::prelude::Transform;
 use itertools::Itertools;
-use opencascade::primitives::IntoShape;
+use opencascade::primitives::{Compound, IntoShape, Shape};
 use parry3d::bounding_volume::*;
 use parry3d::math::Isometry;
 use std::collections::HashMap;
@@ -107,7 +107,7 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
     let mut aabb_map: HashMap<u64, String> = HashMap::new();
     for (id, (s, tol)) in shapes_map {
         // dbg!(tol);
-        if let Ok(mesh) = PlantMesh::gen_occ_mesh(s, tol) {
+        if let Ok(mesh) = PlantMesh::gen_occ_mesh(&s, tol) {
             //保存到文件到dir下
             if mesh.ser_to_file(&dir.join(format!("{}.mesh", id))).is_ok() {
                 let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
@@ -270,43 +270,57 @@ pub async fn apply_insts_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> {
             continue;
         };
         let inverse_mat = b.wt.compute_matrix().as_dmat4().inverse();
-        let mut pos_shape = pos_shape.transformed(&pos_t.compute_matrix().as_dmat4());
-
+        let pos_matrix = pos_t.compute_matrix().as_dmat4();
+        let mut pos_shape = pos_shape.transformed(&pos_matrix);
+        // pos_shape.write_step(format!("{}.step", "pos")).unwrap();
+        // let mut shapes = vec![pos_shape.clone()];
+        let mut final_shape: Option<Shape> = None;
         for n in b.neg_ts {
             let mut neg_shapes = vec![];
             for (neg_id, neg_t) in n.1 {
                 if let Some(neg_shape) = shapes_map.get(&neg_id) {
-                    neg_shapes.push(
-                        neg_shape.transformed(
-                            &(inverse_mat * (n.0 * neg_t).compute_matrix().as_dmat4()),
-                        ),
-                    );
+                    let m = inverse_mat * n.0.compute_matrix().as_dmat4() * neg_t.compute_matrix().as_dmat4();
+                    // dbg!(m);
+                    neg_shapes.push(neg_shape.transformed(&m));
                 }
             }
             if !neg_shapes.is_empty() {
                 for neg_shape in neg_shapes {
-                    pos_shape = pos_shape.subtract(&neg_shape).into_shape().into();
+                    // neg_shape.write_step(format!("{}.step", "neg")).unwrap();
+                    if let Some(f) = &final_shape {
+                        final_shape = Some(f.subtract(&neg_shape).into_shape());
+                    }else{
+                        final_shape = Some(pos_shape.subtract(&neg_shape).into_shape());
+                    }
+                }
+            }
+        }
+        if let Some(f) = &final_shape {
+
+            // f.write_step(format!("{}.step", b.refno)).unwrap();
+
+            // let compound = Compound::from_shapes(shapes).into_shape();
+            // compound.write_step(format!("{}.step", "compound")).unwrap();
+
+            let tol = b.aabb.half_extents().magnitude() * 0.01;
+            // f.write_stl_with_tolerance("test.stl", tol as _).unwrap();
+            dbg!(tol);
+            dbg!(b.refno);
+            if let Ok(mesh) = PlantMesh::gen_occ_mesh(f, tol as _) {
+                //保存到文件到dir下
+                if mesh
+                    .ser_to_file(&dir.join(format!("{}.mesh", b.refno)))
+                    .is_ok()
+                {
+                    // dbg!(tol);
+                    // let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
+                    //如果使用了bool 运算，直接查询参考号对应的几何体就行
+                    //todo 是否要更新aabb ?
+                    // aabb_map.entry(aabb_hash).or_insert(serde_json::to_string(&mesh.aabb).unwrap());
                 }
             }
         }
 
-        // pos_shape.write_step(format!("{}.step", b.refno)).unwrap();
-        let tol = b.aabb.half_extents().magnitude() * 0.01;
-        dbg!(tol);
-        dbg!(b.refno);
-        if let Ok(mesh) = PlantMesh::gen_occ_mesh(pos_shape, tol as _) {
-            //保存到文件到dir下
-            if mesh
-                .ser_to_file(&dir.join(format!("{}.mesh", b.refno)))
-                .is_ok()
-            {
-                // dbg!(tol);
-                // let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
-                //如果使用了bool 运算，直接查询参考号对应的几何体就行
-                //todo 是否要更新aabb ?
-                // aabb_map.entry(aabb_hash).or_insert(serde_json::to_string(&mesh.aabb).unwrap());
-            }
-        }
     }
 
     Ok(())
