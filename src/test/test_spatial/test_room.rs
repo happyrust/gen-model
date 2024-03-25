@@ -48,7 +48,7 @@ async fn test_query_through_element_rooms_3() -> anyhow::Result<()> {
     let target_refno = "17496/156874".into();
 
     let room_number_map = mgr
-        .query_through_element_room_nums(&[target_refno], Some(&vec![Neg, CateNeg,CateCrossNeg]))
+        .query_through_element_room_nums(&[target_refno], Some(&vec![Neg, CateNeg,CataCrossNeg]))
         .await?;
     dbg!(room_number_map);
     Ok(())
@@ -61,7 +61,7 @@ async fn test_query_through_element_rooms_4() -> anyhow::Result<()> {
     let target_refno = "17496/145284".into();
 
     let room_number_map = mgr
-        .query_through_element_room_nums(&[target_refno], Some(&vec![Neg, CateNeg,CateCrossNeg]))
+        .query_through_element_room_nums(&[target_refno], Some(&vec![Neg, CateNeg,CataCrossNeg]))
         .await?;
     dbg!(room_number_map);
     Ok(())

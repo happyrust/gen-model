@@ -105,7 +105,10 @@ puhua_database_ip = ""
 puhua_database_user = ""
 puhua_database_password = ""
 
-#debug_root_refnos = ["24381/58336"]
+#debug_root_refnos = ["24381/180362"]
+#debug_root_refnos = ["24384/30123"]
+debug_root_refnos = ["24381/76837"]
+
 #debug_root_refnos = ["17496/172256"]
 # debug_root_refnos = ["17496/255909"]
 #debug_root_refnos = ["24381/180844"]

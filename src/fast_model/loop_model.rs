@@ -128,14 +128,8 @@ pub async fn gen_loop_geos(
                     generic_type: mgr.get_generic_type(target_refno).await,
                     aabb: None,
                     flow_pt_indexs: vec![],
-                    geo_type: if target_att.is_neg() {
-                        GeoBasicType::Neg
-                    } else {
-                        GeoBasicType::Pos
-                    },
-                    cata_refno: None,
-                    ptset_map: Default::default(),
                     neg_refnos,
+                    ..Default::default()
                 };
                 let mut geo_hash = 0;
                 let mut item_trans = Transform::IDENTITY;
@@ -229,6 +223,7 @@ pub async fn gen_loop_geos(
                     } else {
                         GeoBasicType::Pos
                     },
+                    cata_neg_refnos: Default::default()
                 };
                 shape_insts_data.insert_info(target_refno, geos_info.clone());
                 shape_insts_data.insert_geos_data(

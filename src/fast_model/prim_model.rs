@@ -70,16 +70,7 @@ pub async fn gen_prim_geos(
                     generic_type: mgr_clone.get_generic_type(refno).await,
                     aabb: None,
                     world_transform: trans_origin,
-                    cata_hash: None,
-                    flow_pt_indexs: vec![],
-                    geo_type: if attr.is_neg() {
-                        GeoBasicType::Neg
-                    } else {
-                        GeoBasicType::Pos
-                    },
-                    cata_refno: None,
-                    ptset_map: Default::default(),
-                    neg_refnos: vec![],
+                    ..Default::default()
                 };
                 let mut geo_param = PdmsGeoParam::Unknown;
                 //需要限制负实体的大小，太大，导致负运算失败
@@ -147,6 +138,7 @@ pub async fn gen_prim_geos(
                     } else {
                         GeoBasicType::Pos
                     },
+                    cata_neg_refnos: vec![],
                 };
                 geo_insts.push(inst_geo);
                 if geo_insts.len() > 0 {

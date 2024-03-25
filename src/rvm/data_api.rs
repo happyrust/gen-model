@@ -295,7 +295,7 @@ pub async fn query_single_rvm_geo_instance_aql(refnos: Vec<RefU64>, database: &A
     for id in @refnos
     for v,e in 0 inbound id @@pdms_edges
     let inst = document(@@pdms_inst_infos,v._key)
-    filter inst.geo_type not in ['CateCrossNeg','Neg']
+    filter inst.geo_type not in ['CataCrossNeg','Neg']
     filter inst != null
         return {
             'refno': inst._key,

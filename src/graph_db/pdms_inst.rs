@@ -1,22 +1,22 @@
-use std::collections::HashMap;
-use std::mem::take;
-use aios_core::geometry::{EleGeosInfo, GeoBasicType, ShapeInstancesData};
+use crate::arangodb::ArDatabase;
+use crate::consts::AQL_PDMS_ELES_COLLECTION;
+use crate::consts::*;
+use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::graph_db::structs::*;
 use aios_core::geom_types::RvmGeoInfo;
+use aios_core::geometry::{EleGeosInfo, GeoBasicType, ShapeInstancesData};
 use aios_core::pdms_types::*;
-use aios_core::SUL_DB;
 use aios_core::shape::pdms_shape::RsVec3;
 use aios_core::types::*;
+use aios_core::SUL_DB;
 use bb8_arangodb::arangors_lite::AqlQuery;
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use glam::{Mat3, Quat, Vec3};
 use itertools::Itertools;
 use sqlx::Row;
-use crate::arangodb::ArDatabase;
-use crate::consts::*;
-use crate::consts::AQL_PDMS_ELES_COLLECTION;
-use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::graph_db::structs::*;
+use std::collections::HashMap;
+use std::mem::take;
 
 ///保存instance 数据到数据库
 pub async fn save_compound_inst_info_to_graph_db(
@@ -38,6 +38,8 @@ pub async fn save_instance_data(
     let mut join_set = tokio::task::JoinSet::new();
     let mut aabb_map: HashMap<u64, String> = HashMap::new();
     let mut transform_map: HashMap<u64, String> = HashMap::new();
+    //标识单位矩阵
+    transform_map.insert(0, serde_json::to_string(&Transform::IDENTITY).unwrap());
     let mut param_map = HashMap::new();
     let mut vec3_map = HashMap::new();
     let chunk_size = 300;
@@ -52,15 +54,10 @@ pub async fn save_instance_data(
                     dbg!(&inst);
                     continue;
                 }
-                let aabb_hash = gen_bytes_hash::<_, 64>(&inst.aabb);
-                let tansform_hash = gen_bytes_hash::<_, 64>(&inst.transform);
-                //如果aabb已经保存到map了，直接跳过，否则插入
-                if !aabb_map.contains_key(&aabb_hash) {
-                    aabb_map.insert(aabb_hash, serde_json::to_string(&inst.aabb).unwrap());
-                }
-                if !transform_map.contains_key(&tansform_hash) {
+                let transform_hash = gen_bytes_hash::<_, 64>(&inst.transform);
+                if !transform_map.contains_key(&transform_hash) {
                     transform_map.insert(
-                        tansform_hash,
+                        transform_hash,
                         serde_json::to_string(&inst.transform).unwrap(),
                     );
                 }
@@ -70,7 +67,7 @@ pub async fn save_instance_data(
                 }
                 let key_pts = inst.geo_param.key_points();
                 let mut pt_hashes = vec![];
-                for k in key_pts{
+                for k in key_pts {
                     let pts_hash = k.gen_hash();
                     pt_hashes.push(format!("vec3:⟨{}⟩", pts_hash));
                     if !vec3_map.contains_key(&pts_hash) {
@@ -79,15 +76,24 @@ pub async fn save_instance_data(
                 }
                 //还需要加入geo_param的指向，param 是否填原始参数？ param=param:{}
                 //使用cata_key -> inst_geos
-                let relate_sql = format!(
-                    "relate inst_info:⟨{}⟩->geo_relate->inst_geo:⟨{}⟩ set trans=trans:⟨{}⟩, geom_refno=pe:{}, param=param:⟨{}⟩, pts=[{}]",
+                let mut relate_sql = format!(
+                    "relate inst_info:⟨{}⟩->geo_relate->inst_geo:⟨{}⟩ set trans=trans:⟨{}⟩, geom_refno=pe:{}, param=param:⟨{}⟩, pts=[{}], geo_type='{}', visible={}",
                     v.id(),
                     inst.geo_hash,
-                    tansform_hash,
+                    transform_hash,
                     inst.refno,
                     param_hash,
-                    pt_hashes.join(",")
+                    pt_hashes.join(","),
+                    inst.geo_type.to_string(),
+                    inst.visible
                 );
+                if !inst.cata_neg_refnos.is_empty() {
+                    relate_sql.push_str(&format!(
+                        ", cata_neg=[{}]",
+                        inst.cata_neg_refnos.iter().map(|x| x.to_pe_key()).join(",")
+                    ));
+                }
+                // dbg!(&relate_sql);
                 geo_relate_vec.push(relate_sql);
                 //保存 unit shape 的几何参数
                 json_vec.push(inst.gen_unit_geo_sur_json());
@@ -120,7 +126,6 @@ pub async fn save_instance_data(
     //保存tubi的数据
     let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
     for chunk in keys.chunks(chunk_size) {
-        
         for &k in chunk {
             let v = inst_mgr.inst_tubi_map.get(k).unwrap();
 
@@ -147,7 +152,7 @@ pub async fn save_instance_data(
         let mut inst_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_info_map.get(k).unwrap();
-            if v.world_transform.is_nan()  {
+            if v.world_transform.is_nan() {
                 continue;
             }
             json_vec.push(v.gen_sur_json());
@@ -161,36 +166,40 @@ pub async fn save_instance_data(
             }
             // 变换到世界坐标系中，方便计算
             let mut pt_hashes: Vec<String> = vec![];
-            for (_, k) in &v.ptset_map{
-                let pts_hash = RsVec3(v.world_transform * k.pt).gen_hash();
+            for (_, p) in &v.ptset_map {
+                let pts_hash = RsVec3(v.world_transform * p.pt).gen_hash();
                 pt_hashes.push(format!("vec3:⟨{}⟩", pts_hash));
                 if !vec3_map.contains_key(&pts_hash) {
-                    vec3_map.insert(pts_hash, serde_json::to_string(&k).unwrap());
+                    vec3_map.insert(pts_hash, serde_json::to_string(&p).unwrap());
                 }
+            }
+
+            let mut neg_refnos = v.neg_refnos.clone();
+            if let Some(refnos) = inst_mgr.ngmr_relate_map.get(k) {
+                // dbg!(&refnos);
+                neg_refnos.extend(refnos);
             }
 
             //arrive 和 leave 需要用 index
             //这里的 pts，存储的时点集信息
-            let sql = if v.neg_refnos.is_empty(){
+            let sql = if neg_refnos.is_empty() {
                 format!(
-                    "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩, pts=[{}], generic='{}', geo_type='{}' ",
+                    "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩, pts=[{}], generic='{}', has_cata_neg={}",
                     v.id(),
-                    // aabb_hash,
                     transform_hash,
                     pt_hashes.join(","),
                     v.generic_type.to_string(),
-                    v.geo_type
+                    v.has_cata_neg
                 )
-            }else{
+            } else {
                 format!(
-                    "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩, pts=[{}], generic='{}', geo_type='{}', neg_refnos=[{}]",
+                    "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩, pts=[{}], generic='{}', neg_refnos=[{}], has_cata_neg={}",
                     v.id(),
-                    // aabb_hash,
                     transform_hash,
                     pt_hashes.join(","),
                     v.generic_type.to_string(),
-                    v.geo_type,
-                    v.neg_refnos.iter().map(|x| x.to_pe_key()).join(",")
+                    neg_refnos.iter().map(|x| x.to_pe_key()).join(","),
+                    v.has_cata_neg
                 )
             };
             // dbg!(&sql);
@@ -203,6 +212,7 @@ pub async fn save_instance_data(
                 stringify!(inst_info),
                 json_vec.join(",")
             );
+            // dbg!(&sql);
             //使用surreal 保存NamedAttrMap
             join_set.spawn(async move {
                 SUL_DB.query(sql).await.unwrap();
@@ -298,7 +308,6 @@ pub async fn query_insts_shape_data(
     refnos: impl IntoIterator<Item = &RefU64>,
     geo_type_filter: Option<&[GeoBasicType]>,
 ) -> anyhow::Result<ShapeInstancesData> {
-
     Ok(Default::default())
 }
 
@@ -306,7 +315,6 @@ pub async fn query_instance_level_with_refno_in_arangodb(
     refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<RefU64>> {
-
     Ok(Vec::new())
 }
 
@@ -314,8 +322,7 @@ pub async fn query_instance_level_with_ssc_refno_in_arangodb(
     refno: RefU64,
     database: &ArDatabase,
 ) -> anyhow::Result<Vec<RefU64>> {
-
-        return Ok(vec![]);
+    return Ok(vec![]);
 }
 
 /// 查找基本体得 instance

@@ -96,7 +96,7 @@ pub async fn export_stp(
             GeoBasicType::Pos,
             GeoBasicType::CateNeg,
             GeoBasicType::Neg,
-            GeoBasicType::CateCrossNeg,
+            GeoBasicType::CataCrossNeg,
         ]),
     ).await?;
 
