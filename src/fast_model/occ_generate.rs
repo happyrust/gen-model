@@ -160,7 +160,7 @@ pub async fn update_inst_relate_aabbs() -> anyhow::Result<()> {
     //todo 使用分页来实现刷新
 
     let sql = r#"select in as id, world_trans.d as world_trans,
-            (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb != none) as geo_aabbs from inst_relate where aabb == none"#;
+            (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb.d != none) as geo_aabbs from inst_relate where aabb == none"#;
 
     let mut response = SUL_DB.query(sql).await?;
     let result: Vec<QueryAabbParam> = response.take(0)?;
@@ -272,7 +272,7 @@ pub async fn apply_insts_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> {
              aabb.d as aabb,
             (select value [meta::id(out), trans.d] from out->geo_relate) as ts,
             (select value [world_trans.d, (select value [meta::id(out), trans.d] from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"])]
-        from array::flatten(neg_refnos->inst_relate)) as neg_ts from inst_relate where neg_refnos!=none
+        from array::flatten(neg_refnos->inst_relate)) as neg_ts from inst_relate where neg_refnos!=none and aabb.d!=none
     "#;
     let mut response = SUL_DB.query(sql).await?;
     let boolean_query: Vec<GeoTransQuery> = response.take(0)?;
@@ -372,7 +372,7 @@ pub async fn apply_cata_neg_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> 
 
     let sql = r#"
         select in as refno, (->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
-        from ->inst_info->geo_relate where visible and !out.bad and cata_neg!=none) as boolean_group from inst_relate where has_cata_neg and !booled
+        from ->inst_info->geo_relate where visible and !out.bad and cata_neg!=none) as boolean_group from inst_relate where (->inst_info)[0]!=none and has_cata_neg and !booled
     "#;
     let mut response = SUL_DB.query(sql).await?;
     let mut params: Vec<CataNegGroup> = response.take(0)?;
@@ -425,7 +425,7 @@ pub async fn apply_cata_neg_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> 
                         .transformed(&pos.trans.compute_matrix().as_dmat4());
 
                     for &neg in bg.iter().skip(1) {
-                        dbg!(neg);
+                        // dbg!(neg);
                         let Some(neg_geo) = gms.iter().find(|x| x.geom_refno == neg) else {
                             continue;
                         };
