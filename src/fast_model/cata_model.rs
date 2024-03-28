@@ -133,14 +133,15 @@ pub async fn gen_cata_geos(
     let mut handles = vec![];
     let processed_cnt = Arc::new(Mutex::new(unique_cata_cnt));
     let mut tubi_relates = vec![];
-    let replace_mesh = mgr.db_option.replace_mesh;
+    // let replace_mesh = mgr.db_option.replace_mesh;
+    let replace_mesh = false;
     let multi_threads = mgr.db_option.multi_threads;
 
     let all_unique_keys = Arc::new(
         target_cata_map
             .iter()
             .map(|x| x.cata_hash.clone())
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>()
     );
     // dbg!(&all_unique_keys.len());
     if !all_unique_keys.is_empty() {
@@ -166,9 +167,9 @@ pub async fn gen_cata_geos(
                     }
                     let target_cata = target_cata_map.get(&cata_hash).unwrap();
                     let mut shape_insts_data = instance_mgr.write().await;
-                    let mut target_geo_data_option = None;
                     let mut process_refno = None;
-                    if replace_mesh || target_cata.exist_geo.is_none() {
+                    //如果inst_info 已经存在了，可以直接跳过生成，直接指向过去就可以了
+                    if replace_mesh || !target_cata.exist_inst {
                         //如果没有已有的，需要生成
                         let ele_refno = target_cata.group_refnos[0];
                         process_refno = Some(ele_refno);
@@ -288,6 +289,10 @@ pub async fn gen_cata_geos(
                                 cata_refno: Some(cata_refno),
                                 neg_refnos: vec![],   //负实体是自己，这样好处理
                                 has_cata_neg: false,
+                                ptset_map: design_axis_map
+                                    .remove(&ele_refno)
+                                    .map(|x| x.1)
+                                    .unwrap_or_default(),
                                 ..Default::default()
                             };
 
@@ -370,35 +375,31 @@ pub async fn gen_cata_geos(
                             }
                             {
                                 let mut inst_key = geos_info.get_inst_key();
-                                let mut origin = EleInstGeosData {
+                                let mut geos_data = EleInstGeosData {
                                     inst_key,
                                     refno: ele_refno,
                                     insts: geo_insts,
                                     aabb: None,
                                     type_name: cur_type.to_string(),
-                                    ptset_map: design_axis_map
-                                        .remove(&ele_refno)
-                                        .map(|x| x.1)
-                                        .unwrap_or_default(),
+                                    ..Default::default()
                                 };
-                                target_geo_data_option = Some(origin.clone());
                                 #[cfg(debug_assertions)]
-                                dbg!(origin.insts.len());
-                                if origin.insts.len() > 0 {
+                                dbg!(geos_data.insts.len());
+                                if geos_data.insts.len() > 0 {
                                     shape_insts_data.insert_info(ele_refno, geos_info.clone());
                                     shape_insts_data
-                                        .insert_geos_data(geos_info.get_inst_key(), origin.clone());
+                                        .insert_geos_data(geos_info.get_inst_key(), geos_data);
                                 }
                             }
                             break;
                         }
                     } else {
-                        target_geo_data_option = target_cata.exist_geo.clone();
+                        // target_geo_data_option = target_cata.exist_geo.clone();
                     }
 
-                    let Some(target_geo_insts) = target_geo_data_option else {
-                        continue;
-                    };
+                    // let Some(target_geo_insts) = target_geo_data_option else {
+                    //     continue;
+                    // };
                     for ele_refno in target_cata.group_refnos.clone() {
                         if Some(ele_refno) == process_refno {
                             continue;
@@ -439,7 +440,7 @@ pub async fn gen_cata_geos(
                             aabb: None,
                             world_transform: origin_trans,
                             flow_pt_indexs,
-                            ptset_map: target_geo_insts.ptset_map.clone(),
+                            // ptset_map: target_geo_insts.ptset_map.clone(),
                             ..Default::default()
                         };
                         shape_insts_data.insert_info(ele_refno, geos_info);
@@ -480,17 +481,13 @@ pub async fn gen_cata_geos(
         let hdir = branch_transform
             .transform_vec3(branch_att.get_vec3("HDIR").unwrap())
             .normalize_or_zero();
-        // dbg!(to_pdms_vec_str(&hdir));
         let bran_ttube_pt = branch_transform.transform_point(branch_att.get_vec3("TPOS").unwrap());
-        // dbg!(bran_ttube_pt);
 
         let is_hang = branch_att.get_type_str() == "HANG";
-        // dbg!(&branch_att);
         let h_ref = branch_att
             .get_foreign_refno(if is_hang { "HREF" } else { "HSTU" })
             .unwrap_or_default();
 
-        let bran_name = branch_att.get_name_or_default();
         let tubi_att = aios_core::get_named_attmap(h_ref).await.unwrap_or_default();
         // dbg!(&tubi_att);
         let tubi_cat_ref = tubi_att.get_foreign_refno("CATR").unwrap_or_default();
@@ -569,21 +566,25 @@ pub async fn gen_cata_geos(
         let mut bran_comp_vec = vec![];
         //第一遍完成后，然后生成tubing
         let len = children.len();
+        let al_map = aios_core::query_arrive_leave_points(children.iter().map(|x| &x.refno), false)
+            .await
+            .unwrap_or_default();
+        dbg!(&al_map);
         for (index, ele) in children.into_iter().enumerate() {
             let refno = ele.refno;
             // dbg!(refno);
             let cur_type = ele.noun.as_str();
-            //can get the inst info
-            if let Some(inst_info) = shape_insts_data.get_inst_info(refno)
-                && let Some(inst_geos_data) = shape_insts_data.get_inst_geos_data(inst_info)
-            {
+            //get the inst info
+            if let Some(inst_info) = shape_insts_data.get_inst_info(refno) {
                 println!("正在处理直段{}: {}", cur_type, refno.to_string());
-                let world_trans = inst_info.world_transform;
-                let axis_map = &inst_geos_data.ptset_map;
-                let arrive = inst_info.flow_pt_indexs[0];
-                let leave = inst_info.flow_pt_indexs[1];
                 //有隐含管段
-                // dbg!(axis_map);
+                let Some(axis_map) = al_map
+                    .get(&refno)
+                    .map(|x| x.clone()) else{
+                    continue;
+                };
+                dbg!(&axis_map);
+                let world_trans = inst_info.world_transform;
                 bran_comp_vec.push(refno);
                 current_tubing.arrive_refno = refno;
                 //ATTA，如果设置成SPKBRK，产生直段，否则不产生直段
@@ -592,12 +593,10 @@ pub async fn gen_cata_geos(
                     .await?
                     .get_bool_or_default("SPKBRK");
                 // dbg!(skip);
-                if !skip && axis_map.contains_key(&arrive) {
-                    let a_pos = world_trans.transform_point(axis_map[&arrive].pt);
-                    let dir = axis_map[&arrive].dir;
+                if !skip {
+                    let a_pos = axis_map[0].pt;
+                    let a_dir = axis_map[0].dir;
 
-                    // dbg!(quat_to_pdms_ori_xyz_str(&world_trans.rotation));
-                    let a_dir = world_trans.transform_vec3(dir).normalize_or_zero();
                     let actual_vec = a_pos - current_tubing.start_pt;
                     // dbg!(actual_vec);
                     let actual_dir = actual_vec.normalize_or_zero();
@@ -696,11 +695,9 @@ pub async fn gen_cata_geos(
                         }
                     }
                 }
-                if axis_map.contains_key(&leave) {
-                    let dir = axis_map[&leave].dir;
-                    let ref_dir = axis_map[&leave].ref_dir;
-                    // dbg!(ref_dir);
-                    let l_dir = world_trans.transform_vec3(dir).normalize_or_zero();
+                {
+                    let l_dir = axis_map[1].dir;
+                    let ref_dir = axis_map[1].ref_dir;
                     // let cond = if l_dir.cross(Vec3::Y).z >= 0.0 { 1.0 } else { 0.0 };
                     //todo 需要弄清楚为啥是Vec3::Z
                     let mut l_ref_dir = world_trans.transform_vec3(Vec3::Z).normalize_or_zero();
@@ -711,10 +708,10 @@ pub async fn gen_cata_geos(
                             -1.0
                         };
                         // dbg!(cond);
-                        l_ref_dir = cond * world_trans.transform_vec3(ref_dir).normalize_or_zero();
+                        l_ref_dir = cond *ref_dir;
                     }
                     if skip {} else {
-                        let l_pos = world_trans.transform_point(axis_map[&leave].pt);
+                        let l_pos = axis_map[1].pt;
                         current_tubing.start_pt = l_pos;
                         current_tubing.desire_leave_dir = l_dir;
                         current_tubing.leave_ref_dir = if l_ref_dir.is_normalized() {

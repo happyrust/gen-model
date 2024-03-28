@@ -36,6 +36,7 @@ use tokio::sync::RwLock;
 pub async fn gen_all_geos_data(
     mut mgr: Arc<AiosDBManager>,
     incr_update_log: Option<IncrGeoUpdateLog>,
+    skip_exist: bool,
 ) -> anyhow::Result<bool> {
     let time = Instant::now();
     //根据需要拉入数据到本地数据库也可以
@@ -117,11 +118,12 @@ pub async fn gen_all_geos_data(
         let loop_sjus_map = DashMap::new();
         {
             //todo 区别，一个是从db nums 里获取，一个是从增量更新数据，debug数据里获取
-            let target_ploo_refnos = aios_core::query_multi_deep_children_skip_exist_inst(
+            let target_ploo_refnos = aios_core::query_multi_deep_children_filter_inst(
                 target_refnos.clone(),
                 vec!["PLOO".into()],
+                skip_exist,
             )
-            .await?;
+                .await?;
             // dbg!(&target_ploo_refnos);
             for r in target_ploo_refnos {
                 let Ok(loop_att) = aios_core::get_named_attmap(r).await else {
@@ -151,11 +153,12 @@ pub async fn gen_all_geos_data(
                     .cloned()
                     .collect()
             } else {
-                let r = aios_core::query_multi_deep_children_skip_exist_inst(
+                let r = aios_core::query_multi_deep_children_filter_inst(
                     target_refnos.clone(),
                     vec!["BRAN".into(), "HANG".into()],
+                    skip_exist,
                 )
-                .await?;
+                    .await?;
                 target_refnos.retain_mut(|x| !r.contains(x));
                 // dbg!(&r);
                 r.into_iter().collect()
@@ -177,28 +180,10 @@ pub async fn gen_all_geos_data(
             let target_bran_reuse_cata_map: DashMap<String, CataHashRefnoKV> = {
                 let map = aios_core::query_group_by_cata_hash(&target_bran_hanger_refnos)
                     .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            CataHashRefnoKV {
-                                cata_hash: k,
-                                exist_geo: None,
-                                group_refnos: v,
-                            },
-                        )
-                    })
-                    .collect();
+                    .unwrap_or_default();
                 map
             };
-
-            //获取重用的信息
-            #[cfg(debug_assertions)]
-            {
-                dbg!(target_bran_reuse_cata_map.len());
-            }
-
+            // dbg!(&target_bran_reuse_cata_map);
             let target_single_cata_map = if is_incr_update {
                 let cata_map = DashMap::new();
                 let cata_refnos = &incr_update_log.as_ref().unwrap().basic_cata_refnos;
@@ -211,8 +196,8 @@ pub async fn gen_all_geos_data(
                         att.cata_hash.clone(),
                         CataHashRefnoKV {
                             cata_hash: att.cata_hash,
-                            exist_geo: None,
                             group_refnos: vec![r],
+                            exist_inst: false,
                         },
                     );
                 }
@@ -230,33 +215,23 @@ pub async fn gen_all_geos_data(
                     .await
                     .unwrap();
                 let bran_children_refnos: Vec<RefU64> = response.take(0)?;
-                let mut use_cata_refnos = aios_core::query_multi_deep_children_skip_exist_inst(
+                let mut use_cata_refnos = aios_core::query_multi_deep_children_filter_inst(
                     target_refnos.clone(),
                     CATA_WITHOUT_REUSE_GEO_NAMES.map(String::from).to_vec(),
+                    skip_exist,
                 )
-                .await?;
+                    .await?;
                 use_cata_refnos.extend(bran_children_refnos);
-                let use_cata_map = DashMap::new();
-                //直接使用group的办法，按cata_hash 进行分组
-                for r in use_cata_refnos {
-                    let Ok(Some(att)) = aios_core::get_pe(r).await else {
-                        continue;
-                    };
-                    use_cata_map.insert(
-                        att.cata_hash.clone(),
-                        CataHashRefnoKV {
-                            cata_hash: att.cata_hash,
-                            exist_geo: None,
-                            group_refnos: vec![r],
-                        },
-                    );
-                }
-                use_cata_map
+                let map = aios_core::query_group_by_cata_hash(&use_cata_refnos)
+                    .await
+                    .unwrap_or_default();
+                map
             };
             #[cfg(debug_assertions)]
             {
                 dbg!(&target_bran_reuse_cata_map.len());
                 dbg!(&target_single_cata_map.len());
+                // dbg!(&target_single_cata_map);
             }
 
             let mut has_run_cata = false;
@@ -278,8 +253,8 @@ pub async fn gen_all_geos_data(
                             Arc::new(branch_refnos_map),
                             sjus_map_clone,
                         )
-                        .await
-                        .unwrap();
+                            .await
+                            .unwrap();
                     });
                     has_run_cata = true;
                     handles.push(handle);
@@ -298,8 +273,8 @@ pub async fn gen_all_geos_data(
                             Arc::new(Default::default()),
                             sjus_map_clone,
                         )
-                        .await
-                        .unwrap();
+                            .await
+                            .unwrap();
                     });
                     has_run_cata = true;
                     handles.push(handle);
@@ -329,11 +304,12 @@ pub async fn gen_all_geos_data(
                     .cloned()
                     .collect()
             } else {
-                let mut loop_refnos = aios_core::query_multi_deep_children_skip_exist_inst(
+                let mut loop_refnos = aios_core::query_multi_deep_children_filter_inst(
                     target_refnos.clone(),
                     GNERAL_LOOP_NOUN_NAMES.map(String::from).to_vec(),
+                    skip_exist,
                 )
-                .await?;
+                    .await?;
                 loop_refnos.into_iter().collect()
             };
             println!("使用LOOP的数量: {}", target_loop_refnos.len());
@@ -348,8 +324,8 @@ pub async fn gen_all_geos_data(
                         &target_loop_refnos,
                         sjus_map_clone,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
             }
@@ -364,11 +340,12 @@ pub async fn gen_all_geos_data(
                     .cloned()
                     .collect()
             } else {
-                let mut prim_refnos = aios_core::query_multi_deep_children_skip_exist_inst(
+                let mut prim_refnos = aios_core::query_multi_deep_children_filter_inst(
                     target_refnos.clone(),
                     GNERAL_PRIM_NOUN_NAMES.map(String::from).to_vec(),
+                    skip_exist,
                 )
-                .await?;
+                    .await?;
                 prim_refnos.into_iter().collect()
             };
             println!("使用基本体数量: {}", target_prim_refnos.len());
@@ -381,8 +358,8 @@ pub async fn gen_all_geos_data(
                         instance_mgr_clone.clone(),
                         target_prim_refnos.as_slice(),
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 futures::future::join_all(vec![handle]).await;
             }

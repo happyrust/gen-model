@@ -1164,6 +1164,7 @@ dependencies = [
  "naga",
  "naga_oil",
  "nonmax",
+ "send_wrapper",
  "serde",
  "smallvec",
  "thiserror",

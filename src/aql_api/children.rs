@@ -759,7 +759,7 @@ pub async fn query_travel_children_with_types_and_cata_hash(
     refno: RefU64,
     att_types: &[&str],
     check_parent: bool,
-    skip_exist: bool,
+    filter: bool,
 ) -> anyhow::Result<Vec<CataHashRefnoKV>> {
     // let mut r = vec![];
     let refno_aql = format!("{AQL_PDMS_ELES_COLLECTION}/{}", refno.to_string());
@@ -779,7 +779,7 @@ FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
         exist_geo: exist,
         group_refnos: g[*].v._key,
     }
-    ", ).bind_var("skip_exist", skip_exist)
+    ", ).bind_var("skip_exist", filter)
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)
@@ -801,7 +801,7 @@ FOR v,e,p in 0..10 INBOUND @id @@pdms_edges
     }
     ",
         )
-            .bind_var("skip_exist", skip_exist)
+            .bind_var("skip_exist", filter)
             .bind_var("id", refno_aql)
             .bind_var("nouns", att_types)
             .bind_var("@pdms_eles", AQL_PDMS_ELES_COLLECTION)

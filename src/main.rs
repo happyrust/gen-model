@@ -22,6 +22,7 @@ use std::time::Instant;
 use aios_core::get_db_option;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
+use aios_core::room::room::load_aabb_tree;
 use aios_core::SUL_DB;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use chrono::{Datelike, Local, Timelike};
@@ -37,6 +38,7 @@ use aios_database::fast_model::gen_all_geos_data;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::database::*;
 use aios_database::fast_model::process_gen_meshes;
+use aios_database::fast_model::room_model::build_room_relations;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -101,6 +103,13 @@ async fn main() -> anyhow::Result<()> {
         process_gen_meshes(None).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
+
+    if db_option.gen_spatial_tree{
+        load_aabb_tree().await.unwrap();
+        build_room_relations().await.unwrap();
+    }
+
+
 
     // ///生成ssc 树
     // /// 需要 resource 下文档 ssc_level.xlsx  ssc_room.xlsx 专业分类.xlsx

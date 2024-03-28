@@ -42,13 +42,12 @@ pub async fn save_instance_data(
     transform_map.insert(0, serde_json::to_string(&Transform::IDENTITY).unwrap());
     let mut param_map = HashMap::new();
     let mut vec3_map = HashMap::new();
-    let chunk_size = 300;
+    let chunk_size = 100;
     for chunk in keys.chunks(chunk_size) {
         let mut json_vec = vec![];
         let mut geo_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_geos_map.get(k).unwrap();
-
             for inst in &v.insts {
                 if inst.transform.is_nan() {
                     dbg!(&inst);
@@ -101,14 +100,13 @@ pub async fn save_instance_data(
         }
 
         if !json_vec.is_empty() {
-            let sql = format!(
-                "INSERT IGNORE INTO {} [{}]",
-                stringify!(inst_geo),
-                json_vec.join(",")
-            );
+            let mut sql_string = "".to_string();
+            for json in &json_vec {
+                sql_string.push_str(&format!("insert ignore into {} {};", stringify!(inst_geo), json));
+            }
             //使用surreal 保存NamedAttrMap
             join_set.spawn(async move {
-                SUL_DB.query(sql).await.unwrap();
+                SUL_DB.query(sql_string).await.unwrap();
             });
 
             //保存relate 关系
@@ -120,8 +118,7 @@ pub async fn save_instance_data(
                 });
             }
         }
-    }
-    while let Some(_) = join_set.join_next().await {}
+    }while let Some(_) = join_set.join_next().await {}
 
     //保存tubi的数据
     let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
@@ -155,7 +152,7 @@ pub async fn save_instance_data(
             if v.world_transform.is_nan() {
                 continue;
             }
-            json_vec.push(v.gen_sur_json());
+            json_vec.push(v.gen_sur_json(&mut vec3_map));
 
             let transform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
             if !transform_map.contains_key(&transform_hash) {
@@ -163,15 +160,6 @@ pub async fn save_instance_data(
                     transform_hash,
                     serde_json::to_string(&v.world_transform).unwrap(),
                 );
-            }
-            // 变换到世界坐标系中，方便计算
-            let mut pt_hashes: Vec<String> = vec![];
-            for (_, p) in &v.ptset_map {
-                let pts_hash = RsVec3(v.world_transform * p.pt).gen_hash();
-                pt_hashes.push(format!("vec3:⟨{}⟩", pts_hash));
-                if !vec3_map.contains_key(&pts_hash) {
-                    vec3_map.insert(pts_hash, serde_json::to_string(&p).unwrap());
-                }
             }
 
             let mut neg_refnos = v.neg_refnos.clone();
@@ -182,40 +170,33 @@ pub async fn save_instance_data(
 
             //arrive 和 leave 需要用 index
             //这里的 pts，存储的时点集信息
-            let sql = if neg_refnos.is_empty() {
-                format!(
-                    "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩, pts=[{}], generic='{}', has_cata_neg={}",
-                    v.id(),
-                    transform_hash,
-                    pt_hashes.join(","),
-                    v.generic_type.to_string(),
-                    v.has_cata_neg
-                )
-            } else {
-                format!(
-                    "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩, pts=[{}], generic='{}', neg_refnos=[{}], has_cata_neg={}",
-                    v.id(),
-                    transform_hash,
-                    pt_hashes.join(","),
-                    v.generic_type.to_string(),
-                    neg_refnos.iter().map(|x| x.to_pe_key()).join(","),
-                    v.has_cata_neg
-                )
-            };
+            // "flow_pt_indexs": self.flow_pt_indexs.clone(),
+            let mut sql = format!(
+                "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩,generic='{}', arrive={}, leave={}",
+                v.id_str(),
+                transform_hash,
+                v.generic_type.to_string(),
+                // v.has_cata_neg,
+                *v.flow_pt_indexs.get(0).unwrap_or(&-1),
+                *v.flow_pt_indexs.get(1).unwrap_or(&-1),
+            );
+
+            if !neg_refnos.is_empty() {
+                sql.push_str(&format!(", has_cata_neg=true, neg_refnos=[{}]", v.neg_refnos.iter().map(|x| x.to_pe_key()).join(",")));
+            }
             // dbg!(&sql);
             inst_relate_vec.push(sql);
         }
 
         if !json_vec.is_empty() {
-            let sql = format!(
-                "INSERT IGNORE INTO {} [{}]",
-                stringify!(inst_info),
-                json_vec.join(",")
-            );
-            // dbg!(&sql);
+            let mut sql_string = "".to_string();
+            for json in &json_vec {
+                sql_string.push_str(&format!("insert ignore into {} {};", stringify!(inst_info), json));
+            }
+            // dbg!(&sql_string);
             //使用surreal 保存NamedAttrMap
             join_set.spawn(async move {
-                SUL_DB.query(sql).await.unwrap();
+                SUL_DB.query(sql_string).await.unwrap();
             });
         }
         if !inst_relate_vec.is_empty() {

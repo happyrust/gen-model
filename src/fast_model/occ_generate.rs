@@ -3,7 +3,7 @@ use crate::fast_model::gen_all_geos_data;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::basic::OccSharedShape;
-use aios_core::shape::pdms_shape::PlantMesh;
+use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::test::test_surreal::init_test_surreal;
 use aios_core::{gen_bytes_hash, RefU64, SUL_DB};
 use bevy_transform::prelude::Transform;
@@ -12,16 +12,16 @@ use itertools::Itertools;
 use opencascade::primitives::{Compound, IntoShape, Shape};
 use parry3d::bounding_volume::*;
 use parry3d::math::Isometry;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tracing_subscriber::fmt::format;
 
 ///生成小的几何体
 #[tokio::test]
 pub async fn test_gen_geos() -> anyhow::Result<()> {
     init_test_surreal().await;
-    //首先查询 inst_geo
-    process_gen_meshes(Some(&["17496/171559".into()]))
+    process_gen_meshes(Some(&["17496/171559".into(), "24381/35844".into()]))
         .await
         .unwrap();
     Ok(())
@@ -44,19 +44,21 @@ pub async fn process_gen_meshes(refnos: Option<&[RefU64]>) -> anyhow::Result<()>
         .unwrap();
     println!("正在生成模型");
     let time = std::time::Instant::now();
-    gen_all_geos_data(std::sync::Arc::new(mgr), None)
+    gen_all_geos_data(std::sync::Arc::new(mgr), None, false)
         .await
         .unwrap();
     println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
 
-    gen_inst_meshes(None).await.unwrap();
-    println!("gen_inst_meshes finished");
-    update_inst_relate_aabbs().await.unwrap();
-    println!("update_inst_relate_aabbs finished");
-    apply_cata_neg_boolean(None).await.unwrap();
     let time = std::time::Instant::now();
-    apply_insts_boolean(None).await.unwrap();
-    println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
+    gen_inst_meshes(None).await.unwrap();
+    println!("gen_inst_meshes finished: {} ms", time.elapsed().as_millis());
+    let time = std::time::Instant::now();
+    update_inst_relate_aabbs().await.unwrap();
+    println!("update_inst_relate_aabbs finished: {} ms", time.elapsed().as_millis());
+    // apply_cata_neg_boolean(None).await.unwrap();
+    // let time = std::time::Instant::now();
+    // apply_insts_boolean(None).await.unwrap();
+    // println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
     Ok(())
 }
 
@@ -92,7 +94,7 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
             if let Some(shape) = g.param.gen_occ_shape() {
                 let mut aabb = Aabb::new_invalid();
                 for edge in shape.edges() {
-                    for point in edge.approximation_segments() {
+                    for point in edge.approximation_segments_custom(1.0, 1.0) {
                         aabb.take_point(nalgebra::Point3::new(
                             point.x as f32,
                             point.y as f32,
@@ -100,43 +102,56 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
                         ));
                     }
                 }
-                shapes_map.insert(g.id, (shape, aabb.half_extents().magnitude() as f64 * 0.01));
+                let tol = aabb.half_extents().magnitude() as f64 * 0.01;
+                shapes_map.insert(g.id, (shape, tol));
             }
         }
-    }
-
-    let mut update_sql = vec![];
-    let mut aabb_map: HashMap<u64, String> = HashMap::new();
-    for (id, (s, tol)) in shapes_map {
-        // dbg!(tol);
-        let mut success = false;
-        if let Ok(mesh) = PlantMesh::gen_occ_mesh(&s, tol) {
-            //保存到文件到dir下
-            if mesh.ser_to_file(&dir.join(format!("{}.mesh", id))).is_ok() {
-                let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
-                update_sql.push(format!(
-                    "update inst_geo:⟨{}⟩ set meshed = true, aabb = aabb:⟨{}⟩;",
-                    id, aabb_hash
-                ));
-                aabb_map
-                    .entry(aabb_hash)
-                    .or_insert(serde_json::to_string(&mesh.aabb).unwrap());
-                success = true;
+        let mut update_sql = vec![];
+        let mut aabb_map: HashMap<u64, String> = HashMap::new();
+        let mut pts_json_map = HashMap::new();
+        for (id, (s, tol)) in &shapes_map {
+            // dbg!(tol);
+            let mut success = false;
+            if let Ok(mesh) = PlantMesh::gen_occ_mesh(s, *tol) {
+                //保存到文件到dir下
+                if mesh.ser_to_file(&dir.join(format!("{}.mesh", id))).is_ok() {
+                    let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
+                    let mut pt_hashes = HashSet::new();
+                    for edge in s.edges() {
+                        for point in edge.approximation_segments_custom(1.0, 1.0) {
+                            // dbg!(point);
+                            let pts_hash = RsVec3(point.as_vec3()).gen_hash();
+                            pt_hashes.insert(format!("vec3:⟨{}⟩", pts_hash));
+                            if !pts_json_map.contains_key(&pts_hash) {
+                                pts_json_map.insert(pts_hash, serde_json::to_string(&point).unwrap());
+                            }
+                        }
+                    }
+                    update_sql.push(format!(
+                        "update inst_geo:⟨{}⟩ set meshed = true, aabb = aabb:⟨{}⟩, pts=[{}];",
+                        id, aabb_hash, pt_hashes.into_iter().join(","),
+                    ));
+                    aabb_map
+                        .entry(aabb_hash)
+                        .or_insert(serde_json::to_string(&mesh.aabb).unwrap());
+                    success = true;
+                }
+            }
+            if !success {
+                //有问题的模型，就不需要每次都重复生成了
+                update_sql.push(format!("update inst_geo:⟨{}⟩ set bad = true;", id));
             }
         }
-        if !success {
-            //有问题的模型，就不需要每次都重复生成了
-            update_sql.push(format!("update inst_geo:⟨{}⟩ set bad = true;", id));
-        }
-    }
-    if !update_sql.is_empty() {
-        //执行SUL_DB update,使用chunk 保存
-        for update in update_sql.chunks(100) {
-            SUL_DB.query(update.into_iter().join("\n")).await.unwrap();
-        }
+        if !update_sql.is_empty() {
+            //执行SUL_DB update,使用chunk 保存
+            for update in update_sql.chunks(100) {
+                SUL_DB.query(update.into_iter().join("\n")).await.unwrap();
+            }
 
-        //更新aabb数据到数据库
-        save_aabb_to_surreal(&aabb_map).await?;
+            save_pts_to_surreal(&pts_json_map).await?;
+            //更新aabb数据到数据库
+            save_aabb_to_surreal(&aabb_map).await?;
+        }
     }
 
     Ok(())
@@ -159,42 +174,52 @@ struct GeoAabbTrans {
 pub async fn update_inst_relate_aabbs() -> anyhow::Result<()> {
     //todo 使用分页来实现刷新
 
-    let sql = r#"select in as id, world_trans.d as world_trans,
-            (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb.d != none) as geo_aabbs from inst_relate where aabb == none"#;
 
-    let mut response = SUL_DB.query(sql).await?;
-    let result: Vec<QueryAabbParam> = response.take(0)?;
-    // dbg!(&result);
+    const PAGE_NUM: usize = 200;
+    let mut i = 0;
+    loop {
+        let mut aabb_map: HashMap<u64, String> = HashMap::new();
+        let sql = format!(r#"select in as id, world_trans.d as world_trans,
+            (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb.d != none)
+            as geo_aabbs from inst_relate where aabb == none start {} limit {PAGE_NUM}"#, i * PAGE_NUM);
 
-    let mut aabb_map: HashMap<u64, String> = HashMap::new();
-    for r in result {
-        let mut aabb = Aabb::new_invalid();
-        for g in r.geo_aabbs {
-            let t = r.world_trans * g.trans;
-            let tmp_aabb = g.aabb.scaled(&t.scale.into());
-            let tmp_aabb = tmp_aabb.transform_by(&Isometry {
-                rotation: t.rotation.into(),
-                translation: t.translation.into(),
-            });
-            aabb.merge(&tmp_aabb);
+        let mut response = SUL_DB.query(sql).await?;
+        let result: Vec<QueryAabbParam> = response.take(0)?;
+        i += 1;
+
+        if result.is_empty() {
+            break;
         }
-        let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
-        aabb_map
-            .entry(aabb_hash)
-            .or_insert(serde_json::to_string(&aabb).unwrap());
-        let sql = format!(
-            "update inst_relate set aabb = aabb:⟨{}⟩ where in=pe:{};",
-            aabb_hash,
-            r.id.to_string()
-        );
-        // dbg!(&sql);
-        SUL_DB.query(&sql).await.unwrap();
+        let mut update_sql = String::new();
+        for r in result {
+            let mut aabb = Aabb::new_invalid();
+            for g in r.geo_aabbs {
+                let t = r.world_trans * g.trans;
+                let tmp_aabb = g.aabb.scaled(&t.scale.into());
+                let tmp_aabb = tmp_aabb.transform_by(&Isometry {
+                    rotation: t.rotation.into(),
+                    translation: t.translation.into(),
+                });
+                aabb.merge(&tmp_aabb);
+            }
+            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
+            aabb_map
+                .entry(aabb_hash)
+                .or_insert(serde_json::to_string(&aabb).unwrap());
+            let sql = format!(
+                "update inst_relate set aabb = aabb:⟨{}⟩ where in=pe:{};",
+                aabb_hash,
+                r.id.to_string()
+            );
+            update_sql.push_str(&sql);
+            // dbg!(&sql);
+        }
+        SUL_DB.query(&update_sql).await.unwrap();
+        save_aabb_to_surreal(&aabb_map).await?;
     }
-
-    save_aabb_to_surreal(&aabb_map).await?;
-
     Ok(())
 }
+
 
 async fn save_aabb_to_surreal(aabb_map: &HashMap<u64, String>) -> anyhow::Result<()> {
     if !aabb_map.is_empty() {
@@ -213,6 +238,24 @@ async fn save_aabb_to_surreal(aabb_map: &HashMap<u64, String>) -> anyhow::Result
 
     Ok(())
 }
+
+async fn save_pts_to_surreal(vec3_map: &HashMap<u64, String>) -> anyhow::Result<()> {
+    if !vec3_map.is_empty() {
+        let keys = vec3_map.keys().collect::<Vec<_>>();
+        for chunk in keys.chunks(100) {
+            let mut jsons = vec![];
+            for &&k in chunk {
+                let v = vec3_map.get(&k).unwrap();
+                let json = format!("{{'id':vec3:⟨{}⟩, 'd':{}}}", k, v);
+                jsons.push(json);
+            }
+            let sql = format!("INSERT IGNORE INTO vec3 [{}]", jsons.join(","));
+            SUL_DB.query(sql).await?;
+        }
+    }
+    Ok(())
+}
+
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct GeoParam {
@@ -276,7 +319,7 @@ pub async fn apply_insts_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> {
     "#;
     let mut response = SUL_DB.query(sql).await?;
     let boolean_query: Vec<GeoTransQuery> = response.take(0)?;
-    // dbg!(boolean_query.len());
+    dbg!(boolean_query.len());
     // dbg!(&boolean_query);
 
     let mut tasks = Vec::new();
@@ -286,8 +329,8 @@ pub async fn apply_insts_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> {
         let dir_clone = dir.clone();
         let shapes_map_clone = shapes_map_arc.clone();
         let task = tokio::spawn(async move {
+            let mut update_sql = String::new();
             for mut b in group {
-                let mut update_sql = String::new();
                 let Some((pos_id, pos_t)) = b.ts.pop() else {
                     continue;
                 };
@@ -317,7 +360,7 @@ pub async fn apply_insts_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> {
                 {
                     // pos_shape.write_step(format!("{}.step", b.refno)).unwrap();
                     let tol = b.aabb.half_extents().magnitude() * 0.01;
-                    dbg!(tol);
+                    // dbg!(tol);
                     if let Ok(mesh) = PlantMesh::gen_occ_mesh(&pos_shape, tol as _) {
                         //保存到文件到dir下
                         if mesh
@@ -326,13 +369,13 @@ pub async fn apply_insts_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> {
                         {}
                     }
                 }
-
                 update_sql.push_str(&format!(
                     "update inst_relate set booled=true where in=pe:{};",
                     b.refno
                 ));
-                SUL_DB.query(update_sql).await;
+                // dbg!(&update_sql);
             }
+            SUL_DB.query(update_sql).await;
         });
         tasks.push(task);
     }
@@ -376,8 +419,8 @@ pub async fn apply_cata_neg_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> 
     "#;
     let mut response = SUL_DB.query(sql).await?;
     let mut params: Vec<CataNegGroup> = response.take(0)?;
-    dbg!(params.len());
-    dbg!(&params);
+    // dbg!(params.len());
+    // dbg!(&params);
     if params.is_empty() {
         return Ok(());
     }
@@ -399,18 +442,21 @@ pub async fn apply_cata_neg_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> 
                 // dbg!(&pes);
                 let sql = format!(
                     r#"
-            select geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id from {}->inst_relate->inst_info->geo_relate where  visible and !out.bad and geom_refno in [{}]"#,
+                    select geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id
+                    from {}->inst_relate->inst_info->geo_relate
+                    where visible and !out.bad and geom_refno in [{}]  and out.aabb!=none and out.param!=none"#,
                     g.refno.to_pe_key(),
                     pes
                 );
                 // dbg!(&sql);
-                let Ok(mut resp) = SUL_DB.query(sql).await else {
+                let Ok(mut resp) = SUL_DB.query(&sql).await else {
                     continue;
                 };
-                let gms: Vec<GmGeoData> = resp.take(0).unwrap();
-                // let Ok(gms) = resp.take::<Vec<GmGeoData>>(0) else {
-                //     continue;
-                // };
+                // let gms: Vec<GmGeoData> = resp.take(0).unwrap();
+                let Ok(gms) = resp.take::<Vec<GmGeoData>>(0) else {
+                    dbg!(&sql);
+                    continue;
+                };
                 // dbg!(&gms);
 
                 for bg in g.boolean_group {
@@ -438,7 +484,7 @@ pub async fn apply_cata_neg_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> 
                     }
                     let mut aabb = Aabb::new_invalid();
                     for edge in pos_shape.edges() {
-                        for point in edge.approximation_segments() {
+                        for point in edge.approximation_segments_custom(1.0, 1.0) {
                             aabb.take_point(nalgebra::Point3::new(
                                 point.x as f32,
                                 point.y as f32,
