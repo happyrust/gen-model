@@ -55,10 +55,10 @@ pub async fn process_gen_meshes(refnos: Option<&[RefU64]>) -> anyhow::Result<()>
     let time = std::time::Instant::now();
     update_inst_relate_aabbs().await.unwrap();
     println!("update_inst_relate_aabbs finished: {} ms", time.elapsed().as_millis());
-    // apply_cata_neg_boolean(None).await.unwrap();
-    // let time = std::time::Instant::now();
-    // apply_insts_boolean(None).await.unwrap();
-    // println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
+    apply_cata_neg_boolean(None).await.unwrap();
+    let time = std::time::Instant::now();
+    apply_insts_boolean(None).await.unwrap();
+    println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
     Ok(())
 }
 
@@ -81,14 +81,20 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
     const PAGE_NUM: usize = 100;
     let mut i = 0;
     let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
-    loop {
-        let mut response = SUL_DB.query(&format!("select meta::id(id) as id, param from inst_geo where !meshed && !bad start {} limit {PAGE_NUM}", i * PAGE_NUM)).await?;
+
+    let sql = r#"select value id from inst_geo where !meshed && !bad"#.to_string();
+    let mut response = SUL_DB.query(sql).await.unwrap();
+    let inst_geo_ids: Vec<String> = response.take(0).unwrap();
+
+    for chunk in inst_geo_ids.chunks(PAGE_NUM) {
+        let ids = chunk.join(",");
+        let mut response = SUL_DB.query(&format!("select meta::id(id) as id, param from {}", ids)).await?;
         let result: Vec<QueryGeoParam> = response.take(0)?;
         if result.is_empty() {
             break;
         }
         i += 1;
-        // dbg!(&result);
+        dbg!(&result.len());
         for g in result {
             //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
             if let Some(shape) = g.param.gen_occ_shape() {
@@ -106,7 +112,7 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
                 shapes_map.insert(g.id, (shape, tol));
             }
         }
-        let mut update_sql = vec![];
+        let mut update_sql = "".to_string();
         let mut aabb_map: HashMap<u64, String> = HashMap::new();
         let mut pts_json_map = HashMap::new();
         for (id, (s, tol)) in &shapes_map {
@@ -127,7 +133,7 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
                             }
                         }
                     }
-                    update_sql.push(format!(
+                    update_sql.push_str(&format!(
                         "update inst_geo:⟨{}⟩ set meshed = true, aabb = aabb:⟨{}⟩, pts=[{}];",
                         id, aabb_hash, pt_hashes.into_iter().join(","),
                     ));
@@ -139,19 +145,16 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
             }
             if !success {
                 //有问题的模型，就不需要每次都重复生成了
-                update_sql.push(format!("update inst_geo:⟨{}⟩ set bad = true;", id));
+                update_sql.push_str(&format!("update inst_geo:⟨{}⟩ set bad = true;", id));
             }
         }
         if !update_sql.is_empty() {
             //执行SUL_DB update,使用chunk 保存
-            for update in update_sql.chunks(100) {
-                SUL_DB.query(update.into_iter().join("\n")).await.unwrap();
-            }
-
-            save_pts_to_surreal(&pts_json_map).await?;
-            //更新aabb数据到数据库
-            save_aabb_to_surreal(&aabb_map).await?;
+            SUL_DB.query(update_sql).await.unwrap();
         }
+        save_pts_to_surreal(&pts_json_map).await?;
+        //更新aabb数据到数据库
+        save_aabb_to_surreal(&aabb_map).await?;
     }
 
     Ok(())
@@ -172,27 +175,29 @@ struct GeoAabbTrans {
 
 ///刷新inst_relate 的 aabb
 pub async fn update_inst_relate_aabbs() -> anyhow::Result<()> {
-    //todo 使用分页来实现刷新
-
-
-    const PAGE_NUM: usize = 200;
+    const PAGE_NUM: usize = 300;
     let mut i = 0;
-    loop {
+    let sql = format!(r#"select value id from inst_relate where aabb = none"#);
+    let mut response = SUL_DB.query(sql).await.unwrap();
+    let inst_relate_ids: Vec<String> = response.take(0).unwrap();
+    for chunk in inst_relate_ids.chunks(PAGE_NUM) {
         let mut aabb_map: HashMap<u64, String> = HashMap::new();
+        let ids = chunk.join(",");
         let sql = format!(r#"select in as id, world_trans.d as world_trans,
             (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb.d != none)
-            as geo_aabbs from inst_relate where aabb == none start {} limit {PAGE_NUM}"#, i * PAGE_NUM);
-
-        let mut response = SUL_DB.query(sql).await?;
-        let result: Vec<QueryAabbParam> = response.take(0)?;
+            as geo_aabbs from {}"#, ids);
+        let mut response = SUL_DB.query(sql).await.unwrap();
+        let result: Vec<QueryAabbParam> = response.take(0).unwrap();
+        dbg!(result.len());
         i += 1;
 
-        if result.is_empty() {
-            break;
-        }
         let mut update_sql = String::new();
         for r in result {
             let mut aabb = Aabb::new_invalid();
+            // if r.id == "24383_66722".into() {
+            //     dbg!(&r);
+            // }
+            // dbg!(r.id);
             for g in r.geo_aabbs {
                 let t = r.world_trans * g.trans;
                 let tmp_aabb = g.aabb.scaled(&t.scale.into());
@@ -212,10 +217,9 @@ pub async fn update_inst_relate_aabbs() -> anyhow::Result<()> {
                 r.id.to_string()
             );
             update_sql.push_str(&sql);
-            // dbg!(&sql);
         }
         SUL_DB.query(&update_sql).await.unwrap();
-        save_aabb_to_surreal(&aabb_map).await?;
+        save_aabb_to_surreal(&aabb_map).await.unwrap();
     }
     Ok(())
 }
@@ -225,17 +229,15 @@ async fn save_aabb_to_surreal(aabb_map: &HashMap<u64, String>) -> anyhow::Result
     if !aabb_map.is_empty() {
         let keys = aabb_map.keys().collect::<Vec<_>>();
         for chunk in keys.chunks(100) {
-            let mut jsons = vec![];
+            let mut sql = "".to_string();
             for &&k in chunk {
                 let v = aabb_map.get(&k).unwrap();
                 let json = format!("{{'id':aabb:⟨{}⟩, 'd':{}}}", k, v);
-                jsons.push(json);
+                sql.push_str(&format!("INSERT IGNORE INTO aabb {};", json));
             }
-            let sql = format!("INSERT IGNORE INTO aabb [{}]", jsons.join(","));
-            SUL_DB.query(sql).await?;
+            SUL_DB.query(sql).await.unwrap();
         }
     }
-
     Ok(())
 }
 
@@ -243,14 +245,13 @@ async fn save_pts_to_surreal(vec3_map: &HashMap<u64, String>) -> anyhow::Result<
     if !vec3_map.is_empty() {
         let keys = vec3_map.keys().collect::<Vec<_>>();
         for chunk in keys.chunks(100) {
-            let mut jsons = vec![];
+            let mut sql = "".to_string();
             for &&k in chunk {
                 let v = vec3_map.get(&k).unwrap();
                 let json = format!("{{'id':vec3:⟨{}⟩, 'd':{}}}", k, v);
-                jsons.push(json);
+                sql.push_str(&format!("INSERT IGNORE INTO vec3 {};", json));
             }
-            let sql = format!("INSERT IGNORE INTO vec3 [{}]", jsons.join(","));
-            SUL_DB.query(sql).await?;
+            SUL_DB.query(sql).await.unwrap();
         }
     }
     Ok(())
@@ -469,6 +470,9 @@ pub async fn apply_cata_neg_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> 
                         .gen_occ_shape()
                         .unwrap()
                         .transformed(&pos.trans.compute_matrix().as_dmat4());
+                    // pos_shape
+                    //     .write_step(format!("{}.step", "pos"))
+                    //     .unwrap();
 
                     for &neg in bg.iter().skip(1) {
                         // dbg!(neg);
@@ -493,8 +497,9 @@ pub async fn apply_cata_neg_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> 
                         }
                     }
                     let tol = aabb.half_extents().magnitude() as f64 * 0.01;
+                    // dbg!(tol);
                     // pos_shape
-                    //     .write_step(format!("{}.step", "pos_shape"))
+                    //     .write_step(format!("{}.step", "final"))
                     //     .unwrap();
                     let new_id = g.refno.hash_with_another_refno(bg[0]);
                     if let Ok(mesh) = PlantMesh::gen_occ_mesh(&pos_shape, tol as _) {

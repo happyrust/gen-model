@@ -99,10 +99,11 @@ puhua_database_user = ""
 puhua_database_password = ""
 
 #debug_root_refnos = ["24383/66521"]
-debug_root_refnos = ["24383/66761"]
+#debug_root_refnos = ["17496/249030"]
 #debug_root_refnos = ["24383/66672"]
 #测试单个房间
-#debug_root_refnos = ["24383/66662", "17496/200184"]
+debug_root_refnos = ["24383/66457", "17496/196611"]
+#debug_root_refnos = ["17496/200184"]
 
 #debug_root_refnos = ["17496/172256"]
 # debug_root_refnos = ["17496/255909"]

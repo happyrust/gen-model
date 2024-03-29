@@ -221,6 +221,7 @@ pub async fn gen_all_geos_data(
                     skip_exist,
                 )
                     .await?;
+                dbg!(&use_cata_refnos);
                 use_cata_refnos.extend(bran_children_refnos);
                 let map = aios_core::query_group_by_cata_hash(&use_cata_refnos)
                     .await

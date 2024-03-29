@@ -111,7 +111,9 @@ pub async fn query_room_refnos(panel_refno: RefU64) -> anyhow::Result<HashSet<Re
             });
             //for test
             // dbg!(tri_mesh.contains_point(&Isometry::identity(), &Point::new(0.0, 0.0, 0.0) ));
-            // dbg!(&contains_query);
+            // if !contains_query.is_empty() {
+            //     dbg!(&contains_query);
+            // }
             within_refnos.extend(contains_query.iter().map(|(x, _)| x));
             if !need_check_refnos.is_empty() {
                 dbg!(&need_check_refnos);

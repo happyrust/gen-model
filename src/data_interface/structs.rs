@@ -7,7 +7,7 @@ use serde_with::{serde_as, DisplayFromStr};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-pub type AIOSAxisMap = BTreeMap<i32, CateAxisParam>;
+pub type PlantAxisMap = BTreeMap<i32, CateAxisParam>;
 
 ///有负实体的集合信息, 返回tuple
 #[serde_as]

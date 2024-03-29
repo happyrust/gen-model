@@ -172,17 +172,16 @@ pub async fn save_instance_data(
             //这里的 pts，存储的时点集信息
             // "flow_pt_indexs": self.flow_pt_indexs.clone(),
             let mut sql = format!(
-                "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩,generic='{}', arrive={}, leave={}",
+                "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩,generic='{}', has_cata_neg={}",
                 v.id_str(),
                 transform_hash,
                 v.generic_type.to_string(),
-                // v.has_cata_neg,
-                *v.flow_pt_indexs.get(0).unwrap_or(&-1),
-                *v.flow_pt_indexs.get(1).unwrap_or(&-1),
+                v.has_cata_neg,
             );
 
             if !neg_refnos.is_empty() {
-                sql.push_str(&format!(", has_cata_neg=true, neg_refnos=[{}]", v.neg_refnos.iter().map(|x| x.to_pe_key()).join(",")));
+                sql.push_str(&format!(",neg_refnos=[{}]", neg_refnos.iter().map(|x| x.to_pe_key()).join(",")));
+                // dbg!(&sql);
             }
             // dbg!(&sql);
             inst_relate_vec.push(sql);
