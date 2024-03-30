@@ -465,11 +465,12 @@ pub async fn apply_cata_neg_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> 
                         continue;
                     };
                     // dbg!(pos);
-                    let mut pos_shape = pos
+                    let Some(mut pos_shape) = pos
                         .param
                         .gen_occ_shape()
-                        .unwrap()
-                        .transformed(&pos.trans.compute_matrix().as_dmat4());
+                        .map(|x| x.transformed(&pos.trans.compute_matrix().as_dmat4())) else {
+                        continue;
+                    };
                     // pos_shape
                     //     .write_step(format!("{}.step", "pos"))
                     //     .unwrap();
@@ -479,13 +480,21 @@ pub async fn apply_cata_neg_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> 
                         let Some(neg_geo) = gms.iter().find(|x| x.geom_refno == neg) else {
                             continue;
                         };
-                        let neg_shape = neg_geo
+                        // dbg!(neg_geo.trans.compute_matrix().as_dmat4());
+                        let Some(neg_shape) = neg_geo
                             .param
-                            .gen_occ_shape()
-                            .unwrap()
-                            .transformed(&neg_geo.trans.compute_matrix().as_dmat4());
-                        pos_shape = pos_shape.subtract(&neg_shape).into_shape().into();
+                            .gen_occ_shape() else {
+                            continue;
+                        };
+                        // neg_shape
+                        //     .write_step(format!("{}.step", neg))
+                        //     .unwrap();
+                        let t_neg_shape = neg_shape.transformed(&neg_geo.trans.compute_matrix().as_dmat4());
+                        pos_shape = pos_shape.subtract(&t_neg_shape).into_shape().into();
                     }
+                    // pos_shape
+                    //     .write_step(format!("{}.step", "final"))
+                    //     .unwrap();
                     let mut aabb = Aabb::new_invalid();
                     for edge in pos_shape.edges() {
                         for point in edge.approximation_segments_custom(1.0, 1.0) {

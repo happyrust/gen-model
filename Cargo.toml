@@ -73,7 +73,7 @@ debug_print = "1.0.0"
 #造型功能，先在database测试
 opencascade = { path = "../new-crates/opencascade-rs/crates/opencascade", optional = true}
 serde_with = "3.3.0"
-rayon = "1.7.0"
+rayon = "1.10.0"
 indexmap = "2.0.0"
 urlencoding = "2.1.3"
 notify = "6.1.1"
