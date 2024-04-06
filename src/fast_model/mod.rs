@@ -10,7 +10,15 @@ pub mod shared;
 
 pub mod occ_generate;
 
+pub mod manifold_bool;
+
 pub mod room_model;
+
+pub mod cal_model;
+
+pub mod pdms_inst;
+
+pub mod utils;
 
 pub use gen_model::*;
 pub use occ_generate::*;

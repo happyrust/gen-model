@@ -102,8 +102,32 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/249030"]
 #debug_root_refnos = ["24383/66672"]
 #测试单个房间
-debug_root_refnos = ["24383/66457", "17496/196611"]
-#debug_root_refnos = ["17496/200184"]
+#debug_root_refnos = ["24383/66457", "17496/196611"]
+#debug_root_refnos = ["24383/68039", "17496/197840"]
+#阀门和楼板的距离
+#debug_root_refnos = ["24383/66745", "25688/71674"]
+#debug_root_refnos = ["17496/201546", "17496/79993"]
+#debug_root_refnos = ["24383/89691"]
+#debug_root_refnos = ["24383/89686"]
+
+#debug_root_refnos = ["17496/256046"]
+#debug_root_refnos = ["24383/72928"]
+#debug_root_refnos = ["25688/45314"]
+#有问题的wire
+#debug_root_refnos = ["25688/45274"]
+#debug_root_refnos = ["25688/45261"]
+#debug_root_refnos = ["25688/45175"]
+#debug_root_refnos = ["25688/23155"]
+#floor
+#debug_root_refnos = ["25688/71674"]
+# floor hole
+#debug_root_refnos = ["17496/253664"]
+debug_root_refnos = ["17496/254047"]
+#debug_root_refnos = ["25688/72210"]
+#debug_root_refnos = ["17496/249145"]
+
+#debug_root_refnos = ["24384/22849"]
+#debug_root_refnos = ["24381/36945"]
 
 #debug_root_refnos = ["17496/172256"]
 # debug_root_refnos = ["17496/255909"]

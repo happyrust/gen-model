@@ -213,6 +213,47 @@ pub async fn gen_cata_geos(
                         };
                         #[cfg(debug_assertions)]
                         dbg!(brep_shapes_map.len());
+                        {
+                            // 将一些伪属性需要用到的值存下来，后面也要更新维护这些伪属性，避免重复计算
+                            let mut lock = HASH_PSEUDO_ATT_MAPS.write().await;
+                            let psudo_map = lock
+                                .entry(cata_hash.clone())
+                                .or_insert(NamedAttrMap::default());
+
+                            if desi_att.contains_key("LEAV") {
+                                let arrive = desi_att.get_i32("ARRI").unwrap_or_default();
+                                let leave = desi_att.get_i32("LEAV").unwrap_or_default();
+                                let axis_map = design_axis_map.get(&ele_refno).unwrap();
+                                // dbg!(axis_map);
+                                if axis_map.contains_key(&arrive) {
+                                    let v = axis_map.get(&arrive).unwrap();
+                                    psudo_map
+                                        .insert("ARRWID".into(), NamedAttrValue::F32Type(v.pwidth));
+                                    psudo_map.insert(
+                                        "ARRHEI".into(),
+                                        NamedAttrValue::F32Type(v.pheight),
+                                    );
+                                    psudo_map
+                                        .insert("ABOR".into(), NamedAttrValue::F32Type(v.pbore));
+                                }
+
+                                if axis_map.contains_key(&leave) {
+                                    let v = axis_map.get(&leave).unwrap();
+                                    psudo_map
+                                        .insert("LEAWID".into(), NamedAttrValue::F32Type(v.pwidth));
+                                    psudo_map.insert(
+                                        "LEAHEI".into(),
+                                        NamedAttrValue::F32Type(v.pheight),
+                                    );
+                                    psudo_map
+                                        .insert("LBOR".into(), NamedAttrValue::F32Type(v.pbore));
+                                }
+                            }
+                            // dbg!(ele_refno);
+                            // dbg!(&cata_hash);
+                            // dbg!(&psudo_map);
+                        }
+
                         ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
                         for (ele_refno, shapes) in brep_shapes_map {
                             // let mut found_ngmr = false;
@@ -387,8 +428,8 @@ pub async fn gen_cata_geos(
                                     type_name: cur_type.to_string(),
                                     ..Default::default()
                                 };
-                                #[cfg(debug_assertions)]
-                                dbg!(geos_data.insts.len());
+                                // #[cfg(debug_assertions)]
+                                // dbg!(geos_data.insts.len());
                                 if geos_data.insts.len() > 0 {
                                     shape_insts_data.insert_info(ele_refno, geos_info.clone());
                                     shape_insts_data
@@ -716,7 +757,7 @@ pub async fn gen_cata_geos(
                             // dbg!(cond);
                             l_ref_dir = cond * ref_dir;
                         }
-                        if skip {} else {
+                        if !skip {
                             let l_pos = axis_map[1].pt;
                             current_tubing.start_pt = l_pos;
                             current_tubing.desire_leave_dir = l_dir;

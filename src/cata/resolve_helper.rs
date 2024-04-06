@@ -70,8 +70,6 @@ fn test_expression_regex() {
 }
 
 
-
-
 //  SIN  00 00 03 85
 //  COS  00 00 03 86
 //  TAN  00 00 03 87
@@ -377,7 +375,7 @@ pub fn resolve_axis(
                 let axis =
                     resolve_axis_param(&scom.axis_params[indx], scom, context);
                 let flag = if is_neg { -1.0 } else { 1.0 };
-                dir = flag *  axis.dir;
+                dir = flag * axis.dir;
                 pos = axis.pt;
             } else {
                 return Err(anyhow::anyhow!("未找到点索引: {}", pnt_index));
@@ -397,7 +395,7 @@ pub fn resolve_axis(
                 .unwrap_or(-1);
             if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
                 let mut axis =
-                    resolve_axis_param(&scom.axis_params[indx], scom, context, );
+                    resolve_axis_param(&scom.axis_params[indx], scom, context);
                 let flag = if is_neg { -1.0 } else { 1.0 };
                 ref_dir = flag * mem::take(&mut axis.dir);
             } else {
@@ -493,12 +491,12 @@ pub fn parse_str_axis_to_vec3(
             if cap.len() == 6 {
                 let val_str = cap[2].to_string();
                 let val_result =
-                    eval_str_to_f64(&val_str, context,  true, "AXIS")?.to_string();
+                    eval_str_to_f64(&val_str, context, "AXIS")?.to_string();
                 new_dir_str = dir_str.replace(&val_str, &val_result);
 
                 let val_str = cap[4].to_string();
                 let val_result =
-                    eval_str_to_f64(&val_str, context,  true, "AXIS")?.to_string();
+                    eval_str_to_f64(&val_str, context, "AXIS")?.to_string();
                 new_dir_str = new_dir_str.replace(&val_str, &val_result);
                 is_three = true;
             }
@@ -511,7 +509,7 @@ pub fn parse_str_axis_to_vec3(
                 if cap.len() == 4 {
                     let val_str = cap[2].to_string();
                     let val_result =
-                        eval_str_to_f64(&val_str, context,  true, "AXIS")?.to_string();
+                        eval_str_to_f64(&val_str, context, "AXIS")?.to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                 }
             }

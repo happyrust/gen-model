@@ -34,9 +34,6 @@ use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
-// use crate::graph_db::pdms_arango::{connect_arangodb, save_arangodb_with_db_option};
-use crate::graph_db::pdms_inst::query_insts_shape_data;
-// use crate::graph_db::structs::{PdmsEleData, PdmsEleEdge, PdmsMdbEdge};
 use crate::mqtt_service::{new_mqtt_inst, SyncE3dFileMsg};
 
 pub const TUBI_TOL: f32 = 0.1f32;
@@ -687,12 +684,15 @@ impl AiosDBManager {
     pub async fn get_generic_type(&self, refno: RefU64) -> PdmsGenericType {
         let mut cur_refno = refno;
         while let Ok(b) = aios_core::get_named_attmap(cur_refno).await {
-            if b.is_empty() {
+            if b.is_empty(){
                 break;
             }
             let type_name = b.get_type_str();
-            if PDMS_GNERAL_TYPE_NAMES_MAP.contains_key(&type_name) {
-                return *PDMS_GNERAL_TYPE_NAMES_MAP.get(type_name).unwrap();
+            if type_name == "ZONE" {
+                break;
+            }
+            if let Ok(generic) = PdmsGenericType::from_str(&type_name){
+                return generic;
             }
             cur_refno = b.get_owner();
         }

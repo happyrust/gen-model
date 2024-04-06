@@ -893,9 +893,6 @@ impl PdmsDataInterface for AiosDBManager {
         dbg!(scom_ref);
 
         let scom_info = self.get_or_create_scom_info(scom_ref).await?;
-        // if desi_refno == "25688_8089".into() {
-        //     dbg!(&scom_info);
-        // }
         let context = aios_core::get_or_create_cata_context(desi_refno, is_tubi)
             .await
             .unwrap();

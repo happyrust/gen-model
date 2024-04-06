@@ -76,8 +76,6 @@ pub fn resolve_cata_comp(
     let cat_ref = scom_info.attr_map.get_refno().unwrap_or_default();
 
     let axis_param_map = resolve_axis_params(des_refno, scom_info, &cur_context);
-
-    // dbg!(&axis_param_map);
     let jusl_param = if let Some(plin) = cur_context.get("JUSL") {
         if scom_info.plin_map.contains_key(plin.as_str()) {
             Some(scom_info.plin_map.get(plin.as_str()).unwrap().clone())

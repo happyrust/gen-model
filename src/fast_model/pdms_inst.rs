@@ -19,14 +19,6 @@ use std::collections::HashMap;
 use std::mem::take;
 
 ///保存instance 数据到数据库
-pub async fn save_compound_inst_info_to_graph_db(
-    mgr: &AiosDBManager,
-    inst_info_map: &DashMap<RefU64, EleGeosInfo>,
-) -> anyhow::Result<()> {
-    Ok(())
-}
-
-///保存instance 数据到数据库
 pub async fn save_instance_data(
     mgr: &AiosDBManager,
     inst_mgr: &ShapeInstancesData,
@@ -208,7 +200,6 @@ pub async fn save_instance_data(
     }
     while let Some(_) = join_set.join_next().await {}
 
-    // let keys = inst_mgr.ngmr_inst_info_map.keys().collect::<Vec<_>>();
     let mut join_set = tokio::task::JoinSet::new();
     //保存aabb
     if !aabb_map.is_empty() {

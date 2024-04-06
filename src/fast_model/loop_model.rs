@@ -51,7 +51,6 @@ pub async fn gen_loop_geos(
             if end_idx > loop_cnt as usize {
                 end_idx = loop_cnt as usize;
             }
-            // let mut cached_mesh_mgr = mgr.cached_mesh_mgr.write().await;
             let mut shape_insts_data = instance_mgr.write().await;
             for j in start_idx..end_idx {
                 let loop_refno = all_loop_refnos[j];

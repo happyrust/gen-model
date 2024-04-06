@@ -118,7 +118,7 @@ pub async fn export_stp(
         };
 
         let mut transform = geos_info.world_transform;
-        if let Some((shape, own_pos_refnos)) = insts_data.gen_occ_shape(&transform) {
+        if let Ok((shape, own_pos_refnos)) = insts_data.gen_occ_shape(&transform) {
             if !own_pos_refnos.is_empty() {
                 let t_shape = if is_door {
                     let mut box_shape = AdHocShape::make_box(100.0, 100.0, 100.0).0;

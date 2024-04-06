@@ -1,5 +1,4 @@
 // pub mod pdms_arango;
-pub mod pdms_inst;
 pub mod structs;
 // pub mod ssc_arango;
 use serde::{Serialize, Deserialize};

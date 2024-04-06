@@ -1,0 +1,90 @@
+use std::collections::HashMap;
+use aios_core::{gen_bytes_hash, query_neareast_along_axis, query_neareast_by_pos_dir, RefU64, SUL_DB};
+use bevy_transform::components::Transform;
+use glam::Vec3;
+use parry3d::bounding_volume::Aabb;
+use crate::fast_model::utils::save_transforms_to_surreal;
+use parry3d::bounding_volume::BoundingVolume;
+
+pub async fn update_cal_equip() -> anyhow::Result<()> {
+    update_cal_equip_wtrans().await?;
+    cal_equip_nearest_floor().await?;
+    Ok(())
+}
+
+//将equip的 world transform 这些放到cal_equip 这张表里，存储一些需要计算的缓存数据
+//这样可以减少查询次数，提高性能
+//这个表的数据是在equip的数据变更时，由equip的数据变更触发的
+pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
+    let mut response = SUL_DB
+        .query(format!(r#"select value meta::id(id) from {} where type::thing("cal_equi", meta::id(id))!=none"#, "EQUI"))
+        .await?;
+    let equips: Vec<RefU64> = response.take(0)?;
+    if equips.is_empty() {
+        return Ok(());
+    }
+    let mut transform_map: HashMap<u64, String> = HashMap::new();
+    transform_map.insert(0, serde_json::to_string(&Transform::IDENTITY).unwrap());
+    let mut sql = String::new();
+    for refno in equips {
+        let world_trans = aios_core::get_world_transform(refno).await?.unwrap_or_default();
+        let transform_hash = gen_bytes_hash::<_, 64>(&world_trans);
+        if !transform_map.contains_key(&transform_hash) {
+            transform_map.insert(
+                transform_hash,
+                serde_json::to_string(&world_trans).unwrap(),
+            );
+        }
+        sql.push_str(&format!(
+            "create cal_equi:{refno} SET world_trans=trans:⟨{}⟩;", transform_hash));
+    }
+    save_transforms_to_surreal(&transform_map).await?;
+    SUL_DB.query(sql).await.unwrap();
+    Ok(())
+}
+
+//取得设备下的所有aabb，然后取下面的点到楼板的最近距离
+pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
+    let mut response = SUL_DB
+        .query(format!(r#"select value meta::id(id) from {} where type::thing("cal_equi", meta::id(id))!=none"#, "EQUI"))
+        .await?;
+    let equips: Vec<RefU64> = response.take(0)?;
+    if equips.is_empty() {
+        return Ok(());
+    }
+
+    let mut equip_sql = String::new();
+    for equip in equips {
+        let sql = format!(r#"
+            (select value array::flatten([(select value aabb.d from <-pe_owner<-pe<-pe_owner<-pe->inst_relate),
+                (select value aabb.d from <-pe_owner<-pe->inst_relate)]) from {} where array::len(->nearest_relate)=0)[0]
+            "#, equip.to_pe_key());
+        // dbg!(&sql);
+        let mut response = SUL_DB
+            .query(sql)
+            .await?;
+        let Ok(aabbs) = response.take::<Vec<Aabb>>(0) else{
+            continue;
+        };
+        if aabbs.is_empty() { continue; }
+        let mut final_aabb = Aabb::new_invalid();
+        for aabb in aabbs {
+            final_aabb.merge(&aabb);
+        }
+        //得到底部的中心点，去计算最近的楼板
+        let btm_pts = &final_aabb.vertices()[..4];
+        for btm_pt in btm_pts {
+            let pt: Vec3 =  (*btm_pt).into();
+            if let Ok(Some((nearest, dist))) = query_neareast_by_pos_dir(pt, Vec3::NEG_Z, "FLOOR")
+                .await {
+                // dbg!((btm_pt, nearest, dist));
+                equip_sql.push_str(&format!("relate pe:{equip}->nearest_relate->FLOOR:{nearest} set dist={dist};"));
+                break;
+            }
+        }
+    }
+    if !equip_sql.is_empty(){
+        SUL_DB.query(equip_sql).await.unwrap();
+    }
+    Ok(())
+}

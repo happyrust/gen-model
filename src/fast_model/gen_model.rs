@@ -1,10 +1,8 @@
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::cata_model::NgmrRemovedType;
-use crate::fast_model::{cata_model, loop_model, prim_model, shared};
-use crate::graph_db::pdms_inst::*;
-use aios_core::consts::NGMR_OWN_TYPES;
+use crate::fast_model::{cata_model, loop_model, prim_model, process_meshes_update_db, shared};
+use crate::fast_model::pdms_inst::save_instance_data;
 #[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::geometry::{PlantGeoData, ShapeInstancesData};
@@ -372,6 +370,8 @@ pub async fn gen_all_geos_data(
             dbg!(inst_data.inst_geos_map.len());
             dbg!(inst_data.ngmr_relate_map.len());
             save_instance_data(&mgr, &inst_data).await?;
+            //每个db更新一次，不能都等到最后去更新
+            process_meshes_update_db(None).await?;
         }
         println!("{db_no} 生成完毕。");
     }
