@@ -650,73 +650,73 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获取对应的截面sweep 线，包含了sctn的处理情况
     async fn get_spline_path(&self, refno: RefU64) -> anyhow::Result<Vec<Spine3D>> {
-        let children_refs = aios_core::get_children_refnos(refno).await?;
+        // let children_refs = aios_core::get_children_refnos(refno).await?;
         let mut paths = vec![];
-        for x in children_refs {
-            let type_name = self.get_type_name(x).await;
-            if type_name != "SPINE" {
-                continue;
-            }
-            let spine_att = aios_core::get_named_attmap(x).await?;
-            let children_atts = aios_core::get_children_named_attmaps(x).await?;
-            if (children_atts.len() - 1) % 2 == 0 {
-                for i in 0..(children_atts.len() - 1) / 2 {
-                    let att1 = &(children_atts[2 * i]);
-                    let att2 = &(children_atts[2 * i + 1]);
-                    let att3 = &(children_atts[2 * i + 2]);
-                    let pt0 = att1.get_position().unwrap_or_default();
-                    let pt1 = att3.get_position().unwrap_or_default();
-                    let mid_pt = att2.get_position().unwrap_or_default();
-                    let cur_type_str = att2.get_str("CURTYP").unwrap_or("unset");
-                    let curve_type = match cur_type_str {
-                        "CENT" => SpineCurveType::CENT,
-                        "THRU" => SpineCurveType::THRU,
-                        _ => SpineCurveType::UNKNOWN,
-                    };
-                    paths.push(Spine3D {
-                        pt0,
-                        pt1,
-                        thru_pt: mid_pt,
-                        center_pt: mid_pt,
-                        cond_pos: att2.get_vec3("CPOS").unwrap_or_default(),
-                        curve_type,
-                        preferred_dir: spine_att.get_vec3("YDIR").unwrap_or(Vec3::Z),
-                        radius: att2.get_f32("RADI").unwrap_or_default(),
-                    });
-                }
-            } else if children_atts.len() == 2 {
-                let att1 = &children_atts[0];
-                let att2 = &children_atts[1];
-                let pt0 = att1.get_position().unwrap_or_default();
-                let pt1 = att2.get_position().unwrap_or_default();
-                if att1.get_type_str() == "POINSP" && att2.get_type_str() == "POINSP" {
-                    paths.push(Spine3D {
-                        pt0,
-                        pt1,
-                        curve_type: SpineCurveType::LINE,
-                        preferred_dir: spine_att.get_vec3("YDIR").unwrap_or(Vec3::Z),
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-
-        //考虑sctn这种直接拉升出来的情况
-        if paths.is_empty() {
-            let att = aios_core::get_named_attmap(refno).await?;
-            if let Some(poss) = att.get_poss()
-                && let Some(pose) = att.get_pose()
-            {
-                paths.push(Spine3D {
-                    pt0: poss,
-                    pt1: pose,
-                    curve_type: SpineCurveType::LINE,
-                    preferred_dir: Vec3::Z,
-                    ..Default::default()
-                });
-            }
-        }
-
+        // for x in children_refs {
+        //     let type_name = self.get_type_name(x).await;
+        //     if type_name != "SPINE" {
+        //         continue;
+        //     }
+        //     let spine_att = aios_core::get_named_attmap(x).await?;
+        //     let children_atts = aios_core::get_children_named_attmaps(x).await?;
+        //     if (children_atts.len() - 1) % 2 == 0 {
+        //         for i in 0..(children_atts.len() - 1) / 2 {
+        //             let att1 = &(children_atts[2 * i]);
+        //             let att2 = &(children_atts[2 * i + 1]);
+        //             let att3 = &(children_atts[2 * i + 2]);
+        //             let pt0 = att1.get_position().unwrap_or_default();
+        //             let pt1 = att3.get_position().unwrap_or_default();
+        //             let mid_pt = att2.get_position().unwrap_or_default();
+        //             let cur_type_str = att2.get_str("CURTYP").unwrap_or("unset");
+        //             let curve_type = match cur_type_str {
+        //                 "CENT" => SpineCurveType::CENT,
+        //                 "THRU" => SpineCurveType::THRU,
+        //                 _ => SpineCurveType::UNKNOWN,
+        //             };
+        //             paths.push(Spine3D {
+        //                 pt0,
+        //                 pt1,
+        //                 thru_pt: mid_pt,
+        //                 center_pt: mid_pt,
+        //                 cond_pos: att2.get_vec3("CPOS").unwrap_or_default(),
+        //                 curve_type,
+        //                 preferred_dir: spine_att.get_vec3("YDIR").unwrap_or(Vec3::Z),
+        //                 radius: att2.get_f32("RADI").unwrap_or_default(),
+        //             });
+        //         }
+        //     } else if children_atts.len() == 2 {
+        //         let att1 = &children_atts[0];
+        //         let att2 = &children_atts[1];
+        //         let pt0 = att1.get_position().unwrap_or_default();
+        //         let pt1 = att2.get_position().unwrap_or_default();
+        //         if att1.get_type_str() == "POINSP" && att2.get_type_str() == "POINSP" {
+        //             paths.push(Spine3D {
+        //                 pt0,
+        //                 pt1,
+        //                 curve_type: SpineCurveType::LINE,
+        //                 preferred_dir: spine_att.get_vec3("YDIR").unwrap_or(Vec3::Z),
+        //                 ..Default::default()
+        //             });
+        //         }
+        //     }
+        // }
+        //
+        // //考虑sctn这种直接拉升出来的情况
+        // if paths.is_empty() {
+        //     let att = aios_core::get_named_attmap(refno).await?;
+        //     if let Some(poss) = att.get_poss()
+        //         && let Some(pose) = att.get_pose()
+        //     {
+        //         paths.push(Spine3D {
+        //             pt0: poss,
+        //             pt1: pose,
+        //             curve_type: SpineCurveType::LINE,
+        //             preferred_dir: Vec3::Z,
+        //             ..Default::default()
+        //         });
+        //     }
+        // }
+        //
         Ok(paths)
     }
 

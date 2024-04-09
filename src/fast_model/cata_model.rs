@@ -160,8 +160,8 @@ pub async fn gen_cata_geos(
             let handle = tokio::spawn(async move {
                 let start_idx = i * batch_size;
                 let mut end_idx = start_idx + batch_size;
-                if end_idx > unique_cata_cnt as usize {
-                    end_idx = unique_cata_cnt as usize;
+                if end_idx > unique_cata_cnt {
+                    end_idx = unique_cata_cnt;
                 }
                 println!("当前范围: {start_idx} ~ {end_idx}");
                 for j in start_idx..end_idx {
@@ -172,7 +172,7 @@ pub async fn gen_cata_geos(
                     let target_cata = target_cata_map.get(&cata_hash).unwrap();
                     let mut shape_insts_data = instance_mgr.write().await;
                     let mut process_refno = None;
-                    let mut ptset_map = BTreeMap::new();
+                    let mut ptset_map = None;
                     //如果inst_info 已经存在了，可以直接跳过生成，直接指向过去就可以了
                     if replace_mesh || !target_cata.exist_inst {
                         //如果没有已有的，需要生成
@@ -195,6 +195,7 @@ pub async fn gen_cata_geos(
                             .await
                             .unwrap_or_default();
                         let mut design_axis_map = DashMap::new();
+
                         let cur_type = desi_att.get_type_str();
 
                         let r = gen_cata_single_geoms(
@@ -313,7 +314,7 @@ pub async fn gen_cata_geos(
                                 .flatten()
                                 .collect();
                             //如果有负实体，需要合在一起
-                            ptset_map = design_axis_map
+                            let cur_ptset_map = design_axis_map
                                 .remove(&ele_refno)
                                 .map(|x| x.1)
                                 .unwrap_or_default();
@@ -328,17 +329,18 @@ pub async fn gen_cata_geos(
                                 cata_refno: Some(cata_refno),
                                 neg_refnos: vec![],   //负实体是自己，这样好处理
                                 has_cata_neg: false,
-                                ptset_map: ptset_map.clone(),
+                                ptset_map: cur_ptset_map.clone(),
                                 ..Default::default()
                             };
 
-                            if ele_att.contains_key("ARRI") && !ptset_map.is_empty() {
+                            if ele_att.contains_key("ARRI") && !cur_ptset_map.is_empty() {
                                 let arrive = ele_att.get_i32("ARRI").unwrap_or(-1);
                                 let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
-                                if let Some(a) = ptset_map.values().find(|x| x.number == arrive)
-                                    && let Some(l) = ptset_map.values().find(|x| x.number == leave) {
+                                if let Some(a) = cur_ptset_map.values().find(|x| x.number == arrive)
+                                    && let Some(l) = cur_ptset_map.values().find(|x| x.number == leave) {
                                     local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
                                 }
+                                ptset_map = Some(cur_ptset_map);
                             };
 
                             let mut geo_insts = vec![];
@@ -447,6 +449,10 @@ pub async fn gen_cata_geos(
                             "正在处理同类元件库的模型当前参考号：{}",
                             ele_refno.to_string(),
                         );
+                        // if ptset_map.is_none() {
+                        //     dbg!(&target_cata.ptset);
+                        // }
+                        let cur_ptset_map = ptset_map.as_ref().or(target_cata.ptset.as_ref()).cloned().unwrap_or_default();
                         let Ok(Some(mut origin_trans)) =
                             mgr_clone.get_world_transform(ele_refno).await
                             else {
@@ -465,6 +471,15 @@ pub async fn gen_cata_geos(
                                     + origin_trans.rotation * Vec3::new(0.0, 0.0, off_z);
                             }
                         }
+
+                        if ele_att.contains_key("ARRI") && !cur_ptset_map.is_empty() {
+                            let arrive = ele_att.get_i32("ARRI").unwrap_or(-1);
+                            let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
+                            if let Some(a) = cur_ptset_map.values().find(|x| x.number == arrive)
+                                && let Some(l) = cur_ptset_map.values().find(|x| x.number == leave) {
+                                local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
+                            }
+                        };
                         let mut geos_info = EleGeosInfo {
                             refno: ele_refno,
                             cata_hash: Some(cata_hash.clone()),
@@ -472,15 +487,8 @@ pub async fn gen_cata_geos(
                             generic_type: mgr_clone.get_generic_type(ele_refno).await,
                             aabb: None,
                             world_transform: origin_trans,
+                            ptset_map: cur_ptset_map,
                             ..Default::default()
-                        };
-                        if ele_att.contains_key("ARRI") && !ptset_map.is_empty() {
-                            let arrive = ele_att.get_i32("ARRI").unwrap_or(-1);
-                            let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
-                            if let Some(a) = ptset_map.values().find(|x| x.number == arrive)
-                                && let Some(l) = ptset_map.values().find(|x| x.number == leave) {
-                                local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
-                            }
                         };
                         shape_insts_data.insert_info(ele_refno, geos_info);
                     }

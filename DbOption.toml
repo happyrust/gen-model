@@ -122,12 +122,31 @@ puhua_database_password = ""
 #debug_root_refnos = ["25688/71674"]
 # floor hole
 #debug_root_refnos = ["17496/253664"]
-debug_root_refnos = ["17496/254047"]
+#debug_root_refnos = ["17496/254047"]
+#debug_root_refnos = ["25688/71821"]
+#debug_root_refnos = ["25688/71621"]
+#debug_root_refnos = ["17496/108516"]
+#debug_root_refnos = ["25688/45314"]
 #debug_root_refnos = ["25688/72210"]
 #debug_root_refnos = ["17496/249145"]
 
 #debug_root_refnos = ["24384/22849"]
 #debug_root_refnos = ["24381/36945"]
+#debug_root_refnos = ["24381/180179"]
+#debug_root_refnos = ["17496/80055", "17496/253664"]
+#debug_root_refnos = ["17496/253664"]
+#debug_root_refnos = ["17496/80055"]
+#debug_root_refnos = ["17496/253678"]
+
+debug_root_refnos = ["25688/75998"]
+#debug_root_refnos = ["24381/36576"]
+
+
+
+#WALL
+#debug_root_refnos = ["17496/182135"]
+#debug_root_refnos = ["17496/182525"]
+#debug_root_refnos = ["25688/76000"]
 
 #debug_root_refnos = ["17496/172256"]
 # debug_root_refnos = ["17496/255909"]

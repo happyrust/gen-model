@@ -179,6 +179,7 @@ pub async fn gen_all_geos_data(
                 let map = aios_core::query_group_by_cata_hash(&target_bran_hanger_refnos)
                     .await
                     .unwrap_or_default();
+                // dbg!(&map);
                 map
             };
             // dbg!(&target_bran_reuse_cata_map);
@@ -195,7 +196,7 @@ pub async fn gen_all_geos_data(
                         CataHashRefnoKV {
                             cata_hash: att.cata_hash,
                             group_refnos: vec![r],
-                            exist_inst: false,
+                            ..Default::default()
                         },
                     );
                 }

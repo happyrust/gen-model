@@ -74,20 +74,19 @@ pub async fn gen_prim_geos(
                 };
                 let mut geo_param = PdmsGeoParam::Unknown;
                 //需要限制负实体的大小，太大，导致负运算失败
-                let limit_size: Option<f32> = if GENRAL_NEG_NOUN_NAMES
-                    .contains(&attr.get_type_str())
-                {
-                    if let Some(parent_inst) = shape_insts_data.inst_info_map.get(&attr.get_owner())
-                    {
-                        parent_inst
-                            .aabb
-                            .map(|x| x.bounding_sphere().radius * 2000.0)
-                    } else {
-                        None
-                    }
+                let neg_limit_size: Option<f32> = if GENRAL_NEG_NOUN_NAMES.contains(&attr.get_type_str()) {
+                    // if let Some(parent_inst) = shape_insts_data.inst_info_map.get(&attr.get_owner()) {
+                    //     parent_inst
+                    //         .aabb
+                    //         .map(|x| x.bounding_sphere().radius * 4.0)
+                    // } else {
+                        //负实体默认的最大大小，不能超过
+                       Some(1000_000.0)
+                    // }
                 } else {
                     None
                 };
+                // dbg!((attr.get_type_str(), refno, neg_limit_size));
                 //多面体的处理
                 let brep_shape = if attr.get_type_str() == "POHE" {
                     let pgo_refnos = aios_core::get_children_refnos(refno)
@@ -106,7 +105,7 @@ pub async fn gen_prim_geos(
                     let obj: Box<dyn BrepShapeTrait> = Box::new(Polyhedron { polygons });
                     Some(obj)
                 } else {
-                    attr.create_brep_shape(limit_size)
+                    attr.create_brep_shape(neg_limit_size)
                 };
                 let Some(brep_shape) = brep_shape else {
                     continue;

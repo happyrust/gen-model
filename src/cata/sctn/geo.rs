@@ -56,8 +56,9 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
             let ch_refs = aios_core::get_children_refnos(*x).await.unwrap_or_default();
             if (ch_refs.len() - 1) % 2 == 0 {
                 for i in 0..(ch_refs.len() - 1) / 2 {
+                    let mid_refno = ch_refs[2 * i + 1];
                     let att1 = aios_core::get_named_attmap(ch_refs[2 * i]).await?;
-                    let att2 = aios_core::get_named_attmap(ch_refs[2 * i + 1]).await?;
+                    let att2 = aios_core::get_named_attmap(mid_refno).await?;
                     let att3 = aios_core::get_named_attmap(ch_refs[2 * i + 2]).await?;
                     let pt0 = att1.get_position().unwrap_or_default();
                     let pt1 = att3.get_position().unwrap_or_default();
@@ -69,6 +70,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                         _ => { SpineCurveType::UNKNOWN }
                     };
                     paths.push(Spine3D {
+                        refno: mid_refno,
                         pt0,
                         pt1,
                         thru_pt: mid_pt,
@@ -86,6 +88,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                 let pt1 = att2.get_position().unwrap_or_default();
                 if att1.get_type_str() == "POINSP" && att2.get_type_str() == "POINSP" {
                     paths.push(Spine3D {
+                        refno: ch_refs[0],
                         pt0,
                         pt1,
                         curve_type: SpineCurveType::LINE,
@@ -98,14 +101,15 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         paths
     } else { vec![] };
 
-    // let drne = Vec3::X;
+    dbg!(&spine_paths);
+
     if drns.is_normalized() && drne.is_normalized() {
         let parent_rot = interface.get_world_transform_or_default(parent_refno).await.rotation.as_dquat();
         let current_rot = interface.get_world_transform_or_default(refno).await.rotation.as_dquat();
         let new_rot = current_rot.inverse() * parent_rot;
 
-        let mut tmp_drns = (new_rot.mul_vec3(drns)).normalize();
-        let mut tmp_drne = (new_rot.mul_vec3(drne)).normalize();
+        let tmp_drns = (new_rot.mul_vec3(drns)).normalize();
+        let tmp_drne = (new_rot.mul_vec3(drne)).normalize();
         ///处理随意设置方向的情况，保证一致性
         let angle_s = DVec3::Z.angle_between(tmp_drns);
         dbg!(angle_s);
@@ -184,7 +188,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                         };
                         let transform = loft.get_trans() * transform;
                         brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
-                            refno,
+                            refno: spine.refno,
                             brep_shape: Box::new(loft),
                             transform,
                             visible: true,

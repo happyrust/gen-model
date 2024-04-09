@@ -34,7 +34,7 @@ pub async fn save_instance_data(
     transform_map.insert(0, serde_json::to_string(&Transform::IDENTITY).unwrap());
     let mut param_map = HashMap::new();
     let mut vec3_map = HashMap::new();
-    let chunk_size = 100;
+    let chunk_size = 50;
     for chunk in keys.chunks(chunk_size) {
         let mut json_vec = vec![];
         let mut geo_relate_vec = vec![];
@@ -110,7 +110,8 @@ pub async fn save_instance_data(
                 });
             }
         }
-    }while let Some(_) = join_set.join_next().await {}
+    }
+    while let Some(_) = join_set.join_next().await {}
 
     //保存tubi的数据
     let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
@@ -199,6 +200,7 @@ pub async fn save_instance_data(
         }
     }
     while let Some(_) = join_set.join_next().await {}
+    // dbg!("insert inst_relate, inst_info ok");
 
     let mut join_set = tokio::task::JoinSet::new();
     //保存aabb
@@ -268,6 +270,8 @@ pub async fn save_instance_data(
     }
 
     while let Some(_) = join_set.join_next().await {}
+
+    // dbg!("insert vec3, trans, param ok");
 
     Ok(())
 }
