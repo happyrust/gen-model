@@ -119,6 +119,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     if !db_option.incr_sync {
         aios_core::define_owner_index().await.unwrap();
         aios_core::create_geom_index().await.unwrap();
+        aios_core::define_fullname_index().await.unwrap();
         aios_core::define_pe_name_index().await.unwrap();
     }
 
@@ -333,8 +334,10 @@ pub async fn sync_total_async_threaded(
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default();
-                    dbg!(&debug_refnos);
                     let is_debug = !debug_refnos.is_empty();
+                    if is_debug{
+                        dbg!(&debug_refnos);
+                    }
                     let mut join_set = tokio::task::JoinSet::new();
                     let mut save_atts_time = Instant::now();
                     for kv in type_ele_map.iter() {
@@ -367,26 +370,43 @@ pub async fn sync_total_async_threaded(
                                 uda_json_vec.push(json);
                             }
                             if !json_vec.is_empty() {
-                                let sql = format!(
-                                    "INSERT IGNORE INTO {} [{}]",
-                                    &type_name,
-                                    json_vec.join(",")
-                                );
-                                //使用surreal 保存NamedAttrMap
+                                let mut sql_string = "".to_string();
+                                for json in json_vec {
+                                    let json = format!("INSERT IGNORE INTO {type_name} {json};");
+                                    sql_string.push_str(&json);
+                                }
                                 join_set.spawn(async move {
-                                    SUL_DB.query(sql).await.unwrap();
+                                    SUL_DB.query(sql_string).await.unwrap();
                                 });
+                                // let sql = format!(
+                                //     "INSERT IGNORE INTO {} [{}]",
+                                //     &type_name,
+                                //     json_vec.join(",")
+                                // );
+                                // //使用surreal 保存NamedAttrMap
+                                // join_set.spawn(async move {
+                                //     SUL_DB.query(sql).await.unwrap();
+                                // });
                             }
 
                             if !uda_json_vec.is_empty() {
-                                let sql = format!(
-                                    "INSERT IGNORE INTO ATT_UDA [{}]",
-                                    uda_json_vec.join(",")
-                                );
-                                //使用surreal 保存NamedAttrMap
+                                let mut sql_string = "".to_string();
+                                for json in uda_json_vec {
+                                    let json = format!("INSERT IGNORE INTO ATT_UDA {json};");
+                                    sql_string.push_str(&json);
+                                }
+                                // println!("uda sql:\n {}", &sql_string);
                                 join_set.spawn(async move {
-                                    SUL_DB.query(sql).await.unwrap();
+                                    SUL_DB.query(sql_string).await.unwrap();
                                 });
+                                // let sql = format!(
+                                //     "INSERT IGNORE INTO ATT_UDA [{}]",
+                                //     uda_json_vec.join(",")
+                                // );
+                                // //使用surreal 保存NamedAttrMap
+                                // join_set.spawn(async move {
+                                //     SUL_DB.query(sql).await.unwrap();
+                                // });
                             }
                         }
                     }

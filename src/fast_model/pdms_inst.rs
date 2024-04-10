@@ -223,15 +223,14 @@ pub async fn save_instance_data(
     if !transform_map.is_empty() {
         let keys = transform_map.keys().collect::<Vec<_>>();
         for chunk in keys.chunks(100) {
-            let mut jsons = vec![];
+            let mut sql_string = "".to_string();
             for &&k in chunk {
                 let v = transform_map.get(&k).unwrap();
-                let json = format!("{{'id':trans:⟨{}⟩, 'd':{}}}", k, v);
-                jsons.push(json);
+                let json = format!("INSERT IGNORE INTO trans {{'id':trans:⟨{}⟩, 'd':{}}};", k, v);
+                sql_string.push_str(&json);
             }
-            let sql = format!("INSERT IGNORE INTO trans [{}]", jsons.join(","));
             join_set.spawn(async move {
-                SUL_DB.query(sql).await.unwrap();
+                SUL_DB.query(sql_string).await.unwrap();
             });
         }
     }
@@ -240,15 +239,14 @@ pub async fn save_instance_data(
     if !param_map.is_empty() {
         let keys = param_map.keys().collect::<Vec<_>>();
         for chunk in keys.chunks(100) {
-            let mut jsons = vec![];
+            let mut sql_string = "".to_string();
             for &&k in chunk {
                 let v = param_map.get(&k).unwrap();
-                let json = format!("{{'id':param:⟨{}⟩, 'd':{}}}", k, v);
-                jsons.push(json);
+                let json = format!("INSERT IGNORE INTO param {{'id':param:⟨{}⟩, 'd':{}}};", k, v);
+                sql_string.push_str(&json);
             }
-            let sql = format!("INSERT IGNORE INTO param [{}]", jsons.join(","));
             join_set.spawn(async move {
-                SUL_DB.query(sql).await.unwrap();
+                SUL_DB.query(sql_string).await.unwrap();
             });
         }
     }
@@ -256,15 +254,14 @@ pub async fn save_instance_data(
     if !vec3_map.is_empty() {
         let keys = vec3_map.keys().collect::<Vec<_>>();
         for chunk in keys.chunks(100) {
-            let mut jsons = vec![];
+            let mut sql_string = "".to_string();
             for &&k in chunk {
                 let v = vec3_map.get(&k).unwrap();
-                let json = format!("{{'id':vec3:⟨{}⟩, 'd':{}}}", k, v);
-                jsons.push(json);
+                let json = format!("INSERT IGNORE INTO vec3 {{'id':vec3:⟨{}⟩, 'd':{}}};", k, v);
+                sql_string.push_str(&json);
             }
-            let sql = format!("INSERT IGNORE INTO vec3 [{}]", jsons.join(","));
             join_set.spawn(async move {
-                SUL_DB.query(sql).await.unwrap();
+                SUL_DB.query(sql_string).await.unwrap();
             });
         }
     }

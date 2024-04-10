@@ -15,7 +15,7 @@ use std::sync::Arc;
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
 use glam::DMat4;
 use parse_pdms_db::parse::round_f32;
-use crate::fast_model::manifold_bool::apply_insts_boolean_manifold;
+use crate::fast_model::manifold_bool::{apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold};
 
 ///生成小的几何体
 #[tokio::test]
@@ -34,7 +34,8 @@ pub async fn process_meshes_update_db(refnos: Option<&[RefU64]>) -> anyhow::Resu
     let time = std::time::Instant::now();
     update_inst_relate_aabbs().await.unwrap();
     println!("update_inst_relate_aabbs finished: {} ms", time.elapsed().as_millis());
-    apply_cata_neg_boolean(None).await.unwrap();
+    // apply_cata_neg_boolean_occ(None).await.unwrap();
+    apply_cata_neg_boolean_manifold(None).await.unwrap();
     let time = std::time::Instant::now();
     apply_insts_boolean_manifold(None).await.unwrap();
     apply_insts_boolean_occ(None).await.unwrap();
@@ -77,6 +78,7 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
         // dbg!(&result.len());
         for g in result {
             //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
+            // dbg!(&g);
             match g.param.gen_occ_shape() {
                 Ok(shape) => {
                     let mut aabb = Aabb::new_invalid();
@@ -439,14 +441,15 @@ pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()>
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct CataNegGroup {
+pub struct CataNegGroup {
     pub refno: RefU64,
     pub inst_info_id: String,
     pub boolean_group: Vec<Vec<RefU64>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct GmGeoData {
+pub struct GmGeoData {
+    pub id: String,
     pub geom_refno: RefU64,
     pub trans: Transform,
     pub param: PdmsGeoParam,
@@ -455,7 +458,7 @@ struct GmGeoData {
 }
 
 //处理元件库有负实体的布尔运算
-pub async fn apply_cata_neg_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> {
+pub async fn apply_cata_neg_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()> {
     let dir = dir.unwrap_or("assets/meshes".into());
     //如果dir 不存在，创建这个目录
     if !dir.exists() {
@@ -492,7 +495,7 @@ pub async fn apply_cata_neg_boolean(dir: Option<PathBuf>) -> anyhow::Result<()> 
                 // dbg!(g.refno);
                 let sql = format!(
                     r#"
-                    select geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id
+                    select meta::id(out) as id, geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id
                     from {}->inst_relate->inst_info->geo_relate
                     where visible and !out.bad and geom_refno in [{}]  and out.aabb!=none and out.param!=none"#,
                     g.refno.to_pe_key(),
