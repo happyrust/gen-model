@@ -343,9 +343,6 @@ pub fn resolve_axis_param(
     let pbore = eval_str_to_f32_or_default(&axis_param.pbore, &context,  "DIST");
     let pwidth = eval_str_to_f32_or_default(&axis_param.pwidth, &context,  "DIST");
     let pheight = eval_str_to_f32_or_default(&axis_param.pheight, &context,  "DIST");
-    // if axis_param.number == 4 {
-    //     dbg!(&axis_param);
-    // }
     match axis_param.type_name.as_str() {
         "PTAX" => {
             let d = eval_str_to_f32_or_default(&axis_param.distance, &context,  "DIST");

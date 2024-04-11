@@ -115,7 +115,6 @@ pub async fn gen_all_geos_data(
         //Step 1、提前缓存ploo, 得到对齐方式的偏移
         let loop_sjus_map = DashMap::new();
         {
-            //todo 区别，一个是从db nums 里获取，一个是从增量更新数据，debug数据里获取
             let target_ploo_refnos = aios_core::query_multi_deep_children_filter_inst(
                 target_refnos.clone(),
                 vec!["PLOO".into()],

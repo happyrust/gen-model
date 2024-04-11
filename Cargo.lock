@@ -957,7 +957,7 @@ dependencies = [
  "encase",
  "serde",
  "thiserror",
- "wgpu",
+ "wgpu-types",
 ]
 
 [[package]]
@@ -1007,8 +1007,6 @@ dependencies = [
  "fixedbitset 0.5.4",
  "nonmax",
  "petgraph",
- "rustc-hash",
- "serde",
  "thiserror",
 ]
 
@@ -1074,7 +1072,6 @@ version = "0.14.0-dev"
 dependencies = [
  "proc-macro2",
  "quote",
- "rustc-hash",
  "syn 2.0.52",
  "toml_edit 0.22.9",
 ]
@@ -1169,7 +1166,6 @@ dependencies = [
  "serde",
  "smallvec",
  "thiserror",
- "thread_local",
  "wasm-bindgen",
  "web-sys",
  "wgpu",
@@ -1189,10 +1185,7 @@ dependencies = [
 name = "bevy_tasks"
 version = "0.14.0-dev"
 dependencies = [
- "async-channel 2.2.0",
  "async-executor",
- "async-task",
- "concurrent-queue",
  "futures-lite 2.2.0",
  "wasm-bindgen-futures",
 ]
@@ -1253,7 +1246,6 @@ dependencies = [
  "bevy_a11y",
  "bevy_app",
  "bevy_ecs",
- "bevy_input",
  "bevy_math",
  "bevy_reflect",
  "bevy_utils",
@@ -3216,6 +3208,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "151665d9be52f9bb40fc7966565d39666f2d1e69233571b71b87791c7e0528b3"
 dependencies = [
  "bytemuck",
+ "rand",
  "rkyv",
  "serde",
 ]
@@ -4759,6 +4752,7 @@ checksum = "f0b4cd459a553fb0fc0bca19715e8d057bca8846e311a05c7b861d453c6e4205"
 name = "opencascade"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
  "cxx",
  "glam",
  "kicad-parser",

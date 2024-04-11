@@ -66,16 +66,13 @@ pub async fn gen_cata_single_geoms(
         return Ok(false);
     }
     let geoms_info = mgr.resolve_desi_comp(design_refno, None).await?;
-    if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL"
-    {
+    if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" {
         create_profile_geos(
             design_refno,
             &desi_att,
             &geoms_info,
             &brep_shape_map,
-            mgr.as_ref(),
-        )
-            .await?;
+        ).await?;
         return Ok(true);
     } else {
         let CateGeomsInfo {
@@ -197,7 +194,7 @@ pub async fn gen_cata_geos(
                         let mut design_axis_map = DashMap::new();
 
                         let cur_type = desi_att.get_type_str();
-
+                        dbg!(ele_refno);
                         let r = gen_cata_single_geoms(
                             mgr_clone.clone(),
                             ele_refno,
@@ -257,13 +254,11 @@ pub async fn gen_cata_geos(
 
                         ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
                         for (ele_refno, shapes) in brep_shapes_map {
-                            // let mut found_ngmr = false;
                             let Ok(Some(mut world_transform)) =
                                 mgr_clone.get_world_transform(ele_refno).await
                                 else {
                                     continue;
                                 };
-                            // dbg!((ele_refno, origin_trans));
                             let Ok(ele_att) = aios_core::get_named_attmap(ele_refno).await else {
                                 continue;
                             };
@@ -480,7 +475,7 @@ pub async fn gen_cata_geos(
                                 local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
                             }
                         };
-                        let mut geos_info = EleGeosInfo {
+                        let geos_info = EleGeosInfo {
                             refno: ele_refno,
                             cata_hash: Some(cata_hash.clone()),
                             visible: true,
@@ -613,14 +608,12 @@ pub async fn gen_cata_geos(
         let mut bran_comp_vec = vec![];
         //第一遍完成后，然后生成tubing
         let len = children.len();
-        // dbg!(&children.iter().map(|x| &x.refno).collect::<Vec<_>>());
-        let exist_al_map = {
-            //.filter(|x| !local_al_map.contains_key(x)
-            aios_core::query_arrive_leave_points(
-                children.iter().map(|x| &x.refno).filter(|x| !local_al_map.contains_key(x)), false)
-                .await
-                .unwrap_or_default()
-        };
+        let exist_refnos = children.iter().map(|x| x.refno)
+            .filter(|x| !local_al_map.contains_key(x)).collect::<Vec<_>>();
+        // dbg!(&exist_refnos);
+        let exist_al_map = aios_core::query_arrive_leave_points_by_cata_hash(&exist_refnos[..])
+            .await
+            .unwrap_or_default();
         // dbg!(&exist_al_map);
         // dbg!(&local_al_map);
         for (index, ele) in children.into_iter().enumerate() {
@@ -634,12 +627,10 @@ pub async fn gen_cata_geos(
                 //有隐含管段
                 if let Some(axis_map) = exist_al_map
                     .get(&refno)
-                    .map(|x| x.clone())
                     .or(
                         local_al_map.get(&refno)
-                            .map(|x| [x[0].transformed(&world_trans), x[1].transformed(&world_trans)])
-                    ) {
-                    // dbg!(&axis_map);
+                    ).map(|x| [x[0].transformed(&world_trans), x[1].transformed(&world_trans)])
+                {
                     bran_comp_vec.push(refno);
                     current_tubing.arrive_refno = refno;
                     //ATTA，如果设置成SPKBRK，产生直段，否则不产生直段

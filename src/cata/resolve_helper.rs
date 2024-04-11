@@ -99,6 +99,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
     let geo = panic::catch_unwind(|| {
         match &gmse.type_name[..] {
             "SANN" => CateGeoParam::Profile(CateProfileParam::SANN(SannData {
+                refno: gmse.refno,
                 xy: Vec2::new(gmse.verts[0][0], gmse.verts[0][1]),
                 dxy: Vec2::new(gmse.dxy[0][0], gmse.dxy[0][1]),
                 paxis: (gmse.paxises[0].clone()),
@@ -111,8 +112,8 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 plin_axis: gmse.plin_plax,
             })),
             "SPRO" => {
-                //structural profile
                 CateGeoParam::Profile(CateProfileParam::SPRO(SProfileData {
+                    refno: gmse.refno,
                     verts: gmse.verts.iter().map(|x| x.truncate()).collect(),
                     frads: gmse.frads.clone(),
                     normal_axis: gmse.paxises[0].as_ref().map(|x| x.dir).unwrap_or(Vec3::Z),
@@ -121,8 +122,8 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 }))
             }
             "SREC" => {
-                //structural profile
                 CateGeoParam::Profile(CateProfileParam::SREC(SRectData {
+                    refno: gmse.refno,
                     center: Vec2::new(gmse.xyz[0], gmse.xyz[1]),
                     size: Vec2::new(gmse.lengths[0], gmse.lengths[1]),
                     dxy: gmse.dxy[0],

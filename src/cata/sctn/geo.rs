@@ -2,7 +2,7 @@ use std::default;
 use std::f32::consts::{FRAC_PI_2, PI};
 
 use std::vec::Vec;
-use aios_core::AttrMap;
+use aios_core::{AttrMap, get_world_transform};
 use aios_core::parsed_data::{CateProfileParam, CateGeomsInfo};
 use aios_core::parsed_data::geo_params_data::{CateGeoParam, PdmsGeoParam};
 use aios_core::pdms_types::*;
@@ -20,20 +20,18 @@ use glam::{DVec3, Mat3, Quat, Vec3};
 use parry3d::bounding_volume::Aabb;
 use crate::cata::direction_parse::parse_expr_to_dir;
 
-use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::CateBrepShapeMap;
 
 pub struct ProfileGeosPoints {
     pub points: Vec<(Vec3, Vec3, Vec3)>,
 }
 
-pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
-                                                       att: &NamedAttrMap,
-                                                       geom_info: &CateGeomsInfo,
-                                                       brep_shapes_map: &CateBrepShapeMap,
-                                                       interface: &T, ) -> anyhow::Result<bool> {
-    let geoms = &geom_info.geometries;
-    if geoms.len() == 0 { return Ok(false); }
+pub async fn create_profile_geos(refno: RefU64,
+                                 att: &NamedAttrMap,
+                                 geom_info: &CateGeomsInfo,
+                                 brep_shapes_map: &CateBrepShapeMap) -> anyhow::Result<bool> {
+    let geos = &geom_info.geometries;
+    if geos.len() == 0 { return Ok(false); }
     let type_name = att.get_type_str();
     let mut plax = Vec3::Z;
     let mut extrude_dir = DVec3::Z;
@@ -41,18 +39,16 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
     let mut drne = att.get_dvec3("DRNE").unwrap_or_default().normalize();
     let parent_refno = att.get_owner();
     let mut spine_paths = if type_name == "GENSEC" || type_name == "WALL" {
-        // let children_refs = interface.get_children_from_localdb(refno)?;
         let children_refs = aios_core::get_children_refnos(refno).await.unwrap_or_default();
         let mut paths = vec![];
         for x in children_refs.iter() {
-            let type_name = interface.get_type_name(*x).await;
+            let type_name = aios_core::get_type_name(*x).await?;
             if type_name != "SPINE" {
                 continue;
             }
             let spine_att = aios_core::get_named_attmap(*x).await?;
             drns = spine_att.get_dvec3("DRNS").unwrap_or_default();
             drne = spine_att.get_dvec3("DRNE").unwrap_or_default();
-            // let ch_refs = interface.get_children_from_localdb(*x)?;
             let ch_refs = aios_core::get_children_refnos(*x).await.unwrap_or_default();
             if (ch_refs.len() - 1) % 2 == 0 {
                 for i in 0..(ch_refs.len() - 1) / 2 {
@@ -101,31 +97,31 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         paths
     } else { vec![] };
 
-    dbg!(&spine_paths);
-
+    // dbg!(&spine_paths);
     if drns.is_normalized() && drne.is_normalized() {
-        let parent_rot = interface.get_world_transform_or_default(parent_refno).await.rotation.as_dquat();
-        let current_rot = interface.get_world_transform_or_default(refno).await.rotation.as_dquat();
+        let parent_rot = get_world_transform(parent_refno).await?.unwrap_or_default().rotation.as_dquat();
+        let current_rot = get_world_transform(refno).await?.unwrap_or_default().rotation.as_dquat();
         let new_rot = current_rot.inverse() * parent_rot;
 
         let tmp_drns = (new_rot.mul_vec3(drns)).normalize();
         let tmp_drne = (new_rot.mul_vec3(drne)).normalize();
         ///处理随意设置方向的情况，保证一致性
         let angle_s = DVec3::Z.angle_between(tmp_drns);
-        dbg!(angle_s);
+        // dbg!(angle_s);
         if angle_s < 0.0 {
             drns = -tmp_drns;
         } else {
             drns = tmp_drns;
         }
         let angle_e = DVec3::Z.angle_between(-tmp_drne);
-        dbg!(angle_e);
+        // dbg!(angle_e);
         if angle_e.abs() < 0.0 {
             drne = -tmp_drne;
         } else {
             drne = tmp_drne;
         }
-        println!("refno: {}, 变换后drns: {:?}, drne: {:?}", refno, to_pdms_vec_str(&drns.as_vec3()), to_pdms_vec_str(&drne.as_vec3()));
+        println!("refno: {}, 变换后drns: {:?}, drne: {:?}",
+                 refno, to_pdms_vec_str(&drns.as_vec3()), to_pdms_vec_str(&drne.as_vec3()));
     }
 
     let mut height = 0.0;
@@ -134,8 +130,11 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
             let Some(pose) = att.get_pose() {
             height = pose.distance(poss);
             //还原成相对坐标系下的拉升方向
-            for (i, geom) in geoms.iter().enumerate() {
+            for (i, geom) in geos.iter().enumerate() {
                 if let CateGeoParam::Profile(profile) = geom {
+                    let Some(profile_refno) = profile.get_refno() else{
+                        continue;
+                    };
                     plax = profile.get_plax();
                     let bangle = att.get_f32("BANG").unwrap_or_default();
                     let solid = SweepSolid {
@@ -154,8 +153,9 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
                         lmirror: att.get_bool("LMIRR").unwrap_or_default(),
                     };
 
+                    dbg!(profile_refno);
                     brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
-                        refno,
+                        refno: profile_refno,
                         brep_shape: Box::new(solid),
                         transform: Transform::IDENTITY,
                         visible: true,
@@ -169,7 +169,7 @@ pub async fn create_profile_geos<T: PdmsDataInterface>(refno: RefU64,
         }
     } else {
         for spine in spine_paths {
-            for (i, geom) in geoms.iter().enumerate() {
+            for (i, geom) in geos.iter().enumerate() {
                 if let CateGeoParam::Profile(profile) = geom {
                     plax = profile.get_plax();
                     let (paths, transform) = spine.generate_paths();

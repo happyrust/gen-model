@@ -58,9 +58,6 @@ pub async fn gen_loop_geos(
                     continue;
                 };
                 let target_refno = ce_pe.get_owner();
-                // let Ok(Some(owner_pe)) = aios_core::get_pe(parent_refno).await else {
-                //     continue;
-                // };
                 let Ok(target_type) = aios_core::get_type_name(target_refno).await else {
                     continue;
                 };
@@ -106,21 +103,26 @@ pub async fn gen_loop_geos(
                     continue;
                 }
 
-                let mut children_attmaps = aios_core::get_children_named_attmaps(target_refno)
+                let mut children_loop_attmaps = aios_core::get_children_named_attmaps(target_refno)
                     .await
                     .unwrap_or_default();
                 //处理相邻的情况，第一个loop是正实体，后面的为负实体
-                let cur_sibling_index = children_attmaps
+                let cur_loop_index = children_loop_attmaps
                     .iter()
                     .filter(|&x| x.get_type_str() == "PLOO")
                     .position(|x| x.get_refno().unwrap_or_default() == loop_refno)
                     .unwrap_or_default();
-                let neg_refnos =
+                let mut neg_refnos =
                     aios_core::query_filter_children(target_refno, &GENRAL_NEG_NOUN_NAMES)
                         .await
                         .unwrap_or_default();
+                if children_loop_attmaps.len() > 0 && cur_loop_index == 0 {
+                    neg_refnos.extend(children_loop_attmaps.iter().filter_map(|x| x.get_refno()).skip(1));
+                    dbg!(&neg_refnos);
+                }
+                let final_refno = if cur_loop_index >= 1 { loop_refno } else { target_refno };
                 let mut geos_info = EleGeosInfo {
-                    refno: target_refno,
+                    refno: final_refno,
                     cata_hash: None,
                     visible: true,
                     world_transform: trans_origin,
@@ -158,10 +160,8 @@ pub async fn gen_loop_geos(
                             .await
                             .unwrap_or_default();
                         //不是第一个loop，需要取第一个的loop的height
-                        let mut height = if cur_sibling_index > 0 {
-                            aios_core::get_named_attmap(children_attmaps[0].get_refno_or_default())
-                                .await
-                                .unwrap_or_default()
+                        let mut height = if cur_loop_index > 0 {
+                            children_loop_attmaps[0]
                                 .get_f32("HEIG")
                                 .unwrap_or_default()
                         } else {
@@ -209,7 +209,7 @@ pub async fn gen_loop_geos(
                 //需要判断多个PLOO、LOOP的情况，第二个开始都是负实体
                 let geom_inst = EleInstGeo {
                     geo_hash,
-                    refno: target_refno,
+                    refno: loop_refno,
                     owner_pos_refnos: Default::default(),
                     pts: Default::default(),
                     aabb: None,
@@ -217,19 +217,19 @@ pub async fn gen_loop_geos(
                     visible,
                     is_tubi: false,
                     geo_param: geo_param.clone(),
-                    geo_type: if target_att.is_neg() || cur_sibling_index >= 1 {
+                    geo_type: if target_att.is_neg() || cur_loop_index >= 1 {
                         GeoBasicType::Neg
                     } else {
                         GeoBasicType::Pos
                     },
                     cata_neg_refnos: Default::default()
                 };
-                shape_insts_data.insert_info(target_refno, geos_info.clone());
+                shape_insts_data.insert_info(final_refno, geos_info.clone());
                 shape_insts_data.insert_geos_data(
-                    target_refno.to_string(),
+                    final_refno.to_string(),
                     EleInstGeosData {
-                        inst_key: target_refno.to_string(),
-                        refno: target_refno,
+                        inst_key: final_refno.to_string(),
+                        refno: final_refno,
                         insts: vec![geom_inst.clone()],
                         aabb: None,
                         type_name: target_att.get_type_str().to_string(),
