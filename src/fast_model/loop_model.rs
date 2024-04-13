@@ -37,9 +37,7 @@ pub async fn gen_loop_geos(
     let mut handles = vec![];
     let all_refnos = Arc::new(loop_refnos.to_vec());
     let processed_cnt = Arc::new(Mutex::new(loop_cnt));
-    let replace_mesh = db_option.replace_mesh;
-    let tol_ratio = db_option.mesh_tol_ratio;
-    for i in 0..batch_chunks_cnt as usize {
+    for i in 0..batch_chunks_cnt {
         let mgr = mgr.clone();
         let instance_mgr = instance_mgr.clone();
         let all_loop_refnos = all_refnos.clone();
@@ -48,8 +46,8 @@ pub async fn gen_loop_geos(
         let handle = tokio::spawn(async move {
             let start_idx = i * batch_size;
             let mut end_idx = start_idx + batch_size;
-            if end_idx > loop_cnt as usize {
-                end_idx = loop_cnt as usize;
+            if end_idx > loop_cnt {
+                end_idx = loop_cnt;
             }
             let mut shape_insts_data = instance_mgr.write().await;
             for j in start_idx..end_idx {
@@ -118,7 +116,7 @@ pub async fn gen_loop_geos(
                         .unwrap_or_default();
                 if children_loop_attmaps.len() > 0 && cur_loop_index == 0 {
                     neg_refnos.extend(children_loop_attmaps.iter().filter_map(|x| x.get_refno()).skip(1));
-                    dbg!(&neg_refnos);
+                    // dbg!(&neg_refnos);
                 }
                 let final_refno = if cur_loop_index >= 1 { loop_refno } else { target_refno };
                 let mut geos_info = EleGeosInfo {

@@ -219,6 +219,7 @@ dependencies = [
  "dyn-clone",
  "erased-serde 0.3.31",
  "flate2",
+ "futures",
  "geo 0.28.0",
  "glam",
  "hash32 0.3.1",

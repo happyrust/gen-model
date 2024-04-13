@@ -63,6 +63,8 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                         pos_manifolds.push(manifold);
                     }
                 }
+                let pos_aabb = b.aabb;
+                let z_len = pos_aabb.extents().z as f64;
                 //没有实体的情况，下次就不要再继续计算布尔运算了
                 if pos_manifolds.is_empty() {
                     update_sql.push_str(&format!(
@@ -89,8 +91,9 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                         let Some(mut neg_aabb) = aabb else {
                             continue;
                         };
-                        if para_type == "PrimRevolution" {
-                            dbg!("Found NREV, if aabb is similar, need use scale x, y");
+                        if para_type == "PrimRevolution" || para_type == "PrimRTorus"{
+                            // dbg!("Found NREV, if aabb is similar, need use scale x, y");
+                            dbg!("Found NREV, NRTO, use occ");
                             // //如果选装的点在包围盒里，就需要放大？？
                             // neg_t.scale.x *= 1.01;
                             // neg_t.scale.y *= 1.01;
@@ -98,9 +101,16 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                             return;
                         }
                         //看类型给偏差？todo 解决误差的问题
-                        if para_type == "PrimExtrusion" || para_type.contains("Cylinder") {
+                        if para_type == "PrimExtrusion" || para_type.contains("Cylinder") || para_type == "PrimBox"{
                             // neg_t.translation.z -= 0.0005 * neg_t.scale.z;
-                            neg_t.scale.z *= 1.001;
+                            if neg_aabb.extents().z == 0.0 {
+                                continue;
+                            }
+                            let d = 1.01 * z_len;
+                            let scale_z = (d / neg_aabb.extents().z as f64).min(1.05);
+                            dbg!(scale_z);
+                            // neg_t.scale.z *= (scale_z as f32);
+                            neg_t.scale.z *= scale_z as f32;
                         }
                         let m = inverse_mat
                             * neg_t.compute_matrix().as_dmat4()

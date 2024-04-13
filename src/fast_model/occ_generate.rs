@@ -91,7 +91,7 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
                             ));
                         }
                     }
-                    let tol = aabb.half_extents().magnitude() as f64 * 0.005;
+                    let tol = (aabb.half_extents().magnitude() as f64 * 0.005).min(50.0);
                     shapes_map.insert(g.id, (shape, tol));
                 }
                 Err(e) => {
@@ -104,6 +104,7 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
         let mut pts_json_map = HashMap::new();
         for (id, (s, tol)) in &shapes_map {
             let mut m_tol = *tol;
+            // dbg!(m_tol);
             let mut success = false;
             // #[cfg(debug_assertions)]
             // s.write_step(format!("{}.step", id)).unwrap();
@@ -112,6 +113,8 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
                     // dbg!((id, m_tol, mesh.vertices.len()));
                     //保存到文件到dir下
                     if mesh.ser_to_file(&dir.join(format!("{}.mesh", id))).is_ok() {
+                        #[cfg(debug_assertions)]
+                        mesh.export_obj(false, &format!("{}.obj", id));
                         let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
                         let mut pt_hashes = HashSet::new();
                         for edge in s.edges() {
