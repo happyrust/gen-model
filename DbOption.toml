@@ -24,7 +24,7 @@ gen_model = true
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树
-gen_spatial_tree = true
+gen_spatial_tree = false
 load_spatial_tree = false
 save_spatial_tree_to_db = true
 gen_model_batch_size = 100
@@ -87,9 +87,9 @@ debug_print_world_transform = false
 only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
-included_db_files = ["ams8000_0001"]
+included_db_files = ["ams7999_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
-manual_db_nums = [1112]
+#manual_db_nums = [1112]
 # manual_db_nums = [7999, 1112]  #, 8000
 plat_url = ""
 
@@ -98,9 +98,13 @@ puhua_database_ip = ""
 puhua_database_user = ""
 puhua_database_password = ""
 
-#debug_root_refnos = ["24383/66521"]
+#debug_root_refnos = ["17496/172806"]
+
+#debug_root_refnos = ["24383/92201"]
 #debug_root_refnos = ["17496/249030"]
-#debug_root_refnos = ["24383/66672"]
+#debug_root_refnos = ["17496/248608"]
+#debug_root_refnos = ["24384/28745"]
+
 #测试单个房间
 #debug_root_refnos = ["24383/66457", "17496/196611"]
 #debug_root_refnos = ["24383/68039", "17496/197840"]
@@ -115,9 +119,7 @@ puhua_database_password = ""
 #debug_root_refnos = ["25688/45314"]
 #有问题的wire
 #debug_root_refnos = ["25688/45274"]
-#debug_root_refnos = ["25688/45261"]
-#debug_root_refnos = ["25688/45175"]
-#debug_root_refnos = ["25688/23155"]
+debug_root_refnos = ["24381/101405"]
 #floor
 #debug_root_refnos = ["25688/71674"]
 # floor hole
@@ -138,7 +140,7 @@ puhua_database_password = ""
 #debug_root_refnos = ["17496/80055"]
 #debug_root_refnos = ["17496/253678"]
 
-debug_root_refnos = ["25688/75998"]
+#debug_root_refnos = ["25688/75998"]
 #debug_root_refnos = ["24381/36576"]
 
 

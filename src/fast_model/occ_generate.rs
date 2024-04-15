@@ -161,6 +161,7 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct QueryAabbParam {
     pub id: RefU64,
+    pub inst_relate_id: String,
     pub geo_aabbs: Vec<GeoAabbTrans>,
     pub world_trans: Transform,
 }
@@ -173,52 +174,61 @@ struct GeoAabbTrans {
 
 ///刷新inst_relate 的 aabb
 pub async fn update_inst_relate_aabbs() -> anyhow::Result<()> {
-    const PAGE_NUM: usize = 300;
+    const PAGE_NUM: usize = 500;
     let mut i = 0;
     let sql = format!(r#"select value id from inst_relate where aabb = none"#);
     let mut response = SUL_DB.query(sql).await.unwrap();
     let inst_relate_ids: Vec<String> = response.take(0).unwrap();
+
+    let mut tasks = vec![];
     for chunk in inst_relate_ids.chunks(PAGE_NUM) {
-        let mut aabb_map: HashMap<u64, String> = HashMap::new();
         let ids = chunk.join(",");
-        let sql = format!(r#"select in as id, world_trans.d as world_trans,
+        let task = tokio::spawn(async move {
+            let mut aabb_map: HashMap<u64, String> = HashMap::new();
+            let sql = format!(r#"select id as inst_relate_id, in as id, world_trans.d as world_trans,
             (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb.d != none)
             as geo_aabbs from [{}]"#, ids);
-        let mut response = SUL_DB.query(sql).await.unwrap();
-        let result: Vec<QueryAabbParam> = response.take(0).unwrap();
-        dbg!(result.len());
-        i += 1;
+            let mut response = SUL_DB.query(sql).await.unwrap();
+            let result: Vec<QueryAabbParam> = response.take(0).unwrap();
+            dbg!(result.len());
+            i += 1;
 
-        let mut update_sql = String::new();
-        for r in result {
-            let mut aabb = Aabb::new_invalid();
-            // if r.id == "24383_66722".into() {
-            //     dbg!(&r);
-            // }
-            // dbg!(r.id);
-            for g in r.geo_aabbs {
-                let t = r.world_trans * g.trans;
-                let tmp_aabb = g.aabb.scaled(&t.scale.into());
-                let tmp_aabb = tmp_aabb.transform_by(&Isometry {
-                    rotation: t.rotation.into(),
-                    translation: t.translation.into(),
-                });
-                aabb.merge(&tmp_aabb);
+            let mut update_sql = String::new();
+            for r in result {
+                let mut aabb = Aabb::new_invalid();
+                for g in r.geo_aabbs {
+                    let t = r.world_trans * g.trans;
+                    let tmp_aabb = g.aabb.scaled(&t.scale.into());
+                    let tmp_aabb = tmp_aabb.transform_by(&Isometry {
+                        rotation: t.rotation.into(),
+                        translation: t.translation.into(),
+                    });
+                    aabb.merge(&tmp_aabb);
+                }
+                let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
+                aabb_map
+                    .entry(aabb_hash)
+                    .or_insert(serde_json::to_string(&aabb).unwrap());
+                let sql = format!(
+                    "update {} set aabb = aabb:⟨{}⟩;",
+                    r.inst_relate_id,
+                    aabb_hash,
+                );
+                update_sql.push_str(&sql);
             }
-            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
-            aabb_map
-                .entry(aabb_hash)
-                .or_insert(serde_json::to_string(&aabb).unwrap());
-            let sql = format!(
-                "update inst_relate set aabb = aabb:⟨{}⟩ where in=pe:{};",
-                aabb_hash,
-                r.id.to_string()
-            );
-            update_sql.push_str(&sql);
-        }
-        SUL_DB.query(&update_sql).await.unwrap();
-        utils::save_aabb_to_surreal(&aabb_map).await.unwrap();
+            SUL_DB.query(&update_sql).await.unwrap();
+            utils::save_aabb_to_surreal(&aabb_map).await.unwrap();
+        });
+        tasks.push(task);
     }
+
+    match futures::future::try_join_all(tasks).await {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(e);
+        }
+    }
+
     Ok(())
 }
 
@@ -316,8 +326,8 @@ pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()>
     }
 
     let mut tasks = Vec::new();
-    // let chunk = (boolean_query.len() / 16).max(1);
-    let chunk = boolean_query.len();
+    let chunk = (boolean_query.len() / 16).max(1);
+    // let chunk = boolean_query.len();
     for chunk in boolean_query.chunks(chunk) {
         let group = chunk.to_vec();
         let dir_clone = dir.clone();
@@ -481,8 +491,8 @@ pub async fn apply_cata_neg_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<
     }
 
     let mut tasks = Vec::new();
-    // let chunk = (params.len() / 16).max(1);
-    let chunk = params.len();
+    let chunk = (params.len() / 16).max(1);
+    // let chunk = params.len();
     for chunk in params.chunks(chunk) {
         let group = chunk.to_vec();
         let dir_clone = dir.clone();

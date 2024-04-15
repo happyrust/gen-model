@@ -103,8 +103,10 @@ pub async fn query_room_refnos(panel_refno: RefU64, exclude_refnos: &HashSet<Ref
             let Ok(mesh) = PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", inst.geo_hash)) else {
                 continue;
             };
-            let mut tri_mesh: TriMesh = mesh.
-                get_tri_mesh_with_flag((geom_inst.world_trans * inst.transform).compute_matrix(), TriMeshFlags::ORIENTED);
+            let Some(mut tri_mesh) = mesh.
+                get_tri_mesh_with_flag((geom_inst.world_trans * inst.transform).compute_matrix(), TriMeshFlags::ORIENTED) else {
+                continue;
+            };
             let mut contains_query = GLOBAL_AABB_TREE.read().await.
                 locate_intersecting_bounds(&geom_inst.world_aabb).collect::<Vec<_>>();
             let mut need_check_refnos = vec![];

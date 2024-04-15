@@ -37,7 +37,7 @@ use tracing_subscriber::fmt::format::FmtSpan;
 use aios_database::fast_model::gen_all_geos_data;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::database::*;
-use aios_database::fast_model::{gen_inst_meshes, process_meshes_update_db};
+use aios_database::fast_model::{gen_inst_meshes, process_meshes_update_db, update_inst_relate_aabbs};
 use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 use aios_database::fast_model::room_model::build_room_relations;
 
@@ -88,6 +88,9 @@ async fn main() -> anyhow::Result<()> {
         .use_ns(&db_option.project_code)
         .use_db(&db_option.project_name)
         .await?;
+
+    // update_inst_relate_aabbs().await.unwrap();
+    // return Ok(());
 
     /// 是否全部同步模型
     if db_option.total_sync || db_option.incr_sync {

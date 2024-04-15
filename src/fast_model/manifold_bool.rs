@@ -106,9 +106,10 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                             if neg_aabb.extents().z == 0.0 {
                                 continue;
                             }
-                            let d = 1.01 * z_len;
-                            let scale_z = (d / neg_aabb.extents().z as f64).min(1.05);
-                            dbg!(scale_z);
+                            let d = (z_len + 1.0) / z_len;
+                            // let scale_z = (d / neg_aabb.extents().z as f64).min(1.02);
+                            let scale_z= d.min(1.02);
+                            // dbg!(scale_z);
                             // neg_t.scale.z *= (scale_z as f32);
                             neg_t.scale.z *= scale_z as f32;
                         }

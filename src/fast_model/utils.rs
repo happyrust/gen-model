@@ -5,7 +5,7 @@ use tokio::task::JoinSet;
 pub async fn save_aabb_to_surreal(aabb_map: &HashMap<u64, String>) -> anyhow::Result<()> {
     if !aabb_map.is_empty() {
         let keys = aabb_map.keys().collect::<Vec<_>>();
-        for chunk in keys.chunks(100) {
+        for chunk in keys.chunks(300) {
             let mut sql = "".to_string();
             for &&k in chunk {
                 let v = aabb_map.get(&k).unwrap();
