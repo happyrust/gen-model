@@ -4,11 +4,12 @@ use aios_core::room::room::{GLOBAL_AABB_TREE, load_aabb_tree};
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::test::test_surreal::init_test_surreal;
 use bevy_transform::components::Transform;
+use bevy_transform::TransformPoint;
 use dashmap::DashSet;
 use glam::Vec3;
 use itertools::Itertools;
 use parry3d::bounding_volume::Aabb;
-use parry3d::math::Point;
+use parry3d::math::{Point, Real};
 use parry3d::math::Isometry;
 use parry3d::query::PointQuery;
 use parry3d::shape::{TriMesh, TriMeshFlags};
@@ -19,15 +20,53 @@ use crate::fast_model::process_meshes_update_db;
 #[tokio::test]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
     init_test_surreal().await;
-    let refno = "17496/200186".into();
-    process_meshes_update_db(Some(&["24383/66662".into(), "17496/200186".into()]))
+    let refno = "24381/58346".into();
+    process_meshes_update_db(Some(&["24381/34303".into(), refno]))
         .await
         .unwrap();
     load_aabb_tree().await.unwrap();
     build_room_relations().await.unwrap();
-    let within_refnos = query_room_refnos(refno, &HashSet::new()).await.unwrap();
+    let within_refnos = query_room_refnos(refno, &HashSet::new(), 0.1).await.unwrap();
     dbg!(&within_refnos);
     Ok(())
+}
+
+//TODO need figure out
+#[tokio::test]
+pub async fn test_cal_distance() -> anyhow::Result<()> {
+    init_test_surreal().await;
+    let panel_refno = "24381/34303".into();
+    let mut geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno]).await.unwrap_or_default();
+    // dbg!(&geom_insts);
+    if geom_insts.is_empty() {
+        return Ok(());
+    }
+
+    //将panel的 plant mesh 转换成TriMesh
+    for geom_inst in geom_insts {
+        for inst in geom_inst.insts {
+            let Ok(mesh) = PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", inst.geo_hash)) else {
+                continue;
+            };
+            let Some(mut tri_mesh) = mesh.
+                get_tri_mesh_with_flag(inst.transform.scale, TriMeshFlags::ORIENTED) else {
+                continue;
+            };
+            dbg!(tri_mesh.indices().len());
+            dbg!(tri_mesh.vertices().len());
+
+            dbg!(tri_mesh.local_aabb());
+
+            let point = Vec3::new(
+                8495.01953125, -8.15999984741211, 0.0
+            );
+            dbg!(tri_mesh.local_aabb().contains_local_point(&point.into()));
+            dbg!(tri_mesh.contains_local_point(&point.into()));
+
+            let mat = (geom_inst.world_trans * inst.transform).compute_matrix();
+        }
+    }
+    return Ok(());
 }
 
 pub async fn build_room_relations() -> anyhow::Result<()> {
@@ -37,7 +76,7 @@ pub async fn build_room_relations() -> anyhow::Result<()> {
     dbg!(exclude_panel_refnos.len());
     for (room_refno, room_num, panel_refnos) in room_panel_map {
         for panel_refno in panel_refnos {
-            let refnos = query_room_refnos(panel_refno, &exclude_panel_refnos)
+            let refnos = query_room_refnos(panel_refno, &exclude_panel_refnos, 0.1)
                 .await
                 .unwrap();
             if !refnos.is_empty() {
@@ -87,14 +126,13 @@ async fn build_room_panels_relate() -> anyhow::Result<Vec<(RefU64, String, Vec<R
 }
 
 
-pub async fn query_room_refnos(panel_refno: RefU64, exclude_refnos: &HashSet<RefU64>) -> anyhow::Result<HashSet<RefU64>> {
-
+pub async fn query_room_refnos(panel_refno: RefU64, exclude_refnos: &HashSet<RefU64>, inside_tol: f32) -> anyhow::Result<HashSet<RefU64>> {
     //查询到aabb直接完全在这个房间里的mesh里，就不用做点的检查
     let mut geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno]).await.unwrap_or_default();
+    // dbg!(&geom_insts);
     if geom_insts.is_empty() {
         return Ok(Default::default());
     }
-    // println!("geom insts len: {}", geom_insts.len());
 
     let mut within_refnos = HashSet::new();
     //将panel的 plant mesh 转换成TriMesh
@@ -103,13 +141,19 @@ pub async fn query_room_refnos(panel_refno: RefU64, exclude_refnos: &HashSet<Ref
             let Ok(mesh) = PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", inst.geo_hash)) else {
                 continue;
             };
+            let inv_mat = (geom_inst.world_trans).compute_matrix().inverse();
+            // dbg!(inst.transform.scale);
             let Some(mut tri_mesh) = mesh.
-                get_tri_mesh_with_flag((geom_inst.world_trans * inst.transform).compute_matrix(), TriMeshFlags::ORIENTED) else {
+                get_tri_mesh_with_flag(inst.transform.scale, TriMeshFlags::ORIENTED) else {
                 continue;
             };
             let mut contains_query = GLOBAL_AABB_TREE.read().await.
                 locate_intersecting_bounds(&geom_inst.world_aabb).collect::<Vec<_>>();
-            let mut need_check_refnos = vec![];
+            if contains_query.is_empty() {
+                continue;
+            }
+            // dbg!(&contains_query);
+            let mut need_check_refnos = HashSet::new();
             contains_query.retain(|(refno, bbox)| {
                 //filter the wrong aabb
                 if exclude_refnos.contains(refno) || (bbox.mins[0] > 1000000.0) {
@@ -117,48 +161,63 @@ pub async fn query_room_refnos(panel_refno: RefU64, exclude_refnos: &HashSet<Ref
                 }
                 // dbg!(&bbox);
                 let contains: Vec<bool> =
-                    bbox.vertices().iter().map(|x| tri_mesh.contains_point(&Isometry::identity(), &x)).collect::<Vec<_>>();
+                    bbox.vertices().iter().map(|x| {
+                        let pt = inv_mat.transform_point(*x);
+                        // dbg!((x, pt));
+                        tri_mesh.contains_local_point(&pt.into())
+                    }).collect::<Vec<_>>();
+                // dbg!(&contains);
                 //每一个点都在mesh里面
                 if contains.iter().all(|&x| x) {
                     return true;
                 } else {
                     //只要有一个点在mesh里面，就需要继续检查是否真的相交
                     if contains.iter().any(|&x| x) {
-                        need_check_refnos.push(*refno);
+                        need_check_refnos.insert(*refno);
                     }
                     return false;
                 }
             });
-            //for test
-            // dbg!(tri_mesh.contains_point(&Isometry::identity(), &Point::new(0.0, 0.0, 0.0) ));
-            // if !contains_query.is_empty() {
-            //     dbg!(&contains_query);
-            // }
+            // dbg!(&need_check_refnos);
             within_refnos.extend(contains_query.iter().map(|(x, _)| x));
             if !need_check_refnos.is_empty() {
-                // dbg!(panel_refno);
-                // dbg!(&within_refnos);
-                // dbg!(&need_check_refnos);
                 //首先判断，如果是包围盒完全不在里面，直接跳过
                 //继续的点检查可能会比较耗时，后续应该加开关，让用户判断是否需要继续做检查
                 let pes = need_check_refnos.iter().map(|x| x.to_pe_key()).join(",");
+                //通过点的判断需要排除使用过布尔运算的，针对发生过布尔运算的，直接使用mesh的相交计算即可
                 let mut repsonse = SUL_DB.query(format!(
                     r#"select
-                         in.id as refno, world_trans.d as world_trans,
+                         in.id as refno, world_trans.d as world_trans, aabb.d as world_aabb,
                          (select value [trans.d, ->inst_geo[?pts!=none].pts[?d!=none].d] from ->inst_info->geo_relate) as pts_group
-                       from array::flatten([{}]->inst_relate)
+                       from array::flatten([{}]->inst_relate)  where !booled
                     "#,
                     pes)).await?;
                 let geom_pts: Vec<GeomPtsQuery> = repsonse.take(0)?;
                 // dbg!(&geom_pts);
                 let mut intersect_set = DashSet::new();
                 geom_pts.par_iter().for_each(|g| {
+                    let extends = g.world_aabb.extents().xy().magnitude();
                     if g.pts_group.par_iter().find_any(|(trans, o_pts)| {
                         if let Some(pts) = o_pts {
                             let pt_trans = g.world_trans * (*trans);
-                            pts.par_iter().find_any(|&pt|
-                                tri_mesh.contains_point(&Isometry::identity(), &pt_trans.transform_point(*pt).into())
-                            ).is_some()
+                            pts.par_iter().find_any(|&pt| {
+                                //挨着的相交不算，需要超过一定的距离，才能算相交
+                                //应该为负数
+                                let new_pt = pt_trans.transform_point(*pt);
+                                if !g.world_aabb.contains_local_point(&new_pt.into()) {
+                                    return false;
+                                }
+                                let local_pt = inv_mat.transform_point(new_pt);
+
+                                let d = tri_mesh.distance_to_local_point(&local_pt.into(), false);
+                                // if d < 0.0 {
+                                //     dbg!((g.refno, local_pt, new_pt, d, extends));
+                                // }
+                                // if d / extends  < -inside_tol {
+                                //     dbg!((g.refno, local_pt, new_pt, d));
+                                // }
+                                d / extends  < -inside_tol
+                            }).is_some()
                         } else {
                             false
                         }

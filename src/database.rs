@@ -120,7 +120,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         aios_core::define_owner_index().await.unwrap();
         aios_core::create_geom_index().await.unwrap();
         aios_core::define_fullname_index().await.unwrap();
-        aios_core::define_pe_name_index().await.unwrap();
+        aios_core::define_pe_index().await.unwrap();
     }
 
     let mut create_tables_elapse = 0;

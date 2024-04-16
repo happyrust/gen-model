@@ -24,7 +24,7 @@ gen_model = true
 mesh_tol_ratio = 3.0
 apply_boolean_operation = true
 #是否生成房间树
-gen_spatial_tree = false
+gen_spatial_tree = true
 load_spatial_tree = false
 save_spatial_tree_to_db = true
 gen_model_batch_size = 100
@@ -78,7 +78,7 @@ file_server_host = "http://192.168.31.38:8100/asset/archives"
 
 
 #调试选项
-replace_mesh = true
+replace_mesh = false
 save_model_mesh_to_graph_db = true
 need_sync_refno_basic = false       #是否重新生成 refno_basic 缓存
 reset_mdb_project = false           #是否重新生成 mdb 缓存
@@ -119,7 +119,7 @@ puhua_database_password = ""
 #debug_root_refnos = ["25688/45314"]
 #有问题的wire
 #debug_root_refnos = ["25688/45274"]
-debug_root_refnos = ["24381/101405"]
+debug_root_refnos = ["24381/58346", "24381/34303"]
 #floor
 #debug_root_refnos = ["25688/71674"]
 # floor hole

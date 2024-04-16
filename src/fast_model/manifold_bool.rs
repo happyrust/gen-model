@@ -30,11 +30,12 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
         std::fs::create_dir_all(&dir).unwrap();
     }
     //筛选出来 "Neg", "CataCrossNeg" 的关联
-    //暂时只处理FLOOR的情况
     //and in.noun in ["FLOOR"]
     let sql = r#"
         select
              in as refno,
+             id as inst_relate_id,
+             in.noun as noun,
              world_trans.d as wt,
              aabb.d as aabb,
             (select value [meta::id(out), trans.d] from out->geo_relate) as ts,
@@ -64,7 +65,9 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                     }
                 }
                 let pos_aabb = b.aabb;
-                let z_len = pos_aabb.extents().z as f64;
+                let pos_extent = pos_aabb.extents();
+                // let y_len = pos_aabb.extents().z as f64;
+                // let z_len = pos_aabb.extents().z as f64;
                 //没有实体的情况，下次就不要再继续计算布尔运算了
                 if pos_manifolds.is_empty() {
                     update_sql.push_str(&format!(
@@ -92,26 +95,26 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                             continue;
                         };
                         if para_type == "PrimRevolution" || para_type == "PrimRTorus"{
-                            // dbg!("Found NREV, if aabb is similar, need use scale x, y");
-                            dbg!("Found NREV, NRTO, use occ");
-                            // //如果选装的点在包围盒里，就需要放大？？
-                            // neg_t.scale.x *= 1.01;
-                            // neg_t.scale.y *= 1.01;
-                            //交给OCC处理
-                            return;
+                            //如果选装的点在包围盒里，就需要放大？？
+                            let m = pos_extent.x.max(pos_extent.y) as f64;
+                            let d = (m + 1.0) / m;
+                            let scale_xy= d.min(1.02) as f32;
+                            // dbg!(scale_z);
+                            neg_t.scale.x *= scale_xy;
+                            neg_t.scale.y *= scale_xy;
                         }
                         //看类型给偏差？todo 解决误差的问题
-                        if para_type == "PrimExtrusion" || para_type.contains("Cylinder") || para_type == "PrimBox"{
-                            // neg_t.translation.z -= 0.0005 * neg_t.scale.z;
-                            if neg_aabb.extents().z == 0.0 {
-                                continue;
+                        //如果AABB 比较接近的情况下，又有旋转体
+                        if b.noun == "FLOOR" || b.noun.contains("WALL") {
+                            if para_type == "PrimExtrusion" || para_type.contains("Cylinder") || para_type == "PrimBox"{
+                                if neg_aabb.extents().z == 0.0 {
+                                    continue;
+                                }
+                                let d = (pos_extent.z as f64 + 1.0) / pos_extent.z as f64;
+                                let scale_z= d.min(1.02);
+                                // dbg!(scale_z);
+                                neg_t.scale.z *= scale_z as f32;
                             }
-                            let d = (z_len + 1.0) / z_len;
-                            // let scale_z = (d / neg_aabb.extents().z as f64).min(1.02);
-                            let scale_z= d.min(1.02);
-                            // dbg!(scale_z);
-                            // neg_t.scale.z *= (scale_z as f32);
-                            neg_t.scale.z *= scale_z as f32;
                         }
                         let m = inverse_mat
                             * neg_t.compute_matrix().as_dmat4()

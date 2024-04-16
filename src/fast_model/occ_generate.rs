@@ -106,8 +106,8 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
             let mut m_tol = *tol;
             // dbg!(m_tol);
             let mut success = false;
-            // #[cfg(debug_assertions)]
-            // s.write_step(format!("{}.step", id)).unwrap();
+            #[cfg(debug_assertions)]
+            s.write_step(format!("{}.step", id)).unwrap();
             match PlantMesh::gen_occ_mesh(s, m_tol) {
                 Ok(mesh) => {
                     // dbg!((id, m_tol, mesh.vertices.len()));
@@ -251,6 +251,8 @@ pub struct NegInfo {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct GeoTransQuery {
     pub refno: RefU64,
+    pub noun: String,
+    pub inst_relate_id: String,
     pub wt: Transform,
     pub aabb: Aabb,
     pub ts: Vec<(String, Transform)>,
@@ -308,6 +310,8 @@ pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()>
     let sql = r#"
         select
              in as refno,
+             id as inst_relate_id,
+             in.noun as noun,
              world_trans.d as wt,
              aabb.d as aabb,
             (select value [meta::id(out), trans.d] from out->geo_relate) as ts,
@@ -344,8 +348,8 @@ pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()>
                 //没有实体的情况，下次就不要再继续计算布尔运算了
                 let Some(mut pos_shape) = shapes_map_clone.get(&pos_id).map(|x|x.clone()) else {
                     update_sql.push_str(&format!(
-                        "update inst_relate set bad_bool=true where in=pe:{};",
-                        b.refno
+                        "update {} set bad_bool=true;",
+                        &b.inst_relate_id
                     ));
                     continue;
                 };
@@ -353,8 +357,8 @@ pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()>
                 // dbg!(pos_matrix);
                 let Ok(mut pos_shape) = pos_shape.transformed(&pos_matrix) else {
                     update_sql.push_str(&format!(
-                        "update inst_relate set bad_bool=true where in=pe:{};",
-                        b.refno
+                        "update {} set bad_bool=true;",
+                        &b.inst_relate_id
                     ));
                     continue;
                 };
@@ -376,10 +380,6 @@ pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()>
                 let mut neg_shapes = vec![];
                 let mut cross_neg_shapes = vec![];
                 for (refno, neg_t, negs) in b.neg_ts.into_iter() {
-                    // if refno != "25688/45323".into() {
-                    //     continue;
-                    // }
-                    // for (neg_id, geo_type, t) in negs {
                     for NegInfo{ id, geo_type, para_type, trans, aabb } in negs {
                         if aabb.is_none() {
                             // dbg!(&id);
@@ -422,8 +422,8 @@ pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()>
                                     .is_ok()
                                 {
                                     update_sql.push_str(&format!(
-                                        "update inst_relate set booled=true where in=pe:{};",
-                                        b.refno
+                                        "update {} set booled=true;",
+                                        &b.inst_relate_id
                                     ));
                                     success = true;
                                 }
@@ -432,8 +432,8 @@ pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()>
                     }
                     if !success {
                         update_sql.push_str(&format!(
-                            "update inst_relate set bad_bool=true where in=pe:{};",
-                            b.refno
+                            "update {} set bad_bool=true;",
+                            &b.inst_relate_id
                         ));
                     }
                 }
@@ -621,9 +621,6 @@ pub async fn apply_cata_neg_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<
                             }
                         }
                     }
-                    // pos_shape
-                    //     .write_step(format!("{}.step", "final"))
-                    //     .unwrap();
                 }
                 if !update_sql.is_empty() {
                     SUL_DB.query(update_sql).await.unwrap();
