@@ -1,3 +1,4 @@
+use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
@@ -8,8 +9,7 @@ use dashmap::DashMap;
 use dashmap::DashSet;
 use futures::StreamExt;
 use itertools::Itertools;
-use petgraph::Directed;
-use petgraph::Undirected;
+use log::{error, info};
 use petgraph::algo::all_simple_paths;
 use petgraph::graph::Graph;
 use petgraph::graph::NodeIndex;
@@ -17,15 +17,16 @@ use petgraph::graphmap::GraphMap;
 use petgraph::graphmap::UnGraphMap;
 use petgraph::prelude::DiGraphMap;
 use petgraph::visit::IntoEdgesDirected;
+use petgraph::Directed;
+use petgraph::Undirected;
 use rayon::prelude::*;
+#[cfg(feature = "sql")]
 use sea_orm::entity::prelude::*;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::str::FromStr;
-use std::time::Instant;
 use std::sync::Arc;
-use aios_core::options::DbOption;
-use log::{error, info};
+use tokio::time::Instant;
 
 /// 保存element数据到版本管理
 pub async fn save_pe_to_surreal(
@@ -46,36 +47,39 @@ pub async fn save_pe_to_surreal(
         })
         .unwrap_or_default();
     let is_debug = !debug_refnos.is_empty();
-    let mut model_chunks = keys.par_chunks(option.pe_chunk as _).map(|chunk| {
-        let mut model_chunk = vec![];
-        for &refno in chunk {
-            if is_debug && !debug_refnos.contains(&refno) {
-                continue;
+    let mut model_chunks = keys
+        .par_chunks(option.pe_chunk as _)
+        .map(|chunk| {
+            let mut model_chunk = vec![];
+            for &refno in chunk {
+                if is_debug && !debug_refnos.contains(&refno) {
+                    continue;
+                }
+                let att_map = total_attr_map.get(&refno).unwrap();
+                let owner = att_map.get_refno_by_att_or_default("OWNER");
+                let noun = att_map.get_type();
+                let ele = SPdmsElement {
+                    id: refno.to_string(),
+                    refno,
+                    owner,
+                    name: att_map.get_string_or_default("NAME"),
+                    noun,
+                    dbnum: db_num,
+                    cata_hash: att_map.cal_cata_hash(),
+                    status_tag: None,
+                    version_tag: None,
+                    e3d_version: att_map.get_e3d_version(),
+                    lock: false,
+                    deleted: false,
+                };
+
+                model_chunk.push(ele);
             }
-            let att_map = total_attr_map.get(&refno).unwrap();
-            let owner = att_map.get_refno_by_att_or_default("OWNER");
-            let noun = att_map.get_type();
-            let ele = SPdmsElement {
-                id: refno.to_string(),
-                refno,
-                owner,
-                name: att_map.get_string_or_default("NAME"),
-                noun,
-                dbnum: db_num,
-                cata_hash: att_map.cal_cata_hash(),
-                status_tag: None,
-                version_tag: None,
-                e3d_version: att_map.get_e3d_version(),
-                lock: false,
-                deleted: false,
-            };
+            model_chunk
+        })
+        .collect::<Vec<_>>();
 
-            model_chunk.push(ele);
-        }
-        model_chunk
-    }).collect::<Vec<_>>();
-
-    let mut time = Instant::now();
+    let mut time = tokio::time::Instant::now();
     let mut join_set = tokio::task::JoinSet::new();
     for models in model_chunks {
         let mut jsons_str = vec![];
@@ -102,24 +106,33 @@ pub async fn save_pe_to_surreal(
     // 使用owner创建relate关系
     let mut all_relate_sqls = vec![];
     time = Instant::now();
+    //todo 按需要保存pe_owner 关系？
     for kv in children_map {
         let owner = kv.0;
         let children = kv.1;
         if children.is_empty() {
             continue;
         }
-        if is_debug{
-            let found = children.iter().any(|(c, _)| debug_refnos.contains(c));
-            if !found {
-                continue;
-            }
-        }
+        // if is_debug{
+        //     let found = children.iter().any(|(c, _)| debug_refnos.contains(c));
+        //     if !found {
+        //         continue;
+        //     }
+        // }
+        // let relate_sql = format!(
+        //     "RELATE [{}]->pe_owner->{};",
+        //     children.iter().map(|(c, _)| c.to_pe_key()).join(","),
+        //     owner.to_pe_key()
+        // );
+        // all_relate_sqls.push(relate_sql);
+
+        //use order_num
         let relate_sqls = children
             .iter()
             .enumerate()
             .map(|(i, (child, _))| {
                 format!(
-                    "RELATE pe:{}->pe_owner->pe:{} set order_num = {}",
+                    "RELATE pe:{}->pe_owner->pe:{} set order_num = {};",
                     child.to_string(),
                     owner.to_string(),
                     i
@@ -131,7 +144,12 @@ pub async fn save_pe_to_surreal(
     // dbg!(&all_relate_sqls);
     let mut chunks = all_relate_sqls.chunks(option.pe_chunk as _);
     for mut s in chunks {
-        let sql = s.into_iter().join(";");
+        // let mut sql = "BEGIN TRANSACTION;".to_string();
+        let mut sql = "".to_string();
+        // let sql = s.into_iter().join(";");
+        sql.push_str(&s.into_iter().join(""));
+        // sql.push_str("COMMIT TRANSACTION;");
+        // println!("sql is: {}", &sql);
         relate_join_set.spawn(async move {
             match SUL_DB.query(sql.clone()).await {
                 Ok(_) => {}
@@ -143,6 +161,6 @@ pub async fn save_pe_to_surreal(
         });
     }
     while let Some(_) = relate_join_set.join_next().await {}
-    info!("Relate pes task costs {} s", time.elapsed().as_secs_f32());
+    println!("Relate pes task costs {} s", time.elapsed().as_secs_f32());
     Ok(())
 }

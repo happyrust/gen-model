@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use bb8_arangodb::arangors_lite::{AqlQuery, Database};
+
 use crate::aql_api::foreign_refnos::query_foreign_refno_aql;
 use crate::consts::{AQL_DESPARA_ELES_COLLECTION, AQL_PARA_ELES_COLLECTION};
 use crate::arangodb::ArDatabase;

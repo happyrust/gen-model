@@ -7,20 +7,25 @@ use aios_core::SUL_DB;
 use dashmap::{DashMap, DashSet};
 use itertools::Itertools;
 use parse_pdms_db::parse::*;
+#[cfg(feature = "sql")]
 use sea_orm::{ConnectionTrait, Schema, Statement};
+#[cfg(feature = "sql")]
 use sqlx::{Connection, MySql, MySqlPool, Pool};
+#[cfg(feature = "sql")]
 use sqlx::{Error, Executor};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::fs::File;
 use std::hash::Hash;
 use std::io::Read;
 use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Instant;
+use tokio::fs;
+use tokio::io::AsyncReadExt;
+// use std::time::Instant;
+use tokio::fs::File;
+use tokio::time::Instant;
 
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -28,6 +33,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::tables::*;
 use crate::versioned_db::pe::*;
 
+#[cfg(feature = "sql")]
 pub trait MySqlMethods {
     fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
 
@@ -37,6 +43,7 @@ pub trait MySqlMethods {
 }
 
 /// 初始化project database
+#[cfg(feature = "sql")]
 pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result<()> {
     let pool = MySqlPool::connect(url).await.unwrap();
     sqlx::query(&format!(
@@ -48,6 +55,7 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
 }
 
 /// 初始化 info 库和表
+#[cfg(feature = "sql")]
 pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Result<()> {
     let pool = MySqlPool::connect(&url).await?;
     pool.execute(
@@ -109,17 +117,18 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     // 开始同步pdms/E3D项目的数据
     println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
     // 计时器开始
-    let mut time = Instant::now();
+    let mut time = tokio::time::Instant::now();
     // 获取默认的数据库连接字符串
     let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
     if db_option.sync_tidb.unwrap_or(false) {
+        #[cfg(feature = "sql")]
         create_info_database(&default_conn_str, &db_option.project_name).await?;
     }
 
     if !db_option.incr_sync {
         aios_core::define_owner_index().await.unwrap();
         aios_core::create_geom_index().await.unwrap();
-        aios_core::define_fullname_index().await.unwrap();
+        // aios_core::define_fullname_index().await.unwrap();
         aios_core::define_pe_index().await.unwrap();
     }
 
@@ -128,6 +137,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     dbg!("执行多线程解析");
     // 遍历所有包含的项目
     for project in &db_option.included_projects {
+        #[cfg(feature = "sql")]
         if db_option.sync_tidb.unwrap_or(false) {
             let db = sea_orm::Database::connect(&default_conn_str).await.unwrap();
             let backend = db.get_database_backend();
@@ -146,8 +156,26 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             // }
         }
 
-        if !db_option.incr_sync {
-            match sync_total_async_threaded(&db_option, project, &["DICT", "SYST", "GLB", "GLOB"], false).await {
+        let debug_refnos: Vec<RefU64> = db_option
+            .debug_root_refnos
+            .as_ref()
+            .map(|x| {
+                x.iter()
+                    .map(|x| RefU64::from_str(x).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        //debug 不保存数据，只复杂查看属性值
+        let is_debug = !debug_refnos.is_empty();
+
+        if is_debug || (!db_option.incr_sync) {
+            match sync_total_async_threaded(
+                &db_option,
+                project,
+                &["DICT", "SYST", "GLB", "GLOB"],
+            )
+            .await
+            {
                 Ok(_) => {
                     // 同步数据成功
                     println!("同步UDA和SYS数据成功。");
@@ -159,7 +187,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             }
         }
 
-        match sync_total_async_threaded(&db_option, project, &["DESI", "CATA"], true).await {
+        match sync_total_async_threaded(&db_option, project, &["DESI", "CATA"]).await {
             Ok(_) => {
                 // 同步数据成功
                 println!("同步数据成功。");
@@ -181,6 +209,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "sql")]
 pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
     return match conn.execute(sql).await {
         Ok(_) => true,
@@ -202,16 +231,14 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
     };
 }
 
-
-
 //分成两部分，一部分先保存UDA 和 SYS 这些数据
 ///多线程同步数据，包括增量同步
 pub async fn sync_total_async_threaded(
     db_option: &DbOption,
     project: &str,
     db_types: &[&str],
-    debug_need: bool,
 ) -> anyhow::Result<()> {
+    println!("开始解析 {project} 的 {:?}", db_types);
     let mut data_dir = Path::new(&db_option.project_path); // 创建一个Path对象，表示数据目录的路径
     let need_parsed_files = &db_option.included_db_files; // 获取需要解析的数据库文件列表
     let project_dir = data_dir.join(&project); // 创建一个Path对象，表示项目目录的路径
@@ -229,7 +256,7 @@ pub async fn sync_total_async_threaded(
     }
     let mut children_files = {
         // 获取子文件列表
-        let target_dir = fs::read_dir(&project_dir)
+        let target_dir = std::fs::read_dir(&project_dir)
             .unwrap()
             .into_iter()
             .map(|entry| {
@@ -238,7 +265,7 @@ pub async fn sync_total_async_threaded(
             })
             .find(|x| x.is_dir() && x.file_name().unwrap().to_str().unwrap().ends_with("000"))
             .unwrap();
-        fs::read_dir(target_dir)?
+        std::fs::read_dir(target_dir)?
             .into_iter()
             .map(|entry| {
                 let entry = entry.unwrap();
@@ -256,16 +283,16 @@ pub async fn sync_total_async_threaded(
     if b_replace_types {
         is_replace = true;
     }
-    let mut uda_map: HashMap<i32, AttrMap> = HashMap::new();
     let chunk_size = db_option.sync_chunk_size.unwrap_or(10_0000) as usize;
     let sync_tidb = db_option.sync_tidb.unwrap_or(false);
 
+    // let mut handles = vec![];
     for path in children_files {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string(); // 获取文件名
         {
-            let mut file = File::open(&path).unwrap();
+            let mut file = File::open(&path).await.unwrap();
             let mut buf = vec![0u8; 60];
-            file.read_exact(&mut buf)?;
+            file.read_exact(&mut buf).await?;
             let (db_type, file_version, db_no) = parse_file_basic_info(&buf);
             // #[cfg(debug_assertions)]
             // dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
@@ -274,26 +301,43 @@ pub async fn sync_total_async_threaded(
             }
         }
 
-        if !debug_need
-            || need_parsed_files.is_none()
+        if need_parsed_files.is_none()
             || need_parsed_files.as_ref().unwrap().contains(&file_name)
         {
             // 如果需要解析的文件列表为空或包含当前文件名，则执行以下代码块
             println!("path={:?}", &file_name); // 打印文件路径
-            let project_clone = project.clone(); // 创建项目名称的克隆
             let project_name = project.as_str().to_string(); // 获取项目名称的字符串
             let mut children_map =
                 parse_file_children_map(&path, &None, &file_name, project_name.clone().as_str())
                     .unwrap_or_default();
             dbg!(children_map.len());
             let all_refnos = children_map.keys().cloned().collect::<Vec<_>>();
-            let children_map_clone = Arc::new(children_map);
+            let children_map_arc = Arc::new(children_map);
 
-            for (chunk_index, chunk_refnos) in all_refnos.chunks(chunk_size).enumerate() {
+            let debug_refnos: Vec<RefU64> = db_option
+                .debug_root_refnos
+                .as_ref()
+                .map(|x| {
+                    x.iter()
+                        .map(|x| RefU64::from_str(x).unwrap())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            //debug 不保存数据，只复杂查看属性值
+            let is_debug = !debug_refnos.is_empty();
+            if is_debug {
+                dbg!(&debug_refnos);
+            }
+
+            for (chunk_index, chunk) in all_refnos.chunks(chunk_size).enumerate() {
+                let chunk_refnos = chunk.to_vec();
+                let db_option_clone = db_option.clone();
                 let path_clone = path.clone();
                 let file_name_clone = file_name.clone();
                 let chunk_refnos_clone = chunk_refnos.to_vec();
                 let project_name_clone = project_name.clone();
+                let children_map_clone = children_map_arc.clone();
+                // let handle = tokio::spawn(async move {
                 if let Ok(PdmsDbData {
                     total_attr_map,
                     type_ele_map,
@@ -312,32 +356,23 @@ pub async fn sync_total_async_threaded(
                 )
                 .await
                 {
-                    println!("Processing {} chunk index: {chunk_index}", &file_name);
+                    println!("Processing {} chunk index: {chunk_index}", &file_name_clone);
                     //类型暂时不多线程
                     let total_attr_map_arc = Arc::new(total_attr_map);
                     //开始执行保存数据
-                    dbg!("开始保存pdms_element数据");
-                    save_pe_to_surreal(
-                        &total_attr_map_arc,
-                        db_no as i32,
-                        &children_map_clone,
-                        &db_option,
-                    )
-                    .await?;
-                    dbg!("开始保存属性数据");
-                    let debug_refnos: Vec<RefU64> = db_option
-                        .debug_root_refnos
-                        .as_ref()
-                        .map(|x| {
-                            x.iter()
-                                .map(|x| RefU64::from_str(x).unwrap())
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    let is_debug = !debug_refnos.is_empty();
-                    if is_debug{
-                        dbg!(&debug_refnos);
+                    // dbg!("开始保存pdms_element数据");
+                    if !is_debug {
+                        save_pe_to_surreal(
+                            &total_attr_map_arc,
+                            db_no as i32,
+                            &children_map_clone,
+                            &db_option_clone,
+                        )
+                            .await
+                            .expect("save pe to surreal failed");
                     }
+                    // dbg!("开始保存属性数据");
+
                     let mut join_set = tokio::task::JoinSet::new();
                     let mut save_atts_time = Instant::now();
                     for kv in type_ele_map.iter() {
@@ -347,7 +382,7 @@ pub async fn sync_total_async_threaded(
                             continue;
                         }
                         //UDA 还是要单独存，不然数据很容易混乱
-                        for refnos in &kv.value().iter().chunks(db_option.att_chunk as _) {
+                        for refnos in &kv.value().iter().chunks(db_option_clone.att_chunk as _) {
                             let mut json_vec = vec![];
                             let mut uda_json_vec = vec![];
                             for refno in refnos {
@@ -356,9 +391,8 @@ pub async fn sync_total_async_threaded(
                                 if is_debug {
                                     if debug_refnos.contains(&att.get_refno().unwrap()) {
                                         dbg!(att.value());
-                                    }else{
-                                        continue;
                                     }
+                                    continue;
                                 }
                                 let Some(json) = att.gen_sur_json() else {
                                     continue;
@@ -371,42 +405,42 @@ pub async fn sync_total_async_threaded(
                             }
                             if !json_vec.is_empty() {
                                 let mut sql_string = "".to_string();
-                                for json in json_vec {
-                                    let json = format!("INSERT IGNORE INTO {type_name} {json};");
-                                    sql_string.push_str(&json);
-                                }
-                                join_set.spawn(async move {
-                                    SUL_DB.query(sql_string).await.unwrap();
-                                });
-                                // let sql = format!(
-                                //     "INSERT IGNORE INTO {} [{}]",
-                                //     &type_name,
-                                //     json_vec.join(",")
-                                // );
-                                // //使用surreal 保存NamedAttrMap
+                                // for json in json_vec {
+                                //     let json = format!("INSERT IGNORE INTO {type_name} {json};");
+                                //     sql_string.push_str(&json);
+                                // }
                                 // join_set.spawn(async move {
-                                //     SUL_DB.query(sql).await.unwrap();
+                                //     SUL_DB.query(sql_string).await.unwrap();
                                 // });
+                                let sql = format!(
+                                    "INSERT IGNORE INTO {} [{}]",
+                                    &type_name,
+                                    json_vec.join(",")
+                                );
+                                //使用surreal 保存NamedAttrMap
+                                join_set.spawn(async move {
+                                    SUL_DB.query(sql).await.expect("insert attmap into failed");
+                                });
                             }
 
                             if !uda_json_vec.is_empty() {
-                                let mut sql_string = "".to_string();
-                                for json in uda_json_vec {
-                                    let json = format!("INSERT IGNORE INTO ATT_UDA {json};");
-                                    sql_string.push_str(&json);
-                                }
-                                // println!("uda sql:\n {}", &sql_string);
-                                join_set.spawn(async move {
-                                    SUL_DB.query(sql_string).await.unwrap();
-                                });
-                                // let sql = format!(
-                                //     "INSERT IGNORE INTO ATT_UDA [{}]",
-                                //     uda_json_vec.join(",")
-                                // );
-                                // //使用surreal 保存NamedAttrMap
+                                // let mut sql_string = "".to_string();
+                                // for json in uda_json_vec {
+                                //     let json = format!("INSERT IGNORE INTO ATT_UDA {json};");
+                                //     sql_string.push_str(&json);
+                                // }
+                                // // println!("uda sql:\n {}", &sql_string);
                                 // join_set.spawn(async move {
-                                //     SUL_DB.query(sql).await.unwrap();
+                                //     SUL_DB.query(sql_string).await.unwrap();
                                 // });
+                                let sql = format!(
+                                    "INSERT IGNORE INTO ATT_UDA [{}]",
+                                    uda_json_vec.join(",")
+                                );
+                                //使用surreal 保存NamedAttrMap
+                                join_set.spawn(async move {
+                                    SUL_DB.query(sql).await.expect("insert att_uda into failed");
+                                });
                             }
                         }
                     }
@@ -417,35 +451,16 @@ pub async fn sync_total_async_threaded(
                         save_atts_time.elapsed().as_secs_f32()
                     );
                 }
+                // });
+                // handles.push(handle);
             }
         }
 
         //重新更新一下database info，有可能发生了更新
-        let db_info = get_default_pdms_db_info();
-        let _ = db_info.save(None);
+        // let db_info = get_default_pdms_db_info();
+        // let _ = db_info.save(None);
     }
-    if sync_tidb {
-        let default_conn_str = AiosDBManager::get_default_conn_str(&db_option);
-        let pool = AiosDBManager::get_db_pool(&default_conn_str, project.as_str()).await?;
-        // 保存 uda_map
-        if uda_map.len() > 0 {
-            let mut uda_sql = format!("INSERT IGNORE INTO {PDMS_UDA_ATT_TABLE} (TYPE,DATA) VALUES");
-            for (noun, value) in uda_map.into_iter() {
-                let data = value.into_compress_bytes();
-                uda_sql.push_str(&format!("({},0x{}),", noun, hex::encode(data)))
-            }
-            let mut project_conn = pool.acquire().await.unwrap();
-            uda_sql.remove(uda_sql.len() - 1);
-            let result = project_conn.execute(uda_sql.as_str()).await;
-            match result {
-                Ok(_) => {}
-                Err(e) => {
-                    dbg!(&e);
-                    dbg!(uda_sql.as_str());
-                }
-            }
-        }
-    }
+    // futures::future::join_all(take(&mut handles)).await;
 
     Ok(())
 }

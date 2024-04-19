@@ -7,7 +7,7 @@ use crate::graph_db::pdms_arango::*;
 use crate::graph_db::pdms_inst_arango::*;
 use aios_core::pdms_types::*;
 use aios_core::pdms_types::*;
-use bb8_arangodb::arangors_lite::AqlQuery;
+
 use bevy_transform::prelude::Transform;
 use glam::Vec3;
 use itertools::Itertools;

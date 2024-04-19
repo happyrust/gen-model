@@ -1,22 +1,22 @@
-use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
-use aios_core::pdms_types::*;
-use aios_core::RefU64;
-use dashmap::DashMap;
-use glam::Vec3;
-use std::time::Instant;
-use bevy_transform::components::Transform;
-use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-use aios_core::prim_geo::{Extrusion, Revolution};
-use std::mem::take;
-use aios_core::shape::pdms_shape::{BrepShapeTrait, VerifiedShape};
+use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::shared;
+use aios_core::geometry::*;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+use aios_core::pdms_types::*;
+use aios_core::prim_geo::{Extrusion, Revolution};
+use aios_core::shape::pdms_shape::{BrepShapeTrait, VerifiedShape};
+use aios_core::RefU64;
+use bevy_transform::components::Transform;
+use dashmap::DashMap;
+use glam::Vec3;
 use parry3d::bounding_volume::*;
 use parry3d::math::Isometry;
-use crate::consts::*;
-use aios_core::geometry::*;
+use std::mem::take;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::{Mutex, RwLock};
 
 ///处理带有loop的元件
 pub async fn gen_loop_geos(
@@ -103,22 +103,33 @@ pub async fn gen_loop_geos(
 
                 let mut children_loop_attmaps = aios_core::get_children_named_attmaps(target_refno)
                     .await
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|x| x.get_type_str() == "PLOO")
+                    .collect::<Vec<_>>();
                 //处理相邻的情况，第一个loop是正实体，后面的为负实体
                 let cur_loop_index = children_loop_attmaps
                     .iter()
-                    .filter(|&x| x.get_type_str() == "PLOO")
                     .position(|x| x.get_refno().unwrap_or_default() == loop_refno)
                     .unwrap_or_default();
                 let mut neg_refnos =
                     aios_core::query_filter_children(target_refno, &GENRAL_NEG_NOUN_NAMES)
                         .await
                         .unwrap_or_default();
-                if children_loop_attmaps.len() > 0 && cur_loop_index == 0 {
-                    neg_refnos.extend(children_loop_attmaps.iter().filter_map(|x| x.get_refno()).skip(1));
-                    // dbg!(&neg_refnos);
+                if children_loop_attmaps.len() > 1 && cur_loop_index == 0 {
+                    neg_refnos.extend(
+                        children_loop_attmaps
+                            .iter()
+                            .filter_map(|x| x.get_refno())
+                            .skip(1),
+                    );
+                    dbg!(&neg_refnos);
                 }
-                let final_refno = if cur_loop_index >= 1 { loop_refno } else { target_refno };
+                let final_refno = if cur_loop_index >= 1 {
+                    loop_refno
+                } else {
+                    target_refno
+                };
                 let mut geos_info = EleGeosInfo {
                     refno: final_refno,
                     cata_hash: None,
@@ -159,9 +170,7 @@ pub async fn gen_loop_geos(
                             .unwrap_or_default();
                         //不是第一个loop，需要取第一个的loop的height
                         let mut height = if cur_loop_index > 0 {
-                            children_loop_attmaps[0]
-                                .get_f32("HEIG")
-                                .unwrap_or_default()
+                            children_loop_attmaps[0].get_f32("HEIG").unwrap_or_default()
                         } else {
                             loop_attr
                                 .get_f32("HEIG")
@@ -220,7 +229,7 @@ pub async fn gen_loop_geos(
                     } else {
                         GeoBasicType::Pos
                     },
-                    cata_neg_refnos: Default::default()
+                    cata_neg_refnos: Default::default(),
                 };
                 shape_insts_data.insert_info(final_refno, geos_info.clone());
                 shape_insts_data.insert_geos_data(

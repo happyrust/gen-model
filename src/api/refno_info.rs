@@ -7,7 +7,7 @@ use aios_core::db_number::DbNumMgr;
 use aios_core::helper::table::qualified_table_name;
 use aios_core::pdms_types::*;
 use anyhow::anyhow;
-use bb8_arangodb::arangors_lite::Database;
+
 use crate::consts::*;
 use dashmap::DashMap;
 use sqlx::{Error, MySql, Pool, Row};

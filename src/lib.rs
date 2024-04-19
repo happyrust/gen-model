@@ -39,7 +39,6 @@ pub mod graph_db;
 #[cfg(feature = "gen_model")]
 pub mod fast_model;
 
-pub mod arangodb;
 pub mod versioned_db;
 
 pub mod mqtt_service;

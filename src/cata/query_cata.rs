@@ -94,6 +94,7 @@ pub fn resolve_cata_comp(
         &cur_context,
         &axis_param_map,
     );
+    // dbg!((des_refno, &geometries));
     
     let n_geometries = resolve_gms(
         des_refno,

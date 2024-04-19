@@ -5,7 +5,9 @@ use serde_with::DisplayFromStr;
 use aios_core::pdms_types::*;
 use aios_core::{AttrMap, RefU64Vec};
 use chrono::{Datelike, DateTime, Local, Timelike};
+#[cfg(feature = "sql")]
 use sqlx::{Executor, MySql, Pool, Row};
+#[cfg(feature = "sql")]
 use sqlx::types::Uuid;
 use serde::{Serialize, Deserialize};
 use serde_with::serde_as;
@@ -17,7 +19,7 @@ pub const INCREMENT_DATA: &'static str = "INCREMENT_DATA";
 
 ///需要修改的模型的增量参考号数据
 #[serde_as]
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IncrGeoUpdateLog {
     //基本体模型修改了的参考号
     #[serde_as(as = "HashSet<DisplayFromStr>")]
@@ -73,6 +75,7 @@ pub struct IncrEleUpdateLog {
 
 impl IncrEleUpdateLog {
     /// 将增量数据保存到对应的表
+    #[cfg(feature = "sql")]
     pub async fn save_increment_data_to_sql(increment_datas: Vec<IncrEleUpdateLog>, session_name: String, pool: &Pool<MySql>) -> anyhow::Result<()> {
         // 将数据根据dbno分类
         let mut data_map = HashMap::new();
@@ -105,22 +108,7 @@ struct Record {
     id: Thing,
 }
 
-// impl AiosDBManager{
-//     pub async fn save_increment_data(&self, incr_logs: &Vec<IncrUpdateLog>, session_name: String) -> anyhow::Result<()> {
-//         for incr_log in incr_logs {
-//             // self.version_db.create()
-//             let created: Vec<Record> = self.version_db
-//                 .create("incr_log")
-//                 .content(incr_log)
-//                 .await.unwrap();
-//         }
-//
-//         //test query by data
-//
-//         Ok(())
-//     }
-// }
-
+#[cfg(feature = "sql")]
 fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncrEleUpdateLog>, session_name: &str) -> String {
     let mut sql = format!("INSERT INTO {dbno}_{INCREMENT_DATA}(ID,REFNO,REFNO_STR,OWNER, OPERATE, VERSION,NUMBDB,TIME,CHILDREN,OLD_DATA,NEW_DATA,USER) VALUES");
     for increment_data in increment_datas {
@@ -147,6 +135,7 @@ fn gen_insert_increment_sql(dbno: i32, increment_datas: Vec<IncrEleUpdateLog>, s
 }
 
 /// 通过uuid查询该条增删记录
+#[cfg(feature = "sql")]
 pub async fn query_key_data(key: &str, numbdb: i32, pool: &Pool<MySql>) -> anyhow::Result<Option<IncrEleUpdateLog>> {
 
     let sql = gen_query_key_data_sql(key, numbdb);
@@ -173,6 +162,7 @@ pub async fn query_key_data(key: &str, numbdb: i32, pool: &Pool<MySql>) -> anyho
 }
 
 /// 创建对应的增量记录表
+#[cfg(feature = "sql")]
 pub async fn create_increment_table(dbno: i32, pool: &Pool<MySql>) -> anyhow::Result<()> {
     let sql = gen_create_increment_table_sql(dbno);
     let mut conn = pool;
@@ -188,6 +178,7 @@ pub async fn create_increment_table(dbno: i32, pool: &Pool<MySql>) -> anyhow::Re
 }
 
 /// 生成创建表的sql
+#[cfg(feature = "sql")]
 fn gen_create_increment_table_sql(dbno: i32) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("CREATE TABLE IF NOT EXISTS {}_{INCREMENT_DATA} (", dbno));
@@ -208,12 +199,14 @@ fn gen_create_increment_table_sql(dbno: i32) -> String {
     sql
 }
 
+#[cfg(feature = "sql")]
 fn gen_query_key_data_sql(key: &str, numbdb: i32) -> String {
     let mut sql = String::new();
     sql.push_str(&format!("SELECT * FROM {}_{INCREMENT_DATA} WHERE ID = '{}'", numbdb, key));
     sql
 }
 
+#[cfg(feature = "sql")]
 #[tokio::test]
 async fn test_increment_record() -> anyhow::Result<()> {
     let _ = dotenv::dotenv();

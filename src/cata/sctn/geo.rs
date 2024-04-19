@@ -97,7 +97,6 @@ pub async fn create_profile_geos(refno: RefU64,
         paths
     } else { vec![] };
 
-    // dbg!(&spine_paths);
     if drns.is_normalized() && drne.is_normalized() {
         let parent_rot = get_world_transform(parent_refno).await?.unwrap_or_default().rotation.as_dquat();
         let current_rot = get_world_transform(refno).await?.unwrap_or_default().rotation.as_dquat();
@@ -152,8 +151,6 @@ pub async fn create_profile_geos(refno: RefU64,
                         }),
                         lmirror: att.get_bool("LMIRR").unwrap_or_default(),
                     };
-
-                    dbg!(profile_refno);
                     brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
                         refno: profile_refno,
                         brep_shape: Box::new(solid),
@@ -188,7 +185,8 @@ pub async fn create_profile_geos(refno: RefU64,
                         };
                         let transform = loft.get_trans() * transform;
                         brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
-                            refno: spine.refno,
+                            // refno: spine.refno,
+                            refno: profile.get_refno().unwrap_or(spine.refno),
                             brep_shape: Box::new(loft),
                             transform,
                             visible: true,

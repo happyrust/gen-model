@@ -1,21 +1,21 @@
-use std::collections::{HashMap, HashSet};
-use aios_core::{GeomInstQuery, GeomPtsQuery, ModelHashInst, RefU64, SUL_DB};
-use aios_core::room::room::{GLOBAL_AABB_TREE, load_aabb_tree};
+use crate::fast_model::process_meshes_update_db;
+use aios_core::room::room::{load_aabb_tree, GLOBAL_AABB_TREE};
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::test::test_surreal::init_test_surreal;
+use aios_core::{GeomInstQuery, GeomPtsQuery, ModelHashInst, RefU64, SUL_DB};
 use bevy_transform::components::Transform;
 use bevy_transform::TransformPoint;
 use dashmap::DashSet;
 use glam::Vec3;
 use itertools::Itertools;
 use parry3d::bounding_volume::Aabb;
-use parry3d::math::{Point, Real};
 use parry3d::math::Isometry;
+use parry3d::math::{Point, Real};
 use parry3d::query::PointQuery;
 use parry3d::shape::{TriMesh, TriMeshFlags};
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
-use crate::fast_model::process_meshes_update_db;
+use std::collections::{HashMap, HashSet};
 
 #[tokio::test]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
@@ -26,7 +26,9 @@ pub async fn test_cal_rooms() -> anyhow::Result<()> {
         .unwrap();
     load_aabb_tree().await.unwrap();
     build_room_relations().await.unwrap();
-    let within_refnos = query_room_refnos(refno, &HashSet::new(), 0.1).await.unwrap();
+    let within_refnos = query_room_refnos(refno, &HashSet::new(), 0.1)
+        .await
+        .unwrap();
     dbg!(&within_refnos);
     Ok(())
 }
@@ -36,7 +38,9 @@ pub async fn test_cal_rooms() -> anyhow::Result<()> {
 pub async fn test_cal_distance() -> anyhow::Result<()> {
     init_test_surreal().await;
     let panel_refno = "24381/34303".into();
-    let mut geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno]).await.unwrap_or_default();
+    let mut geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno])
+        .await
+        .unwrap_or_default();
     // dbg!(&geom_insts);
     if geom_insts.is_empty() {
         return Ok(());
@@ -45,11 +49,14 @@ pub async fn test_cal_distance() -> anyhow::Result<()> {
     //将panel的 plant mesh 转换成TriMesh
     for geom_inst in geom_insts {
         for inst in geom_inst.insts {
-            let Ok(mesh) = PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", inst.geo_hash)) else {
+            let Ok(mesh) =
+                PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", inst.geo_hash))
+            else {
                 continue;
             };
-            let Some(mut tri_mesh) = mesh.
-                get_tri_mesh_with_flag(inst.transform.scale, TriMeshFlags::ORIENTED) else {
+            let Some(mut tri_mesh) = mesh
+                .get_tri_mesh_with_flag(inst.transform.compute_matrix(), TriMeshFlags::ORIENTED)
+            else {
                 continue;
             };
             dbg!(tri_mesh.indices().len());
@@ -57,9 +64,7 @@ pub async fn test_cal_distance() -> anyhow::Result<()> {
 
             dbg!(tri_mesh.local_aabb());
 
-            let point = Vec3::new(
-                8495.01953125, -8.15999984741211, 0.0
-            );
+            let point = Vec3::new(8495.01953125, -8.15999984741211, 0.0);
             dbg!(tri_mesh.local_aabb().contains_local_point(&point.into()));
             dbg!(tri_mesh.contains_local_point(&point.into()));
 
@@ -71,8 +76,11 @@ pub async fn test_cal_distance() -> anyhow::Result<()> {
 
 pub async fn build_room_relations() -> anyhow::Result<()> {
     let room_panel_map = build_room_panels_relate().await.unwrap();
-    let exclude_panel_refnos = room_panel_map.iter().map(|(_, _, panel_refnos)|
-        panel_refnos.clone()).flatten().collect::<HashSet<_>>();
+    let exclude_panel_refnos = room_panel_map
+        .iter()
+        .map(|(_, _, panel_refnos)| panel_refnos.clone())
+        .flatten()
+        .collect::<HashSet<_>>();
     dbg!(exclude_panel_refnos.len());
     for (room_refno, room_num, panel_refnos) in room_panel_map {
         for panel_refno in panel_refnos {
@@ -81,19 +89,27 @@ pub async fn build_room_relations() -> anyhow::Result<()> {
                 .unwrap();
             if !refnos.is_empty() {
                 dbg!(refnos.len());
-                save_room_relate(panel_refno, &refnos, &room_num).await.unwrap();
+                save_room_relate(panel_refno, &refnos, &room_num)
+                    .await
+                    .unwrap();
             }
         }
     }
     Ok(())
 }
 
-async fn save_room_relate(panel_refno: RefU64, within_refnos: &HashSet<RefU64>, room_num: &str) -> anyhow::Result<()> {
+async fn save_room_relate(
+    panel_refno: RefU64,
+    within_refnos: &HashSet<RefU64>,
+    room_num: &str,
+) -> anyhow::Result<()> {
     let mut final_sql = "".to_string();
     for refno in within_refnos {
         let sql = format!(
             "relate {}->room_relate->{} set room_num='{}';",
-            panel_refno.to_pe_key(), refno.to_pe_key(), room_num
+            panel_refno.to_pe_key(),
+            refno.to_pe_key(),
+            room_num
         );
         final_sql.push_str(&sql);
     }
@@ -101,7 +117,6 @@ async fn save_room_relate(panel_refno: RefU64, within_refnos: &HashSet<RefU64>, 
     SUL_DB.query(&final_sql).await?;
     Ok(())
 }
-
 
 async fn build_room_panels_relate() -> anyhow::Result<Vec<(RefU64, String, Vec<RefU64>)>> {
     //属于room的panel
@@ -115,7 +130,8 @@ async fn build_room_panels_relate() -> anyhow::Result<Vec<(RefU64, String, Vec<R
     for (room_refno, room_num, panel_refnos) in &result {
         let sql = format!(
             "relate {}->room_panel_relate->[{}] set room_num='{}';",
-            room_refno.to_pe_key(), panel_refnos.iter().map(|x| x.to_pe_key()).join(","),
+            room_refno.to_pe_key(),
+            panel_refnos.iter().map(|x| x.to_pe_key()).join(","),
             room_num
         );
         sql_string.push_str(&sql);
@@ -125,10 +141,15 @@ async fn build_room_panels_relate() -> anyhow::Result<Vec<(RefU64, String, Vec<R
     Ok(result)
 }
 
-
-pub async fn query_room_refnos(panel_refno: RefU64, exclude_refnos: &HashSet<RefU64>, inside_tol: f32) -> anyhow::Result<HashSet<RefU64>> {
+pub async fn query_room_refnos(
+    panel_refno: RefU64,
+    exclude_refnos: &HashSet<RefU64>,
+    inside_tol: f32,
+) -> anyhow::Result<HashSet<RefU64>> {
     //查询到aabb直接完全在这个房间里的mesh里，就不用做点的检查
-    let mut geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno]).await.unwrap_or_default();
+    let mut geom_insts: Vec<GeomInstQuery> = aios_core::query_insts(&[panel_refno])
+        .await
+        .unwrap_or_default();
     // dbg!(&geom_insts);
     if geom_insts.is_empty() {
         return Ok(Default::default());
@@ -138,53 +159,58 @@ pub async fn query_room_refnos(panel_refno: RefU64, exclude_refnos: &HashSet<Ref
     //将panel的 plant mesh 转换成TriMesh
     for geom_inst in geom_insts {
         for inst in geom_inst.insts {
-            let Ok(mesh) = PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", inst.geo_hash)) else {
+            let Ok(mesh) =
+                PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", inst.geo_hash))
+            else {
                 continue;
             };
-            let inv_mat = (geom_inst.world_trans).compute_matrix().inverse();
-            // dbg!(inst.transform.scale);
-            let Some(mut tri_mesh) = mesh.
-                get_tri_mesh_with_flag(inst.transform.scale, TriMeshFlags::ORIENTED) else {
+            let Some(mut tri_mesh) = mesh.get_tri_mesh_with_flag(
+                (geom_inst.world_trans * inst.transform).compute_matrix(),
+                TriMeshFlags::ORIENTED,
+            ) else {
                 continue;
             };
-            let mut contains_query = GLOBAL_AABB_TREE.read().await.
-                locate_intersecting_bounds(&geom_inst.world_aabb).collect::<Vec<_>>();
-            if contains_query.is_empty() {
-                continue;
-            }
-            // dbg!(&contains_query);
-            let mut need_check_refnos = HashSet::new();
+            let mut contains_query = GLOBAL_AABB_TREE
+                .read()
+                .await
+                .locate_intersecting_bounds(&geom_inst.world_aabb)
+                .collect::<Vec<_>>();
+            let mut need_check_refnos = vec![];
             contains_query.retain(|(refno, bbox)| {
                 //filter the wrong aabb
                 if exclude_refnos.contains(refno) || (bbox.mins[0] > 1000000.0) {
                     return false;
                 }
                 // dbg!(&bbox);
-                let contains: Vec<bool> =
-                    bbox.vertices().iter().map(|x| {
-                        let pt = inv_mat.transform_point(*x);
-                        // dbg!((x, pt));
-                        tri_mesh.contains_local_point(&pt.into())
-                    }).collect::<Vec<_>>();
-                // dbg!(&contains);
+                let contains: Vec<bool> = bbox
+                    .vertices()
+                    .iter()
+                    .map(|x| tri_mesh.contains_point(&Isometry::identity(), &x))
+                    .collect::<Vec<_>>();
                 //每一个点都在mesh里面
                 if contains.iter().all(|&x| x) {
                     return true;
                 } else {
                     //只要有一个点在mesh里面，就需要继续检查是否真的相交
                     if contains.iter().any(|&x| x) {
-                        need_check_refnos.insert(*refno);
+                        need_check_refnos.push(*refno);
                     }
                     return false;
                 }
             });
-            // dbg!(&need_check_refnos);
+            //for test
+            // dbg!(tri_mesh.contains_point(&Isometry::identity(), &Point::new(0.0, 0.0, 0.0) ));
+            // if !contains_query.is_empty() {
+            //     dbg!(&contains_query);
+            // }
             within_refnos.extend(contains_query.iter().map(|(x, _)| x));
             if !need_check_refnos.is_empty() {
+                // dbg!(panel_refno);
+                // dbg!(&within_refnos);
+                // dbg!(&need_check_refnos);
                 //首先判断，如果是包围盒完全不在里面，直接跳过
                 //继续的点检查可能会比较耗时，后续应该加开关，让用户判断是否需要继续做检查
                 let pes = need_check_refnos.iter().map(|x| x.to_pe_key()).join(",");
-                //通过点的判断需要排除使用过布尔运算的，针对发生过布尔运算的，直接使用mesh的相交计算即可
                 let mut repsonse = SUL_DB.query(format!(
                     r#"select
                          in.id as refno, world_trans.d as world_trans, aabb.d as world_aabb,
@@ -196,39 +222,35 @@ pub async fn query_room_refnos(panel_refno: RefU64, exclude_refnos: &HashSet<Ref
                 // dbg!(&geom_pts);
                 let mut intersect_set = DashSet::new();
                 geom_pts.par_iter().for_each(|g| {
-                    let extends = g.world_aabb.extents().xy().magnitude();
-                    if g.pts_group.par_iter().find_any(|(trans, o_pts)| {
-                        if let Some(pts) = o_pts {
-                            let pt_trans = g.world_trans * (*trans);
-                            pts.par_iter().find_any(|&pt| {
-                                //挨着的相交不算，需要超过一定的距离，才能算相交
-                                //应该为负数
-                                let new_pt = pt_trans.transform_point(*pt);
-                                if !g.world_aabb.contains_local_point(&new_pt.into()) {
-                                    return false;
-                                }
-                                let local_pt = inv_mat.transform_point(new_pt);
-
-                                let d = tri_mesh.distance_to_local_point(&local_pt.into(), false);
-                                // if d < 0.0 {
-                                //     dbg!((g.refno, local_pt, new_pt, d, extends));
-                                // }
-                                // if d / extends  < -inside_tol {
-                                //     dbg!((g.refno, local_pt, new_pt, d));
-                                // }
-                                d / extends  < -inside_tol
-                            }).is_some()
-                        } else {
-                            false
-                        }
-                    }).is_some() {
+                    if g.pts_group
+                        .par_iter()
+                        .find_any(|(trans, o_pts)| {
+                            if let Some(pts) = o_pts {
+                                let pt_trans = g.world_trans * (*trans);
+                                pts.par_iter()
+                                    .find_any(|&pt| {
+                                        tri_mesh.contains_point(
+                                            &Isometry::identity(),
+                                            &pt_trans.transform_point(*pt).into(),
+                                        )
+                                    })
+                                    .is_some()
+                            } else {
+                                false
+                            }
+                        })
+                        .is_some()
+                    {
                         // dbg!(g.refno);
                         intersect_set.insert(g.refno);
                     }
                 });
                 if !intersect_set.is_empty() {
-                    println!("found intersect room panel {}, refnos: {}", panel_refno,
-                             &intersect_set.iter().map(|x| x.to_string()).join(","));
+                    println!(
+                        "found intersect room panel {}, refnos: {}",
+                        panel_refno,
+                        &intersect_set.iter().map(|x| x.to_string()).join(",")
+                    );
                 }
                 within_refnos.extend(intersect_set);
                 // dbg!(&within_refnos);

@@ -194,6 +194,7 @@ pub async fn gen_cata_geos(
                         let mut design_axis_map = DashMap::new();
 
                         let cur_type = desi_att.get_type_str();
+                        #[cfg(debug_assertions)]
                         dbg!(ele_refno);
                         let r = gen_cata_single_geoms(
                             mgr_clone.clone(),
@@ -205,7 +206,7 @@ pub async fn gen_cata_geos(
                         match r {
                             Ok(_) => {}
                             Err(e) => {
-                                // println!("生成元件库模型失败: {:?}", e);
+                                println!("{ele_refno} 生成元件库模型失败: {:?}", e);
                                 continue;
                             }
                         };
@@ -345,6 +346,7 @@ pub async fn gen_cata_geos(
                                     visible_set.insert(s.refno);
                                 }
                             }
+                            // dbg!(&shapes);
                             //直接将所有的几何体组合起来
                             for shape in shapes {
                                 let CateBrepShape {

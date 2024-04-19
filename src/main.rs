@@ -23,8 +23,8 @@ use aios_core::get_db_option;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::room::room::load_aabb_tree;
-use aios_core::SUL_DB;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
+use aios_core::SUL_DB;
 use chrono::{Datelike, Local, Timelike};
 use futures::StreamExt;
 use itertools::Itertools;
@@ -33,17 +33,18 @@ use simplelog::*;
 use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::format::FmtSpan;
 
-#[cfg(feature = "gen_model")]
-use aios_database::fast_model::gen_all_geos_data;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::database::*;
-use aios_database::fast_model::{gen_inst_meshes, process_meshes_update_db, update_inst_relate_aabbs};
 use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
+#[cfg(feature = "gen_model")]
+use aios_database::fast_model::gen_all_geos_data;
 use aios_database::fast_model::room_model::build_room_relations;
+use aios_database::fast_model::{
+    gen_inst_meshes, process_meshes_update_db, update_inst_relate_aabbs,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-
     // fmt::fmt()
     // .with_span_events(FmtSpan::CLOSE)
     // .with_target(false)
@@ -66,12 +67,16 @@ async fn main() -> anyhow::Result<()> {
         // 创建日志文件
         let file = File::create(filename).unwrap();
 
-        CombinedLogger::init(
-            vec![
-                TermLogger::new(LevelFilter::Warn, Config::default(), TerminalMode::Mixed, ColorChoice::Auto),
-                WriteLogger::new(LevelFilter::Info, Config::default(), file),
-            ]
-        ).unwrap();
+        CombinedLogger::init(vec![
+            TermLogger::new(
+                LevelFilter::Warn,
+                Config::default(),
+                TerminalMode::Mixed,
+                ColorChoice::Auto,
+            ),
+            WriteLogger::new(LevelFilter::Info, Config::default(), file),
+        ])
+        .unwrap();
     }
 
     #[cfg(feature = "local")]
@@ -110,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     load_aabb_tree().await.unwrap();
-    if db_option.gen_spatial_tree{
+    if db_option.gen_spatial_tree {
         build_room_relations().await.unwrap();
     }
 
@@ -118,7 +123,6 @@ async fn main() -> anyhow::Result<()> {
         update_cal_equip().await?;
         update_cal_bran_component().await?;
     }
-
 
     // ///生成ssc 树
     // /// 需要 resource 下文档 ssc_level.xlsx  ssc_room.xlsx 专业分类.xlsx
@@ -150,7 +154,6 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "mqtt")]
     tokio::join!(
         // AiosDBManager::run_e3d_clone_bg_task(mgr.clone()),
-
         AiosDBManager::spawn_exec_watcher(mgr.clone()),
         AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
         // AiosDBManager::demo_mqtt_requests(),
@@ -199,28 +202,3 @@ fn test_turn_bin_into_json() {
     let mut new_file = File::create("all_attr_info_1.json").unwrap();
     new_file.write_all(&json.into_bytes()).unwrap();
 }
-
-/// This code is a test suite for logging and database operations.
-/// It sets up a logger using the `env_logger` crate and logs an error message.
-/// It also performs database operations using the `AiosDBManager` struct.
-/// The `test_log` function logs an error message to a file.
-/// The `test_db1_dehash` function initializes a database manager, retrieves children within a project,
-/// and calculates a hash value.
-/// This code requires the `env_logger`, `log`, and `tokio` crates to be added as dependencies.
-#[test]
-fn test_log() {
-    use env_logger::{Builder, fmt::Target};
-    use log::error;
-
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("log.txt")
-        .unwrap();
-
-    let mut builder = Builder::from_default_env();
-    builder.target(Target::Pipe(Box::new(file))).init();
-    error!("Some error");
-}
-
-

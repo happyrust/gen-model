@@ -1,8 +1,8 @@
 use std::sync::Arc;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
-use bb8_arangodb::arangors_lite::collection::CollectionType::{Document, Edge};
-use bb8_arangodb::arangors_lite::AqlQuery;
+
+
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use crate::api::attr::query_attr;

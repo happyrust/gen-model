@@ -14,7 +14,7 @@ use aios_core::CataContext;
 use aios_core::{AttrMap, RefU64Vec};
 use anyhow::anyhow;
 use async_trait::async_trait;
-use bb8_arangodb::arangors_lite::AqlQuery;
+
 use bevy_transform::prelude::Transform;
 use dashmap::mapref::one::Ref;
 use dashmap::DashMap;
@@ -24,6 +24,7 @@ use itertools::Itertools;
 use parry3d::bounding_volume::BoundingVolume;
 use pdms_io::watch::PdmsWatcher;
 use rumqttc::AsyncClient;
+#[cfg(feature = "sql")]
 use sqlx::{MySql, Pool, Row};
 use std::boxed::Box;
 use std::collections::BTreeMap;
@@ -33,8 +34,6 @@ use std::fmt::{Debug, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-use crate::arangodb::ArPool;
 use crate::cata::query_cata::query_gm_param;
 use crate::cata::query_cata::{query_axis_params, resolve_cata_comp};
 use crate::cata::resolve::resolve_axis_param;
@@ -48,6 +47,7 @@ use crate::defines::*;
 #[derive(Clone)]
 pub struct AiosDBManager {
     //不同project的连接池子
+    #[cfg(feature = "sql")]
     pub project_map: DashMap<String, Pool<MySql>>,
 
     pub projects: Vec<String>,

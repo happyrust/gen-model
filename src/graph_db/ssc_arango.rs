@@ -1,5 +1,5 @@
 use aios_core::pdms_types::*;
-use bb8_arangodb::arangors_lite::{AqlQuery, Database};
+
 use sqlx::{MySql, Pool, Row};
 use crate::consts::AQL_PDMS_INST_INFO_COLLECTION;
 use crate::arangodb::ArDatabase;

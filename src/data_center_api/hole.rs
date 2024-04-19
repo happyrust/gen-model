@@ -8,7 +8,7 @@ use aios_core::negative_mesh_type::NegativeEdges;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use aios_core::tool::hash_tool::hash_two_str;
-use bb8_arangodb::arangors_lite::AqlQuery;
+
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use glam::Vec3;

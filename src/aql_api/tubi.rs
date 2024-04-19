@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use aios_core::data_center::TubiData;
 use aios_core::prim_geo::tubing::TubiEdge;
-use bb8_arangodb::arangors_lite::{AqlQuery, Database};
+
 use dashmap::DashMap;
 use glam::Vec3;
 use std::str::FromStr;

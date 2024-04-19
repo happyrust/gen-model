@@ -7,7 +7,7 @@ use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use aios_core::tool::hash_tool::hash_two_str;
 use aios_core::create_attas_structs::VirtualEmbedGraphNodeQuery;
-use bb8_arangodb::arangors_lite::AqlQuery;
+
 use sqlx::{MySql, Pool, Row};
 use crate::arangodb::ArDatabase;
 use crate::consts::AQL_PDMS_ELES_COLLECTION;

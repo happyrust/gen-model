@@ -412,9 +412,7 @@ pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()>
                             #[cfg(debug_assertions)]
                             {
                                 final_shape.write_step(format!("{}.step", b.refno)).unwrap();
-                                // final_shape.write_stl_with_tolerance(format!("{}.stl", b.refno), tol as _).unwrap();
                             }
-                            // dbg!(tol);
                             if let Ok(mesh) = PlantMesh::gen_occ_mesh(&final_shape, tol as _) {
                                 //保存到文件到dir下
                                 if mesh

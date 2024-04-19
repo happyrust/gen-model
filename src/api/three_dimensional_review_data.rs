@@ -1,7 +1,7 @@
 use aios_core::three_dimensional_review::{ThreeDimensionalModelDataCrate, ThreeDimensionalModelDataToArango};
 use crate::graph_db::pdms_arango::save_arangodb_doc;
 // use crate::options::DbOption;
-use bb8_arangodb::arangors_lite::AqlQuery;
+
 use crate::arangodb::ArDatabase;
 
 

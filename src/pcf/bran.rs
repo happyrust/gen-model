@@ -3,7 +3,7 @@ use std::sync::Arc;
 use aios_core::{AttrMap, AttrVal};
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::tubing::TubiEdge;
-use bb8_arangodb::arangors_lite::Database;
+
 
 use dashmap::DashMap;
 use glam::Vec3;

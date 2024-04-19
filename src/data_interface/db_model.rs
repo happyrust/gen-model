@@ -10,7 +10,6 @@ use aios_core::get_db_option;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::SUL_DB;
-use arangors_lite::AqlQuery;
 use dashmap::DashMap;
 use futures::StreamExt;
 use glam::Vec3;
@@ -26,7 +25,9 @@ use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
 use rumqttc::Event::Incoming;
 use rumqttc::{Packet, QoS};
+#[cfg(feature = "sql")]
 use sqlx::pool::PoolOptions;
+#[cfg(feature = "sql")]
 use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
 use tokio::sync::Mutex;
 
@@ -443,6 +444,7 @@ impl AiosDBManager {
         format!("mysql://{user}:{pwd}@{ip}:{port}")
     }
 
+    #[cfg(feature = "sql")]
     #[inline]
     pub async fn get_global_pool(&self) -> anyhow::Result<Pool<MySql>> {
         let connection_str = self.default_conn_str();
@@ -466,6 +468,7 @@ impl AiosDBManager {
         format!("mysql://{user}:{pwd}@{ip}:{port}")
     }
     /// 获得pool
+    #[cfg(feature = "sql")]
     #[inline]
     pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
         let url = &format!("{connection_str}/{}", project);
@@ -487,6 +490,7 @@ impl AiosDBManager {
     }
 
     ///获取普华mysql数据库的连接pool
+    #[cfg(feature = "sql")]
     #[inline]
     pub async fn get_puhua_pool(&self) -> anyhow::Result<Pool<MySql>> {
         let conn = self.puhua_conn_str();
@@ -500,6 +504,7 @@ impl AiosDBManager {
     }
 
     ///获取mysql数据库模糊查询的连接pool
+    #[cfg(feature = "sql")]
     #[inline]
     pub async fn get_fuzzy_query_pool(&self) -> anyhow::Result<Pool<MySql>> {
         let connection_str = self.default_conn_str();
@@ -514,6 +519,7 @@ impl AiosDBManager {
 
 
     ///获得默认的pool
+    #[cfg(feature = "sql")]
     #[inline]
     pub async fn get_default_pool(conn_str: &str) -> anyhow::Result<Pool<MySql>> {
         MySqlPool::connect(conn_str)
@@ -529,9 +535,11 @@ impl AiosDBManager {
     ///初始化db manager
     pub async fn init(db_option: &DbOption) -> anyhow::Result<Self> {
         let dir = db_option.project_path.to_string();
+        #[cfg(feature = "sql")]
         let mut project_map = DashMap::new();
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         for project in &db_option.included_projects {
+            #[cfg(feature = "sql")]
             if db_option.use_tidb.unwrap_or(false) {
                 let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
                 match project_pool {
@@ -608,6 +616,7 @@ impl AiosDBManager {
             }
         });
         Ok(Self {
+            #[cfg(feature = "sql")]
             project_map,
             projects,
             needed_parse_files: None,
@@ -625,12 +634,14 @@ impl AiosDBManager {
     }
 
     /// 根据project获取连接池
+    #[cfg(feature = "sql")]
     #[inline]
     pub fn get_project_pool(&self, project: &str) -> Option<Pool<MySql>> {
         self.project_map.get(project).map(|x| x.value().clone())
     }
 
     /// 根据project获取连接池
+    #[cfg(feature = "sql")]
     #[inline]
     pub fn get_cur_project_pool(&self) -> Option<Pool<MySql>> {
         self.project_map
@@ -639,6 +650,7 @@ impl AiosDBManager {
     }
 
     ///获得project 的db
+    #[cfg(feature = "sql")]
     #[inline]
     pub async fn get_project_pool_by_refno(&self, refno: RefU64) -> Option<(String, Pool<MySql>)> {
         // if let Some(projects) = self.ref0_projects.get(&refno.get_0()) {

@@ -1,6 +1,4 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use crate::fast_model::{CataNegGroup, GeoTransQuery, GmGeoData, NegInfo};
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::PlantMesh;
@@ -8,7 +6,9 @@ use aios_core::SUL_DB;
 use glam::DMat4;
 use nalgebra::Isometry;
 use parry3d::bounding_volume::Aabb;
-use crate::fast_model::{CataNegGroup, GeoTransQuery, GmGeoData, NegInfo};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 #[inline]
 fn load_mesh(id: &str) -> anyhow::Result<PlantMesh> {
@@ -70,10 +70,8 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                 // let z_len = pos_aabb.extents().z as f64;
                 //没有实体的情况，下次就不要再继续计算布尔运算了
                 if pos_manifolds.is_empty() {
-                    update_sql.push_str(&format!(
-                        "update inst_relate set bad_bool=true where in=pe:{};",
-                        b.refno
-                    ));
+                    update_sql
+                        .push_str(&format!("update {} set bad_bool=true;", &b.inst_relate_id));
                     continue;
                 };
                 // dbg!(b.refno);
@@ -81,37 +79,58 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                 let mut pos_manifold = ManifoldRust::batch_boolean(&pos_manifolds, 0);
                 // dbg!(pos_manifold.num_tri());
                 if pos_manifold.num_tri() == 0 {
-                    update_sql.push_str(&format!(
-                        "update inst_relate set bad_bool=true where in=pe:{};",
-                        b.refno
-                    ));
+                    update_sql
+                        .push_str(&format!("update {} set bad_bool=true;", &b.inst_relate_id));
                     continue;
                 };
 
                 let mut neg_manifolds = vec![];
                 for (refno, mut neg_t, negs) in b.neg_ts.into_iter() {
-                    for NegInfo { id, geo_type, para_type, trans, aabb } in negs {
+                    for NegInfo {
+                        id,
+                        geo_type,
+                        para_type,
+                        trans,
+                        aabb,
+                    } in negs
+                    {
                         let Some(mut neg_aabb) = aabb else {
                             continue;
                         };
-                        if para_type == "PrimRevolution" || para_type == "PrimRTorus"{
+                        //如果有关键点在包围盒上了，就需要做缩放
+                        // let intersect = pos_aabb.intersects(&neg_aabb);
+                        if para_type == "PrimRevolution" || para_type == "PrimRTorus" {
                             //如果选装的点在包围盒里，就需要放大？？
                             let m = pos_extent.x.max(pos_extent.y) as f64;
                             let d = (m + 1.0) / m;
-                            let scale_xy= d.min(1.02) as f32;
-                            // dbg!(scale_z);
-                            neg_t.scale.x *= scale_xy;
-                            neg_t.scale.y *= scale_xy;
+                            let scale_xy = d.clamp(1.01, 1.02) as f32;
+                            // dbg!(scale_xy);
+                            let scale_xy = 1.02;
+                            let sim_dist = neg_aabb
+                                .extents()
+                                .xy()
+                                .metric_distance(&pos_aabb.extents().xy());
+                            if sim_dist < 10.0 || b.noun == "FLOOR" {
+                                // dbg!((neg_aabb.extents().xy() - pos_aabb.extents().xy()));
+                                //交给occ 去处理
+                                return;
+                            }
+
+                            // neg_t.scale.x *= scale_xy;
+                            // neg_t.scale.y *= scale_xy;
                         }
                         //看类型给偏差？todo 解决误差的问题
                         //如果AABB 比较接近的情况下，又有旋转体
-                        if b.noun == "FLOOR" || b.noun.contains("WALL") {
-                            if para_type == "PrimExtrusion" || para_type.contains("Cylinder") || para_type == "PrimBox"{
+                        if b.noun == "FLOOR" || b.noun.contains("WALL") || b.noun == "GENSEC" {
+                            if para_type == "PrimExtrusion"
+                                || para_type.contains("Cylinder")
+                                || para_type == "PrimBox"
+                            {
                                 if neg_aabb.extents().z == 0.0 {
                                     continue;
                                 }
                                 let d = (pos_extent.z as f64 + 1.0) / pos_extent.z as f64;
-                                let scale_z= d.min(1.02);
+                                let scale_z = d.min(1.02);
                                 // dbg!(scale_z);
                                 neg_t.scale.z *= scale_z as f32;
                             }
@@ -134,19 +153,16 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                     //保存到文件到dir下
                     if mesh
                         .ser_to_file(&dir_clone.join(format!("{}.mesh", b.refno)))
-                        .is_ok() {
-                        update_sql.push_str(&format!(
-                            "update inst_relate set booled=true where in=pe:{};",
-                            b.refno
-                        ));
+                        .is_ok()
+                    {
+                        update_sql
+                            .push_str(&format!("update {} set bad_bool=true;", &b.inst_relate_id));
                         success = true;
                     }
 
                     if !success {
-                        update_sql.push_str(&format!(
-                            "update inst_relate set bad_bool=true where in=pe:{};",
-                            b.refno
-                        ));
+                        update_sql
+                            .push_str(&format!("update {} set bad_bool=true;", &b.inst_relate_id));
                     }
                 }
                 // dbg!(&update_sql);
@@ -233,7 +249,9 @@ pub async fn apply_cata_neg_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Re
                         continue;
                     };
 
-                    let Ok(mut pos_manifold) = load_manifold(&pos.id, pos.trans.compute_matrix().as_dmat4()) else {
+                    let Ok(mut pos_manifold) =
+                        load_manifold(&pos.id, pos.trans.compute_matrix().as_dmat4())
+                    else {
                         update_sql.push_str(&format!(
                             "update {}<-inst_relate set bad_bool=true;",
                             &g.inst_info_id,

@@ -3,7 +3,7 @@ use std::str::FromStr;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::RefU64;
 use aios_core::pdms_types::UdaMajorType::P;
-use bb8_arangodb::arangors_lite::{AqlQuery, Database};
+
 use dashmap::DashMap;
 
 use once_cell::sync::Lazy;

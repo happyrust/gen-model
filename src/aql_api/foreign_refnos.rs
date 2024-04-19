@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use aios_core::pdms_types::RefU64;
-use bb8_arangodb::arangors_lite::{AqlQuery, Database};
+
 use clap::builder::Str;
 use crate::aql_api::{PdmsRefnoNameAql, PdmsSpreNameAql};
 use crate::consts::{AQL_PDMS_ELES_COLLECTION, PDMS_ELEMENTS_TABLE};
