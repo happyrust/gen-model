@@ -34,7 +34,7 @@ use tracing_subscriber::fmt;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 use aios_database::data_interface::tidb_manager::AiosDBManager;
-use aios_database::database::*;
+use aios_database::versioned_db::database::*;
 use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 #[cfg(feature = "gen_model")]
 use aios_database::fast_model::gen_all_geos_data;
@@ -45,11 +45,7 @@ use aios_database::fast_model::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // fmt::fmt()
-    // .with_span_events(FmtSpan::CLOSE)
-    // .with_target(false)
-    // .with_level(false)
-    // .init();
+
     let db_option: DbOption = get_db_option().clone();
     // 如果启用了日志功能
     if db_option.enable_log {
@@ -76,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
             ),
             WriteLogger::new(LevelFilter::Info, Config::default(), file),
         ])
-        .unwrap();
+            .unwrap();
     }
 
     #[cfg(feature = "local")]
@@ -114,15 +110,17 @@ async fn main() -> anyhow::Result<()> {
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
-    load_aabb_tree().await.unwrap();
-    if db_option.gen_spatial_tree {
-        build_room_relations().await.unwrap();
-    }
+    AiosDBManager::exec_watcher(mgr.clone()).await.expect("exec_watcher error");
 
-    {
-        update_cal_equip().await?;
-        update_cal_bran_component().await?;
-    }
+    // load_aabb_tree().await.unwrap();
+    // if db_option.gen_spatial_tree {
+    //     build_room_relations().await.unwrap();
+    // }
+    //
+    // {
+    //     update_cal_equip().await?;
+    //     update_cal_bran_component().await?;
+    // }
 
     // ///生成ssc 树
     // /// 需要 resource 下文档 ssc_level.xlsx  ssc_room.xlsx 专业分类.xlsx

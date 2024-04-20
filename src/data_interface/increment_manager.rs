@@ -17,6 +17,7 @@ use pdms_io::defines::DbPageBasicInfo;
 use pdms_io::io::PdmsIO;
 use pdms_io::sync::compress::{CompressOptions, execute_compress};
 use pdms_io::watch::PdmsWatcher;
+use petgraph::visit::Walker;
 use rumqttc::QoS;
 use surrealdb::sql::Thing;
 use tokio::fs::create_dir_all;
@@ -39,6 +40,23 @@ pub struct IncrementInfo {
     pub operation: EleOperation,
 }
 
+impl IncrementInfo {
+    #[inline]
+    pub fn is_modified(&self) -> bool {
+        matches!(self.operation, EleOperation::Modified)
+    }
+
+    #[inline]
+    pub fn is_deleted(&self) -> bool {
+        matches!(self.operation, EleOperation::Deleted)
+    }
+
+    #[inline]
+    pub fn is_added(&self) -> bool {
+        matches!(self.operation, EleOperation::Add)
+    }
+}
+
 const JSON_CHUNK_COUNT: usize = 200;
 
 impl AiosDBManager {
@@ -51,10 +69,7 @@ impl AiosDBManager {
         if increment_ranges_map.is_empty() {
             return Ok(false);
         }
-        let mut modify_type_eles_map = HashMap::new();
-        let mut added_type_eles_map = HashMap::new();
-        let mut delete_keys = vec![];
-        let mut delete_maps: HashMap<RefU64, IncrementInfo> = HashMap::new();
+        let mut update_type_eles_map = HashMap::new();
         let mut deleted_refnos_set = HashSet::new();
 
         let mut total_add_len = 0;
@@ -62,62 +77,99 @@ impl AiosDBManager {
         let mut total_deleted_len = 0;
         let mut geo_update_log = IncrGeoUpdateLog::default();
         let mut owner_children_map = IndexMap::new();
-        let mut deleted_owner_set = IndexSet::new();
+        // let mut deleted_owner_set = IndexSet::new();
         let mut all_relate_sqls = vec![];
         let mut has_changed = false;
         //TODO: 如何鉴别只有claim page的变化，没有数据的更新，就不需要执行增量更新
         for (path, (basic_info, last_pageno)) in increment_ranges_map {
             let mut io = PdmsIO::new(path, true);
             io.open()?;
-            let eles = io
+            let eles_map = io
                 .collect_increment_eles(&basic_info, Some(last_pageno))
                 .await?;
-            dbg!(eles.len());
-            if eles.is_empty() {
+            dbg!(eles_map.len());
+            if eles_map.is_empty() {
                 continue;
             }
-            for ele in eles {
+            //批量检测是否存在这些eles
+            let mut exist_refnos = HashSet::new();
+            let pes = eles_map.keys().map(|x| x.to_pe_key()).join(",");
+            let mut resp =
+                SUL_DB.query(format!("SELECT VALUE id FROM [{pes}];")).await?;
+            // dbg!(&resp);
+            let refnos: Vec<RefU64> = resp.take(0).unwrap();
+            exist_refnos.extend(refnos);
+            for (&refno, ele) in &eles_map {
                 let mut attmap: NamedAttrMap = ele.whole_attmap.merge().into();
                 attmap.set_e3d_version(ele.version as _);
                 let owner = attmap.get_owner();
-                let refno = ele.refno;
                 let type_name = attmap.get_type();
                 let type_name = type_name.as_str();
                 has_changed = true;
                 // dbg!(ele.refno);
                 // dbg!(&attmap);
                 let mut ele_op = EleOperation::Modified;
-                // 删除只是owner的children变化了，但是需要记录删除的节点
-                // 只要有返回，说明节点存在，返回为空，说明是叶子节点
-                if let Ok(old_refnos) = aios_core::get_children_refnos(ele.refno).await {
-                    //检查是否有删除的
-                    old_refnos
-                        .iter()
-                        .filter(|x| !ele.children.contains(*x))
-                        .for_each(|&x| {
-                            let key = x.hash_with_another_refno(ele.refno);
-                            delete_keys.push(key.to_string());
-                            deleted_refnos_set.insert(x);
-                            //执行的是父节点的操作
-                            ele_op = EleOperation::Deleted;
-                            // dbg!(x);
-                            delete_maps.entry(x).or_insert(IncrementInfo {
-                                refno: x,
-                                db_no: basic_info.pdms_header.db_num,
-                                attr: Default::default(),
-                                children: Default::default(),
-                                operation: EleOperation::Deleted,
-                            });
-                            //方便处理删除后模型更新的情况
-                            deleted_owner_set.insert(owner);
-                            // owner_children_map.entry(owner).or_insert_with(HashSet::new).insert(refno);
-                        });
+                if exist_refnos.contains(&ele.refno) {
+                    let old_children = aios_core::get_children_refnos(ele.refno).await?;
+                    for (i, child) in old_children.into_iter().enumerate() {
+                        if !ele.children.contains(&child) {
+                            //index current delete refno, owner refno
+                            let t = (i, child, refno);
+                            println!("Delete: {:?}", t);
+                            deleted_refnos_set.insert(t);
+                            total_deleted_len += 1;
+                        }
+                    }
+
+                    if ele_op == EleOperation::Modified {
+                        total_modify_len += 1;
+                    }
                 } else {
+                    total_add_len += 1;
                     ele_op = EleOperation::Add;
+                    let mut index = 0;
+                    let mut is_last_add = false;
+                    if let Some(owner_ele) = eles_map.get(&owner) {
+                        index = owner_ele.children.iter()
+                            .position(|&x| x == refno)
+                            .unwrap_or(0);
+                        is_last_add = index == owner_ele.children.len() - 1;
+
+                        let cp = refno.to_pe_key();
+                        let op = owner.to_pe_key();
+                        //如果是最后一个，啥子都不用管，直接插入到最后
+                        if is_last_add {
+                            all_relate_sqls.push(format!(
+                                "RELATE {0}->pe_owner:[{1}, {index}]->{1};",
+                                cp,
+                                op,
+                            ));
+                        } else {
+                            //如果不是最后添加的，需要删除这个owner，重新添加所有owner关系
+                            all_relate_sqls.push(
+                                format!("delete pe_owner:[{0}, 0]..[{0}, {1}];", &op, owner_ele.children.len())
+                            );
+                            let relate_sqls = owner_ele.children
+                                .iter()
+                                .enumerate()
+                                .map(|(i, child)| {
+                                    let cp = child.to_pe_key();
+                                    format!(
+                                        "RELATE {0}->pe_owner:[{1}, {i}]->{1};",
+                                        cp,
+                                        op,
+                                    )
+                                })
+                                .collect::<Vec<String>>();
+                            all_relate_sqls.extend_from_slice(&relate_sqls);
+                        }
+                    }
+                };
+                #[cfg(debug_assertions)]
+                {
+                    dbg!((refno, ele_op));
                 }
 
-                //暂时处理好新增的情况
-                //按照owner 先排序
                 if PRIMITIVE_NOUN_NAMES.contains(&type_name) {
                     geo_update_log.prim_refnos.insert(refno);
                 } else if GNERAL_LOOP_NOUN_NAMES.contains(&type_name) {
@@ -136,34 +188,6 @@ impl AiosDBManager {
                         .or_insert_with(HashSet::new)
                         .insert(refno);
                 }
-
-                //创建relate关系
-                if ele_op == EleOperation::Deleted {
-                    //todo 模型可以不删，只有负实体的依赖需要更新模型
-                    //todo 模型压缩处理
-                    //如果是负实体这种发生修改，需要更新owner
-                    //如果有cref这些，
-                    //存储删除的语句
-                } else {
-                    //todo 添加overwrite模式，覆盖之前的数据
-                    //提供一个channel传入，在指定的地方执行
-                    //需要添加索引
-                    let relate_sqls = ele
-                        .children
-                        .iter()
-                        .enumerate()
-                        .map(|(i, child)| {
-                            format!(
-                                "RELATE pe:{}->pe_owner->pe:{} set order_num = {}",
-                                child.to_string(),
-                                refno.to_string(),
-                                i
-                            )
-                        })
-                        .collect::<Vec<String>>();
-                    all_relate_sqls.extend_from_slice(&relate_sqls);
-                }
-
                 let increment_info = IncrementInfo {
                     refno,
                     db_no: basic_info.pdms_header.db_num,
@@ -171,32 +195,13 @@ impl AiosDBManager {
                     children: ele.children.clone(),
                     operation: ele_op,
                 };
-                if ele_op == EleOperation::Modified {
-                    modify_type_eles_map
+                if ele_op == EleOperation::Modified ||
+                    ele_op == EleOperation::Add {
+                    update_type_eles_map
                         .entry(ele.noun)
                         .or_insert(Vec::new())
                         .push(increment_info);
-                } else if ele_op == EleOperation::Add {
-                    added_type_eles_map
-                        .entry(ele.noun)
-                        .or_insert(Vec::new())
-                        .push(increment_info);
-                }
-
-                match ele_op {
-                    EleOperation::None => {}
-                    EleOperation::Add => {
-                        dbg!(ele.refno);
-                        total_add_len += 1;
-                    }
-                    EleOperation::Modified => {
-                        total_modify_len += 1;
-                    }
-                    EleOperation::Deleted => {
-                        dbg!(ele.refno);
-                        total_deleted_len += 1;
-                    }
-                }
+                };
             }
         }
         //如果没有发生变化，直接返回
@@ -207,9 +212,9 @@ impl AiosDBManager {
         //可以采用channel模式，发送更新的数据，然后更新数据
         //保存新增数据
         let mut total_time = Instant::now();
-        let mut add_join_set = tokio::task::JoinSet::new();
+        let mut sql_join_set = tokio::task::JoinSet::new();
         //新增模型的处理
-        for (noun, v) in added_type_eles_map {
+        for (noun, v) in update_type_eles_map {
             let type_name = db1_dehash(noun as _);
             if type_name.is_empty() {
                 continue;
@@ -217,12 +222,12 @@ impl AiosDBManager {
             let type_name = type_name.as_str();
 
             for chunk in v.chunks(JSON_CHUNK_COUNT) {
-                let mut pe_json_vec = vec![];
-                let mut att_json_vec = vec![];
+                let mut insert_pe_jsons_str = String::new();
+                let mut update_pe_sql_str = String::new();
+                let mut update_att_sql_str = String::new();
                 for k in chunk {
                     let refno = k.refno;
                     let pe = SPdmsElement {
-                        id: refno.to_string(),
                         refno,
                         owner: k.attr.get_owner(),
                         name: k.attr.get_name_or_default(),
@@ -236,92 +241,64 @@ impl AiosDBManager {
                         deleted: false,
                     };
 
-                    pe_json_vec.push(pe.gen_sur_json());
-                    if let Some(json) = k.attr.gen_sur_json() {
-                        att_json_vec.push(json);
+                    let json = pe.gen_sur_json();
+                    let att_json = k.attr.gen_sur_json();
+                    if k.is_modified() {
+                        update_pe_sql_str.push_str(format!("UPDATE {} CONTENT {};", refno.to_pe_key(), json).as_str());
+                    } else {
+                        insert_pe_jsons_str.push_str(&json);
+                        insert_pe_jsons_str.push_str(",");
+                    }
+                    //不管怎样，update和add，都用update的方式
+                    if let Some(att_json) = att_json {
+                        update_att_sql_str.push_str(format!("UPDATE {} CONTENT {};", refno.to_table_key(&type_name), att_json).as_str());
                     }
                 }
-                //对新增的pe处理
-                let pe_sql = format!("INSERT IGNORE INTO pe [{}]", pe_json_vec.join(","));
+                let pe_sql = if insert_pe_jsons_str.is_empty() {
+                    update_pe_sql_str
+                } else {
+                    format!("INSERT IGNORE INTO pe [{}]; {update_pe_sql_str}", insert_pe_jsons_str)
+                };
+                if !update_att_sql_str.is_empty() {
+                    sql_join_set.spawn(async move {
+                        SUL_DB.query(update_att_sql_str).await.unwrap();
+                    });
+                };
                 //使用surreal 保存NamedAttrMap
-                add_join_set.spawn(async move {
-                    SUL_DB.query(pe_sql).await.unwrap();
-                });
-
-                //对新增的属性处理
-                let attmap_sql = format!(
-                    "INSERT IGNORE INTO {} [{}]",
-                    &type_name,
-                    att_json_vec.join(",")
-                );
-                // println!("attmap sql: {}", &attmap_sql);
-                //使用surreal 保存NamedAttrMap
-                add_join_set.spawn(async move {
-                    SUL_DB.query(attmap_sql).await.unwrap();
-                });
+                if !pe_sql.is_empty() {
+                    sql_join_set.spawn(async move {
+                        SUL_DB.query(pe_sql).await.unwrap();
+                    });
+                }
             }
         }
         //等待保存任务完成
-        while let Some(_) = add_join_set.join_next().await {}
+        while let Some(_) = sql_join_set.join_next().await {}
 
         let mut del_join_set = tokio::task::JoinSet::new();
         //删除模型的处理
         for chunk in &deleted_refnos_set.iter().chunks(JSON_CHUNK_COUNT) {
-            let mut del_sqls = chunk
-                .into_iter()
-                .map(|k| format!("update pe:{} set deleted = true;", k))
-                .collect::<Vec<_>>();
-            // dbg!(&del_sqls);
+            let pes = chunk.into_iter().map(|(i, refno, owner)| {
+                // format!("pe_owner:[{0}, {i}]", owner.to_pe_key())
+                refno.to_pe_key()
+            }).join(",");
+            // update pe:{} set deleted = true;
+            let del_sql = format!("delete select id from array::flatten([{}]->pe_owner);", &pes);
+            // let del_sql = format!("delete [{}];", pes);
+            dbg!(&del_sql);
             del_join_set.spawn(async move {
-                SUL_DB.query(del_sqls.join(";")).await.unwrap();
+                SUL_DB.query(del_sql).await.unwrap();
             });
         }
         while let Some(_) = del_join_set.join_next().await {}
-
-        let mut modify_join_set = tokio::task::JoinSet::new();
-        //修改模型的处理
-        for (noun, v) in modify_type_eles_map {
-            let type_name = db1_dehash(noun as _);
-            if type_name.is_empty() {
-                continue;
-            }
-            let type_name = type_name.as_str();
-
-            for chunk in v.chunks(JSON_CHUNK_COUNT) {
-                let mut update_vec = vec![];
-                for k in chunk {
-                    let refno = k.refno;
-                    update_vec.push(format!(
-                        "update pe:{} set name = '{}'",
-                        refno,
-                        k.attr.get_name_or_default()
-                    ));
-                    if let Some(json) = k.attr.gen_sur_json_exclude(&["id"]) {
-                        // println!("{}", &json);
-                        update_vec.push(format!(
-                            "update {}:{} content {}",
-                            k.attr.get_type_str(),
-                            refno,
-                            json
-                        ));
-                    }
-                }
-                // dbg!(&update_vec);
-                //使用surreal 保存NamedAttrMap
-                modify_join_set.spawn(async move {
-                    SUL_DB.query(update_vec.join(";")).await.unwrap();
-                });
-            }
-        }
-        //等待保存任务完成
-        while let Some(_) = modify_join_set.join_next().await {}
 
         let mut relate_join_set = tokio::task::JoinSet::new();
         let mut time = Instant::now();
         dbg!(all_relate_sqls.len());
         let mut chunks = all_relate_sqls.chunks(100);
         for mut s in chunks {
-            let sql = s.into_iter().join(";");
+            let sql = s.into_iter().join("");
+            dbg!(&sql);
             relate_join_set.spawn(async move {
                 SUL_DB.query(sql).await.unwrap();
             });
@@ -369,7 +346,7 @@ impl AiosDBManager {
                 let dir_entry = entry.unwrap();
                 let path = dir_entry.path();
                 let file_name = path.file_stem().unwrap().to_str().unwrap();
-                //|| !file_name.ends_with("0001") 
+                //|| !file_name.ends_with("0001")
                 if path.is_dir() {
                     continue;
                 }
@@ -460,7 +437,7 @@ impl AiosDBManager {
                         notify::EventKind::Modify(notify::event::ModifyKind::Data(_)) 
                         | notify::EventKind::Modify(notify::event::ModifyKind::Any) 
                         | notify::EventKind::Create(notify::event::CreateKind::File) | notify::EventKind::Remove(notify::event::RemoveKind::File));
-                    if !data_changed{
+                    if !data_changed {
                         continue;
                     }
                     //后面用派发任务的方式,不要放在这里阻塞
@@ -483,7 +460,7 @@ impl AiosDBManager {
                             }
                         }
                         // dbg!(&params);
-                        if params.is_empty(){
+                        if params.is_empty() {
                             continue;
                         }
                         let mut notify_file_names = vec![];
@@ -495,7 +472,7 @@ impl AiosDBManager {
                                 //执行没问题了，再更新当前的版本记录，headers直接存本地json
                                 for (path, new_header) in new_headers {
                                     let file_name = path.file_stem().unwrap().to_str().unwrap();
-                                    if path.is_dir(){
+                                    if path.is_dir() {
                                         continue;
                                     }
                                     dbg!(&file_name);
@@ -504,7 +481,7 @@ impl AiosDBManager {
                                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
                                         dbg!((old.pdms_header.page_no, new_header.pdms_header.page_no));
                                         //未发生修改，直接跳过
-                                        if old.pdms_header.page_no >= new_header.pdms_header.page_no{
+                                        if old.pdms_header.page_no >= new_header.pdms_header.page_no {
                                             continue;
                                         }
                                         *old.value_mut() = new_header;
@@ -532,7 +509,7 @@ impl AiosDBManager {
                                             &file_hash
                                         );
                                         // dbg!(&sql);
-                                        let mut response  = SUL_DB
+                                        let mut response = SUL_DB
                                             .query(&sql)
                                             .await.unwrap();
                                         // dbg!(&response);
@@ -546,7 +523,7 @@ impl AiosDBManager {
                                     }
                                 }
                                 //now save the watch.json
-                                self.watcher.save(None);
+                                self.watcher.save(None).expect("save watch.json failed");
                             }
                             Ok(false) => {
                                 println!("{:?} 文件发生修改，但是没有发生增量更新。", &event.paths);
@@ -569,11 +546,11 @@ impl AiosDBManager {
                             .unwrap();
                         //todo 检查是否只是发生了claim page的变化，如果只是claim修改，是需要每次都同步？
                         //会导致出现循环
-                        self.mqtt_client
-                            .clone()
-                            .publish("Sync/E3d", QoS::ExactlyOnce, true, payload)
-                            .await
-                            .unwrap();
+                        // self.mqtt_client
+                        //     .clone()
+                        //     .publish("Sync/E3d", QoS::ExactlyOnce, true, payload)
+                        //     .await
+                        //     .unwrap();
                     }
                 }
                 Err(e) => println!("watch error: {:?}", e),

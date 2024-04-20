@@ -26,14 +26,15 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
+use parse_pdms_db::parse::DbBasicData;
 use tokio::time::Instant;
 
 /// 保存element数据到版本管理
-pub async fn save_pe_to_surreal(
+pub async fn save_pes(
     total_attr_map: &DashMap<RefU64, NamedAttrMap>,
     db_num: i32,
-    children_map: &HashMap<RefU64, Vec<(RefU64, String)>>,
     option: &DbOption,
+    output: flume::Sender<String>,
 ) -> anyhow::Result<()> {
     use itertools::Itertools;
     let keys = total_attr_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
@@ -47,120 +48,94 @@ pub async fn save_pe_to_surreal(
         })
         .unwrap_or_default();
     let is_debug = !debug_refnos.is_empty();
-    let mut model_chunks = keys
-        .par_chunks(option.pe_chunk as _)
-        .map(|chunk| {
-            let mut model_chunk = vec![];
-            for &refno in chunk {
-                if is_debug && !debug_refnos.contains(&refno) {
-                    continue;
-                }
-                let att_map = total_attr_map.get(&refno).unwrap();
-                let owner = att_map.get_refno_by_att_or_default("OWNER");
-                let noun = att_map.get_type();
-                let ele = SPdmsElement {
-                    id: refno.to_string(),
-                    refno,
-                    owner,
-                    name: att_map.get_string_or_default("NAME"),
-                    noun,
-                    dbnum: db_num,
-                    cata_hash: att_map.cal_cata_hash(),
-                    status_tag: None,
-                    version_tag: None,
-                    e3d_version: att_map.get_e3d_version(),
-                    lock: false,
-                    deleted: false,
-                };
 
-                model_chunk.push(ele);
+    let mut exist_refnos: HashSet<RefU64> = HashSet::new();
+    for chunk in keys.chunks(option.pe_chunk as _) {
+        //是否需要覆盖保存数据库
+        if option.replace_dbs {
+            let pes = chunk.iter().map(|x| x.to_pe_key()).join(",");
+            let mut resp =
+                SUL_DB.query(format!("SELECT VALUE id FROM [{pes}];")).await?;
+            // dbg!(&resp);
+            let refnos: Vec<RefU64> = resp.take(0).unwrap();
+            exist_refnos.extend(refnos);
+            if !exist_refnos.is_empty() {
+                // dbg!(exist_refnos.len());
             }
-            model_chunk
-        })
-        .collect::<Vec<_>>();
-
-    let mut time = tokio::time::Instant::now();
-    let mut join_set = tokio::task::JoinSet::new();
-    for models in model_chunks {
-        let mut jsons_str = vec![];
-        for m in models {
-            jsons_str.push(m.gen_sur_json());
         }
-        let sql = format!("INSERT IGNORE INTO pe [{}]", jsons_str.join(","));
-        //手动修改，替换掉""
-        join_set.spawn(async move {
-            match SUL_DB.query(sql.clone()).await {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("save pe to surreal error: {}", e);
-                    error!("{}", sql);
-                }
+        let mut insert_jsons_str = String::new();
+        let mut update_sql_str = String::new();
+        for &refno in chunk {
+            if is_debug && !debug_refnos.contains(&refno) {
+                continue;
             }
-        });
+            let att_map = total_attr_map.get(&refno).unwrap();
+            let owner = att_map.get_refno_by_att_or_default("OWNER");
+            let noun = att_map.get_type();
+            let ele = SPdmsElement {
+                refno,
+                owner,
+                name: att_map.get_string_or_default("NAME"),
+                noun,
+                dbnum: db_num,
+                cata_hash: att_map.cal_cata_hash(),
+                status_tag: None,
+                version_tag: None,
+                e3d_version: att_map.get_e3d_version(),
+                lock: false,
+                deleted: false,
+            };
+            let json = ele.gen_sur_json();
+            if exist_refnos.contains(&refno) {
+                update_sql_str.push_str(format!("UPDATE {} CONTENT {};", refno.to_pe_key(), json).as_str());
+                // dbg!(&update_sql_str);
+            } else {
+                insert_jsons_str.push_str(&json);
+                insert_jsons_str.push_str(",");
+            }
+        }
+        let sql = format!("INSERT IGNORE INTO pe [{}]; {update_sql_str}", insert_jsons_str);
+        // println!("开始发送: {}", chunk.len());
+        output.send(sql).expect("send pes error");
     }
-    while let Some(_) = join_set.join_next().await {}
+    Ok(())
+}
 
-    println!("Save pes task costs {} s", time.elapsed().as_secs_f32());
 
-    let mut relate_join_set = tokio::task::JoinSet::new();
-    // 使用owner创建relate关系
+pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<String>){
+    //todo 增加删除已有owner的逻辑
     let mut all_relate_sqls = vec![];
-    time = Instant::now();
-    //todo 按需要保存pe_owner 关系？
-    for kv in children_map {
+    for kv in &db_basic.children_map {
         let owner = kv.0;
         let children = kv.1;
         if children.is_empty() {
             continue;
         }
-        // if is_debug{
-        //     let found = children.iter().any(|(c, _)| debug_refnos.contains(c));
-        //     if !found {
-        //         continue;
-        //     }
-        // }
-        // let relate_sql = format!(
-        //     "RELATE [{}]->pe_owner->{};",
-        //     children.iter().map(|(c, _)| c.to_pe_key()).join(","),
-        //     owner.to_pe_key()
-        // );
-        // all_relate_sqls.push(relate_sql);
 
-        //use order_num
         let relate_sqls = children
             .iter()
             .enumerate()
             .map(|(i, (child, _))| {
+                let cp = child.to_pe_key();
+                let op = owner.to_pe_key();
                 format!(
-                    "RELATE pe:{}->pe_owner->pe:{} set order_num = {};",
-                    child.to_string(),
-                    owner.to_string(),
-                    i
+                    "RELATE {0}->pe_owner:[{1}, {i}]->{1};",
+                    cp,
+                    op,
                 )
             })
             .collect::<Vec<String>>();
         all_relate_sqls.extend_from_slice(&relate_sqls);
+        if all_relate_sqls.len() >= 1000 {
+            let sql = all_relate_sqls.join("");
+            all_relate_sqls.clear();
+            // dbg!(sql.len());
+            output.send(sql).expect("send pe_relates error");
+            // break;
+        }
     }
-    // dbg!(&all_relate_sqls);
-    let mut chunks = all_relate_sqls.chunks(option.pe_chunk as _);
-    for mut s in chunks {
-        // let mut sql = "BEGIN TRANSACTION;".to_string();
-        let mut sql = "".to_string();
-        // let sql = s.into_iter().join(";");
-        sql.push_str(&s.into_iter().join(""));
-        // sql.push_str("COMMIT TRANSACTION;");
-        // println!("sql is: {}", &sql);
-        relate_join_set.spawn(async move {
-            match SUL_DB.query(sql.clone()).await {
-                Ok(_) => {}
-                Err(e) => {
-                    error!("relate pe to surreal error: {}", e);
-                    error!("{}", sql);
-                }
-            }
-        });
+    if !all_relate_sqls.is_empty() {
+        let sql = all_relate_sqls.join("");
+        output.send(sql).expect("send pe_relates error");
     }
-    while let Some(_) = relate_join_set.join_next().await {}
-    println!("Relate pes task costs {} s", time.elapsed().as_secs_f32());
-    Ok(())
 }

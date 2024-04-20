@@ -26,7 +26,6 @@ use anyhow::anyhow;
 use sled::IVec;
 
 pub mod tables;
-pub mod database;
 pub mod consts;
 // pub mod api;
 // pub mod aql_api;
