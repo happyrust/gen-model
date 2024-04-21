@@ -34,7 +34,6 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
     let sql = r#"
         select
              in as refno,
-             id as inst_relate_id,
              in.noun as noun,
              world_trans.d as wt,
              aabb.d as aabb,
@@ -69,9 +68,10 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                 // let y_len = pos_aabb.extents().z as f64;
                 // let z_len = pos_aabb.extents().z as f64;
                 //没有实体的情况，下次就不要再继续计算布尔运算了
+                let inst_relate_id = b.refno.to_table_key("inst_relate");
                 if pos_manifolds.is_empty() {
                     update_sql
-                        .push_str(&format!("update {} set bad_bool=true;", &b.inst_relate_id));
+                        .push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
                     continue;
                 };
                 // dbg!(b.refno);
@@ -80,7 +80,7 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                 // dbg!(pos_manifold.num_tri());
                 if pos_manifold.num_tri() == 0 {
                     update_sql
-                        .push_str(&format!("update {} set bad_bool=true;", &b.inst_relate_id));
+                        .push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
                     continue;
                 };
 
@@ -148,7 +148,7 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                     let mut success = false;
                     let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
                     let mesh = PlantMesh::from(&final_manifold);
-                    #[cfg(debug_assertions)]
+                    #[cfg(feature="debug_model")]
                     mesh.export_obj(false, &format!("{}.obj", b.refno));
                     //保存到文件到dir下
                     if mesh
@@ -156,13 +156,13 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                         .is_ok()
                     {
                         update_sql
-                            .push_str(&format!("update {} set bad_bool=true;", &b.inst_relate_id));
+                            .push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
                         success = true;
                     }
 
                     if !success {
                         update_sql
-                            .push_str(&format!("update {} set bad_bool=true;", &b.inst_relate_id));
+                            .push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
                     }
                 }
                 // dbg!(&update_sql);
@@ -195,7 +195,7 @@ pub async fn apply_cata_neg_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Re
     }
 
     let sql = r#"
-        select in as refno, (->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
+        select in as refno, <string>(->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
         from ->inst_info->geo_relate where visible and !out.bad and cata_neg!=none) as boolean_group from inst_relate where (->inst_info)[0]!=none and has_cata_neg and !bad_bool and !booled
     "#;
     let mut response = SUL_DB.query(sql).await?;
@@ -222,7 +222,7 @@ pub async fn apply_cata_neg_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Re
                 // dbg!(g.refno);
                 let sql = format!(
                     r#"
-                    select meta::id(out) as id, geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id
+                    select <string> meta::id(out) as id, geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id
                     from {}->inst_relate->inst_info->geo_relate
                     where visible and !out.bad and geom_refno in [{}]  and out.aabb!=none and out.param!=none"#,
                     g.refno.to_pe_key(),
@@ -274,7 +274,7 @@ pub async fn apply_cata_neg_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Re
                         let new_id = g.refno.hash_with_another_refno(bg[0]);
                         let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
                         let mesh = PlantMesh::from(&final_manifold);
-                        #[cfg(debug_assertions)]
+                        #[cfg(feature="debug_model")]
                         mesh.export_obj(false, &format!("{}.obj", g.refno));
                         //保存到文件到dir下
                         if mesh
@@ -287,7 +287,7 @@ pub async fn apply_cata_neg_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Re
                             ));
                             // 有索引的关系，所以geom_refno需要点变化
                             update_sql.push_str(&format!(
-                                "relate {}->geo_relate->inst_geo:⟨{}⟩ set geom_refno=pe:{}, geo_type='Pos', trans=trans:⟨0⟩;",
+                                "relate {}->geo_relate->inst_geo:⟨{}⟩ set geom_refno=pe:⟨{}⟩, geo_type='Pos', trans=trans:⟨0⟩;",
                                 &g.inst_info_id,
                                 new_id,
                                 format!("{}_b", bg[0]),

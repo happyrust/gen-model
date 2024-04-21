@@ -5,6 +5,7 @@ use aios_core::tool::db_tool::db1_dehash;
 use aios_core::types::*;
 use aios_core::SUL_DB;
 use dashmap::{DashMap, DashSet};
+use futures::StreamExt;
 use itertools::Itertools;
 use parse_pdms_db::parse::*;
 #[cfg(feature = "sql")]
@@ -21,7 +22,6 @@ use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
-use futures::StreamExt;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 // use std::time::Instant;
@@ -50,8 +50,8 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-        .execute(&pool)
-        .await?;
+    .execute(&pool)
+    .await?;
     Ok(())
 }
 
@@ -64,9 +64,9 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
             "CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};",
             project_name
         )
-            .as_str(),
+        .as_str(),
     )
-        .await?;
+    .await?;
 
     //todo 改成一对多的实现
     let mut pool =
@@ -147,7 +147,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 backend.clone(),
                 format!("CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8;"),
             ))
-                .await?;
+            .await?;
         }
 
         let debug_refnos: Vec<RefU64> = db_option
@@ -163,11 +163,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         let is_debug = !debug_refnos.is_empty();
 
         if is_debug || (!db_option.incr_sync) {
-            match sync_total_async_threaded(
-                &db_option,
-                project,
-                &["DICT", "SYST", "GLB", "GLOB"],
-            )
+            match sync_total_async_threaded(&db_option, project, &["DICT", "SYST", "GLB", "GLOB"])
                 .await
             {
                 Ok(_) => {
@@ -212,7 +208,8 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
             match &e {
                 Error::Database(error) => {
                     //index already exist
-                    if error.code() == Some(Cow::from("42000")) {} else {
+                    if error.code() == Some(Cow::from("42000")) {
+                    } else {
                         dbg!(sql);
                     }
                 }
@@ -236,7 +233,7 @@ pub async fn sync_total_async_threaded(
     let db_option_arc = Arc::new(db_option.clone()); // 创建一个Arc对象，表示数据库选项
     let mut data_dir = Path::new(&db_option_arc.project_path); // 创建一个Path对象，表示数据目录的路径
     let project_dir = data_dir.join(&project); // 创建一个Path对象，表示项目目录的路径
-    // let batch_insert_sql_cnt = db_option_arc.batch_insert_sql_cnt as usize; // 获取批量插入SQL数量
+                                               // let batch_insert_sql_cnt = db_option_arc.batch_insert_sql_cnt as usize; // 获取批量插入SQL数量
 
     if !Path::new(&project_dir).exists() {
         // 如果项目目录不存在，则抛出错误
@@ -276,7 +273,6 @@ pub async fn sync_total_async_threaded(
     const CHUNK_SIZE: usize = 10000;
     let (sender, receiver) = flume::bounded(CHUNK_SIZE);
 
-
     let mut all_handles = vec![];
     for i in 0..60 {
         let receiver: flume::Receiver<String> = receiver.clone();
@@ -297,23 +293,33 @@ pub async fn sync_total_async_threaded(
         all_handles.push(insert_handle);
     }
 
-    let db_types_clone = db_types.into_iter().map(|&x| x.to_string()).collect::<Vec<_>>();
+    let db_types_clone = db_types
+        .into_iter()
+        .map(|&x| x.to_string())
+        .collect::<Vec<_>>();
+    let is_sys_parse = db_types_clone.contains(&"SYST".to_string());
     let parse_handle = tokio::spawn(async move {
-        let mut handles = vec![];
+        // let mut handles = vec![];
         //todo 按照文件大小排序，只有小于多少的能开启多线程，模型一大就不合适了
         for path in children_files {
             let file_name = path.file_name().unwrap().to_str().unwrap().to_string(); // 获取文件名
 
-            if db_option_arc.included_db_files.is_none()
-                || db_option_arc.included_db_files.as_ref().unwrap().contains(&file_name)
+            let mut time = tokio::time::Instant::now();
+            if is_sys_parse
+                || db_option_arc.included_db_files.is_none()
+                || db_option_arc
+                    .included_db_files
+                    .as_ref()
+                    .unwrap()
+                    .contains(&file_name)
             {
                 {
                     let mut file = File::open(&path).await.unwrap();
                     let mut buf = vec![0u8; 60];
                     file.read_exact(&mut buf).await.unwrap();
                     let (db_type, file_version, db_no) = parse_file_basic_info(&buf);
-                    #[cfg(debug_assertions)]
-                    dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
+                    // #[cfg(debug_assertions)]
+                    // dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
                     if !db_types_clone.contains(&db_type) {
                         continue;
                     }
@@ -322,9 +328,13 @@ pub async fn sync_total_async_threaded(
                 // 如果需要解析的文件列表为空或包含当前文件名，则执行以下代码块
                 println!("path={:?}", &file_name); // 打印文件路径
                 let project_name = project.as_str().to_string(); // 获取项目名称的字符串
-                let mut db_basic =
-                    parse_file_db_basic_data(&path, &None, &file_name, project_name.clone().as_str())
-                        .unwrap_or_default();
+                let mut db_basic = parse_file_db_basic_data(
+                    &path,
+                    &None,
+                    &file_name,
+                    project_name.clone().as_str(),
+                )
+                .unwrap_or_default();
                 dbg!(db_basic.children_map.len());
                 let all_refnos = db_basic.children_map.keys().cloned().collect::<Vec<_>>();
                 let db_basic = Arc::new(db_basic);
@@ -347,6 +357,7 @@ pub async fn sync_total_async_threaded(
                 }
 
                 let debug_refnos = Arc::new(debug_refnos);
+                //按照SITE划分？
                 for (chunk_index, chunk) in all_refnos.chunks(chunk_size).enumerate() {
                     let sender = sender.clone();
                     let chunk_refnos = chunk.to_vec();
@@ -356,26 +367,24 @@ pub async fn sync_total_async_threaded(
                     let project_name_clone = project_name.clone();
                     let db_basic_clone = db_basic.clone();
                     let debug_refnos = debug_refnos.clone();
-                    let handle = tokio::spawn(async move {
+                    // let handle = tokio::spawn(async move {
                         if let Ok(PdmsDbData {
-                                      total_attr_map,
-                                      type_ele_map,
-                                      refno_info_map,
-                                      db_type,
-                                      db_no,
-                                      version,
-                                      foreign_refnos_map,
-                                      ..
-                                  }) = parse_file_with_chunk(
+                            total_attr_map,
+                            type_ele_map,
+                            db_type,
+                            db_no,
+                            version,
+                            foreign_refnos_map,
+                            ..
+                        }) = parse_file_with_chunk(
                             db_basic_clone.clone(),
                             &None,
                             &file_name_clone,
                             project_name_clone.as_str(),
                             &chunk_refnos_clone,
                         )
-                            .await
+                        .await
                         {
-                            // println!("Processing {} chunk index: {chunk_index}", &file_name_clone);
                             //类型暂时不多线程
                             let total_attr_map_arc = Arc::new(total_attr_map);
                             //开始执行保存数据
@@ -383,18 +392,15 @@ pub async fn sync_total_async_threaded(
                             let sender_clone = sender.clone();
                             if !is_debug {
                                 save_pes(
+                                    &db_basic_clone,
                                     &total_attr_map_arc,
                                     db_no as i32,
                                     &db_option_clone,
                                     sender,
                                 )
-                                    .await
-                                    .expect("save pe to surreal failed");
+                                .await
+                                .expect("save pe to surreal failed");
                             }
-                            // dbg!("开始保存属性数据");
-
-                            // let mut join_set = tokio::task::JoinSet::new();
-                            // let mut save_atts_time = Instant::now();
                             for kv in type_ele_map.iter() {
                                 let noun: i32 = *kv.key() as _;
                                 let type_name = db1_dehash(noun as _);
@@ -402,7 +408,9 @@ pub async fn sync_total_async_threaded(
                                     continue;
                                 }
                                 //UDA 还是要单独存，不然数据很容易混乱
-                                for refnos in &kv.value().iter().chunks(db_option_clone.att_chunk as _) {
+                                for refnos in
+                                    &kv.value().iter().chunks(db_option_clone.att_chunk as _)
+                                {
                                     let mut json_vec = vec![];
                                     let mut uda_json_vec = vec![];
                                     for refno in refnos {
@@ -424,7 +432,6 @@ pub async fn sync_total_async_threaded(
                                         uda_json_vec.push(json);
                                     }
                                     if !json_vec.is_empty() {
-                                        let mut sql_string = "".to_string();
                                         let sql = format!(
                                             "INSERT IGNORE INTO {} [{}]",
                                             &type_name,
@@ -443,24 +450,22 @@ pub async fn sync_total_async_threaded(
                                 }
                             }
                         }
-                    });
-                    handles.push(handle);
+                    // });
+                    // handles.push(handle);
                 }
             }
             //单个文件多线程
-            if !handles.is_empty() {
-                dbg!(handles.len());
-                let mut time = tokio::time::Instant::now();
-                futures::future::join_all(take(&mut handles)).await;
-                println!("解析任务完成, 耗时: {} s", time.elapsed().as_secs_f32());
-            }
-
-            // Ok::<(), Box<dyn std::error::Error>>(())
+            // if !handles.is_empty() {
+            //     dbg!(handles.len());
+            //
+            //     futures::future::join_all(take(&mut handles)).await;
+            //
+            // }
+            println!("解析任务完成, 耗时: {} s", time.elapsed().as_secs_f32());
             //重新更新一下database info，有可能发生了更新
             // let db_info = get_default_pdms_db_info();
             // let _ = db_info.save(None);
         }
-
     });
     all_handles.push(parse_handle);
     futures::future::join_all(take(&mut all_handles)).await;

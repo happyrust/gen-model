@@ -9,6 +9,7 @@ truck = []
 local = []
 ws = []
 debug_obj_export = []
+debug_model = []
 mqtt = []
 viewer = []                                      #是否开启视图
 gen_model = ["aios_core/gen_model"]

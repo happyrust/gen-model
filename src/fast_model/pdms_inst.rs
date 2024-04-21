@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use aios_core::geometry::ShapeInstancesData;
 use aios_core::pdms_types::*;
-use aios_core::SUL_DB;
 use aios_core::types::*;
+use aios_core::SUL_DB;
 use bevy_transform::prelude::Transform;
 use itertools::Itertools;
 
@@ -24,7 +24,7 @@ pub async fn save_instance_data(
     //标识单位矩阵
     transform_map.insert(0, serde_json::to_string(&Transform::IDENTITY).unwrap());
     let mut param_map = HashMap::new();
-    let mut vec3_map = HashMap::new();
+    let mut vec3_map: HashMap<u64, String> = HashMap::new();
     let chunk_size = 50;
     for chunk in keys.chunks(chunk_size) {
         let mut json_vec = vec![];
@@ -69,6 +69,7 @@ pub async fn save_instance_data(
                     inst.geo_type.to_string(),
                     inst.visible
                 );
+                // dbg!(&relate_sql);
                 if !inst.cata_neg_refnos.is_empty() {
                     relate_sql.push_str(&format!(
                         ", cata_neg=[{}]",
@@ -85,7 +86,11 @@ pub async fn save_instance_data(
         if !json_vec.is_empty() {
             let mut sql_string = "".to_string();
             for json in &json_vec {
-                sql_string.push_str(&format!("insert ignore into {} {};", stringify!(inst_geo), json));
+                sql_string.push_str(&format!(
+                    "insert ignore into {} {};",
+                    stringify!(inst_geo),
+                    json
+                ));
             }
             //使用surreal 保存NamedAttrMap
             join_set.spawn(async move {
@@ -154,17 +159,21 @@ pub async fn save_instance_data(
 
             //arrive 和 leave 需要用 index
             //这里的 pts，存储的时点集信息
-            // "flow_pt_indexs": self.flow_pt_indexs.clone(),
             let mut sql = format!(
-                "relate pe:{k}->inst_relate->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩,generic='{}', has_cata_neg={}",
+                "relate {}->{}->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩, generic='{}', has_cata_neg={}",
+                k.to_pe_key(),
+                k.to_table_key("inst_relate"),
                 v.id_str(),
                 transform_hash,
                 v.generic_type.to_string(),
                 v.has_cata_neg,
             );
-
+            // dbg!(&sql);
             if !neg_refnos.is_empty() {
-                sql.push_str(&format!(",neg_refnos=[{}]", neg_refnos.iter().map(|x| x.to_pe_key()).join(",")));
+                sql.push_str(&format!(
+                    ",neg_refnos=[{}]",
+                    neg_refnos.iter().map(|x| x.to_pe_key()).join(",")
+                ));
                 // dbg!(&sql);
             }
             // dbg!(&sql);
@@ -174,7 +183,11 @@ pub async fn save_instance_data(
         if !json_vec.is_empty() {
             let mut sql_string = "".to_string();
             for json in &json_vec {
-                sql_string.push_str(&format!("insert ignore into {} {};", stringify!(inst_info), json));
+                sql_string.push_str(&format!(
+                    "insert ignore into {} {};",
+                    stringify!(inst_info),
+                    json
+                ));
             }
             // dbg!(&sql_string);
             //使用surreal 保存NamedAttrMap
@@ -217,7 +230,10 @@ pub async fn save_instance_data(
             let mut sql_string = "".to_string();
             for &&k in chunk {
                 let v = transform_map.get(&k).unwrap();
-                let json = format!("INSERT IGNORE INTO trans {{'id':trans:⟨{}⟩, 'd':{}}};", k, v);
+                let json = format!(
+                    "INSERT IGNORE INTO trans {{'id':trans:⟨{}⟩, 'd':{}}};",
+                    k, v
+                );
                 sql_string.push_str(&json);
             }
             join_set.spawn(async move {
@@ -233,7 +249,10 @@ pub async fn save_instance_data(
             let mut sql_string = "".to_string();
             for &&k in chunk {
                 let v = param_map.get(&k).unwrap();
-                let json = format!("INSERT IGNORE INTO param {{'id':param:⟨{}⟩, 'd':{}}};", k, v);
+                let json = format!(
+                    "INSERT IGNORE INTO param {{'id':param:⟨{}⟩, 'd':{}}};",
+                    k, v
+                );
                 sql_string.push_str(&json);
             }
             join_set.spawn(async move {

@@ -4,18 +4,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use aios_core::{get_db_option, RefU64Vec};
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
-use aios_core::SUL_DB;
 use aios_core::tool::db_tool::db1_dehash;
+use aios_core::SUL_DB;
+use aios_core::{get_db_option, RefU64Vec};
 use futures::StreamExt;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 use notify::{RecursiveMode, Watcher};
 use pdms_io::defines::DbPageBasicInfo;
 use pdms_io::io::PdmsIO;
-use pdms_io::sync::compress::{CompressOptions, execute_compress};
+use pdms_io::sync::compress::{execute_compress, CompressOptions};
 use pdms_io::watch::PdmsWatcher;
 use petgraph::visit::Walker;
 use rumqttc::QoS;
@@ -24,8 +24,8 @@ use tokio::fs::create_dir_all;
 use tokio::task::JoinSet;
 use walkdir::WalkDir;
 
-use crate::fast_model::gen_all_geos_data;
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
+use crate::fast_model::gen_all_geos_data;
 // use pdms_io::watch::PdmsWatcher;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -94,8 +94,9 @@ impl AiosDBManager {
             //批量检测是否存在这些eles
             let mut exist_refnos = HashSet::new();
             let pes = eles_map.keys().map(|x| x.to_pe_key()).join(",");
-            let mut resp =
-                SUL_DB.query(format!("SELECT VALUE id FROM [{pes}];")).await?;
+            let mut resp = SUL_DB
+                .query(format!("SELECT VALUE id FROM [{pes}];"))
+                .await?;
             // dbg!(&resp);
             let refnos: Vec<RefU64> = resp.take(0).unwrap();
             exist_refnos.extend(refnos);
@@ -130,7 +131,9 @@ impl AiosDBManager {
                     let mut index = 0;
                     let mut is_last_add = false;
                     if let Some(owner_ele) = eles_map.get(&owner) {
-                        index = owner_ele.children.iter()
+                        index = owner_ele
+                            .children
+                            .iter()
                             .position(|&x| x == refno)
                             .unwrap_or(0);
                         is_last_add = index == owner_ele.children.len() - 1;
@@ -139,26 +142,24 @@ impl AiosDBManager {
                         let op = owner.to_pe_key();
                         //如果是最后一个，啥子都不用管，直接插入到最后
                         if is_last_add {
-                            all_relate_sqls.push(format!(
-                                "RELATE {0}->pe_owner:[{1}, {index}]->{1};",
-                                cp,
-                                op,
-                            ));
+                            all_relate_sqls
+                                .push(
+                                    format!("RELATE {0}->pe_owner:[{1}, {index}]->{1};", cp, op,),
+                                );
                         } else {
                             //如果不是最后添加的，需要删除这个owner，重新添加所有owner关系
-                            all_relate_sqls.push(
-                                format!("delete pe_owner:[{0}, 0]..[{0}, {1}];", &op, owner_ele.children.len())
-                            );
-                            let relate_sqls = owner_ele.children
+                            all_relate_sqls.push(format!(
+                                "delete pe_owner:[{0}, 0]..[{0}, {1}];",
+                                &op,
+                                owner_ele.children.len()
+                            ));
+                            let relate_sqls = owner_ele
+                                .children
                                 .iter()
                                 .enumerate()
                                 .map(|(i, child)| {
                                     let cp = child.to_pe_key();
-                                    format!(
-                                        "RELATE {0}->pe_owner:[{1}, {i}]->{1};",
-                                        cp,
-                                        op,
-                                    )
+                                    format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", cp, op,)
                                 })
                                 .collect::<Vec<String>>();
                             all_relate_sqls.extend_from_slice(&relate_sqls);
@@ -195,8 +196,7 @@ impl AiosDBManager {
                     children: ele.children.clone(),
                     operation: ele_op,
                 };
-                if ele_op == EleOperation::Modified ||
-                    ele_op == EleOperation::Add {
+                if ele_op == EleOperation::Modified || ele_op == EleOperation::Add {
                     update_type_eles_map
                         .entry(ele.noun)
                         .or_insert(Vec::new())
@@ -227,10 +227,12 @@ impl AiosDBManager {
                 let mut update_att_sql_str = String::new();
                 for k in chunk {
                     let refno = k.refno;
+                    let name = k.attr.get_name();
                     let pe = SPdmsElement {
                         refno,
                         owner: k.attr.get_owner(),
-                        name: k.attr.get_name_or_default(),
+                        is_default_name: name.is_none(),
+                        name: name.unwrap_or_default(),
                         noun: k.attr.get_type(),
                         dbnum: k.db_no,
                         e3d_version: k.attr.get_e3d_version(),
@@ -238,26 +240,37 @@ impl AiosDBManager {
                         status_tag: None,
                         cata_hash: k.attr.cal_cata_hash(),
                         lock: false,
-                        deleted: false,
                     };
 
                     let json = pe.gen_sur_json();
                     let att_json = k.attr.gen_sur_json();
                     if k.is_modified() {
-                        update_pe_sql_str.push_str(format!("UPDATE {} CONTENT {};", refno.to_pe_key(), json).as_str());
+                        update_pe_sql_str.push_str(
+                            format!("UPDATE {} CONTENT {};", refno.to_pe_key(), json).as_str(),
+                        );
                     } else {
                         insert_pe_jsons_str.push_str(&json);
                         insert_pe_jsons_str.push_str(",");
                     }
                     //不管怎样，update和add，都用update的方式
                     if let Some(att_json) = att_json {
-                        update_att_sql_str.push_str(format!("UPDATE {} CONTENT {};", refno.to_table_key(&type_name), att_json).as_str());
+                        update_att_sql_str.push_str(
+                            format!(
+                                "UPDATE {} CONTENT {};",
+                                refno.to_table_key(&type_name),
+                                att_json
+                            )
+                            .as_str(),
+                        );
                     }
                 }
                 let pe_sql = if insert_pe_jsons_str.is_empty() {
                     update_pe_sql_str
                 } else {
-                    format!("INSERT IGNORE INTO pe [{}]; {update_pe_sql_str}", insert_pe_jsons_str)
+                    format!(
+                        "INSERT IGNORE INTO pe [{}]; {update_pe_sql_str}",
+                        insert_pe_jsons_str
+                    )
                 };
                 if !update_att_sql_str.is_empty() {
                     sql_join_set.spawn(async move {
@@ -278,12 +291,18 @@ impl AiosDBManager {
         let mut del_join_set = tokio::task::JoinSet::new();
         //删除模型的处理
         for chunk in &deleted_refnos_set.iter().chunks(JSON_CHUNK_COUNT) {
-            let pes = chunk.into_iter().map(|(i, refno, owner)| {
-                // format!("pe_owner:[{0}, {i}]", owner.to_pe_key())
-                refno.to_pe_key()
-            }).join(",");
+            let pes = chunk
+                .into_iter()
+                .map(|(i, refno, owner)| {
+                    // format!("pe_owner:[{0}, {i}]", owner.to_pe_key())
+                    refno.to_pe_key()
+                })
+                .join(",");
             // update pe:{} set deleted = true;
-            let del_sql = format!("delete select id from array::flatten([{}]->pe_owner);", &pes);
+            let del_sql = format!(
+                "delete select id from array::flatten([{}]->pe_owner);",
+                &pes
+            );
             // let del_sql = format!("delete [{}];", pes);
             dbg!(&del_sql);
             del_join_set.spawn(async move {
@@ -434,9 +453,11 @@ impl AiosDBManager {
                     //跳过只是meta data变动的情况
                     let data_changed = matches!(
                         event.kind,
-                        notify::EventKind::Modify(notify::event::ModifyKind::Data(_)) 
-                        | notify::EventKind::Modify(notify::event::ModifyKind::Any) 
-                        | notify::EventKind::Create(notify::event::CreateKind::File) | notify::EventKind::Remove(notify::event::RemoveKind::File));
+                        notify::EventKind::Modify(notify::event::ModifyKind::Data(_))
+                            | notify::EventKind::Modify(notify::event::ModifyKind::Any)
+                            | notify::EventKind::Create(notify::event::CreateKind::File)
+                            | notify::EventKind::Remove(notify::event::RemoveKind::File)
+                    );
                     if !data_changed {
                         continue;
                     }
@@ -479,9 +500,13 @@ impl AiosDBManager {
                                     //这个地方是不是需要直接去读取文件，然后更新headers，不能太依赖json数据
                                     //或者每次启动都重新更新这个文件？
                                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
-                                        dbg!((old.pdms_header.page_no, new_header.pdms_header.page_no));
+                                        dbg!((
+                                            old.pdms_header.page_no,
+                                            new_header.pdms_header.page_no
+                                        ));
                                         //未发生修改，直接跳过
-                                        if old.pdms_header.page_no >= new_header.pdms_header.page_no {
+                                        if old.pdms_header.page_no >= new_header.pdms_header.page_no
+                                        {
                                             continue;
                                         }
                                         *old.value_mut() = new_header;
@@ -491,8 +516,11 @@ impl AiosDBManager {
                                         let output: PathBuf =
                                             format!("asset/archives/{}.cba", file_name).into();
                                         // dbg!(&output);
-                                        let compress_opt =
-                                            CompressOptions::new(path.clone(), output, "asset/temp");
+                                        let compress_opt = CompressOptions::new(
+                                            path.clone(),
+                                            output,
+                                            "asset/temp",
+                                        );
                                         let file_hash = execute_compress(compress_opt)
                                             .await
                                             .unwrap()
@@ -509,9 +537,7 @@ impl AiosDBManager {
                                             &file_hash
                                         );
                                         // dbg!(&sql);
-                                        let mut response = SUL_DB
-                                            .query(&sql)
-                                            .await.unwrap();
+                                        let mut response = SUL_DB.query(&sql).await.unwrap();
                                         // dbg!(&response);
                                         let id = response.take::<Vec<String>>(0).unwrap();
                                         // dbg!(id.len());
