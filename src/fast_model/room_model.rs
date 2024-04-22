@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
     init_test_surreal().await;
     let refno = "24381/58346".into();
-    process_meshes_update_db(Some(&["24381/34303".into(), refno]))
+    process_meshes_update_db(None, (&["24381/34303".into(), refno]))
         .await
         .unwrap();
     load_aabb_tree().await.unwrap();

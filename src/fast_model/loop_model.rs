@@ -1,7 +1,7 @@
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::shared;
+use crate::fast_model::{get_generic_type, shared};
 use aios_core::geometry::*;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
@@ -16,18 +16,18 @@ use parry3d::math::Isometry;
 use std::mem::take;
 use std::sync::Arc;
 use std::time::Instant;
+use aios_core::options::DbOption;
 use tokio::sync::{Mutex, RwLock};
 
 ///处理带有loop的元件
 pub async fn gen_loop_geos(
-    mgr: Arc<AiosDBManager>,
-    instance_mgr: Arc<RwLock<ShapeInstancesData>>,
+    db_option: Arc<DbOption>,
     loop_refnos: &[RefU64],
     sjus_map_arc: Arc<DashMap<RefU64, (Vec3, f32)>>,
+    sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
     let t = Instant::now();
-    let db_option = &mgr.db_option;
-    let mut batch_size = mgr.db_option.gen_model_batch_size;
+    let mut batch_size = db_option.gen_model_batch_size;
     let loop_cnt = loop_refnos.len();
     if loop_cnt == 0 {
         return Ok(true);
@@ -36,20 +36,19 @@ pub async fn gen_loop_geos(
     let mut batch_chunks_cnt = (loop_cnt / batch_size + 1);
     let mut handles = vec![];
     let all_refnos = Arc::new(loop_refnos.to_vec());
-    let processed_cnt = Arc::new(Mutex::new(loop_cnt));
+    // let processed_cnt = Arc::new(Mutex::new(loop_cnt));
     for i in 0..batch_chunks_cnt {
-        let mgr = mgr.clone();
-        let instance_mgr = instance_mgr.clone();
         let all_loop_refnos = all_refnos.clone();
-        let processed_cnt = processed_cnt.clone();
+        // let processed_cnt = processed_cnt.clone();
         let sjus_map_clone = sjus_map_arc.clone();
+        let sender = sender.clone();
         let handle = tokio::spawn(async move {
             let start_idx = i * batch_size;
             let mut end_idx = start_idx + batch_size;
             if end_idx > loop_cnt {
                 end_idx = loop_cnt;
             }
-            let mut shape_insts_data = instance_mgr.write().await;
+            let mut shape_insts_data = ShapeInstancesData::default();
             for j in start_idx..end_idx {
                 let loop_refno = all_loop_refnos[j];
                 let Ok(Some(ce_pe)) = aios_core::get_pe(loop_refno).await else {
@@ -63,7 +62,7 @@ pub async fn gen_loop_geos(
                 let mut target_att = aios_core::get_named_attmap(target_refno)
                     .await
                     .unwrap_or_default();
-                let Ok(Some(mut trans_origin)) = mgr.get_world_transform(loop_refno).await else {
+                let Ok(Some(mut trans_origin)) = aios_core::get_world_transform(loop_refno).await else {
                     continue;
                 };
                 //判断父节点是否有SJUS，需要调整位置
@@ -73,13 +72,13 @@ pub async fn gen_loop_geos(
                     let offset = trans_origin.rotation.mul_vec3(sjus_adjust.value().0);
                     trans_origin.translation += offset;
                 }
-                println!(
-                    "正在处理loops类型的模型，索引：{}, 当前参考号：{}, 剩余: {}",
-                    j,
-                    target_refno.to_string(),
-                    processed_cnt.lock().await.to_owned()
-                );
-                *processed_cnt.lock().await -= 1;
+                // println!(
+                //     "正在处理loops类型的模型，索引：{}, 当前参考号：{}, 剩余: {}",
+                //     j,
+                //     target_refno.to_string(),
+                //     processed_cnt.lock().await.to_owned()
+                // );
+                // *processed_cnt.lock().await -= 1;
                 let mut loop_verts: Vec<Vec3> = vec![];
                 let mut fradius_vec: Vec<f32> = vec![];
 
@@ -123,7 +122,7 @@ pub async fn gen_loop_geos(
                             .filter_map(|x| x.get_refno())
                             .skip(1),
                     );
-                    dbg!(&neg_refnos);
+                    // dbg!(&neg_refnos);
                 }
                 let final_refno = if cur_loop_index >= 1 {
                     loop_refno
@@ -135,7 +134,7 @@ pub async fn gen_loop_geos(
                     cata_hash: None,
                     visible: true,
                     world_transform: trans_origin,
-                    generic_type: mgr.get_generic_type(target_refno).await,
+                    generic_type: get_generic_type(target_refno).await.unwrap_or_default(),
                     aabb: None,
                     flow_pt_indexs: vec![],
                     neg_refnos,
@@ -244,14 +243,12 @@ pub async fn gen_loop_geos(
                     },
                 );
             }
+
+            sender.send(shape_insts_data).expect("send loop shape_insts_data error");
         });
 
         handles.push(handle);
-        if !db_option.multi_threads {
-            if !handles.is_empty() {
-                futures::future::join_all(take(&mut handles)).await;
-            }
-        }
+
     }
     futures::future::join_all(take(&mut handles)).await;
     println!(

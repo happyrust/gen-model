@@ -7,7 +7,7 @@ use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::test::test_surreal::init_test_surreal;
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
-use aios_core::{gen_bytes_hash, RefU64, SUL_DB};
+use aios_core::{gen_bytes_hash, query_deep_visible_inst_refnos, RefU64, SUL_DB};
 use bevy_transform::prelude::Transform;
 use glam::DMat4;
 use itertools::Itertools;
@@ -18,37 +18,53 @@ use parse_pdms_db::parse::round_f32;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use aios_core::options::DbOption;
 use surrealdb::sql::Thing;
 
 ///生成小的几何体
 #[tokio::test]
 pub async fn test_gen_geos() -> anyhow::Result<()> {
     init_test_surreal().await;
-    process_meshes_update_db(Some(&["17496/171559".into(), "24381/35844".into()]))
+    process_meshes_update_db(None, (&["17496/171559".into(), "24381/35844".into()]))
         .await
         .unwrap();
     Ok(())
 }
 
-pub async fn process_meshes_update_db(refnos: Option<&[RefU64]>) -> anyhow::Result<()> {
-    let time = std::time::Instant::now();
-    gen_inst_meshes(None).await.unwrap();
-    println!(
-        "gen_inst_meshes finished: {} ms",
-        time.elapsed().as_millis()
-    );
-    let time = std::time::Instant::now();
-    update_inst_relate_aabbs().await.unwrap();
-    println!(
-        "update_inst_relate_aabbs finished: {} ms",
-        time.elapsed().as_millis()
-    );
-    // apply_cata_neg_boolean_occ(None).await.unwrap();
-    apply_cata_neg_boolean_manifold(None).await.unwrap();
-    let time = std::time::Instant::now();
-    apply_insts_boolean_manifold(None).await.unwrap();
-    apply_insts_boolean_occ(None).await.unwrap();
-    println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
+pub async fn process_meshes_update_db(option: Option<DbOption>, refnos: &[RefU64]) -> anyhow::Result<()> {
+
+    let mut target_refnos = vec![];
+    if !refnos.is_empty(){
+        for &refno in refnos {
+            let visible_refnos = query_deep_visible_inst_refnos(refno).await?;
+            target_refnos.extend(visible_refnos);
+        }
+        dbg!(target_refnos.len());
+    }
+
+    if option.as_ref().map(|x| x.gen_mesh).unwrap_or(true){
+        let time = std::time::Instant::now();
+        gen_inst_meshes(&target_refnos, None).await.unwrap();
+        println!(
+            "gen_inst_meshes finished: {} ms",
+            time.elapsed().as_millis()
+        );
+        let time = std::time::Instant::now();
+        update_inst_relate_aabbs().await.unwrap();
+        println!(
+            "update_inst_relate_aabbs finished: {} ms",
+            time.elapsed().as_millis()
+        );
+    }
+
+    if option.as_ref().map(|x| x.apply_boolean_operation).unwrap_or(true){
+        // apply_cata_neg_boolean_occ(None).await.unwrap();
+        let time = std::time::Instant::now();
+        apply_cata_neg_boolean_manifold(&target_refnos, None).await.unwrap();
+        apply_insts_boolean_manifold(None).await.unwrap();
+        apply_insts_boolean_occ(None).await.unwrap();
+        println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
+    }
     Ok(())
 }
 
@@ -58,10 +74,7 @@ struct QueryGeoParam {
     pub param: PdmsGeoParam,
 }
 
-pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
-    //首先查询 inst_geo
-    //需要扫描当前的文件夹，是否有已经生成的几何体
-    //使用page 去扫描？
+pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow::Result<()> {
     let dir = dir.unwrap_or("assets/meshes".into());
     //如果dir 不存在，创建这个目录
     if !dir.exists() {
@@ -72,24 +85,33 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
     let mut i = 0;
     let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
 
-    let sql = r#"select value id from inst_geo where !meshed && !bad"#.to_string();
+    let sql = if !refnos.is_empty() {
+        let pes = refnos.iter().map(|x| x.to_pe_key()).join(",");
+        format!(r#"array::group(select value (->inst_relate.out->geo_relate.out) from [{pes}])"#)
+    }else{
+        r#"select value id from inst_geo where !meshed && !bad"#.to_string()
+    };
+
     let mut response = SUL_DB.query(sql).await.unwrap();
     let inst_geo_ids: Vec<Thing> = response.take(0).unwrap();
+    dbg!(inst_geo_ids.len());
 
-    for chunk in inst_geo_ids.chunks(PAGE_NUM) {
+    for (idx, chunk) in inst_geo_ids.chunks(PAGE_NUM).enumerate() {
         let ids = chunk.into_iter().map(|x| x.to_string()).join(",");
+        // let ids = chunk.into_iter().join(",");
+        // dbg!(idx);
         let mut response = SUL_DB
-            .query(&format!("select meta::id(id) as id, param from [{}]", ids))
+            .query(&format!("select <string> meta::id(id) as id, param from [{}]", ids))
             .await?;
         let result: Vec<QueryGeoParam> = response.take(0)?;
         if result.is_empty() {
             break;
         }
         i += 1;
-        // dbg!(&result.len());
+        // dbg!(&result);
         for g in result {
             //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
-            // dbg!(&g);
+            // dbg!(&g.id);
             match g.param.gen_occ_shape() {
                 Ok(shape) => {
                     let mut aabb = Aabb::new_invalid();
@@ -106,7 +128,7 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
                     shapes_map.insert(g.id, (shape, tol));
                 }
                 Err(e) => {
-                    // dbg!("{} error: {e}", g.id);
+                    dbg!("{} error: {e}", g.id);
                 }
             }
         }
@@ -175,7 +197,6 @@ pub async fn gen_inst_meshes(dir: Option<PathBuf>) -> anyhow::Result<()> {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct QueryAabbParam {
     pub id: RefU64,
-    // pub inst_relate_id: String,
     pub geo_aabbs: Vec<GeoAabbTrans>,
     pub world_trans: Transform,
 }
@@ -190,13 +211,14 @@ struct GeoAabbTrans {
 pub async fn update_inst_relate_aabbs() -> anyhow::Result<()> {
     const PAGE_NUM: usize = 500;
     let mut i = 0;
-    let sql = format!(r#"select value <string>id from inst_relate where aabb = none"#);
+    let sql = format!(r#"select value id from inst_relate where aabb = none"#);
     let mut response = SUL_DB.query(sql).await.unwrap();
-    let inst_relate_ids: Vec<String> = response.take(0).unwrap();
+    let inst_relate_ids: Vec<Thing> = response.take(0).unwrap();
 
     let mut tasks = vec![];
     for chunk in inst_relate_ids.chunks(PAGE_NUM) {
-        let ids = chunk.join(",");
+        // let ids = chunk.join(",");
+        let ids = chunk.into_iter().map(|x| x.to_string()).join(",");
         let task = tokio::spawn(async move {
             let mut aabb_map: HashMap<u64, String> = HashMap::new();
             let sql = format!(
@@ -207,7 +229,9 @@ pub async fn update_inst_relate_aabbs() -> anyhow::Result<()> {
             );
             let mut response = SUL_DB.query(sql).await.unwrap();
             let result: Vec<QueryAabbParam> = response.take(0).unwrap();
-            dbg!(result.len());
+            // dbg!(result.len());
+            #[cfg(debug_assertions)]
+            println!("QueryAabbParam len: {}", result.len());
             i += 1;
 
             let mut update_sql = String::new();
@@ -294,7 +318,7 @@ pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()>
     //避免重复执行布尔运算
     //"Neg",
     let sql = r#"
-     select meta::id(id) as id, param from
+     select <string>meta::id(id) as id, param from
          array::group(select value array::group([array::group(neg_refnos->inst_relate->inst_info->geo_relate[where !bad and
          geo_type in ["Neg", "CataCrossNeg"]]->inst_geo),
          ->inst_info->geo_relate->inst_geo[?!bad]]) from inst_relate where neg_refnos!=none and !bad_bool and !booled) where param!=none;
@@ -473,7 +497,7 @@ pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()>
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CataNegGroup {
     pub refno: RefU64,
-    pub inst_info_id: String,
+    pub inst_info_id: Thing,
     pub boolean_group: Vec<Vec<RefU64>>,
 }
 
@@ -484,7 +508,7 @@ pub struct GmGeoData {
     pub trans: Transform,
     pub param: PdmsGeoParam,
     //暂时aabb 不变
-    pub aabb_id: String,
+    pub aabb_id: Thing,
 }
 
 //处理元件库有负实体的布尔运算
@@ -496,7 +520,7 @@ pub async fn apply_cata_neg_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<
     }
 
     let sql = r#"
-        select in as refno, <string>(->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
+        select in as refno, (->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
         from ->inst_info->geo_relate where visible and !out.bad and cata_neg!=none) as boolean_group from inst_relate where (->inst_info)[0]!=none and has_cata_neg and !bad_bool and !booled
     "#;
     let mut response = SUL_DB.query(sql).await?;

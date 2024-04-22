@@ -11,11 +11,9 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 
 ///保存instance 数据到数据库
 pub async fn save_instance_data(
-    mgr: &AiosDBManager,
     inst_mgr: &ShapeInstancesData,
 ) -> anyhow::Result<()> {
-    println!("开始保存instance数据");
-
+    // println!("开始保存instance数据");
     //保存inst geos 数据
     let keys = inst_mgr.inst_geos_map.keys().collect::<Vec<_>>();
     let mut join_set = tokio::task::JoinSet::new();

@@ -59,7 +59,7 @@ pub async fn get_inst_data_from_inst_major(
     }
     let refnos = query_travel_children_with_type_aql(&database, refno, "INST").await?;
     for ele in refnos {
-        let pos = mgr.get_world_transform(ele.refno).await?;
+        let pos = aios_core::get_world_transform(ele.refno).await?;
         if pos.is_none() {
             continue;
         }
@@ -268,7 +268,7 @@ pub async fn get_equi_data_from_electric_major(
     }
     let refnos = query_travel_children_with_type_aql(&database, refno, "EQUI").await?;
     for ele in refnos {
-        let pos = mgr.get_world_transform(ele.refno).await?;
+        let pos = aios_core::get_world_transform(ele.refno).await?;
         if pos.is_none() {
             continue;
         }

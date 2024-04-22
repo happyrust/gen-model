@@ -270,7 +270,8 @@ pub fn resolve_gmse_params(
                     }));
                 } else {
                     paxises.push(None);
-                    dbg!(&gm);
+                    // dbg!(&gm);
+                    #[cfg(debug_assertions)]
                     println!("Axis: '{axis_str}' index not exist");
                 }
             }

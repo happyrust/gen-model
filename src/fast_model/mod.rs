@@ -18,7 +18,13 @@ pub mod cal_model;
 
 pub mod pdms_inst;
 
+pub mod resolve;
+
+pub mod query;
+
 pub mod utils;
 
 pub use gen_model::*;
 pub use occ_generate::*;
+pub use query::*;
+pub use resolve::*;

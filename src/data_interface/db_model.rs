@@ -690,27 +690,6 @@ impl AiosDBManager {
         }
     }
 
-
-    //todo 获取类型直接采用edge上的查询
-    ///获得参考号对应的一般类型
-    pub async fn get_generic_type(&self, refno: RefU64) -> PdmsGenericType {
-        let mut cur_refno = refno;
-        while let Ok(b) = aios_core::get_named_attmap(cur_refno).await {
-            if b.is_empty(){
-                break;
-            }
-            let type_name = b.get_type_str();
-            if type_name == "ZONE" {
-                break;
-            }
-            if let Ok(generic) = PdmsGenericType::from_str(&type_name){
-                return generic;
-            }
-            cur_refno = b.get_owner();
-        }
-        PdmsGenericType::UNKOWN
-    }
-
     ///获得当前mdb下的site参考号
     pub async fn get_site_refnos(&self) -> anyhow::Result<Vec<RefU64>> {
         // let world_refno = self.get_desi_world().await?.refno;

@@ -1,7 +1,7 @@
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::shared;
+use crate::fast_model::{get_generic_type, shared};
 use aios_core::geometry::*;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
@@ -15,16 +15,16 @@ use parry3d::math::Isometry;
 use std::mem::take;
 use std::sync::Arc;
 use std::time::Instant;
+use aios_core::options::DbOption;
 use tokio::sync::{Mutex, RwLock};
 
 /// 生成基本体的几何数据
 pub async fn gen_prim_geos(
-    mgr: Arc<AiosDBManager>,
-    instance_mgr: Arc<RwLock<ShapeInstancesData>>,
+    db_option: Arc<DbOption>,
     prim_refnos: &[RefU64],
+    sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
     let t = Instant::now();
-    let db_option = &mgr.db_option;
     let batch_size = db_option.gen_model_batch_size;
     let prim_cnt = prim_refnos.len();
     if prim_cnt == 0 {
@@ -35,28 +35,28 @@ pub async fn gen_prim_geos(
     let all_refnos = Arc::new(prim_refnos.to_vec());
     let processed_cnt = Arc::new(Mutex::new(prim_cnt));
     for i in 0..batch_chunks_cnt as usize {
-        let mgr_clone = mgr.clone();
-        let instance_mgr = instance_mgr.clone();
+
 
         let all_refnos = all_refnos.clone();
         let processed_cnt = processed_cnt.clone();
+        let sender = sender.clone();
         let handle = tokio::spawn(async move {
+            let mut shape_insts_data = ShapeInstancesData::default();
             let start_idx = i * batch_size;
             let mut end_idx = start_idx + batch_size;
             if end_idx > prim_cnt as usize {
                 end_idx = prim_cnt as usize;
             }
             for j in start_idx..end_idx {
-                let mut shape_insts_data = instance_mgr.write().await;
                 let refno = all_refnos[j];
-                println!(
-                    "正在处理基本体的模型，索引：{}, 当前参考号：{}, 剩余: {}",
-                    j,
-                    refno.to_string(),
-                    processed_cnt.lock().await.to_owned()
-                );
+                // println!(
+                //     "正在处理基本体的模型，索引：{}, 当前参考号：{}, 剩余: {}",
+                //     j,
+                //     refno.to_string(),
+                //     processed_cnt.lock().await.to_owned()
+                // );
                 *processed_cnt.lock().await -= 1;
-                let Ok(Some(mut trans_origin)) = mgr_clone.get_world_transform(refno).await else {
+                let Ok(Some(mut trans_origin)) = aios_core::get_world_transform(refno).await else {
                     continue;
                 };
                 let mut geo_insts = vec![];
@@ -67,7 +67,7 @@ pub async fn gen_prim_geos(
                 let mut geos_info = EleGeosInfo {
                     refno,
                     visible,
-                    generic_type: mgr_clone.get_generic_type(refno).await,
+                    generic_type: get_generic_type(refno).await.unwrap_or_default(),
                     aabb: None,
                     world_transform: trans_origin,
                     ..Default::default()
@@ -161,6 +161,8 @@ pub async fn gen_prim_geos(
                     );
                 }
             }
+
+            sender.send(shape_insts_data).expect("send prim shape_insts_data error");
         });
         handles.push(handle);
         if !db_option.multi_threads {

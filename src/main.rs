@@ -15,6 +15,7 @@ extern crate strum_macros;
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -25,14 +26,12 @@ use aios_core::pdms_types::*;
 use aios_core::room::room::load_aabb_tree;
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::SUL_DB;
+use bevy_reflect::List;
 use chrono::{Datelike, Local, Timelike};
 use futures::StreamExt;
 use itertools::Itertools;
 use log::{error, LevelFilter};
 use simplelog::*;
-use tracing_subscriber::fmt;
-use tracing_subscriber::fmt::format::FmtSpan;
-
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::versioned_db::database::*;
 use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
@@ -106,8 +105,15 @@ async fn main() -> anyhow::Result<()> {
     if db_option.gen_model {
         println!("正在生成模型");
         let mut time = Instant::now();
-        gen_all_geos_data(mgr.clone(), None, !db_option.replace_mesh).await?;
+        gen_all_geos_data(&db_option, None).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+    }
+
+    {
+        let mut time = Instant::now();
+        let debug_refnos = db_option.get_debug_refnos();
+        process_meshes_update_db(Some(db_option.clone()), &debug_refnos).await.expect("更新模型数据失败");
+        println!("处理模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
     AiosDBManager::exec_watcher(mgr.clone()).await.expect("exec_watcher error");

@@ -40,10 +40,10 @@ async fn test_query_ancestor_by_refno() -> anyhow::Result<()> {
 async fn test_query_wtrans_by_refno() -> anyhow::Result<()> {
     super::init_test_surreal().await;
     let mgr = Arc::new(get_test_ams_db_manager_async().await);
-    // let wtrans = mgr.get_world_transform("17496_118635".into()).await.unwrap();
+    // let wtrans = aios_core::get_world_transform("17496_118635".into()).await.unwrap();
     // dbg!(wtrans);
     //todo fix POSL attribute
-    // let wtrans = mgr.get_world_transform("17496_107068".into()).await.unwrap();
+    // let wtrans = aios_core::get_world_transform("17496_107068".into()).await.unwrap();
     // dbg!(wtrans);
 
     let wtrans = mgr

@@ -338,7 +338,7 @@ impl AiosDBManager {
             .content(&geo_update_log)
             .await?;
 
-        gen_all_geos_data(Arc::new(self.clone()), Some(geo_update_log), false)
+        gen_all_geos_data(&self.db_option, Some(geo_update_log))
             .await
             .unwrap();
 

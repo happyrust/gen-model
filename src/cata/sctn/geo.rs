@@ -119,6 +119,7 @@ pub async fn create_profile_geos(refno: RefU64,
         } else {
             drne = tmp_drne;
         }
+        #[cfg(debug_assertions)]
         println!("refno: {}, 变换后drns: {:?}, drne: {:?}",
                  refno, to_pdms_vec_str(&drns.as_vec3()), to_pdms_vec_str(&drne.as_vec3()));
     }

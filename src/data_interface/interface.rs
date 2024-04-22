@@ -184,24 +184,8 @@ pub trait PdmsDataInterface: Send + Sync {
 
     async fn get_spre_ref(&self, refno: RefU64) -> Option<RefU64>;
 
-    async fn get_cat_ref(&self, refno: RefU64) -> Option<RefU64>;
+    async fn get_cat_refno(&self, refno: RefU64) -> Option<RefU64>;
 
     async fn get_cat_attmap(&self, refno: RefU64) -> Option<NamedAttrMap>;
-
-    async fn query_gm_params(&self, refno: RefU64) -> anyhow::Result<Vec<GmParam>>;
-
-    async fn get_or_create_scom_info(&self, cata_refno: RefU64) -> anyhow::Result<ScomInfo>;
-
-    async fn resolve_desi_comp(
-        &self,
-        desi_refno: RefU64,
-        scom_ref_option: Option<RefU64>,
-    ) -> anyhow::Result<CateGeomsInfo>;
-
-    async fn resolve_axis_params(
-        &self,
-        refno: RefU64,
-        context: Option<CataContext>,
-    ) -> anyhow::Result<BTreeMap<i32, CateAxisParam>>;
 
 }

@@ -10,7 +10,7 @@ use aios_core::pdms_data::ScomInfo;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::spine::{Spine3D, SpineCurveType};
 use aios_core::types::AttrVal::*;
-use aios_core::CataContext;
+use aios_core::{CataContext, rs_surreal};
 use aios_core::{AttrMap, RefU64Vec};
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -43,6 +43,7 @@ use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::*;
 use crate::defines::*;
+use crate::fast_model::{get_or_create_scom_info, query_gm_params};
 
 #[derive(Clone)]
 pub struct AiosDBManager {
@@ -745,7 +746,7 @@ impl PdmsDataInterface for AiosDBManager {
 
     ///获得元件库的catr参考号
     #[inline]
-    async fn get_cat_ref(&self, refno: RefU64) -> Option<RefU64> {
+    async fn get_cat_refno(&self, refno: RefU64) -> Option<RefU64> {
         aios_core::get_cat_refno(refno).await.ok().flatten()
     }
 
@@ -755,171 +756,5 @@ impl PdmsDataInterface for AiosDBManager {
         aios_core::get_cat_attmap(refno).await.ok()
     }
 
-    ///收集几何参数
-    async fn query_gm_params(&self, refno: RefU64) -> anyhow::Result<Vec<GmParam>> {
-        let mut gms = vec![];
-        let mut children = vec![];
-        for c in aios_core::get_children_named_attmaps(refno).await? {
-            if TOTAL_CATA_GEO_NOUN_NAMES.contains(&c.get_type_str()) {
-                children.push(c.clone());
-            }
-            //有可能嵌套负实体
-            for cc in aios_core::get_children_named_attmaps(c.get_refno_or_default()).await? {
-                if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type_str()) {
-                    children.push(cc.clone());
-                }
-            }
-        }
-        // dbg!(&children);
-        for geo_am in children {
-            //todo visible 不应该在这里执行过滤
-            //后续如果需要使用这些不同等级的模型，需要切换
-            if !geo_am.is_visible_by_level(None).unwrap_or(true) {
-                continue;
-            }
-            let is_spro = geo_am.get_type_str() == "SPRO"; //todo add other types
-            let geom = query_gm_param(&geo_am, is_spro).await.unwrap_or_default();
-            // if is_spro {
-            //     dbg!(&geom);
-            // }
-            gms.push(geom);
-        }
-        // dbg!(&gms);
-        Ok(gms)
-    }
 
-    ///收集SCOM的信息, 暂时慎用缓存
-    async fn get_or_create_scom_info(&self, cata_refno: RefU64) -> anyhow::Result<ScomInfo> {
-        let scom_info = if let Some(info) = SCOM_INFO_MAP.get(&cata_refno) {
-            info.value().clone()
-        } else {
-            // dbg!(cata_refno);
-            let attr_map = aios_core::get_named_attmap(cata_refno).await?;
-            let type_noun = attr_map.get_type_str();
-            let ptref_name = match type_noun {
-                "SPRF" => "PSTR",
-                _ => "PTRE",
-            };
-            let mut axis_params = vec![];
-            let mut axis_param_numbers = vec![];
-            if let Some(ptre_refno) = attr_map.get_foreign_refno(ptref_name) {
-                if let Ok(axis_param_map) = query_axis_params(ptre_refno).await {
-                    axis_params = axis_param_map.values().cloned().collect::<Vec<_>>();
-                    axis_param_numbers = axis_param_map.keys().cloned().collect::<Vec<_>>();
-                }
-            }
-            let gmse_refno =
-                aios_core::query_single_by_paths(cata_refno, &["->GMRE", "->GSTR"], &["refno"])
-                    .await
-                    .map(|x| x.get_refno_lossy().unwrap_or_default())?;
-            #[cfg(debug_assertions)]
-            dbg!(gmse_refno);
-            let gm_params = self.query_gm_params(gmse_refno).await?;
-            let mut ngm_params = vec![];
-            //-ve， 和design发生左右的负实体
-            if let Some(gmse_refno) = attr_map.get_foreign_refno("NGMR") {
-                ngm_params = self.query_gm_params(gmse_refno).await?;
-            }
-
-            let mut plin_map = HashMap::new();
-            if let Some(pstr_refno) = attr_map.get_foreign_refno("PSTR") {
-                let pstr_am = aios_core::get_children_named_attmaps(pstr_refno).await?;
-                for a in pstr_am {
-                    if let Some(k) = a.get_as_string("PKEY") {
-                        plin_map.insert(
-                            k,
-                            PlinParam {
-                                vxy: [
-                                    a.get_as_string("PX").unwrap_or("0".to_string()),
-                                    a.get_as_string("PY").unwrap_or("0".to_string()),
-                                ],
-                                dxy: [
-                                    a.get_as_string("DX").unwrap_or("0".to_string()),
-                                    a.get_as_string("DY").unwrap_or("0".to_string()),
-                                ],
-                                plax: a.get_as_string("PLAX").unwrap_or("unset".to_string()),
-                            },
-                        );
-                    }
-                }
-            }
-            ScomInfo {
-                gtype: attr_map.get_as_string("GTYP").unwrap_or("unset".into()),
-                dtse_params: vec![],
-                gm_params,
-                ngm_params,
-                axis_params,
-                params: attr_map
-                    .get_as_string("PARA")
-                    .unwrap_or_default()
-                    .replace("\n", " ")
-                    .replace("  ", " ")
-                    .into(),
-                axis_param_numbers,
-                attr_map,
-                plin_map,
-            }
-        };
-        Ok(scom_info)
-    }
-
-    ///求解design component
-    async fn resolve_desi_comp(
-        &self,
-        desi_refno: RefU64,
-        mut tubi_scom: Option<RefU64>,
-    ) -> anyhow::Result<CateGeomsInfo> {
-        let desi_att = aios_core::get_named_attmap(desi_refno).await?;
-        let is_tubi = tubi_scom.is_some();
-
-        #[cfg(debug_assertions)]
-        if is_tubi {
-            dbg!(tubi_scom);
-        }
-
-        let scom_ref = if let Some(scom) = tubi_scom {
-            scom
-        } else {
-            let scom = self
-                .get_cat_ref(desi_refno)
-                .await
-                .ok_or(anyhow::anyhow!(format!(
-                    "CAT引用不存在: {}",
-                    desi_refno.to_string()
-                )))?;
-            scom
-        };
-        #[cfg(debug_assertions)]
-        dbg!(scom_ref);
-
-        let scom_info = self.get_or_create_scom_info(scom_ref).await?;
-        // #[cfg(debug_assertions)]
-        // dbg!(&scom_info);
-        let context = aios_core::get_or_create_cata_context(desi_refno, is_tubi)
-            .await
-            .unwrap();
-
-        let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(context));
-        geom_info.map_err(|_| anyhow!("resolve_cata_comp failed"))
-    }
-
-    /// 求解axis的数值
-    async fn resolve_axis_params(
-        &self,
-        refno: RefU64,
-        context: Option<CataContext>,
-    ) -> anyhow::Result<BTreeMap<i32, CateAxisParam>> {
-        let mut map = BTreeMap::new();
-        let scom_refno = self.get_cat_ref(refno).await.unwrap_or_default();
-        if !scom_refno.is_valid() {
-            return Ok(Default::default());
-        }
-        let scom = self.get_or_create_scom_info(scom_refno).await?;
-        let context = context.unwrap_or(aios_core::get_or_create_cata_context(refno, false).await?);
-        for i in 0..scom.axis_params.len() {
-            let axis = resolve_axis_param(&scom.axis_params[i], &scom, &context);
-            map.insert(scom.axis_param_numbers[i], axis);
-        }
-        Ok(map)
-    }
 }

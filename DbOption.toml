@@ -21,8 +21,10 @@ project_code = 1516
 module = "DESI"
 #是否生成模型数据
 gen_model = true
-mesh_tol_ratio = 3.0
+gen_mesh = true
+replace_mesh = false
 apply_boolean_operation = true
+mesh_tol_ratio = 3.0
 #是否生成房间树
 gen_spatial_tree = true
 load_spatial_tree = false
@@ -31,7 +33,6 @@ gen_model_batch_size = 100
 
 #生成补充类型的graph，方便查询直接生成语句
 gen_noun_graph = false
-
 
 #arangodb 配置
 arangodb_database = "ams"
@@ -78,7 +79,6 @@ file_server_host = "http://192.168.31.38:8100/asset/archives"
 
 
 #调试选项
-replace_mesh = false
 save_model_mesh_to_graph_db = true
 need_sync_refno_basic = false       #是否重新生成 refno_basic 缓存
 reset_mdb_project = false           #是否重新生成 mdb 缓存
@@ -88,8 +88,8 @@ only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #included_db_files = ["ams1112_0001"]
-#manual_db_nums = [7999, 7997, 1112, 8000]
-# manual_db_nums = [1112]
+manual_db_nums = [7999, 7997, 1112, 8000]
+#manual_db_nums = [7326]
 plat_url = ""
 
 #puhua
@@ -97,4 +97,6 @@ puhua_database_ip = ""
 puhua_database_user = ""
 puhua_database_password = ""
 
- debug_root_refnos = ["17496/171666"]
+debug_root_refnos = ["23710/10352"]
+#debug_root_refnos = ["17496/172806"]
+#debug_root_refnos = ["17496/172806"]
