@@ -1,41 +1,43 @@
-use num_enum::{IntoPrimitive, TryFromPrimitive};
-use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
-use aios_core::pdms_types::*;
-use dashmap::DashMap;
-use aios_core::{gen_bytes_hash, HASH_PSEUDO_ATT_MAPS, NamedAttrMap, NamedAttrValue, RefU64, SUL_DB};
-use aios_core::pe::SPdmsElement;
-use glam::{DMat4, DVec3, Vec3};
-use std::time::Instant;
-use std::collections::{HashMap, HashSet};
-use aios_core::csg::manifold::ManifoldRust;
-use aios_core::prim_geo::category::{CateBrepShape, convert_to_brep_shapes};
-use bevy_transform::components::Transform;
-use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-use nalgebra::Point3;
-use aios_core::tool::hash_tool::hash_two_str;
-use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
-use std::mem::take;
-use aios_core::consts::NGMR_OWN_TYPES;
-use aios_core::geometry::*;
-use aios_core::prim_geo::basic::{BOXI_GEO_HASH, TUBI_GEO_HASH};
-use aios_core::prim_geo::{PdmsTubing, TubiEdge};
-use aios_core::tool::math_tool::to_pdms_vec_str;
-use aios_core::parsed_data::CateGeomsInfo;
 use crate::cata::sctn::geo::create_profile_geos;
+use crate::consts::*;
 use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::structs::{PlantAxisMap, CateBrepShapeMap};
+use crate::data_interface::structs::{CateBrepShapeMap, PlantAxisMap};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model;
 use crate::fast_model::{get_generic_type, resolve_desi_comp, shared};
+use aios_core::consts::NGMR_OWN_TYPES;
+use aios_core::csg::manifold::ManifoldRust;
+use aios_core::geometry::*;
+use aios_core::options::DbOption;
+use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+use aios_core::parsed_data::CateGeomsInfo;
+use aios_core::pdms_types::*;
+use aios_core::pe::SPdmsElement;
+use aios_core::prim_geo::basic::{BOXI_GEO_HASH, TUBI_GEO_HASH};
+use aios_core::prim_geo::category::{convert_to_brep_shapes, CateBrepShape};
+use aios_core::prim_geo::*;
+use aios_core::prim_geo::{PdmsTubing, TubiEdge};
+use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
+use aios_core::tool::hash_tool::hash_two_str;
+use aios_core::tool::math_tool::to_pdms_vec_str;
+use aios_core::{
+    gen_bytes_hash, NamedAttrMap, NamedAttrValue, RefU64, HASH_PSEUDO_ATT_MAPS, SUL_DB,
+};
+use bevy_transform::components::Transform;
+use dashmap::DashMap;
+use glam::{DMat4, DVec3, Vec3};
+use nalgebra::Point3;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use parry3d::bounding_volume::*;
 use parry3d::math::Isometry;
-use crate::consts::*;
-use aios_core::prim_geo::*;
 use std::borrow::BorrowMut;
 use std::collections::BTreeMap;
-use aios_core::options::DbOption;
+use std::collections::{HashMap, HashSet};
+use std::mem::take;
+use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::{Mutex, RwLock};
 
 #[derive(Debug, Default, IntoPrimitive, Eq, PartialEq, TryFromPrimitive, Copy, Clone)]
 #[repr(i32)]
@@ -52,7 +54,6 @@ pub enum NgmrRemovedType {
     All = 7,
 }
 
-
 ///获取单个元件的模型数据
 pub async fn gen_cata_single_geoms(
     design_refno: RefU64,
@@ -66,13 +67,9 @@ pub async fn gen_cata_single_geoms(
         return Ok(false);
     }
     let geoms_info = resolve_desi_comp(design_refno, None).await?;
-    if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL" {
-        create_profile_geos(
-            design_refno,
-            &desi_att,
-            &geoms_info,
-            &brep_shape_map,
-        ).await?;
+    if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL"
+    {
+        create_profile_geos(design_refno, &desi_att, &geoms_info, &brep_shape_map).await?;
         return Ok(true);
     } else {
         let CateGeomsInfo {
@@ -137,7 +134,7 @@ pub async fn gen_cata_geos(
         target_cata_map
             .iter()
             .map(|x| x.cata_hash.clone())
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>(),
     );
     let unique_cata_cnt = all_unique_keys.len();
     let batch_chunks_cnt = all_unique_keys.len() / batch_size + 1;
@@ -198,12 +195,9 @@ pub async fn gen_cata_geos(
                         let cur_type = desi_att.get_type_str();
                         #[cfg(debug_assertions)]
                         dbg!(ele_refno);
-                        let r = gen_cata_single_geoms(
-                            ele_refno,
-                            &brep_shapes_map,
-                            &design_axis_map,
-                        )
-                            .await;
+                        let r =
+                            gen_cata_single_geoms(ele_refno, &brep_shapes_map, &design_axis_map)
+                                .await;
                         match r {
                             Ok(_) => {}
                             Err(e) => {
@@ -258,9 +252,9 @@ pub async fn gen_cata_geos(
                         for (ele_refno, shapes) in brep_shapes_map {
                             let Ok(Some(mut world_transform)) =
                                 aios_core::get_world_transform(ele_refno).await
-                                else {
-                                    continue;
-                                };
+                            else {
+                                continue;
+                            };
                             let Ok(ele_att) = aios_core::get_named_attmap(ele_refno).await else {
                                 continue;
                             };
@@ -270,8 +264,7 @@ pub async fn gen_cata_geos(
                                 if let Some(sjus_adjust) = sjus_map_clone.get(&parent) {
                                     let height = sjus_adjust.value().1;
                                     let off_z = cal_sjus_value(sjus, height);
-                                    let parent_trans =
-                                        aios_core::get_world_transform(parent)
+                                    let parent_trans = aios_core::get_world_transform(parent)
                                         .await
                                         .unwrap_or_default()
                                         .unwrap_or_default();
@@ -288,8 +281,8 @@ pub async fn gen_cata_geos(
                                 &["->GMRE", "->GSTR"],
                                 &["refno"],
                             )
-                                .await
-                                .map(|x| x.get_refno_lossy().unwrap_or_default()) else {
+                            .await
+                            .map(|x| x.get_refno_lossy().unwrap_or_default()) else {
                                 continue;
                             };
                             #[cfg(debug_assertions)]
@@ -297,7 +290,9 @@ pub async fn gen_cata_geos(
 
                             //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
                             //反过来查询负实体，然后查询它的owner，来找到相邻的正实体
-                            let mut pos_neg_map: HashMap<RefU64, Vec<RefU64>> = if gmse_refno.is_valid() {
+                            let mut pos_neg_map: HashMap<RefU64, Vec<RefU64>> = if gmse_refno
+                                .is_valid()
+                            {
                                 aios_core::query_refnos_has_pos_neg_map(&[gmse_refno], Some(true))
                                     .await
                                     .unwrap_or_default()
@@ -324,7 +319,7 @@ pub async fn gen_cata_geos(
                                 aabb: None,
                                 world_transform,
                                 cata_refno: Some(cata_refno),
-                                neg_refnos: vec![],   //负实体是自己，这样好处理
+                                neg_refnos: vec![], //负实体是自己，这样好处理
                                 has_cata_neg: false,
                                 ptset_map: cur_ptset_map.clone(),
                                 ..Default::default()
@@ -334,7 +329,9 @@ pub async fn gen_cata_geos(
                                 let arrive = ele_att.get_i32("ARRI").unwrap_or(-1);
                                 let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
                                 if let Some(a) = cur_ptset_map.values().find(|x| x.number == arrive)
-                                    && let Some(l) = cur_ptset_map.values().find(|x| x.number == leave) {
+                                    && let Some(l) =
+                                        cur_ptset_map.values().find(|x| x.number == leave)
+                                {
                                     local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
                                 }
                                 ptset_map = Some(cur_ptset_map);
@@ -347,6 +344,7 @@ pub async fn gen_cata_geos(
                                     visible_set.insert(s.refno);
                                 }
                             }
+                            // dbg!(&shapes);
                             // dbg!(&visible_set);
                             //直接将所有的几何体组合起来
                             for shape in shapes {
@@ -366,13 +364,13 @@ pub async fn gen_cata_geos(
                                 if !visible {
                                     continue;
                                 }
-                                let mut trans = brep_shape.get_trans();
+                                let mut shape_trans = brep_shape.get_trans();
                                 let is_neg = neg_own_pos_map.contains_key(&refno);
                                 let geo_hash = brep_shape.hash_unit_mesh_params();
                                 let rot = transform.rotation;
                                 let translation =
-                                    transform.translation + transform.rotation * trans.translation;
-                                let scale = trans.scale;
+                                    transform.translation + transform.rotation * shape_trans.translation;
+                                let scale = shape_trans.scale;
                                 let transform = Transform {
                                     translation,
                                     rotation: rot,
@@ -383,7 +381,8 @@ pub async fn gen_cata_geos(
                                     continue;
                                 }
                                 //如果不可见直接跳过
-                                let mut cata_neg_refnos = pos_neg_map.remove(&refno).unwrap_or_default();
+                                let mut cata_neg_refnos =
+                                    pos_neg_map.remove(&refno).unwrap_or_default();
                                 // dbg!(&cata_neg_refnos);
                                 cata_neg_refnos.retain(|x| visible_set.contains(x));
                                 // dbg!(&cata_neg_refnos);
@@ -414,7 +413,9 @@ pub async fn gen_cata_geos(
                                     cata_neg_refnos,
                                 };
                                 if is_ngmr {
-                                    if let Ok(target_owners) = query_ngmr_owner(ele_refno, refno).await {
+                                    if let Ok(target_owners) =
+                                        query_ngmr_owner(ele_refno, refno).await
+                                    {
                                         shape_insts_data.insert_ngmr(ele_refno, target_owners);
                                     }
                                 }
@@ -452,12 +453,16 @@ pub async fn gen_cata_geos(
                         // if ptset_map.is_none() {
                         //     dbg!(&target_cata.ptset);
                         // }
-                        let cur_ptset_map = ptset_map.as_ref().or(target_cata.ptset.as_ref()).cloned().unwrap_or_default();
+                        let cur_ptset_map = ptset_map
+                            .as_ref()
+                            .or(target_cata.ptset.as_ref())
+                            .cloned()
+                            .unwrap_or_default();
                         let Ok(Some(mut origin_trans)) =
                             aios_core::get_world_transform(ele_refno).await
-                            else {
-                                continue;
-                            };
+                        else {
+                            continue;
+                        };
 
                         let ele_att = aios_core::get_named_attmap(ele_refno)
                             .await
@@ -469,6 +474,7 @@ pub async fn gen_cata_geos(
                                 let off_z = cal_sjus_value(sjus, height);
                                 origin_trans.translation += sjus_adjust.value().0
                                     + origin_trans.rotation * Vec3::new(0.0, 0.0, off_z);
+                                // println!("Offset by sjus {}", origin_trans.translation);
                             }
                         }
 
@@ -476,7 +482,8 @@ pub async fn gen_cata_geos(
                             let arrive = ele_att.get_i32("ARRI").unwrap_or(-1);
                             let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
                             if let Some(a) = cur_ptset_map.values().find(|x| x.number == arrive)
-                                && let Some(l) = cur_ptset_map.values().find(|x| x.number == leave) {
+                                && let Some(l) = cur_ptset_map.values().find(|x| x.number == leave)
+                            {
                                 local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
                             }
                         };
@@ -494,7 +501,9 @@ pub async fn gen_cata_geos(
                     }
                 }
 
-                sender.send(shape_insts_data).expect("send cata shape_insts_data failed.");
+                sender
+                    .send(shape_insts_data)
+                    .expect("send cata shape_insts_data failed.");
             });
             handles.push(handle);
         }
@@ -504,8 +513,8 @@ pub async fn gen_cata_geos(
 
     let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
     //直段需要插入一个单位的cylinder
-    let mut inst_tubi_map = HashMap::new();
 
+    let mut tubi_shape_insts_data = ShapeInstancesData::default();
     for bran in branch_map.iter() {
         let branch_refno = *bran.key();
         // dbg!(branch_refno);
@@ -536,7 +545,8 @@ pub async fn gen_cata_geos(
         // dbg!(&tubi_att);
         let tubi_cat_ref = tubi_att.get_foreign_refno("CATR").unwrap_or_default();
         // dbg!(&tubi_cat_ref);
-        let mut h_tubi_size = fast_model::query_tubi_size(branch_refno, tubi_cat_ref, is_hang).await?;
+        let mut h_tubi_size =
+            fast_model::query_tubi_size(branch_refno, tubi_cat_ref, is_hang).await?;
         // dbg!(&tubi_size);
         //todo 其实这里应该待定比较好
         let mut tubi_geo_hash = if matches!(h_tubi_size, TubiSize::BoxSize(_)) {
@@ -575,13 +585,15 @@ pub async fn gen_cata_geos(
                 if current_tubing.is_dir_ok() {
                     if let Some(t) = current_tubing.get_transform() {
                         let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                        inst_tubi_map.insert(
+                        tubi_shape_insts_data.insert_tubi(
                             branch_refno,
                             EleGeosInfo {
                                 refno: branch_refno,
                                 cata_hash: Some(tubi_geo_hash.to_string()),
                                 visible: true,
-                                generic_type: get_generic_type(branch_refno).await.unwrap_or_default(),
+                                generic_type: get_generic_type(branch_refno)
+                                    .await
+                                    .unwrap_or_default(),
                                 aabb: Some(aabb),
                                 world_transform: t,
                                 flow_pt_indexs: vec![],
@@ -610,8 +622,11 @@ pub async fn gen_cata_geos(
         let mut bran_comp_vec = vec![];
         //第一遍完成后，然后生成tubing
         let len = children.len();
-        let exist_refnos = children.iter().map(|x| x.refno)
-            .filter(|x| !local_al_map.contains_key(x)).collect::<Vec<_>>();
+        let exist_refnos = children
+            .iter()
+            .map(|x| x.refno)
+            .filter(|x| !local_al_map.contains_key(x))
+            .collect::<Vec<_>>();
         // dbg!(&exist_refnos);
         let exist_al_map = aios_core::query_arrive_leave_points_by_cata_hash(&exist_refnos[..])
             .await
@@ -627,21 +642,28 @@ pub async fn gen_cata_geos(
             {
                 // println!("正在处理直段{}: {}", cur_type, refno.to_string());
                 // let world_trans = inst_info.world_transform;
-                let world_trans = aios_core::get_world_transform(refno).await?.unwrap_or_default();
+                let world_trans = aios_core::get_world_transform(refno)
+                    .await?
+                    .unwrap_or_default();
                 //有隐含管段
-                if let Some(axis_map) = exist_al_map
-                    .get(&refno)
-                    .or(
-                        local_al_map.get(&refno)
-                    ).map(|x| [x[0].transformed(&world_trans), x[1].transformed(&world_trans)])
+                if let Some(axis_map) =
+                    exist_al_map
+                        .get(&refno)
+                        .or(local_al_map.get(&refno))
+                        .map(|x| {
+                            [
+                                x[0].transformed(&world_trans),
+                                x[1].transformed(&world_trans),
+                            ]
+                        })
                 {
                     bran_comp_vec.push(refno);
                     current_tubing.arrive_refno = refno;
                     //ATTA，如果设置成SPKBRK，产生直段，否则不产生直段
                     let skip = (cur_type == "ATTA")
                         && !aios_core::get_named_attmap(refno)
-                        .await?
-                        .get_bool_or_default("SPKBRK");
+                            .await?
+                            .get_bool_or_default("SPKBRK");
                     // dbg!(skip);
                     if !skip {
                         let a_pos = axis_map[0].pt;
@@ -678,36 +700,40 @@ pub async fn gen_cata_geos(
                                             &["->LSTU->CATR"],
                                             &["refno"],
                                         )
-                                            .await
-                                            .map(|x| x.get_refno_lossy().unwrap_or_default())
-                                            .unwrap_or_default();
+                                        .await
+                                        .map(|x| x.get_refno_lossy().unwrap_or_default())
+                                        .unwrap_or_default();
                                         // dbg!(&lstube_cat_ref);
                                         current_tubing.tubi_size = fast_model::query_tubi_size(
                                             current_tubing.leave_refno,
                                             lstube_cat_ref,
                                             is_hang,
                                         )
-                                            .await?;
+                                        .await?;
                                     }
                                     #[cfg(debug_assertions)]
                                     dbg!(&current_tubing.tubi_size);
                                     tubi_geo_hash =
-                                        if matches!(current_tubing.tubi_size, TubiSize::BoxSize(_)) {
+                                        if matches!(current_tubing.tubi_size, TubiSize::BoxSize(_))
+                                        {
                                             BOXI_GEO_HASH
                                         } else {
                                             TUBI_GEO_HASH
                                         };
                                     if let Some(t) = current_tubing.get_transform() {
-                                        let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                                        inst_tubi_map.insert(
+                                        let aabb =
+                                            shared::aabb_apply_transform(&unit_cyli_aabb, &t);
+                                        tubi_shape_insts_data.insert_tubi(
                                             current_tubing.leave_refno,
                                             EleGeosInfo {
                                                 refno: current_tubing.leave_refno,
                                                 cata_hash: Some(tubi_geo_hash.to_string()),
                                                 visible: true,
-                                                generic_type:
-                                                    get_generic_type(current_tubing.leave_refno)
-                                                    .await.unwrap_or_default(),
+                                                generic_type: get_generic_type(
+                                                    current_tubing.leave_refno,
+                                                )
+                                                .await
+                                                .unwrap_or_default(),
                                                 aabb: Some(aabb),
                                                 world_transform: t,
                                                 ..Default::default()
@@ -787,15 +813,15 @@ pub async fn gen_cata_geos(
                         // dbg!(&current_tubing);
                         if let Some(t) = current_tubing.get_transform() {
                             let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                            inst_tubi_map.insert(
+                            tubi_shape_insts_data.insert_tubi(
                                 current_tubing.leave_refno,
                                 EleGeosInfo {
                                     refno: current_tubing.leave_refno,
                                     cata_hash: Some(tubi_geo_hash.to_string()),
                                     visible: true,
-                                    generic_type:
-                                        get_generic_type(current_tubing.leave_refno)
-                                        .await.unwrap_or_default(),
+                                    generic_type: get_generic_type(current_tubing.leave_refno)
+                                        .await
+                                        .unwrap_or_default(),
                                     aabb: Some(aabb),
                                     world_transform: t,
                                     ..Default::default()
@@ -821,6 +847,10 @@ pub async fn gen_cata_geos(
         }
     }
 
+    sender
+        .send(tubi_shape_insts_data)
+        .expect("send tubi shape_insts_data failed.");
+
     // if !inst_tubi_map.is_empty() {
     //     for (k, v) in inst_tubi_map {
     //         // main.insert_tubi(k, v);
@@ -844,19 +874,19 @@ pub async fn gen_cata_geos(
     Ok(true)
 }
 
-
 //收集ngmr的信息
-pub async fn query_ngmr_owner(refno: RefU64, ngmr_geo_refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
+pub async fn query_ngmr_owner(
+    refno: RefU64,
+    ngmr_geo_refno: RefU64,
+) -> anyhow::Result<Vec<RefU64>> {
     // dbg!((refno, ngmr_geo_refno));
     let att = aios_core::get_named_attmap(refno).await.unwrap_or_default();
     let c_ref = att.get_foreign_refno("CREF");
     // #[cfg(debug_assertions)]
     // dbg!(c_ref);
-    let ance_result = aios_core::query_filter_ancestors(
-        refno.clone(),
-        NGMR_OWN_TYPES.map(String::from).to_vec(),
-    )
-        .await?;
+    let ance_result =
+        aios_core::query_filter_ancestors(refno.clone(), NGMR_OWN_TYPES.map(String::from).to_vec())
+            .await?;
     let o_ref = ance_result.into_iter().next();
     // #[cfg(debug_assertions)]
     // dbg!(o_ref);
@@ -864,16 +894,19 @@ pub async fn query_ngmr_owner(refno: RefU64, ngmr_geo_refno: RefU64) -> anyhow::
         .await
         .unwrap_or_default();
     let removed_type =
-        NgmrRemovedType::try_from(geo_att.get_i32("NAPP").unwrap_or(-1))
-            .unwrap_or_default();
+        NgmrRemovedType::try_from(geo_att.get_i32("NAPP").unwrap_or(-1)).unwrap_or_default();
     // #[cfg(debug_assertions)]
     // dbg!(removed_type);
     let mut target_refnos = vec![];
     match removed_type {
         NgmrRemovedType::Nothing => {}
-        NgmrRemovedType::Attached => { c_ref.map(|x| target_refnos.push(x)); }
-        NgmrRemovedType::AsDefault | NgmrRemovedType::Owner => { o_ref.map(|x| target_refnos.push(x)); }
-        NgmrRemovedType::Item => { target_refnos.push(refno) }
+        NgmrRemovedType::Attached => {
+            c_ref.map(|x| target_refnos.push(x));
+        }
+        NgmrRemovedType::AsDefault | NgmrRemovedType::Owner => {
+            o_ref.map(|x| target_refnos.push(x));
+        }
+        NgmrRemovedType::Item => target_refnos.push(refno),
         NgmrRemovedType::AttachedAndOwner => {
             c_ref.map(|x| target_refnos.push(x));
             o_ref.map(|x| target_refnos.push(x));

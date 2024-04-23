@@ -23,7 +23,10 @@ fn load_manifold(id: &str, mat: DMat4) -> anyhow::Result<ManifoldRust> {
     Ok(manifold)
 }
 
-pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Result<()> {
+pub async fn apply_insts_boolean_manifold(
+    refnos: &[RefU64],
+    dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let dir = dir.unwrap_or("assets/meshes".into());
     //如果dir 不存在，创建这个目录
     if !dir.exists() {
@@ -31,19 +34,43 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
     }
     //筛选出来 "Neg", "CataCrossNeg" 的关联
     //and in.noun in ["FLOOR"]
-    let sql = r#"
-        select
-             in as refno,
-             in.noun as noun,
-             world_trans.d as wt,
-             aabb.d as aabb,
-            (select value [meta::id(out), trans.d] from out->geo_relate) as ts,
-            (select value [in, world_trans.d, (select meta::id(out) as id, geo_type, trans.d as trans,
-             out.aabb.d as aabb, object::keys(out.param)[0] as para_type
-            from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"])]
-        from array::flatten(neg_refnos->inst_relate)) as neg_ts from inst_relate where !bad_bool
-        and !booled and neg_refnos!=none and aabb.d!=none
-    "#;
+    let sql = if refnos.is_empty() {
+        r#"
+            select
+                in as refno,
+                in.noun as noun,
+                world_trans.d as wt,
+                aabb.d as aabb,
+                (select value [meta::id(out), trans.d] from out->geo_relate) as ts,
+                (select value [in, world_trans.d, (select meta::id(out) as id, geo_type, trans.d as trans,
+                out.aabb.d as aabb, object::keys(out.param)[0] as para_type
+                from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"])]
+            from array::flatten(neg_refnos->inst_relate)) as neg_ts from inst_relate where !bad_bool
+            and !booled and neg_refnos!=none and aabb.d!=none
+        "#.to_string()
+    } else {
+        let inst_keys = refnos
+            .iter()
+            .map(|x| x.to_inst_relate_key())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            r#"
+            select
+                in as refno,
+                in.noun as noun,
+                world_trans.d as wt,
+                aabb.d as aabb,
+                (select value [meta::id(out), trans.d] from out->geo_relate) as ts,
+                (select value [in, world_trans.d, (select meta::id(out) as id, geo_type, trans.d as trans,
+                out.aabb.d as aabb, object::keys(out.param)[0] as para_type
+                from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"])]
+            from array::flatten(neg_refnos->inst_relate)) as neg_ts from [{}] where !bad_bool
+            and !booled and neg_refnos!=none and aabb.d!=none
+        "#,
+            inst_keys
+        )
+    };
     // dbg!("apply_insts_boolean_manifold");
     let mut response = SUL_DB.query(sql).await.unwrap();
     let boolean_query: Vec<GeoTransQuery> = response.take(0).unwrap();
@@ -71,8 +98,7 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                 //没有实体的情况，下次就不要再继续计算布尔运算了
                 let inst_relate_id = b.refno.to_table_key("inst_relate");
                 if pos_manifolds.is_empty() {
-                    update_sql
-                        .push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
+                    update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
                     continue;
                 };
                 // dbg!(b.refno);
@@ -80,8 +106,7 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                 let mut pos_manifold = ManifoldRust::batch_boolean(&pos_manifolds, 0);
                 // dbg!(pos_manifold.num_tri());
                 if pos_manifold.num_tri() == 0 {
-                    update_sql
-                        .push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
+                    update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
                     continue;
                 };
 
@@ -95,37 +120,44 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
                         aabb,
                     } in negs
                     {
+                        // dbg!(&b.noun);
                         let Some(mut neg_aabb) = aabb else {
                             continue;
                         };
                         //如果有关键点在包围盒上了，就需要做缩放
                         // let intersect = pos_aabb.intersects(&neg_aabb);
-                        if para_type == "PrimRevolution" || para_type == "PrimRTorus" {
-                            //如果选装的点在包围盒里，就需要放大？？
-                            let m = pos_extent.x.max(pos_extent.y) as f64;
-                            let d = (m + 1.0) / m;
-                            let scale_xy = d.clamp(1.01, 1.02) as f32;
-                            // dbg!(scale_xy);
-                            let scale_xy = 1.02;
-                            let sim_dist = neg_aabb
-                                .extents()
-                                .xy()
-                                .metric_distance(&pos_aabb.extents().xy());
-                            if sim_dist < 10.0 || b.noun == "FLOOR" {
-                                // dbg!((neg_aabb.extents().xy() - pos_aabb.extents().xy()));
-                                //交给occ 去处理
-                                return;
-                            }
-
-                            // neg_t.scale.x *= scale_xy;
-                            // neg_t.scale.y *= scale_xy;
-                        }
+                        // if para_type == "PrimRevolution" || para_type == "PrimRTorus" {
+                        //     //如果选装的点在包围盒里，就需要放大？？
+                        //     let m = pos_extent.x.max(pos_extent.y) as f64;
+                        //     let d = (m + 1.0) / m;
+                        //     let scale_xy = d.clamp(1.01, 1.02) as f32;
+                        //     //
+                        //     let scale_xy = 1.02;
+                        //     let nxy_max = neg_aabb.extents().xy().max();
+                        //     let pxy_max = pos_aabb.extents().xy().max();
+                        //     let sim_dist = (nxy_max - pxy_max).abs();
+                        //     dbg!((neg_aabb.extents().xy() , pos_aabb.extents().xy()));
+                        //     dbg!(sim_dist/pxy_max);
+                        //     if sim_dist < 10.0 /*|| b.noun == "FLOOR"*/ {
+                        //         // dbg!((neg_aabb.extents().xy() - pos_aabb.extents().xy()));
+                        //         //交给occ 去处理
+                        //         // return;
+                        //         neg_t.scale.x *= scale_xy;
+                        //         neg_t.scale.y *= scale_xy;
+                        //         dbg!(scale_xy);
+                        //     }
+                        // }
                         //看类型给偏差？todo 解决误差的问题
                         //如果AABB 比较接近的情况下，又有旋转体
-                        if b.noun == "FLOOR" || b.noun.contains("WALL") || b.noun == "GENSEC" {
-                            if para_type == "PrimExtrusion"
-                                || para_type.contains("Cylinder")
-                                || para_type == "PrimBox"
+
+                        if b.noun == "FLOOR"
+                            || b.noun.contains("WALL")
+                            || b.noun == "GENSEC"
+                            || b.noun == "PANE"
+                        {
+                            // if para_type == "PrimExtrusion"
+                            //     || para_type.contains("Cylinder")
+                            //     || para_type == "PrimBox" || para_type == "PrimRevolution" || para_type == "PrimRTorus"
                             {
                                 if neg_aabb.extents().z == 0.0 {
                                     continue;
@@ -190,26 +222,34 @@ pub async fn apply_insts_boolean_manifold(dir: Option<PathBuf>) -> anyhow::Resul
 }
 
 //处理元件库有负实体的布尔运算
-pub async fn apply_cata_neg_boolean_manifold(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow::Result<()> {
+pub async fn apply_cata_neg_boolean_manifold(
+    refnos: &[RefU64],
+    dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let dir = dir.unwrap_or("assets/meshes".into());
     //如果dir 不存在，创建这个目录
     if !dir.exists() {
         std::fs::create_dir_all(&dir).unwrap();
     }
 
-    let sql =
-        if !refnos.is_empty() {
-            let inst_keys = refnos.iter().map(|x| x.to_inst_relate_key()).collect::<Vec<_>>().join(",");
-            format!(r#"
-            select in as refno, (->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
-            from ->inst_info->geo_relate where visible and !out.bad and cata_neg!=none) as boolean_group
-            from [{inst_keys}] where (->inst_info)[0]!=none and has_cata_neg and !bad_bool and !booled"#)
-        } else {
+    let sql = if !refnos.is_empty() {
+        let inst_keys = refnos
+            .iter()
+            .map(|x| x.to_inst_relate_key())
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
             r#"
             select in as refno, (->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
             from ->inst_info->geo_relate where visible and !out.bad and cata_neg!=none) as boolean_group
+            from [{inst_keys}] where (->inst_info)[0]!=none and has_cata_neg and !bad_bool and !booled"#
+        )
+    } else {
+        r#"
+            select in as refno, (->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
+            from ->inst_info->geo_relate where visible and !out.bad and cata_neg!=none) as boolean_group
             from inst_relate where (->inst_info)[0]!=none and has_cata_neg and !bad_bool and !booled"#.to_string()
-        };
+    };
     // println!("sql is {}", &sql);
     let mut response = SUL_DB.query(sql).await?;
     let mut params: Vec<CataNegGroup> = response.take(0)?;
@@ -265,13 +305,13 @@ pub async fn apply_cata_neg_boolean_manifold(refnos: &[RefU64], dir: Option<Path
 
                     let Ok(mut pos_manifold) =
                         load_manifold(&pos.id, pos.trans.compute_matrix().as_dmat4())
-                        else {
-                            update_sql.push_str(&format!(
-                                "update {}<-inst_relate set bad_bool=true;",
-                                &g.inst_info_id,
-                            ));
-                            continue;
-                        };
+                    else {
+                        update_sql.push_str(&format!(
+                            "update {}<-inst_relate set bad_bool=true;",
+                            &g.inst_info_id,
+                        ));
+                        continue;
+                    };
 
                     // dbg!(&update_sql);
                     let mut neg_manifolds = vec![];
@@ -289,7 +329,7 @@ pub async fn apply_cata_neg_boolean_manifold(refnos: &[RefU64], dir: Option<Path
                         let new_id = g.refno.hash_with_another_refno(bg[0]);
                         let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
                         let mesh = PlantMesh::from(&final_manifold);
-                        // #[cfg(feature = "debug_model")]
+                        #[cfg(feature = "debug_model")]
                         mesh.export_obj(false, &format!("{}.obj", g.refno));
                         //保存到文件到dir下
                         if mesh

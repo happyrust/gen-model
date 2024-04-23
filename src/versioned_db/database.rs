@@ -8,6 +8,7 @@ use dashmap::{DashMap, DashSet};
 use futures::StreamExt;
 use itertools::Itertools;
 use parse_pdms_db::parse::*;
+use petgraph::prelude::DiGraph;
 #[cfg(feature = "sql")]
 use sea_orm::{ConnectionTrait, Schema, Statement};
 #[cfg(feature = "sql")]
@@ -25,7 +26,7 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 // use std::time::Instant;
-use tokio::fs::File;
+use tokio::fs::{create_dir_all, File};
 use tokio::time::Instant;
 
 use crate::consts::*;
@@ -138,18 +139,6 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     dbg!("执行多线程解析");
     // 遍历所有包含的项目
     for project in &db_option.included_projects {
-        #[cfg(feature = "sql")]
-        if db_option.sync_tidb.unwrap_or(false) {
-            let db = sea_orm::Database::connect(&default_conn_str).await.unwrap();
-            let backend = db.get_database_backend();
-            let schema = Schema::new(backend);
-            db.execute(Statement::from_string(
-                backend.clone(),
-                format!("CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8;"),
-            ))
-            .await?;
-        }
-
         let debug_refnos: Vec<RefU64> = db_option
             .debug_root_refnos
             .as_ref()
@@ -229,11 +218,11 @@ pub async fn sync_total_async_threaded(
     project: &str,
     db_types: &[&str],
 ) -> anyhow::Result<()> {
+    let pg_dir = "assets/pg";
+    create_dir_all(pg_dir).await.unwrap();
     println!("开始解析 {project} 的 {:?}", db_types);
     let db_option_arc = Arc::new(db_option.clone()); // 创建一个Arc对象，表示数据库选项
-    let mut data_dir = Path::new(&db_option_arc.project_path); // 创建一个Path对象，表示数据目录的路径
-    let project_dir = data_dir.join(&project); // 创建一个Path对象，表示项目目录的路径
-                                               // let batch_insert_sql_cnt = db_option_arc.batch_insert_sql_cnt as usize; // 获取批量插入SQL数量
+    let project_dir = db_option.get_project_path(&project).unwrap(); // 创建一个Path对象，表示项目目录的路径
 
     if !Path::new(&project_dir).exists() {
         // 如果项目目录不存在，则抛出错误
@@ -298,6 +287,7 @@ pub async fn sync_total_async_threaded(
         .map(|&x| x.to_string())
         .collect::<Vec<_>>();
     let is_sys_parse = db_types_clone.contains(&"SYST".to_string());
+    let is_save_db = db_option.is_save_db();
     let parse_handle = tokio::spawn(async move {
         // let mut handles = vec![];
         //todo 按照文件大小排序，只有小于多少的能开启多线程，模型一大就不合适了
@@ -313,16 +303,14 @@ pub async fn sync_total_async_threaded(
                     .unwrap()
                     .contains(&file_name)
             {
-                {
-                    let mut file = File::open(&path).await.unwrap();
-                    let mut buf = vec![0u8; 60];
-                    file.read_exact(&mut buf).await.unwrap();
-                    let (db_type, file_version, db_no) = parse_file_basic_info(&buf);
-                    // #[cfg(debug_assertions)]
-                    // dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
-                    if !db_types_clone.contains(&db_type) {
-                        continue;
-                    }
+                let mut file = File::open(&path).await.unwrap();
+                let mut buf = vec![0u8; 60];
+                file.read_exact(&mut buf).await.unwrap();
+                let (db_type, file_version, db_no) = parse_file_basic_info(&buf);
+                // #[cfg(debug_assertions)]
+                // dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
+                if !db_types_clone.contains(&db_type) {
+                    continue;
                 }
 
                 // 如果需要解析的文件列表为空或包含当前文件名，则执行以下代码块
@@ -337,9 +325,18 @@ pub async fn sync_total_async_threaded(
                 .unwrap_or_default();
                 dbg!(db_basic.children_map.len());
                 let all_refnos = db_basic.children_map.keys().cloned().collect::<Vec<_>>();
-                let db_basic = Arc::new(db_basic);
+                //将children map 转成 petgraph
 
-                save_pe_relates(&db_basic, sender.clone()).await;
+                let graph = db_basic.gen_petgraph();
+
+                graph
+                    .save(&format!("{pg_dir}/{db_no}.pg"))
+                    .expect("save pg failed");
+
+                let db_basic = Arc::new(db_basic);
+                if is_save_db {
+                    save_pe_relates(&db_basic, sender.clone()).await;
+                }
 
                 let debug_refnos: Vec<RefU64> = db_option_arc
                     .debug_root_refnos
@@ -352,6 +349,7 @@ pub async fn sync_total_async_threaded(
                     .unwrap_or_default();
                 //debug 不保存数据，只复杂查看属性值
                 let is_debug = !debug_refnos.is_empty();
+
                 if is_debug {
                     dbg!(&debug_refnos);
                 }
@@ -368,69 +366,72 @@ pub async fn sync_total_async_threaded(
                     let db_basic_clone = db_basic.clone();
                     let debug_refnos = debug_refnos.clone();
                     // let handle = tokio::spawn(async move {
-                        if let Ok(PdmsDbData {
-                            total_attr_map,
-                            type_ele_map,
-                            db_type,
-                            db_no,
-                            version,
-                            foreign_refnos_map,
-                            ..
-                        }) = parse_file_with_chunk(
-                            db_basic_clone.clone(),
-                            &None,
-                            &file_name_clone,
-                            project_name_clone.as_str(),
-                            &chunk_refnos_clone,
-                        )
-                        .await
-                        {
-                            //类型暂时不多线程
-                            let total_attr_map_arc = Arc::new(total_attr_map);
-                            //开始执行保存数据
-                            // dbg!("开始保存pdms_element数据");
-                            let sender_clone = sender.clone();
-                            if !is_debug {
-                                save_pes(
-                                    &db_basic_clone,
-                                    &total_attr_map_arc,
-                                    db_no as i32,
-                                    &db_option_clone,
-                                    sender,
-                                )
-                                .await
-                                .expect("save pe to surreal failed");
+                    if let Ok(PdmsDbData {
+                        total_attr_map,
+                        type_ele_map,
+                        db_type,
+                        db_no,
+                        version,
+                        foreign_refnos_map,
+                        ..
+                    }) = parse_file_with_chunk(
+                        db_basic_clone.clone(),
+                        &None,
+                        &file_name_clone,
+                        project_name_clone.as_str(),
+                        &chunk_refnos_clone,
+                    )
+                    .await
+                    {
+                        //类型暂时不多线程
+                        let total_attr_map_arc = Arc::new(total_attr_map);
+                        //开始执行保存数据
+                        // dbg!("开始保存pdms_element数据");
+                        let sender_clone = sender.clone();
+                        if !is_debug && is_save_db {
+                            save_pes(
+                                &db_basic_clone,
+                                &total_attr_map_arc,
+                                db_no as i32,
+                                &db_option_clone,
+                                sender,
+                            )
+                            .await
+                            .expect("save pe to surreal failed");
+                        }
+                        for kv in type_ele_map.iter() {
+                            let noun: i32 = *kv.key() as _;
+                            let type_name = db1_dehash(noun as _);
+                            if type_name.is_empty() {
+                                continue;
                             }
-                            for kv in type_ele_map.iter() {
-                                let noun: i32 = *kv.key() as _;
-                                let type_name = db1_dehash(noun as _);
-                                if type_name.is_empty() {
-                                    continue;
-                                }
-                                //UDA 还是要单独存，不然数据很容易混乱
-                                for refnos in
-                                    &kv.value().iter().chunks(db_option_clone.att_chunk as _)
-                                {
-                                    let mut json_vec = vec![];
-                                    let mut uda_json_vec = vec![];
-                                    for refno in refnos {
-                                        let att = total_attr_map_arc.get(refno).unwrap();
-                                        //调试时，只解析这个单独的refno
-                                        if is_debug {
-                                            if debug_refnos.contains(&att.get_refno().unwrap()) {
-                                                dbg!(att.value());
-                                            }
-                                            continue;
+                            //UDA 还是要单独存，不然数据很容易混乱
+                            for refnos in &kv.value().iter().chunks(db_option_clone.att_chunk as _)
+                            {
+                                let mut json_vec = vec![];
+                                let mut uda_json_vec = vec![];
+                                for refno in refnos {
+                                    let att = total_attr_map_arc.get(refno).unwrap();
+                                    //调试时，只解析这个单独的refno
+                                    if is_debug {
+                                        if debug_refnos.contains(&att.get_refno().unwrap()) {
+                                            dbg!(att.value());
                                         }
-                                        let Some(json) = att.gen_sur_json() else {
-                                            continue;
-                                        };
-                                        json_vec.push(json);
-                                        let Some(json) = att.gen_sur_json_uda(&[]) else {
-                                            continue;
-                                        };
-                                        uda_json_vec.push(json);
+                                        continue;
                                     }
+                                    if !is_save_db {
+                                        continue;
+                                    }
+                                    let Some(json) = att.gen_sur_json() else {
+                                        continue;
+                                    };
+                                    json_vec.push(json);
+                                    let Some(json) = att.gen_sur_json_uda(&[]) else {
+                                        continue;
+                                    };
+                                    uda_json_vec.push(json);
+                                }
+                                if is_save_db {
                                     if !json_vec.is_empty() {
                                         let sql = format!(
                                             "INSERT IGNORE INTO {} [{}]",
@@ -450,8 +451,7 @@ pub async fn sync_total_async_threaded(
                                 }
                             }
                         }
-                    // });
-                    // handles.push(handle);
+                    }
                 }
             }
             //单个文件多线程

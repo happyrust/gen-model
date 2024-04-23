@@ -243,7 +243,7 @@ impl AiosDBManager {
                     };
 
                     let json = pe.gen_sur_json();
-                    let att_json = k.attr.gen_sur_json();
+                    let att_json = k.attr.gen_sur_json_exclude(&["id"]);
                     if k.is_modified() {
                         update_pe_sql_str.push_str(
                             format!("UPDATE {} CONTENT {};", refno.to_pe_key(), json).as_str(),
@@ -252,6 +252,7 @@ impl AiosDBManager {
                         insert_pe_jsons_str.push_str(&json);
                         insert_pe_jsons_str.push_str(",");
                     }
+
                     //不管怎样，update和add，都用update的方式
                     if let Some(att_json) = att_json {
                         update_att_sql_str.push_str(
@@ -264,6 +265,7 @@ impl AiosDBManager {
                         );
                     }
                 }
+                // println!("{}", &update_pe_sql_str);
                 let pe_sql = if insert_pe_jsons_str.is_empty() {
                     update_pe_sql_str
                 } else {
@@ -272,6 +274,7 @@ impl AiosDBManager {
                         insert_pe_jsons_str
                     )
                 };
+                // println!("{}", &update_att_sql_str);
                 if !update_att_sql_str.is_empty() {
                     sql_join_set.spawn(async move {
                         SUL_DB.query(update_att_sql_str).await.unwrap();
@@ -317,7 +320,7 @@ impl AiosDBManager {
         let mut chunks = all_relate_sqls.chunks(100);
         for mut s in chunks {
             let sql = s.into_iter().join("");
-            dbg!(&sql);
+            // dbg!(&sql);
             relate_join_set.spawn(async move {
                 SUL_DB.query(sql).await.unwrap();
             });
@@ -444,8 +447,8 @@ impl AiosDBManager {
                 .expect("watch files failed");
         });
 
-        create_dir_all("asset/archives").await.unwrap();
-        create_dir_all("asset/temp").await.unwrap();
+        create_dir_all("assets/archives").await.unwrap();
+        create_dir_all("assets/temp").await.unwrap();
         while let Some(res) = rx.next().await {
             match res {
                 Ok(event) => {

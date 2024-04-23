@@ -116,38 +116,15 @@ async fn main() -> anyhow::Result<()> {
         println!("处理模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
+    if db_option.gen_spatial_tree {
+        load_aabb_tree().await.unwrap();
+        build_room_relations().await.unwrap();
+        update_cal_equip().await?;
+        update_cal_bran_component().await?;
+    }
+
     AiosDBManager::exec_watcher(mgr.clone()).await.expect("exec_watcher error");
 
-    // load_aabb_tree().await.unwrap();
-    // if db_option.gen_spatial_tree {
-    //     build_room_relations().await.unwrap();
-    // }
-    //
-    // {
-    //     update_cal_equip().await?;
-    //     update_cal_bran_component().await?;
-    // }
-
-    // ///生成ssc 树
-    // /// 需要 resource 下文档 ssc_level.xlsx  ssc_room.xlsx 专业分类.xlsx
-    // if db_option.rebuild_ssc_tree {
-    //     println!("正在同步SSC");
-    //     if let Ok(database) = mgr.get_arango_db().await {
-    //         // 保存ssc
-    //         // async_total_ssc_data(&project_db.value(), mgr.clone()).await?;
-    //         // set_arangodb_all_ssc_nodes(project_db.value(), &mgr.get_arango_db().await?).await?;
-    //         let _ = save_ssc_level_excel(&database).await?;
-    //         let _result = get_room_info_from_excel_refactor(&database).await.unwrap();
-    //         let _result = insert_ssc_room_node_refactor(&database).await.unwrap();
-    //     }
-    //     println!("SSC同步完成");
-    // }
-    //
-    // if db_option.only_sync_sys {
-    //     println!("正在同步TEAM DATA");
-    //     sync_system_db(&mgr).await?;
-    // }
-    //
     // //房间树要重写
     if db_option.gen_spatial_tree {
         // mgr.calculate_rooms().await.expect("房间计算失败");

@@ -517,7 +517,6 @@ impl AiosDBManager {
             .map_err({ |x| anyhow::anyhow!(x.to_string()) })
     }
 
-
     ///获得默认的pool
     #[cfg(feature = "sql")]
     #[inline]
@@ -538,26 +537,11 @@ impl AiosDBManager {
         #[cfg(feature = "sql")]
         let mut project_map = DashMap::new();
         let default_conn = AiosDBManager::get_default_conn_str(&db_option);
-        for project in &db_option.included_projects {
-            #[cfg(feature = "sql")]
-            if db_option.use_tidb.unwrap_or(false) {
-                let project_pool = AiosDBManager::get_db_pool(&default_conn, project).await;
-                match project_pool {
-                    Ok(pool) => {
-                        println!("数据库连接成功 {project}");
-                        project_map.entry(project.clone()).or_insert(pool.clone());
-                    }
-                    Err(_) => {
-                        println!("项目: {} 连接创建失败", project);
-                    }
-                }
-                println!("正在创建数据库连接 {project}");
-            }
-        }
-        let projects = db_option.included_projects.clone();
+        let projects = db_option.get_project_dir_names().clone();
 
         let db_paths =
-            collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref())).unwrap_or_default();
+            collect_db_dirs(&db_option.project_path, projects.iter().map(|x| x.as_ref()))
+                .unwrap_or_default();
         let mut watcher = PdmsWatcher::load_from_json(None).unwrap_or(PdmsWatcher::new(db_paths));
         #[cfg(feature = "debug_watch")]
         {
@@ -589,7 +573,7 @@ impl AiosDBManager {
                             if mqtt_connect_status.is_none() {
                                 *mqtt_connect_status = Some(true);
                                 info!("Init connected to MQTT broker.");
-                            }else{
+                            } else {
                                 if !(*mqtt_connect_status).unwrap() {
                                     *mqtt_connect_status = Some(true);
                                     info!("Connected to MQTT broker.");
@@ -603,7 +587,7 @@ impl AiosDBManager {
                         if mqtt_connect_status.is_none() {
                             *mqtt_connect_status = Some(false);
                             error!("Init MQTT Connection error encountered: {}", e);
-                        }else {
+                        } else {
                             if (*mqtt_connect_status).unwrap() {
                                 *mqtt_connect_status = Some(false);
                                 error!("MQTT Connection error encountered: {}", e);

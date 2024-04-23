@@ -81,14 +81,14 @@ pub async fn build_room_relations() -> anyhow::Result<()> {
         .map(|(_, _, panel_refnos)| panel_refnos.clone())
         .flatten()
         .collect::<HashSet<_>>();
-    dbg!(exclude_panel_refnos.len());
+    // dbg!(exclude_panel_refnos.len());
     for (room_refno, room_num, panel_refnos) in room_panel_map {
         for panel_refno in panel_refnos {
             let refnos = query_room_refnos(panel_refno, &exclude_panel_refnos, 0.1)
                 .await
                 .unwrap();
             if !refnos.is_empty() {
-                dbg!(refnos.len());
+                // dbg!(refnos.len());
                 save_room_relate(panel_refno, &refnos, &room_num)
                     .await
                     .unwrap();

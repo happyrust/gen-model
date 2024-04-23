@@ -4,13 +4,13 @@ use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::tool::db_tool::db1_hash;
 use aios_core::SUL_DB;
+use aios_core::db::*;
 use config::File;
 use dashmap::DashMap;
 use dashmap::DashSet;
 use futures::StreamExt;
 use itertools::Itertools;
 use log::{error, info};
-use parse_pdms_db::parse::DbBasicData;
 use petgraph::algo::all_simple_paths;
 use petgraph::graph::Graph;
 use petgraph::graph::NodeIndex;
@@ -55,8 +55,8 @@ fn gen_full_name(
                     //需要再保存一个noun index ，即这个ele 在children中是同类型的第几个
                     noun_idx = children
                         .iter()
-                        .filter(|(_, n)| n == noun)
-                        .position(|(c, _)| *c == refno)
+                        .filter(|&&c| db_basic.get_type(c) == noun)
+                        .position(|&c| c == refno)
                         .unwrap_or_default()
                         + 1;
                 }
@@ -98,8 +98,8 @@ fn gen_default_name(
         //需要再保存一个noun index ，即这个ele 在children中是同类型的第几个
         noun_idx = children
             .iter()
-            .filter(|(_, n)| n == noun)
-            .position(|(c, _)| *c == refno)
+            .filter(|&c| db_basic.get_type(*c) == noun)
+            .position(|c| *c == refno)
             .unwrap_or_default()
             + 1;
     }
@@ -207,10 +207,10 @@ pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<Strin
         let relate_sqls = children
             .iter()
             .enumerate()
-            .map(|(i, (child, c_noun))| {
+            .map(|(i, child)| {
                 let cp = child.to_pe_key();
                 let op = owner.to_pe_key();
-                format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", cp, op,)
+                format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", cp, op, )
             })
             .collect::<Vec<String>>();
         all_relate_sqls.extend_from_slice(&relate_sqls);
