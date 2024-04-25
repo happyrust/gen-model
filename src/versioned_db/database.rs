@@ -223,8 +223,10 @@ pub async fn sync_total_async_threaded(
     println!("开始解析 {project} 的 {:?}", db_types);
     let db_option_arc = Arc::new(db_option.clone()); // 创建一个Arc对象，表示数据库选项
     let project_dir = db_option.get_project_path(&project).unwrap(); // 创建一个Path对象，表示项目目录的路径
+    dbg!(&project_dir);
 
     if !Path::new(&project_dir).exists() {
+        dbg!("项目文件夹指定不正确");
         // 如果项目目录不存在，则抛出错误
         return Err(anyhow::anyhow!("项目文件夹指定不正确"));
     }
@@ -247,6 +249,7 @@ pub async fn sync_total_async_threaded(
             })
             .collect::<Vec<PathBuf>>()
     };
+    dbg!(children_files.len());
     // 先解析一遍uda
     // 正式解析
     let project = Arc::new(project.to_string()); // 创建一个Arc对象，表示项目名称
@@ -308,7 +311,7 @@ pub async fn sync_total_async_threaded(
                 file.read_exact(&mut buf).await.unwrap();
                 let (db_type, file_version, db_no) = parse_file_basic_info(&buf);
                 // #[cfg(debug_assertions)]
-                // dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
+                dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
                 if !db_types_clone.contains(&db_type) {
                     continue;
                 }
@@ -326,12 +329,11 @@ pub async fn sync_total_async_threaded(
                 dbg!(db_basic.children_map.len());
                 let all_refnos = db_basic.children_map.keys().cloned().collect::<Vec<_>>();
                 //将children map 转成 petgraph
-
-                let graph = db_basic.gen_petgraph();
-
-                graph
-                    .save(&format!("{pg_dir}/{db_no}.pg"))
-                    .expect("save pg failed");
+                // let graph = db_basic.gen_petgraph();
+                //
+                // graph
+                //     .save(&format!("{pg_dir}/{db_no}.pg"))
+                //     .expect("save pg failed");
 
                 let db_basic = Arc::new(db_basic);
                 if is_save_db {
@@ -453,6 +455,8 @@ pub async fn sync_total_async_threaded(
                         }
                     }
                 }
+
+                println!("解析任务完成, 耗时: {} s", time.elapsed().as_secs_f32());
             }
             //单个文件多线程
             // if !handles.is_empty() {
@@ -461,7 +465,6 @@ pub async fn sync_total_async_threaded(
             //     futures::future::join_all(take(&mut handles)).await;
             //
             // }
-            println!("解析任务完成, 耗时: {} s", time.elapsed().as_secs_f32());
             //重新更新一下database info，有可能发生了更新
             // let db_info = get_default_pdms_db_info();
             // let _ = db_info.save(None);

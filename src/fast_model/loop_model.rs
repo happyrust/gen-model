@@ -239,7 +239,6 @@ pub async fn gen_loop_geos(
                         insts: vec![geom_inst.clone()],
                         aabb: None,
                         type_name: target_att.get_type_str().to_string(),
-                        ptset_map: Default::default(),
                     },
                 );
             }

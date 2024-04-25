@@ -139,7 +139,6 @@ pub async fn gen_cata_geos(
     let unique_cata_cnt = all_unique_keys.len();
     let batch_chunks_cnt = all_unique_keys.len() / batch_size + 1;
     println!("使用元件库的模型总数：{unique_cata_cnt}, 分块数量: {batch_chunks_cnt}");
-    // return Ok(true);
     // dbg!(&all_unique_keys.len());
     if !all_unique_keys.is_empty() {
         for i in 0..batch_chunks_cnt {

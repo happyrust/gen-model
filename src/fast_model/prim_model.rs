@@ -156,7 +156,6 @@ pub async fn gen_prim_geos(
                             insts: geo_insts,
                             aabb: None,
                             type_name: attr.get_type_str().to_string(),
-                            ptset_map: Default::default(),
                         },
                     );
                 }

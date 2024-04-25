@@ -8,7 +8,7 @@ use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::test::test_surreal::init_test_surreal;
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
-use aios_core::{gen_bytes_hash, query_deep_visible_inst_refnos, RefU64, SUL_DB};
+use aios_core::{gen_bytes_hash, query_deep_neg_inst_refnos, query_deep_visible_inst_refnos, RefU64, SUL_DB};
 use bevy_transform::prelude::Transform;
 use glam::DMat4;
 use itertools::Itertools;
@@ -35,14 +35,20 @@ pub async fn process_meshes_update_db(
     option: Option<DbOption>,
     refnos: &[RefU64],
 ) -> anyhow::Result<()> {
+    let mut target_visible_refnos = vec![];
     let mut target_refnos = vec![];
+    let mut target_neg_refnos = vec![];
 
     if option.as_ref().map(|x| x.gen_mesh).unwrap_or(true) {
         if !refnos.is_empty() {
             for &refno in refnos {
-                let visible_refnos = query_deep_visible_inst_refnos(refno, true).await?;
-                target_refnos.extend(visible_refnos);
+                let visible_refnos = query_deep_visible_inst_refnos(refno).await?;
+                target_visible_refnos.extend(visible_refnos);
+                let neg_refnos = query_deep_neg_inst_refnos(refno).await?;
+                target_neg_refnos.extend(neg_refnos);
             }
+            target_refnos = target_visible_refnos.clone();
+            target_refnos.extend(target_neg_refnos);
             dbg!(target_refnos.len());
         }
 
@@ -65,19 +71,12 @@ pub async fn process_meshes_update_db(
         .map(|x| x.apply_boolean_operation)
         .unwrap_or(true)
     {
-        if !refnos.is_empty() && (target_refnos.is_empty()) {
-            for &refno in refnos {
-                let visible_refnos = query_deep_visible_inst_refnos(refno, true).await?;
-                target_refnos.extend(visible_refnos);
-            }
-            dbg!(target_refnos.len());
-        }
         // apply_cata_neg_boolean_occ(None).await.unwrap();
         let time = std::time::Instant::now();
-        apply_cata_neg_boolean_manifold(&target_refnos, None)
+        apply_cata_neg_boolean_manifold(&target_visible_refnos, None)
             .await
             .unwrap();
-        apply_insts_boolean_manifold(&target_refnos, None)
+        apply_insts_boolean_manifold(&target_visible_refnos, None)
             .await
             .unwrap();
         // apply_insts_boolean_occ(None).await.unwrap();

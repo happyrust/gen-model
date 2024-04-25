@@ -150,6 +150,7 @@ pub async fn apply_insts_boolean_manifold(
                         //看类型给偏差？todo 解决误差的问题
                         //如果AABB 比较接近的情况下，又有旋转体
 
+                        // dbg!(&b.noun);
                         if b.noun == "FLOOR"
                             || b.noun.contains("WALL")
                             || b.noun == "GENSEC"
@@ -176,7 +177,7 @@ pub async fn apply_insts_boolean_manifold(
                         }
                     }
                 }
-                // dbg!(neg_shapes.len());
+                dbg!(neg_manifolds.len());
                 if !neg_manifolds.is_empty() {
                     let mut success = false;
                     let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
@@ -189,7 +190,7 @@ pub async fn apply_insts_boolean_manifold(
                         .is_ok()
                     {
                         update_sql
-                            .push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
+                            .push_str(&format!("update {} set booled=true;", &inst_relate_id));
                         success = true;
                     }
 
@@ -198,7 +199,7 @@ pub async fn apply_insts_boolean_manifold(
                             .push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
                     }
                 }
-                // dbg!(&update_sql);
+                dbg!(&update_sql);
             }
             if !update_sql.is_empty() {
                 match SUL_DB.query(update_sql).await {
@@ -351,7 +352,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                                 "update {}<-inst_relate set booled=true;",
                                 &g.inst_info_id,
                             ));
-                            // dbg!(&update_sql);
+                            dbg!(&update_sql);
                         }
                     }
                 }

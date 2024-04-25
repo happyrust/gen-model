@@ -285,9 +285,6 @@ pub async fn gen_all_geos_data(
                                 || !branch_refnos_map.is_empty()
                             {
                                 let sjus_map_clone = loop_sjus_map_arc.clone();
-                                // {
-                                //     instance_mgr_clone.write().await.fill_basic_shapes();
-                                // }
                                 let db_option = db_option.clone();
                                 let sender = sender.clone();
                                 let handle = tokio::spawn(async move {

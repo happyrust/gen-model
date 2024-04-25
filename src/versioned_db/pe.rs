@@ -83,7 +83,7 @@ fn gen_full_name(
     }
 }
 
-fn gen_default_name(
+pub fn gen_default_name(
     refno: RefU64,
     db_basic: &DbBasicData,
     total_attr_map: &DashMap<RefU64, NamedAttrMap>,
@@ -152,20 +152,17 @@ pub async fn save_pes(
             let att_map = total_attr_map.get(&refno).unwrap();
             let owner = att_map.get_refno_by_att_or_default("OWNER");
             let noun = att_map.get_type();
-            let name = att_map.get_string("NAME");
+            let name = att_map.get_string("NAME").unwrap_or_default();
 
             let ele = SPdmsElement {
                 refno,
                 owner,
-                is_default_name: name.is_none(),
-                name: name.unwrap_or(gen_default_name(refno, db_basic, total_attr_map)),
+                name,
                 noun,
                 dbnum: db_num,
                 cata_hash: att_map.cal_cata_hash(),
-                status_tag: None,
-                version_tag: None,
                 e3d_version: att_map.get_e3d_version(),
-                lock: false,
+                ..Default::default()
             };
             let json = ele.gen_sur_json();
             if exist_refnos.contains(&refno) {

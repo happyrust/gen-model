@@ -15,7 +15,7 @@ pub async fn save_instance_data(
 ) -> anyhow::Result<()> {
     // println!("开始保存instance数据");
     //保存inst geos 数据
-    let keys = inst_mgr.inst_geos_map.keys().collect::<Vec<_>>();
+
     let mut join_set = tokio::task::JoinSet::new();
     let mut aabb_map: HashMap<u64, String> = HashMap::new();
     let mut transform_map: HashMap<u64, String> = HashMap::new();
@@ -23,6 +23,8 @@ pub async fn save_instance_data(
     transform_map.insert(0, serde_json::to_string(&Transform::IDENTITY).unwrap());
     let mut param_map = HashMap::new();
     let mut vec3_map: HashMap<u64, String> = HashMap::new();
+
+    let keys = inst_mgr.inst_geos_map.keys().collect::<Vec<_>>();
     let chunk_size = 50;
     for chunk in keys.chunks(chunk_size) {
         let mut json_vec = vec![];
@@ -130,6 +132,7 @@ pub async fn save_instance_data(
     }
 
     let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
+    // dbg!(&keys);
     let mut join_set = tokio::task::JoinSet::new();
     for chunk in keys.chunks(chunk_size) {
         let mut json_vec = vec![];

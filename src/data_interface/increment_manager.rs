@@ -7,7 +7,7 @@ use std::time::Instant;
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
-use aios_core::SUL_DB;
+use aios_core::{clear_all_caches, SUL_DB};
 use aios_core::{get_db_option, RefU64Vec};
 use futures::StreamExt;
 use indexmap::{IndexMap, IndexSet};
@@ -25,7 +25,7 @@ use tokio::task::JoinSet;
 use walkdir::WalkDir;
 
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
-use crate::fast_model::gen_all_geos_data;
+use crate::fast_model::{gen_all_geos_data, process_meshes_update_db};
 // use pdms_io::watch::PdmsWatcher;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -100,6 +100,11 @@ impl AiosDBManager {
             // dbg!(&resp);
             let refnos: Vec<RefU64> = resp.take(0).unwrap();
             exist_refnos.extend(refnos);
+            for (&refno, _) in &eles_map {
+                clear_all_caches(refno).await;
+            }
+
+            let mut need_delete_owner_set = HashSet::new();
             for (&refno, ele) in &eles_map {
                 let mut attmap: NamedAttrMap = ele.whole_attmap.merge().into();
                 attmap.set_e3d_version(ele.version as _);
@@ -110,6 +115,8 @@ impl AiosDBManager {
                 // dbg!(ele.refno);
                 // dbg!(&attmap);
                 let mut ele_op = EleOperation::Modified;
+                let mut need_update_all_relate_after_delete = false;
+                let mut need_update_all_relate_after_add = false;
                 if exist_refnos.contains(&ele.refno) {
                     let old_children = aios_core::get_children_refnos(ele.refno).await?;
                     for (i, child) in old_children.into_iter().enumerate() {
@@ -119,6 +126,7 @@ impl AiosDBManager {
                             println!("Delete: {:?}", t);
                             deleted_refnos_set.insert(t);
                             total_deleted_len += 1;
+                            need_update_all_relate_after_delete = true;
                         }
                     }
 
@@ -147,25 +155,48 @@ impl AiosDBManager {
                                     format!("RELATE {0}->pe_owner:[{1}, {index}]->{1};", cp, op,),
                                 );
                         } else {
-                            //如果不是最后添加的，需要删除这个owner，重新添加所有owner关系
-                            all_relate_sqls.push(format!(
-                                "delete pe_owner:[{0}, 0]..[{0}, {1}];",
-                                &op,
-                                owner_ele.children.len()
-                            ));
-                            let relate_sqls = owner_ele
-                                .children
-                                .iter()
-                                .enumerate()
-                                .map(|(i, child)| {
-                                    let cp = child.to_pe_key();
-                                    format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", cp, op,)
-                                })
-                                .collect::<Vec<String>>();
-                            all_relate_sqls.extend_from_slice(&relate_sqls);
+                            need_update_all_relate_after_add = true;
                         }
                     }
-                };
+                }
+
+                if need_update_all_relate_after_delete ||
+                    need_update_all_relate_after_add {
+                    //优先使用更新的，因为可能是父节点发生修改，直接全刷
+                    let (owner_ele, o_refno) = if need_update_all_relate_after_add {
+                        (eles_map.get(&owner).unwrap(), owner)
+                    } else {
+                        (ele, ele.refno)
+                    };
+
+                    // dbg!((owner_ele, o_refno));
+                    //如果不是最后添加的，需要删除这个owner，重新添加所有owner关系
+                    // if let Some(owner_ele) = eles_map.get(&owner)
+
+                    //不需要重复插入和执行，特别是多个的时候
+                    if !need_delete_owner_set.contains(&o_refno) {
+                        all_relate_sqls.push(format!(
+                            "delete pe_owner:[{0}, 0]..[{0}, {1}];",
+                            o_refno.to_pe_key(),
+                            owner_ele.children.len()
+                        ));
+
+
+                        let relate_sqls = owner_ele
+                            .children
+                            .iter()
+                            .enumerate()
+                            .map(|(i, child)| {
+                                let cp = child.to_pe_key();
+                                format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", cp, o_refno.to_pe_key())
+                            })
+                            .collect::<Vec<String>>();
+                        all_relate_sqls.extend_from_slice(&relate_sqls);
+
+                        need_delete_owner_set.insert(o_refno);
+                    }
+                }
+
                 #[cfg(debug_assertions)]
                 {
                     dbg!((refno, ele_op));
@@ -175,6 +206,7 @@ impl AiosDBManager {
                     geo_update_log.prim_refnos.insert(refno);
                 } else if GNERAL_LOOP_NOUN_NAMES.contains(&type_name) {
                     geo_update_log.loop_refnos.insert(refno);
+                    geo_update_log.loop_owner_refnos.insert(owner);
                 } else if CATA_HAS_TUBI_GEO_NAMES.contains(&type_name) {
                     geo_update_log.bran_hanger_refnos.insert(refno);
                 } else if CATA_GEO_NAMES.contains(&type_name) {
@@ -209,10 +241,26 @@ impl AiosDBManager {
             return Ok(false);
         }
 
+        //relate 优先处理
+        let mut relate_join_set = tokio::task::JoinSet::new();
+        let mut time = Instant::now();
+        // dbg!(all_relate_sqls.len());
+        let mut chunks = all_relate_sqls.chunks(100);
+        for mut s in chunks {
+            let sql = s.into_iter().join("");
+            // dbg!(&sql);
+            // println!("relates sql: {}", &sql);
+            relate_join_set.spawn(async move {
+                SUL_DB.query(sql).await.unwrap();
+            });
+        }
+        while let Some(_) = relate_join_set.join_next().await {}
+        println!("Relate pes task costs {} s", time.elapsed().as_secs_f32());
+
         //可以采用channel模式，发送更新的数据，然后更新数据
         //保存新增数据
-        let mut total_time = Instant::now();
-        let mut sql_join_set = tokio::task::JoinSet::new();
+        // let mut sql_join_set = tokio::task::JoinSet::new();
+        let mut att_pe_handles = vec![];
         //新增模型的处理
         for (noun, v) in update_type_eles_map {
             let type_name = db1_dehash(noun as _);
@@ -231,15 +279,12 @@ impl AiosDBManager {
                     let pe = SPdmsElement {
                         refno,
                         owner: k.attr.get_owner(),
-                        is_default_name: name.is_none(),
                         name: name.unwrap_or_default(),
                         noun: k.attr.get_type(),
                         dbnum: k.db_no,
                         e3d_version: k.attr.get_e3d_version(),
-                        version_tag: None,
-                        status_tag: None,
                         cata_hash: k.attr.cal_cata_hash(),
-                        lock: false,
+                        ..Default::default()
                     };
 
                     let json = pe.gen_sur_json();
@@ -266,68 +311,57 @@ impl AiosDBManager {
                     }
                 }
                 // println!("{}", &update_pe_sql_str);
-                let pe_sql = if insert_pe_jsons_str.is_empty() {
-                    update_pe_sql_str
-                } else {
+                let insert_pe_sql = if !insert_pe_jsons_str.is_empty() {
+                    insert_pe_jsons_str.pop();
                     format!(
-                        "INSERT IGNORE INTO pe [{}]; {update_pe_sql_str}",
+                        "INSERT IGNORE INTO pe [{}];",
                         insert_pe_jsons_str
                     )
-                };
-                // println!("{}", &update_att_sql_str);
-                if !update_att_sql_str.is_empty() {
-                    sql_join_set.spawn(async move {
+                } else { "".to_owned() };
+
+
+
+                let handle = tokio::task::spawn(async move {
+                    if !update_att_sql_str.is_empty() {
+                        // println!("update_att_sql_str: {}", &update_att_sql_str);
                         SUL_DB.query(update_att_sql_str).await.unwrap();
-                    });
-                };
-                //使用surreal 保存NamedAttrMap
-                if !pe_sql.is_empty() {
-                    sql_join_set.spawn(async move {
-                        SUL_DB.query(pe_sql).await.unwrap();
-                    });
-                }
+                    }
+                    if !update_pe_sql_str.is_empty() {
+                        // println!("update_pe_sql: {}", &update_pe_sql_str);
+                        SUL_DB.query(update_pe_sql_str).await.unwrap();
+                    }
+
+                    //使用surreal 保存pe
+                    if !insert_pe_sql.is_empty() {
+                        // println!("insert_pe_sql: {}", &insert_pe_sql);
+                        let response = SUL_DB.query(insert_pe_sql).await.unwrap();
+                        // dbg!(&response);
+                    }
+
+                });
+
+                att_pe_handles.push(handle);
             }
         }
+        futures::future::join_all(att_pe_handles).await;
         //等待保存任务完成
-        while let Some(_) = sql_join_set.join_next().await {}
+        // while let Some(_) = sql_join_set.join_next().await {}
 
-        let mut del_join_set = tokio::task::JoinSet::new();
         //删除模型的处理
-        for chunk in &deleted_refnos_set.iter().chunks(JSON_CHUNK_COUNT) {
-            let pes = chunk
+        let deleted_refnos: Vec<(usize, RefU64, RefU64)> = deleted_refnos_set.into_iter().collect::<Vec<_>>();
+        for chunk in deleted_refnos.chunks(JSON_CHUNK_COUNT) {
+            let del_sql = chunk
                 .into_iter()
                 .map(|(i, refno, owner)| {
-                    // format!("pe_owner:[{0}, {i}]", owner.to_pe_key())
-                    refno.to_pe_key()
+                    format!(
+                        "update {} set deleted=true;",
+                        refno.to_pe_key()
+                    )
                 })
-                .join(",");
-            // update pe:{} set deleted = true;
-            let del_sql = format!(
-                "delete select id from array::flatten([{}]->pe_owner);",
-                &pes
-            );
-            // let del_sql = format!("delete [{}];", pes);
-            dbg!(&del_sql);
-            del_join_set.spawn(async move {
-                SUL_DB.query(del_sql).await.unwrap();
-            });
+                .join("");
+            // dbg!(&del_sql);
+            SUL_DB.query(&del_sql).await.unwrap();
         }
-        while let Some(_) = del_join_set.join_next().await {}
-
-        let mut relate_join_set = tokio::task::JoinSet::new();
-        let mut time = Instant::now();
-        dbg!(all_relate_sqls.len());
-        let mut chunks = all_relate_sqls.chunks(100);
-        for mut s in chunks {
-            let sql = s.into_iter().join("");
-            // dbg!(&sql);
-            relate_join_set.spawn(async move {
-                SUL_DB.query(sql).await.unwrap();
-            });
-        }
-        while let Some(_) = relate_join_set.join_next().await {}
-        println!("Relate pes task costs {} s", time.elapsed().as_secs_f32());
-
         //todo 批量查询types
         for (k, v) in owner_children_map {
             if let Ok(type_name) = aios_core::get_type_name(k).await {
@@ -341,7 +375,13 @@ impl AiosDBManager {
             .content(&geo_update_log)
             .await?;
 
+        let all_refnos = geo_update_log.get_all_visible_refnos().into_iter().collect::<Vec<_>>();
         gen_all_geos_data(&self.db_option, Some(geo_update_log))
+            .await
+            .unwrap();
+
+        dbg!(&all_refnos);
+        process_meshes_update_db(None, &all_refnos)
             .await
             .unwrap();
 

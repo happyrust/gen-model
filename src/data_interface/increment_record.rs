@@ -27,6 +27,9 @@ pub struct IncrGeoUpdateLog {
     //拉伸体模型修改了的参考号
     #[serde_as(as = "HashSet<DisplayFromStr>")]
     pub loop_refnos: HashSet<RefU64>,
+
+    #[serde_as(as = "HashSet<DisplayFromStr>")]
+    pub loop_owner_refnos: HashSet<RefU64>,
     //元件库模型的属性修改了的参考号
     #[serde_as(as = "HashSet<DisplayFromStr>")]
     pub bran_hanger_refnos: HashSet<RefU64>,
@@ -48,6 +51,17 @@ impl IncrGeoUpdateLog{
     pub fn count(&self) -> usize{
         self.prim_refnos.len() + self.loop_refnos.len() + self.basic_cata_refnos.len() + self.bran_hanger_refnos.len()
     }
+
+    #[inline]
+    pub fn get_all_visible_refnos(&self) -> HashSet<RefU64> {
+        let mut refnos = HashSet::new();
+        refnos.extend(self.prim_refnos.iter());
+        refnos.extend(self.loop_owner_refnos.iter());
+        refnos.extend(self.basic_cata_refnos.iter());
+        refnos.extend(self.bran_hanger_refnos.iter());
+        refnos
+    }
+
 }
 
 //各个db的信息记录，需要跟踪起来？

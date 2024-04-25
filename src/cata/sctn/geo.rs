@@ -184,9 +184,9 @@ pub async fn create_profile_geos(refno: RefU64,
                             path,
                             lmirror: att.get_bool("LMIRR").unwrap_or_default(),
                         };
-                        let transform = loft.get_trans() * transform;
+                        let transform = transform * loft.get_trans();
+                        dbg!(transform.translation);
                         brep_shapes_map.entry(refno).or_insert(Vec::new()).push(CateBrepShape {
-                            // refno: spine.refno,
                             refno: profile.get_refno().unwrap_or(spine.refno),
                             brep_shape: Box::new(loft),
                             transform,
