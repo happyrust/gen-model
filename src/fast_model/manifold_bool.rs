@@ -74,7 +74,7 @@ pub async fn apply_insts_boolean_manifold(
     // dbg!("apply_insts_boolean_manifold");
     let mut response = SUL_DB.query(sql).await.unwrap();
     let boolean_query: Vec<GeoTransQuery> = response.take(0).unwrap();
-    dbg!(boolean_query.len());
+    // dbg!(boolean_query.len());
 
     let mut tasks = Vec::new();
     let chunk = (boolean_query.len() / 16).max(1);
@@ -177,7 +177,7 @@ pub async fn apply_insts_boolean_manifold(
                         }
                     }
                 }
-                dbg!(neg_manifolds.len());
+                // dbg!(neg_manifolds.len());
                 if !neg_manifolds.is_empty() {
                     let mut success = false;
                     let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
@@ -199,7 +199,7 @@ pub async fn apply_insts_boolean_manifold(
                             .push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
                     }
                 }
-                dbg!(&update_sql);
+                // dbg!(&update_sql);
             }
             if !update_sql.is_empty() {
                 match SUL_DB.query(update_sql).await {
@@ -352,7 +352,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                                 "update {}<-inst_relate set booled=true;",
                                 &g.inst_info_id,
                             ));
-                            dbg!(&update_sql);
+                            // dbg!(&update_sql);
                         }
                     }
                 }

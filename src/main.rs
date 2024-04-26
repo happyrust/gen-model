@@ -123,12 +123,8 @@ async fn main() -> anyhow::Result<()> {
         update_cal_bran_component().await?;
     }
 
-    AiosDBManager::exec_watcher(mgr.clone()).await.expect("exec_watcher error");
+    // AiosDBManager::exec_watcher(mgr.clone()).await.expect("exec_watcher error");
 
-    // //房间树要重写
-    if db_option.gen_spatial_tree {
-        // mgr.calculate_rooms().await.expect("房间计算失败");
-    }
 
     //todo 如何处理初始化的同步，第一次启动一定要同步一次，首先生成archive文件，然后再同步
     //是否需要重构下面的这行代码？

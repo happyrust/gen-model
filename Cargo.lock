@@ -87,7 +87,7 @@ dependencies = [
  "futures",
  "glam",
  "hex",
- "id_tree",
+ "id_tree 1.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "indexmap 2.2.6",
  "itertools 0.12.1",
  "jsonxf",
@@ -159,7 +159,7 @@ dependencies = [
  "glam",
  "hash32 0.3.1",
  "hexasphere",
- "id_tree",
+ "id_tree 1.8.0",
  "indexmap 2.2.6",
  "itertools 0.12.1",
  "jsonxf",
@@ -2760,6 +2760,15 @@ dependencies = [
 [[package]]
 name = "id_tree"
 version = "1.8.0"
+dependencies = [
+ "serde",
+ "serde_derive",
+ "snowflake",
+]
+
+[[package]]
+name = "id_tree"
+version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bcd9db8dd5be8bde5a2624ed4b2dfb74368fe7999eb9c4940fd3ca344b61071a"
 dependencies = [
@@ -3793,7 +3802,7 @@ dependencies = [
  "hash32 0.3.1",
  "hash32-derive",
  "hex",
- "id_tree",
+ "id_tree 1.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "instant",
  "itertools 0.12.1",
  "lazy_static",
