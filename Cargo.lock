@@ -73,7 +73,7 @@ dependencies = [
  "bincode",
  "bitflags 2.5.0",
  "bitvec",
- "cached 0.49.3",
+ "cached 0.50.0",
  "calamine",
  "cc",
  "chrono",
@@ -1074,8 +1074,22 @@ version = "0.49.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8e8e463fceca5674287f32d252fb1d94083758b8709c160efae66d263e5f4eba"
 dependencies = [
- "ahash 0.8.11",
  "cached_proc_macro 0.20.0",
+ "cached_proc_macro_types",
+ "hashbrown 0.14.3",
+ "instant",
+ "once_cell",
+ "thiserror",
+]
+
+[[package]]
+name = "cached"
+version = "0.50.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a7d38ed2761b8a13ce42bc44b09d5a052b88da2f9fead624c779f31ac0729a"
+dependencies = [
+ "ahash 0.8.11",
+ "cached_proc_macro 0.21.0",
  "cached_proc_macro_types",
  "hashbrown 0.14.3",
  "instant",
@@ -1108,6 +1122,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cached_proc_macro"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "771aa57f3b17da6c8bcacb187bb9ec9bc81c8160e72342e67c329e0e1651a669"
+dependencies = [
+ "darling 0.20.8",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.60",
+]
+
+[[package]]
 name = "cached_proc_macro_types"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1133,6 +1159,7 @@ name = "cavalier_contours"
 version = "0.4.0"
 dependencies = [
  "num-traits",
+ "serde",
  "static_aabb2d_index",
 ]
 

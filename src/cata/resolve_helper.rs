@@ -289,7 +289,6 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     y: gmse.xyz[1],
                     z: gmse.xyz[2],
                     verts: gmse.verts.clone(),
-                    frads: gmse.frads.clone(),
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
                 })
@@ -308,7 +307,6 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 pb: (gmse.paxises[1].clone()),
                 angle: gmse.pang,
                 verts: gmse.verts.clone(),
-                frads: gmse.frads.clone(),
                 x: gmse.xyz[0],
                 y: gmse.xyz[1],
                 z: gmse.xyz[2],

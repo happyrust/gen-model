@@ -26,9 +26,6 @@ pub struct IncrGeoUpdateLog {
     pub prim_refnos: HashSet<RefU64>,
     //拉伸体模型修改了的参考号
     #[serde_as(as = "HashSet<DisplayFromStr>")]
-    pub loop_refnos: HashSet<RefU64>,
-
-    #[serde_as(as = "HashSet<DisplayFromStr>")]
     pub loop_owner_refnos: HashSet<RefU64>,
     //元件库模型的属性修改了的参考号
     #[serde_as(as = "HashSet<DisplayFromStr>")]
@@ -49,7 +46,7 @@ impl IncrGeoUpdateLog{
 
     #[inline]
     pub fn count(&self) -> usize{
-        self.prim_refnos.len() + self.loop_refnos.len() + self.basic_cata_refnos.len() + self.bran_hanger_refnos.len()
+        self.prim_refnos.len() + self.loop_owner_refnos.len() + self.basic_cata_refnos.len() + self.bran_hanger_refnos.len()
     }
 
     #[inline]

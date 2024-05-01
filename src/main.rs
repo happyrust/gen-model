@@ -117,8 +117,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if db_option.gen_spatial_tree {
+        println!("正在生成空间树");
         load_aabb_tree().await.unwrap();
+        println!("正在计算房间");
+        let mut time = Instant::now();
         build_room_relations().await.unwrap();
+        println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
         update_cal_equip().await?;
         update_cal_bran_component().await?;
     }

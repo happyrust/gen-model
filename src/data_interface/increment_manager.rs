@@ -204,8 +204,9 @@ impl AiosDBManager {
 
                 if PRIMITIVE_NOUN_NAMES.contains(&type_name) {
                     geo_update_log.prim_refnos.insert(refno);
-                } else if GNERAL_LOOP_NOUN_NAMES.contains(&type_name) {
-                    geo_update_log.loop_refnos.insert(refno);
+                } else if GNERAL_LOOP_OWNER_NOUN_NAMES.contains(&type_name) {
+                    //TODO 如果修改的是顶点
+                    geo_update_log.loop_owner_refnos.insert(refno);
                     geo_update_log.loop_owner_refnos.insert(owner);
                 } else if CATA_HAS_TUBI_GEO_NAMES.contains(&type_name) {
                     geo_update_log.bran_hanger_refnos.insert(refno);

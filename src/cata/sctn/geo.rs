@@ -36,7 +36,7 @@ fn cal_end_face_rot(current_rot: DQuat, extru_dir: DVec3, face_dir: Option<DVec3
         if angle.abs() > FRAC_PI_2 as _ {
             tmp_drns = -tmp_drns;
         }
-        dbg!(angle);
+        // dbg!(angle);
         rot = DQuat::from_rotation_arc(start_dir, tmp_drns);
     }
     rot
@@ -175,8 +175,8 @@ pub async fn create_profile_geos(refno: RefU64,
             let drns_rot = cal_end_face_rot(current_rot, spine.get_dir(true).as_dvec3(), drns);
             let drne_rot = cal_end_face_rot(current_rot, spine.get_dir(false).as_dvec3(), drne);
 
-            dbg!(dquat_to_pdms_ori_xyz_str(&drns_rot));
-            dbg!(dquat_to_pdms_ori_xyz_str(&drne_rot));
+            // dbg!(dquat_to_pdms_ori_xyz_str(&drns_rot));
+            // dbg!(dquat_to_pdms_ori_xyz_str(&drne_rot));
 
             for (i, geom) in geos.iter().enumerate() {
                 if let CateGeoParam::Profile(profile) = geom {

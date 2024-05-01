@@ -63,11 +63,11 @@ pdms_io = { path = "../pdms-io" }
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "5.5.3", features = ["serde", "rayon"] }
-tokio = { vertion = "1", features = ["full"] }
+tokio = { version = "1.37.0", features = ["full"] }
 serde = { version = "1.0.137", features = ["derive"] }
 id_tree = { version = "1.8.0", features = ["serde_support"] }
 glam = { version = "0.25.0", features = ["rkyv"] }
-cached = "0.49"
+cached = "0.50.0"
 rkyv = { version = "0.7.44", features = ["hashbrown"] }
 
 

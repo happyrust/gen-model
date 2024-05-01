@@ -129,7 +129,7 @@ pub async fn gen_all_geos_data(
                     .clone()
                     .into_iter()
                     .collect();
-                origin_target_refnos.extend(incr_updates.as_ref().unwrap().loop_refnos.clone());
+                origin_target_refnos.extend(incr_updates.as_ref().unwrap().loop_owner_refnos.clone());
                 origin_target_refnos.extend(incr_updates.as_ref().unwrap().prim_refnos.clone());
             }
 
@@ -326,27 +326,29 @@ pub async fn gen_all_geos_data(
 
                     //loop 基本体的处理
                     {
-                        let target_loop_refnos: Vec<RefU64> = if is_incr_update {
-                            incr_updates_log.loop_refnos.iter().cloned().collect()
+                        let target_loop_owner_refnos: Vec<RefU64> = if is_incr_update {
+                            incr_updates_log.loop_owner_refnos.iter().cloned().collect()
                         } else {
-                            let mut loop_refnos = aios_core::query_multi_deep_children_filter_inst(
+                            let mut loop_owner_refnos = aios_core::query_multi_deep_children_filter_inst(
                                 target_refnos.clone(),
-                                GNERAL_LOOP_NOUN_NAMES.map(String::from).to_vec(),
+                                GNERAL_LOOP_OWNER_NOUN_NAMES.map(String::from).to_vec(),
                                 skip_exist,
                             )
                             .await
                             .unwrap_or_default();
-                            loop_refnos.into_iter().collect()
+                            loop_owner_refnos.into_iter().collect()
                         };
-                        println!("使用LOOP的数量: {}", target_loop_refnos.len());
-                        if run_cache_loop && !target_loop_refnos.is_empty() {
+                        let target_loop_owner_refnos: Vec<RefU64> = vec!["25688_71674".into()];
+                        println!("使用LOOP的数量: {}", target_loop_owner_refnos.len());
+                        dbg!(&target_loop_owner_refnos);
+                        if run_cache_loop && !target_loop_owner_refnos.is_empty() {
                             let sjus_map_clone = loop_sjus_map_arc.clone();
                             let sender = sender.clone();
                             let db_option = db_option.clone();
                             let handle = tokio::spawn(async move {
                                 loop_model::gen_loop_geos(
                                     db_option,
-                                    &target_loop_refnos,
+                                    &target_loop_owner_refnos,
                                     sjus_map_clone,
                                     sender,
                                 )
@@ -387,16 +389,6 @@ pub async fn gen_all_geos_data(
                     }
 
                     futures::future::join_all(gen_inst_handles).await;
-
-                    {
-                        // let inst_data = instance_mgr.read().await;
-                        // println!("当前db下的基本体生成统计：");
-                        // dbg!(inst_data.inst_geos_map.len());
-                        // dbg!(inst_data.ngmr_relate_map.len());
-
-                        //每个db更新一次，不能都等到最后去更新
-                        // process_meshes_update_db(None).await.expect("更新模型数据失败");
-                    }
                 });
                 handles.push(handle);
             }
