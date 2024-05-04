@@ -1,13 +1,10 @@
-use crate::cata::sctn::geo::create_profile_geos;
 use crate::consts::*;
 use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::structs::{CateBrepShapeMap, PlantAxisMap};
-use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::data_interface::structs::PlantAxisMap;
 use crate::fast_model;
 use crate::fast_model::{get_generic_type, resolve_desi_comp, shared};
 use aios_core::consts::NGMR_OWN_TYPES;
-use aios_core::csg::manifold::ManifoldRust;
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
@@ -19,7 +16,6 @@ use aios_core::prim_geo::category::{convert_to_brep_shapes, CateBrepShape};
 use aios_core::prim_geo::*;
 use aios_core::prim_geo::{PdmsTubing, TubiEdge};
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
-use aios_core::tool::hash_tool::hash_two_str;
 use aios_core::tool::math_tool::to_pdms_vec_str;
 use aios_core::{
     gen_bytes_hash, NamedAttrMap, NamedAttrValue, RefU64, HASH_PSEUDO_ATT_MAPS, SUL_DB,
@@ -30,13 +26,11 @@ use glam::{DMat4, DVec3, Vec3};
 use nalgebra::Point3;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use parry3d::bounding_volume::*;
-use parry3d::math::Isometry;
-use std::borrow::BorrowMut;
-use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::mem::take;
 use std::sync::Arc;
 use std::time::Instant;
+use aios_core::prim_geo::profile::create_profile_geos;
 use tokio::sync::{Mutex, RwLock};
 
 #[derive(Debug, Default, IntoPrimitive, Eq, PartialEq, TryFromPrimitive, Copy, Clone)]
@@ -69,7 +63,7 @@ pub async fn gen_cata_single_geoms(
     let geoms_info = resolve_desi_comp(design_refno, None).await?;
     if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL"
     {
-        create_profile_geos(design_refno, &desi_att, &geoms_info, &brep_shape_map).await?;
+        create_profile_geos(design_refno, &geoms_info, &brep_shape_map).await?;
         return Ok(true);
     } else {
         let CateGeomsInfo {

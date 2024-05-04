@@ -123,7 +123,7 @@ pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow:
         .iter()
         .map(|(x, y)| (x.id.to_raw(), *y))
         .collect::<HashMap<_, _>>();
-    dbg!(&thing_map);
+    // dbg!(&thing_map);
     for (idx, chunk) in inst_geo_ids.chunks(PAGE_NUM).enumerate() {
         let ids = chunk.into_iter().map(|(x, _)| x.to_string()).join(",");
         // let ids = chunk.into_iter().join(",");
@@ -158,7 +158,7 @@ pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow:
                     //如果作为负实体，需要缩小一些范围？如果作为负实体的母体，需要把精度提高一些
                     //如果是作为负实体可以稍微降一些？
                     let mut coeff = 0.005;
-                    dbg!(&g.id);
+                    // dbg!(&g.id);
                     if thing_map.get(&g.id).copied().unwrap_or(false) {
                         match g.param {
                             PdmsGeoParam::PrimExtrusion(_) | PdmsGeoParam::PrimRevolution(_) => {

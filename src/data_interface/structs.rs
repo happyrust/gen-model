@@ -44,10 +44,7 @@ where
 
 // #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct CateBrepShapeData {
-    // pub scom_refno: RefU64,
     pub gmse_refno: RefU64,
     pub shapes: Vec<CateBrepShape>,
 }
 
-///元件库的几何Map，键值为 ele refno, 值为 (scom_refno, shapes)
-pub type CateBrepShapeMap = DashMap<RefU64, Vec<CateBrepShape>>;
