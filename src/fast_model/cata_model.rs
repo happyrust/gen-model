@@ -684,6 +684,7 @@ pub async fn gen_cata_geos(
                                     // 检测到有重叠的情况，就需要忽略
                                     //如果 leave 的 还是 bran 的参考号，说明还是要用h_tubi_size
                                     if current_tubing.leave_refno == branch_refno {
+                                        #[cfg(feature = "debug_model")]
                                         println!("管道 bran 开头有个直段.");
                                         current_tubing.tubi_size = h_tubi_size;
                                     } else {
@@ -732,6 +733,7 @@ pub async fn gen_cata_geos(
                                                 ..Default::default()
                                             },
                                         );
+                                        #[cfg(feature = "debug_model")]
                                         println!(
                                             "发现直段{}->{}, 方向: {}, 辅助方向: {}",
                                             current_tubing.leave_refno.to_slash_string(),
@@ -767,7 +769,6 @@ pub async fn gen_cata_geos(
                     {
                         let l_dir = axis_map[1].dir;
                         let ref_dir = axis_map[1].ref_dir;
-                        // let cond = if l_dir.cross(Vec3::Y).z >= 0.0 { 1.0 } else { 0.0 };
                         //todo 需要弄清楚为啥是Vec3::Z
                         let mut l_ref_dir = world_trans.transform_vec3(Vec3::Z).normalize_or_zero();
                         if l_ref_dir.dot(l_dir) >= 0.99 {

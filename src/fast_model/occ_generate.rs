@@ -81,7 +81,8 @@ pub async fn process_meshes_update_db(
         apply_insts_boolean_manifold(&target_visible_refnos, None)
             .await
             .unwrap();
-        // apply_insts_boolean_occ(None).await.unwrap();
+        //有一些布尔运算要精确计算，不然会有薄片出现
+        apply_insts_boolean_occ(&target_visible_refnos, None).await.unwrap();
         println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
     }
     Ok(())
@@ -163,7 +164,7 @@ pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow:
                         match g.param {
                             PdmsGeoParam::PrimExtrusion(_) | PdmsGeoParam::PrimRevolution(_) => {
                                 coeff /= 10.0;
-                                dbg!(&coeff);
+                                // dbg!(&coeff);
                             }
                             _ => {
                                 coeff /= 5.0;
@@ -367,20 +368,30 @@ fn round_dmat4(m: DMat4) -> DMat4 {
 
 //需要带入，缩小范围
 ///执行bool 运算
-pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()> {
+pub async fn apply_insts_boolean_occ(refnos: &[RefU64],
+                                     dir: Option<PathBuf>, ) -> anyhow::Result<()> {
     let dir = dir.unwrap_or("assets/meshes".into());
     //如果dir 不存在，创建这个目录
     if !dir.exists() {
         std::fs::create_dir_all(&dir).unwrap();
     }
+    let inst_keys =
+        if !refnos.is_empty() {
+            refnos
+                .iter()
+                .map(|x| x.to_inst_relate_key())
+                .collect::<Vec<_>>()
+                .join(",")
+        } else {
+            "inst_relate".to_string()
+        };
     //避免重复执行布尔运算
-    //"Neg",
-    let sql = r#"
+    let sql = format!(r#"
      select <string>meta::id(id) as id, param from
          array::group(select value array::group([array::group(neg_refnos->inst_relate->inst_info->geo_relate[where !bad and
          geo_type in ["Neg", "CataCrossNeg"]]->inst_geo),
-         ->inst_info->geo_relate->inst_geo[?!bad]]) from inst_relate where neg_refnos!=none and !bad_bool and !booled) where param!=none;
-    "#;
+         ->inst_info->geo_relate->inst_geo[?!bad]]) from {} where neg_refnos!=none and !bad_bool and !booled) where param!=none;
+    "#, &inst_keys);
     let mut response = SUL_DB.query(sql).await?;
     let params: Vec<GeoParam> = response.take(0)?;
     dbg!(&params.len());
@@ -403,24 +414,26 @@ pub async fn apply_insts_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<()>
 
     // and in.noun not in ["FLOOR"]
     //筛选出来 "Neg", "CataCrossNeg" 的关联
-    let sql = r#"
-        select
-             in as refno,
-             in.noun as noun,
-             world_trans.d as wt,
-             aabb.d as aabb,
-            (select value [meta::id(out), trans.d] from out->geo_relate) as ts,
-           (select value [in, world_trans.d, (select meta::id(out) as id, geo_type, trans.d as trans,
-             out.aabb.d as aabb, object::keys(out.param)[0] as para_type
-            from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"])]
-            from array::flatten(neg_refnos->inst_relate)) as neg_ts
-        from inst_relate where !bad_bool and !booled
-            and neg_refnos!=none and aabb.d!=none
-    "#;
-    let mut response = SUL_DB.query(sql).await?;
-    let boolean_query: Vec<GeoTransQuery> = response.take(0)?;
+    let sql = format!(
+            r#"
+            select
+                in as refno,
+                in.noun as noun,
+                world_trans.d as wt,
+                aabb.d as aabb,
+                (select value [meta::id(out), trans.d] from out->geo_relate) as ts,
+                (select value [in, world_trans.d, (select meta::id(out) as id, geo_type, trans.d as trans,
+                out.aabb.d as aabb, object::keys(out.param)[0] as para_type
+                from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"])]
+            from array::flatten(neg_refnos->inst_relate)) as neg_ts from [{}] where !bad_bool
+            and !booled and neg_refnos!=none and aabb.d!=none
+        "#,
+            inst_keys
+        );
+    let mut response = SUL_DB.query(sql).await.unwrap();
+    let boolean_query: Vec<GeoTransQuery> = response.take(0).unwrap();
     #[cfg(debug_assertions)]
-    println!("inst boolean len: {}", boolean_query.len());
+    println!("occ inst boolean len: {}", boolean_query.len());
     // dbg!(boolean_query.len());
     // dbg!(&boolean_query);
     if boolean_query.is_empty() {
@@ -637,13 +650,13 @@ pub async fn apply_cata_neg_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<
                         .param
                         .gen_occ_shape()
                         .map(|x| x.transformed(&pos.trans.compute_matrix().as_dmat4()))
-                    else {
-                        update_sql.push_str(&format!(
-                            "update {}<-inst_relate set bad_bool=true;",
-                            &g.inst_info_id,
-                        ));
-                        continue;
-                    };
+                        else {
+                            update_sql.push_str(&format!(
+                                "update {}<-inst_relate set bad_bool=true;",
+                                &g.inst_info_id,
+                            ));
+                            continue;
+                        };
                     // pos_shape
                     //     .write_step(format!("{}.step", "pos"))
                     //     .unwrap();

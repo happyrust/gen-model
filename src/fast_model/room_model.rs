@@ -204,57 +204,59 @@ pub async fn query_room_refnos(
             //     dbg!(&contains_query);
             // }
             within_refnos.extend(contains_query.iter().map(|(x, _)| x));
-            if !need_check_refnos.is_empty() {
-                // dbg!(panel_refno);
-                // dbg!(&within_refnos);
-                // dbg!(&need_check_refnos);
-                //首先判断，如果是包围盒完全不在里面，直接跳过
-                //继续的点检查可能会比较耗时，后续应该加开关，让用户判断是否需要继续做检查
-                let pes = need_check_refnos.iter().map(|x| x.to_pe_key()).join(",");
-                let mut repsonse = SUL_DB.query(format!(
-                    r#"select
-                         in.id as refno, world_trans.d as world_trans, aabb.d as world_aabb,
-                         (select value [trans.d, ->inst_geo[?pts!=none].pts[?d!=none].d] from ->inst_info->geo_relate) as pts_group
-                       from array::flatten([{}]->inst_relate)  where !booled
-                    "#,
-                    pes)).await?;
-                let geom_pts: Vec<GeomPtsQuery> = repsonse.take(0)?;
-                // dbg!(&geom_pts);
-                let mut intersect_set = DashSet::new();
-                geom_pts.par_iter().for_each(|g| {
-                    if g.pts_group
-                        .par_iter()
-                        .find_any(|(trans, o_pts)| {
-                            if let Some(pts) = o_pts {
-                                let pt_trans = g.world_trans * (*trans);
-                                pts.par_iter()
-                                    .find_any(|&pt| {
-                                        tri_mesh.contains_point(
-                                            &Isometry::identity(),
-                                            &pt_trans.transform_point(*pt).into(),
-                                        )
-                                    })
-                                    .is_some()
-                            } else {
-                                false
-                            }
-                        })
-                        .is_some()
-                    {
-                        // dbg!(g.refno);
-                        intersect_set.insert(g.refno);
-                    }
-                });
-                if !intersect_set.is_empty() {
-                    println!(
-                        "found intersect room panel {}, refnos: {}",
-                        panel_refno,
-                        &intersect_set.iter().map(|x| x.to_string()).join(",")
-                    );
-                }
-                within_refnos.extend(intersect_set);
-                // dbg!(&within_refnos);
-            }
+            //todo 先暂时不检查相交的情况
+            // if !need_check_refnos.is_empty() {
+            //     // dbg!(panel_refno);
+            //     // dbg!(&within_refnos);
+            //     // dbg!(&need_check_refnos);
+            //     //首先判断，如果是包围盒完全不在里面，直接跳过
+            //     //继续的点检查可能会比较耗时，后续应该加开关，让用户判断是否需要继续做检查
+            //     let pes = need_check_refnos.iter().map(|x| x.to_pe_key()).join(",");
+            //     let mut repsonse = SUL_DB.query(format!(
+            //         r#"select
+            //              in.id as refno, world_trans.d as world_trans, aabb.d as world_aabb,
+            //              (select value [trans.d, ->inst_geo[?pts!=none].pts[?d!=none].d] from ->inst_info->geo_relate) as pts_group
+            //            from array::flatten([{}]->inst_relate)  where !booled
+            //         "#,
+            //         pes)).await?;
+            //     let geom_pts: Vec<GeomPtsQuery> = repsonse.take(0)?;
+            //     // dbg!(&geom_pts);
+            //     let mut intersect_set = DashSet::new();
+            //     geom_pts.par_iter().for_each(|g| {
+            //         if g.pts_group
+            //             .par_iter()
+            //             .find_any(|(trans, o_pts)| {
+            //                 if let Some(pts) = o_pts {
+            //                     let pt_trans = g.world_trans * (*trans);
+            //                     pts.par_iter()
+            //                         .find_any(|&pt| {
+            //                             tri_mesh.contains_point(
+            //                                 &Isometry::identity(),
+            //                                 &pt_trans.transform_point(*pt).into(),
+            //                             )
+            //                         })
+            //                         .is_some()
+            //                 } else {
+            //                     false
+            //                 }
+            //             })
+            //             .is_some()
+            //         {
+            //             // dbg!(g.refno);
+            //             intersect_set.insert(g.refno);
+            //         }
+            //     });
+            //     if !intersect_set.is_empty() {
+            //         println!(
+            //             "found intersect room panel {}, refnos: {}",
+            //             panel_refno,
+            //             &intersect_set.iter().map(|x| x.to_string()).join(",")
+            //         );
+            //     }
+            //     within_refnos.extend(intersect_set);
+            //     // dbg!(&within_refnos);
+            // }
+            //
         }
     }
 

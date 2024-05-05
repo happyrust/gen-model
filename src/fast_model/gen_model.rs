@@ -86,7 +86,7 @@ pub async fn gen_all_geos_data(
         let insert_handle = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {
                 save_instance_data(&shape_insts).await?;
-                println!("insert shape insts: {}", shape_insts.inst_info_map.len());
+                // println!("insert shape insts: {}", shape_insts.inst_info_map.len());
                 *total_shape_cnt.lock().await += shape_insts.inst_info_map.len();
             }
             Ok::<_, anyhow::Error>(())
@@ -338,9 +338,8 @@ pub async fn gen_all_geos_data(
                             .unwrap_or_default();
                             loop_owner_refnos.into_iter().collect()
                         };
-                        let target_loop_owner_refnos: Vec<RefU64> = vec!["25688_71674".into()];
                         println!("使用LOOP的数量: {}", target_loop_owner_refnos.len());
-                        dbg!(&target_loop_owner_refnos);
+                        // dbg!(&target_loop_owner_refnos);
                         if run_cache_loop && !target_loop_owner_refnos.is_empty() {
                             let sjus_map_clone = loop_sjus_map_arc.clone();
                             let sender = sender.clone();

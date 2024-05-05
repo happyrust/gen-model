@@ -249,7 +249,7 @@ pub async fn sync_total_async_threaded(
             })
             .collect::<Vec<PathBuf>>()
     };
-    dbg!(children_files.len());
+    // dbg!(children_files.len());
     // 先解析一遍uda
     // 正式解析
     let project = Arc::new(project.to_string()); // 创建一个Arc对象，表示项目名称
@@ -311,7 +311,7 @@ pub async fn sync_total_async_threaded(
                 file.read_exact(&mut buf).await.unwrap();
                 let (db_type, file_version, db_no) = parse_file_basic_info(&buf);
                 // #[cfg(debug_assertions)]
-                dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
+                // dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
                 if !db_types_clone.contains(&db_type) {
                     continue;
                 }
