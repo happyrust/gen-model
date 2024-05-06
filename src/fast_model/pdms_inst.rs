@@ -58,8 +58,20 @@ pub async fn save_instance_data(
                 }
                 //还需要加入geo_param的指向，param 是否填原始参数？ param=param:{}
                 //使用cata_key -> inst_geos
+                let cat_negs_str =  if !inst.cata_neg_refnos.is_empty() {
+                    format!(
+                        ", cata_neg=[{}]",
+                        inst.cata_neg_refnos.iter().map(|x| x.to_pe_key()).join(",")
+                    )
+                } else {
+                    "".to_string()
+                };
                 let mut relate_sql = format!(
-                    "relate inst_info:⟨{}⟩->geo_relate->inst_geo:⟨{}⟩ set trans=trans:⟨{}⟩, geom_refno=pe:{}, param=param:⟨{}⟩, pts=[{}], geo_type='{}', visible={}",
+                    r#"
+                    if inst_info:⟨{0}⟩.id == none {{
+                        relate inst_info:⟨{0}⟩->geo_relate->inst_geo:⟨{1}⟩ set trans=trans:⟨{2}⟩,
+                            geom_refno=pe:{3}, param=param:⟨{4}⟩, pts=[{5}], geo_type='{6}', visible={7} {8};
+                    }};"#,
                     v.id(),
                     inst.geo_hash,
                     transform_hash,
@@ -67,16 +79,9 @@ pub async fn save_instance_data(
                     param_hash,
                     pt_hashes.join(","),
                     inst.geo_type.to_string(),
-                    inst.visible
+                    inst.visible,
+                    cat_negs_str
                 );
-                // dbg!(&relate_sql);
-                if !inst.cata_neg_refnos.is_empty() {
-                    relate_sql.push_str(&format!(
-                        ", cata_neg=[{}]",
-                        inst.cata_neg_refnos.iter().map(|x| x.to_pe_key()).join(",")
-                    ));
-                }
-                // dbg!(&relate_sql);
                 geo_relate_vec.push(relate_sql);
                 //保存 unit shape 的几何参数
                 json_vec.push(inst.gen_unit_geo_sur_json());
@@ -102,7 +107,9 @@ pub async fn save_instance_data(
                 //使用surreal 保存NamedAttrMap
                 // dbg!(&geo_relate_vec);
                 join_set.spawn(async move {
-                    SUL_DB.query(geo_relate_vec.join(";")).await.unwrap();
+                    let sql = geo_relate_vec.join("");
+                    // println!("{}", &sql);
+                    SUL_DB.query(sql).await.unwrap();
                 });
             }
         }
@@ -162,8 +169,10 @@ pub async fn save_instance_data(
             //这里的 pts，存储的时点集信息
             let mut sql = format!(
                 "relate {}->{}->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩, generic='{}', has_cata_neg={}",
+                // k.to_pe_versioned_key(v.version),
                 k.to_pe_key(),
-                k.to_table_key("inst_relate"),
+                // k.to_inst_relate_versioned_key(v.version),
+                k.to_inst_relate_key(),
                 v.id_str(),
                 transform_hash,
                 v.generic_type.to_string(),

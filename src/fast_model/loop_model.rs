@@ -70,6 +70,7 @@ pub async fn gen_loop_geos(
                         .unwrap_or_default();
                 let mut geos_info = EleGeosInfo {
                     refno: target_refno,
+                    version: target_att.get_e3d_version(),
                     cata_hash: None,
                     visible: true,
                     world_transform: trans_origin,
@@ -166,7 +167,7 @@ pub async fn gen_loop_geos(
                 shape_insts_data.insert_geos_data(
                     target_refno.to_string(),
                     EleInstGeosData {
-                        inst_key: target_refno.to_string(),
+                        inst_key: geos_info.get_inst_key(),
                         refno: target_refno,
                         insts: vec![geom_inst.clone()],
                         aabb: None,

@@ -2,7 +2,7 @@ use crate::fast_model::{CataNegGroup, GeoTransQuery, GmGeoData, NegInfo};
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::{RefU64, SUL_DB};
+use aios_core::{get_inst_relate_keys, RefU64, SUL_DB};
 use glam::DMat4;
 use nalgebra::Isometry;
 use parry3d::bounding_volume::Aabb;
@@ -35,21 +35,12 @@ pub async fn apply_cata_neg_boolean_manifold(
         std::fs::create_dir_all(&dir).unwrap();
     }
 
-    let inst_keys =
-        if !refnos.is_empty() {
-            refnos
-                .iter()
-                .map(|x| x.to_inst_relate_key())
-                .collect::<Vec<_>>()
-                .join(",")
-        } else {
-            "inst_relate".to_string()
-        };
+    let inst_keys = get_inst_relate_keys(refnos);;
 
     let sql =  format!(
         r#" select in as refno, (->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
             from ->inst_info->geo_relate where visible and !out.bad and cata_neg!=none) as boolean_group
-            from [{inst_keys}] where (->inst_info)[0]!=none and has_cata_neg and !bad_bool and !booled"#
+            from {inst_keys} where (->inst_info)[0]!=none and has_cata_neg and !bad_bool and !booled"#
     );
     // println!("sql is {}", &sql);
     let mut response = SUL_DB.query(sql).await?;
@@ -183,16 +174,7 @@ pub async fn apply_insts_boolean_manifold(
     if !dir.exists() {
         std::fs::create_dir_all(&dir).unwrap();
     }
-    let inst_keys =
-        if !refnos.is_empty() {
-            refnos
-                .iter()
-                .map(|x| x.to_inst_relate_key())
-                .collect::<Vec<_>>()
-                .join(",")
-        } else {
-            "inst_relate".to_string()
-        };
+    let inst_keys = get_inst_relate_keys(refnos);
     //筛选出来 "Neg", "CataCrossNeg" 的关联
     let sql =
         format!(r#" select
@@ -204,7 +186,7 @@ pub async fn apply_insts_boolean_manifold(
                 (select value [in, world_trans.d, (select meta::id(out) as id, geo_type, trans.d as trans,
                 out.aabb.d as aabb, object::keys(out.param)[0] as para_type
                 from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"])]
-            from array::flatten(neg_refnos->inst_relate)) as neg_ts from [{}] where !bad_bool
+            from array::flatten(neg_refnos->inst_relate)) as neg_ts from {} where !bad_bool
             and !booled and neg_refnos!=none and aabb.d!=none
         "#,
             inst_keys

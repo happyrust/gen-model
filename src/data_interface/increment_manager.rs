@@ -9,6 +9,7 @@ use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
 use aios_core::{clear_all_caches, SUL_DB};
 use aios_core::{get_db_option, RefU64Vec};
+use aios_core::version::backup_att_and_pe_to_history_tables;
 use futures::StreamExt;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
@@ -205,7 +206,7 @@ impl AiosDBManager {
                 if PRIMITIVE_NOUN_NAMES.contains(&type_name) {
                     geo_update_log.prim_refnos.insert(refno);
                 } else if GNERAL_LOOP_OWNER_NOUN_NAMES.contains(&type_name) {
-                    //TODO 如果修改的是顶点
+                    //TODO 如果修改的是顶点， 这里要考虑到最终的构件，也要添加进来，比如 vert -> GWALL/FLOOR 等
                     geo_update_log.loop_owner_refnos.insert(refno);
                     geo_update_log.loop_owner_refnos.insert(owner);
                 } else if CATA_HAS_TUBI_GEO_NAMES.contains(&type_name) {
@@ -274,8 +275,10 @@ impl AiosDBManager {
                 let mut insert_pe_jsons_str = String::new();
                 let mut update_pe_sql_str = String::new();
                 let mut update_att_sql_str = String::new();
+                let mut history_refnos_set = Vec::new();
                 for k in chunk {
                     let refno = k.refno;
+                    history_refnos_set.push(refno);
                     let name = k.attr.get_name();
                     let pe = SPdmsElement {
                         refno,
@@ -311,6 +314,10 @@ impl AiosDBManager {
                         );
                     }
                 }
+
+                backup_att_and_pe_to_history_tables(&history_refnos_set).await.unwrap();
+
+                //调用函数，将当前数据存储到版本表里
                 // println!("{}", &update_pe_sql_str);
                 let insert_pe_sql = if !insert_pe_jsons_str.is_empty() {
                     insert_pe_jsons_str.pop();
@@ -319,7 +326,6 @@ impl AiosDBManager {
                         insert_pe_jsons_str
                     )
                 } else { "".to_owned() };
-
 
 
                 let handle = tokio::task::spawn(async move {
@@ -382,6 +388,7 @@ impl AiosDBManager {
             .unwrap();
 
         dbg!(&all_refnos);
+        //todo 把历史的数据 inst_relate 里的in 改成使用pe_history:[refno, version]
         process_meshes_update_db(None, &all_refnos)
             .await
             .unwrap();

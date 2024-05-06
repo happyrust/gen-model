@@ -260,7 +260,7 @@ pub async fn sync_total_async_threaded(
         is_replace = true;
     }
     let chunk_size = db_option_arc.sync_chunk_size.unwrap_or(10_0000) as usize;
-    let sync_tidb = db_option_arc.sync_tidb.unwrap_or(false);
+    // let sync_tidb = db_option_arc.sync_tidb.unwrap_or(false);
 
     const CHUNK_SIZE: usize = 10000;
     let (sender, receiver) = flume::bounded(CHUNK_SIZE);

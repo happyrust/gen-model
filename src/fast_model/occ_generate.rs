@@ -8,9 +8,7 @@ use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::test::test_surreal::init_test_surreal;
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
-use aios_core::{
-    gen_bytes_hash, query_deep_neg_inst_refnos, query_deep_visible_inst_refnos, RefU64, SUL_DB,
-};
+use aios_core::{gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos, query_deep_visible_inst_refnos, RefU64, SUL_DB};
 use bevy_transform::prelude::Transform;
 use glam::DMat4;
 use itertools::Itertools;
@@ -105,17 +103,12 @@ pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow:
     let mut i = 0;
     let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
 
-    let sql = if !refnos.is_empty() {
-        let inst_relate_keys = refnos.iter().map(|x| x.to_inst_relate_key()).join(",");
-        format!(
-            r#"array::group(select value (select value [out, $parent.neg_refnos!=none] from out->geo_relate where !out.meshed and !out.bad)
-            from [{inst_relate_keys}]) "#
-        )
-    } else {
-        r#"select value [id, (<-geo_relate.in<-inst_relate[?neg_refnos!=none].neg_refnos) != none ] from
-            inst_geo where !meshed && !bad"#.to_string()
-    };
-    // dbg!(&sql);
+    let inst_keys = get_inst_relate_keys(refnos);
+    let sql =format!(
+        r#"array::group(select value (select value [out, $parent.neg_refnos!=none] from out->geo_relate where !out.meshed and !out.bad)
+            from {inst_keys})"#
+    );
+    // println!("sql is {}", &sql);
 
     let mut response = SUL_DB.query(sql).await.unwrap();
     let inst_geo_ids: Vec<(Thing, bool)> = response.take(0).unwrap();
@@ -199,7 +192,9 @@ pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow:
                         let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
                         let mut pt_hashes = HashSet::new();
                         for edge in s.edges() {
-                            for point in edge.approximation_segments_custom(1.0, 1.0) {
+                            //TODO edge 这里取中点就可以了
+                            // for point in edge.approximation_segments_custom(1.0, 1.0) {
+                            for point in [edge.start_point(), edge.end_point()] {
                                 // dbg!(point);
                                 let pts_hash = RsVec3(point.as_vec3()).gen_hash();
                                 pt_hashes.insert(format!("vec3:⟨{}⟩", pts_hash));
@@ -227,7 +222,7 @@ pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow:
             }
             if !success {
                 //有问题的模型，就不需要每次都重复生成了
-                update_sql.push_str(&format!("update inst_geo:⟨{}⟩ set bad = true;", id));
+                update_sql.push_str(&format!("update inst_geo:⟨{}⟩ set bad=true;", id));
             }
         }
         if !update_sql.is_empty() {
@@ -244,7 +239,8 @@ pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow:
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct QueryAabbParam {
-    pub id: RefU64,
+    pub id: Thing,
+    pub refno: RefU64,
     pub geo_aabbs: Vec<GeoAabbTrans>,
     pub world_trans: Transform,
 }
@@ -260,16 +256,11 @@ pub async fn update_inst_relate_aabbs(refnos: &[RefU64]) -> anyhow::Result<()> {
     const PAGE_NUM: usize = 500;
     let mut i = 0;
 
-    let sql = if refnos.is_empty() {
-        format!(r#"select value id from inst_relate where aabb = none"#)
-    } else {
-        let inst_keys = refnos
-            .iter()
-            .map(|x| x.to_inst_relate_key())
-            .collect::<Vec<_>>()
-            .join(",");
-        format!(r#"select value id from [{}] where aabb = none"#, inst_keys)
-    };
+    let inst_keys = get_inst_relate_keys(refnos);
+    let sql =
+        format!(r#"select value id from {inst_keys} where aabb = none;"#);
+
+    // println!("sql is {}", &sql);
 
     let mut response = SUL_DB.query(sql).await.unwrap();
     let inst_relate_ids: Vec<Thing> = response.take(0).unwrap();
@@ -280,14 +271,14 @@ pub async fn update_inst_relate_aabbs(refnos: &[RefU64]) -> anyhow::Result<()> {
         // let task = tokio::spawn(async move {
         let mut aabb_map: HashMap<u64, String> = HashMap::new();
         let sql = format!(
-            r#"select in as id, world_trans.d as world_trans,
+            r#"select id, in as refno, world_trans.d as world_trans,
             (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb.d != none)
             as geo_aabbs from [{}]"#,
             ids
         );
         let mut response = SUL_DB.query(sql).await.unwrap();
         let result: Vec<QueryAabbParam> = response.take(0).unwrap();
-        // dbg!(result.len());
+        dbg!(result.len());
         #[cfg(debug_assertions)]
         println!("QueryAabbParam len: {}", result.len());
         i += 1;
@@ -308,9 +299,10 @@ pub async fn update_inst_relate_aabbs(refnos: &[RefU64]) -> anyhow::Result<()> {
             aabb_map
                 .entry(aabb_hash)
                 .or_insert(serde_json::to_string(&aabb).unwrap());
+            // let inst_relate_id = format!("{}->inst_relate", r.refno.to_pe_key());
             let sql = format!(
                 "update {} set aabb = aabb:⟨{}⟩;",
-                r.id.to_table_key("inst_relate"),
+                r.id.to_string(),
                 aabb_hash,
             );
             update_sql.push_str(&sql);
@@ -375,16 +367,7 @@ pub async fn apply_insts_boolean_occ(refnos: &[RefU64],
     if !dir.exists() {
         std::fs::create_dir_all(&dir).unwrap();
     }
-    let inst_keys =
-        if !refnos.is_empty() {
-            refnos
-                .iter()
-                .map(|x| x.to_inst_relate_key())
-                .collect::<Vec<_>>()
-                .join(",")
-        } else {
-            "inst_relate".to_string()
-        };
+    let inst_keys = get_inst_relate_keys(refnos);
     //避免重复执行布尔运算
     let sql = format!(r#"
      select <string>meta::id(id) as id, param from
@@ -425,7 +408,7 @@ pub async fn apply_insts_boolean_occ(refnos: &[RefU64],
                 (select value [in, world_trans.d, (select meta::id(out) as id, geo_type, trans.d as trans,
                 out.aabb.d as aabb, object::keys(out.param)[0] as para_type
                 from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"])]
-            from array::flatten(neg_refnos->inst_relate)) as neg_ts from [{}] where !bad_bool
+            from array::flatten(neg_refnos->inst_relate)) as neg_ts from {} where !bad_bool
             and !booled and neg_refnos!=none and aabb.d!=none
         "#,
             inst_keys

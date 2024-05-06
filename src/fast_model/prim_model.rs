@@ -66,6 +66,7 @@ pub async fn gen_prim_geos(
                 let visible = attr.is_visible_by_level(None).unwrap_or(true);
                 let mut geos_info = EleGeosInfo {
                     refno,
+                    version: attr.get_e3d_version(),
                     visible,
                     generic_type: get_generic_type(refno).await.unwrap_or_default(),
                     aabb: None,
@@ -147,17 +148,17 @@ pub async fn gen_prim_geos(
                             .unwrap_or_default();
                     // dbg!(&neg_refnos);
 
-                    shape_insts_data.insert_info(refno, geos_info);
                     shape_insts_data.insert_geos_data(
                         refno.to_string(),
                         EleInstGeosData {
-                            inst_key: refno.to_string(),
+                            inst_key: geos_info.get_inst_key(),
                             refno,
                             insts: geo_insts,
                             aabb: None,
                             type_name: attr.get_type_str().to_string(),
                         },
                     );
+                    shape_insts_data.insert_info(refno, geos_info);
                 }
             }
 

@@ -304,8 +304,10 @@ pub async fn gen_cata_geos(
                                 .map(|x| x.1)
                                 .unwrap_or_default();
 
+                            dbg!(ele_att.get_e3d_version());
                             let mut geos_info = EleGeosInfo {
                                 refno: ele_refno,
+                                version: ele_att.get_e3d_version(),
                                 cata_hash: Some(cata_hash.clone()),
                                 visible: true,
                                 generic_type: get_generic_type(ele_refno).await.unwrap_or_default(),
@@ -337,8 +339,6 @@ pub async fn gen_cata_geos(
                                     visible_set.insert(s.refno);
                                 }
                             }
-                            // dbg!(&shapes);
-                            // dbg!(&visible_set);
                             //直接将所有的几何体组合起来
                             for shape in shapes {
                                 let CateBrepShape {
@@ -482,6 +482,7 @@ pub async fn gen_cata_geos(
                         };
                         let geos_info = EleGeosInfo {
                             refno: ele_refno,
+                            version: ele_att.get_e3d_version(),
                             cata_hash: Some(cata_hash.clone()),
                             visible: true,
                             generic_type: get_generic_type(ele_refno).await.unwrap_or_default(),
@@ -582,6 +583,7 @@ pub async fn gen_cata_geos(
                             branch_refno,
                             EleGeosInfo {
                                 refno: branch_refno,
+                                version: branch_att.get_e3d_version(),
                                 cata_hash: Some(tubi_geo_hash.to_string()),
                                 visible: true,
                                 generic_type: get_generic_type(branch_refno)
@@ -721,6 +723,7 @@ pub async fn gen_cata_geos(
                                             current_tubing.leave_refno,
                                             EleGeosInfo {
                                                 refno: current_tubing.leave_refno,
+                                                version: branch_att.get_e3d_version(),
                                                 cata_hash: Some(tubi_geo_hash.to_string()),
                                                 visible: true,
                                                 generic_type: get_generic_type(
@@ -811,6 +814,7 @@ pub async fn gen_cata_geos(
                                 current_tubing.leave_refno,
                                 EleGeosInfo {
                                     refno: current_tubing.leave_refno,
+                                    version: branch_att.get_e3d_version(),
                                     cata_hash: Some(tubi_geo_hash.to_string()),
                                     visible: true,
                                     generic_type: get_generic_type(current_tubing.leave_refno)
