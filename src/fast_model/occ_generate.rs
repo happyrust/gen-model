@@ -42,17 +42,23 @@ pub async fn process_meshes_update_db(
     if option.as_ref().map(|x| x.gen_mesh).unwrap_or(true) {
         if !refnos.is_empty() {
             for &refno in refnos {
-                let visible_refnos = query_deep_visible_inst_refnos(refno).await?;
+                let Ok(visible_refnos) = query_deep_visible_inst_refnos(refno).await else {
+                    continue;
+                };
                 target_visible_refnos.extend(visible_refnos);
-                let neg_refnos = query_deep_neg_inst_refnos(refno).await?;
+                let Ok(neg_refnos) = query_deep_neg_inst_refnos(refno).await else{
+                    continue;
+                };
+                // dbg!(neg_refnos.len());
                 target_neg_refnos.extend(neg_refnos);
             }
             target_refnos = target_visible_refnos.clone();
             target_refnos.extend(target_neg_refnos);
-            dbg!(target_refnos.len());
+            // dbg!(target_refnos.len());
         }
 
         let time = std::time::Instant::now();
+        // dbg!(&target_refnos);
         gen_inst_meshes(&target_refnos, None).await.unwrap();
         println!(
             "gen_inst_meshes finished: {} ms",
@@ -273,12 +279,12 @@ pub async fn update_inst_relate_aabbs(refnos: &[RefU64]) -> anyhow::Result<()> {
         let sql = format!(
             r#"select id, in as refno, world_trans.d as world_trans,
             (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb.d != none)
-            as geo_aabbs from [{}]"#,
+            as geo_aabbs from [{}] where world_trans.d != none;"#,
             ids
         );
         let mut response = SUL_DB.query(sql).await.unwrap();
         let result: Vec<QueryAabbParam> = response.take(0).unwrap();
-        dbg!(result.len());
+        // dbg!(result.len());
         #[cfg(debug_assertions)]
         println!("QueryAabbParam len: {}", result.len());
         i += 1;
@@ -377,7 +383,7 @@ pub async fn apply_insts_boolean_occ(refnos: &[RefU64],
     "#, &inst_keys);
     let mut response = SUL_DB.query(sql).await?;
     let params: Vec<GeoParam> = response.take(0)?;
-    dbg!(&params.len());
+    // dbg!(&params.len());
     if params.is_empty() {
         return Ok(());
     }

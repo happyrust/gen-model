@@ -32,6 +32,7 @@ use futures::StreamExt;
 use itertools::Itertools;
 use log::{error, LevelFilter};
 use simplelog::*;
+use surrealdb::opt::auth::Root;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::versioned_db::database::*;
 use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
@@ -88,6 +89,11 @@ async fn main() -> anyhow::Result<()> {
         .use_ns(&db_option.project_code)
         .use_db(&db_option.project_name)
         .await?;
+    SUL_DB
+        .signin(Root {
+            username: &db_option.v_user,
+            password: &db_option.v_password,
+        }).await?;
 
     aios_core::function::define_common_functions().await.unwrap();
 
@@ -123,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
         load_aabb_tree().await.unwrap();
         println!("正在计算房间");
         let mut time = Instant::now();
-        build_room_relations().await.unwrap();
+        build_room_relations(&db_option).await.unwrap();
         println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
         update_cal_equip().await?;
         update_cal_bran_component().await?;

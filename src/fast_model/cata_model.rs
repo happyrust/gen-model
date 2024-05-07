@@ -303,8 +303,7 @@ pub async fn gen_cata_geos(
                                 .remove(&ele_refno)
                                 .map(|x| x.1)
                                 .unwrap_or_default();
-
-                            dbg!(ele_att.get_e3d_version());
+                            // dbg!(ele_att.get_e3d_version());
                             let mut geos_info = EleGeosInfo {
                                 refno: ele_refno,
                                 version: ele_att.get_e3d_version(),
@@ -317,6 +316,7 @@ pub async fn gen_cata_geos(
                                 neg_refnos: vec![], //负实体是自己，这样好处理
                                 has_cata_neg: false,
                                 ptset_map: cur_ptset_map.clone(),
+                                is_solid: true,
                                 ..Default::default()
                             };
 
@@ -416,6 +416,8 @@ pub async fn gen_cata_geos(
                             }
                             {
                                 let mut inst_key = geos_info.get_inst_key();
+                                geos_info.is_solid = geo_insts.iter().any(|x| x.geo_type == GeoBasicType::Pos
+                                    || x.geo_type == GeoBasicType::Compound);
                                 let mut geos_data = EleInstGeosData {
                                     inst_key,
                                     refno: ele_refno,
@@ -439,13 +441,6 @@ pub async fn gen_cata_geos(
                         if Some(ele_refno) == process_refno {
                             continue;
                         }
-                        // println!(
-                        //     "正在处理同类元件库的模型当前参考号：{}",
-                        //     ele_refno.to_string(),
-                        // );
-                        // if ptset_map.is_none() {
-                        //     dbg!(&target_cata.ptset);
-                        // }
                         let cur_ptset_map = ptset_map
                             .as_ref()
                             .or(target_cata.ptset.as_ref())
@@ -486,9 +481,9 @@ pub async fn gen_cata_geos(
                             cata_hash: Some(cata_hash.clone()),
                             visible: true,
                             generic_type: get_generic_type(ele_refno).await.unwrap_or_default(),
-                            aabb: None,
                             world_transform: origin_trans,
                             ptset_map: cur_ptset_map,
+                            is_solid: true,  //TODO 这里是不是需要取查一下？
                             ..Default::default()
                         };
                         shape_insts_data.insert_info(ele_refno, geos_info);
@@ -593,12 +588,13 @@ pub async fn gen_cata_geos(
                                 world_transform: t,
                                 flow_pt_indexs: vec![],
                                 cata_refno: None,
+                                is_solid: true,
                                 ..Default::default()
                             },
                         );
                         tubi_relates.push(format!(
                             "relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                    set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={}",
+                                    set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
                             current_tubing.leave_refno,
                             current_tubing.arrive_refno,
                             gen_bytes_hash::<_, 64>(&aabb),
@@ -733,6 +729,7 @@ pub async fn gen_cata_geos(
                                                 .unwrap_or_default(),
                                                 aabb: Some(aabb),
                                                 world_transform: t,
+                                                is_solid: true,
                                                 ..Default::default()
                                             },
                                         );
@@ -749,7 +746,7 @@ pub async fn gen_cata_geos(
                                         tubi_relates.push(
                                             format!(
                                                 "relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩ \
-                                            set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans= trans:⟨{}⟩, bore_size={}",
+                                            set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans= trans:⟨{}⟩, bore_size={};",
                                                 current_tubing.leave_refno,
                                                 current_tubing.arrive_refno,
                                                 gen_bytes_hash::<_, 64>(&aabb),
@@ -763,8 +760,8 @@ pub async fn gen_cata_geos(
                                         dbg!(&current_tubing);
                                         dbg!(to_pdms_vec_str(&current_tubing.desire_arrive_dir));
                                         dbg!(to_pdms_vec_str(&current_tubing.desire_leave_dir));
+                                        println!("{} 的直段方向有问题", refno.to_string());
                                     }
-                                    println!("{} 的直段方向有问题", refno.to_string());
                                 }
                             }
                         }
@@ -822,12 +819,13 @@ pub async fn gen_cata_geos(
                                         .unwrap_or_default(),
                                     aabb: Some(aabb),
                                     world_transform: t,
+                                    is_solid: true,
                                     ..Default::default()
                                 },
                             );
                             tubi_relates.push(
                                 format!(
-                                    "relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩ set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩,bore_size={}",
+                                    "relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩ set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩,bore_size={};",
                                     current_tubing.leave_refno,
                                     current_tubing.arrive_refno,
                                     gen_bytes_hash::<_, 64>(&aabb),
@@ -837,8 +835,11 @@ pub async fn gen_cata_geos(
                             );
                         }
                     } else {
-                        dbg!(current_tubing.desire_arrive_dir);
-                        println!("{} 的直段方向有问题", refno.to_string());
+                        #[cfg(feature = "debug")]
+                        {
+                            dbg!(current_tubing.desire_arrive_dir);
+                            println!("{} 的直段方向有问题", refno.to_string());
+                        }
                     }
                 }
             }
@@ -849,20 +850,9 @@ pub async fn gen_cata_geos(
         .send(tubi_shape_insts_data)
         .expect("send tubi shape_insts_data failed.");
 
-    // if !inst_tubi_map.is_empty() {
-    //     for (k, v) in inst_tubi_map {
-    //         // main.insert_tubi(k, v);
-    //     }
-    //     println!("模型生成完毕,正在保存直段到图数据库");
-    // }
-
-    //todo 暂时放在这里
-    //将tubi的关系建立起来，直接指向inst_geo, 由bran出发，每段tubi都指向对应的inst_geo，
-    //需要在edge上加上对应的参考号，如果是branch，需要加上branch的参考号
-    //使用relate创建这个关系，先把relate语句保存到tubi_relate_vec
     if !tubi_relates.is_empty() {
-        // dbg!(tubi_relates.join(";"));
-        SUL_DB.query(tubi_relates.join(";")).await.unwrap();
+        // dbg!(tubi_relates.join(""));
+        SUL_DB.query(tubi_relates.join("")).await.unwrap();
     }
     println!(
         "处理元件库几何体: {} 花费时间: {} ms",

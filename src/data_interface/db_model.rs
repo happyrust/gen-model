@@ -69,10 +69,6 @@ impl AiosDBManager {
     pub async fn init_form_config() -> anyhow::Result<Self> {
         let db_option = get_db_option();
         let mut mgr = Self::init(&db_option).await?;
-        //加载空间树
-        if db_option.load_spatial_tree {
-            // mgr.compute_aabb_trees().await?;
-        }
         Ok(mgr)
     }
 
@@ -606,14 +602,9 @@ impl AiosDBManager {
             needed_parse_files: None,
             project_path: dir,
             db_option: db_option.clone(),
-            // cached_mesh_mgr: Arc::new(Default::default()),
-            // arango_pool,
             watcher: Arc::new(watcher),
             mqtt_client,
             rtree: None,
-            // room_panels_rtree: None,
-            // room_info_map: Default::default(),
-            // room_panel_info_map: Default::default(),
         })
     }
 

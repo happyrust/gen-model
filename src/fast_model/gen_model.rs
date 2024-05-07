@@ -118,9 +118,7 @@ pub async fn gen_all_geos_data(
                     ))
                     .await?;
                 origin_target_refnos = response.take(0)?;
-            } else if is_debug {
-                origin_target_refnos = debug_root_refnos.clone();
-            } else if is_incr_update {
+            }  else if is_incr_update {
                 // root_refnos 为incr_update_log里的loop_refnos，basic_cata_refnos， prim_refnos的合集
                 origin_target_refnos = incr_updates
                     .as_ref()
@@ -131,17 +129,18 @@ pub async fn gen_all_geos_data(
                     .collect();
                 origin_target_refnos.extend(incr_updates.as_ref().unwrap().loop_owner_refnos.clone());
                 origin_target_refnos.extend(incr_updates.as_ref().unwrap().prim_refnos.clone());
+            } else if is_debug {
+                origin_target_refnos = debug_root_refnos.clone();
             }
 
             let incr_updates_log_arc = Arc::new(incr_updates.clone().unwrap_or_default());
 
             //是否需要按照类型进行分组
-            dbg!(origin_target_refnos.len());
+            // dbg!(&origin_target_refnos);
             //使用tokio的多线程处理
             for target in origin_target_refnos.clone() {
                 let incr_updates_log = incr_updates_log_arc.clone();
                 let shape_insts_arc = Arc::new(RwLock::new(ShapeInstancesData::default()));
-                let instance_mgr = shape_insts_arc.clone();
                 let db_option = db_option.clone();
                 let sender = sender.clone();
                 let handle = tokio::task::spawn(async move {
@@ -338,7 +337,9 @@ pub async fn gen_all_geos_data(
                             .unwrap_or_default();
                             loop_owner_refnos.into_iter().collect()
                         };
-                        println!("使用LOOP的数量: {}", target_loop_owner_refnos.len());
+                        if target_loop_owner_refnos.is_empty(){
+                            println!("使用LOOP的数量: {}", target_loop_owner_refnos.len());
+                        }
                         // dbg!(&target_loop_owner_refnos);
                         if run_cache_loop && !target_loop_owner_refnos.is_empty() {
                             let sjus_map_clone = loop_sjus_map_arc.clone();
@@ -370,7 +371,9 @@ pub async fn gen_all_geos_data(
                             .unwrap_or_default();
                             prim_refnos.into_iter().collect()
                         };
-                        println!("使用基本体数量: {}", target_prim_refnos.len());
+                        if !target_prim_refnos.is_empty(){
+                            println!("使用基本体数量: {}", target_prim_refnos.len());
+                        }
                         if run_cache_prim && !target_prim_refnos.is_empty() {
                             let db_option = db_option.clone();
                             let sender = sender.clone();
@@ -391,7 +394,9 @@ pub async fn gen_all_geos_data(
                 });
                 handles.push(handle);
             }
-            println!("{dbno} 生成完毕。");
+            if dbno!=0{
+                println!("{dbno} 生成完毕。");
+            }
         }
         futures::future::join_all(take(&mut handles)).await;
         Ok::<_, anyhow::Error>(())

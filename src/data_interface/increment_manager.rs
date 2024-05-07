@@ -218,10 +218,10 @@ impl AiosDBManager {
                         .or_insert_with(HashSet::new)
                         .insert(refno);
                 } else {
-                    owner_children_map
-                        .entry(attmap.get_owner())
-                        .or_insert_with(HashSet::new)
-                        .insert(refno);
+                    let owner_type = aios_core::get_type_name(owner).await?;
+                    if CATA_HAS_TUBI_GEO_NAMES.contains(&owner_type.as_str()) {
+                        geo_update_log.basic_cata_refnos.insert(refno);
+                    }
                 }
                 let increment_info = IncrementInfo {
                     refno,

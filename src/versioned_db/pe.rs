@@ -168,7 +168,6 @@ pub async fn save_pes(
             if exist_refnos.contains(&refno) {
                 update_sql_str
                     .push_str(format!("UPDATE {} CONTENT {};", refno.to_pe_key(), json).as_str());
-                // dbg!(&update_sql_str);
             } else {
                 insert_jsons_str.push_str(&json);
                 insert_jsons_str.push_str(",");

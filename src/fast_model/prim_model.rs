@@ -34,9 +34,7 @@ pub async fn gen_prim_geos(
     let mut handles = vec![];
     let all_refnos = Arc::new(prim_refnos.to_vec());
     let processed_cnt = Arc::new(Mutex::new(prim_cnt));
-    for i in 0..batch_chunks_cnt as usize {
-
-
+    for i in 0..batch_chunks_cnt {
         let all_refnos = all_refnos.clone();
         let processed_cnt = processed_cnt.clone();
         let sender = sender.clone();
@@ -147,7 +145,7 @@ pub async fn gen_prim_geos(
                             .await
                             .unwrap_or_default();
                     // dbg!(&neg_refnos);
-
+                    geos_info.is_solid = geo_insts.iter().any(|x| x.geo_type == GeoBasicType::Pos);
                     shape_insts_data.insert_geos_data(
                         refno.to_string(),
                         EleInstGeosData {

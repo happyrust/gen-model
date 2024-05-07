@@ -163,7 +163,7 @@ pub async fn gen_loop_geos(
                     },
                     cata_neg_refnos: Default::default(),
                 };
-                shape_insts_data.insert_info(target_refno, geos_info.clone());
+                geos_info.is_solid = geom_inst.geo_type == GeoBasicType::Pos;
                 shape_insts_data.insert_geos_data(
                     target_refno.to_string(),
                     EleInstGeosData {
@@ -174,6 +174,7 @@ pub async fn gen_loop_geos(
                         type_name: target_att.get_type_str().to_string(),
                     },
                 );
+                shape_insts_data.insert_info(target_refno, geos_info);
             }
 
             sender.send(shape_insts_data).expect("send loop shape_insts_data error");
