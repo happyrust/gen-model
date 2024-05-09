@@ -1,4 +1,4 @@
-use crate::fast_model::{CataNegGroup, GeoTransQuery, GmGeoData, NegInfo};
+use crate::fast_model::{CataNegGroup, ManiGeoTransQuery, GmGeoData, NegInfo};
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::PlantMesh;
@@ -186,14 +186,14 @@ pub async fn apply_insts_boolean_manifold(
                 (select value [in, world_trans.d, (select meta::id(out) as id, geo_type, trans.d as trans,
                 out.aabb.d as aabb, object::keys(out.param)[0] as para_type
                 from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"])]
-            from array::flatten(neg_refnos->inst_relate)) as neg_ts from {} where !bad_bool
-            and !booled and neg_refnos!=none and aabb.d!=none
+            from array::flatten(in<-neg_relate.in->inst_relate) ) as neg_ts from {} where !bad_bool
+            and !booled and (in<-neg_relate)[0] != none and aabb.d!=none
         "#,
             inst_keys
         );
     let mut response = SUL_DB.query(sql).await.unwrap();
-    let boolean_query: Vec<GeoTransQuery> = response.take(0).unwrap();
-    // dbg!(boolean_query.len());
+    let boolean_query: Vec<ManiGeoTransQuery> = response.take(0).unwrap();
+    // dbg!(&boolean_query);
 
     let mut tasks = Vec::new();
     let chunk = (boolean_query.len() / 16).max(1);
@@ -309,11 +309,12 @@ pub async fn apply_insts_boolean_manifold(
                 if found_need_occ {
                     continue;
                 }
-                // dbg!(neg_manifolds.len());
+
                 if !neg_manifolds.is_empty() {
                     let mut success = false;
                     let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
                     let mesh = PlantMesh::from(&final_manifold);
+                    // dbg!(neg_manifolds.len());
                     #[cfg(feature = "debug_model")]
                     mesh.export_obj(false, &format!("{}.obj", b.refno));
                     //保存到文件到dir下

@@ -40,7 +40,7 @@ use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal
 use aios_database::fast_model::gen_all_geos_data;
 use aios_database::fast_model::room_model::build_room_relations;
 use aios_database::fast_model::{
-    gen_inst_meshes, process_meshes_update_db, update_inst_relate_aabbs,
+    gen_inst_meshes, process_meshes_update_db,
 };
 
 #[tokio::main]

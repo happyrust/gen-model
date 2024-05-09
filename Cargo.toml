@@ -9,7 +9,7 @@ truck = []
 local = []
 ws = []
 debug_obj_export = []
-debug_model = []
+debug_model = ["aios_core/debug_wire"]
 mqtt = []
 viewer = []                                      #是否开启视图
 gen_model = ["aios_core/gen_model"]
@@ -66,7 +66,7 @@ dashmap = { version = "5.5.3", features = ["serde", "rayon"] }
 tokio = { version = "1.37.0", features = ["full"] }
 serde = { version = "1.0.137", features = ["derive"] }
 id_tree = { version = "1.8.0", features = ["serde_support"] }
-glam = { version = "0.25.0", features = ["rkyv"] }
+glam = { version = "0.27.0", features = ["rkyv"] }
 cached = "0.50.0"
 rkyv = { version = "0.7.44", features = ["hashbrown"] }
 

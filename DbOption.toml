@@ -30,7 +30,7 @@ mesh_tol_ratio = 3.0
 gen_spatial_tree = true
 load_spatial_tree = false
 save_spatial_tree_to_db = false
-gen_model_batch_size = 100
+gen_model_batch_size = 16
 
 #生成补充类型的graph，方便查询直接生成语句
 gen_noun_graph = false
@@ -102,7 +102,9 @@ puhua_database_password = ""
 
 room_keyword = "-RM"   # 2016  K-R-K100   (-R-)
 
-debug_root_refnos = ["17496/256243"]
-#debug_root_refnos = [ "24383/74426" ]
+#debug_root_refnos = [
+#    "25688_48848",
+#]
+debug_root_refnos = [ "17496_171606" ]
 # debug_root_refnos = ["24383/66457", "24381/34110"]
 #debug_root_refnos = ["17496/172806"]

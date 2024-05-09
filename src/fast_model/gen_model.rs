@@ -95,8 +95,8 @@ pub async fn gen_all_geos_data(
     }
 
     let process_handle = tokio::spawn(async move {
-        let mut handles = vec![];
         for dbno in db_nos {
+            // let mut handles = vec![];
             if is_incr_update {
                 println!("开始处理更新模型数量: {}", incr_count);
             } else if is_debug {
@@ -116,8 +116,8 @@ pub async fn gen_all_geos_data(
                         "select value id from SITE where REFNO.dbnum={}",
                         dbno
                     ))
-                    .await?;
-                origin_target_refnos = response.take(0)?;
+                    .await.unwrap();
+                origin_target_refnos = response.take(0).unwrap();
             }  else if is_incr_update {
                 // root_refnos 为incr_update_log里的loop_refnos，basic_cata_refnos， prim_refnos的合集
                 origin_target_refnos = incr_updates
@@ -140,10 +140,9 @@ pub async fn gen_all_geos_data(
             //使用tokio的多线程处理
             for target in origin_target_refnos.clone() {
                 let incr_updates_log = incr_updates_log_arc.clone();
-                let shape_insts_arc = Arc::new(RwLock::new(ShapeInstancesData::default()));
                 let db_option = db_option.clone();
                 let sender = sender.clone();
-                let handle = tokio::task::spawn(async move {
+                // let handle = tokio::task::spawn(async move {
                     let mut target_refnos = vec![target];
                     //Step 1、提前缓存ploo, 得到对齐方式的偏移
                     let loop_sjus_map = DashMap::new();
@@ -156,7 +155,7 @@ pub async fn gen_all_geos_data(
                             )
                             .await
                         else {
-                            return;
+                            continue;
                         };
                         for r in target_ploo_refnos {
                             let Ok(loop_att) = aios_core::get_named_attmap(r).await else {
@@ -254,7 +253,7 @@ pub async fn gen_all_geos_data(
                                 .unwrap();
                             let Ok(bran_children_refnos) = response.take::<Vec<RefU64>>(0) else {
                                 dbg!("查询BRAN, HANG出错");
-                                return;
+                                continue;
                             };
                             let mut use_cata_refnos =
                                 aios_core::query_multi_deep_children_filter_inst(
@@ -337,7 +336,7 @@ pub async fn gen_all_geos_data(
                             .unwrap_or_default();
                             loop_owner_refnos.into_iter().collect()
                         };
-                        if target_loop_owner_refnos.is_empty(){
+                        if !target_loop_owner_refnos.is_empty(){
                             println!("使用LOOP的数量: {}", target_loop_owner_refnos.len());
                         }
                         // dbg!(&target_loop_owner_refnos);
@@ -391,14 +390,14 @@ pub async fn gen_all_geos_data(
                     }
 
                     futures::future::join_all(gen_inst_handles).await;
-                });
-                handles.push(handle);
+                // });
+                // handles.push(handle);
             }
             if dbno!=0{
-                println!("{dbno} 生成完毕。");
+                println!("数据库号： {dbno} 生成完毕。");
             }
+            // futures::future::join_all(take(&mut handles)).await;
         }
-        futures::future::join_all(take(&mut handles)).await;
         Ok::<_, anyhow::Error>(())
     });
     all_handles.push(process_handle);

@@ -64,10 +64,11 @@ pub async fn gen_loop_geos(
                     trans_origin.translation += offset;
                 }
 
-                let mut neg_refnos =
+                let neg_refnos =
                     aios_core::query_filter_children(target_refno, &GENRAL_NEG_NOUN_NAMES)
                         .await
                         .unwrap_or_default();
+                shape_insts_data.insert_negs(target_refno, &neg_refnos);
                 let mut geos_info = EleGeosInfo {
                     refno: target_refno,
                     version: target_att.get_e3d_version(),
@@ -77,7 +78,6 @@ pub async fn gen_loop_geos(
                     generic_type: get_generic_type(target_refno).await.unwrap_or_default(),
                     aabb: None,
                     flow_pt_indexs: vec![],
-                    neg_refnos,
                     ..Default::default()
                 };
                 let mut geo_hash = 0;

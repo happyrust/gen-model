@@ -140,10 +140,11 @@ pub async fn gen_prim_geos(
                 };
                 geo_insts.push(inst_geo);
                 if geo_insts.len() > 0 {
-                    geos_info.neg_refnos =
+                    let neg_refnos =
                         aios_core::query_filter_children(refno, &GENRAL_NEG_NOUN_NAMES)
                             .await
                             .unwrap_or_default();
+                    shape_insts_data.insert_negs(refno, &neg_refnos);
                     // dbg!(&neg_refnos);
                     geos_info.is_solid = geo_insts.iter().any(|x| x.geo_type == GeoBasicType::Pos);
                     shape_insts_data.insert_geos_data(

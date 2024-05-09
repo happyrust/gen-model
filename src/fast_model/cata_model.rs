@@ -120,10 +120,10 @@ pub async fn gen_cata_geos(
     let mut handles = vec![];
     let mut tubi_relates = vec![];
     let gen_mesh = db_option.gen_mesh;
-    let multi_threads = db_option.multi_threads;
+    // let multi_threads = db_option.multi_threads;
     let mut local_al_map = Arc::new(DashMap::new());
     let is_bran = branch_map.len() > 0;
-    let processed_cnt = Arc::new(Mutex::new(target_cata_map.len()));
+    // let processed_cnt = Arc::new(Mutex::new(target_cata_map.len()));
     let all_unique_keys = Arc::new(
         target_cata_map
             .iter()
@@ -131,13 +131,17 @@ pub async fn gen_cata_geos(
             .collect::<Vec<_>>(),
     );
     let unique_cata_cnt = all_unique_keys.len();
-    let batch_chunks_cnt = all_unique_keys.len() / batch_size + 1;
+    let mut batch_chunks_cnt = 16;
+    let mut batch_size = all_unique_keys.len() / batch_chunks_cnt + 1;
+    //如果只有一个元件，就不分块了
+    if batch_size == 1 {
+        batch_size = 1;
+        batch_chunks_cnt = all_unique_keys.len();
+    }
     println!("使用元件库的模型总数：{unique_cata_cnt}, 分块数量: {batch_chunks_cnt}");
-    // dbg!(&all_unique_keys.len());
     if !all_unique_keys.is_empty() {
         for i in 0..batch_chunks_cnt {
             let all_unique_keys = all_unique_keys.clone();
-            let processed_cnt = processed_cnt.clone();
             let target_cata_map = target_cata_map.clone();
             let sjus_map_clone = sjus_map_arc.clone();
             let local_al_map_clone = local_al_map.clone();
@@ -167,13 +171,6 @@ pub async fn gen_cata_geos(
                         //如果没有已有的，需要生成
                         let ele_refno = target_cata.group_refnos[0];
                         process_refno = Some(ele_refno);
-                        // println!(
-                        //     "正在处理元件库的模型，索引：{}, 当前参考号：{}, 剩余: {}",
-                        //     j,
-                        //     ele_refno.to_string(),
-                        //     processed_cnt.lock().await.to_owned()
-                        // );
-                        // *processed_cnt.lock().await -= 1;
                         let Ok(Some(cata_refno)) = aios_core::get_cat_refno(ele_refno).await else {
                             // println!("{ele_refno} 的元件库引用为空，跳过");
                             continue;
@@ -186,8 +183,8 @@ pub async fn gen_cata_geos(
                         let mut design_axis_map = DashMap::new();
 
                         let cur_type = desi_att.get_type_str();
-                        #[cfg(debug_assertions)]
-                        dbg!(ele_refno);
+                        // #[cfg(debug_assertions)]
+                        // dbg!(ele_refno);
                         let r =
                             gen_cata_single_geoms(ele_refno, &brep_shapes_map, &design_axis_map)
                                 .await;
@@ -198,8 +195,8 @@ pub async fn gen_cata_geos(
                                 continue;
                             }
                         };
-                        #[cfg(debug_assertions)]
-                        dbg!(brep_shapes_map.len());
+                        // #[cfg(debug_assertions)]
+                        // dbg!(brep_shapes_map.len());
                         {
                             // 将一些伪属性需要用到的值存下来，后面也要更新维护这些伪属性，避免重复计算
                             let mut lock = HASH_PSEUDO_ATT_MAPS.write().await;
@@ -236,18 +233,15 @@ pub async fn gen_cata_geos(
                                         .insert("LBOR".into(), NamedAttrValue::F32Type(v.pbore));
                                 }
                             }
-                            // dbg!(ele_refno);
-                            // dbg!(&cata_hash);
-                            // dbg!(&psudo_map);
                         }
 
                         ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
                         for (ele_refno, shapes) in brep_shapes_map {
                             let Ok(Some(mut world_transform)) =
                                 aios_core::get_world_transform(ele_refno).await
-                            else {
-                                continue;
-                            };
+                                else {
+                                    continue;
+                                };
                             let Ok(ele_att) = aios_core::get_named_attmap(ele_refno).await else {
                                 continue;
                             };
@@ -274,12 +268,12 @@ pub async fn gen_cata_geos(
                                 &["->GMRE", "->GSTR"],
                                 &["refno"],
                             )
-                            .await
-                            .map(|x| x.get_refno_lossy().unwrap_or_default()) else {
+                                .await
+                                .map(|x| x.get_refno_lossy().unwrap_or_default()) else {
                                 continue;
                             };
-                            #[cfg(debug_assertions)]
-                            dbg!((ele_refno, gmse_refno));
+                            // #[cfg(debug_assertions)]
+                            // dbg!((ele_refno, gmse_refno));
 
                             //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
                             //反过来查询负实体，然后查询它的owner，来找到相邻的正实体
@@ -292,7 +286,6 @@ pub async fn gen_cata_geos(
                             } else {
                                 HashMap::new()
                             };
-                            // dbg!(&pos_neg_map);
                             let mut neg_own_pos_map: HashMap<RefU64, RefU64> = pos_neg_map
                                 .iter()
                                 .map(|(k, negs)| negs.iter().map(|x| (*x, *k)))
@@ -313,8 +306,6 @@ pub async fn gen_cata_geos(
                                 aabb: None,
                                 world_transform,
                                 cata_refno: Some(cata_refno),
-                                neg_refnos: vec![], //负实体是自己，这样好处理
-                                has_cata_neg: false,
                                 ptset_map: cur_ptset_map.clone(),
                                 is_solid: true,
                                 ..Default::default()
@@ -325,7 +316,7 @@ pub async fn gen_cata_geos(
                                 let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
                                 if let Some(a) = cur_ptset_map.values().find(|x| x.number == arrive)
                                     && let Some(l) =
-                                        cur_ptset_map.values().find(|x| x.number == leave)
+                                    cur_ptset_map.values().find(|x| x.number == leave)
                                 {
                                     local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
                                 }
@@ -406,9 +397,9 @@ pub async fn gen_cata_geos(
                                     cata_neg_refnos,
                                 };
                                 if is_ngmr {
+                                    //获得ngmr的关系
                                     if let Ok(target_owners) =
-                                        query_ngmr_owner(ele_refno, refno).await
-                                    {
+                                        query_ngmr_owner(ele_refno, refno).await {
                                         shape_insts_data.insert_ngmr(ele_refno, target_owners);
                                     }
                                 }
@@ -448,9 +439,9 @@ pub async fn gen_cata_geos(
                             .unwrap_or_default();
                         let Ok(Some(mut origin_trans)) =
                             aios_core::get_world_transform(ele_refno).await
-                        else {
-                            continue;
-                        };
+                            else {
+                                continue;
+                            };
 
                         let ele_att = aios_core::get_named_attmap(ele_refno)
                             .await
@@ -497,7 +488,7 @@ pub async fn gen_cata_geos(
             handles.push(handle);
         }
     }
-    dbg!(handles.len());
+    // dbg!(handles.len());
     futures::future::join_all(take(&mut handles)).await;
 
     let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
@@ -506,19 +497,16 @@ pub async fn gen_cata_geos(
     let mut tubi_shape_insts_data = ShapeInstancesData::default();
     for bran in branch_map.iter() {
         let branch_refno = *bran.key();
-        // dbg!(branch_refno);
         let Ok(children) = aios_core::get_children_pes(branch_refno).await else {
             continue;
         };
         let Ok(branch_att) = aios_core::get_named_attmap(branch_refno).await else {
             continue;
         };
-        // dbg!(&children);
         //可能只有branch 元素需要做一遍求解
         let Ok(Some(branch_transform)) = aios_core::get_world_transform(branch_refno).await else {
             continue;
         };
-        // dbg!(&branch_att);
         let htube_pt = branch_transform.transform_point(branch_att.get_vec3("HPOS").unwrap());
         let hdir = branch_transform
             .transform_vec3(branch_att.get_vec3("HDIR").unwrap())
@@ -531,12 +519,9 @@ pub async fn gen_cata_geos(
             .unwrap_or_default();
 
         let tubi_att = aios_core::get_named_attmap(h_ref).await.unwrap_or_default();
-        // dbg!(&tubi_att);
         let tubi_cat_ref = tubi_att.get_foreign_refno("CATR").unwrap_or_default();
-        // dbg!(&tubi_cat_ref);
         let mut h_tubi_size =
             fast_model::query_tubi_size(branch_refno, tubi_cat_ref, is_hang).await?;
-        // dbg!(&tubi_size);
         //todo 其实这里应该待定比较好
         let mut tubi_geo_hash = if matches!(h_tubi_size, TubiSize::BoxSize(_)) {
             BOXI_GEO_HASH
@@ -547,6 +532,9 @@ pub async fn gen_cata_geos(
         let tref = branch_att
             .get_foreign_refno(if is_hang { "TREF" } else { "LSTU" })
             .unwrap_or_default();
+        let tdir = branch_transform
+            .transform_vec3(branch_att.get_vec3("TDIR").unwrap())
+            .normalize_or_zero();
         let mut current_tubing = PdmsTubing {
             leave_refno: branch_refno,
             arrive_refno: tref,
@@ -556,22 +544,23 @@ pub async fn gen_cata_geos(
             leave_ref_dir: None,
             desire_arrive_dir: Default::default(),
             tubi_size: h_tubi_size,
+            index: 0,
         };
 
         let bran_owner_type = aios_core::get_type_name(branch_att.get_owner())
             .await
             .unwrap_or_default();
         let is_hvac = bran_owner_type == "HVAC";
-        // dbg!(is_hvac);
         // 需要求解出 leave bore
         if children.len() == 0 && !is_hvac {
             if bran_ttube_pt.distance(current_tubing.start_pt) > TUBI_TOL {
                 current_tubing.arrive_refno = tref;
                 current_tubing.end_pt = bran_ttube_pt;
                 //需要检查href的方位
-                current_tubing.desire_arrive_dir = -current_tubing.get_dir();
+                current_tubing.desire_arrive_dir = tdir;
+                let dist = current_tubing.end_pt.distance(current_tubing.start_pt);
                 //检查一下方向是否一致，不一致的，不显示，或者加标记位
-                if current_tubing.is_dir_ok() {
+                if dist > TUBI_TOL && current_tubing.is_dir_ok() {
                     if let Some(t) = current_tubing.get_transform() {
                         let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
                         tubi_shape_insts_data.insert_tubi(
@@ -592,15 +581,30 @@ pub async fn gen_cata_geos(
                                 ..Default::default()
                             },
                         );
+                        #[cfg(feature = "debug_model")]
+                        println!(
+                            "发现直段{}->{}, 方向: {}, 辅助方向: {}, 距离: {:.3}",
+                            current_tubing.leave_refno.to_slash_string(),
+                            current_tubing.arrive_refno.to_slash_string(),
+                            to_pdms_vec_str(&current_tubing.desire_leave_dir),
+                            to_pdms_vec_str(
+                                &current_tubing.leave_ref_dir.unwrap_or_default()
+                            ),
+                            dist
+                        );
                         tubi_relates.push(format!(
-                            "relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩  \
-                                    set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
-                            current_tubing.leave_refno,
-                            current_tubing.arrive_refno,
-                            gen_bytes_hash::<_, 64>(&aabb),
-                            gen_bytes_hash::<_, 64>(&t),
-                            serde_json::to_string(&h_tubi_size).unwrap_or_default(),
-                        ));
+                                "relate pe:{}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
+                                                set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
+                                branch_refno,
+                                branch_refno.to_pe_key(),
+                                current_tubing.index,
+                                current_tubing.leave_refno,
+                                current_tubing.arrive_refno,
+                                gen_bytes_hash::<_, 64>(&aabb),
+                                gen_bytes_hash::<_, 64>(&t),
+                                current_tubing.tubi_size.to_string(),
+                            ));
+                        current_tubing.index += 1;
                     }
                 } else {
                     // println!("{} 的直段方向有问题", branch_refno.to_string());
@@ -622,17 +626,11 @@ pub async fn gen_cata_geos(
         let exist_al_map = aios_core::query_arrive_leave_points_by_cata_hash(&exist_refnos[..])
             .await
             .unwrap_or_default();
-        // dbg!(&exist_al_map);
-        // dbg!(&local_al_map);
         for (index, ele) in children.into_iter().enumerate() {
             let refno = ele.refno;
-            // dbg!(refno);
             let cur_type = ele.noun.as_str();
-            //get the inst info
-            // if let Some(inst_info) = shape_insts_data.get_inst_info(refno)
             {
                 // println!("正在处理直段{}: {}", cur_type, refno.to_string());
-                // let world_trans = inst_info.world_transform;
                 let world_trans = aios_core::get_world_transform(refno)
                     .await?
                     .unwrap_or_default();
@@ -653,8 +651,8 @@ pub async fn gen_cata_geos(
                     //ATTA，如果设置成SPKBRK，产生直段，否则不产生直段
                     let skip = (cur_type == "ATTA")
                         && !aios_core::get_named_attmap(refno)
-                            .await?
-                            .get_bool_or_default("SPKBRK");
+                        .await?
+                        .get_bool_or_default("SPKBRK");
                     // dbg!(skip);
                     if !skip {
                         let a_pos = axis_map[0].pt;
@@ -670,15 +668,15 @@ pub async fn gen_cata_geos(
                             dbg!(to_pdms_vec_str(&actual_dir));
                             dbg!(to_pdms_vec_str(&a_dir));
                         }
-                        if actual_vec.length() > TUBI_TOL && !same_dir {
-                            current_tubing.end_pt = a_pos;
-                            current_tubing.desire_arrive_dir = a_dir;
+                        current_tubing.end_pt = a_pos;
+                        current_tubing.desire_arrive_dir = a_dir;
+                        let dist = actual_vec.length();
+                        if dist  > TUBI_TOL && !same_dir {
                             //TODO: 需要弄清楚风管开头的不需要加直段?
                             let is_hvac_start = is_hvac && (index == 0);
                             //风管开头这样的不需要处理
                             if !is_hvac_start {
                                 if current_tubing.is_dir_ok() {
-                                    // dbg!(&current_tubing);
                                     // 检测到有重叠的情况，就需要忽略
                                     //如果 leave 的 还是 bran 的参考号，说明还是要用h_tubi_size
                                     if current_tubing.leave_refno == branch_refno {
@@ -692,18 +690,17 @@ pub async fn gen_cata_geos(
                                             &["->LSTU->CATR"],
                                             &["refno"],
                                         )
-                                        .await
-                                        .map(|x| x.get_refno_lossy().unwrap_or_default())
-                                        .unwrap_or_default();
-                                        // dbg!(&lstube_cat_ref);
+                                            .await
+                                            .map(|x| x.get_refno_lossy().unwrap_or_default())
+                                            .unwrap_or_default();
                                         current_tubing.tubi_size = fast_model::query_tubi_size(
                                             current_tubing.leave_refno,
                                             lstube_cat_ref,
                                             is_hang,
                                         )
-                                        .await?;
+                                            .await?;
                                     }
-                                    #[cfg(debug_assertions)]
+                                    #[cfg(feature = "debug_model")]
                                     dbg!(&current_tubing.tubi_size);
                                     tubi_geo_hash =
                                         if matches!(current_tubing.tubi_size, TubiSize::BoxSize(_))
@@ -713,8 +710,7 @@ pub async fn gen_cata_geos(
                                             TUBI_GEO_HASH
                                         };
                                     if let Some(t) = current_tubing.get_transform() {
-                                        let aabb =
-                                            shared::aabb_apply_transform(&unit_cyli_aabb, &t);
+                                        let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
                                         tubi_shape_insts_data.insert_tubi(
                                             current_tubing.leave_refno,
                                             EleGeosInfo {
@@ -725,8 +721,8 @@ pub async fn gen_cata_geos(
                                                 generic_type: get_generic_type(
                                                     current_tubing.leave_refno,
                                                 )
-                                                .await
-                                                .unwrap_or_default(),
+                                                    .await
+                                                    .unwrap_or_default(),
                                                 aabb: Some(aabb),
                                                 world_transform: t,
                                                 is_solid: true,
@@ -735,27 +731,33 @@ pub async fn gen_cata_geos(
                                         );
                                         #[cfg(feature = "debug_model")]
                                         println!(
-                                            "发现直段{}->{}, 方向: {}, 辅助方向: {}",
+                                            "发现直段{}->{}, 方向: {}, 辅助方向: {}, 距离: {:.3}",
                                             current_tubing.leave_refno.to_slash_string(),
                                             current_tubing.arrive_refno.to_slash_string(),
                                             to_pdms_vec_str(&current_tubing.desire_leave_dir),
                                             to_pdms_vec_str(
                                                 &current_tubing.leave_ref_dir.unwrap_or_default()
                                             ),
+                                            dist
                                         );
-                                        tubi_relates.push(
-                                            format!(
-                                                "relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩ \
-                                            set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans= trans:⟨{}⟩, bore_size={};",
-                                                current_tubing.leave_refno,
-                                                current_tubing.arrive_refno,
-                                                gen_bytes_hash::<_, 64>(&aabb),
-                                                gen_bytes_hash::<_, 64>(&t),
-                                                serde_json::to_string(&h_tubi_size).unwrap_or_default(),
-                                            ));
+                                        let sql = format!(
+                                            "relate pe:{}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
+                                                            set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
+                                            branch_refno,
+                                            branch_refno.to_pe_key(),
+                                            current_tubing.index,
+                                            current_tubing.leave_refno,
+                                            current_tubing.arrive_refno,
+                                            gen_bytes_hash::<_, 64>(&aabb),
+                                            gen_bytes_hash::<_, 64>(&t),
+                                            current_tubing.tubi_size.to_string(),
+                                        );
+                                        // println!("sql is {}", &sql);
+                                        tubi_relates.push(sql);
+                                        current_tubing.index += 1;
                                     }
                                 } else {
-                                    #[cfg(feature = "debug")]
+                                    #[cfg(feature = "debug_model")]
                                     {
                                         dbg!(&current_tubing);
                                         dbg!(to_pdms_vec_str(&current_tubing.desire_arrive_dir));
@@ -777,7 +779,6 @@ pub async fn gen_cata_geos(
                             } else {
                                 -1.0
                             };
-                            // dbg!(cond);
                             l_ref_dir = cond * ref_dir;
                         }
                         if !skip {
@@ -797,14 +798,12 @@ pub async fn gen_cata_geos(
 
             if index == len - 1 && !is_hvac {
                 let last_dist = bran_ttube_pt.distance(current_tubing.start_pt);
-                // dbg!(last_dist);
                 if last_dist > TUBI_TOL {
                     //检查是否有一端是世界坐标原点
                     current_tubing.end_pt = bran_ttube_pt;
                     current_tubing.arrive_refno = tref;
-                    current_tubing.desire_arrive_dir = -current_tubing.desire_leave_dir;
+                    current_tubing.desire_arrive_dir = tdir;
                     if current_tubing.is_dir_ok() {
-                        // dbg!(&current_tubing);
                         if let Some(t) = current_tubing.get_transform() {
                             let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
                             tubi_shape_insts_data.insert_tubi(
@@ -823,19 +822,33 @@ pub async fn gen_cata_geos(
                                     ..Default::default()
                                 },
                             );
-                            tubi_relates.push(
-                                format!(
-                                    "relate pe:{branch_refno}->tubi_relate->inst_geo:⟨{tubi_geo_hash}⟩ set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩,bore_size={};",
-                                    current_tubing.leave_refno,
-                                    current_tubing.arrive_refno,
-                                    gen_bytes_hash::<_, 64>(&aabb),
-                                    gen_bytes_hash::<_, 64>(&t),
-                                    serde_json::to_string(&h_tubi_size).unwrap_or_default(),
-                                )
+                            #[cfg(feature = "debug_model")]
+                            println!(
+                                "发现直段{}->{}, 方向: {}, 辅助方向: {}, 距离: {:.3}",
+                                current_tubing.leave_refno.to_slash_string(),
+                                current_tubing.arrive_refno.to_slash_string(),
+                                to_pdms_vec_str(&current_tubing.desire_leave_dir),
+                                to_pdms_vec_str(
+                                    &current_tubing.leave_ref_dir.unwrap_or_default()
+                                ),
+                                last_dist
                             );
+                            tubi_relates.push(format!(
+                                "relate pe:{}->tubi_relate:[{}, {}]->inst_geo:⟨{tubi_geo_hash}⟩  \
+                                                set leave=pe:{},arrive=pe:{},aabb=aabb:⟨{}⟩,world_trans=trans:⟨{}⟩, bore_size={};",
+                                branch_refno,
+                                branch_refno.to_pe_key(),
+                                current_tubing.index,
+                                current_tubing.leave_refno,
+                                current_tubing.arrive_refno,
+                                gen_bytes_hash::<_, 64>(&aabb),
+                                gen_bytes_hash::<_, 64>(&t),
+                                current_tubing.tubi_size.to_string(),
+                            ));
+                            current_tubing.index += 1;
                         }
                     } else {
-                        #[cfg(feature = "debug")]
+                        #[cfg(feature = "debug_model")]
                         {
                             dbg!(current_tubing.desire_arrive_dir);
                             println!("{} 的直段方向有问题", refno.to_string());
@@ -913,6 +926,6 @@ pub async fn query_ngmr_owner(
             target_refnos.push(refno);
         }
     }
-    // dbg!(&target_refnos);
+    // dbg!((refno, ngmr_geo_refno, &target_refnos));
     Ok(target_refnos)
 }

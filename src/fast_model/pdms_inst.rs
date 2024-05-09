@@ -140,6 +140,28 @@ pub async fn save_instance_data(
     let mut join_set = tokio::task::JoinSet::new();
     // let mut inst_relate_join_set = tokio::task::JoinSet::new();
     let mut inst_relate_vec = vec![];
+
+    // if let Some(refnos) = inst_mgr.ngmr_relate_map.get(k)
+    {
+        let mut ngmr_relate_vec = vec![];
+        for (k, refnos) in &inst_mgr.neg_relate_map {
+            for r in refnos {
+                ngmr_relate_vec.push(format!(
+                    "relate {}->neg_relate:{}->{};",
+                    r.to_pe_key(),
+                    r.to_string(),
+                    k.to_pe_key(),
+                ));
+            }
+            // dbg!(&ngmr_relate_vec);
+        }
+        let ngmr_relate_sql = ngmr_relate_vec.join("");
+        if !ngmr_relate_sql.is_empty() {
+            SUL_DB.query(ngmr_relate_sql).await.unwrap();
+        }
+    }
+
+    // dbg!(&inst_mgr.ngmr_relate_map);
     for chunk in keys.chunks(chunk_size) {
         let mut json_vec = vec![];
         for &k in chunk {
@@ -157,12 +179,6 @@ pub async fn save_instance_data(
                 );
             }
 
-            let mut neg_refnos = v.neg_refnos.clone();
-            if let Some(refnos) = inst_mgr.ngmr_relate_map.get(k) {
-                // dbg!(&refnos);
-                neg_refnos.extend(refnos);
-            }
-
             //arrive 和 leave 需要用 index
             //这里的 pts，存储的时点集信息
             let mut sql = format!(
@@ -177,15 +193,10 @@ pub async fn save_instance_data(
                 v.has_cata_neg,
                 v.is_solid
             );
-            // dbg!(&sql);
-            if !neg_refnos.is_empty() {
-                sql.push_str(&format!(
-                    ",neg_refnos=[{}]",
-                    neg_refnos.iter().map(|x| x.to_pe_key()).join(",")
-                ));
-            }
             inst_relate_vec.push(sql);
         }
+
+
 
         if !json_vec.is_empty() {
             let mut sql_string = "".to_string();
