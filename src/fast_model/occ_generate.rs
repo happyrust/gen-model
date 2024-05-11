@@ -8,7 +8,10 @@ use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::test::test_surreal::init_test_surreal;
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
-use aios_core::{gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos, query_deep_visible_inst_refnos, RefU64, SUL_DB};
+use aios_core::{
+    gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
+    query_deep_visible_inst_refnos, RefU64, SUL_DB,
+};
 use bevy_transform::prelude::Transform;
 use glam::DMat4;
 use itertools::Itertools;
@@ -35,71 +38,89 @@ pub async fn process_meshes_update_db(
     option: Option<DbOption>,
     refnos: &[RefU64],
 ) -> anyhow::Result<()> {
-    let mut target_visible_refnos = vec![];
+    if !refnos.is_empty() {
+        let replace_exist = option.as_ref().map(|x| x.replace_mesh).unwrap_or(false);
+        for &refno in refnos {
+            dbg!(refno);
+            let mut target_visible_refnos = vec![];
+            let mut update_refnos = query_deep_visible_inst_refnos(refno)
+                .await
+                .unwrap_or_default();
+            target_visible_refnos.extend(update_refnos.clone());
 
-    if option.as_ref().map(|x| x.gen_mesh).unwrap_or(true) {
-        if !refnos.is_empty() {
-            for &refno in refnos {
-                let mut update_refnos = query_deep_visible_inst_refnos(refno).await.unwrap_or_default();
-                target_visible_refnos.extend(update_refnos.clone());
+            let neg_refnos = query_deep_neg_inst_refnos(refno).await.unwrap_or_default();
+            update_refnos.extend(neg_refnos);
 
-                let neg_refnos = query_deep_neg_inst_refnos(refno).await.unwrap_or_default();
-                update_refnos.extend(neg_refnos);
+            if update_refnos.is_empty() {
+                continue;
+            }
 
-                //缩小范围
+            //缩小范围
+            if option.as_ref().map(|x| x.gen_mesh).unwrap_or(true) {
                 let time = std::time::Instant::now();
                 // dbg!(&target_refnos);
-                gen_inst_meshes(&update_refnos, None).await.unwrap();
+                // 生成模型文件
+                gen_inst_meshes(&update_refnos, replace_exist, None)
+                    .await
+                    .unwrap();
                 println!(
                     "gen_inst_meshes finished: {} ms",
                     time.elapsed().as_millis()
                 );
                 let time = std::time::Instant::now();
-                update_inst_relate_aabbs_by_refnos(&update_refnos).await.unwrap();
+                // 更新aabb 到inst relate，geo relate
+                update_inst_relate_aabbs_by_refnos(&update_refnos, replace_exist)
+                    .await
+                    .unwrap();
                 println!(
                     "update_inst_relate_aabbs finished: {} ms",
                     time.elapsed().as_millis()
                 );
             }
-            // target_refnos = target_visible_refnos.clone();
-            // target_refnos.extend(target_neg_refnos);
-            // dbg!(target_refnos.len());
-        }else{
-            let time = std::time::Instant::now();
-            // dbg!(&target_refnos);
-            gen_inst_meshes(&[], None).await.unwrap();
-            println!(
-                "gen_inst_meshes finished: {} ms",
-                time.elapsed().as_millis()
-            );
-            let time = std::time::Instant::now();
-            update_inst_relate_aabbs_by_refnos(&[]).await.unwrap();
-            println!(
-                "update_inst_relate_aabbs finished: {} ms",
-                time.elapsed().as_millis()
-            );
+
+            if target_visible_refnos.is_empty() {
+                continue;
+            }
+
+            if option
+                .as_ref()
+                .map(|x| x.apply_boolean_operation)
+                .unwrap_or(true)
+            {
+                // apply_cata_neg_boolean_occ(None).await.unwrap();
+                let time = std::time::Instant::now();
+                //生成元件库内部几何体的负实体运算
+                apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist, None)
+                    .await
+                    .unwrap();
+                apply_insts_boolean_manifold(&target_visible_refnos, replace_exist, None)
+                    .await
+                    .unwrap();
+                //有一些布尔运算要精确计算，不然会有薄片出现
+                //生成负实体的布尔运算
+                apply_insts_boolean_occ(&target_visible_refnos, replace_exist, None)
+                    .await
+                    .unwrap();
+                println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
+            }
         }
-
-
     }
+    // else{
+    //     let time = std::time::Instant::now();
+    //     // dbg!(&target_refnos);
+    //     gen_inst_meshes(&[], None).await.unwrap();
+    //     println!(
+    //         "gen_inst_meshes finished: {} ms",
+    //         time.elapsed().as_millis()
+    //     );
+    //     let time = std::time::Instant::now();
+    //     update_inst_relate_aabbs_by_refnos(&[]).await.unwrap();
+    //     println!(
+    //         "update_inst_relate_aabbs finished: {} ms",
+    //         time.elapsed().as_millis()
+    //     );
+    // }
 
-    if option
-        .as_ref()
-        .map(|x| x.apply_boolean_operation)
-        .unwrap_or(true)
-    {
-        // apply_cata_neg_boolean_occ(None).await.unwrap();
-        let time = std::time::Instant::now();
-        apply_cata_neg_boolean_manifold(&target_visible_refnos, None)
-            .await
-            .unwrap();
-        apply_insts_boolean_manifold(&target_visible_refnos, None)
-            .await
-            .unwrap();
-        //有一些布尔运算要精确计算，不然会有薄片出现
-        apply_insts_boolean_occ(&target_visible_refnos, None).await.unwrap();
-        println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
-    }
     Ok(())
 }
 
@@ -109,7 +130,12 @@ struct QueryGeoParam {
     pub param: PdmsGeoParam,
 }
 
-pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow::Result<()> {
+///生成meshes
+pub async fn gen_inst_meshes(
+    refnos: &[RefU64],
+    replace_exist: bool,
+    dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let dir = dir.unwrap_or("assets/meshes".into());
     //如果dir 不存在，创建这个目录
     if !dir.exists() {
@@ -119,29 +145,37 @@ pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow:
     const PAGE_NUM: usize = 100;
     let mut i = 0;
 
-
     let inst_keys = get_inst_relate_keys(refnos);
-    let sql =format!(
-        r#"array::group(select value (select value [out, $parent.neg_refnos!=none] from out->geo_relate where !out.meshed and !out.bad)
+    let sql = if replace_exist {
+        format!(
+            r#"array::group(select value (select value [out, $parent.neg_refnos!=none] from out->geo_relate where !out.bad)
             from {inst_keys})"#
-    );
+        )
+    } else {
+        format!(
+            r#"array::group(select value (select value [out, $parent.neg_refnos!=none] from out->geo_relate where !out.meshed and !out.bad)
+            from {inst_keys})"#
+        )
+    };
     // println!("sql is {}", &sql);
 
     let mut response = SUL_DB.query(sql).await.unwrap();
     let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0).unwrap();
+    dbg!(inst_geo_ids.len());
     inst_geo_ids.retain(|(x, y)| x.is_some());
 
     let thing_map = inst_geo_ids
         .iter()
-        .map(|(x, y)|
-            (x.as_ref().unwrap().id.to_raw(), *y)
-        )
+        .map(|(x, y)| (x.as_ref().unwrap().id.to_raw(), *y))
         .collect::<HashMap<_, _>>();
     let thing_map_arc = Arc::new(thing_map);
     // dbg!(&thing_map);
     let mut tasks = vec![];
     for (idx, chunk) in inst_geo_ids.chunks(PAGE_NUM).enumerate() {
-        let ids = chunk.into_iter().map(|(x, _)| x.as_ref().unwrap().to_string()).join(",");
+        let ids = chunk
+            .into_iter()
+            .map(|(x, _)| x.as_ref().unwrap().to_string())
+            .join(",");
         let thing_map = thing_map_arc.clone();
         let dir = dir.clone();
         let task = tokio::spawn(async move {
@@ -151,7 +185,8 @@ pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow:
                     "select <string> meta::id(id) as id, param from [{}]",
                     ids
                 ))
-                .await.unwrap();
+                .await
+                .unwrap();
             let result: Vec<QueryGeoParam> = response.take(0).unwrap();
             if result.is_empty() {
                 return;
@@ -179,7 +214,8 @@ pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow:
                         // dbg!(&g.id);
                         if thing_map.get(&g.id).copied().unwrap_or(false) {
                             match g.param {
-                                PdmsGeoParam::PrimExtrusion(_) | PdmsGeoParam::PrimRevolution(_) => {
+                                PdmsGeoParam::PrimExtrusion(_)
+                                | PdmsGeoParam::PrimRevolution(_) => {
                                     coeff /= 10.0;
                                     // dbg!(&coeff);
                                 }
@@ -225,8 +261,10 @@ pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow:
                                     let pts_hash = RsVec3(point.as_vec3()).gen_hash();
                                     pt_hashes.insert(format!("vec3:⟨{}⟩", pts_hash));
                                     if !pts_json_map.contains_key(&pts_hash) {
-                                        pts_json_map
-                                            .insert(pts_hash, serde_json::to_string(&point).unwrap());
+                                        pts_json_map.insert(
+                                            pts_hash,
+                                            serde_json::to_string(&point).unwrap(),
+                                        );
                                     }
                                 }
                             }
@@ -258,7 +296,6 @@ pub async fn gen_inst_meshes(refnos: &[RefU64], dir: Option<PathBuf>) -> anyhow:
             utils::save_pts_to_surreal(&pts_json_map).await.unwrap();
             //更新aabb数据到数据库
             utils::save_aabb_to_surreal(&aabb_map).await.unwrap();
-
         });
         tasks.push(task);
     }
@@ -288,22 +325,29 @@ struct GeoAabbTrans {
 }
 
 ///刷新inst_relate 的 aabb
-pub async fn update_inst_relate_aabbs_by_refnos(refnos: &[RefU64]) -> anyhow::Result<()> {
+pub async fn update_inst_relate_aabbs_by_refnos(
+    refnos: &[RefU64],
+    replace_exist: bool,
+) -> anyhow::Result<()> {
     const PAGE_NUM: usize = 100;
     let use_specified_refnos = !refnos.is_empty();
-    // println!("sql is {}", &sql);
-    // dbg!(refnos.len());
     let mut start = 0;
     let mut tasks = vec![];
     for chunk in refnos.chunks(PAGE_NUM) {
-        if chunk.is_empty() { continue; }
+        if chunk.is_empty() {
+            continue;
+        }
         let inst_keys = get_inst_relate_keys(chunk);
         let task = tokio::spawn(async move {
-            let sql = format!(
+            let mut sql = format!(
                 r#"select id, in as refno, world_trans.d as world_trans,
             (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb.d != none and trans.d != none)
-            as geo_aabbs from {inst_keys} where aabb=none and world_trans.d != none;"#,
+            as geo_aabbs from {inst_keys} where world_trans.d != none"#,
             );
+            //替换所有的aabb
+            if !replace_exist {
+                sql.push_str("and aabb=none");
+            }
             let mut response = SUL_DB.query(sql).await.unwrap();
             let result: Vec<QueryAabbParam> = response.take(0).unwrap();
             // dbg!(result.len());
@@ -350,7 +394,6 @@ pub async fn update_inst_relate_aabbs_by_refnos(refnos: &[RefU64]) -> anyhow::Re
 
     Ok(())
 }
-
 
 // pub async fn update_inst_relate_aabbs() -> anyhow::Result<()> {
 //     const PAGE_NUM: usize = 100;
@@ -427,7 +470,6 @@ pub async fn update_inst_relate_aabbs_by_refnos(refnos: &[RefU64]) -> anyhow::Re
 //     Ok(())
 // }
 
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct GeoParam {
     pub id: String,
@@ -485,8 +527,11 @@ fn round_dmat4(m: DMat4) -> DMat4 {
 
 //需要带入，缩小范围
 ///执行bool 运算
-pub async fn apply_insts_boolean_occ(refnos: &[RefU64],
-                                     dir: Option<PathBuf>, ) -> anyhow::Result<()> {
+pub async fn apply_insts_boolean_occ(
+    refnos: &[RefU64],
+    replace_exist: bool,
+    dir: Option<PathBuf>,
+) -> anyhow::Result<()> {
     let dir = dir.unwrap_or("assets/meshes".into());
     //如果dir 不存在，创建这个目录
     if !dir.exists() {
@@ -495,8 +540,8 @@ pub async fn apply_insts_boolean_occ(refnos: &[RefU64],
     let inst_keys = get_inst_relate_keys(refnos);
 
     //筛选出来 "Neg", "CataCrossNeg" 的关联
-    let sql = format!(
-            r#"
+    let mut sql = format!(
+        r#"
             select
                 in as refno,
                 in.noun as noun,
@@ -507,10 +552,13 @@ pub async fn apply_insts_boolean_occ(refnos: &[RefU64],
                 out.aabb.d as aabb, object::keys(out.param)[0] as para_type
                 from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"])]
             from array::flatten(in<-neg_relate.in->inst_relate) ) as neg_ts from {} where !bad_bool
-            and !booled and (in<-neg_relate)[0] != none and aabb.d!=none
+            and (in<-neg_relate)[0] != none and aabb.d!=none
         "#,
-            inst_keys
-        );
+        inst_keys
+    );
+    if !replace_exist {
+        sql.push_str("and !booled");
+    }
     let mut response = SUL_DB.query(sql).await.unwrap();
     let boolean_query: Vec<OccGeoTransQuery> = response.take(0).unwrap();
     #[cfg(debug_assertions)]
@@ -560,7 +608,7 @@ pub async fn apply_insts_boolean_occ(refnos: &[RefU64],
             // dbg!(b.refno);
             let inverse_mat = b.wt.compute_matrix().as_dmat4().inverse();
 
-            #[cfg(feature="debug_model")]
+            #[cfg(feature = "debug_model")]
             pos_shape.write_step(format!("{}.step", "pos")).unwrap();
             // dbg!(b.neg_ts.len());
             let mut neg_shapes = vec![];
@@ -730,13 +778,13 @@ pub async fn apply_cata_neg_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<
                         .param
                         .gen_occ_shape()
                         .map(|x| x.transformed(&pos.trans.compute_matrix().as_dmat4()))
-                        else {
-                            update_sql.push_str(&format!(
-                                "update {}<-inst_relate set bad_bool=true;",
-                                &g.inst_info_id,
-                            ));
-                            continue;
-                        };
+                    else {
+                        update_sql.push_str(&format!(
+                            "update {}<-inst_relate set bad_bool=true;",
+                            &g.inst_info_id,
+                        ));
+                        continue;
+                    };
                     // pos_shape
                     //     .write_step(format!("{}.step", "pos"))
                     //     .unwrap();

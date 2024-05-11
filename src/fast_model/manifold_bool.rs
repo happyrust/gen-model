@@ -1,4 +1,4 @@
-use crate::fast_model::{CataNegGroup, ManiGeoTransQuery, GmGeoData, NegInfo};
+use crate::fast_model::{CataNegGroup, GmGeoData, ManiGeoTransQuery, NegInfo};
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::PlantMesh;
@@ -23,10 +23,10 @@ fn load_manifold(id: &str, mat: DMat4) -> anyhow::Result<ManifoldRust> {
     Ok(manifold)
 }
 
-
 //处理元件库有负实体的布尔运算
 pub async fn apply_cata_neg_boolean_manifold(
     refnos: &[RefU64],
+    replace_exist: bool,
     dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let dir = dir.unwrap_or("assets/meshes".into());
@@ -35,13 +35,18 @@ pub async fn apply_cata_neg_boolean_manifold(
         std::fs::create_dir_all(&dir).unwrap();
     }
 
-    let inst_keys = get_inst_relate_keys(refnos);;
+    let inst_keys = get_inst_relate_keys(refnos);
 
-    let sql =  format!(
+    let mut sql = format!(
         r#" select in as refno, (->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
             from ->inst_info->geo_relate where visible and !out.bad and cata_neg!=none) as boolean_group
-            from {inst_keys} where (->inst_info)[0]!=none and has_cata_neg and !bad_bool and !booled"#
+            from {inst_keys} where (->inst_info)[0]!=none and has_cata_neg and !bad_bool"#
     );
+
+    if !replace_exist {
+        sql.push_str(" and !booled");
+    }
+
     // println!("sql is {}", &sql);
     let mut response = SUL_DB.query(sql).await?;
     let mut params: Vec<CataNegGroup> = response.take(0)?;
@@ -97,13 +102,13 @@ pub async fn apply_cata_neg_boolean_manifold(
 
                     let Ok(mut pos_manifold) =
                         load_manifold(&pos.id, pos.trans.compute_matrix().as_dmat4())
-                        else {
-                            update_sql.push_str(&format!(
-                                "update {}<-inst_relate set bad_bool=true;",
-                                &g.inst_info_id,
-                            ));
-                            continue;
-                        };
+                    else {
+                        update_sql.push_str(&format!(
+                            "update {}<-inst_relate set bad_bool=true;",
+                            &g.inst_info_id,
+                        ));
+                        continue;
+                    };
 
                     // dbg!(&update_sql);
                     let mut neg_manifolds = vec![];
@@ -117,7 +122,6 @@ pub async fn apply_cata_neg_boolean_manifold(
                         }
                     }
                     if !neg_manifolds.is_empty() {
-                        // for neg_shape in neg_shapes {
                         let new_id = g.refno.hash_with_another_refno(bg[0]);
                         let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
                         let mesh = PlantMesh::from(&final_manifold);
@@ -154,7 +158,7 @@ pub async fn apply_cata_neg_boolean_manifold(
         });
         tasks.push(task);
     }
-    dbg!(tasks.len());
+    // dbg!(tasks.len());
     match futures::future::try_join_all(tasks).await {
         Ok(_) => {}
         Err(e) => {
@@ -167,6 +171,7 @@ pub async fn apply_cata_neg_boolean_manifold(
 
 pub async fn apply_insts_boolean_manifold(
     refnos: &[RefU64],
+    replace_exist: bool,
     dir: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     let dir = dir.unwrap_or("assets/meshes".into());
@@ -176,8 +181,8 @@ pub async fn apply_insts_boolean_manifold(
     }
     let inst_keys = get_inst_relate_keys(refnos);
     //筛选出来 "Neg", "CataCrossNeg" 的关联
-    let sql =
-        format!(r#" select
+    let mut sql = format!(
+        r#" select
                 in as refno,
                 in.noun as noun,
                 world_trans.d as wt,
@@ -187,10 +192,13 @@ pub async fn apply_insts_boolean_manifold(
                 out.aabb.d as aabb, object::keys(out.param)[0] as para_type
                 from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"])]
             from array::flatten(in<-neg_relate.in->inst_relate) ) as neg_ts from {} where !bad_bool
-            and !booled and (in<-neg_relate)[0] != none and aabb.d!=none
+            and (in<-neg_relate)[0] != none and aabb.d!=none
         "#,
-            inst_keys
-        );
+        inst_keys
+    );
+    if !replace_exist {
+        sql.push_str(" and !booled");
+    }
     let mut response = SUL_DB.query(sql).await.unwrap();
     let boolean_query: Vec<ManiGeoTransQuery> = response.take(0).unwrap();
     // dbg!(&boolean_query);
@@ -295,7 +303,6 @@ pub async fn apply_insts_boolean_manifold(
                             let scale_z = d.min(1.02);
                             neg_t.scale.z *= scale_z as f32;
                         }
-
 
                         let m = inverse_mat
                             * neg_t.compute_matrix().as_dmat4()
