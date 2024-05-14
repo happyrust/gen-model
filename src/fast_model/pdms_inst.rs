@@ -64,17 +64,17 @@ pub async fn save_instance_data(
                     "".to_string()
                 };
                 // dbg!(&v);
-                let mut relate_sql = format!(
+                let relate_sql = format!(
                     r#"
                     if inst_info:⟨{0}⟩.id == none {{
                         relate inst_info:⟨{0}⟩->geo_relate->inst_geo:⟨{1}⟩ set trans=trans:⟨{2}⟩,
-                            geom_refno=pe:{3}, param=param:⟨{4}⟩, pts=[{5}], geo_type='{6}', visible={7} {8};
+                            geom_refno=pe:{3}, pts=[{4}], geo_type='{5}', visible={6} {7};
                     }};"#,
                     v.id(),
                     inst.geo_hash,
                     transform_hash,
                     inst.refno,
-                    param_hash,
+                    // param_hash,
                     pt_hashes.join(","),
                     inst.geo_type.to_string(),
                     inst.visible,
@@ -88,13 +88,11 @@ pub async fn save_instance_data(
 
         if !json_vec.is_empty() {
             let mut sql_string = "".to_string();
-            for json in &json_vec {
-                sql_string.push_str(&format!(
-                    "insert ignore into {} {};",
-                    stringify!(inst_geo),
-                    json
-                ));
-            }
+            sql_string.push_str(&format!(
+                "insert ignore into {} [{}];",
+                stringify!(inst_geo),
+                json_vec.join(",")
+            ));
             //使用surreal 保存NamedAttrMap
             join_set.spawn(async move {
                 SUL_DB.query(sql_string).await.unwrap();
@@ -138,7 +136,7 @@ pub async fn save_instance_data(
     let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
     // dbg!(&keys);
     let mut join_set = tokio::task::JoinSet::new();
-    // let mut inst_relate_join_set = tokio::task::JoinSet::new();
+    // let mu tasks = vec![];
     let mut inst_relate_vec = vec![];
 
     // if let Some(refnos) = inst_mgr.ngmr_relate_map.get(k)
@@ -196,19 +194,13 @@ pub async fn save_instance_data(
             inst_relate_vec.push(sql);
         }
 
-
-
         if !json_vec.is_empty() {
             let mut sql_string = "".to_string();
-            for json in &json_vec {
-                sql_string.push_str(&format!(
-                    "insert ignore into {} {};",
-                    stringify!(inst_info),
-                    json
-                ));
-            }
-            // dbg!(&sql_string);
-            //使用surreal 保存NamedAttrMap
+            sql_string.push_str(&format!(
+                "insert ignore into {} [{}];",
+                stringify!(inst_info),
+                json_vec.join(",")
+            ));
             join_set.spawn(async move {
                 SUL_DB.query(sql_string).await.unwrap();
             });
@@ -263,23 +255,23 @@ pub async fn save_instance_data(
     }
 
     //保存param_map数据
-    if !param_map.is_empty() {
-        let keys = param_map.keys().collect::<Vec<_>>();
-        for chunk in keys.chunks(100) {
-            let mut sql_string = "".to_string();
-            for &&k in chunk {
-                let v = param_map.get(&k).unwrap();
-                let json = format!(
-                    "INSERT IGNORE INTO param {{'id':param:⟨{}⟩, 'd':{}}};",
-                    k, v
-                );
-                sql_string.push_str(&json);
-            }
-            // join_set.spawn(async move {
-                SUL_DB.query(sql_string).await.unwrap();
-            // });
-        }
-    }
+    // if !param_map.is_empty() {
+    //     let keys = param_map.keys().collect::<Vec<_>>();
+    //     for chunk in keys.chunks(100) {
+    //         let mut sql_string = "".to_string();
+    //         for &&k in chunk {
+    //             let v = param_map.get(&k).unwrap();
+    //             let json = format!(
+    //                 "INSERT IGNORE INTO param {{'id':param:⟨{}⟩, 'd':{}}};",
+    //                 k, v
+    //             );
+    //             sql_string.push_str(&json);
+    //         }
+    //         // join_set.spawn(async move {
+    //             SUL_DB.query(sql_string).await.unwrap();
+    //         // });
+    //     }
+    // }
 
     if !vec3_map.is_empty() {
         let keys = vec3_map.keys().collect::<Vec<_>>();

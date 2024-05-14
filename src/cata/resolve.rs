@@ -276,7 +276,7 @@ pub fn resolve_gmse_params(
                 }
             }
         } else {
-            let dir = parse_str_axis_to_vec3_or_default(axis, context).normalize_or_zero();
+            let dir = parse_str_axis_to_vec3(axis, context).ok();
             let axis = CateAxisParam {
                 refno: Default::default(),
                 number: 0,
@@ -296,7 +296,9 @@ pub fn resolve_gmse_params(
             + Vec2::new(eval_str_to_f32_or_default(&jusl.dxy[0], context,  "DIST"),
                         eval_str_to_f32_or_default(&jusl.dxy[1], context,  "DIST"));
 
-        plin_plax = parse_str_axis_to_vec3_or_default(&jusl.plax, context);
+        if let Ok(dir) =  parse_str_axis_to_vec3(&jusl.plax, context){
+            plin_plax = dir;
+        }
     }
     let type_name = gm.gm_type.clone();
     Ok(GmseParamData {
@@ -344,21 +346,27 @@ pub fn resolve_axis_param(
     let pbore = eval_str_to_f32_or_default(&axis_param.pbore, &context,  "DIST");
     let pwidth = eval_str_to_f32_or_default(&axis_param.pwidth, &context,  "DIST");
     let pheight = eval_str_to_f32_or_default(&axis_param.pheight, &context,  "DIST");
+    let mut error_axis = false;
+    let Ok((m_dir, ref_dir, pos)) = resolve_axis(axis_param, scom, context) else {
+        return Default::default();
+    };
+    let dir = m_dir.is_normalized().then(|| m_dir);
+    let ref_dir = ref_dir.is_normalized().then(|| ref_dir);
     match axis_param.type_name.as_str() {
         "PTAX" => {
             let d = eval_str_to_f32_or_default(&axis_param.distance, &context,  "DIST");
-            let (dir, ref_dir, pos) =
-                resolve_axis(axis_param, scom, context).unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
+            // let (dir, ref_dir, pos) =
+            //     resolve_axis(axis_param, scom, context).unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
             CateAxisParam {
                 refno: axis_param.refno,
                 number,
-                pt: d * dir + pos,
+                pt: d * m_dir + pos,
                 dir,
+                ref_dir,
                 pconnect,
                 pbore,
                 pwidth,
                 pheight,
-                ref_dir,
                 ..Default::default()
             }
         }
@@ -366,32 +374,28 @@ pub fn resolve_axis_param(
             let x = eval_str_to_f32_or_default(&axis_param.x, &context,  "DIST");
             let y = eval_str_to_f32_or_default(&axis_param.y, &context,  "DIST");
             let z = eval_str_to_f32_or_default(&axis_param.z, &context,  "DIST");
-            let (dir, ref_dir, pos) = resolve_axis(axis_param, scom, context)
-                .unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
             CateAxisParam {
                 refno: axis_param.refno,
                 number,
                 pt: pos + Vec3::new(x, y, z),
                 dir,
+                ref_dir,
                 pconnect,
                 pbore,
                 pwidth,
                 pheight,
-                ref_dir,
                 ..Default::default()
             }
         }
         "PTPOS" => {
-            let (dir, ref_dir, pos) = resolve_axis(axis_param, scom, context)
-                .unwrap_or((Vec3::Y, Vec3::Y, Vec3::ZERO));
             let mut cate_axis = CateAxisParam {
                 number,
                 dir,
+                ref_dir,
                 pconnect,
                 pbore,
                 pwidth,
                 pheight,
-                ref_dir,
                 ..Default::default()
             };
             if let Some(pnt_index_str) = axis_param.pnt_index_str.as_ref() {

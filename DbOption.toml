@@ -105,6 +105,6 @@ room_keyword = "-RM"   # 2016  K-R-K100   (-R-)
 #debug_root_refnos = [
 #    "25688_48848",
 #]
-debug_root_refnos = [ "17496_171606" ]
+debug_root_refnos = [ "24381/38407" ]
 # debug_root_refnos = ["24383/66457", "24381/34110"]
 #debug_root_refnos = ["17496/172806"]

@@ -116,7 +116,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     refno: gmse.refno,
                     verts: gmse.verts.iter().map(|x| x.truncate()).collect(),
                     frads: gmse.frads.clone(),
-                    normal_axis: gmse.paxises[0].as_ref().map(|x| x.dir).unwrap_or(Vec3::Z),
+                    normal_axis: gmse.paxises[0].as_ref().map(|x| x.dir).flatten().unwrap_or(Vec3::Z),
                     plin_pos: gmse.plin_pos,
                     plin_axis: gmse.plin_plax,
                 }))
@@ -127,7 +127,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     center: Vec2::new(gmse.xyz[0], gmse.xyz[1]),
                     size: Vec2::new(gmse.lengths[0], gmse.lengths[1]),
                     dxy: gmse.dxy[0],
-                    normal_axis: gmse.paxises[0].as_ref().map(|x| x.dir).unwrap_or(Vec3::Z),
+                    normal_axis: gmse.paxises[0].as_ref().map(|x| x.dir).flatten().unwrap_or(Vec3::Z),
                     plin_pos: gmse.plin_pos,
                     plin_axis: gmse.plin_plax,
                 }))
@@ -360,7 +360,6 @@ pub fn resolve_axis(
     let mut dir = Vec3::ZERO;
     let mut ref_dir = Vec3::ZERO;
     let mut pos = Vec3::ZERO;
-
     let re = Regex::new(r"^(-?)P(\d+)$").unwrap();
     if re.is_match(dir_str) {
         if let Some(cap) = re.captures(dir_str) {
@@ -373,15 +372,18 @@ pub fn resolve_axis(
             if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_index) {
                 let axis =
                     resolve_axis_param(&scom.axis_params[indx], scom, context);
+                // if axis.dir.is_none() {
+                //     return Err(anyhow::anyhow!("方向为空"));
+                // }
                 let flag = if is_neg { -1.0 } else { 1.0 };
-                dir = flag * axis.dir;
+                dir = flag * axis.dir.unwrap_or_default();
                 pos = axis.pt;
             } else {
                 return Err(anyhow::anyhow!("未找到点索引: {}", pnt_index));
             }
         }
     } else {
-        dir = parse_str_axis_to_vec3_or_default(dir_str, context);
+        dir = parse_str_axis_to_vec3(dir_str, context)?;
     }
 
     if re.is_match(ref_dir_str) {
@@ -395,15 +397,18 @@ pub fn resolve_axis(
             if let Some(indx) = scom.axis_param_numbers.iter().position(|&x| x == pnt_indx) {
                 let mut axis =
                     resolve_axis_param(&scom.axis_params[indx], scom, context);
+                // if axis.dir.is_none() {
+                //     return Err(anyhow::anyhow!("方向为空"));
+                // }
                 let flag = if is_neg { -1.0 } else { 1.0 };
-                ref_dir = flag * mem::take(&mut axis.dir);
+                ref_dir = flag * axis.dir.unwrap_or_default();
             } else {
                 return Err(anyhow::anyhow!("未找到点索引: {}", pnt_indx));
             }
         }
     } else {
         //unset 不存在 ref dir的情况
-        ref_dir = parse_str_axis_to_vec3_or_default(ref_dir_str, context);
+        ref_dir = parse_str_axis_to_vec3(ref_dir_str, context).unwrap_or_default();
     }
 
     return Ok((dir.normalize_or_zero(), ref_dir.normalize_or_zero(), pos));
@@ -442,7 +447,7 @@ pub fn parse_ori_str_to_quat(
             .replace("U", "Z")
             .replace("D", "-Z");
         // dbg!(&dir_str);
-        let dir = parse_str_axis_to_vec3_or_default(&dir_str, context);
+        let dir = parse_str_axis_to_vec3(&dir_str, context)?;
         // dbg!(dir);
         comb_dir_str.push_str(f.as_str());
         match f.as_str() {
@@ -465,12 +470,12 @@ pub fn parse_ori_str_to_quat(
     Ok(Quat::from_mat3(&mat))
 }
 
-pub fn parse_str_axis_to_vec3_or_default(
-    pdir: &str,
-    context: &CataContext,
-) -> Vec3 {
-    parse_str_axis_to_vec3(pdir, context).unwrap_or(Vec3::ZERO)
-}
+// pub fn parse_str_axis_to_vec3_or_default(
+//     pdir: &str,
+//     context: &CataContext,
+// ) -> Vec3 {
+//     parse_str_axis_to_vec3(pdir, context).unwrap_or(Vec3::ZERO)
+// }
 
 ///解析表达式里的axis
 pub fn parse_str_axis_to_vec3(
@@ -503,6 +508,7 @@ pub fn parse_str_axis_to_vec3(
 
         if !is_three {
             // dbg!(is_three);
+            // dbg!(&dir_str);
             let re = Regex::new(r"(-?[X|Y|Z])(.*[^-])(-?[X|Y|Z])").unwrap();
             for cap in re.captures_iter(&dir_str) {
                 if cap.len() == 4 {
@@ -512,6 +518,7 @@ pub fn parse_str_axis_to_vec3(
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                 }
             }
+            // dbg!(&new_dir_str);
         }
     }
     let dir_str = new_dir_str.replace(" ", "");
