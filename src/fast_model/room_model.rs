@@ -16,17 +16,18 @@ use parry3d::shape::{TriMesh, TriMeshFlags};
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::options::DbOption;
 
 #[tokio::test]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
-    init_test_surreal().await;
+    let option = init_test_surreal().await;
     let refno = "24381/58346".into();
     process_meshes_update_db(None, (&["24381/34303".into(), refno]))
         .await
         .unwrap();
     load_aabb_tree().await.unwrap();
-    build_room_relations().await.unwrap();
+    build_room_relations(&option).await.unwrap();
     let within_refnos = query_room_refnos(refno, &HashSet::new(), 0.1)
         .await
         .unwrap();
@@ -179,13 +180,17 @@ pub async fn query_room_refnos(
                 .locate_intersecting_bounds(&geom_inst.world_aabb)
                 .collect::<Vec<_>>();
             let mut need_check_refnos = vec![];
-            contains_query.retain(|(refno, bbox)| {
+            contains_query.retain(|RStarBoundingBox{
+                                       refno,
+                                       aabb,
+                                       ..
+                                   }| {
                 //filter the wrong aabb
-                if exclude_refnos.contains(refno) || (bbox.mins[0] > 1000000.0) {
+                if exclude_refnos.contains(refno) || (aabb.mins[0] > 1000000.0) {
                     return false;
                 }
                 // dbg!(&bbox);
-                let contains: Vec<bool> = bbox
+                let contains: Vec<bool> = aabb
                     .vertices()
                     .iter()
                     .map(|x| tri_mesh.contains_point(&Isometry::identity(), &x))
@@ -206,7 +211,7 @@ pub async fn query_room_refnos(
             // if !contains_query.is_empty() {
             //     dbg!(&contains_query);
             // }
-            within_refnos.extend(contains_query.iter().map(|(x, _)| x));
+            within_refnos.extend(contains_query.iter().map(|r| r.refno));
             if !need_check_refnos.is_empty() {
                 // dbg!(panel_refno);
                 // dbg!(&within_refnos);
