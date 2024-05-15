@@ -626,9 +626,11 @@ pub async fn gen_cata_geos(
         let exist_al_map = aios_core::query_arrive_leave_points_by_cata_hash(&exist_refnos[..])
             .await
             .unwrap_or_default();
+        let mut leave_type = "BRAN".to_string();
         for (index, ele) in children.into_iter().enumerate() {
             let refno = ele.refno;
-            let cur_type = ele.noun.as_str();
+            let arrive_type = ele.noun.as_str();
+            let exclude = (is_hvac && leave_type != "STRT");
             {
                 // println!("正在处理直段{}: {}", cur_type, refno.to_string());
                 let world_trans = aios_core::get_world_transform(refno)
@@ -649,7 +651,7 @@ pub async fn gen_cata_geos(
                     bran_comp_vec.push(refno);
                     current_tubing.arrive_refno = refno;
                     //ATTA，如果设置成SPKBRK，产生直段，否则不产生直段
-                    let skip = (cur_type == "ATTA")
+                    let mut skip = (arrive_type == "ATTA")
                         && !aios_core::get_named_attmap(refno)
                         .await?
                         .get_bool_or_default("SPKBRK");
@@ -675,9 +677,10 @@ pub async fn gen_cata_geos(
                         let dist = actual_vec.length();
                         if dist  > TUBI_TOL && !same_dir {
                             //TODO: 需要弄清楚风管开头的不需要加直段?
-                            let is_hvac_start = is_hvac && (index == 0);
+                            // let is_hvac_start = is_hvac && (index == 0);
+                            // 如果是hvac 必须leave 的是STRT才可以
                             //风管开头这样的不需要处理
-                            if !is_hvac_start {
+                            if !exclude {
                                 if current_tubing.is_dir_ok() {
                                     // 检测到有重叠的情况，就需要忽略
                                     //如果 leave 的 还是 bran 的参考号，说明还是要用h_tubi_size
@@ -803,7 +806,7 @@ pub async fn gen_cata_geos(
                 }
             }
 
-            if index == len - 1 && !is_hvac {
+            if index == len - 1 && !exclude {
                 let last_dist = bran_ttube_pt.distance(current_tubing.start_pt);
                 if last_dist > TUBI_TOL {
                     //检查是否有一端是世界坐标原点
@@ -863,6 +866,7 @@ pub async fn gen_cata_geos(
                     }
                 }
             }
+            leave_type = arrive_type.to_string();
         }
     }
 
@@ -871,7 +875,7 @@ pub async fn gen_cata_geos(
         .expect("send tubi shape_insts_data failed.");
 
     if !tubi_relates.is_empty() {
-        // dbg!(tubi_relates.join(""));
+        println!("tubi relate: {}", tubi_relates.join(""));
         SUL_DB.query(tubi_relates.join("")).await.unwrap();
     }
     println!(
