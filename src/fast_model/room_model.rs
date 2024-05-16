@@ -174,9 +174,8 @@ pub async fn query_room_refnos(
             ) else {
                 continue;
             };
-            let mut contains_query = GLOBAL_AABB_TREE
-                .read()
-                .await
+            let mut read = GLOBAL_AABB_TREE.read().await;
+            let mut contains_query = read
                 .locate_intersecting_bounds(&geom_inst.world_aabb)
                 .collect::<Vec<_>>();
             let mut need_check_refnos = vec![];
