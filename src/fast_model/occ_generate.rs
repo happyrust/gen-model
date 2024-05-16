@@ -41,7 +41,6 @@ pub async fn process_meshes_update_db(
     if !refnos.is_empty() {
         let replace_exist = option.as_ref().map(|x| x.replace_mesh).unwrap_or(false);
         for &refno in refnos {
-            dbg!(refno);
             let mut target_visible_refnos = vec![];
             let mut update_refnos = query_deep_visible_inst_refnos(refno)
                 .await
