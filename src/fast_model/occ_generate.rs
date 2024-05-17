@@ -22,6 +22,7 @@ use parse_pdms_db::parse::round_f32;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
 use surrealdb::sql::Thing;
 
 ///生成小的几何体
@@ -179,122 +180,132 @@ pub async fn gen_inst_meshes(
         let dir = dir.clone();
         let task = tokio::spawn(async move {
             let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
-            let mut response = SUL_DB
-                .query(&format!(
-                    "select <string> meta::id(id) as id, param from [{}]",
-                    ids
-                ))
-                .await
-                .unwrap();
-            let result: Vec<QueryGeoParam> = response.take(0).unwrap();
-            if result.is_empty() {
-                return;
-            }
-            i += 1;
-            // dbg!(&result);
-            for g in result {
-                //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
-                // dbg!(&g);
-                match g.param.gen_occ_shape() {
-                    Ok(shape) => {
-                        let mut aabb = Aabb::new_invalid();
-                        for edge in shape.edges() {
-                            for point in edge.approximation_segments_custom(2.0, 2.0) {
-                                aabb.take_point(nalgebra::Point3::new(
-                                    point.x as f32,
-                                    point.y as f32,
-                                    point.z as f32,
-                                ));
-                            }
-                        }
-                        //如果作为负实体，需要缩小一些范围？如果作为负实体的母体，需要把精度提高一些
-                        //如果是作为负实体可以稍微降一些？
-                        let mut coeff = 0.005;
-                        // dbg!(&g.id);
-                        if thing_map.get(&g.id).copied().unwrap_or(false) {
-                            match g.param {
-                                PdmsGeoParam::PrimExtrusion(_)
-                                | PdmsGeoParam::PrimRevolution(_) => {
-                                    coeff /= 10.0;
-                                    // dbg!(&coeff);
-                                }
-                                _ => {
-                                    coeff /= 5.0;
-                                }
-                            };
-                        }
-
-                        let tol = (aabb.half_extents().magnitude() as f64 * coeff).min(50.0);
-                        shapes_map.insert(g.id, (shape, tol));
+            let sql = format!(
+                "select <string> meta::id(id) as id, param from [{}]",
+                ids
+            );
+            match SUL_DB.query(&sql).await {
+                Ok(mut response) => {
+                    let r = response.take::<Vec<QueryGeoParam>>(0);
+                    if let Err(e) = &r {
+                        init_deserialize_error("Vec<QueryGeoParam>", e, &std::panic::Location::caller().to_string());
                     }
-                    Err(e) => {
-                        println!("{} error: {}", g.id, e.to_string());
+                    let result: Vec<QueryGeoParam> = r.unwrap();
+                    if result.is_empty() {
+                        return;
                     }
-                }
-            }
-            let mut update_sql = "".to_string();
-            let mut aabb_map: HashMap<u64, String> = HashMap::new();
-            let mut pts_json_map = HashMap::new();
-            for (id, (s, tol)) in &shapes_map {
-                let mut m_tol = *tol;
-                // dbg!(m_tol);
-                let mut success = false;
-                // #[cfg(feature = "debug_model")]
-                // s.write_step(format!("{}.step", id)).unwrap();
-                match PlantMesh::gen_occ_mesh(s, m_tol) {
-                    Ok(mesh) => {
-                        #[cfg(feature = "debug_model")]
-                        mesh.export_obj(false, &format!("{}.obj", id));
-                        // dbg!((id, m_tol, mesh.vertices.len()));
-                        //保存到文件到dir下
-                        if mesh.ser_to_file(&dir.join(format!("{}.mesh", id))).is_ok() {
-                            #[cfg(feature = "debug_model")]
-                            mesh.export_obj(false, &format!("{}.obj", id));
-                            let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
-                            let mut pt_hashes = HashSet::new();
-                            for edge in s.edges() {
-                                //TODO edge 这里取中点就可以了
-                                // for point in edge.approximation_segments_custom(1.0, 1.0) {
-                                for point in [edge.start_point(), edge.end_point()] {
-                                    // dbg!(point);
-                                    let pts_hash = RsVec3(point.as_vec3()).gen_hash();
-                                    pt_hashes.insert(format!("vec3:⟨{}⟩", pts_hash));
-                                    if !pts_json_map.contains_key(&pts_hash) {
-                                        pts_json_map.insert(
-                                            pts_hash,
-                                            serde_json::to_string(&point).unwrap(),
-                                        );
+                    i += 1;
+                    // dbg!(&result);
+                    for g in result {
+                        //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
+                        // dbg!(&g);
+                        match g.param.gen_occ_shape() {
+                            Ok(shape) => {
+                                let mut aabb = Aabb::new_invalid();
+                                for edge in shape.edges() {
+                                    for point in edge.approximation_segments_custom(2.0, 2.0) {
+                                        aabb.take_point(nalgebra::Point3::new(
+                                            point.x as f32,
+                                            point.y as f32,
+                                            point.z as f32,
+                                        ));
                                     }
                                 }
+                                //如果作为负实体，需要缩小一些范围？如果作为负实体的母体，需要把精度提高一些
+                                //如果是作为负实体可以稍微降一些？
+                                let mut coeff = 0.005;
+                                // dbg!(&g.id);
+                                if thing_map.get(&g.id).copied().unwrap_or(false) {
+                                    match g.param {
+                                        PdmsGeoParam::PrimExtrusion(_)
+                                        | PdmsGeoParam::PrimRevolution(_) => {
+                                            coeff /= 10.0;
+                                            // dbg!(&coeff);
+                                        }
+                                        _ => {
+                                            coeff /= 5.0;
+                                        }
+                                    };
+                                }
+
+                                let tol = (aabb.half_extents().magnitude() as f64 * coeff).min(50.0);
+                                shapes_map.insert(g.id, (shape, tol));
                             }
-                            update_sql.push_str(&format!(
-                                "update inst_geo:⟨{}⟩ set meshed = true, aabb = aabb:⟨{}⟩, pts=[{}];",
-                                id,
-                                aabb_hash,
-                                pt_hashes.into_iter().join(","),
-                            ));
-                            aabb_map
-                                .entry(aabb_hash)
-                                .or_insert(serde_json::to_string(&mesh.aabb).unwrap());
-                            success = true;
+                            Err(e) => {
+                                println!("{} error: {}", g.id, e.to_string());
+                            }
                         }
                     }
-                    Err(e) => {
-                        println!("{} mesh error: {}", id, e.to_string());
+                    let mut update_sql = "".to_string();
+                    let mut aabb_map: HashMap<u64, String> = HashMap::new();
+                    let mut pts_json_map = HashMap::new();
+                    for (id, (s, tol)) in &shapes_map {
+                        let mut m_tol = *tol;
+                        // dbg!(m_tol);
+                        let mut success = false;
+                        // #[cfg(feature = "debug_model")]
+                        // s.write_step(format!("{}.step", id)).unwrap();
+                        match PlantMesh::gen_occ_mesh(s, m_tol) {
+                            Ok(mesh) => {
+                                #[cfg(feature = "debug_model")]
+                                mesh.export_obj(false, &format!("{}.obj", id));
+                                // dbg!((id, m_tol, mesh.vertices.len()));
+                                //保存到文件到dir下
+                                if mesh.ser_to_file(&dir.join(format!("{}.mesh", id))).is_ok() {
+                                    #[cfg(feature = "debug_model")]
+                                    mesh.export_obj(false, &format!("{}.obj", id));
+                                    let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
+                                    let mut pt_hashes = HashSet::new();
+                                    for edge in s.edges() {
+                                        //TODO edge 这里取中点就可以了
+                                        // for point in edge.approximation_segments_custom(1.0, 1.0) {
+                                        for point in [edge.start_point(), edge.end_point()] {
+                                            // dbg!(point);
+                                            let pts_hash = RsVec3(point.as_vec3()).gen_hash();
+                                            pt_hashes.insert(format!("vec3:⟨{}⟩", pts_hash));
+                                            if !pts_json_map.contains_key(&pts_hash) {
+                                                pts_json_map.insert(
+                                                    pts_hash,
+                                                    serde_json::to_string(&point).unwrap(),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    update_sql.push_str(&format!(
+                                        "update inst_geo:⟨{}⟩ set meshed = true, aabb = aabb:⟨{}⟩, pts=[{}];",
+                                        id,
+                                        aabb_hash,
+                                        pt_hashes.into_iter().join(","),
+                                    ));
+                                    aabb_map
+                                        .entry(aabb_hash)
+                                        .or_insert(serde_json::to_string(&mesh.aabb).unwrap());
+                                    success = true;
+                                }
+                            }
+                            Err(e) => {
+                                println!("{} mesh error: {}", id, e.to_string());
+                            }
+                        }
+                        if !success {
+                            //有问题的模型，就不需要每次都重复生成了
+                            update_sql.push_str(&format!("update inst_geo:⟨{}⟩ set bad=true;", id));
+                        }
                     }
+                    if !update_sql.is_empty() {
+                        //执行SUL_DB update,使用chunk 保存
+                        if let Err(_) = SUL_DB.query(&update_sql).await {
+                            init_save_database_error(&update_sql);
+                        }
+                    }
+                    utils::save_pts_to_surreal(&pts_json_map).await;
+                    //更新aabb数据到数据库
+                    utils::save_aabb_to_surreal(&aabb_map).await;
                 }
-                if !success {
-                    //有问题的模型，就不需要每次都重复生成了
-                    update_sql.push_str(&format!("update inst_geo:⟨{}⟩ set bad=true;", id));
+                Err(e) => {
+                    init_query_error(&sql, e, &std::panic::Location::caller().to_string());
                 }
             }
-            if !update_sql.is_empty() {
-                //执行SUL_DB update,使用chunk 保存
-                SUL_DB.query(update_sql).await.unwrap();
-            }
-            utils::save_pts_to_surreal(&pts_json_map).await.unwrap();
-            //更新aabb数据到数据库
-            utils::save_aabb_to_surreal(&aabb_map).await.unwrap();
         });
         tasks.push(task);
     }
@@ -379,7 +390,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             if !update_sql.is_empty() {
                 SUL_DB.query(&update_sql).await.unwrap();
             }
-            utils::save_aabb_to_surreal(&aabb_map).await.unwrap();
+            utils::save_aabb_to_surreal(&aabb_map).await;
         });
         tasks.push(task);
     }
@@ -777,13 +788,13 @@ pub async fn apply_cata_neg_boolean_occ(dir: Option<PathBuf>) -> anyhow::Result<
                         .param
                         .gen_occ_shape()
                         .map(|x| x.transformed(&pos.trans.compute_matrix().as_dmat4()))
-                    else {
-                        update_sql.push_str(&format!(
-                            "update {}<-inst_relate set bad_bool=true;",
-                            &g.inst_info_id,
-                        ));
-                        continue;
-                    };
+                        else {
+                            update_sql.push_str(&format!(
+                                "update {}<-inst_relate set bad_bool=true;",
+                                &g.inst_info_id,
+                            ));
+                            continue;
+                        };
                     // pos_shape
                     //     .write_step(format!("{}.step", "pos"))
                     //     .unwrap();
