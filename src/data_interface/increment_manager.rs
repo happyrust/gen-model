@@ -410,7 +410,6 @@ impl AiosDBManager {
     //初始化监测
     pub async fn init_watcher(&self) -> anyhow::Result<()> {
         let mut params = IndexMap::new();
-        let mut latest_need_update_headers = IndexMap::new();
         fs::create_dir_all("asset/archives")?;
         let mut time = Instant::now();
         dbg!(&self.watcher.watch_dirs);
@@ -441,19 +440,14 @@ impl AiosDBManager {
                 if !CHECK_DB_TYPES.contains(&db_type.as_str()) {
                     continue;
                 }
-                let Ok(max_pgno) = aios_core::query_db_max_version(db_num).await else{
+                //TODO 这种情况，需要全新的解析
+                let Ok(db_latest_pgno) = aios_core::query_db_max_version(db_num).await else{
                     //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
                     continue;
                 };
 
-                if file_latest_max_pgno <= max_pgno {
-                    continue;
-                }
-                println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大pgno: {max_pgno}, 文件属性对应pgno: {file_latest_max_pgno}", &file_name);
-                //暂时先跳过更新比较大的
-                if file_latest_max_pgno - max_pgno > 0x8000 {
-                    continue;
-                }
+
+
 
                 // self.watcher
                 //     .file_name_full_path_map
@@ -471,14 +465,17 @@ impl AiosDBManager {
                 io.open().unwrap();
                 //每个path 都要检查一遍
                 if let Ok(basic_info) = io.get_page_basic_info() {
-                    if file_latest_max_pgno != 0 {
+                    if db_latest_pgno != 0 {
                         #[cfg(feature = "debug_parse")]
-                        dbg!((db_num, file_latest_max_pgno));
-                        params.insert(
-                            path.to_path_buf(),
-                            (basic_info.clone(), file_latest_max_pgno),
-                        );
-                        latest_need_update_headers.insert(path.to_path_buf(), basic_info.clone());
+                        dbg!((db_num, db_latest_pgno));
+                        //暂时先跳过更新比较大的
+                        if file_latest_max_pgno > db_latest_pgno && (file_latest_max_pgno - db_latest_pgno < 1000) {
+                            println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大pgno: {db_latest_pgno}, 文件属性对应pgno: {file_latest_max_pgno}", &file_name);
+                            params.insert(
+                                path.to_path_buf(),
+                                (basic_info.clone(), db_latest_pgno),
+                            );
+                        }
                         self.watcher.headers.insert(path.to_path_buf(), basic_info);
                     }
                 }
@@ -532,7 +529,7 @@ impl AiosDBManager {
                     }
                     //后面用派发任务的方式,不要放在这里阻塞
                     println!("changed: {:?}", &event);
-                    dbg!(&self.watcher.headers);
+                    // dbg!(&self.watcher.headers);
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(&event.paths) {
                         let mut params = IndexMap::new();
                         for (path, new_header) in &new_headers {
