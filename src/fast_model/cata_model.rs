@@ -667,7 +667,7 @@ pub async fn gen_cata_geos(
                         let actual_dir = actual_vec.normalize_or_zero();
                         //判断actual_dir 和 a_dir 是否一致，一致的话说明有重叠
                         let same_dir = actual_dir.dot(a_dir) > 0.99;
-                        #[cfg(debug_assertions)]
+                        #[cfg(feature = "debug_model")]
                         if same_dir {
                             dbg!(to_pdms_vec_str(&actual_dir));
                             dbg!(to_pdms_vec_str(&a_dir));
@@ -676,8 +676,6 @@ pub async fn gen_cata_geos(
                         current_tubing.desire_arrive_dir = a_dir;
                         let dist = actual_vec.length();
                         if dist  > TUBI_TOL && !same_dir {
-                            //TODO: 需要弄清楚风管开头的不需要加直段?
-                            // let is_hvac_start = is_hvac && (index == 0);
                             // 如果是hvac 必须leave 的是STRT才可以
                             //风管开头这样的不需要处理
                             if !exclude {
@@ -701,12 +699,12 @@ pub async fn gen_cata_geos(
                                             .await
                                             .map(|x| x.get_refno_lossy().unwrap_or_default())
                                             .unwrap_or_default();
+                                        // dbg!((current_tubing.leave_refno, lstube_cat_ref));
                                         current_tubing.tubi_size = fast_model::query_tubi_size(
                                             current_tubing.leave_refno,
                                             lstube_cat_ref,
                                             is_hang,
-                                        )
-                                            .await?;
+                                        ).await?;
                                     }
                                     #[cfg(feature = "debug_model")]
                                     dbg!(&current_tubing.tubi_size);
@@ -875,7 +873,7 @@ pub async fn gen_cata_geos(
         .expect("send tubi shape_insts_data failed.");
 
     if !tubi_relates.is_empty() {
-        println!("tubi relate: {}", tubi_relates.join(""));
+        // println!("tubi relate: {}", tubi_relates.join(""));
         SUL_DB.query(tubi_relates.join("")).await.unwrap();
     }
     println!(

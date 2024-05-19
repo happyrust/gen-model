@@ -97,6 +97,12 @@ async fn main() -> anyhow::Result<()> {
 
     aios_core::function::define_common_functions().await.unwrap();
 
+    let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
+    // AiosDBManager::exec_watcher(mgr.clone()).await.expect("exec_watcher error");
+
+    mgr.init_watcher().await.unwrap();
+    // return Ok(());
+
     // update_inst_relate_aabbs().await.unwrap();
     // return Ok(());
 
@@ -107,7 +113,6 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     /// 创建db manager
-    let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
 
     #[cfg(feature = "gen_model")]
     if db_option.gen_model {
@@ -135,8 +140,7 @@ async fn main() -> anyhow::Result<()> {
         update_cal_bran_component().await?;
     }
 
-    // AiosDBManager::exec_watcher(mgr.clone()).await.expect("exec_watcher error");
-
+    mgr.async_watch().await.unwrap();
 
     //todo 如何处理初始化的同步，第一次启动一定要同步一次，首先生成archive文件，然后再同步
     //是否需要重构下面的这行代码？

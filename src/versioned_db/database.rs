@@ -23,6 +23,7 @@ use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use aios_core::tool::hash_tool::hash_str;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 // use std::time::Instant;
@@ -294,10 +295,11 @@ pub async fn sync_total_async_threaded(
     let parse_handle = tokio::spawn(async move {
         // let mut handles = vec![];
         //todo 按照文件大小排序，只有小于多少的能开启多线程，模型一大就不合适了
+        let mut db_info_sql = vec![];
         for path in children_files {
             let file_name = path.file_name().unwrap().to_str().unwrap().to_string(); // 获取文件名
 
-            let mut time = tokio::time::Instant::now();
+            let mut time = Instant::now();
             if is_sys_parse
                 || db_option_arc.included_db_files.is_none()
                 || db_option_arc
@@ -310,6 +312,11 @@ pub async fn sync_total_async_threaded(
                 let mut buf = vec![0u8; 60];
                 file.read_exact(&mut buf).await.unwrap();
                 let (db_type, file_version, db_no) = parse_file_basic_info(&buf);
+                let file_name_hash = hash_str(&file_name);
+                db_info_sql.push(format!(
+                    "INSERT IGNORE INTO db_info (id, db_type, file_version, dbnum, file_name) VALUES ('{}', '{}', '{}', '{}', '{}')",
+                    file_name_hash, db_type, file_version, db_no, file_name
+                ));
                 // #[cfg(debug_assertions)]
                 // dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
                 if !db_types_clone.contains(&db_type) {
@@ -469,6 +476,11 @@ pub async fn sync_total_async_threaded(
             // let db_info = get_default_pdms_db_info();
             // let _ = db_info.save(None);
         }
+
+        //执行保存db_info sql
+        let db_info_sql = db_info_sql.join(";");
+        SUL_DB.query(&db_info_sql).await.expect("save db_info failed");
+
     });
     all_handles.push(parse_handle);
     futures::future::join_all(take(&mut all_handles)).await;

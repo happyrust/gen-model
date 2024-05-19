@@ -16,6 +16,7 @@ gen_model = ["aios_core/gen_model"]
 occ = ["aios_core/occ", "dep:opencascade"]
 manifold = ["aios_core/manifold"]
 sql = ["dep:sea-orm", "dep:sqlx"]
+debug_parse = ["pdms_io/debug_parse"]
 
 [dependencies]
 config = "0.13.1"

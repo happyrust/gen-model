@@ -346,7 +346,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             );
             //替换所有的aabb
             if !replace_exist {
-                sql.push_str("and aabb=none");
+                sql.push_str(" and aabb=none");
             }
             let mut response = SUL_DB.query(sql).await.unwrap();
             let result: Vec<QueryAabbParam> = response.take(0).unwrap();
@@ -557,7 +557,7 @@ pub async fn apply_insts_boolean_occ(
         inst_keys
     );
     if !replace_exist {
-        sql.push_str("and !booled");
+        sql.push_str(" and !booled");
     }
     let mut response = SUL_DB.query(sql).await.unwrap();
     let boolean_query: Vec<OccGeoTransQuery> = response.take(0).unwrap();

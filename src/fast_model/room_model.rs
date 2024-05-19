@@ -252,6 +252,7 @@ pub async fn query_room_refnos(
                         intersect_set.insert(g.refno);
                     }
                 });
+                #[cfg(feature = "debug_model")]
                 if !intersect_set.is_empty() {
                     println!(
                         "found intersect room panel {}, refnos: {}",

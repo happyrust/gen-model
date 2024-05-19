@@ -118,7 +118,7 @@ pub async fn gen_all_geos_data(
                     ))
                     .await.unwrap();
                 origin_target_refnos = response.take(0).unwrap();
-            }  else if is_incr_update {
+            } else if is_incr_update {
                 // root_refnos 为incr_update_log里的loop_refnos，basic_cata_refnos， prim_refnos的合集
                 origin_target_refnos = incr_updates
                     .as_ref()
@@ -143,257 +143,257 @@ pub async fn gen_all_geos_data(
                 let db_option = db_option.clone();
                 let sender = sender.clone();
                 // let handle = tokio::task::spawn(async move {
-                    let mut target_refnos = vec![target];
-                    //Step 1、提前缓存ploo, 得到对齐方式的偏移
-                    let loop_sjus_map = DashMap::new();
-                    {
-                        let Ok(target_ploo_refnos) =
-                            aios_core::query_multi_deep_children_filter_inst(
-                                target_refnos.clone(),
-                                vec!["PLOO".into()],
-                                skip_exist,
-                            )
+                let mut target_refnos = vec![target];
+                //Step 1、提前缓存ploo, 得到对齐方式的偏移
+                let loop_sjus_map = DashMap::new();
+                {
+                    let Ok(target_ploo_refnos) =
+                        aios_core::query_multi_deep_children_filter_inst(
+                            target_refnos.clone(),
+                            vec!["PLOO".into()],
+                            skip_exist,
+                        )
                             .await
                         else {
                             continue;
                         };
-                        for r in target_ploo_refnos {
-                            let Ok(loop_att) = aios_core::get_named_attmap(r).await else {
-                                continue;
-                            };
-                            let owner = loop_att.get_owner();
-                            let mut height = loop_att
-                                .get_f32("HEIG")
-                                .unwrap_or(loop_att.get_f32("HEIG").unwrap_or_default());
-                            let sjus = loop_att.get_str("SJUS").unwrap_or_default();
-                            let off_z = cata_model::cal_sjus_value(sjus, height);
-                            //对齐方式的距离，应该存储下来，子节点要与其保持一致的偏移
-                            //插入方向和偏移距离
-                            loop_sjus_map.insert(owner, (Vec3::NEG_Z * off_z, height));
-                        }
+                    for r in target_ploo_refnos {
+                        let Ok(loop_att) = aios_core::get_named_attmap(r).await else {
+                            continue;
+                        };
+                        let owner = loop_att.get_owner();
+                        let mut height = loop_att
+                            .get_f32("HEIG")
+                            .unwrap_or(loop_att.get_f32("HEIG").unwrap_or_default());
+                        let sjus = loop_att.get_str("SJUS").unwrap_or_default();
+                        let off_z = cata_model::cal_sjus_value(sjus, height);
+                        //对齐方式的距离，应该存储下来，子节点要与其保持一致的偏移
+                        //插入方向和偏移距离
+                        loop_sjus_map.insert(owner, (Vec3::NEG_Z * off_z, height));
                     }
+                }
 
-                    let loop_sjus_map_arc = Arc::new(loop_sjus_map);
-                    let mut gen_inst_handles = vec![];
-                    //元件库的模型计算
-                    {
-                        let target_bran_hanger_refnos: Vec<RefU64> = if is_incr_update {
-                            incr_updates_log
-                                .bran_hanger_refnos
-                                .iter()
-                                .cloned()
-                                .collect()
-                        } else {
-                            let r = aios_core::query_multi_deep_children_filter_inst(
-                                target_refnos.clone(),
-                                vec!["BRAN".into(), "HANG".into()],
-                                skip_exist,
-                            )
+                let loop_sjus_map_arc = Arc::new(loop_sjus_map);
+                let mut gen_inst_handles = vec![];
+                //元件库的模型计算
+                {
+                    let target_bran_hanger_refnos: Vec<RefU64> = if is_incr_update {
+                        incr_updates_log
+                            .bran_hanger_refnos
+                            .iter()
+                            .cloned()
+                            .collect()
+                    } else {
+                        let r = aios_core::query_multi_deep_children_filter_inst(
+                            target_refnos.clone(),
+                            vec!["BRAN".into(), "HANG".into()],
+                            skip_exist,
+                        )
                             .await
                             .unwrap();
-                            target_refnos.retain_mut(|x| !r.contains(x));
-                            // dbg!(&r);
-                            r.into_iter().collect()
-                        };
-                        if !target_bran_hanger_refnos.is_empty() {
-                            println!(
-                                "使用管道或者支吊架元件库数量: {}",
-                                target_bran_hanger_refnos.len()
-                            );
-                        }
-                        //查询出branch 和 branch 下的子节点
-                        let mut branch_refnos_map = DashMap::new();
-                        let mut bran_comp_eles = vec![];
-                        for &refno in &target_bran_hanger_refnos {
-                            let children =
-                                aios_core::get_children_pes(refno).await.unwrap_or_default();
-                            bran_comp_eles.extend(children.iter().map(|x| x.refno));
-                            //求出元件对应的outside bore
-                            branch_refnos_map.insert(refno, children);
-                        }
-
-                        let target_bran_reuse_cata_map: DashMap<String, CataHashRefnoKV> = {
-                            let map =
-                                aios_core::query_group_by_cata_hash(&target_bran_hanger_refnos)
-                                    .await
-                                    .unwrap_or_default();
-                            // dbg!(&map);
-                            map
-                        };
-                        // dbg!(&target_bran_reuse_cata_map);
-                        let target_single_cata_map = if is_incr_update {
-                            let cata_map = DashMap::new();
-                            let cata_refnos = &incr_updates_log.basic_cata_refnos;
-                            //直接使用group的办法，按cata_hash 进行分组
-                            for &r in cata_refnos {
-                                let Ok(Some(att)) = aios_core::get_pe(r).await else {
-                                    continue;
-                                };
-                                cata_map.insert(
-                                    att.cata_hash.clone(),
-                                    CataHashRefnoKV {
-                                        cata_hash: att.cata_hash,
-                                        group_refnos: vec![r],
-                                        ..Default::default()
-                                    },
-                                );
-                            }
-                            cata_map
-                        } else {
-                            let mut response = SUL_DB
-                                .query(format!(
-                                    "select value refno from [{}] where owner.noun in ['BRAN', 'HANG']",
-                                    target_refnos
-                                        .iter()
-                                        .map(|x| x.to_pe_key())
-                                        .collect::<Vec<_>>()
-                                        .join(",")
-                                ))
-                                .await
-                                .unwrap();
-                            let Ok(bran_children_refnos) = response.take::<Vec<RefU64>>(0) else {
-                                dbg!("查询BRAN, HANG出错");
-                                continue;
-                            };
-                            let mut use_cata_refnos =
-                                aios_core::query_multi_deep_children_filter_inst(
-                                    target_refnos.clone(),
-                                    CATA_WITHOUT_REUSE_GEO_NAMES.map(String::from).to_vec(),
-                                    skip_exist,
-                                )
-                                .await
-                                .unwrap_or_default();
-                            // dbg!(&use_cata_refnos);
-                            use_cata_refnos.extend(bran_children_refnos);
-                            let map = aios_core::query_group_by_cata_hash(&use_cata_refnos)
-                                .await
-                                .unwrap_or_default();
-                            map
-                        };
-                        #[cfg(debug_assertions)]
-                        {
-                            dbg!(target_bran_reuse_cata_map.len());
-                            dbg!(target_single_cata_map.len());
-                        }
-
-                        let mut has_run_cata = false;
-                        if run_cache_cata {
-                            //bran，hanger下需要重用的模型
-                            if !target_bran_reuse_cata_map.is_empty()
-                                || !branch_refnos_map.is_empty()
-                            {
-                                let sjus_map_clone = loop_sjus_map_arc.clone();
-                                let db_option = db_option.clone();
-                                let sender = sender.clone();
-                                let handle = tokio::spawn(async move {
-                                    cata_model::gen_cata_geos(
-                                        db_option,
-                                        Arc::new(target_bran_reuse_cata_map),
-                                        Arc::new(branch_refnos_map),
-                                        sjus_map_clone,
-                                        sender,
-                                    )
-                                    .await
-                                    .unwrap();
-                                });
-                                has_run_cata = true;
-                                gen_inst_handles.push(handle);
-                            }
-
-                            //不能重用的类型
-                            if !target_single_cata_map.is_empty() {
-                                let sjus_map_clone = loop_sjus_map_arc.clone();
-                                let db_option = db_option.clone();
-                                let sender = sender.clone();
-                                let handle = tokio::spawn(async move {
-                                    cata_model::gen_cata_geos(
-                                        db_option,
-                                        Arc::new(target_single_cata_map),
-                                        Arc::new(Default::default()),
-                                        sjus_map_clone,
-                                        sender,
-                                    )
-                                    .await
-                                    .unwrap();
-                                });
-                                has_run_cata = true;
-                                gen_inst_handles.push(handle);
-                            }
-                        }
+                        target_refnos.retain_mut(|x| !r.contains(x));
+                        // dbg!(&r);
+                        r.into_iter().collect()
+                    };
+                    if !target_bran_hanger_refnos.is_empty() {
+                        println!(
+                            "使用管道或者支吊架元件库数量: {}",
+                            target_bran_hanger_refnos.len()
+                        );
+                    }
+                    //查询出branch 和 branch 下的子节点
+                    let mut branch_refnos_map = DashMap::new();
+                    let mut bran_comp_eles = vec![];
+                    for &refno in &target_bran_hanger_refnos {
+                        let children =
+                            aios_core::get_children_pes(refno).await.unwrap_or_default();
+                        bran_comp_eles.extend(children.iter().map(|x| x.refno));
+                        //求出元件对应的outside bore
+                        branch_refnos_map.insert(refno, children);
                     }
 
-                    //loop 基本体的处理
-                    {
-                        let target_loop_owner_refnos: Vec<RefU64> = if is_incr_update {
-                            incr_updates_log.loop_owner_refnos.iter().cloned().collect()
-                        } else {
-                            let mut loop_owner_refnos = aios_core::query_multi_deep_children_filter_inst(
+                    let target_bran_reuse_cata_map: DashMap<String, CataHashRefnoKV> = {
+                        let map =
+                            aios_core::query_group_by_cata_hash(&target_bran_hanger_refnos)
+                                .await
+                                .unwrap_or_default();
+                        // dbg!(&map);
+                        map
+                    };
+                    // dbg!(&target_bran_reuse_cata_map);
+                    let target_single_cata_map = if is_incr_update {
+                        let cata_map = DashMap::new();
+                        let cata_refnos = &incr_updates_log.basic_cata_refnos;
+                        //直接使用group的办法，按cata_hash 进行分组
+                        for &r in cata_refnos {
+                            let Ok(Some(att)) = aios_core::get_pe(r).await else {
+                                continue;
+                            };
+                            cata_map.insert(
+                                att.cata_hash.clone(),
+                                CataHashRefnoKV {
+                                    cata_hash: att.cata_hash,
+                                    group_refnos: vec![r],
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        cata_map
+                    } else {
+                        let mut response = SUL_DB
+                            .query(format!(
+                                "select value refno from [{}] where owner.noun in ['BRAN', 'HANG']",
+                                target_refnos
+                                    .iter()
+                                    .map(|x| x.to_pe_key())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            ))
+                            .await
+                            .unwrap();
+                        let Ok(bran_children_refnos) = response.take::<Vec<RefU64>>(0) else {
+                            dbg!("查询BRAN, HANG出错");
+                            continue;
+                        };
+                        let mut use_cata_refnos =
+                            aios_core::query_multi_deep_children_filter_inst(
                                 target_refnos.clone(),
-                                GNERAL_LOOP_OWNER_NOUN_NAMES.map(String::from).to_vec(),
+                                CATA_WITHOUT_REUSE_GEO_NAMES.map(String::from).to_vec(),
                                 skip_exist,
                             )
+                                .await
+                                .unwrap_or_default();
+                        // dbg!(&use_cata_refnos);
+                        use_cata_refnos.extend(bran_children_refnos);
+                        let map = aios_core::query_group_by_cata_hash(&use_cata_refnos)
                             .await
                             .unwrap_or_default();
-                            loop_owner_refnos.into_iter().collect()
-                        };
-                        if !target_loop_owner_refnos.is_empty(){
-                            println!("使用LOOP的数量: {}", target_loop_owner_refnos.len());
-                        }
-                        // dbg!(&target_loop_owner_refnos);
-                        if run_cache_loop && !target_loop_owner_refnos.is_empty() {
+                        map
+                    };
+                    #[cfg(debug_assertions)]
+                    {
+                        dbg!(target_bran_reuse_cata_map.len());
+                        dbg!(target_single_cata_map.len());
+                    }
+
+                    let mut has_run_cata = false;
+                    if run_cache_cata {
+                        //bran，hanger下需要重用的模型
+                        if !target_bran_reuse_cata_map.is_empty()
+                            || !branch_refnos_map.is_empty()
+                        {
                             let sjus_map_clone = loop_sjus_map_arc.clone();
-                            let sender = sender.clone();
                             let db_option = db_option.clone();
+                            let sender = sender.clone();
                             let handle = tokio::spawn(async move {
-                                loop_model::gen_loop_geos(
+                                cata_model::gen_cata_geos(
                                     db_option,
-                                    &target_loop_owner_refnos,
+                                    Arc::new(target_bran_reuse_cata_map),
+                                    Arc::new(branch_refnos_map),
                                     sjus_map_clone,
                                     sender,
                                 )
-                                .await
-                                .unwrap();
+                                    .await
+                                    .unwrap();
                             });
+                            has_run_cata = true;
                             gen_inst_handles.push(handle);
                         }
 
-                        ///基本体模型的生成
-                        let target_prim_refnos: Vec<RefU64> = if is_incr_update {
-                            incr_updates_log.prim_refnos.iter().cloned().collect()
-                        } else {
-                            let mut prim_refnos = aios_core::query_multi_deep_children_filter_inst(
-                                target_refnos.clone(),
-                                GNERAL_PRIM_NOUN_NAMES.map(String::from).to_vec(),
-                                skip_exist,
-                            )
-                            .await
-                            .unwrap_or_default();
-                            prim_refnos.into_iter().collect()
-                        };
-                        if !target_prim_refnos.is_empty(){
-                            println!("使用基本体数量: {}", target_prim_refnos.len());
-                        }
-                        if run_cache_prim && !target_prim_refnos.is_empty() {
+                        //不能重用的类型
+                        if !target_single_cata_map.is_empty() {
+                            let sjus_map_clone = loop_sjus_map_arc.clone();
                             let db_option = db_option.clone();
                             let sender = sender.clone();
                             let handle = tokio::spawn(async move {
-                                prim_model::gen_prim_geos(
+                                cata_model::gen_cata_geos(
                                     db_option,
-                                    target_prim_refnos.as_slice(),
+                                    Arc::new(target_single_cata_map),
+                                    Arc::new(Default::default()),
+                                    sjus_map_clone,
                                     sender,
                                 )
-                                .await
-                                .unwrap();
+                                    .await
+                                    .unwrap();
                             });
+                            has_run_cata = true;
                             gen_inst_handles.push(handle);
                         }
                     }
+                }
 
-                    futures::future::join_all(gen_inst_handles).await;
+                //loop 基本体的处理
+                {
+                    let target_loop_owner_refnos: Vec<RefU64> = if is_incr_update {
+                        incr_updates_log.loop_owner_refnos.iter().cloned().collect()
+                    } else {
+                        let mut loop_owner_refnos = aios_core::query_multi_deep_children_filter_inst(
+                            target_refnos.clone(),
+                            GNERAL_LOOP_OWNER_NOUN_NAMES.map(String::from).to_vec(),
+                            skip_exist,
+                        )
+                            .await
+                            .unwrap_or_default();
+                        loop_owner_refnos.into_iter().collect()
+                    };
+                    if !target_loop_owner_refnos.is_empty() {
+                        println!("使用LOOP的数量: {}", target_loop_owner_refnos.len());
+                    }
+                    // dbg!(&target_loop_owner_refnos);
+                    if run_cache_loop && !target_loop_owner_refnos.is_empty() {
+                        let sjus_map_clone = loop_sjus_map_arc.clone();
+                        let sender = sender.clone();
+                        let db_option = db_option.clone();
+                        let handle = tokio::spawn(async move {
+                            loop_model::gen_loop_geos(
+                                db_option,
+                                &target_loop_owner_refnos,
+                                sjus_map_clone,
+                                sender,
+                            )
+                                .await
+                                .unwrap();
+                        });
+                        gen_inst_handles.push(handle);
+                    }
+
+                    ///基本体模型的生成
+                    let target_prim_refnos: Vec<RefU64> = if is_incr_update {
+                        incr_updates_log.prim_refnos.iter().cloned().collect()
+                    } else {
+                        let mut prim_refnos = aios_core::query_multi_deep_children_filter_inst(
+                            target_refnos.clone(),
+                            GNERAL_PRIM_NOUN_NAMES.map(String::from).to_vec(),
+                            skip_exist,
+                        )
+                            .await
+                            .unwrap_or_default();
+                        prim_refnos.into_iter().collect()
+                    };
+                    if !target_prim_refnos.is_empty() {
+                        println!("使用基本体数量: {}", target_prim_refnos.len());
+                    }
+                    if run_cache_prim && !target_prim_refnos.is_empty() {
+                        let db_option = db_option.clone();
+                        let sender = sender.clone();
+                        let handle = tokio::spawn(async move {
+                            prim_model::gen_prim_geos(
+                                db_option,
+                                target_prim_refnos.as_slice(),
+                                sender,
+                            )
+                                .await
+                                .unwrap();
+                        });
+                        gen_inst_handles.push(handle);
+                    }
+                }
+
+                futures::future::join_all(gen_inst_handles).await;
                 // });
                 // handles.push(handle);
             }
-            if dbno!=0{
+            if dbno != 0 {
                 println!("数据库号： {dbno} 生成完毕。");
             }
             // futures::future::join_all(take(&mut handles)).await;
@@ -422,6 +422,7 @@ pub async fn query_tubi_size(
     let tubi_geoms_info = resolve_desi_comp(refno, Some(tubi_cat_ref))
         .await
         .unwrap_or_default();
+    // dbg!(&tubi_geoms_info);
     for geom in &tubi_geoms_info.geometries {
         if let BoxImplied(d) = geom {
             return Ok(TubiSize::BoxSize((d.height, d.width)));
@@ -429,7 +430,6 @@ pub async fn query_tubi_size(
             return Ok(TubiSize::BoreSize(d.diameter));
         }
     }
-    // use default
     {
         if let Ok(cat_att) = aios_core::get_named_attmap(tubi_cat_ref).await {
             let params = cat_att.get_f32_vec("PARA").unwrap_or_default();

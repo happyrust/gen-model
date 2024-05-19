@@ -14,6 +14,7 @@ use futures::StreamExt;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 use notify::{RecursiveMode, Watcher};
+use parse_pdms_db::parse::parse_db_basic_info;
 use pdms_io::defines::DbPageBasicInfo;
 use pdms_io::io::PdmsIO;
 use pdms_io::sync::compress::{execute_compress, CompressOptions};
@@ -60,6 +61,9 @@ impl IncrementInfo {
 
 const JSON_CHUNK_COUNT: usize = 200;
 
+
+pub const CHECK_DB_TYPES: [&'static str; 6] = ["CATA", "DESI", "DICT", "SYST", "GLB", "GLOB"];
+
 impl AiosDBManager {
     ///执行增量更新
     pub async fn execute_incr_update(
@@ -78,7 +82,6 @@ impl AiosDBManager {
         let mut total_deleted_len = 0;
         let mut geo_update_log = IncrGeoUpdateLog::default();
         let mut owner_children_map = IndexMap::new();
-        // let mut deleted_owner_set = IndexSet::new();
         let mut all_relate_sqls = vec![];
         let mut has_changed = false;
         //TODO: 如何鉴别只有claim page的变化，没有数据的更新，就不需要执行增量更新
@@ -86,9 +89,12 @@ impl AiosDBManager {
             let mut io = PdmsIO::new(path, true);
             io.open()?;
             let eles_map = io
-                .collect_increment_eles(&basic_info, Some(last_pageno))
+                .collect_increment_eles(&basic_info, last_pageno)
                 .await?;
-            dbg!(eles_map.len());
+            if eles_map.is_empty(){
+                continue;
+            }
+            dbg!((last_pageno, eles_map.len()));
             if eles_map.is_empty() {
                 continue;
             }
@@ -139,12 +145,15 @@ impl AiosDBManager {
                     ele_op = EleOperation::Add;
                     let mut index = 0;
                     let mut is_last_add = false;
+                    #[cfg(feature = "debug_parse")]
+                    dbg!(ele.refno);
                     if let Some(owner_ele) = eles_map.get(&owner) {
                         index = owner_ele
                             .children
                             .iter()
                             .position(|&x| x == refno)
                             .unwrap_or(0);
+                        // dbg!(owner_ele);
                         is_last_add = index == owner_ele.children.len() - 1;
 
                         let cp = refno.to_pe_key();
@@ -170,10 +179,6 @@ impl AiosDBManager {
                         (ele, ele.refno)
                     };
 
-                    // dbg!((owner_ele, o_refno));
-                    //如果不是最后添加的，需要删除这个owner，重新添加所有owner关系
-                    // if let Some(owner_ele) = eles_map.get(&owner)
-
                     //不需要重复插入和执行，特别是多个的时候
                     if !need_delete_owner_set.contains(&o_refno) {
                         all_relate_sqls.push(format!(
@@ -198,10 +203,8 @@ impl AiosDBManager {
                     }
                 }
 
-                #[cfg(debug_assertions)]
-                {
-                    dbg!((refno, ele_op));
-                }
+                #[cfg(feature = "debug_parse")]
+                dbg!((refno, ele_op));
 
                 if PRIMITIVE_NOUN_NAMES.contains(&type_name) {
                     geo_update_log.prim_refnos.insert(refno);
@@ -251,7 +254,8 @@ impl AiosDBManager {
         for mut s in chunks {
             let sql = s.into_iter().join("");
             // dbg!(&sql);
-            // println!("relates sql: {}", &sql);
+            #[cfg(feature = "debug_parse")]
+            println!("relates sql: {}", &sql);
             relate_join_set.spawn(async move {
                 SUL_DB.query(sql).await.unwrap();
             });
@@ -398,6 +402,12 @@ impl AiosDBManager {
         Ok(true)
     }
 
+    //直接通过数据库的查询，获得当前最新的version，不需要使用json的方式
+    // pub fn scan_incr_updates(path_buf: PathBuf) -> anyhow::Result<IndexMap<PathBuf, (DbPageBasicInfo, u32)>> {
+    //
+    // }
+
+    //初始化监测
     pub async fn init_watcher(&self) -> anyhow::Result<()> {
         let mut params = IndexMap::new();
         let mut latest_need_update_headers = IndexMap::new();
@@ -416,13 +426,38 @@ impl AiosDBManager {
                 let dir_entry = entry.unwrap();
                 let path = dir_entry.path();
                 let file_name = path.file_stem().unwrap().to_str().unwrap();
-                //|| !file_name.ends_with("0001")
                 if path.is_dir() {
                     continue;
                 }
-                self.watcher
-                    .file_name_full_path_map
-                    .insert(file_name.to_owned(), path.to_path_buf());
+
+                let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
+                // if db_num != 1112 {
+                //     continue;
+                // }
+                let file_latest_max_pgno = PdmsIO::new(path.to_path_buf(), true)
+                    .get_att_latest_pgno()
+                    .unwrap_or_default();
+
+                if !CHECK_DB_TYPES.contains(&db_type.as_str()) {
+                    continue;
+                }
+                let Ok(max_pgno) = aios_core::query_db_max_version(db_num).await else{
+                    //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
+                    continue;
+                };
+
+                if file_latest_max_pgno <= max_pgno {
+                    continue;
+                }
+                println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大pgno: {max_pgno}, 文件属性对应pgno: {file_latest_max_pgno}", &file_name);
+                //暂时先跳过更新比较大的
+                if file_latest_max_pgno - max_pgno > 0x8000 {
+                    continue;
+                }
+
+                // self.watcher
+                //     .file_name_full_path_map
+                //     .insert(file_name.to_owned(), path.to_path_buf());
                 //初始化CBA的Archive文件，来保证后续增量下载, 后面是否需要加一个环境变量，来控制是否需要重新生成archive文件
                 //是否需要完全初始化
                 // let input = path.to_path_buf();
@@ -434,44 +469,25 @@ impl AiosDBManager {
 
                 let mut io = PdmsIO::new(path, true);
                 io.open().unwrap();
+                //每个path 都要检查一遍
                 if let Ok(basic_info) = io.get_page_basic_info() {
-                    if let Some(mut old) = self.watcher.headers.get_mut(&path.to_path_buf()) {
-                        //未发生修改，直接跳过
-                        if old.pdms_header.page_no == basic_info.pdms_header.page_no {
-                            continue;
-                        }
+                    if file_latest_max_pgno != 0 {
+                        #[cfg(feature = "debug_parse")]
+                        dbg!((db_num, file_latest_max_pgno));
                         params.insert(
                             path.to_path_buf(),
-                            (basic_info.clone(), old.pdms_header.page_no),
+                            (basic_info.clone(), file_latest_max_pgno),
                         );
-                        //在old里有出现，但是版本号不一致，需要更新
-                        latest_need_update_headers.insert(path.to_path_buf(), basic_info);
-                    } else {
-                        //在old里面没有出现，需要更新进来
+                        latest_need_update_headers.insert(path.to_path_buf(), basic_info.clone());
                         self.watcher.headers.insert(path.to_path_buf(), basic_info);
                     }
                 }
-                // break;
             }
-            // while let Some(_) = join_set.join_next().await {}
-            // break;
         }
-        self.watcher.save(None).unwrap();
-        println!("初始化增量更新耗时: {} s", time.elapsed().as_secs_f32());
+
+        //等所有的文件都检查同步完毕，才执行更新
         match self.execute_incr_update(params).await {
             Ok(true) => {
-                //执行没问题了，再更新当前的版本记录，headers直接存本地json
-                for (path, new_header) in latest_need_update_headers {
-                    if let Some(mut old) = self.watcher.headers.get_mut(&path) {
-                        //未发生修改，直接跳过
-                        if old.pdms_header.page_no == new_header.pdms_header.page_no {
-                            continue;
-                        }
-                        *old.value_mut() = new_header;
-                    }
-                }
-                //now save the watch.json
-                self.watcher.save(None).unwrap();
                 println!("执行启动后的自动增量完成。")
             }
             Ok(false) => {
@@ -481,6 +497,8 @@ impl AiosDBManager {
                 println!("Execute increment update error: {:?}", e);
             }
         }
+
+        println!("初始化增量更新耗时: {} s", time.elapsed().as_secs_f32());
 
         anyhow::Ok(())
     }
@@ -514,13 +532,15 @@ impl AiosDBManager {
                     }
                     //后面用派发任务的方式,不要放在这里阻塞
                     println!("changed: {:?}", &event);
+                    dbg!(&self.watcher.headers);
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(&event.paths) {
                         let mut params = IndexMap::new();
                         for (path, new_header) in &new_headers {
-                            dbg!(new_header.pdms_header.page_no);
+                            // dbg!(new_header.pdms_header.page_no);
+                            // dbg!(path);
                             if let Some(mut old) = self.watcher.headers.get_mut(path) {
-                                dbg!(path);
-                                dbg!(old.pdms_header.page_no);
+                                // dbg!(path);
+                                // dbg!(old.pdms_header.page_no);
                                 //未发生修改，直接跳过
                                 if old.pdms_header.page_no == new_header.pdms_header.page_no {
                                     continue;
@@ -600,7 +620,7 @@ impl AiosDBManager {
                                     }
                                 }
                                 //now save the watch.json
-                                self.watcher.save(None).expect("save watch.json failed");
+                                // self.watcher.save(None).expect("save watch.json failed");
                             }
                             Ok(false) => {
                                 println!("{:?} 文件发生修改，但是没有发生增量更新。", &event.paths);
