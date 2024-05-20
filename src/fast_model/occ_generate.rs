@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
+use anyhow::anyhow;
 use surrealdb::sql::Thing;
 
 ///生成小的几何体
@@ -98,8 +99,7 @@ pub async fn process_meshes_update_db(
                 //有一些布尔运算要精确计算，不然会有薄片出现
                 //生成负实体的布尔运算
                 apply_insts_boolean_occ(&target_visible_refnos, replace_exist, None)
-                    .await
-                    .unwrap();
+                    .await?;
                 println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
             }
         }
@@ -187,7 +187,7 @@ pub async fn gen_inst_meshes(
                 Ok(mut response) => {
                     let r = response.take::<Vec<QueryGeoParam>>(0);
                     if let Err(e) = &r {
-                        init_deserialize_error("Vec<QueryGeoParam>", e, &sql,&std::panic::Location::caller().to_string());
+                        init_deserialize_error("Vec<QueryGeoParam>", e, &sql, &std::panic::Location::caller().to_string());
                         return;
                     }
                     let result: Vec<QueryGeoParam> = r.unwrap();
@@ -560,7 +560,7 @@ pub async fn apply_insts_boolean_occ(
                 (select value [out.param, trans.d] from out->geo_relate) as ts,
                 (select value [in, world_trans.d, (select out.param as param, geo_type, trans.d as trans,
                 out.aabb.d as aabb, object::keys(out.param)[0] as para_type
-                from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"])]
+                from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"] and out.param != NONE )]
             from array::flatten(in<-neg_relate.in->inst_relate) ) as neg_ts from {} where !bad_bool
             and (in<-neg_relate)[0] != none and aabb.d!=none
         "#,
@@ -569,136 +569,147 @@ pub async fn apply_insts_boolean_occ(
     if !replace_exist {
         sql.push_str(" and !booled");
     }
-    let mut response = SUL_DB.query(sql).await.unwrap();
-    let boolean_query: Vec<OccGeoTransQuery> = response.take(0).unwrap();
-    #[cfg(debug_assertions)]
-    println!("occ inst boolean len: {}", boolean_query.len());
-    // dbg!(boolean_query.len());
-    // dbg!(&boolean_query);
-    if boolean_query.is_empty() {
-        return Ok(());
-    }
-
-    let chunk = (boolean_query.len() / 16).max(1);
-    for chunk in boolean_query.chunks(chunk) {
-        let group = chunk.to_vec();
-        let dir_clone = dir.clone();
-        // let shapes_map_clone = shapes_map_arc.clone();
-        // let task = tokio::spawn(async move {
-        let mut update_sql = String::new();
-        for mut b in group {
-            if b.ts.is_empty() {
-                continue;
-            }
-            let Some((pos_param, pos_t)) = b.ts.pop() else {
-                continue;
-            };
-            let inst_relate_id = b.refno.to_table_key("inst_relate");
-            //没有实体的情况，下次就不要再继续计算布尔运算了
-            // let Ok(shape) = g.param.gen_occ_shape() {
-            let Ok(mut pos_shape) = pos_param.gen_occ_shape() else {
-                update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
-                continue;
-            };
-            let pos_matrix = pos_t.compute_matrix().as_dmat4();
-            // dbg!(pos_matrix);
-            let Ok(mut pos_shape) = pos_shape.transformed(&pos_matrix) else {
-                update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
-                continue;
-            };
-
-            for (param, t) in b.ts.iter() {
-                // dbg!(id);
-                if let Ok(shape) = param.gen_occ_shape() {
-                    if let Ok(s) = shape.transformed(&t.compute_matrix().as_dmat4()) {
-                        pos_shape = pos_shape.union(&s.0).shape.into();
+    match SUL_DB.query(&sql).await {
+        Ok(mut response) => {
+            match response.take::<Vec<OccGeoTransQuery>>(0) {
+                Ok(boolean_query) => {
+                    #[cfg(debug_assertions)]
+                    println!("occ inst boolean len: {}", boolean_query.len());
+                    // dbg!(boolean_query.len());
+                    // dbg!(&boolean_query);
+                    if boolean_query.is_empty() {
+                        return Ok(());
                     }
-                }
-            }
-            // dbg!(b.refno);
-            let inverse_mat = b.wt.compute_matrix().as_dmat4().inverse();
 
-            #[cfg(feature = "debug_model")]
-            pos_shape.write_step(format!("{}.step", "pos")).unwrap();
-            // dbg!(b.neg_ts.len());
-            let mut neg_shapes = vec![];
-            let mut cross_neg_shapes = vec![];
-            for (refno, neg_t, negs) in b.neg_ts.into_iter() {
-                for ParamNegInfo {
-                    param,
-                    geo_type,
-                    para_type,
-                    trans,
-                    aabb,
-                } in negs
-                {
-                    if aabb.is_none() {
-                        // dbg!(&id);
-                        continue;
-                    }
-                    if let Ok(neg_shape) = param.gen_occ_shape() {
-                        let m = round_dmat4(
-                            inverse_mat
-                                * neg_t.compute_matrix().as_dmat4()
-                                * trans.compute_matrix().as_dmat4(),
-                        );
-                        // dbg!(m);
-                        // dbg!(refno);
-                        if let Ok(t_neg_shape) = neg_shape.0.transformed_by_gmat(&m) {
-                            // t_neg_shape.write_step(format!("{}.step", &neg_id)).unwrap();
-                            if geo_type == "Neg" {
-                                // dbg!(refno);
-                                neg_shapes.push(t_neg_shape);
-                            } else {
-                                cross_neg_shapes.push(t_neg_shape);
+                    let chunk = (boolean_query.len() / 16).max(1);
+                    for chunk in boolean_query.chunks(chunk) {
+                        let group = chunk.to_vec();
+                        let dir_clone = dir.clone();
+                        // let shapes_map_clone = shapes_map_arc.clone();
+                        // let task = tokio::spawn(async move {
+                        let mut update_sql = String::new();
+                        for mut b in group {
+                            if b.ts.is_empty() {
+                                continue;
                             }
-                        }
-                    }
-                }
-            }
-            // dbg!((neg_shapes.len(), cross_neg_shapes.len()));
-            if !neg_shapes.is_empty() || !cross_neg_shapes.is_empty() {
-                let mut success = false;
-                let inst_relate_id = b.refno.to_table_key("inst_relate");
-                if let Ok(pos_shape) = pos_shape.subtract_shapes(&neg_shapes, false) {
-                    if let Ok(final_shape) = pos_shape.subtract_shapes(&cross_neg_shapes, true) {
-                        let tol = b.aabb.half_extents().magnitude() * 0.01;
-                        #[cfg(feature = "debug_model")]
-                        {
-                            final_shape.write_step(format!("{}.step", b.refno)).unwrap();
-                        }
-                        if let Ok(mesh) = PlantMesh::gen_occ_mesh(&final_shape, tol as _) {
-                            //保存到文件到dir下
-                            if mesh
-                                .ser_to_file(&dir_clone.join(format!("{}.mesh", b.refno)))
-                                .is_ok()
-                            {
-                                update_sql.push_str(&format!(
-                                    "update {} set booled=true;",
-                                    &inst_relate_id
-                                ));
-                                success = true;
+                            let Some((pos_param, pos_t)) = b.ts.pop() else {
+                                continue;
+                            };
+                            let inst_relate_id = b.refno.to_table_key("inst_relate");
+                            //没有实体的情况，下次就不要再继续计算布尔运算了
+                            // let Ok(shape) = g.param.gen_occ_shape() {
+                            let Ok(mut pos_shape) = pos_param.gen_occ_shape() else {
+                                update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
+                                continue;
+                            };
+                            let pos_matrix = pos_t.compute_matrix().as_dmat4();
+                            // dbg!(pos_matrix);
+                            let Ok(mut pos_shape) = pos_shape.transformed(&pos_matrix) else {
+                                update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
+                                continue;
+                            };
+
+                            for (param, t) in b.ts.iter() {
+                                // dbg!(id);
+                                if let Ok(shape) = param.gen_occ_shape() {
+                                    if let Ok(s) = shape.transformed(&t.compute_matrix().as_dmat4()) {
+                                        pos_shape = pos_shape.union(&s.0).shape.into();
+                                    }
+                                }
                             }
+                            // dbg!(b.refno);
+                            let inverse_mat = b.wt.compute_matrix().as_dmat4().inverse();
+
+                            #[cfg(feature = "debug_model")]
+                            pos_shape.write_step(format!("{}.step", "pos")).unwrap();
+                            // dbg!(b.neg_ts.len());
+                            let mut neg_shapes = vec![];
+                            let mut cross_neg_shapes = vec![];
+                            for (refno, neg_t, negs) in b.neg_ts.into_iter() {
+                                for ParamNegInfo {
+                                    param,
+                                    geo_type,
+                                    para_type,
+                                    trans,
+                                    aabb,
+                                } in negs
+                                {
+                                    if aabb.is_none() {
+                                        // dbg!(&id);
+                                        continue;
+                                    }
+                                    if let Ok(neg_shape) = param.gen_occ_shape() {
+                                        let m = round_dmat4(
+                                            inverse_mat
+                                                * neg_t.compute_matrix().as_dmat4()
+                                                * trans.compute_matrix().as_dmat4(),
+                                        );
+                                        // dbg!(m);
+                                        // dbg!(refno);
+                                        if let Ok(t_neg_shape) = neg_shape.0.transformed_by_gmat(&m) {
+                                            // t_neg_shape.write_step(format!("{}.step", &neg_id)).unwrap();
+                                            if geo_type == "Neg" {
+                                                // dbg!(refno);
+                                                neg_shapes.push(t_neg_shape);
+                                            } else {
+                                                cross_neg_shapes.push(t_neg_shape);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // dbg!((neg_shapes.len(), cross_neg_shapes.len()));
+                            if !neg_shapes.is_empty() || !cross_neg_shapes.is_empty() {
+                                let mut success = false;
+                                let inst_relate_id = b.refno.to_table_key("inst_relate");
+                                if let Ok(pos_shape) = pos_shape.subtract_shapes(&neg_shapes, false) {
+                                    if let Ok(final_shape) = pos_shape.subtract_shapes(&cross_neg_shapes, true) {
+                                        let tol = b.aabb.half_extents().magnitude() * 0.01;
+                                        #[cfg(feature = "debug_model")]
+                                        {
+                                            final_shape.write_step(format!("{}.step", b.refno)).unwrap();
+                                        }
+                                        if let Ok(mesh) = PlantMesh::gen_occ_mesh(&final_shape, tol as _) {
+                                            //保存到文件到dir下
+                                            if mesh
+                                                .ser_to_file(&dir_clone.join(format!("{}.mesh", b.refno)))
+                                                .is_ok()
+                                            {
+                                                update_sql.push_str(&format!(
+                                                    "update {} set booled=true;",
+                                                    &inst_relate_id
+                                                ));
+                                                success = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                if !success {
+                                    update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
+                                }
+                            }
+                            // dbg!(&update_sql);
                         }
+                        let r = SUL_DB.query(&update_sql).await;
+                        if let Err(_e) = r {
+                            init_save_database_error(&update_sql);
+                        }
+                        // });
+                        // tasks.push(task);
                     }
                 }
-                if !success {
-                    update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
+                Err(e) => {
+                    init_deserialize_error("Vec<OccGeoTransQuery>", &e, &sql, &std::panic::Location::caller().to_string());
+                    return Err(anyhow!(e.to_string()));
                 }
             }
-            // dbg!(&update_sql);
         }
-        SUL_DB.query(update_sql).await;
-        // });
-        // tasks.push(task);
+        Err(e) => {
+            init_query_error(&sql, &e, &std::panic::Location::caller().to_string());
+            return Err(anyhow!(e.to_string()));
+        }
     }
-    // dbg!(tasks.len());
-    // match futures::future::try_join_all(tasks).await {
-    //     Ok(_) => {}
-    //     Err(e) => {
-    //         dbg!(e);
-    //     }
-    // }
+
     Ok(())
 }
 
