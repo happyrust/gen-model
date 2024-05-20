@@ -9,6 +9,8 @@ use parry3d::bounding_volume::Aabb;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use aios_core::error::{init_deserialize_error, init_query_error};
+use anyhow::anyhow;
 
 #[inline]
 fn load_mesh(id: &str) -> anyhow::Result<PlantMesh> {
@@ -102,13 +104,13 @@ pub async fn apply_cata_neg_boolean_manifold(
 
                     let Ok(mut pos_manifold) =
                         load_manifold(&pos.id, pos.trans.compute_matrix().as_dmat4())
-                    else {
-                        update_sql.push_str(&format!(
-                            "update {}<-inst_relate set bad_bool=true;",
-                            &g.inst_info_id,
-                        ));
-                        continue;
-                    };
+                        else {
+                            update_sql.push_str(&format!(
+                                "update {}<-inst_relate set bad_bool=true;",
+                                &g.inst_info_id,
+                            ));
+                            continue;
+                        };
 
                     // dbg!(&update_sql);
                     let mut neg_manifolds = vec![];
@@ -199,164 +201,177 @@ pub async fn apply_insts_boolean_manifold(
     if !replace_exist {
         sql.push_str(" and !booled");
     }
-    let mut response = SUL_DB.query(sql).await.unwrap();
-    let boolean_query: Vec<ManiGeoTransQuery> = response.take(0).unwrap();
-    // dbg!(&boolean_query);
+    match SUL_DB.query(&sql).await {
+        Ok(mut response) => {
+            match response.take::<Vec<ManiGeoTransQuery>>(0) {
+                Ok(boolean_query) => {
+                    let mut tasks = Vec::new();
+                    let chunk = (boolean_query.len() / 16).max(1);
+                    //排除有NREV的情况，因为NREV的布尔计算不是很准，还要判断这个NREV的包围盒和实体的包围盒是否差不多大
+                    for chunk in boolean_query.chunks(chunk) {
+                        let group = chunk.to_vec();
+                        let dir_clone = dir.clone();
+                        let task = tokio::spawn(async move {
+                            let mut update_sql = String::new();
+                            for mut b in group {
+                                let mut pos_manifolds = vec![];
+                                for (pos_id, pos_t) in b.ts.iter() {
+                                    if let Ok(manifold) = load_manifold(pos_id, pos_t.compute_matrix().as_dmat4()) {
+                                        pos_manifolds.push(manifold);
+                                    }
+                                }
+                                let pos_aabb = b.aabb;
+                                let pos_extent = pos_aabb.extents();
+                                //没有实体的情况，下次就不要再继续计算布尔运算了
+                                let inst_relate_id = b.refno.to_table_key("inst_relate");
+                                if pos_manifolds.is_empty() {
+                                    update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
+                                    continue;
+                                };
+                                let inverse_mat = b.wt.compute_matrix().as_dmat4().inverse();
+                                let mut pos_manifold = ManifoldRust::batch_boolean(&pos_manifolds, 0);
+                                if pos_manifold.num_tri() == 0 {
+                                    update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
+                                    continue;
+                                };
 
-    let mut tasks = Vec::new();
-    let chunk = (boolean_query.len() / 16).max(1);
-    //排除有NREV的情况，因为NREV的布尔计算不是很准，还要判断这个NREV的包围盒和实体的包围盒是否差不多大
-    for chunk in boolean_query.chunks(chunk) {
-        let group = chunk.to_vec();
-        let dir_clone = dir.clone();
-        let task = tokio::spawn(async move {
-            let mut update_sql = String::new();
-            for mut b in group {
-                let mut pos_manifolds = vec![];
-                for (pos_id, pos_t) in b.ts.iter() {
-                    if let Ok(manifold) = load_manifold(pos_id, pos_t.compute_matrix().as_dmat4()) {
-                        pos_manifolds.push(manifold);
-                    }
-                }
-                let pos_aabb = b.aabb;
-                let pos_extent = pos_aabb.extents();
-                //没有实体的情况，下次就不要再继续计算布尔运算了
-                let inst_relate_id = b.refno.to_table_key("inst_relate");
-                if pos_manifolds.is_empty() {
-                    update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
-                    continue;
-                };
-                let inverse_mat = b.wt.compute_matrix().as_dmat4().inverse();
-                let mut pos_manifold = ManifoldRust::batch_boolean(&pos_manifolds, 0);
-                if pos_manifold.num_tri() == 0 {
-                    update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
-                    continue;
-                };
+                                let mut neg_manifolds = vec![];
+                                let mut found_need_occ = false;
+                                for (refno, mut neg_t, negs) in b.neg_ts.into_iter() {
+                                    for NegInfo {
+                                        id,
+                                        geo_type,
+                                        para_type,
+                                        trans,
+                                        aabb,
+                                    } in negs
+                                    {
+                                        // dbg!(&b.noun);
+                                        let Some(mut neg_aabb) = aabb else {
+                                            continue;
+                                        };
+                                        // 什么情况下该使用OCC的布尔运算？
+                                        // dbg!((refno, neg_aabb.extents().xy() , pos_aabb.extents().xy()));
+                                        let neg_max = neg_aabb.extents().xy().max();
+                                        let pos_max = pos_aabb.extents().xy().max();
+                                        //一个模糊的条件，如果aabb的尺寸比较接近，最好就应该移交给OCC去处理！！
+                                        //这里暂时扩大一下xy的缩放，这样缩放会导致切割的会不太准确
+                                        if para_type == "PrimRevolution" || para_type == "PrimRTorus" {
+                                            if neg_max / pos_max > 0.9 {
+                                                found_need_occ = true;
+                                                continue;
+                                                // let scale_xy = 1.02;
+                                                // neg_t.scale.x *= scale_xy;
+                                                // neg_t.scale.y *= scale_xy;
+                                            }
+                                        }
 
-                let mut neg_manifolds = vec![];
-                let mut found_need_occ = false;
-                for (refno, mut neg_t, negs) in b.neg_ts.into_iter() {
-                    for NegInfo {
-                        id,
-                        geo_type,
-                        para_type,
-                        trans,
-                        aabb,
-                    } in negs
-                    {
-                        // dbg!(&b.noun);
-                        let Some(mut neg_aabb) = aabb else {
-                            continue;
-                        };
-                        // 什么情况下该使用OCC的布尔运算？
-                        // dbg!((refno, neg_aabb.extents().xy() , pos_aabb.extents().xy()));
-                        let neg_max = neg_aabb.extents().xy().max();
-                        let pos_max = pos_aabb.extents().xy().max();
-                        //一个模糊的条件，如果aabb的尺寸比较接近，最好就应该移交给OCC去处理！！
-                        //这里暂时扩大一下xy的缩放，这样缩放会导致切割的会不太准确
-                        if para_type == "PrimRevolution" || para_type == "PrimRTorus" {
-                            if neg_max / pos_max > 0.9 {
-                                found_need_occ = true;
-                                continue;
-                                // let scale_xy = 1.02;
-                                // neg_t.scale.x *= scale_xy;
-                                // neg_t.scale.y *= scale_xy;
+                                        //如果有关键点在包围盒上了，就需要做缩放
+                                        // let intersect = pos_aabb.intersects(&neg_aabb);
+                                        // if para_type == "PrimRevolution" || para_type == "PrimRTorus" {
+                                        //     //如果选装的点在包围盒里，就需要放大？？
+                                        //     let m = pos_extent.x.max(pos_extent.y) as f64;
+                                        //     let d = (m + 1.0) / m;
+                                        //     let scale_xy = d.clamp(1.01, 1.02) as f32;
+                                        //     //
+                                        //     let scale_xy = 1.02;
+                                        //     let nxy_max = neg_aabb.extents().xy().max();
+                                        //     let pxy_max = pos_aabb.extents().xy().max();
+                                        //     let sim_dist = (nxy_max - pxy_max).abs();
+                                        //     dbg!((neg_aabb.extents().xy() , pos_aabb.extents().xy()));
+                                        //     dbg!(sim_dist/pxy_max);
+                                        //     if sim_dist < 10.0 /*|| b.noun == "FLOOR"*/ {
+                                        //         // dbg!((neg_aabb.extents().xy() - pos_aabb.extents().xy()));
+                                        //         //交给occ 去处理
+                                        //         // return;
+                                        //         neg_t.scale.x *= scale_xy;
+                                        //         neg_t.scale.y *= scale_xy;
+                                        //         dbg!(scale_xy);
+                                        //     }
+                                        // }
+                                        //看类型给偏差？todo 解决误差的问题
+                                        //如果AABB 比较接近的情况下，又有旋转体
+
+                                        // dbg!(&b.noun);
+                                        if b.noun == "FLOOR"
+                                            || b.noun.contains("WALL")
+                                            || b.noun == "GENSEC"
+                                            || b.noun == "PANE"
+                                        {
+                                            if neg_aabb.extents().z == 0.0 {
+                                                continue;
+                                            }
+                                            let d = (pos_extent.z as f64 + 1.0) / pos_extent.z as f64;
+                                            let scale_z = d.min(1.02);
+                                            neg_t.scale.z *= scale_z as f32;
+                                        }
+
+                                        let m = inverse_mat
+                                            * neg_t.compute_matrix().as_dmat4()
+                                            * trans.compute_matrix().as_dmat4();
+                                        if let Ok(manifold) = load_manifold(&id, m) {
+                                            neg_manifolds.push(manifold);
+                                        }
+                                    }
+                                }
+                                //直接交给OCC去处理精确的计算
+                                if found_need_occ {
+                                    continue;
+                                }
+
+                                if !neg_manifolds.is_empty() {
+                                    let mut success = false;
+                                    let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
+                                    let mesh = PlantMesh::from(&final_manifold);
+                                    // dbg!(neg_manifolds.len());
+                                    #[cfg(feature = "debug_model")]
+                                    mesh.export_obj(false, &format!("{}.obj", b.refno));
+                                    //保存到文件到dir下
+                                    if mesh
+                                        .ser_to_file(&dir_clone.join(format!("{}.mesh", b.refno)))
+                                        .is_ok()
+                                    {
+                                        update_sql
+                                            .push_str(&format!("update {} set booled=true;", &inst_relate_id));
+                                        success = true;
+                                    }
+
+                                    if !success {
+                                        update_sql
+                                            .push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
+                                    }
+                                }
+                                // dbg!(&update_sql);
                             }
-                        }
-
-                        //如果有关键点在包围盒上了，就需要做缩放
-                        // let intersect = pos_aabb.intersects(&neg_aabb);
-                        // if para_type == "PrimRevolution" || para_type == "PrimRTorus" {
-                        //     //如果选装的点在包围盒里，就需要放大？？
-                        //     let m = pos_extent.x.max(pos_extent.y) as f64;
-                        //     let d = (m + 1.0) / m;
-                        //     let scale_xy = d.clamp(1.01, 1.02) as f32;
-                        //     //
-                        //     let scale_xy = 1.02;
-                        //     let nxy_max = neg_aabb.extents().xy().max();
-                        //     let pxy_max = pos_aabb.extents().xy().max();
-                        //     let sim_dist = (nxy_max - pxy_max).abs();
-                        //     dbg!((neg_aabb.extents().xy() , pos_aabb.extents().xy()));
-                        //     dbg!(sim_dist/pxy_max);
-                        //     if sim_dist < 10.0 /*|| b.noun == "FLOOR"*/ {
-                        //         // dbg!((neg_aabb.extents().xy() - pos_aabb.extents().xy()));
-                        //         //交给occ 去处理
-                        //         // return;
-                        //         neg_t.scale.x *= scale_xy;
-                        //         neg_t.scale.y *= scale_xy;
-                        //         dbg!(scale_xy);
-                        //     }
-                        // }
-                        //看类型给偏差？todo 解决误差的问题
-                        //如果AABB 比较接近的情况下，又有旋转体
-
-                        // dbg!(&b.noun);
-                        if b.noun == "FLOOR"
-                            || b.noun.contains("WALL")
-                            || b.noun == "GENSEC"
-                            || b.noun == "PANE"
-                        {
-                            if neg_aabb.extents().z == 0.0 {
-                                continue;
+                            if !update_sql.is_empty() {
+                                match SUL_DB.query(update_sql).await {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        dbg!(e);
+                                    }
+                                }
                             }
-                            let d = (pos_extent.z as f64 + 1.0) / pos_extent.z as f64;
-                            let scale_z = d.min(1.02);
-                            neg_t.scale.z *= scale_z as f32;
-                        }
-
-                        let m = inverse_mat
-                            * neg_t.compute_matrix().as_dmat4()
-                            * trans.compute_matrix().as_dmat4();
-                        if let Ok(manifold) = load_manifold(&id, m) {
-                            neg_manifolds.push(manifold);
+                        });
+                        tasks.push(task);
+                    }
+                    // dbg!(tasks.len());
+                    match futures::future::try_join_all(tasks).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            dbg!(e);
                         }
                     }
                 }
-                //直接交给OCC去处理精确的计算
-                if found_need_occ {
-                    continue;
-                }
-
-                if !neg_manifolds.is_empty() {
-                    let mut success = false;
-                    let final_manifold = pos_manifold.batch_boolean_subtract(&neg_manifolds);
-                    let mesh = PlantMesh::from(&final_manifold);
-                    // dbg!(neg_manifolds.len());
-                    #[cfg(feature = "debug_model")]
-                    mesh.export_obj(false, &format!("{}.obj", b.refno));
-                    //保存到文件到dir下
-                    if mesh
-                        .ser_to_file(&dir_clone.join(format!("{}.mesh", b.refno)))
-                        .is_ok()
-                    {
-                        update_sql
-                            .push_str(&format!("update {} set booled=true;", &inst_relate_id));
-                        success = true;
-                    }
-
-                    if !success {
-                        update_sql
-                            .push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
-                    }
-                }
-                // dbg!(&update_sql);
-            }
-            if !update_sql.is_empty() {
-                match SUL_DB.query(update_sql).await {
-                    Ok(_) => {}
-                    Err(e) => {
-                        dbg!(e);
-                    }
+                Err(e) => {
+                    dbg!(&sql);
+                    init_deserialize_error("Vec<ManiGeoTransQuery>", &e, &std::panic::Location::caller().to_string());
+                    return Err(anyhow!(e.to_string()));
                 }
             }
-        });
-        tasks.push(task);
-    }
-    // dbg!(tasks.len());
-    match futures::future::try_join_all(tasks).await {
-        Ok(_) => {}
+        }
         Err(e) => {
-            dbg!(e);
+            init_query_error(&sql, &e, &std::panic::Location::caller().to_string());
+            return Err(anyhow!(e.to_string()));
         }
     }
     Ok(())
