@@ -94,8 +94,7 @@ pub async fn process_meshes_update_db(
                     .await
                     .unwrap();
                 apply_insts_boolean_manifold(&target_visible_refnos, replace_exist, None)
-                    .await
-                    .unwrap();
+                    .await?;
                 //有一些布尔运算要精确计算，不然会有薄片出现
                 //生成负实体的布尔运算
                 apply_insts_boolean_occ(&target_visible_refnos, replace_exist, None)
@@ -181,14 +180,15 @@ pub async fn gen_inst_meshes(
         let task = tokio::spawn(async move {
             let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
             let sql = format!(
-                "select <string> meta::id(id) as id, param from [{}]",
+                "select <string> meta::id(id) as id, param from [{}] where param != NONE",
                 ids
             );
             match SUL_DB.query(&sql).await {
                 Ok(mut response) => {
                     let r = response.take::<Vec<QueryGeoParam>>(0);
                     if let Err(e) = &r {
-                        init_deserialize_error("Vec<QueryGeoParam>", e, &std::panic::Location::caller().to_string());
+                        init_deserialize_error("Vec<QueryGeoParam>", e, &sql,&std::panic::Location::caller().to_string());
+                        return;
                     }
                     let result: Vec<QueryGeoParam> = r.unwrap();
                     if result.is_empty() {
