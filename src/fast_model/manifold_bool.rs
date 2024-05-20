@@ -363,8 +363,7 @@ pub async fn apply_insts_boolean_manifold(
                     }
                 }
                 Err(e) => {
-                    dbg!(&sql);
-                    init_deserialize_error("Vec<ManiGeoTransQuery>", &e, &std::panic::Location::caller().to_string());
+                    init_deserialize_error("Vec<ManiGeoTransQuery>", &e, &sql,&std::panic::Location::caller().to_string());
                     return Err(anyhow!(e.to_string()));
                 }
             }

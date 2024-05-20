@@ -187,7 +187,7 @@ pub async fn gen_inst_meshes(
                 Ok(mut response) => {
                     let r = response.take::<Vec<QueryGeoParam>>(0);
                     if let Err(e) = &r {
-                        init_deserialize_error("Vec<QueryGeoParam>", e, &std::panic::Location::caller().to_string());
+                        init_deserialize_error("Vec<QueryGeoParam>", e, &sql,&std::panic::Location::caller().to_string());
                         return;
                     }
                     let result: Vec<QueryGeoParam> = r.unwrap();
