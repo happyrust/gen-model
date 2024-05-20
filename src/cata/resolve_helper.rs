@@ -383,7 +383,7 @@ pub fn resolve_axis(
             }
         }
     } else {
-        dir = parse_str_axis_to_vec3(dir_str, context)?;
+        dir = parse_str_axis_to_vec3(dir_str, context).unwrap_or_default();
     }
 
     if re.is_match(ref_dir_str) {

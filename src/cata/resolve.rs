@@ -346,7 +346,6 @@ pub fn resolve_axis_param(
     let pbore = eval_str_to_f32_or_default(&axis_param.pbore, &context,  "DIST");
     let pwidth = eval_str_to_f32_or_default(&axis_param.pwidth, &context,  "DIST");
     let pheight = eval_str_to_f32_or_default(&axis_param.pheight, &context,  "DIST");
-    let mut error_axis = false;
     let Ok((m_dir, ref_dir, pos)) = resolve_axis(axis_param, scom, context) else {
         return Default::default();
     };

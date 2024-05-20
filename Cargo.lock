@@ -151,6 +151,7 @@ dependencies = [
  "clap",
  "config 0.13.4",
  "dashmap",
+ "deku",
  "derivative",
  "derive_more",
  "downcast-rs",
@@ -166,6 +167,7 @@ dependencies = [
  "itertools 0.12.1",
  "jsonxf",
  "lazy_static",
+ "log",
  "lyon",
  "manifold-sys",
  "memchr",
@@ -190,12 +192,14 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "serde_with",
+ "simplelog",
  "smallvec",
  "smol_str",
  "sqlx",
  "strum",
  "strum_macros",
  "surrealdb",
+ "thiserror",
  "tokio",
  "urlencoding",
  "uuid",
@@ -3925,12 +3929,14 @@ dependencies = [
  "chrono",
  "dashmap",
  "deku",
+ "derivative",
  "dpcsync",
  "fern",
  "futures",
  "futures-util",
  "indexmap 2.2.6",
  "log",
+ "memchr",
  "nom",
  "notify",
  "num_cpus",
@@ -5897,7 +5903,7 @@ checksum = "81cdd64d312baedb58e21336b31bc043b77e01cc99033ce76ef539f78e965ebc"
 
 [[package]]
 name = "surrealdb"
-version = "1.4.2"
+version = "1.6.0"
 dependencies = [
  "async-channel 1.9.0",
  "bincode",
@@ -5933,6 +5939,8 @@ dependencies = [
 [[package]]
 name = "surrealdb-core"
 version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a2f403dba761e0e3404f90334f8ff1454f1f308e88c84dd5dbcee52866ff30e"
 dependencies = [
  "addr",
  "any_ascii",
@@ -6126,18 +6134,18 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.58"
+version = "1.0.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03468839009160513471e86a034bb2c5c0e4baae3b43f79ffc55c4a5427b3297"
+checksum = "c546c80d6be4bc6a00c0f01730c08df82eaa7a7a61f11d656526506112cc1709"
 dependencies = [
  "thiserror-impl",
 ]
 
 [[package]]
 name = "thiserror-impl"
-version = "1.0.58"
+version = "1.0.61"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c61f3ba182994efc43764a46c018c347bc492c79f024e705f46567b418f6d4f7"
+checksum = "46c3384250002a6d5af4d114f2845d37b57521033f30d5c3f46c4d70e1197533"
 dependencies = [
  "proc-macro2",
  "quote",

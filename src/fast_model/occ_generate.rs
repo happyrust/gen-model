@@ -161,7 +161,7 @@ pub async fn gen_inst_meshes(
 
     let mut response = SUL_DB.query(sql).await.unwrap();
     let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0).unwrap();
-    dbg!(inst_geo_ids.len());
+    // dbg!(inst_geo_ids.len());
     inst_geo_ids.retain(|(x, y)| x.is_some());
 
     let thing_map = inst_geo_ids
