@@ -584,36 +584,37 @@ impl AiosDBManager {
                                         let output: PathBuf =
                                             format!("asset/archives/{}.cba", file_name).into();
                                         // dbg!(&output);
-                                        let compress_opt = CompressOptions::new(
-                                            path.clone(),
-                                            output,
-                                            "asset/temp",
-                                        );
-                                        let file_hash = execute_compress(compress_opt)
-                                            .await
-                                            .unwrap()
-                                            .to_string();
-                                        // dbg!(&file_hash);
 
-                                        //数据库里不存在这个file hash的记录，才需要发送
-                                        //是自己创建的，在记录里还没有的，才能发送消息出去
-                                        //如果是别的创建的，就应该调过
-                                        let sql = format!(
-                                            "select value id from (select * from e3d_sync where location != '{}' and '{}' in file_names and '{}' in file_hashes order by timestamp desc) ",
-                                            get_db_option().location.as_str(),
-                                            file_name,
-                                            &file_hash
-                                        );
-                                        // dbg!(&sql);
-                                        let mut response = SUL_DB.query(&sql).await.unwrap();
-                                        // dbg!(&response);
-                                        let id = response.take::<Vec<String>>(0).unwrap();
-                                        // dbg!(id.len());
-                                        if id.is_empty() {
-                                            println!("发生了增量更新，推送：{}", &file_name);
-                                            notify_file_hashes.push(file_hash);
-                                            notify_file_names.push(file_name.to_owned());
-                                        }
+                                        // let compress_opt = CompressOptions::new(
+                                        //     path.clone(),
+                                        //     output,
+                                        //     "asset/temp",
+                                        // );
+                                        // let file_hash = execute_compress(compress_opt)
+                                        //     .await
+                                        //     .unwrap()
+                                        //     .to_string();
+                                        // // dbg!(&file_hash);
+                                        //
+                                        // //数据库里不存在这个file hash的记录，才需要发送
+                                        // //是自己创建的，在记录里还没有的，才能发送消息出去
+                                        // //如果是别的创建的，就应该调过
+                                        // let sql = format!(
+                                        //     "select value id from (select * from e3d_sync where location != '{}' and '{}' in file_names and '{}' in file_hashes order by timestamp desc) ",
+                                        //     get_db_option().location.as_str(),
+                                        //     file_name,
+                                        //     &file_hash
+                                        // );
+                                        // // dbg!(&sql);
+                                        // let mut response = SUL_DB.query(&sql).await.unwrap();
+                                        // // dbg!(&response);
+                                        // let id = response.take::<Vec<String>>(0).unwrap();
+                                        // // dbg!(id.len());
+                                        // if id.is_empty() {
+                                        //     println!("发生了增量更新，推送：{}", &file_name);
+                                        //     notify_file_hashes.push(file_hash);
+                                        //     notify_file_names.push(file_name.to_owned());
+                                        // }
                                     }
                                 }
                                 //now save the watch.json

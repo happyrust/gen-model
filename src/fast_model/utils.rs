@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use aios_core::error::init_save_database_error;
 use aios_core::SUL_DB;
 use tokio::task::JoinSet;
 
-pub async fn save_aabb_to_surreal(aabb_map: &HashMap<u64, String>) -> anyhow::Result<()> {
+pub async fn save_aabb_to_surreal(aabb_map: &HashMap<u64, String>) {
     if !aabb_map.is_empty() {
         let keys = aabb_map.keys().collect::<Vec<_>>();
         for chunk in keys.chunks(300) {
@@ -12,13 +13,17 @@ pub async fn save_aabb_to_surreal(aabb_map: &HashMap<u64, String>) -> anyhow::Re
                 let json = format!("{{'id':aabb:⟨{}⟩, 'd':{}}}", k, v);
                 sql.push_str(&format!("INSERT IGNORE INTO aabb {};", json));
             }
-            SUL_DB.query(sql).await.unwrap();
+            match SUL_DB.query(&sql).await {
+                Ok(_) => {}
+                Err(_) => {
+                    init_save_database_error(&sql);
+                }
+            }
         }
     }
-    Ok(())
 }
 
-pub async fn save_pts_to_surreal(vec3_map: &HashMap<u64, String>) -> anyhow::Result<()> {
+pub async fn save_pts_to_surreal(vec3_map: &HashMap<u64, String>) {
     if !vec3_map.is_empty() {
         let keys = vec3_map.keys().collect::<Vec<_>>();
         for chunk in keys.chunks(100) {
@@ -28,11 +33,16 @@ pub async fn save_pts_to_surreal(vec3_map: &HashMap<u64, String>) -> anyhow::Res
                 let json = format!("{{'id':vec3:⟨{}⟩, 'd':{}}}", k, v);
                 sql.push_str(&format!("INSERT IGNORE INTO vec3 {};", json));
             }
-            SUL_DB.query(sql).await.unwrap();
+            match SUL_DB.query(&sql).await {
+                Ok(_) => {}
+                Err(_e) => {
+                    init_save_database_error(&sql);
+                }
+            };
         }
     }
-    Ok(())
 }
+
 pub async fn save_transforms_to_surreal(trans_map: &HashMap<u64, String>) -> anyhow::Result<()> {
     if !trans_map.is_empty() {
         let keys = trans_map.keys().collect::<Vec<_>>();
