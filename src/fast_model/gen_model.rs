@@ -173,6 +173,8 @@ pub async fn gen_all_geos_data(
                     }
                 }
 
+                dbg!(&loop_sjus_map);
+
                 let loop_sjus_map_arc = Arc::new(loop_sjus_map);
                 let mut gen_inst_handles = vec![];
                 //元件库的模型计算

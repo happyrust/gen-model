@@ -57,7 +57,7 @@ pub async fn gen_loop_geos(
                     continue;
                 };
                 //判断父节点是否有SJUS，需要调整位置
-                if ( target_type == "FLOOR" || target_type == "PANE")
+                if ( target_type == "FLOOR" || target_type == "PANE" || target_type == "GWALL")
                     && let Some(sjus_adjust) = sjus_map_clone.get(&target_refno)
                 {
                     let offset = trans_origin.rotation.mul_vec3(sjus_adjust.value().0);

@@ -512,6 +512,7 @@ pub async fn gen_cata_geos(
             .transform_vec3(branch_att.get_vec3("HDIR").unwrap())
             .normalize_or_zero();
         let bran_ttube_pt = branch_transform.transform_point(branch_att.get_vec3("TPOS").unwrap());
+        dbg!(bran_ttube_pt);
 
         let is_hang = branch_att.get_type_str() == "HANG";
         let h_ref = branch_att
@@ -790,8 +791,10 @@ pub async fn gen_cata_geos(
                         }
                         if !skip {
                             let l_pos = axis_map[1].pt;
+                            dbg!(l_pos);
                             current_tubing.start_pt = l_pos;
                             current_tubing.desire_leave_dir = l_dir;
+                            dbg!(l_dir);
                             current_tubing.leave_ref_dir = if l_ref_dir.is_normalized() {
                                 Some(l_ref_dir)
                             } else {
@@ -806,12 +809,30 @@ pub async fn gen_cata_geos(
 
             if index == len - 1 && !exclude {
                 let last_dist = bran_ttube_pt.distance(current_tubing.start_pt);
+
                 if last_dist > TUBI_TOL {
                     //检查是否有一端是世界坐标原点
                     current_tubing.end_pt = bran_ttube_pt;
                     current_tubing.arrive_refno = tref;
                     current_tubing.desire_arrive_dir = tdir;
                     if current_tubing.is_dir_ok() {
+                        if matches!(current_tubing.tubi_size, TubiSize::None) {
+                            let lstube_cat_ref = aios_core::query_single_by_paths(
+                                current_tubing.leave_refno,
+                                &["->LSTU->CATR"],
+                                &["refno"],
+                            )
+                                .await
+                                .map(|x| x.get_refno_lossy().unwrap_or_default())
+                                .unwrap_or_default();
+                            // dbg!((current_tubing.leave_refno, lstube_cat_ref));
+                            current_tubing.tubi_size = fast_model::query_tubi_size(
+                                current_tubing.leave_refno,
+                                lstube_cat_ref,
+                                is_hang,
+                            ).await?;
+                        }
+                        // dbg!(&current_tubing);
                         if let Some(t) = current_tubing.get_transform() {
                             let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
                             tubi_shape_insts_data.insert_tubi(
