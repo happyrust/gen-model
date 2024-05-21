@@ -40,10 +40,16 @@ pub async fn gen_all_geos_data(
     db_option: &DbOption,
     incr_updates: Option<IncrGeoUpdateLog>,
 ) -> anyhow::Result<bool> {
+
+
     let skip_exist = !db_option.replace_mesh;
     let time = Instant::now();
     //根据需要拉入数据到本地数据库也可以
     let is_incr_update = incr_updates.is_some();
+    //排除增量更新的情况，如果debug_root_refnos 为空，即没有模型需要生成
+    if !is_incr_update && db_option.debug_root_refnos.as_ref().map(|x| x.is_empty()).unwrap_or(false) {
+        return Ok(true);
+    }
     if is_incr_update && incr_updates.as_ref().unwrap().count() == 0 {
         return Ok(false);
     }
@@ -105,9 +111,9 @@ pub async fn gen_all_geos_data(
                 println!("开始处理db: {dbno}");
             }
             let d_types = db_option.debug_refno_types.clone();
-            let mut run_cache_cata = d_types.iter().any(|x| x == "CATA");
-            let mut run_cache_loop = d_types.iter().any(|x| x == "LOOP");
-            let mut run_cache_prim = d_types.iter().any(|x| x == "PRIM");
+            let mut gen_cata_flag = d_types.iter().any(|x| x == "CATA");
+            let mut gen_loop_flag = d_types.iter().any(|x| x == "LOOP");
+            let mut gen_prim_flag = d_types.iter().any(|x| x == "PRIM");
 
             let mut origin_target_refnos = vec![];
             if !is_incr_update && !is_debug {
@@ -172,9 +178,6 @@ pub async fn gen_all_geos_data(
                         loop_sjus_map.insert(owner, (Vec3::NEG_Z * off_z, height));
                     }
                 }
-
-                dbg!(&loop_sjus_map);
-
                 let loop_sjus_map_arc = Arc::new(loop_sjus_map);
                 let mut gen_inst_handles = vec![];
                 //元件库的模型计算
@@ -279,7 +282,7 @@ pub async fn gen_all_geos_data(
                     }
 
                     let mut has_run_cata = false;
-                    if run_cache_cata {
+                    if gen_cata_flag {
                         //bran，hanger下需要重用的模型
                         if !target_bran_reuse_cata_map.is_empty()
                             || !branch_refnos_map.is_empty()
@@ -342,7 +345,7 @@ pub async fn gen_all_geos_data(
                         println!("使用LOOP的数量: {}", target_loop_owner_refnos.len());
                     }
                     // dbg!(&target_loop_owner_refnos);
-                    if run_cache_loop && !target_loop_owner_refnos.is_empty() {
+                    if gen_loop_flag && !target_loop_owner_refnos.is_empty() {
                         let sjus_map_clone = loop_sjus_map_arc.clone();
                         let sender = sender.clone();
                         let db_option = db_option.clone();
@@ -375,7 +378,7 @@ pub async fn gen_all_geos_data(
                     if !target_prim_refnos.is_empty() {
                         println!("使用基本体数量: {}", target_prim_refnos.len());
                     }
-                    if run_cache_prim && !target_prim_refnos.is_empty() {
+                    if gen_prim_flag && !target_prim_refnos.is_empty() {
                         let db_option = db_option.clone();
                         let sender = sender.clone();
                         let handle = tokio::spawn(async move {

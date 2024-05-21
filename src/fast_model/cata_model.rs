@@ -512,7 +512,7 @@ pub async fn gen_cata_geos(
             .transform_vec3(branch_att.get_vec3("HDIR").unwrap())
             .normalize_or_zero();
         let bran_ttube_pt = branch_transform.transform_point(branch_att.get_vec3("TPOS").unwrap());
-        dbg!(bran_ttube_pt);
+        // dbg!(bran_ttube_pt);
 
         let is_hang = branch_att.get_type_str() == "HANG";
         let h_ref = branch_att
@@ -791,10 +791,10 @@ pub async fn gen_cata_geos(
                         }
                         if !skip {
                             let l_pos = axis_map[1].pt;
-                            dbg!(l_pos);
+                            // dbg!(l_pos);
                             current_tubing.start_pt = l_pos;
                             current_tubing.desire_leave_dir = l_dir;
-                            dbg!(l_dir);
+                            // dbg!(l_dir);
                             current_tubing.leave_ref_dir = if l_ref_dir.is_normalized() {
                                 Some(l_ref_dir)
                             } else {

@@ -88,6 +88,7 @@ pub async fn process_meshes_update_db(
                 .unwrap_or(true)
             {
                 // apply_cata_neg_boolean_occ(None).await.unwrap();
+                dbg!(target_visible_refnos.len());
                 let time = std::time::Instant::now();
                 //生成元件库内部几何体的负实体运算
                 apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist, None)

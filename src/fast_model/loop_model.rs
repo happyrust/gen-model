@@ -33,7 +33,14 @@ pub async fn gen_loop_geos(
         return Ok(true);
     }
     //处理loop elements
-    let mut batch_chunks_cnt = (loop_owner_cnt / batch_size + 1);
+    // let mut batch_chunks_cnt = (loop_owner_cnt / batch_size + 1);
+    let mut batch_chunks_cnt = 16;
+    let mut batch_size = loop_owner_cnt / batch_chunks_cnt + 1;
+    //如果只有一个元件，就不分块了
+    if batch_size == 1 {
+        batch_size = 1;
+        batch_chunks_cnt = loop_owner_cnt;
+    }
     let mut handles = vec![];
     let all_refnos = Arc::new(loop_owner_refnos.to_vec());
     for i in 0..batch_chunks_cnt {

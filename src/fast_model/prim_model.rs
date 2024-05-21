@@ -30,7 +30,14 @@ pub async fn gen_prim_geos(
     if prim_cnt == 0 {
         return Ok(true);
     }
-    let batch_chunks_cnt = prim_cnt / batch_size + 1;
+    // let batch_chunks_cnt = prim_cnt / batch_size + 1;
+    let mut batch_chunks_cnt = 16;
+    let mut batch_size = prim_cnt / batch_chunks_cnt + 1;
+    //如果只有一个元件，就不分块了
+    if batch_size == 1 {
+        batch_size = 1;
+        batch_chunks_cnt = prim_cnt;
+    }
     let mut handles = vec![];
     let all_refnos = Arc::new(prim_refnos.to_vec());
     let processed_cnt = Arc::new(Mutex::new(prim_cnt));
