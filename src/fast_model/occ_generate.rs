@@ -295,7 +295,7 @@ pub async fn gen_inst_meshes(
                     if !update_sql.is_empty() {
                         //执行SUL_DB update,使用chunk 保存
                         if let Err(_) = SUL_DB.query(&update_sql).await {
-                            init_save_database_error(&update_sql);
+                            init_save_database_error(&update_sql, &std::panic::Location::caller().to_string());
                         }
                     }
                     utils::save_pts_to_surreal(&pts_json_map).await;
@@ -690,9 +690,11 @@ pub async fn apply_insts_boolean_occ(
                             }
                             // dbg!(&update_sql);
                         }
-                        let r = SUL_DB.query(&update_sql).await;
-                        if let Err(_e) = r {
-                            init_save_database_error(&update_sql);
+                        if !update_sql.is_empty() {
+                            let r = SUL_DB.query(&update_sql).await;
+                            if let Err(_e) = r {
+                                init_save_database_error(&update_sql, &std::panic::Location::caller().to_string());
+                            }
                         }
                         // });
                         // tasks.push(task);

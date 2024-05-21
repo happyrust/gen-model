@@ -16,7 +16,7 @@ pub async fn save_aabb_to_surreal(aabb_map: &HashMap<u64, String>) {
             match SUL_DB.query(&sql).await {
                 Ok(_) => {}
                 Err(_) => {
-                    init_save_database_error(&sql);
+                    init_save_database_error(&sql,&std::panic::Location::caller().to_string());
                 }
             }
         }
@@ -36,7 +36,7 @@ pub async fn save_pts_to_surreal(vec3_map: &HashMap<u64, String>) {
             match SUL_DB.query(&sql).await {
                 Ok(_) => {}
                 Err(_e) => {
-                    init_save_database_error(&sql);
+                    init_save_database_error(&sql,&std::panic::Location::caller().to_string());
                 }
             };
         }
