@@ -1,7 +1,7 @@
 use crate::fast_model::manifold_bool::{
     apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold,
 };
-use crate::fast_model::utils;
+use crate::fast_model::{EXIST_MESH_GEO_HASHES, utils};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::basic::OccSharedShape;
@@ -161,8 +161,22 @@ pub async fn gen_inst_meshes(
 
     let mut response = SUL_DB.query(sql).await.unwrap();
     let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0).unwrap();
-    // dbg!(inst_geo_ids.len());
-    inst_geo_ids.retain(|(x, y)| x.is_some());
+    dbg!(inst_geo_ids.len());
+    dbg!(EXIST_MESH_GEO_HASHES.len());
+    //排除已经生成了的模型
+    inst_geo_ids.retain(|(x, y)| if let Some(t) = x {
+        if replace_exist{
+            true
+        }else{
+            !EXIST_MESH_GEO_HASHES.contains(&t.id.to_raw())
+        }
+    } else {
+        false
+    });
+    dbg!(inst_geo_ids.len());
+    if inst_geo_ids.is_empty(){
+        return Ok(());
+    }
 
     let thing_map = inst_geo_ids
         .iter()
@@ -315,6 +329,12 @@ pub async fn gen_inst_meshes(
         Ok(_) => {}
         Err(e) => {
             dbg!(e);
+        }
+    }
+
+    for (id, _) in inst_geo_ids{
+        if let Some(id) = id{
+            EXIST_MESH_GEO_HASHES.insert(id.to_raw());
         }
     }
 

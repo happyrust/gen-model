@@ -20,9 +20,9 @@ project_name = "AvevaMarineSample"
 project_code = 1516
 module = "DESI"
 #是否生成模型数据
-gen_model = true
+gen_model = false
 gen_mesh = true
-replace_mesh = true
+replace_mesh = false
 save_db = true
 apply_boolean_operation = true
 mesh_tol_ratio = 3.0
@@ -105,6 +105,6 @@ room_keyword = "-RM"   # 2016  K-R-K100   (-R-)
 #debug_root_refnos = [
 #    "25688_48848",
 #]
-debug_root_refnos = [ "24381/38407" ]
+debug_root_refnos = ["24381/101412"]
 # debug_root_refnos = ["24383/66457", "24381/34110"]
 #debug_root_refnos = ["17496/172806"]

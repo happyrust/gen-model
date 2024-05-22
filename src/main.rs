@@ -13,8 +13,10 @@ extern crate strum;
 #[macro_use]
 extern crate strum_macros;
 
+use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -39,9 +41,7 @@ use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal
 #[cfg(feature = "gen_model")]
 use aios_database::fast_model::gen_all_geos_data;
 use aios_database::fast_model::room_model::build_room_relations;
-use aios_database::fast_model::{
-    gen_inst_meshes, process_meshes_update_db,
-};
+use aios_database::fast_model::{EXIST_MESH_GEO_HASHES, gen_inst_meshes, process_meshes_update_db};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -97,15 +97,11 @@ async fn main() -> anyhow::Result<()> {
 
     aios_core::function::define_common_functions().await.unwrap();
 
+    let sync_live = db_option.sync_live.unwrap_or(false);
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    // AiosDBManager::exec_watcher(mgr.clone()).await.expect("exec_watcher error");
-
-    mgr.init_watcher().await.unwrap();
-    // return Ok(());
-
-    // update_inst_relate_aabbs().await.unwrap();
-    // return Ok(());
-
+    if sync_live{
+        mgr.init_watcher().await.unwrap();
+    }
     /// 是否全部同步模型
     if db_option.total_sync || db_option.incr_sync {
         // 同步pdms数据
@@ -125,6 +121,16 @@ async fn main() -> anyhow::Result<()> {
     {
         let mut time = Instant::now();
         let debug_refnos = db_option.get_debug_refnos();
+        //统计一下assets mesh 目录下有多少个mesh，直接忽略去生成
+        let path: PathBuf = "assets/meshes".into();
+        //收集目录下的文件名
+        let paths = fs::read_dir(path).unwrap();
+        for entry in paths{
+            let entry = entry.unwrap();
+            let geo_hash = entry.path().file_stem().unwrap().to_str().unwrap().to_string();
+            EXIST_MESH_GEO_HASHES.insert(geo_hash);
+        }
+
         process_meshes_update_db(Some(db_option.clone()), &debug_refnos).await.expect("更新模型数据失败");
         println!("处理模型花费时间: {} ms", time.elapsed().as_millis());
     }
@@ -140,7 +146,9 @@ async fn main() -> anyhow::Result<()> {
         update_cal_bran_component().await?;
     }
 
-    mgr.async_watch().await.unwrap();
+    if sync_live{
+        mgr.async_watch().await.unwrap();
+    }
 
     //todo 如何处理初始化的同步，第一次启动一定要同步一次，首先生成archive文件，然后再同步
     //是否需要重构下面的这行代码？
