@@ -30,13 +30,56 @@ use surrealdb::sql::Thing;
 #[tokio::test]
 pub async fn test_gen_geos() -> anyhow::Result<()> {
     init_test_surreal().await;
-    process_meshes_update_db(None, (&["17496/171559".into(), "24381/35844".into()]))
+    process_meshes_update_db_deep(None, (&["17496/171559".into(), "24381/35844".into()]))
         .await
         .unwrap();
     Ok(())
 }
 
 pub async fn process_meshes_update_db(
+    option: Option<DbOption>,
+    refnos: &[RefU64],
+) -> anyhow::Result<()> {
+    if refnos.is_empty(){
+        return Ok(());
+    }
+    let replace_exist = option.as_ref().map(|x| x.replace_mesh).unwrap_or(false);
+    let time = std::time::Instant::now();
+    // dbg!(&target_refnos);
+    // 生成模型文件
+    gen_inst_meshes(&refnos, replace_exist, None)
+        .await
+        .unwrap();
+    println!(
+        "gen_inst_meshes finished: {} ms",
+        time.elapsed().as_millis()
+    );
+    let time = std::time::Instant::now();
+    update_inst_relate_aabbs_by_refnos(&refnos, replace_exist)
+        .await
+        .unwrap();
+    println!(
+        "update_inst_relate_aabbs finished: {} ms",
+        time.elapsed().as_millis()
+    );
+
+    let time = std::time::Instant::now();
+    //生成元件库内部几何体的负实体运算
+    apply_cata_neg_boolean_manifold(&refnos, replace_exist, None)
+        .await
+        .unwrap();
+    apply_insts_boolean_manifold(&refnos, replace_exist, None)
+        .await?;
+    //有一些布尔运算要精确计算，不然会有薄片出现
+    //生成负实体的布尔运算
+    apply_insts_boolean_occ(&refnos, replace_exist, None)
+        .await?;
+    println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
+
+    Ok(())
+}
+
+pub async fn process_meshes_update_db_deep(
     option: Option<DbOption>,
     refnos: &[RefU64],
 ) -> anyhow::Result<()> {
@@ -162,7 +205,7 @@ pub async fn gen_inst_meshes(
     let mut response = SUL_DB.query(sql).await.unwrap();
     let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0).unwrap();
     dbg!(inst_geo_ids.len());
-    dbg!(EXIST_MESH_GEO_HASHES.len());
+    // dbg!(EXIST_MESH_GEO_HASHES.len());
     //排除已经生成了的模型
     inst_geo_ids.retain(|(x, y)| if let Some(t) = x {
         if replace_exist{
@@ -406,6 +449,8 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                     r.id.to_string(),
                     aabb_hash,
                 );
+                //todo 如果没有transform，直接按None处理，都是默认Transform::IDENTITY
+                // dbg!(&sql);
                 update_sql.push_str(&sql);
             }
             if !update_sql.is_empty() {
@@ -587,7 +632,8 @@ pub async fn apply_insts_boolean_occ(
         "#,
         inst_keys
     );
-    if !replace_exist {
+    // if !replace_exist
+    {
         sql.push_str(" and !booled");
     }
     match SUL_DB.query(&sql).await {

@@ -182,6 +182,7 @@ pub async fn apply_insts_boolean_manifold(
         std::fs::create_dir_all(&dir).unwrap();
     }
     let inst_keys = get_inst_relate_keys(refnos);
+    // let mut remain_refnos = vec![];
     //筛选出来 "Neg", "CataCrossNeg" 的关联
     let mut sql = format!(
         r#" select
@@ -314,6 +315,7 @@ pub async fn apply_insts_boolean_manifold(
                                         }
                                     }
                                 }
+                                // dbg!(found_need_occ);
                                 //直接交给OCC去处理精确的计算
                                 if found_need_occ {
                                     continue;

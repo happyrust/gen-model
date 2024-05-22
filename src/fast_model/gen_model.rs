@@ -3,7 +3,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::pdms_inst::save_instance_data;
 use crate::fast_model::{
-    cata_model, loop_model, prim_model, process_meshes_update_db, resolve_desi_comp, shared,
+    cata_model, loop_model, prim_model, process_meshes_update_db_deep, resolve_desi_comp, shared,
 };
 #[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
@@ -113,7 +113,7 @@ pub async fn gen_all_geos_data(
             let mut gen_loop_flag = d_types.iter().any(|x| x == "LOOP");
             let mut gen_prim_flag = d_types.iter().any(|x| x == "PRIM");
 
-            let mut origin_target_refnos = vec![];
+            let mut origin_root_refnos = vec![];
             if !is_incr_update && !is_debug {
                 let mut response = SUL_DB
                     .query(format!(
@@ -121,62 +121,64 @@ pub async fn gen_all_geos_data(
                         dbno
                     ))
                     .await.unwrap();
-                origin_target_refnos = response.take(0).unwrap();
+                origin_root_refnos = response.take(0).unwrap();
             } else if is_incr_update {
                 // root_refnos 为incr_update_log里的loop_refnos，basic_cata_refnos， prim_refnos的合集
-                origin_target_refnos = incr_updates
+                origin_root_refnos = incr_updates
                     .as_ref()
                     .unwrap()
                     .basic_cata_refnos
                     .clone()
                     .into_iter()
                     .collect();
-                origin_target_refnos.extend(incr_updates.as_ref().unwrap().loop_owner_refnos.clone());
-                origin_target_refnos.extend(incr_updates.as_ref().unwrap().prim_refnos.clone());
+                origin_root_refnos.extend(incr_updates.as_ref().unwrap().loop_owner_refnos.clone());
+                origin_root_refnos.extend(incr_updates.as_ref().unwrap().prim_refnos.clone());
             } else if is_debug {
-                origin_target_refnos = debug_root_refnos.clone();
+                origin_root_refnos = debug_root_refnos.clone();
             }
 
             let incr_updates_log_arc = Arc::new(incr_updates.clone().unwrap_or_default());
 
+            //Step 1、提前缓存ploo, 得到对齐方式的偏移
+            let loop_sjus_map = DashMap::new();
+            {
+                let Ok(target_ploo_refnos) =
+                    aios_core::query_multi_deep_children_filter_inst(
+                        origin_root_refnos.clone(),
+                        vec!["PLOO".into()],
+                        skip_exist,
+                    )
+                        .await
+                    else {
+                        continue;
+                    };
+                for r in target_ploo_refnos {
+                    let Ok(loop_att) = aios_core::get_named_attmap(r).await else {
+                        continue;
+                    };
+                    let owner = loop_att.get_owner();
+                    let mut height = loop_att
+                        .get_f32("HEIG")
+                        .unwrap_or(loop_att.get_f32("HEIG").unwrap_or_default());
+                    let sjus = loop_att.get_str("SJUS").unwrap_or_default();
+                    let off_z = cata_model::cal_sjus_value(sjus, height);
+                    //对齐方式的距离，应该存储下来，子节点要与其保持一致的偏移
+                    //插入方向和偏移距离
+                    loop_sjus_map.insert(owner, (Vec3::NEG_Z * off_z, height));
+                }
+            }
+            let loop_sjus_map_arc = Arc::new(loop_sjus_map);
+
             //是否需要按照类型进行分组
             // dbg!(&origin_target_refnos);
             //使用tokio的多线程处理
-            for target in origin_target_refnos.clone() {
+            for target in origin_root_refnos.clone() {
                 let incr_updates_log = incr_updates_log_arc.clone();
                 let db_option = db_option.clone();
                 let sender = sender.clone();
                 // let handle = tokio::task::spawn(async move {
                 let mut target_refnos = vec![target];
-                //Step 1、提前缓存ploo, 得到对齐方式的偏移
-                let loop_sjus_map = DashMap::new();
-                {
-                    let Ok(target_ploo_refnos) =
-                        aios_core::query_multi_deep_children_filter_inst(
-                            target_refnos.clone(),
-                            vec!["PLOO".into()],
-                            skip_exist,
-                        )
-                            .await
-                        else {
-                            continue;
-                        };
-                    for r in target_ploo_refnos {
-                        let Ok(loop_att) = aios_core::get_named_attmap(r).await else {
-                            continue;
-                        };
-                        let owner = loop_att.get_owner();
-                        let mut height = loop_att
-                            .get_f32("HEIG")
-                            .unwrap_or(loop_att.get_f32("HEIG").unwrap_or_default());
-                        let sjus = loop_att.get_str("SJUS").unwrap_or_default();
-                        let off_z = cata_model::cal_sjus_value(sjus, height);
-                        //对齐方式的距离，应该存储下来，子节点要与其保持一致的偏移
-                        //插入方向和偏移距离
-                        loop_sjus_map.insert(owner, (Vec3::NEG_Z * off_z, height));
-                    }
-                }
-                let loop_sjus_map_arc = Arc::new(loop_sjus_map);
+
                 let mut gen_inst_handles = vec![];
                 //元件库的模型计算
                 {
@@ -395,6 +397,10 @@ pub async fn gen_all_geos_data(
                 futures::future::join_all(gen_inst_handles).await;
                 // });
                 // handles.push(handle);
+                //如果是增量更新，只需要运行一次，就可以停止，因为incr_log里已经包含了批量的refnos
+                if is_incr_update{
+                    break;
+                }
             }
             if dbno != 0 {
                 println!("数据库号： {dbno} 生成完毕。");

@@ -38,7 +38,6 @@ pub async fn gen_loop_geos(
     let mut batch_size = loop_owner_cnt / batch_chunks_cnt + 1;
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
-        batch_size = 1;
         batch_chunks_cnt = loop_owner_cnt;
     }
     let mut handles = vec![];

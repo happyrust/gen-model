@@ -479,8 +479,9 @@ pub async fn sync_total_async_threaded(
 
         //执行保存db_info sql
         let db_info_sql = db_info_sql.join(";");
-        SUL_DB.query(&db_info_sql).await.expect("save db_info failed");
-
+        if !db_info_sql.is_empty(){
+            SUL_DB.query(&db_info_sql).await.expect("save db_info failed");
+        }
     });
     all_handles.push(parse_handle);
     futures::future::join_all(take(&mut all_handles)).await;

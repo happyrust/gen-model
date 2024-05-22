@@ -1,4 +1,4 @@
-use crate::fast_model::process_meshes_update_db;
+use crate::fast_model::process_meshes_update_db_deep;
 use aios_core::room::room::{load_aabb_tree, GLOBAL_AABB_TREE};
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::test::test_surreal::init_test_surreal;
@@ -23,7 +23,7 @@ use aios_core::options::DbOption;
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
     let option = init_test_surreal().await;
     let refno = "24381/58346".into();
-    process_meshes_update_db(None, (&["24381/34303".into(), refno]))
+    process_meshes_update_db_deep(None, (&["24381/34303".into(), refno]))
         .await
         .unwrap();
     load_aabb_tree().await.unwrap();

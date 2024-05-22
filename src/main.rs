@@ -41,7 +41,7 @@ use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal
 #[cfg(feature = "gen_model")]
 use aios_database::fast_model::gen_all_geos_data;
 use aios_database::fast_model::room_model::build_room_relations;
-use aios_database::fast_model::{EXIST_MESH_GEO_HASHES, gen_inst_meshes, process_meshes_update_db};
+use aios_database::fast_model::{EXIST_MESH_GEO_HASHES, gen_inst_meshes, process_meshes_update_db_deep};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -99,9 +99,7 @@ async fn main() -> anyhow::Result<()> {
 
     let sync_live = db_option.sync_live.unwrap_or(false);
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    if sync_live{
-        mgr.init_watcher().await.unwrap();
-    }
+
     /// 是否全部同步模型
     if db_option.total_sync || db_option.incr_sync {
         // 同步pdms数据
@@ -109,6 +107,9 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     /// 创建db manager
+    if sync_live{
+        mgr.init_watcher().await.unwrap();
+    }
 
     #[cfg(feature = "gen_model")]
     if db_option.gen_model {
@@ -131,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
             EXIST_MESH_GEO_HASHES.insert(geo_hash);
         }
 
-        process_meshes_update_db(Some(db_option.clone()), &debug_refnos).await.expect("更新模型数据失败");
+        process_meshes_update_db_deep(Some(db_option.clone()), &debug_refnos).await.expect("更新模型数据失败");
         println!("处理模型花费时间: {} ms", time.elapsed().as_millis());
     }
 

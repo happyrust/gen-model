@@ -93,6 +93,8 @@ pub async fn save_instance_data(
                 stringify!(inst_geo),
                 json_vec.join(",")
             ));
+            #[cfg(feature = "debug_sql")]
+            println!("insert inst_geo sql: {}", &sql_string);
             //使用surreal 保存NamedAttrMap
             join_set.spawn(async move {
                 SUL_DB.query(sql_string).await.unwrap();

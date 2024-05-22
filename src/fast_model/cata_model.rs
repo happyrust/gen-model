@@ -135,7 +135,6 @@ pub async fn gen_cata_geos(
     let mut batch_size = all_unique_keys.len() / batch_chunks_cnt + 1;
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
-        batch_size = 1;
         batch_chunks_cnt = all_unique_keys.len();
     }
     println!("使用元件库的模型总数：{unique_cata_cnt}, 分块数量: {batch_chunks_cnt}");

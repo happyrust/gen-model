@@ -20,15 +20,11 @@ use pdms_io::io::PdmsIO;
 use pdms_io::sync::compress::{execute_compress, CompressOptions};
 use pdms_io::watch::PdmsWatcher;
 use petgraph::visit::Walker;
-use rumqttc::QoS;
-use surrealdb::sql::Thing;
 use tokio::fs::create_dir_all;
-use tokio::task::JoinSet;
 use walkdir::WalkDir;
 
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
-use crate::fast_model::{gen_all_geos_data, process_meshes_update_db};
-// use pdms_io::watch::PdmsWatcher;
+use crate::fast_model::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::mqtt_service::SyncE3dFileMsg;
@@ -82,15 +78,24 @@ impl AiosDBManager {
         let mut total_deleted_len = 0;
         let mut geo_update_log = IncrGeoUpdateLog::default();
         let mut owner_children_map = IndexMap::new();
+        let mut delete_relate_sqls = vec![];
         let mut all_relate_sqls = vec![];
         let mut has_changed = false;
         //TODO: 如何鉴别只有claim page的变化，没有数据的更新，就不需要执行增量更新
         for (path, (basic_info, last_pageno)) in increment_ranges_map {
             let mut io = PdmsIO::new(path, true);
             io.open()?;
-            let eles_map = io
-                .collect_increment_eles(&basic_info, last_pageno)
+            let mut eles_map = io
+                .collect_increment_eles(last_pageno)
                 .await?;
+            let sync_refnos = self.db_option.get_manual_sync_refnos();
+            if !sync_refnos.is_empty(){
+                for r in sync_refnos{
+                    let sync_map = io.auto_get_elements_deep(r).await.unwrap_or_default();
+                    // dbg!(&sync_map);
+                    eles_map.extend(sync_map);
+                }
+            }
             if eles_map.is_empty(){
                 continue;
             }
@@ -111,7 +116,7 @@ impl AiosDBManager {
                 clear_all_caches(refno).await;
             }
 
-            let mut need_delete_owner_set = HashSet::new();
+            let mut processed_owner_set = HashSet::new();
             for (&refno, ele) in &eles_map {
                 let mut attmap: NamedAttrMap = ele.whole_attmap.merge().into();
                 attmap.set_e3d_version(ele.version as _);
@@ -119,11 +124,10 @@ impl AiosDBManager {
                 let type_name = attmap.get_type();
                 let type_name = type_name.as_str();
                 has_changed = true;
-                // dbg!(ele.refno);
-                // dbg!(&attmap);
                 let mut ele_op = EleOperation::Modified;
                 let mut need_update_all_relate_after_delete = false;
                 let mut need_update_all_relate_after_add = false;
+                //需要处理虽然存在，但是owner关系还没建立的情况
                 if exist_refnos.contains(&ele.refno) {
                     let old_children = aios_core::get_children_refnos(ele.refno).await?;
                     for (i, child) in old_children.into_iter().enumerate() {
@@ -153,7 +157,6 @@ impl AiosDBManager {
                             .iter()
                             .position(|&x| x == refno)
                             .unwrap_or(0);
-                        // dbg!(owner_ele);
                         is_last_add = index == owner_ele.children.len() - 1;
 
                         let cp = refno.to_pe_key();
@@ -170,37 +173,35 @@ impl AiosDBManager {
                     }
                 }
 
-                if need_update_all_relate_after_delete ||
-                    need_update_all_relate_after_add {
-                    //优先使用更新的，因为可能是父节点发生修改，直接全刷
-                    let (owner_ele, o_refno) = if need_update_all_relate_after_add {
-                        (eles_map.get(&owner).unwrap(), owner)
-                    } else {
-                        (ele, ele.refno)
-                    };
-
-                    //不需要重复插入和执行，特别是多个的时候
-                    if !need_delete_owner_set.contains(&o_refno) {
-                        all_relate_sqls.push(format!(
-                            "delete pe_owner:[{0}, 0]..[{0}, {1}];",
-                            o_refno.to_pe_key(),
-                            owner_ele.children.len()
+                // if need_update_all_relate_after_delete ||
+                //     need_update_all_relate_after_add
+                //如果owner 存在这个map里，那么肯定是能重刷 owner relate 的
+                //如果不在，就需要去找到这个owner，单独重刷
+                if let Some(owner_ele) = eles_map.get(&owner) {
+                    //只要有children，都可以直接进行一次
+                    if !processed_owner_set.contains(&refno) {
+                        delete_relate_sqls.push(format!(
+                            "delete pe_owner:[{0}, 0]..[{0}, 100];",
+                            refno.to_pe_key()
                         ));
 
-
-                        let relate_sqls = owner_ele
-                            .children
-                            .iter()
-                            .enumerate()
-                            .map(|(i, child)| {
-                                let cp = child.to_pe_key();
-                                format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", cp, o_refno.to_pe_key())
-                            })
-                            .collect::<Vec<String>>();
-                        all_relate_sqls.extend_from_slice(&relate_sqls);
-
-                        need_delete_owner_set.insert(o_refno);
+                        if !ele.children.is_empty(){
+                            let relate_sqls = ele
+                                .children
+                                .iter()
+                                .enumerate()
+                                .map(|(i, child)| {
+                                    let cp = child.to_pe_key();
+                                    format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", cp, refno.to_pe_key())
+                                })
+                                .collect::<Vec<String>>();
+                            all_relate_sqls.extend_from_slice(&relate_sqls);
+                        }
+                        processed_owner_set.insert(refno);
                     }
+                }else{
+                    //如果有未发现的element 就需要去数据文件里找出这个element，然后添加
+                    dbg!(ele);
                 }
 
                 #[cfg(feature = "debug_parse")]
@@ -250,12 +251,24 @@ impl AiosDBManager {
         let mut relate_join_set = tokio::task::JoinSet::new();
         let mut time = Instant::now();
         // dbg!(all_relate_sqls.len());
+
+        let mut chunks = delete_relate_sqls.chunks(100);
+        for mut s in chunks {
+            let sql = s.into_iter().join("");
+            // dbg!(&sql);
+            // #[cfg(feature = "debug_parse")]
+            // println!("delete relates sql: {}", &sql);
+            // relate_join_set.spawn(async move {
+                SUL_DB.query(sql).await.unwrap();
+            // });
+        }
+
         let mut chunks = all_relate_sqls.chunks(100);
         for mut s in chunks {
             let sql = s.into_iter().join("");
             // dbg!(&sql);
-            #[cfg(feature = "debug_parse")]
-            println!("relates sql: {}", &sql);
+            // #[cfg(feature = "debug_parse")]
+            // println!("add relates sql: {}", &sql);
             relate_join_set.spawn(async move {
                 SUL_DB.query(sql).await.unwrap();
             });
@@ -391,7 +404,7 @@ impl AiosDBManager {
             .await
             .unwrap();
 
-        dbg!(&all_refnos);
+        // dbg!(&all_refnos);
         //todo 把历史的数据 inst_relate 里的in 改成使用pe_history:[refno, version]
         //todo 有个时间差，改好了未必更新完了，需要在这里更新后，推送通知？
         process_meshes_update_db(None, &all_refnos)
@@ -431,9 +444,9 @@ impl AiosDBManager {
                 }
 
                 let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
-                // if db_num != 1112 {
-                //     continue;
-                // }
+                if db_num != 1112 {
+                    continue;
+                }
                 let file_latest_max_pgno = PdmsIO::new(path.to_path_buf(), true)
                     .get_att_latest_pgno()
                     .unwrap_or_default();

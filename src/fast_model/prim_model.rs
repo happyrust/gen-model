@@ -35,7 +35,6 @@ pub async fn gen_prim_geos(
     let mut batch_size = prim_cnt / batch_chunks_cnt + 1;
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
-        batch_size = 1;
         batch_chunks_cnt = prim_cnt;
     }
     let mut handles = vec![];
