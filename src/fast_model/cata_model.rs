@@ -778,9 +778,10 @@ pub async fn gen_cata_geos(
                     {
                         let l_dir = axis_map[1].dir.unwrap_or_default();
                         let ref_dir = axis_map[1].ref_dir.unwrap_or_default();
+                        // dbg!(ref_dir);
 
                         //todo 需要弄清楚为啥是Vec3::Z
-                        let mut l_ref_dir = world_trans.transform_vec3(Vec3::Z).normalize_or_zero();
+                        let mut l_ref_dir = world_trans.transform_vec3(ref_dir).normalize_or_zero();
                         if l_ref_dir.dot(l_dir) >= 0.99 {
                             let cond = if l_dir.cross(ref_dir).z >= 0.0 {
                                 1.0
@@ -794,7 +795,7 @@ pub async fn gen_cata_geos(
                             // dbg!(l_pos);
                             current_tubing.start_pt = l_pos;
                             current_tubing.desire_leave_dir = l_dir;
-                            // dbg!(l_dir);
+                            // dbg!(l_ref_dir);
                             current_tubing.leave_ref_dir = if l_ref_dir.is_normalized() {
                                 Some(l_ref_dir)
                             } else {
