@@ -177,13 +177,17 @@ impl AiosDBManager {
                 //     need_update_all_relate_after_add
                 //如果owner 存在这个map里，那么肯定是能重刷 owner relate 的
                 //如果不在，就需要去找到这个owner，单独重刷
-                if let Some(owner_ele) = eles_map.get(&owner) {
+                // if let Some(owner_ele) = eles_map.get(&owner)
+                {
                     //只要有children，都可以直接进行一次
                     if !processed_owner_set.contains(&refno) {
-                        delete_relate_sqls.push(format!(
-                            "delete pe_owner:[{0}, 0]..[{0}, 100];",
-                            refno.to_pe_key()
-                        ));
+                        //只有不是add的情况下才需要这么去删除
+                        if ele_op != EleOperation::Add {
+                            delete_relate_sqls.push(format!(
+                                "delete pe_owner:[{0}, 0]..[{0}, 100];",
+                                refno.to_pe_key()
+                            ));
+                        }
 
                         if !ele.children.is_empty(){
                             let relate_sqls = ele
@@ -199,9 +203,33 @@ impl AiosDBManager {
                         }
                         processed_owner_set.insert(refno);
                     }
-                }else{
+                }
+                if eles_map.get(&owner).is_none() {
                     //如果有未发现的element 就需要去数据文件里找出这个element，然后添加
-                    dbg!(ele);
+                    // dbg!(ele);
+                    //找到这个owner，然后把最新的结果更新进来
+                    if !processed_owner_set.contains(&owner) {
+                        if let Ok(owner_ele) = io.auto_get_element(owner).await{
+                            delete_relate_sqls.push(format!(
+                                "delete pe_owner:[{0}, 0]..[{0}, 100];",
+                                owner.to_pe_key()
+                            ));
+                            let owner_pe_key = owner.to_pe_key();
+                            if !owner_ele.children.is_empty(){
+                                let relate_sqls = owner_ele
+                                    .children
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, child)| {
+                                        format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", child.to_pe_key(), &owner_pe_key)
+                                    })
+                                    .collect::<Vec<String>>();
+                                dbg!(&relate_sqls);
+                                all_relate_sqls.extend_from_slice(&relate_sqls);
+                            }
+                            processed_owner_set.insert(owner);
+                        }
+                    }
                 }
 
                 #[cfg(feature = "debug_parse")]
@@ -444,9 +472,9 @@ impl AiosDBManager {
                 }
 
                 let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
-                if db_num != 1112 {
-                    continue;
-                }
+                // if db_num != 1112 {
+                //     continue;
+                // }
                 let file_latest_max_pgno = PdmsIO::new(path.to_path_buf(), true)
                     .get_att_latest_pgno()
                     .unwrap_or_default();
