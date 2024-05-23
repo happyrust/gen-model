@@ -235,6 +235,11 @@ pub async fn apply_insts_boolean_manifold(
                                     update_sql.push_str(&format!("update {} set bad_bool=true;", &inst_relate_id));
                                     continue;
                                 };
+                                #[cfg(feature = "debug_model")]
+                                {
+                                    let pos_mesh = PlantMesh::from(&pos_manifold);
+                                    pos_mesh.export_obj(false, "pos_t.obj").unwrap();
+                                }
 
                                 let mut neg_manifolds = vec![];
                                 let mut found_need_occ = false;
@@ -311,6 +316,11 @@ pub async fn apply_insts_boolean_manifold(
                                             * neg_t.compute_matrix().as_dmat4()
                                             * trans.compute_matrix().as_dmat4();
                                         if let Ok(manifold) = load_manifold(&id, m) {
+                                            #[cfg(feature = "debug_model")]
+                                            {
+                                                let neg_mesh = PlantMesh::from(&manifold);
+                                                neg_mesh.export_obj(false, &format!("{}_t.obj", &id)).unwrap();
+                                            }
                                             neg_manifolds.push(manifold);
                                         }
                                     }
