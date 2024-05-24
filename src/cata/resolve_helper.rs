@@ -495,12 +495,12 @@ pub fn parse_str_axis_to_vec3(
             if cap.len() == 6 {
                 let val_str = cap[2].to_string();
                 let val_result =
-                    eval_str_to_f64(&val_str, context, "AXIS")?.to_string();
+                    eval_str_to_f64(&val_str, context, "ANGL")?.to_string();
                 new_dir_str = dir_str.replace(&val_str, &val_result);
 
                 let val_str = cap[4].to_string();
                 let val_result =
-                    eval_str_to_f64(&val_str, context, "AXIS")?.to_string();
+                    eval_str_to_f64(&val_str, context, "ANGL")?.to_string();
                 new_dir_str = new_dir_str.replace(&val_str, &val_result);
                 is_three = true;
             }
@@ -514,7 +514,7 @@ pub fn parse_str_axis_to_vec3(
                 if cap.len() == 4 {
                     let val_str = cap[2].to_string();
                     let val_result =
-                        eval_str_to_f64(&val_str, context, "AXIS")?.to_string();
+                        eval_str_to_f64(&val_str, context, "ANGL")?.to_string();
                     new_dir_str = dir_str.replace(&val_str, &val_result);
                 }
             }
