@@ -652,7 +652,7 @@ pub async fn gen_cata_geos(
                     bran_comp_vec.push(refno);
                     current_tubing.arrive_refno = refno;
                     //ATTA，如果设置成SPKBRK，产生直段，否则不产生直段
-                    let mut skip = (arrive_type == "ATTA")
+                    let mut skip = (arrive_type == "ATTA" || arrive_type == "BRCO")
                         && !aios_core::get_named_attmap(refno)
                         .await?
                         .get_bool_or_default("SPKBRK");
