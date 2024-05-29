@@ -184,7 +184,7 @@ pub async fn apply_insts_boolean_manifold(
                 out.aabb.d as aabb, object::keys(out.param)[0] as para_type
                 from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"] and out.param != NONE)]
             from array::flatten(in<-neg_relate.in->inst_relate) ) as neg_ts from {} where !bad_bool
-            and (in<-neg_relate)[0] != none and aabb.d!=none
+            and (in<-neg_relate)[0] != none and aabb.d != NONE
         "#,
         inst_keys
     );

@@ -20,9 +20,11 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
+use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 
 // use regex::internal::Input;
 use aios_core::get_db_option;
+use aios_core::material_query::save_all_material_data;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::room::room::load_aabb_tree;
@@ -145,6 +147,11 @@ async fn main() -> anyhow::Result<()> {
         println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
         update_cal_equip().await?;
         update_cal_bran_component().await?;
+    }
+    let aios_mgr = AiosDBMgr::init_from_db_option().await?;
+    let gen_material = db_option.gen_material.unwrap_or(false);
+    if gen_material {
+        save_all_material_data(&aios_mgr).await?;
     }
 
     if sync_live{
