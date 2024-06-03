@@ -108,6 +108,8 @@ pub fn cal_sjus_value(sjus: &str, height: f32) -> f32 {
 }
 
 /// 生成元件库的branch型几何体
+/// 动态修改tubi，还是要单独出来, 还是直接去修改整个bran？
+/// 先暂时整个重新生成？
 pub async fn gen_cata_geos(
     db_option: Arc<DbOption>,
     target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
@@ -962,3 +964,5 @@ pub async fn query_ngmr_owner(
     // dbg!((refno, ngmr_geo_refno, &target_refnos));
     Ok(target_refnos)
 }
+
+

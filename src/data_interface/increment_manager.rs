@@ -76,7 +76,7 @@ impl AiosDBManager {
         let mut total_modify_len = 0;
         let mut total_deleted_len = 0;
         let mut geo_update_log = IncrGeoUpdateLog::default();
-        let mut owner_children_map = IndexMap::new();
+        // let mut owner_children_map = IndexMap::new();
         let mut delete_relate_sqls = vec![];
         let mut all_relate_sqls = vec![];
         let mut has_changed = false;
@@ -254,14 +254,16 @@ impl AiosDBManager {
                     geo_update_log.bran_hanger_refnos.insert(refno);
                 } else if CATA_GEO_NAMES.contains(&type_name) {
                     geo_update_log.basic_cata_refnos.insert(refno);
-                    owner_children_map
-                        .entry(attmap.get_owner())
-                        .or_insert_with(HashSet::new)
-                        .insert(refno);
+                    // owner_children_map
+                    //     .entry(attmap.get_owner())
+                    //     .or_insert_with(HashSet::new)
+                    //     .insert(refno);
                 } else {
                     let owner_type = aios_core::get_type_name(owner).await?;
                     if CATA_HAS_TUBI_GEO_NAMES.contains(&owner_type.as_str()) {
-                        geo_update_log.basic_cata_refnos.insert(refno);
+                        // geo_update_log.basic_cata_refnos.insert(refno);
+                        //直接更新整个bran，简化逻辑
+                        geo_update_log.bran_hanger_refnos.insert(owner);
                     }
                 }
                 let increment_info = IncrementInfo {
@@ -282,6 +284,14 @@ impl AiosDBManager {
         //如果没有发生变化，直接返回
         if !has_changed {
             return Ok(false);
+        }
+
+        //备份更新 tubi 的数据
+        if !geo_update_log.bran_hanger_refnos.is_empty(){
+            let bran_refnos = geo_update_log.bran_hanger_refnos.iter().cloned().collect::<Vec<_>>();
+            backup_att_and_pe_to_history_tables(&bran_refnos)
+                .await
+                .unwrap();
         }
 
         //relate 优先处理
@@ -369,6 +379,7 @@ impl AiosDBManager {
                     }
                 }
 
+                //备份需要修改的历史数据
                 backup_att_and_pe_to_history_tables(&history_refnos_set)
                     .await
                     .unwrap();
@@ -419,17 +430,19 @@ impl AiosDBManager {
             SUL_DB.query(&del_sql).await.unwrap();
         }
         //todo 批量查询types
-        for (k, v) in owner_children_map {
-            if let Ok(type_name) = aios_core::get_type_name(k).await {
-                if type_name == "BRAN" || type_name == "HANG" {
-                    geo_update_log.bran_hanger_refnos.insert(k);
-                }
-            }
-        }
+        // for (k, v) in owner_children_map {
+        //     if let Ok(type_name) = aios_core::get_type_name(k).await {
+        //         if type_name == "BRAN" || type_name == "HANG" {
+        //             geo_update_log.bran_hanger_refnos.insert(k);
+        //         }
+        //     }
+        // }
         let r: Vec<IncrGeoUpdateLog> = SUL_DB
             .create("incr_model_log")
             .content(&geo_update_log)
             .await?;
+
+        dbg!(&geo_update_log);
 
         let all_refnos = geo_update_log
             .get_all_visible_refnos()
