@@ -169,6 +169,8 @@ pub async fn gen_cata_geos(
                     if gen_mesh || !target_cata.exist_inst {
                         //如果没有已有的，需要生成
                         let ele_refno = target_cata.group_refnos[0];
+                        #[cfg(feature = "debug_model")]
+                        println!("开始生成元件库模型: {ele_refno}");
                         process_refno = Some(ele_refno);
                         let Ok(Some(cata_refno)) = aios_core::get_cat_refno(ele_refno).await else {
                             // println!("{ele_refno} 的元件库引用为空，跳过");

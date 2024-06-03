@@ -581,7 +581,7 @@ impl AiosDBManager {
                         continue;
                     }
                     //后面用派发任务的方式,不要放在这里阻塞
-                    println!("changed: {:?}", &event);
+                    // println!("changed: {:?}", &event);
                     // dbg!(&self.watcher.headers);
                     if let Ok(new_headers) = PdmsWatcher::scan_db_headers(&event.paths) {
                         let mut params = IndexMap::new();
