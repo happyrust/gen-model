@@ -671,6 +671,7 @@ dependencies = [
  "bevy_derive",
  "bevy_ecs",
  "bevy_reflect",
+ "bevy_state",
  "bevy_tasks",
  "bevy_utils",
  "console_error_panic_hook",
@@ -754,9 +755,11 @@ dependencies = [
 name = "bevy_math"
 version = "0.14.0-dev"
 dependencies = [
+ "bevy_reflect",
  "glam 0.27.0",
  "rand",
  "serde",
+ "smallvec",
  "thiserror",
 ]
 
@@ -768,7 +771,6 @@ version = "0.14.0-dev"
 name = "bevy_reflect"
 version = "0.14.0-dev"
 dependencies = [
- "bevy_math",
  "bevy_ptr",
  "bevy_reflect_derive",
  "bevy_utils",
@@ -790,6 +792,26 @@ dependencies = [
  "quote",
  "syn 2.0.60",
  "uuid",
+]
+
+[[package]]
+name = "bevy_state"
+version = "0.14.0-dev"
+dependencies = [
+ "bevy_ecs",
+ "bevy_reflect",
+ "bevy_state_macros",
+ "bevy_utils",
+]
+
+[[package]]
+name = "bevy_state_macros"
+version = "0.14.0-dev"
+dependencies = [
+ "bevy_macro_utils",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.60",
 ]
 
 [[package]]

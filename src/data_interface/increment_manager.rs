@@ -7,9 +7,9 @@ use std::time::Instant;
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::tool::db_tool::db1_dehash;
+use aios_core::version::backup_att_and_pe_to_history_tables;
 use aios_core::{clear_all_caches, SUL_DB};
 use aios_core::{get_db_option, RefU64Vec};
-use aios_core::version::backup_att_and_pe_to_history_tables;
 use futures::StreamExt;
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
@@ -24,9 +24,9 @@ use tokio::fs::create_dir_all;
 use walkdir::WalkDir;
 
 use crate::data_interface::increment_record::IncrGeoUpdateLog;
-use crate::fast_model::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::fast_model::*;
 use crate::mqtt_service::SyncE3dFileMsg;
 
 #[derive(Debug, Default, Clone)]
@@ -57,7 +57,6 @@ impl IncrementInfo {
 
 const JSON_CHUNK_COUNT: usize = 200;
 
-
 pub const CHECK_DB_TYPES: [&'static str; 6] = ["CATA", "DESI", "DICT", "SYST", "GLB", "GLOB"];
 
 impl AiosDBManager {
@@ -85,18 +84,16 @@ impl AiosDBManager {
         for (path, (basic_info, last_pageno)) in increment_ranges_map {
             let mut io = PdmsIO::new(path, true);
             io.open()?;
-            let mut eles_map = io
-                .collect_increment_eles(last_pageno)
-                .await?;
+            let mut eles_map = io.collect_increment_eles(last_pageno).await?;
             let sync_refnos = self.db_option.get_manual_sync_refnos();
-            if !sync_refnos.is_empty(){
-                for r in sync_refnos{
+            if !sync_refnos.is_empty() {
+                for r in sync_refnos {
                     let sync_map = io.auto_get_elements_deep(r).await.unwrap_or_default();
                     // dbg!(&sync_map);
                     eles_map.extend(sync_map);
                 }
             }
-            if eles_map.is_empty(){
+            if eles_map.is_empty() {
                 continue;
             }
             dbg!((last_pageno, eles_map.len()));
@@ -189,14 +186,18 @@ impl AiosDBManager {
                             ));
                         }
 
-                        if !ele.children.is_empty(){
+                        if !ele.children.is_empty() {
                             let relate_sqls = ele
                                 .children
                                 .iter()
                                 .enumerate()
                                 .map(|(i, child)| {
                                     let cp = child.to_pe_key();
-                                    format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", cp, refno.to_pe_key())
+                                    format!(
+                                        "RELATE {0}->pe_owner:[{1}, {i}]->{1};",
+                                        cp,
+                                        refno.to_pe_key()
+                                    )
                                 })
                                 .collect::<Vec<String>>();
                             all_relate_sqls.extend_from_slice(&relate_sqls);
@@ -209,21 +210,26 @@ impl AiosDBManager {
                     // dbg!(ele);
                     //找到这个owner，然后把最新的结果更新进来
                     if !processed_owner_set.contains(&owner) {
-                        if let Ok(owner_ele) = io.auto_get_element(owner).await{
+                        if let Ok(owner_ele) = io.auto_get_element(owner).await {
                             delete_relate_sqls.push(format!(
                                 "delete pe_owner:[{0}, 0]..[{0}, 100];",
                                 owner.to_pe_key()
                             ));
                             let owner_pe_key = owner.to_pe_key();
-                            if !owner_ele.children.is_empty(){
+                            if !owner_ele.children.is_empty() {
                                 let relate_sqls = owner_ele
                                     .children
                                     .iter()
                                     .enumerate()
                                     .map(|(i, child)| {
-                                        format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", child.to_pe_key(), &owner_pe_key)
+                                        format!(
+                                            "RELATE {0}->pe_owner:[{1}, {i}]->{1};",
+                                            child.to_pe_key(),
+                                            &owner_pe_key
+                                        )
                                     })
                                     .collect::<Vec<String>>();
+                                #[cfg(feature = "debug_parse")]
                                 dbg!(&relate_sqls);
                                 all_relate_sqls.extend_from_slice(&relate_sqls);
                             }
@@ -234,13 +240,16 @@ impl AiosDBManager {
 
                 #[cfg(feature = "debug_parse")]
                 dbg!((refno, ele_op));
-
+                //TODO 如果修改的是顶点， 这里要考虑到最终的构件，也要添加进来，比如 vert -> GWALL/FLOOR 等
+                //e3d will handle automatically, so no check here.
+                // if type_name == "VERT" || type_name == "PAVE" {
+                //     // dbg!(type_name);
+                //     //owner->owner
+                // }
                 if PRIMITIVE_NOUN_NAMES.contains(&type_name) {
                     geo_update_log.prim_refnos.insert(refno);
                 } else if GNERAL_LOOP_OWNER_NOUN_NAMES.contains(&type_name) {
-                    //TODO 如果修改的是顶点， 这里要考虑到最终的构件，也要添加进来，比如 vert -> GWALL/FLOOR 等
                     geo_update_log.loop_owner_refnos.insert(refno);
-                    geo_update_log.loop_owner_refnos.insert(owner);
                 } else if CATA_HAS_TUBI_GEO_NAMES.contains(&type_name) {
                     geo_update_log.bran_hanger_refnos.insert(refno);
                 } else if CATA_GEO_NAMES.contains(&type_name) {
@@ -287,7 +296,7 @@ impl AiosDBManager {
             // #[cfg(feature = "debug_parse")]
             // println!("delete relates sql: {}", &sql);
             // relate_join_set.spawn(async move {
-                SUL_DB.query(sql).await.unwrap();
+            SUL_DB.query(sql).await.unwrap();
             // });
         }
 
@@ -360,18 +369,18 @@ impl AiosDBManager {
                     }
                 }
 
-                backup_att_and_pe_to_history_tables(&history_refnos_set).await.unwrap();
+                backup_att_and_pe_to_history_tables(&history_refnos_set)
+                    .await
+                    .unwrap();
 
                 //调用函数，将当前数据存储到版本表里
                 // println!("{}", &update_pe_sql_str);
                 let insert_pe_sql = if !insert_pe_jsons_str.is_empty() {
                     insert_pe_jsons_str.pop();
-                    format!(
-                        "INSERT IGNORE INTO pe [{}];",
-                        insert_pe_jsons_str
-                    )
-                } else { "".to_owned() };
-
+                    format!("INSERT IGNORE INTO pe [{}];", insert_pe_jsons_str)
+                } else {
+                    "".to_owned()
+                };
 
                 let handle = tokio::task::spawn(async move {
                     if !update_att_sql_str.is_empty() {
@@ -389,7 +398,6 @@ impl AiosDBManager {
                         let response = SUL_DB.query(insert_pe_sql).await.unwrap();
                         // dbg!(&response);
                     }
-
                 });
 
                 att_pe_handles.push(handle);
@@ -400,16 +408,12 @@ impl AiosDBManager {
         // while let Some(_) = sql_join_set.join_next().await {}
 
         //删除模型的处理
-        let deleted_refnos: Vec<(usize, RefU64, RefU64)> = deleted_refnos_set.into_iter().collect::<Vec<_>>();
+        let deleted_refnos: Vec<(usize, RefU64, RefU64)> =
+            deleted_refnos_set.into_iter().collect::<Vec<_>>();
         for chunk in deleted_refnos.chunks(JSON_CHUNK_COUNT) {
             let del_sql = chunk
                 .into_iter()
-                .map(|(i, refno, owner)| {
-                    format!(
-                        "update {} set deleted=true;",
-                        refno.to_pe_key()
-                    )
-                })
+                .map(|(i, refno, owner)| format!("update {} set deleted=true;", refno.to_pe_key()))
                 .join("");
             // dbg!(&del_sql);
             SUL_DB.query(&del_sql).await.unwrap();
@@ -427,7 +431,15 @@ impl AiosDBManager {
             .content(&geo_update_log)
             .await?;
 
-        let all_refnos = geo_update_log.get_all_visible_refnos().into_iter().collect::<Vec<_>>();
+        let all_refnos = geo_update_log
+            .get_all_visible_refnos()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let all_deep_refnos = geo_update_log
+            .get_all_visible_refnos_deep()
+            .await
+            .into_iter()
+            .collect::<Vec<_>>();
         gen_all_geos_data(&self.db_option, Some(geo_update_log))
             .await
             .unwrap();
@@ -435,7 +447,11 @@ impl AiosDBManager {
         // dbg!(&all_refnos);
         //todo 把历史的数据 inst_relate 里的in 改成使用pe_history:[refno, version]
         //todo 有个时间差，改好了未必更新完了，需要在这里更新后，推送通知？
-        process_meshes_update_db(None, &all_refnos)
+        //需要针对bran（hanger） 展开到子节点
+
+        #[cfg(feature = "debug_sql")]
+        dbg!(&all_deep_refnos);
+        process_meshes_update_db(Some(self.db_option.clone()), &all_deep_refnos)
             .await
             .unwrap();
 
@@ -483,7 +499,7 @@ impl AiosDBManager {
                     continue;
                 }
                 //TODO 这种情况，需要全新的解析
-                let Ok(db_latest_pgno) = aios_core::query_db_max_version(db_num).await else{
+                let Ok(db_latest_pgno) = aios_core::query_db_max_version(db_num).await else {
                     //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
                     continue;
                 };
@@ -507,12 +523,11 @@ impl AiosDBManager {
                         #[cfg(feature = "debug_parse")]
                         dbg!((db_num, db_latest_pgno));
                         //暂时先跳过更新比较大的
-                        if file_latest_max_pgno > db_latest_pgno && (file_latest_max_pgno - db_latest_pgno < 1000) {
+                        if file_latest_max_pgno > db_latest_pgno
+                            && (file_latest_max_pgno - db_latest_pgno < 1000)
+                        {
                             println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大pgno: {db_latest_pgno}, 文件属性对应pgno: {file_latest_max_pgno}", &file_name);
-                            params.insert(
-                                path.to_path_buf(),
-                                (basic_info.clone(), db_latest_pgno),
-                            );
+                            params.insert(path.to_path_buf(), (basic_info.clone(), db_latest_pgno));
                         }
                         self.watcher.headers.insert(path.to_path_buf(), basic_info);
                     }

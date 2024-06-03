@@ -42,10 +42,17 @@ pub async fn gen_all_geos_data(
 ) -> anyhow::Result<bool> {
     let skip_exist = !db_option.replace_mesh;
     let time = Instant::now();
+    // dbg!(&incr_updates);
     //根据需要拉入数据到本地数据库也可以
     let is_incr_update = incr_updates.is_some();
     //排除增量更新的情况，如果debug_root_refnos 为空，即没有模型需要生成
-    if !is_incr_update && db_option.debug_root_refnos.as_ref().map(|x| x.is_empty()).unwrap_or(false) {
+    if !is_incr_update
+        && db_option
+            .debug_root_refnos
+            .as_ref()
+            .map(|x| x.is_empty())
+            .unwrap_or(false)
+    {
         return Ok(true);
     }
     if is_incr_update && incr_updates.as_ref().unwrap().count() == 0 {
@@ -72,6 +79,7 @@ pub async fn gen_all_geos_data(
         db_nos = aios_core::get_design_dbnos(db_option.mdb_name.clone()).await?;
         dbg!(&db_nos);
     }
+    // dbg!((is_incr_update, &db_nos));
 
     let incr_count = if is_incr_update {
         incr_updates.as_ref().unwrap().count()
@@ -100,6 +108,7 @@ pub async fn gen_all_geos_data(
 
     let process_handle = tokio::spawn(async move {
         for dbno in db_nos {
+            dbg!(dbno);
             // let mut handles = vec![];
             if is_incr_update {
                 println!("开始处理更新模型数量: {}", incr_count);
@@ -120,19 +129,17 @@ pub async fn gen_all_geos_data(
                         "select value id from SITE where REFNO.dbnum={}",
                         dbno
                     ))
-                    .await.unwrap();
+                    .await
+                    .unwrap();
                 origin_root_refnos = response.take(0).unwrap();
             } else if is_incr_update {
                 // root_refnos 为incr_update_log里的loop_refnos，basic_cata_refnos， prim_refnos的合集
                 origin_root_refnos = incr_updates
                     .as_ref()
                     .unwrap()
-                    .basic_cata_refnos
-                    .clone()
+                    .get_all_visible_refnos()
                     .into_iter()
                     .collect();
-                origin_root_refnos.extend(incr_updates.as_ref().unwrap().loop_owner_refnos.clone());
-                origin_root_refnos.extend(incr_updates.as_ref().unwrap().prim_refnos.clone());
             } else if is_debug {
                 origin_root_refnos = debug_root_refnos.clone();
             }
@@ -142,16 +149,15 @@ pub async fn gen_all_geos_data(
             //Step 1、提前缓存ploo, 得到对齐方式的偏移
             let loop_sjus_map = DashMap::new();
             {
-                let Ok(target_ploo_refnos) =
-                    aios_core::query_multi_deep_children_filter_inst(
-                        origin_root_refnos.clone(),
-                        vec!["PLOO".into()],
-                        skip_exist,
-                    )
-                        .await
-                    else {
-                        continue;
-                    };
+                let Ok(target_ploo_refnos) = aios_core::query_multi_deep_children_filter_inst(
+                    origin_root_refnos.clone(),
+                    vec!["PLOO".into()],
+                    skip_exist,
+                )
+                .await
+                else {
+                    continue;
+                };
                 for r in target_ploo_refnos {
                     let Ok(loop_att) = aios_core::get_named_attmap(r).await else {
                         continue;
@@ -170,7 +176,7 @@ pub async fn gen_all_geos_data(
             let loop_sjus_map_arc = Arc::new(loop_sjus_map);
 
             //是否需要按照类型进行分组
-            // dbg!(&origin_target_refnos);
+            // dbg!(&origin_root_refnos);
             //使用tokio的多线程处理
             for target in origin_root_refnos.clone() {
                 let incr_updates_log = incr_updates_log_arc.clone();
@@ -194,8 +200,8 @@ pub async fn gen_all_geos_data(
                             vec!["BRAN".into(), "HANG".into()],
                             skip_exist,
                         )
-                            .await
-                            .unwrap();
+                        .await
+                        .unwrap();
                         target_refnos.retain_mut(|x| !r.contains(x));
                         // dbg!(&r);
                         r.into_iter().collect()
@@ -210,18 +216,16 @@ pub async fn gen_all_geos_data(
                     let mut branch_refnos_map = DashMap::new();
                     let mut bran_comp_eles = vec![];
                     for &refno in &target_bran_hanger_refnos {
-                        let children =
-                            aios_core::get_children_pes(refno).await.unwrap_or_default();
+                        let children = aios_core::get_children_pes(refno).await.unwrap_or_default();
                         bran_comp_eles.extend(children.iter().map(|x| x.refno));
                         //求出元件对应的outside bore
                         branch_refnos_map.insert(refno, children);
                     }
 
                     let target_bran_reuse_cata_map: DashMap<String, CataHashRefnoKV> = {
-                        let map =
-                            aios_core::query_group_by_cata_hash(&target_bran_hanger_refnos)
-                                .await
-                                .unwrap_or_default();
+                        let map = aios_core::query_group_by_cata_hash(&target_bran_hanger_refnos)
+                            .await
+                            .unwrap_or_default();
                         // dbg!(&map);
                         map
                     };
@@ -260,14 +264,13 @@ pub async fn gen_all_geos_data(
                             dbg!("查询BRAN, HANG出错");
                             continue;
                         };
-                        let mut use_cata_refnos =
-                            aios_core::query_multi_deep_children_filter_inst(
-                                target_refnos.clone(),
-                                CATA_WITHOUT_REUSE_GEO_NAMES.map(String::from).to_vec(),
-                                skip_exist,
-                            )
-                                .await
-                                .unwrap_or_default();
+                        let mut use_cata_refnos = aios_core::query_multi_deep_children_filter_inst(
+                            target_refnos.clone(),
+                            CATA_WITHOUT_REUSE_GEO_NAMES.map(String::from).to_vec(),
+                            skip_exist,
+                        )
+                        .await
+                        .unwrap_or_default();
                         // dbg!(&use_cata_refnos);
                         use_cata_refnos.extend(bran_children_refnos);
                         let map = aios_core::query_group_by_cata_hash(&use_cata_refnos)
@@ -284,9 +287,7 @@ pub async fn gen_all_geos_data(
                     let mut has_run_cata = false;
                     if gen_cata_flag {
                         //bran，hanger下需要重用的模型
-                        if !target_bran_reuse_cata_map.is_empty()
-                            || !branch_refnos_map.is_empty()
-                        {
+                        if !target_bran_reuse_cata_map.is_empty() || !branch_refnos_map.is_empty() {
                             let sjus_map_clone = loop_sjus_map_arc.clone();
                             let db_option = db_option.clone();
                             let sender = sender.clone();
@@ -298,8 +299,8 @@ pub async fn gen_all_geos_data(
                                     sjus_map_clone,
                                     sender,
                                 )
-                                    .await
-                                    .unwrap();
+                                .await
+                                .unwrap();
                             });
                             has_run_cata = true;
                             gen_inst_handles.push(handle);
@@ -318,8 +319,8 @@ pub async fn gen_all_geos_data(
                                     sjus_map_clone,
                                     sender,
                                 )
-                                    .await
-                                    .unwrap();
+                                .await
+                                .unwrap();
                             });
                             has_run_cata = true;
                             gen_inst_handles.push(handle);
@@ -332,11 +333,12 @@ pub async fn gen_all_geos_data(
                     let target_loop_owner_refnos: Vec<RefU64> = if is_incr_update {
                         incr_updates_log.loop_owner_refnos.iter().cloned().collect()
                     } else {
-                        let mut loop_owner_refnos = aios_core::query_multi_deep_children_filter_inst(
-                            target_refnos.clone(),
-                            GNERAL_LOOP_OWNER_NOUN_NAMES.map(String::from).to_vec(),
-                            skip_exist,
-                        )
+                        let mut loop_owner_refnos =
+                            aios_core::query_multi_deep_children_filter_inst(
+                                target_refnos.clone(),
+                                GNERAL_LOOP_OWNER_NOUN_NAMES.map(String::from).to_vec(),
+                                skip_exist,
+                            )
                             .await
                             .unwrap_or_default();
                         loop_owner_refnos.into_iter().collect()
@@ -356,8 +358,8 @@ pub async fn gen_all_geos_data(
                                 sjus_map_clone,
                                 sender,
                             )
-                                .await
-                                .unwrap();
+                            .await
+                            .unwrap();
                         });
                         gen_inst_handles.push(handle);
                     }
@@ -371,8 +373,8 @@ pub async fn gen_all_geos_data(
                             GNERAL_PRIM_NOUN_NAMES.map(String::from).to_vec(),
                             skip_exist,
                         )
-                            .await
-                            .unwrap_or_default();
+                        .await
+                        .unwrap_or_default();
                         prim_refnos.into_iter().collect()
                     };
                     if !target_prim_refnos.is_empty() {
@@ -387,8 +389,8 @@ pub async fn gen_all_geos_data(
                                 target_prim_refnos.as_slice(),
                                 sender,
                             )
-                                .await
-                                .unwrap();
+                            .await
+                            .unwrap();
                         });
                         gen_inst_handles.push(handle);
                     }
@@ -398,7 +400,7 @@ pub async fn gen_all_geos_data(
                 // });
                 // handles.push(handle);
                 //如果是增量更新，只需要运行一次，就可以停止，因为incr_log里已经包含了批量的refnos
-                if is_incr_update{
+                if is_incr_update {
                     break;
                 }
             }
