@@ -25,6 +25,7 @@ use aios_core::pdms_data::AttInfoMap;
 use anyhow::anyhow;
 use sled::IVec;
 
+pub mod api;
 pub mod tables;
 pub mod consts;
 pub mod data_interface;
