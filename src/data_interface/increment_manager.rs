@@ -130,9 +130,12 @@ impl AiosDBManager {
                     for (i, child) in old_children.into_iter().enumerate() {
                         if !ele.children.contains(&child) {
                             //index current delete refno, owner refno
+                            //需要get deep children
+                            let deep_children = aios_core::query_deep_children_refnos(child).await?;
                             let t = (i, child, refno);
                             println!("Delete: {:?}", t);
-                            deleted_refnos_set.insert(t);
+                            deleted_refnos_set.extend(deep_children);
+                            // deleted_refnos_set.insert(t);
                             total_deleted_len += 1;
                             need_update_all_relate_after_delete = true;
                         }
@@ -406,8 +409,7 @@ impl AiosDBManager {
                     //使用surreal 保存pe
                     if !insert_pe_sql.is_empty() {
                         // println!("insert_pe_sql: {}", &insert_pe_sql);
-                        let response = SUL_DB.query(insert_pe_sql).await.unwrap();
-                        // dbg!(&response);
+                       SUL_DB.query(insert_pe_sql).await.unwrap();
                     }
                 });
 
@@ -419,30 +421,27 @@ impl AiosDBManager {
         // while let Some(_) = sql_join_set.join_next().await {}
 
         //删除模型的处理
-        let deleted_refnos: Vec<(usize, RefU64, RefU64)> =
+        let deleted_refnos: Vec<RefU64> =
             deleted_refnos_set.into_iter().collect::<Vec<_>>();
+        //备份需要删除的模型数据，还是暂时保留在原来的地方？
+        backup_att_and_pe_to_history_tables(&deleted_refnos)
+            .await
+            .unwrap();
+        geo_update_log.delete_refnos.extend(deleted_refnos.clone());
         for chunk in deleted_refnos.chunks(JSON_CHUNK_COUNT) {
             let del_sql = chunk
                 .into_iter()
-                .map(|(i, refno, owner)| format!("update {} set deleted=true;", refno.to_pe_key()))
+                .map(|refno| format!("update {} set deleted=true;", refno.to_pe_key()))
                 .join("");
             // dbg!(&del_sql);
             SUL_DB.query(&del_sql).await.unwrap();
         }
-        //todo 批量查询types
-        // for (k, v) in owner_children_map {
-        //     if let Ok(type_name) = aios_core::get_type_name(k).await {
-        //         if type_name == "BRAN" || type_name == "HANG" {
-        //             geo_update_log.bran_hanger_refnos.insert(k);
-        //         }
-        //     }
-        // }
         let r: Vec<IncrGeoUpdateLog> = SUL_DB
             .create("incr_model_log")
             .content(&geo_update_log)
             .await?;
 
-        dbg!(&geo_update_log);
+        // dbg!(&geo_update_log);
 
         let all_refnos = geo_update_log
             .get_all_visible_refnos()
