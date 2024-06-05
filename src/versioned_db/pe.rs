@@ -26,11 +26,16 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
+#[cfg(feature = "sql")]
 use sqlx::Executor;
+#[cfg(feature = "sql")]
+use sqlx::{MySql, Pool};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use crate::api::element::gen_pdms_element_insert_sql;
 use crate::consts::PDMS_ELEMENTS_TABLE;
+use crate::versioned_db::database::SenderSql;
+use crate::versioned_db::database::SenderSql::{MysqlSql, SurrealSql};
 
 fn gen_full_name(
     refno: RefU64,
@@ -115,7 +120,7 @@ pub async fn save_pes(
     total_attr_map: &DashMap<RefU64, NamedAttrMap>,
     db_num: i32,
     option: &DbOption,
-    output: flume::Sender<String>,
+    output: flume::Sender<SenderSql>,
 ) -> anyhow::Result<()> {
     use itertools::Itertools;
     let keys = total_attr_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
@@ -181,7 +186,7 @@ pub async fn save_pes(
             insert_jsons_str
         );
         // println!("开始发送: {}", chunk.len());
-        output.send(sql).expect("send pes error");
+        output.send(SurrealSql(sql)).expect("send pes error");
     }
     Ok(())
 }
@@ -189,13 +194,13 @@ pub async fn save_pes(
 #[cfg(feature = "sql")]
 pub async fn save_pes_mysql(
     db_basic: &DbBasicData,
+    project: &str,
     total_attr_map: &DashMap<RefU64, NamedAttrMap>,
+    project_maps:&HashMap<String, Pool<MySql>>,
     option: &DbOption,
     db_num: i32,
-    aios_mgr: &AiosDBMgr,
-    mut handles: &mut Vec<JoinHandle<()>>,
+    output: &flume::Sender<SenderSql>,
 ) {
-    use itertools::Itertools;
     let keys = total_attr_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
     let debug_refnos: Vec<RefU64> = option
         .debug_root_refnos
@@ -208,10 +213,7 @@ pub async fn save_pes_mysql(
         .unwrap_or_default();
     let is_debug = !debug_refnos.is_empty();
 
-    let mut exist_refnos: HashSet<RefU64> = HashSet::new();
     let children_map = &db_basic.children_map;
-
-    let Ok(pool) = aios_mgr.get_project_pool().await else { return; };
 
     for chunk in keys.chunks(option.pe_chunk as _) {
         let mut insert_sql = String::new();
@@ -230,16 +232,17 @@ pub async fn save_pes_mysql(
         if option.replace_dbs {
             sql = sql.replace("INSERT IGNORE", "REPLACE");
         }
-        let Ok(mut conn) = pool.acquire().await else { continue; };
-        let task = tokio::spawn(async move {
-            match conn.execute(sql.as_str()).await {
-                Ok(_) => {}
-                Err(e) => {
-                    dbg!(e.to_string());
-                }
+        sql.remove(sql.len()-1);
+        // output.send(MysqlSql((project.to_string(),sql))).expect("send pdmselement mysql sql failed");
+        let Some(pool) = project_maps.get(project) else { continue; };
+        let mut conn = pool.acquire().await.expect("get pool failed");
+        match conn.execute(sql.as_str()).await {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(e.to_string());
+                dbg!(&sql);
             }
-        });
-        handles.push(task);
+        }
     }
 }
 
@@ -251,7 +254,7 @@ pub async fn save_pes_mysql(
 //     0
 // }
 
-pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<String>) {
+pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<SenderSql>) {
     //todo 增加删除已有owner的逻辑
     let mut all_relate_sqls = vec![];
     for kv in &db_basic.children_map {
@@ -274,12 +277,12 @@ pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<Strin
             let sql = all_relate_sqls.join("");
             all_relate_sqls.clear();
             // dbg!(sql.len());
-            output.send(sql).expect("send pe_relates error");
+            output.send(SurrealSql(sql)).expect("send pe_relates error");
             // break;
         }
     }
     if !all_relate_sqls.is_empty() {
         let sql = all_relate_sqls.join("");
-        output.send(sql).expect("send pe_relates error");
+        output.send(SurrealSql(sql)).expect("send pe_relates error");
     }
 }

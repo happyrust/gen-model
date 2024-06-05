@@ -17,12 +17,14 @@ use sqlx::{Connection, MySql, MySqlPool, Pool};
 use sqlx::{Error, Executor};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::hash::Hash;
 use std::io::Read;
 use std::mem::take;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::tool::hash_tool::hash_str;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
@@ -34,7 +36,14 @@ use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 // use crate::graph_db::pdms_arango::*;
 use crate::tables::*;
+use crate::versioned_db::database::SenderSql::SurrealSql;
 use crate::versioned_db::pe::*;
+
+pub enum SenderSql {
+    SurrealSql(String),
+    // 项目名 , sql
+    MysqlSql((String, String)),
+}
 
 #[cfg(feature = "sql")]
 pub trait MySqlMethods {
@@ -52,27 +61,26 @@ pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result
     sqlx::query(&format!(
         "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
     ))
-    .execute(&pool)
-    .await?;
+        .execute(&pool)
+        .await?;
     Ok(())
 }
 
 /// 初始化 info 库和表
 #[cfg(feature = "sql")]
-pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Result<()> {
-    let pool = MySqlPool::connect(&url).await?;
+pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
+    let pool = aios_mgr.get_global_pool().await?;
+    let project_name = aios_mgr.db_option.project_name.clone();
     pool.execute(
         format!(
             "CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};",
             project_name
         )
-        .as_str(),
+            .as_str(),
     )
-    .await?;
+        .await?;
 
     //todo 改成一对多的实现
-    let mut pool =
-        AiosDBManager::get_db_pool(&url, &format!("{}_{}", PDMS_INFO_DB, project_name)).await?;
     let mut sql = String::new();
     sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, {
         PDMS_REFNO_INFOS_TABLE
@@ -103,7 +111,17 @@ pub async fn create_info_database(url: &str, project_name: &str) -> anyhow::Resu
         }
     }
     let result = pool
-        .execute(gen_create_version_info_table_sql(project_name).as_str())
+        .execute(gen_create_version_info_table_sql(&project_name).as_str())
+        .await;
+    match result {
+        Ok(_) => {}
+        Err(e) => {
+            dbg!(&e);
+        }
+    }
+    let pool = aios_mgr.get_project_pool().await?;
+    let result = pool
+        .execute(gen_create_element_tables_sql().as_str())
         .await;
     match result {
         Ok(_) => {}
@@ -122,10 +140,10 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     // 计时器开始
     let mut time = tokio::time::Instant::now();
     // 获取默认的数据库连接字符串
-    let default_conn_str = AiosDBManager::get_default_conn_str(db_option);
+    let aios_mgr = AiosDBMgr::init_from_db_option().await?;
     if db_option.sync_tidb.unwrap_or(false) {
         #[cfg(feature = "sql")]
-        create_info_database(&default_conn_str, &db_option.project_name).await?;
+        create_info_database(&aios_mgr).await?;
     }
 
     if !db_option.incr_sync {
@@ -198,8 +216,7 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
             match &e {
                 Error::Database(error) => {
                     //index already exist
-                    if error.code() == Some(Cow::from("42000")) {
-                    } else {
+                    if error.code() == Some(Cow::from("42000")) {} else {
                         dbg!(sql);
                     }
                 }
@@ -253,31 +270,55 @@ pub async fn sync_total_async_threaded(
     // dbg!(children_files.len());
     // 先解析一遍uda
     // 正式解析
+    let mgr = AiosDBMgr::init_from_db_option().await?;
     let project = Arc::new(project.to_string()); // 创建一个Arc对象，表示项目名称
     let mut is_replace = db_option_arc.replace_dbs; // 是否替换数据库的数据
     let replace_types = db_option_arc.replace_types.clone(); // 获取替换的类型列表
     let b_replace_types = replace_types.is_some(); // 是否存在替换的类型列表
+    // 是否保存到tidb
+    let b_save_mysql = db_option_arc.sync_tidb.unwrap_or(false);
     if b_replace_types {
         is_replace = true;
     }
     let chunk_size = db_option_arc.sync_chunk_size.unwrap_or(10_0000) as usize;
     // let sync_tidb = db_option_arc.sync_tidb.unwrap_or(false);
-
+    #[cfg(feature = "sql")]
+        let pool = mgr.get_project_pools().await?;
     const CHUNK_SIZE: usize = 10000;
     let (sender, receiver) = flume::bounded(CHUNK_SIZE);
 
     let mut all_handles = vec![];
-    for i in 0..60 {
-        let receiver: flume::Receiver<String> = receiver.clone();
+    for i in 0..6 {
+        let receiver: flume::Receiver<SenderSql> = receiver.clone();
+        #[cfg(feature = "sql")]
+            let pools_clone = pool.clone();
+
         let insert_handle = tokio::task::spawn(async move {
             let mut record_stream = receiver.into_stream().chunks(CHUNK_SIZE);
             while let Some(sqls) = record_stream.next().await {
                 println!("thread {i} Imported records: {}", sqls.len());
                 for sql in sqls {
-                    if !sql.is_empty() {
-                        // println!("{}", format!("thread {i} inserting {}.", sql.len()));
-                        SUL_DB.query(sql).await.expect("insert db failed");
-                        // println!("{}", format!("thread {i} finished."));
+                    match sql {
+                        SenderSql::SurrealSql(sql) => {
+                            if !sql.is_empty() {
+                                // println!("{}", format!("thread {i} inserting {}.", sql.len()));
+                                SUL_DB.query(sql).await.expect("insert db failed");
+                                // println!("{}", format!("thread {i} finished."));
+                            }
+                        }
+                        #[cfg(feature = "sql")]
+                        SenderSql::MysqlSql((project, sql)) => {
+                            let Some(pool) = pools_clone.get(&project) else { continue; };
+                            let mut conn = pool.acquire().await.expect("get pool failed");
+                            match conn.execute(sql.as_str()).await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    dbg!(e.to_string());
+                                    dbg!(&sql);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -303,10 +344,10 @@ pub async fn sync_total_async_threaded(
             if is_sys_parse
                 || db_option_arc.included_db_files.is_none()
                 || db_option_arc
-                    .included_db_files
-                    .as_ref()
-                    .unwrap()
-                    .contains(&file_name)
+                .included_db_files
+                .as_ref()
+                .unwrap()
+                .contains(&file_name)
             {
                 let mut file = File::open(&path).await.unwrap();
                 let mut buf = vec![0u8; 60];
@@ -317,8 +358,6 @@ pub async fn sync_total_async_threaded(
                     "INSERT IGNORE INTO db_info (id, db_type, file_version, dbnum, file_name) VALUES ('{}', '{}', '{}', '{}', '{}')",
                     file_name_hash, db_type, file_version, db_no, file_name
                 ));
-                // #[cfg(debug_assertions)]
-                // dbg!(&(db_type.as_str(), file_version, db_no, &file_name));
                 if !db_types_clone.contains(&db_type) {
                     continue;
                 }
@@ -332,15 +371,8 @@ pub async fn sync_total_async_threaded(
                     &file_name,
                     project_name.clone().as_str(),
                 )
-                .unwrap_or_default();
-                dbg!(db_basic.children_map.len());
+                    .unwrap_or_default();
                 let all_refnos = db_basic.children_map.keys().cloned().collect::<Vec<_>>();
-                //将children map 转成 petgraph
-                // let graph = db_basic.gen_petgraph();
-                //
-                // graph
-                //     .save(&format!("{pg_dir}/{db_no}.pg"))
-                //     .expect("save pg failed");
 
                 let db_basic = Arc::new(db_basic);
                 if is_save_db {
@@ -375,90 +407,98 @@ pub async fn sync_total_async_threaded(
                     let db_basic_clone = db_basic.clone();
                     let debug_refnos = debug_refnos.clone();
                     // let handle = tokio::spawn(async move {
-                    if let Ok(PdmsDbData {
-                        total_attr_map,
-                        type_ele_map,
-                        db_type,
-                        db_no,
-                        version,
-                        foreign_refnos_map,
-                        ..
-                    }) = parse_file_with_chunk(
+                    match parse_file_with_chunk(
                         db_basic_clone.clone(),
                         &None,
                         &file_name_clone,
                         project_name_clone.as_str(),
                         &chunk_refnos_clone,
-                    )
-                    .await
-                    {
-                        //类型暂时不多线程
-                        let total_attr_map_arc = Arc::new(total_attr_map);
-                        //开始执行保存数据
-                        // dbg!("开始保存pdms_element数据");
-                        let sender_clone = sender.clone();
-                        if !is_debug && is_save_db {
-                            save_pes(
-                                &db_basic_clone,
-                                &total_attr_map_arc,
-                                db_no as i32,
-                                &db_option_clone,
-                                sender,
-                            )
-                            .await
-                            .expect("save pe to surreal failed");
-                        }
-                        for kv in type_ele_map.iter() {
-                            let noun: i32 = *kv.key() as _;
-                            let type_name = db1_dehash(noun as _);
-                            if type_name.is_empty() {
-                                continue;
+                    ).await {
+                        Ok(PdmsDbData {
+                               total_attr_map,
+                               type_ele_map,
+                               db_type,
+                               db_no,
+                               version,
+                               foreign_refnos_map,
+                               ..
+                           }) => {
+                            //类型暂时不多线程
+                            let total_attr_map_arc = Arc::new(total_attr_map);
+                            //开始执行保存数据
+                            // dbg!("开始保存pdms_element数据");
+                            let sender_clone = sender.clone();
+                            if !is_debug && is_save_db {
+                                save_pes(
+                                    &db_basic_clone,
+                                    &total_attr_map_arc,
+                                    db_no as i32,
+                                    &db_option_clone,
+                                    sender,
+                                )
+                                    .await
+                                    .expect("save pe to surreal failed");
                             }
-                            //UDA 还是要单独存，不然数据很容易混乱
-                            for refnos in &kv.value().iter().chunks(db_option_clone.att_chunk as _)
-                            {
-                                let mut json_vec = vec![];
-                                let mut uda_json_vec = vec![];
-                                for refno in refnos {
-                                    let att = total_attr_map_arc.get(refno).unwrap();
-                                    //调试时，只解析这个单独的refno
-                                    if is_debug {
-                                        if debug_refnos.contains(&att.get_refno().unwrap()) {
-                                            dbg!(att.value());
+                            if b_save_mysql {
+                                #[cfg(feature = "sql")]
+                                    save_pes_mysql(&db_basic_clone, &project_name, &total_attr_map_arc, &pool,
+                                                   &db_option_clone, db_no as i32, &sender_clone).await;
+                            }
+                            for kv in type_ele_map.iter() {
+                                let noun: i32 = *kv.key() as _;
+                                let type_name = db1_dehash(noun as _);
+                                if type_name.is_empty() {
+                                    continue;
+                                }
+                                //UDA 还是要单独存，不然数据很容易混乱
+                                for refnos in &kv.value().iter().chunks(db_option_clone.att_chunk as _)
+                                {
+                                    let mut json_vec = vec![];
+                                    let mut uda_json_vec = vec![];
+                                    for refno in refnos {
+                                        let att = total_attr_map_arc.get(refno).unwrap();
+                                        //调试时，只解析这个单独的refno
+                                        if is_debug {
+                                            if debug_refnos.contains(&att.get_refno().unwrap()) {
+                                                dbg!(att.value());
+                                            }
+                                            continue;
                                         }
-                                        continue;
+                                        if !is_save_db {
+                                            continue;
+                                        }
+                                        let Some(json) = att.gen_sur_json() else {
+                                            continue;
+                                        };
+                                        json_vec.push(json);
+                                        let Some(json) = att.gen_sur_json_uda(&[]) else {
+                                            continue;
+                                        };
+                                        uda_json_vec.push(json);
                                     }
-                                    if !is_save_db {
-                                        continue;
-                                    }
-                                    let Some(json) = att.gen_sur_json() else {
-                                        continue;
-                                    };
-                                    json_vec.push(json);
-                                    let Some(json) = att.gen_sur_json_uda(&[]) else {
-                                        continue;
-                                    };
-                                    uda_json_vec.push(json);
-                                }
-                                if is_save_db {
-                                    if !json_vec.is_empty() {
-                                        let sql = format!(
-                                            "INSERT IGNORE INTO {} [{}]",
-                                            &type_name,
-                                            json_vec.join(",")
-                                        );
-                                        sender_clone.send(sql).expect("send attmap sql failed");
-                                    }
+                                    if is_save_db {
+                                        if !json_vec.is_empty() {
+                                            let sql = format!(
+                                                "INSERT IGNORE INTO {} [{}]",
+                                                &type_name,
+                                                json_vec.join(",")
+                                            );
+                                            sender_clone.send(SurrealSql(sql)).expect("send attmap sql failed");
+                                        }
 
-                                    if !uda_json_vec.is_empty() {
-                                        let sql = format!(
-                                            "INSERT IGNORE INTO ATT_UDA [{}]",
-                                            uda_json_vec.join(",")
-                                        );
-                                        sender_clone.send(sql).expect("send usa sql failed");
+                                        if !uda_json_vec.is_empty() {
+                                            let sql = format!(
+                                                "INSERT IGNORE INTO ATT_UDA [{}]",
+                                                uda_json_vec.join(",")
+                                            );
+                                            sender_clone.send(SurrealSql(sql)).expect("send usa sql failed");
+                                        }
                                     }
                                 }
                             }
+                        }
+                        Err(e) => {
+                            dbg!(e.to_string());
                         }
                     }
                 }
@@ -479,7 +519,7 @@ pub async fn sync_total_async_threaded(
 
         //执行保存db_info sql
         let db_info_sql = db_info_sql.join(";");
-        if !db_info_sql.is_empty(){
+        if !db_info_sql.is_empty() {
             SUL_DB.query(&db_info_sql).await.expect("save db_info failed");
         }
     });

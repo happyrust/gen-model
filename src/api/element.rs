@@ -19,7 +19,8 @@ pub fn gen_pdms_element_insert_sql(att: &NamedAttrMap, dbno: i32, children_map: 
         .unwrap_or_default();
 
     let mut sql = String::new();
-    sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {} , {} , {} ,0 ) ,"#,
+    let name = name.replace(r#"""#,"'");
+    sql.push_str(&format!(r#"({}, "`{}`", "`{}`", {},"`{}`" , {} , {} , {} ,0 ) ,"#,
                           refno.0, refno.to_pdms_str(), type_name, owner.0, name, dbno, order, children_count));
     sql
 }
