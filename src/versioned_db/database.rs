@@ -276,7 +276,13 @@ pub async fn sync_total_async_threaded(
                 for sql in sqls {
                     if !sql.is_empty() {
                         // println!("{}", format!("thread {i} inserting {}.", sql.len()));
-                        SUL_DB.query(sql).await.expect("insert db failed");
+                        match SUL_DB.query(&sql).await {
+                            Ok(_) => {}
+                            Err(e) => {
+                                dbg!(&e);
+                                dbg!(&sql);
+                            }
+                        }
                         // println!("{}", format!("thread {i} finished."));
                     }
                 }
@@ -346,7 +352,6 @@ pub async fn sync_total_async_threaded(
                 if is_save_db {
                     save_pe_relates(&db_basic, sender.clone()).await;
                 }
-
                 let debug_refnos: Vec<RefU64> = db_option_arc
                     .debug_root_refnos
                     .as_ref()
@@ -358,11 +363,12 @@ pub async fn sync_total_async_threaded(
                     .unwrap_or_default();
                 //debug 不保存数据，只复杂查看属性值
                 let is_debug = !debug_refnos.is_empty();
-
                 if is_debug {
-                    dbg!(&debug_refnos);
+                    let debug_refno = debug_refnos[0];
+                    if let Some(children) = db_basic.children_map.get(&debug_refno){
+                        dbg!(children);
+                    }
                 }
-
                 let debug_refnos = Arc::new(debug_refnos);
                 //按照SITE划分？
                 for (chunk_index, chunk) in all_refnos.chunks(chunk_size).enumerate() {
@@ -415,8 +421,7 @@ pub async fn sync_total_async_threaded(
                                 continue;
                             }
                             //UDA 还是要单独存，不然数据很容易混乱
-                            for refnos in &kv.value().iter().chunks(db_option_clone.att_chunk as _)
-                            {
+                            for refnos in &kv.value().iter().chunks(db_option_clone.att_chunk as _) {
                                 let mut json_vec = vec![];
                                 let mut uda_json_vec = vec![];
                                 for refno in refnos {

@@ -453,7 +453,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                     .entry(aabb_hash)
                     .or_insert(serde_json::to_string(&aabb).unwrap());
                 let sql = format!(
-                    "update {} set aabb = aabb:⟨{}⟩;",
+                    "upsert {} set aabb = aabb:⟨{}⟩;",
                     r.id.to_string(),
                     aabb_hash,
                 );
@@ -461,10 +461,10 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                 // dbg!(&sql);
                 update_sql.push_str(&sql);
             }
+            utils::save_aabb_to_surreal(&aabb_map).await;
             if !update_sql.is_empty() {
                 SUL_DB.query(&update_sql).await.unwrap();
             }
-            utils::save_aabb_to_surreal(&aabb_map).await;
         });
         tasks.push(task);
     }
@@ -594,7 +594,7 @@ pub async fn apply_insts_boolean_occ(
                             // let Ok(shape) = g.param.gen_occ_shape() {
                             let Ok(mut pos_shape) = pos_param.gen_occ_shape() else {
                                 update_sql.push_str(&format!(
-                                    "update {} set bad_bool=true;",
+                                    "upsert {} set bad_bool=true;",
                                     &inst_relate_id
                                 ));
                                 continue;
@@ -603,7 +603,7 @@ pub async fn apply_insts_boolean_occ(
                             // dbg!(pos_matrix);
                             let Ok(mut pos_shape) = pos_shape.transformed(&pos_matrix) else {
                                 update_sql.push_str(&format!(
-                                    "update {} set bad_bool=true;",
+                                    "upsert {} set bad_bool=true;",
                                     &inst_relate_id
                                 ));
                                 continue;
@@ -687,7 +687,7 @@ pub async fn apply_insts_boolean_occ(
                                                 .is_ok()
                                             {
                                                 update_sql.push_str(&format!(
-                                                    "update {} set booled=true;",
+                                                    "upsert {} set booled=true;",
                                                     &inst_relate_id
                                                 ));
                                                 success = true;
@@ -697,7 +697,7 @@ pub async fn apply_insts_boolean_occ(
                                 }
                                 if !success {
                                     update_sql.push_str(&format!(
-                                        "update {} set bad_bool=true;",
+                                        "upsert {} set bad_bool=true;",
                                         &inst_relate_id
                                     ));
                                 }
@@ -807,7 +807,7 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
                 for bg in g.boolean_group {
                     let Some(pos) = gms.iter().find(|x| x.geom_refno == bg[0]) else {
                         update_sql.push_str(&format!(
-                            "update {}<-inst_relate set bad_bool=true;",
+                            "upsert {}<-inst_relate set bad_bool=true;",
                             &g.inst_info_id,
                         ));
                         continue;
@@ -819,7 +819,7 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
                         .map(|x| x.transformed(&pos.trans.compute_matrix().as_dmat4()))
                     else {
                         update_sql.push_str(&format!(
-                            "update {}<-inst_relate set bad_bool=true;",
+                            "upsert {}<-inst_relate set bad_bool=true;",
                             &g.inst_info_id,
                         ));
                         continue;
@@ -886,7 +886,7 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
                                         format!("{}_b", bg[0]),
                                     ));
                                     update_sql.push_str(&format!(
-                                        "update {}<-inst_relate set booled=true;",
+                                        "upsert {}<-inst_relate set booled=true;",
                                         &g.inst_info_id,
                                     ));
                                     success = true;
@@ -895,7 +895,7 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
 
                             if !success {
                                 update_sql.push_str(&format!(
-                                    "update {}<-inst_relate set bad_bool=true;",
+                                    "upsert {}<-inst_relate set bad_bool=true;",
                                     &g.inst_info_id,
                                 ));
                             }

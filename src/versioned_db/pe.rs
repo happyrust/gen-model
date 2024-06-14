@@ -183,14 +183,9 @@ pub async fn save_pes(
     Ok(())
 }
 
-// fn cal_depth(db_basic_data: &DbBasicData, refno: RefU64) -> usize{
-//     let mut depth = 0;
-//     if db_basic_data.children_map.contains_key() {
-//
-//     }
-//     0
-// }
 
+
+//使用insert relations 去保存图数据关联关系
 pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<String>) {
     //todo 增加删除已有owner的逻辑
     let mut all_relate_sqls = vec![];
@@ -206,20 +201,21 @@ pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<Strin
             .map(|(i, child)| {
                 let cp = child.to_pe_key();
                 let op = owner.to_pe_key();
-                format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", cp, op, )
+                // format!("RELATE {0}->pe_owner:[{1}, {i}]->{1};", cp, op, )
+                format!("{{ id: pe_owner:[{1}, {i}], in: {0}, out: {1} }}", cp, op)
             })
             .collect::<Vec<String>>();
         all_relate_sqls.extend_from_slice(&relate_sqls);
-        if all_relate_sqls.len() >= 2000 {
-            let sql = all_relate_sqls.join("");
+        if all_relate_sqls.len() >= 500 {
+            let sql = format!("INSERT RELATION INTO pe_owner [{}];", all_relate_sqls.join(","));
             all_relate_sqls.clear();
-            // dbg!(sql.len());
+            // dbg!(&sql);
             output.send(sql).expect("send pe_relates error");
             // break;
         }
     }
     if !all_relate_sqls.is_empty() {
-        let sql = all_relate_sqls.join("");
+        let sql = format!("INSERT RELATION INTO pe_owner [{}];", all_relate_sqls.join(","));
         output.send(sql).expect("send pe_relates error");
     }
 }
