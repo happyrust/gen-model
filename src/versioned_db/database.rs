@@ -288,7 +288,7 @@ pub async fn sync_total_async_threaded(
     let (sender, receiver) = flume::bounded(CHUNK_SIZE);
 
     let mut all_handles = vec![];
-    for i in 0..6 {
+    for i in 0..60 {
         let receiver: flume::Receiver<SenderSql> = receiver.clone();
         #[cfg(feature = "sql")]
             let pools_clone = pool.clone();
