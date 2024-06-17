@@ -19,8 +19,8 @@ fn load_mesh(id: &str) -> anyhow::Result<PlantMesh> {
 }
 
 #[inline]
-fn load_manifold(id: &str, mat: DMat4) -> anyhow::Result<ManifoldRust> {
-    let mesh = PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", id))?;
+fn load_manifold(dir: &PathBuf, id: &str, mat: DMat4) -> anyhow::Result<ManifoldRust> {
+    let mesh = PlantMesh::des_mesh_file(&dir.join(format!("{}.mesh", id)))?;
     let manifold: ManifoldRust = (&mesh, &mat).into();
     Ok(manifold)
 }
@@ -36,11 +36,11 @@ pub async fn apply_cata_neg_boolean_manifold(
     let mut sql = format!(
         r#" select in as refno, (->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
             from ->inst_info->geo_relate where visible and !out.bad and cata_neg!=none) as boolean_group
-            from {inst_keys} where (->inst_info)[0]!=none and has_cata_neg and !bad_bool"#
+            from {inst_keys} where (->inst_info)[0]!=none and has_cata_neg "#
     );
 
     if !replace_exist {
-        sql.push_str(" and !booled");
+        sql.push_str("and !bad_bool and !booled");
     }
 
     // println!("sql is {}", &sql);
@@ -97,7 +97,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                     };
 
                     let Ok(mut pos_manifold) =
-                        load_manifold(&pos.id, pos.trans.compute_matrix().as_dmat4())
+                        load_manifold(&dir_clone, &pos.id, pos.trans.compute_matrix().as_dmat4())
                     else {
                         update_sql.push_str(&format!(
                             "UPSERT {}<-inst_relate set bad_bool=true;",
@@ -113,7 +113,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                             continue;
                         };
                         let m = neg_geo.trans.compute_matrix().as_dmat4();
-                        if let Ok(manifold) = load_manifold(&neg_geo.id, m) {
+                        if let Ok(manifold) = load_manifold(&dir_clone, &neg_geo.id, m) {
                             neg_manifolds.push(manifold);
                         }
                     }
@@ -207,7 +207,7 @@ pub async fn apply_insts_boolean_manifold(
                                 let mut pos_manifolds = vec![];
                                 for (pos_id, pos_t) in b.ts.iter() {
                                     if let Ok(manifold) =
-                                        load_manifold(pos_id, pos_t.compute_matrix().as_dmat4())
+                                        load_manifold(&dir_clone, pos_id, pos_t.compute_matrix().as_dmat4())
                                     {
                                         pos_manifolds.push(manifold);
                                     }
@@ -316,7 +316,7 @@ pub async fn apply_insts_boolean_manifold(
                                         let m = inverse_mat
                                             * neg_t.compute_matrix().as_dmat4()
                                             * trans.compute_matrix().as_dmat4();
-                                        if let Ok(manifold) = load_manifold(&id, m) {
+                                        if let Ok(manifold) = load_manifold(&dir_clone, &id, m) {
                                             #[cfg(feature = "debug_model")]
                                             {
                                                 let neg_mesh = PlantMesh::from(&manifold);

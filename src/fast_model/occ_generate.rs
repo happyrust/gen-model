@@ -422,7 +422,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
     const PAGE_NUM: usize = 100;
     let use_specified_refnos = !refnos.is_empty();
     let mut start = 0;
-    let mut tasks = vec![];
+    // let mut tasks = vec![];
     let aabb_map = Arc::new(DashMap::new());
     for chunk in refnos.chunks(PAGE_NUM) {
         if chunk.is_empty() {
@@ -430,7 +430,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         }
         let aabb_map = aabb_map.clone();
         let inst_keys = get_inst_relate_keys(chunk);
-        let task = tokio::spawn(async move {
+        // let task = tokio::spawn(async move {
             let mut sql = format!(
                 r#"select id, in as refno, world_trans.d as world_trans,
             (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb.d != none and trans.d != none)
@@ -464,7 +464,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                     .entry(aabb_hash)
                     .or_insert(serde_json::to_string(&aabb).unwrap());
                 let sql = format!(
-                    "upsert {} set aabb = aabb:⟨{}⟩;",
+                    "update {} set aabb = aabb:⟨{}⟩;",
                     r.id.to_string(),
                     aabb_hash,
                 );
@@ -477,16 +477,16 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                 // dbg!(&update_sql);
                 SUL_DB.query(&update_sql).await.unwrap();
             }
-        });
-        tasks.push(task);
+        // });
+        // tasks.push(task);
     }
 
-    match futures::future::try_join_all(tasks).await {
-        Ok(_) => {}
-        Err(e) => {
-            dbg!(e);
-        }
-    }
+    // match futures::future::try_join_all(tasks).await {
+    //     Ok(_) => {}
+    //     Err(e) => {
+    //         dbg!(e);
+    //     }
+    // }
     utils::save_aabb_to_surreal(&aabb_map).await;
 
     Ok(())
