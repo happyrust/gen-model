@@ -115,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
     if db_option.gen_model {
         println!("正在生成模型");
         let mut time = Instant::now();
+        fs::create_dir_all("assets/meshes")?;
         gen_all_geos_data(&db_option, None).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }

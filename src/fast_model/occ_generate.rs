@@ -24,6 +24,7 @@ use parse_pdms_db::parse::round_f32;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use dashmap::DashMap;
 use surrealdb::sql::Thing;
 
 ///生成小的几何体
@@ -201,7 +202,7 @@ pub async fn gen_inst_meshes(
     // println!("sql is {}", &sql);
     let mut response = SUL_DB.query(sql).await.unwrap();
     let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0).unwrap();
-    dbg!(inst_geo_ids.len());
+    // dbg!(inst_geo_ids.len());
     // dbg!(EXIST_MESH_GEO_HASHES.len());
     //排除已经生成了的模型
     inst_geo_ids.retain(|(x, y)| {
@@ -227,6 +228,9 @@ pub async fn gen_inst_meshes(
     let thing_has_neg_map_arc = Arc::new(thing_has_neg_map);
     // dbg!(&thing_map);
     let mut tasks = vec![];
+    //: DashMap<u64, String>
+    let aabb_map = Arc::new(DashMap::new());
+    let pts_json_map = Arc::new(DashMap::new());
     for (idx, chunk) in inst_geo_ids.chunks(PAGE_NUM).enumerate() {
         let ids = chunk
             .into_iter()
@@ -234,6 +238,8 @@ pub async fn gen_inst_meshes(
             .join(",");
         let thing_neg_map = thing_has_neg_map_arc.clone();
         let dir = dir.clone();
+        let aabb_map = aabb_map.clone();
+        let pts_json_map = pts_json_map.clone();
         let task = tokio::spawn(async move {
             let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
             let sql = format!(
@@ -300,8 +306,7 @@ pub async fn gen_inst_meshes(
                         }
                     }
                     let mut update_sql = "".to_string();
-                    let mut aabb_map: HashMap<u64, String> = HashMap::new();
-                    let mut pts_json_map = HashMap::new();
+
                     for (id, (s, tol)) in &shapes_map {
                         let mut m_tol = *tol;
                         // dbg!(m_tol);
@@ -364,9 +369,9 @@ pub async fn gen_inst_meshes(
                             );
                         }
                     }
-                    utils::save_pts_to_surreal(&pts_json_map).await;
+                    // utils::save_pts_to_surreal(&pts_json_map).await;
                     //更新aabb数据到数据库
-                    utils::save_aabb_to_surreal(&aabb_map).await;
+                    // utils::save_aabb_to_surreal(&aabb_map).await;
                 }
                 Err(e) => {
                     init_query_error(&sql, e, &std::panic::Location::caller().to_string());
@@ -388,6 +393,9 @@ pub async fn gen_inst_meshes(
             EXIST_MESH_GEO_HASHES.insert(id.to_raw());
         }
     }
+
+    utils::save_pts_to_surreal(&pts_json_map).await;
+    utils::save_aabb_to_surreal(&aabb_map).await;
 
     Ok(())
 }
@@ -415,10 +423,12 @@ pub async fn update_inst_relate_aabbs_by_refnos(
     let use_specified_refnos = !refnos.is_empty();
     let mut start = 0;
     let mut tasks = vec![];
+    let aabb_map = Arc::new(DashMap::new());
     for chunk in refnos.chunks(PAGE_NUM) {
         if chunk.is_empty() {
             continue;
         }
+        let aabb_map = aabb_map.clone();
         let inst_keys = get_inst_relate_keys(chunk);
         let task = tokio::spawn(async move {
             let mut sql = format!(
@@ -433,10 +443,11 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             let mut response = SUL_DB.query(sql).await.unwrap();
             let result: Vec<QueryAabbParam> = response.take(0).unwrap();
             // dbg!(result.len());
-            #[cfg(debug_assertions)]
-            println!("QueryAabbParam len: {}", result.len());
-            let mut aabb_map: HashMap<u64, String> = HashMap::new();
+            // #[cfg(debug_assertions)]
+            // println!("QueryAabbParam len: {}", result.len());
+
             let mut update_sql = String::new();
+
             for r in result {
                 let mut aabb = Aabb::new_invalid();
                 for g in r.geo_aabbs {
@@ -461,8 +472,9 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                 // dbg!(&sql);
                 update_sql.push_str(&sql);
             }
-            utils::save_aabb_to_surreal(&aabb_map).await;
+            // utils::save_aabb_to_surreal(&aabb_map).await;
             if !update_sql.is_empty() {
+                // dbg!(&update_sql);
                 SUL_DB.query(&update_sql).await.unwrap();
             }
         });
@@ -475,6 +487,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             dbg!(e);
         }
     }
+    utils::save_aabb_to_surreal(&aabb_map).await;
 
     Ok(())
 }

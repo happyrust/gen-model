@@ -212,6 +212,16 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
     };
 }
 
+
+//去掉不符合条件的 \\u0002 这种，替换成空字符串
+#[inline]
+fn normalize_sql_string(sql: &str) -> String {
+    regex::Regex::new(r"\\u[0-9a-fA-F]{4}")
+        .unwrap()
+        .replace_all(&sql, "")
+        .to_string()
+}
+
 //分成两部分，一部分先保存UDA 和 SYS 这些数据
 ///多线程同步数据，包括增量同步
 pub async fn sync_total_async_threaded(
@@ -439,11 +449,11 @@ pub async fn sync_total_async_threaded(
                                     let Some(json) = att.gen_sur_json() else {
                                         continue;
                                     };
-                                    json_vec.push(json);
+                                    json_vec.push(normalize_sql_string(&json));
                                     let Some(json) = att.gen_sur_json_uda(&[]) else {
                                         continue;
                                     };
-                                    uda_json_vec.push(json);
+                                    uda_json_vec.push(normalize_sql_string(&json));
                                 }
                                 if is_save_db {
                                     if !json_vec.is_empty() {
