@@ -586,10 +586,10 @@ fn set_uda_attr(
 }
 
 pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, order: usize, children_count: usize) -> String {
-    let implicit = &att.implicit_attmap;
-    let refno = implicit.get_refno().unwrap();
-    let type_name = implicit.get_type();
-    let owner = implicit.get_owner();
+    let attmap = &att.att_map();
+    let refno = attmap.get_refno().unwrap();
+    let type_name = attmap.get_type();
+    let owner = attmap.get_owner();
 
     let mut sql = String::new();
     sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {} , {} , {} ,0 ) ,"#,

@@ -256,7 +256,7 @@ pub async fn save_pes_mysql(
 
 
 //使用insert relations 去保存图数据关联关系
-pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<String>) {
+pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<SenderSql>) {
     //todo 增加删除已有owner的逻辑
     let mut all_relate_sqls = vec![];
     for kv in &db_basic.children_map {
@@ -281,11 +281,10 @@ pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<Strin
             all_relate_sqls.clear();
             // dbg!(sql.len());
             output.send(SurrealSql(sql)).expect("send pe_relates error");
-            // break;
         }
     }
     if !all_relate_sqls.is_empty() {
-        let sql = all_relate_sqls.join("");
+        let sql = format!("INSERT RELATION INTO pe_owner [{}];", all_relate_sqls.join(","));
         output.send(SurrealSql(sql)).expect("send pe_relates error");
     }
 }
