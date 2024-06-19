@@ -21,13 +21,21 @@ use petgraph::visit::IntoEdgesDirected;
 use petgraph::Directed;
 use petgraph::Undirected;
 use rayon::prelude::*;
-#[cfg(feature = "sql")]
-use sea_orm::entity::prelude::*;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
+use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
+#[cfg(feature = "sql")]
+use sqlx::Executor;
+#[cfg(feature = "sql")]
+use sqlx::{MySql, Pool};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use crate::api::element::gen_pdms_element_insert_sql;
+use crate::consts::PDMS_ELEMENTS_TABLE;
+use crate::versioned_db::database::SenderSql;
+use crate::versioned_db::database::SenderSql::{MysqlSql, SurrealSql};
 
 fn gen_full_name(
     refno: RefU64,
@@ -112,7 +120,7 @@ pub async fn save_pes(
     total_attr_map: &DashMap<RefU64, NamedAttrMap>,
     db_num: i32,
     option: &DbOption,
-    output: flume::Sender<String>,
+    output: flume::Sender<SenderSql>,
 ) -> anyhow::Result<()> {
     use itertools::Itertools;
     let keys = total_attr_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
@@ -178,11 +186,73 @@ pub async fn save_pes(
             insert_jsons_str
         );
         // println!("开始发送: {}", chunk.len());
-        output.send(sql).expect("send pes error");
+        output.send(SurrealSql(sql)).expect("send pes error");
     }
     Ok(())
 }
 
+#[cfg(feature = "sql")]
+pub async fn save_pes_mysql(
+    db_basic: &DbBasicData,
+    project: &str,
+    total_attr_map: &DashMap<RefU64, NamedAttrMap>,
+    project_maps:&HashMap<String, Pool<MySql>>,
+    option: &DbOption,
+    db_num: i32,
+    output: &flume::Sender<SenderSql>,
+) {
+    let keys = total_attr_map.iter().map(|x| *x.key()).collect::<Vec<_>>();
+    let debug_refnos: Vec<RefU64> = option
+        .debug_root_refnos
+        .as_ref()
+        .map(|x| {
+            x.iter()
+                .map(|x| RefU64::from_str(x).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let is_debug = !debug_refnos.is_empty();
+
+    let children_map = &db_basic.children_map;
+
+    for chunk in keys.chunks(option.pe_chunk as _) {
+        let mut insert_sql = String::new();
+        for &refno in chunk {
+            if is_debug && !debug_refnos.contains(&refno) {
+                continue;
+            }
+            let att_map = total_attr_map.get(&refno).unwrap();
+            let sql = gen_pdms_element_insert_sql(att_map.value(), db_num, children_map);
+            if !sql.is_empty() {
+                insert_sql.push_str(&sql);
+            }
+        }
+        let mut sql = format!(
+            "INSERT IGNORE INTO {PDMS_ELEMENTS_TABLE} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB , ORDER_NUM,CHILDREN_COUNT, IS_DEL  ) VALUES {insert_sql}", );
+        if option.replace_dbs {
+            sql = sql.replace("INSERT IGNORE", "REPLACE");
+        }
+        sql.remove(sql.len()-1);
+        // output.send(MysqlSql((project.to_string(),sql))).expect("send pdmselement mysql sql failed");
+        let Some(pool) = project_maps.get(project) else { continue; };
+        let mut conn = pool.acquire().await.expect("get pool failed");
+        match conn.execute(sql.as_str()).await {
+            Ok(_) => {}
+            Err(e) => {
+                dbg!(e.to_string());
+                dbg!(&sql);
+            }
+        }
+    }
+}
+
+// fn cal_depth(db_basic_data: &DbBasicData, refno: RefU64) -> usize{
+//     let mut depth = 0;
+//     if db_basic_data.children_map.contains_key() {
+//
+//     }
+//     0
+// }
 
 
 //使用insert relations 去保存图数据关联关系
@@ -209,13 +279,13 @@ pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<Strin
         if all_relate_sqls.len() >= 500 {
             let sql = format!("INSERT RELATION INTO pe_owner [{}];", all_relate_sqls.join(","));
             all_relate_sqls.clear();
-            // dbg!(&sql);
-            output.send(sql).expect("send pe_relates error");
+            // dbg!(sql.len());
+            output.send(SurrealSql(sql)).expect("send pe_relates error");
             // break;
         }
     }
     if !all_relate_sqls.is_empty() {
-        let sql = format!("INSERT RELATION INTO pe_owner [{}];", all_relate_sqls.join(","));
-        output.send(sql).expect("send pe_relates error");
+        let sql = all_relate_sqls.join("");
+        output.send(SurrealSql(sql)).expect("send pe_relates error");
     }
 }
