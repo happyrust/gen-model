@@ -90,7 +90,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                 for bg in g.boolean_group {
                     let Some(pos) = gms.iter().find(|x| x.geom_refno == bg[0]) else {
                         update_sql.push_str(&format!(
-                            "UPSERT {}<-inst_relate set bad_bool=true;",
+                            "update {}<-inst_relate set bad_bool=true;",
                             &g.inst_info_id,
                         ));
                         continue;
@@ -100,7 +100,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                         load_manifold(&dir_clone, &pos.id, pos.trans.compute_matrix().as_dmat4())
                     else {
                         update_sql.push_str(&format!(
-                            "UPSERT {}<-inst_relate set bad_bool=true;",
+                            "update {}<-inst_relate set bad_bool=true;",
                             &g.inst_info_id,
                         ));
                         continue;
@@ -140,7 +140,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                                 format!("{}_b", bg[0]),
                             ));
                             update_sql.push_str(&format!(
-                                "UPSERT {}<-inst_relate set booled=true;",
+                                "update {}<-inst_relate set booled=true;",
                                 &g.inst_info_id,
                             ));
                             // dbg!(&update_sql);
@@ -218,7 +218,7 @@ pub async fn apply_insts_boolean_manifold(
                                 let inst_relate_id = b.refno.to_table_key("inst_relate");
                                 if pos_manifolds.is_empty() {
                                     update_sql.push_str(&format!(
-                                        "UPSERT {} set bad_bool=true;",
+                                        "update {} set bad_bool=true;",
                                         &inst_relate_id
                                     ));
                                     continue;
@@ -228,7 +228,7 @@ pub async fn apply_insts_boolean_manifold(
                                     ManifoldRust::batch_boolean(&pos_manifolds, 0);
                                 if pos_manifold.num_tri() == 0 {
                                     update_sql.push_str(&format!(
-                                        "UPSERT {} set bad_bool=true;",
+                                        "update {} set bad_bool=true;",
                                         &inst_relate_id
                                     ));
                                     continue;
@@ -348,7 +348,7 @@ pub async fn apply_insts_boolean_manifold(
                                         .is_ok()
                                     {
                                         update_sql.push_str(&format!(
-                                            "UPSERT {} set booled=true;",
+                                            "update {} set booled=true;",
                                             &inst_relate_id
                                         ));
                                         success = true;
