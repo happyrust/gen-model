@@ -173,7 +173,8 @@ pub async fn gen_cata_geos(
                         let ele_refno = target_cata.group_refnos[0];
                         process_refno = Some(ele_refno);
                         let Ok(Some(cata_refno)) = aios_core::get_cat_refno(ele_refno).await else {
-                            // println!("{ele_refno} 的元件库引用为空，跳过");
+                            #[cfg(feature = "debug_model")]
+                            println!("{ele_refno} 的元件库引用为空，跳过");
                             continue;
                         };
                         #[cfg(feature = "debug_model")]
