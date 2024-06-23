@@ -397,7 +397,7 @@ pub async fn gen_cata_geos(
                                     } else {
                                         GeoBasicType::Pos
                                     },
-                                    owner_pos_refnos: Default::default(),
+
                                     cata_neg_refnos,
                                 };
                                 if is_ngmr {

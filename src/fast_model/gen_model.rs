@@ -329,7 +329,7 @@ pub async fn gen_all_geos_data(
                     }
                 }
 
-                //loop 基本体的处理
+                //loop 模型的处理
                 {
                     let target_loop_owner_refnos: Vec<RefU64> = if is_incr_update {
                         incr_updates_log.loop_owner_refnos.iter().cloned().collect()
@@ -340,8 +340,8 @@ pub async fn gen_all_geos_data(
                                 GNERAL_LOOP_OWNER_NOUN_NAMES.map(String::from).to_vec(),
                                 skip_exist,
                             )
-                            .await
-                            .unwrap_or_default();
+                                .await
+                                .unwrap_or_default();
                         loop_owner_refnos.into_iter().collect()
                     };
                     if !target_loop_owner_refnos.is_empty() {
@@ -359,13 +359,15 @@ pub async fn gen_all_geos_data(
                                 sjus_map_clone,
                                 sender,
                             )
-                            .await
-                            .unwrap();
+                                .await
+                                .unwrap();
                         });
                         gen_inst_handles.push(handle);
                     }
+                }
 
-                    ///基本体模型的生成
+                //基本体模型的生成
+                {
                     let target_prim_refnos: Vec<RefU64> = if is_incr_update {
                         incr_updates_log.prim_refnos.iter().cloned().collect()
                     } else {
@@ -376,6 +378,7 @@ pub async fn gen_all_geos_data(
                         )
                         .await
                         .unwrap_or_default();
+                        dbg!(&prim_refnos);
                         prim_refnos.into_iter().collect()
                     };
                     if !target_prim_refnos.is_empty() {

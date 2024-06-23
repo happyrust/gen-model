@@ -266,7 +266,6 @@ pub async fn gen_inst_meshes(
                     // dbg!(&result);
                     for g in result {
                         //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
-                        // dbg!(&g);
                         match g.param.gen_occ_shape() {
                             Ok(shape) => {
                                 let mut aabb = Aabb::new_invalid();

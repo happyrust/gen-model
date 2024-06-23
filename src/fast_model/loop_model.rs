@@ -155,7 +155,7 @@ pub async fn gen_loop_geos(
                 let geom_inst = EleInstGeo {
                     geo_hash,
                     refno: target_refno,
-                    owner_pos_refnos: Default::default(),
+
                     pts: Default::default(),
                     aabb: None,
                     transform: tr,

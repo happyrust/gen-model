@@ -5,13 +5,13 @@ use crate::fast_model::{get_generic_type, shared};
 use aios_core::geometry::*;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
-use aios_core::prim_geo::facet::*;
 use aios_core::prim_geo::*;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, VerifiedShape};
 use aios_core::RefU64;
 use bevy_transform::components::Transform;
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::Isometry;
+use aios_core::prim_geo::polyhedron::Polygon;
 use std::mem::take;
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,7 +30,6 @@ pub async fn gen_prim_geos(
     if prim_cnt == 0 {
         return Ok(true);
     }
-    // let batch_chunks_cnt = prim_cnt / batch_size + 1;
     let mut batch_chunks_cnt = 16;
     let mut batch_size = prim_cnt / batch_chunks_cnt + 1;
     //如果只有一个元件，就不分块了
@@ -97,6 +96,7 @@ pub async fn gen_prim_geos(
                     let pgo_refnos = aios_core::get_children_refnos(refno)
                         .await
                         .unwrap_or_default();
+                    // dbg!(&pgo_refnos);
                     let mut polygons = vec![];
                     for pgo_refno in pgo_refnos {
                         let mut verts = vec![];
@@ -104,11 +104,16 @@ pub async fn gen_prim_geos(
                             .await
                             .unwrap_or_default();
                         for v in v_att {
+                            // dbg!(&v);
                             verts.push(v.get_position().unwrap_or_default());
                         }
+                        polygons.push(Polygon{
+                            verts
+                        });
                     }
-                    let obj: Box<dyn BrepShapeTrait> = Box::new(Polyhedron { polygons });
-                    Some(obj)
+                    // dbg!(&polygons);
+                    let shape: Box<dyn BrepShapeTrait> = Box::new(Polyhedron { polygons });
+                    Some(shape)
                 } else {
                     attr.create_brep_shape(neg_limit_size)
                 };
@@ -127,10 +132,10 @@ pub async fn gen_prim_geos(
                     .convert_to_geo_param()
                     .unwrap_or(PdmsGeoParam::Unknown);
                 let geo_hash = brep_shape.hash_unit_mesh_params();
+                // dbg!(geo_hash);
                 let inst_geo = EleInstGeo {
                     geo_hash,
                     refno,
-                    owner_pos_refnos: Default::default(),
                     pts: Default::default(),
                     aabb: None,
                     transform,
