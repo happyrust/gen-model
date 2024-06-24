@@ -1,37 +1,39 @@
 use crate::fast_model::process_meshes_update_db_deep;
-use aios_core::room::room::{load_aabb_tree, GLOBAL_AABB_TREE};
+use aios_core::room::room::{load_aabb_tree, GLOBAL_AABB_TREE, load_room_aabb_tree};
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::test::test_surreal::init_test_surreal;
 use aios_core::{GeomInstQuery, GeomPtsQuery, ModelHashInst, RefU64, SUL_DB};
 use bevy_transform::components::Transform;
 use bevy_transform::TransformPoint;
 use dashmap::DashSet;
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use itertools::Itertools;
 use parry3d::bounding_volume::Aabb;
-use parry3d::math::Isometry;
+use parry3d::math::{Isometry, Vector};
 use parry3d::math::{Point, Real};
 use parry3d::query::PointQuery;
 use parry3d::shape::{TriMesh, TriMeshFlags};
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::options::DbOption;
 
 #[tokio::test]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
     let option = init_test_surreal().await;
-    let refno = "24381/58346".into();
-    process_meshes_update_db_deep(None, (&["24381/34303".into(), refno]))
-        .await
-        .unwrap();
+    let refno = "24381/35857".into();
+    // process_meshes_update_db_deep(None, (&["24381/34303".into(), refno]))
+    //     .await
+    //     .unwrap();
     load_aabb_tree().await.unwrap();
     build_room_relations(&option).await.unwrap();
-    let within_refnos = query_room_refnos(refno, &HashSet::new(), 0.1)
+    let mesh_path = option.get_meshes_path();
+    let within_refnos = cal_room_refnos(&mesh_path, refno, &HashSet::new(), 0.1)
         .await
         .unwrap();
-    dbg!(&within_refnos);
+    // dbg!(&within_refnos);
     Ok(())
 }
 
@@ -77,6 +79,7 @@ pub async fn test_cal_distance() -> anyhow::Result<()> {
 }
 
 pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
+    let mesh_dir = db_option.get_meshes_path();
     let room_key_word = db_option.get_room_key_word();
     let room_panel_map = build_room_panels_relate(&room_key_word).await.unwrap();
     let exclude_panel_refnos = room_panel_map
@@ -87,7 +90,7 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
     // dbg!(exclude_panel_refnos.len());
     for (room_refno, room_num, panel_refnos) in room_panel_map {
         for panel_refno in panel_refnos {
-            let refnos = query_room_refnos(panel_refno, &exclude_panel_refnos, 0.1)
+            let refnos = cal_room_refnos(&mesh_dir, panel_refno, &exclude_panel_refnos, 0.1)
                 .await
                 .unwrap();
             if !refnos.is_empty() {
@@ -129,7 +132,7 @@ async fn build_room_panels_relate(room_key_word: &str) -> anyhow::Result<Vec<(Re
     // println!("room panel sql is {}", &sql);
     let mut response = SUL_DB.query(sql).await?;
     let room_groups: Vec<(RefU64, String, Vec<RefU64>)> = response.take(0)?;
-    dbg!(&room_groups.len());
+    // dbg!(&room_groups.len());
     let mut sql_string = String::new();
     for (room_refno, room_num, panel_refnos) in &room_groups {
         let sql = format!(
@@ -145,7 +148,8 @@ async fn build_room_panels_relate(room_key_word: &str) -> anyhow::Result<Vec<(Re
     Ok(room_groups)
 }
 
-pub async fn query_room_refnos(
+pub async fn cal_room_refnos(
+    mesh_dir: &PathBuf,
     panel_refno: RefU64,
     exclude_refnos: &HashSet<RefU64>,
     inside_tol: f32,
@@ -163,14 +167,15 @@ pub async fn query_room_refnos(
     //将panel的 plant mesh 转换成TriMesh
     for geom_inst in geom_insts {
         for inst in geom_inst.insts {
+            let file_path = mesh_dir.join(format!("{}.mesh", inst.geo_hash));
             let Ok(mesh) =
-                PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", inst.geo_hash))
+                PlantMesh::des_mesh_file(&file_path)
             else {
                 continue;
             };
             let Some(mut tri_mesh) = mesh.get_tri_mesh_with_flag(
                 (geom_inst.world_trans * inst.transform).compute_matrix(),
-                TriMeshFlags::ORIENTED,
+                TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
             ) else {
                 continue;
             };
@@ -178,6 +183,7 @@ pub async fn query_room_refnos(
             let mut contains_query = read
                 .locate_intersecting_bounds(&geom_inst.world_aabb)
                 .collect::<Vec<_>>();
+            // dbg!(&contains_query);
             let mut need_check_refnos = vec![];
             contains_query.retain(|RStarBoundingBox{
                                        refno,
@@ -185,7 +191,8 @@ pub async fn query_room_refnos(
                                        ..
                                    }| {
                 //filter the wrong aabb
-                if exclude_refnos.contains(refno) || (aabb.mins[0] > 1000000.0) {
+                //排除自己
+                if exclude_refnos.contains(refno) || (aabb.mins[0] > 1000000.0) || panel_refno == *refno{
                     return false;
                 }
                 // dbg!(&bbox);
@@ -211,6 +218,8 @@ pub async fn query_room_refnos(
             //     dbg!(&contains_query);
             // }
             within_refnos.extend(contains_query.iter().map(|r| r.refno));
+            // let need_check_refnos: Vec<RefU64> = vec!["24383_71586".into()];
+            // dbg!(&need_check_refnos);
             if !need_check_refnos.is_empty() {
                 // dbg!(panel_refno);
                 // dbg!(&within_refnos);
