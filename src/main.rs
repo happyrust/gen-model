@@ -28,6 +28,7 @@ use aios_core::material::save_all_material_data;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::room::room::load_aabb_tree;
+use aios_core::ssc_setting::{set_pbs_fixed_node, set_pbs_node, set_pbs_room_major_node, set_pbs_room_node, set_pdms_major_code};
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::SUL_DB;
 use bevy_reflect::List;
@@ -153,6 +154,17 @@ async fn main() -> anyhow::Result<()> {
     let gen_material = db_option.gen_material.unwrap_or(false);
     if gen_material {
         save_all_material_data(&aios_mgr).await?;
+    }
+
+    if db_option.rebuild_ssc_tree {
+        dbg!("生成pbs节点");
+        set_pdms_major_code(&aios_mgr).await?;
+        let mut handles = vec![];
+        set_pbs_fixed_node(&mut handles).await?;
+        let rooms = set_pbs_room_node(&mut handles).await?;
+        set_pbs_room_major_node(&rooms, &mut handles).await?;
+        set_pbs_node(&mut handles).await?;
+        futures::future::join_all(handles).await;
     }
 
     if sync_live {
