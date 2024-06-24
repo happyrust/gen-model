@@ -47,7 +47,6 @@ use aios_database::fast_model::{EXIST_MESH_GEO_HASHES, gen_inst_meshes, process_
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-
     let db_option: DbOption = get_db_option().clone();
     // 如果启用了日志功能
     if db_option.enable_log {
@@ -109,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     /// 创建db manager
-    if sync_live{
+    if sync_live {
         mgr.init_watcher().await.unwrap();
     }
 
@@ -129,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
         let path: PathBuf = "assets/meshes".into();
         //收集目录下的文件名
         let paths = fs::read_dir(path).unwrap();
-        for entry in paths{
+        for entry in paths {
             let entry = entry.unwrap();
             let geo_hash = entry.path().file_stem().unwrap().to_str().unwrap().to_string();
             EXIST_MESH_GEO_HASHES.insert(geo_hash);
@@ -156,7 +155,7 @@ async fn main() -> anyhow::Result<()> {
         save_all_material_data(&aios_mgr).await?;
     }
 
-    if sync_live{
+    if sync_live {
         mgr.async_watch().await.unwrap();
     }
 
