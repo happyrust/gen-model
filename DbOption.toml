@@ -1,6 +1,6 @@
 #同步文件配置
 total_sync = false
-incr_sync = true
+incr_sync = false
 enable_log = false
 sync_graph_db = false
 sync_versioned = false
@@ -12,14 +12,14 @@ sync_chunk_size = 1_0000
 #项目设置
 project_path = "D:/downloads/Projects12.1.SP4"
 #included_projects = ["KMX", "sch", "REF", "PDM", "SPDM", "LCS", "MSPProject"]
-included_projects = ["KMX"]
-mdb_name = "MDBALL"
-project_name = "KMX"
-project_code = 1001
+included_projects = ["AvevaMarineSample"]
+mdb_name = "ALL"
+project_name = "AvevaMarineSample"
+project_code = 1516
 module = "DESI"
 #是否生成模型数据
-gen_model = true
-gen_mesh = true
+gen_model = false
+gen_mesh = false
 replace_mesh = true
 save_db = true
 apply_boolean_operation = true
@@ -55,10 +55,8 @@ batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 
 #版本数据库服务配置
-v_ip = "localhost"
-#v_port = "8004"
-#v_port = "8003"
-v_port = "8009"
+v_ip = "127.0.0.1"
+v_port = "9001"
 v_user = "root"
 v_password = "root"
 pe_chunk = 500
@@ -100,7 +98,7 @@ puhua_database_ip = ""
 puhua_database_user = ""
 puhua_database_password = ""
 
-room_keyword = "-RM"   # 2016  K-R-K100   (-R-)
+room_key_word = ["-RM","-R"]   # 2016  K-R-K100   (-R-)
 
 debug_root_refnos = ["23198/361031"]
 #manual_sync_refnos = ["17496/269319"]
