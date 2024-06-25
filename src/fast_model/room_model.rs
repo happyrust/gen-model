@@ -82,7 +82,6 @@ pub async fn test_cal_distance() -> anyhow::Result<()> {
 pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
     let mesh_dir = db_option.get_meshes_path();
     let room_key_word = db_option.get_room_key_word();
-    println!("房间关键字为: {:?}", room_key_word.clone());
     let room_panel_map = build_room_panels_relate(&room_key_word).await.unwrap();
     let exclude_panel_refnos = room_panel_map
         .iter()
@@ -128,7 +127,7 @@ async fn save_room_relate(
 
 async fn build_room_panels_relate(room_key_word: &Vec<String>) -> anyhow::Result<Vec<(RefU64, String, Vec<RefU64>)>> {
     // 拼接判断条件
-    let filter = room_key_word.iter().map(|x| format!("'{}' in NAME", x)).join(" or");
+    let filter = room_key_word.iter().map(|x| format!("'{}' in NAME", x)).join(" or ");
     //属于room的panel
     let sql = format!(r#"
         select value [meta::id(id), array::last(string::split(NAME, '-')),  REFNO<-pe_owner<-pe<-pe_owner<-pe[?noun='PANE'].id] from FRMW where {filter}

@@ -140,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if db_option.gen_spatial_tree {
+        println!("房间关键字为: {:?}", db_option.room_key_word.clone());
         println!("正在生成空间树");
         load_aabb_tree().await.unwrap();
         println!("正在计算房间");
