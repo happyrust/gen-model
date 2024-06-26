@@ -17,6 +17,7 @@ occ = ["aios_core/occ", "dep:opencascade"]
 manifold = ["aios_core/manifold"]
 sql = ["dep:sea-orm", "dep:sqlx"]
 debug_parse = ["pdms_io/debug_parse"]
+surreal_v2 = []
 
 [dependencies]
 config = "0.13.1"

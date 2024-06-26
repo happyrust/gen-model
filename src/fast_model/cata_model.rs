@@ -511,7 +511,10 @@ pub async fn gen_cata_geos(
         let Ok(Some(branch_transform)) = aios_core::get_world_transform(branch_refno).await else {
             continue;
         };
-        let htube_pt = branch_transform.transform_point(branch_att.get_vec3("HPOS").unwrap());
+        let Some(hpt) = branch_att.get_vec3("HPOS") else{
+            continue;
+        };
+        let htube_pt = branch_transform.transform_point(hpt);
         let hdir = branch_transform
             .transform_vec3(branch_att.get_vec3("HDIR").unwrap())
             .normalize_or_zero();

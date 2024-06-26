@@ -386,7 +386,11 @@ pub async fn sync_total_async_threaded(
 
                 let db_basic = Arc::new(db_basic);
                 if is_save_db {
-                    save_pe_relates(&db_basic, sender.clone()).await;
+                    if cfg!(feature = "surreal_v2"){
+                        save_pe_relates_by_insert(&db_basic, sender.clone()).await;
+                    }else{
+                        save_pe_relates(&db_basic, sender.clone()).await;
+                    }
                 }
                 let debug_refnos: Vec<RefU64> = db_option_arc
                     .debug_root_refnos
