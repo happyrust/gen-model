@@ -585,17 +585,17 @@ fn set_uda_attr(
     Ok(())
 }
 
-pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, order: usize, children_count: usize) -> String {
-    let attmap = &att.att_map();
-    let refno = attmap.get_refno().unwrap();
-    let type_name = attmap.get_type();
-    let owner = attmap.get_owner();
-
-    let mut sql = String::new();
-    sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {} , {} , {} ,0 ) ,"#,
-                          refno.0, refno.to_pdms_str(), type_name, owner.0, name, dbno, order, children_count));
-    sql
-}
+// pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, order: usize, children_count: usize) -> String {
+//     let attmap = &att.att_map();
+//     let refno = attmap.get_refno().unwrap();
+//     let type_name = attmap.get_type();
+//     let owner = attmap.get_owner();
+//
+//     let mut sql = String::new();
+//     sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {} , {} , {} ,0 ) ,"#,
+//                           refno.0, refno.to_pdms_str(), type_name, owner.0, name, dbno, order, children_count));
+//     sql
+// }
 
 #[tokio::test]
 async fn test_threads() {

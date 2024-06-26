@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::options::DbOption;
+use aios_core::room::algorithm::match_room_name;
 
 #[tokio::test]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
@@ -55,14 +56,14 @@ pub async fn test_cal_distance() -> anyhow::Result<()> {
         for inst in geom_inst.insts {
             let Ok(mesh) =
                 PlantMesh::des_mesh_file(&format!("assets/meshes/{}.mesh", inst.geo_hash))
-            else {
-                continue;
-            };
+                else {
+                    continue;
+                };
             let Some(mut tri_mesh) = mesh
                 .get_tri_mesh_with_flag(inst.transform.compute_matrix(), TriMeshFlags::ORIENTED)
-            else {
-                continue;
-            };
+                else {
+                    continue;
+                };
             dbg!(tri_mesh.indices().len());
             dbg!(tri_mesh.vertices().len());
 
@@ -88,7 +89,7 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
         .flatten()
         .collect::<HashSet<_>>();
     // dbg!(exclude_panel_refnos.len());
-    for (room_refno, room_num, panel_refnos) in room_panel_map {
+    for (_room_refno, room_num, panel_refnos) in room_panel_map {
         for panel_refno in panel_refnos {
             let refnos = cal_room_refnos(&mesh_dir, panel_refno, &exclude_panel_refnos, 0.1)
                 .await
@@ -124,17 +125,20 @@ async fn save_room_relate(
     Ok(())
 }
 
-async fn build_room_panels_relate(room_key_word: &str) -> anyhow::Result<Vec<(RefU64, String, Vec<RefU64>)>> {
+async fn build_room_panels_relate(room_key_word: &Vec<String>) -> anyhow::Result<Vec<(RefU64, String, Vec<RefU64>)>> {
+    // 拼接判断条件
+    let filter = room_key_word.iter().map(|x| format!("'{}' in NAME", x)).join(" or ");
     //属于room的panel
     let sql = format!(r#"
-        select value [meta::id(id), array::last(string::split(NAME, '-')),  REFNO<-pe_owner<-pe<-pe_owner<-pe[?noun='PANE'].id] from FRMW where '{room_key_word}' in NAME
+        select value [meta::id(id), array::last(string::split(NAME, '-')),  REFNO<-pe_owner<-pe<-pe_owner<-pe[?noun='PANE'].id] from FRMW where {filter}
     "#);
-    // println!("room panel sql is {}", &sql);
     let mut response = SUL_DB.query(sql).await?;
     let room_groups: Vec<(RefU64, String, Vec<RefU64>)> = response.take(0)?;
     // dbg!(&room_groups.len());
     let mut sql_string = String::new();
     for (room_refno, room_num, panel_refnos) in &room_groups {
+        // 判断 room_num是否符合规则
+        if !match_room_name(room_num) { continue; }
         let sql = format!(
             "relate {}->room_panel_relate->[{}] set room_num='{}';",
             room_refno.to_pe_key(),
@@ -144,7 +148,6 @@ async fn build_room_panels_relate(room_key_word: &str) -> anyhow::Result<Vec<(Re
         sql_string.push_str(&sql);
     }
     SUL_DB.query(sql_string).await?;
-
     Ok(room_groups)
 }
 
@@ -170,9 +173,9 @@ pub async fn cal_room_refnos(
             let file_path = mesh_dir.join(format!("{}.mesh", inst.geo_hash));
             let Ok(mesh) =
                 PlantMesh::des_mesh_file(&file_path)
-            else {
-                continue;
-            };
+                else {
+                    continue;
+                };
             let Some(mut tri_mesh) = mesh.get_tri_mesh_with_flag(
                 (geom_inst.world_trans * inst.transform).compute_matrix(),
                 TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
@@ -185,14 +188,14 @@ pub async fn cal_room_refnos(
                 .collect::<Vec<_>>();
             // dbg!(&contains_query);
             let mut need_check_refnos = vec![];
-            contains_query.retain(|RStarBoundingBox{
+            contains_query.retain(|RStarBoundingBox {
                                        refno,
                                        aabb,
                                        ..
                                    }| {
                 //filter the wrong aabb
                 //排除自己
-                if exclude_refnos.contains(refno) || (aabb.mins[0] > 1000000.0) || panel_refno == *refno{
+                if exclude_refnos.contains(refno) || (aabb.mins[0] > 1000000.0) || panel_refno == *refno {
                     return false;
                 }
                 // dbg!(&bbox);

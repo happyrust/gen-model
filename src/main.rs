@@ -28,6 +28,7 @@ use aios_core::material::save_all_material_data;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::room::room::load_aabb_tree;
+use aios_core::ssc_setting::{set_pbs_fixed_node, set_pbs_node, set_pbs_room_major_node, set_pbs_room_node, set_pdms_major_code};
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::SUL_DB;
 use bevy_reflect::List;
@@ -47,7 +48,6 @@ use aios_database::fast_model::{EXIST_MESH_GEO_HASHES, gen_inst_meshes, process_
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-
     let db_option: DbOption = get_db_option().clone();
     // 如果启用了日志功能
     if db_option.enable_log {
@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     /// 创建db manager
-    if sync_live{
+    if sync_live {
         mgr.init_watcher().await.unwrap();
     }
 
@@ -129,7 +129,7 @@ async fn main() -> anyhow::Result<()> {
         let path: PathBuf = "assets/meshes".into();
         //收集目录下的文件名
         let paths = fs::read_dir(path).unwrap();
-        for entry in paths{
+        for entry in paths {
             let entry = entry.unwrap();
             let geo_hash = entry.path().file_stem().unwrap().to_str().unwrap().to_string();
             EXIST_MESH_GEO_HASHES.insert(geo_hash);
@@ -140,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if db_option.gen_spatial_tree {
+        println!("房间关键字为: {:?}", db_option.room_key_word.clone());
         println!("正在生成空间树");
         load_aabb_tree().await.unwrap();
         println!("正在计算房间");
@@ -156,7 +157,18 @@ async fn main() -> anyhow::Result<()> {
         save_all_material_data(&aios_mgr).await?;
     }
 
-    if sync_live{
+    if db_option.rebuild_ssc_tree {
+        dbg!("生成pbs节点");
+        set_pdms_major_code(&aios_mgr).await?;
+        let mut handles = vec![];
+        set_pbs_fixed_node(&mut handles).await?;
+        let rooms = set_pbs_room_node(&mut handles).await?;
+        set_pbs_room_major_node(&rooms, &mut handles).await?;
+        set_pbs_node(&mut handles).await?;
+        futures::future::join_all(handles).await;
+    }
+
+    if sync_live {
         mgr.async_watch().await.unwrap();
     }
 
