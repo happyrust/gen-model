@@ -131,7 +131,7 @@ async fn build_room_panels_relate(room_key_word: &Vec<String>) -> anyhow::Result
     //属于room的panel
     let sql = format!(r#"
         select value [meta::id(id), array::last(string::split(NAME, '-')),
-         array::flatten([REFNO<-pe_owner<-pe[?noun='PANE'].id, REFNO<-pe_owner<-pe<-pe_owner<-pe[?noun='PANE'].id]) from FRMW where {filter}
+         array::flatten([REFNO<-pe_owner<-pe[?noun='PANE'].id, REFNO<-pe_owner<-pe<-pe_owner<-pe[?noun='PANE'].id])] from FRMW where {filter}
     "#);
     let mut response = SUL_DB.query(sql).await?;
     let room_groups: Vec<(RefU64, String, Vec<RefU64>)> = response.take(0)?;
