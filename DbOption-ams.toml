@@ -103,7 +103,7 @@ puhua_database_password = ""
 
 room_keyword = "-RM"   # 2016  K-R-K100   (-R-)
 
-#debug_root_refnos = ["24575/1475"]
+debug_root_refnos = ["17496/258934"]
 #manual_sync_refnos = ["17496/269319"]
 # debug_root_refnos = ["24383/66457", "24381/34110"]
 #debug_root_refnos = ["17496/172806"]
