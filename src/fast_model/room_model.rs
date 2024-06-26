@@ -138,7 +138,8 @@ async fn build_room_panels_relate(room_key_word: &Vec<String>) -> anyhow::Result
     let mut sql_string = String::new();
     for (room_refno, room_num, panel_refnos) in &room_groups {
         // 判断 room_num是否符合规则
-        if !match_room_name(room_num) { continue; }
+        if !match_room_name(room_num) {
+            continue; }
         let sql = format!(
             "relate {}->room_panel_relate->[{}] set room_num='{}';",
             room_refno.to_pe_key(),
