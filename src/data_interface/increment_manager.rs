@@ -444,9 +444,9 @@ impl AiosDBManager {
             .into_iter()
             .collect::<Vec<_>>();
         //有可能没更新完，就update了模型？
-        // gen_all_geos_data(&self.db_option, Some(geo_update_log))
-        //     .await
-        //     .unwrap();
+        gen_all_geos_data(&self.db_option, Some(geo_update_log))
+            .await
+            .unwrap();
 
         // dbg!(&all_refnos);
         //todo 把历史的数据 inst_relate 里的in 改成使用pe_history:[refno, version]
@@ -456,9 +456,9 @@ impl AiosDBManager {
         #[cfg(feature = "debug_sql")]
         dbg!(&all_deep_refnos);
 
-        // process_meshes_update_db(Some(self.db_option.clone()), &all_deep_refnos)
-        //     .await
-        //     .unwrap();
+        process_meshes_update_db(Some(self.db_option.clone()), &all_deep_refnos)
+            .await
+            .unwrap();
 
         println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_deleted_len}");
 
