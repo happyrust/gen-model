@@ -493,9 +493,9 @@ impl AiosDBManager {
                 }
 
                 let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
-                if db_num != 7999 {
-                    continue;
-                }
+                // if db_num != 7999 {
+                //     continue;
+                // }
                 let file_latest_max_pgno = PdmsIO::new(path.to_path_buf(), true)
                     .get_att_latest_pgno()
                     .unwrap_or_default();
