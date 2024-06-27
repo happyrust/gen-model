@@ -172,11 +172,6 @@ impl AiosDBManager {
                     }
                 }
 
-                // if need_update_all_relate_after_delete ||
-                //     need_update_all_relate_after_add
-                //如果owner 存在这个map里，那么肯定是能重刷 owner relate 的
-                //如果不在，就需要去找到这个owner，单独重刷
-                // if let Some(owner_ele) = eles_map.get(&owner)
                 {
                     //只要有children，都可以直接进行一次
                     if !processed_owner_set.contains(&refno) {
@@ -242,12 +237,7 @@ impl AiosDBManager {
 
                 #[cfg(feature = "debug_parse")]
                 dbg!((refno, ele_op));
-                //TODO 如果修改的是顶点， 这里要考虑到最终的构件，也要添加进来，比如 vert -> GWALL/FLOOR 等
-                //e3d will handle automatically, so no check here.
-                // if type_name == "VERT" || type_name == "PAVE" {
-                //     // dbg!(type_name);
-                //     //owner->owner
-                // }
+                //如果修改的是顶点， 这里要考虑到最终的构件，也要添加进来，比如 vert -> GWALL/FLOOR 等
                 if PRIMITIVE_NOUN_NAMES.contains(&type_name) {
                     geo_update_log.prim_refnos.insert(refno);
                 } else if GNERAL_LOOP_OWNER_NOUN_NAMES.contains(&type_name) {
@@ -256,10 +246,6 @@ impl AiosDBManager {
                     geo_update_log.bran_hanger_refnos.insert(refno);
                 } else if CATA_GEO_NAMES.contains(&type_name) {
                     geo_update_log.basic_cata_refnos.insert(refno);
-                    // owner_children_map
-                    //     .entry(attmap.get_owner())
-                    //     .or_insert_with(HashSet::new)
-                    //     .insert(refno);
                 } else {
                     let owner_type = aios_core::get_type_name(owner).await?;
                     if CATA_HAS_TUBI_GEO_NAMES.contains(&owner_type.as_str()) {
@@ -325,9 +311,6 @@ impl AiosDBManager {
         while let Some(_) = relate_join_set.join_next().await {}
         println!("Relate pes task costs {} s", time.elapsed().as_secs_f32());
 
-        //可以采用channel模式，发送更新的数据，然后更新数据
-        //保存新增数据
-        // let mut sql_join_set = tokio::task::JoinSet::new();
         let mut att_pe_handles = vec![];
         //新增模型的处理
         for (noun, v) in update_type_eles_map {
@@ -460,9 +443,10 @@ impl AiosDBManager {
             .await
             .into_iter()
             .collect::<Vec<_>>();
-        gen_all_geos_data(&self.db_option, Some(geo_update_log))
-            .await
-            .unwrap();
+        //有可能没更新完，就update了模型？
+        // gen_all_geos_data(&self.db_option, Some(geo_update_log))
+        //     .await
+        //     .unwrap();
 
         // dbg!(&all_refnos);
         //todo 把历史的数据 inst_relate 里的in 改成使用pe_history:[refno, version]
@@ -471,9 +455,10 @@ impl AiosDBManager {
 
         #[cfg(feature = "debug_sql")]
         dbg!(&all_deep_refnos);
-        process_meshes_update_db(Some(self.db_option.clone()), &all_deep_refnos)
-            .await
-            .unwrap();
+
+        // process_meshes_update_db(Some(self.db_option.clone()), &all_deep_refnos)
+        //     .await
+        //     .unwrap();
 
         println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_deleted_len}");
 
@@ -508,7 +493,7 @@ impl AiosDBManager {
                 }
 
                 let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
-                if db_num != 5052 {
+                if db_num != 7999 {
                     continue;
                 }
                 let file_latest_max_pgno = PdmsIO::new(path.to_path_buf(), true)

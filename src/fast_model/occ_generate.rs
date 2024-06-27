@@ -7,7 +7,7 @@ use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
-use aios_core::test::test_surreal::init_test_surreal;
+use aios_core::init_test_surreal;
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
 use aios_core::{
     gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
@@ -44,7 +44,7 @@ pub async fn process_meshes_update_db(
     if refnos.is_empty() {
         return Ok(());
     }
-    let replace_exist = option.as_ref().map(|x| x.replace_mesh).unwrap_or(true);
+    let replace_exist = option.as_ref().map(|x| x.is_replace_mesh()).unwrap_or(true);
     let time = std::time::Instant::now();
     let dir = option
         .as_ref()
@@ -91,7 +91,7 @@ pub async fn process_meshes_update_db_deep(
             .as_ref()
             .map(|x| x.get_meshes_path())
             .unwrap_or("assets/meshes".into());
-        let replace_exist = option.as_ref().map(|x| x.replace_mesh).unwrap_or(false);
+        let replace_exist = option.as_ref().map(|x| x.is_replace_mesh()).unwrap_or(false);
         for &refno in refnos {
             let mut target_visible_refnos = vec![];
             let mut update_refnos = query_deep_visible_inst_refnos(refno)
@@ -154,22 +154,6 @@ pub async fn process_meshes_update_db_deep(
             }
         }
     }
-    // else{
-    //     let time = std::time::Instant::now();
-    //     // dbg!(&target_refnos);
-    //     gen_inst_meshes(&[], None).await.unwrap();
-    //     println!(
-    //         "gen_inst_meshes finished: {} ms",
-    //         time.elapsed().as_millis()
-    //     );
-    //     let time = std::time::Instant::now();
-    //     update_inst_relate_aabbs_by_refnos(&[]).await.unwrap();
-    //     println!(
-    //         "update_inst_relate_aabbs finished: {} ms",
-    //         time.elapsed().as_millis()
-    //     );
-    // }
-
     Ok(())
 }
 
@@ -216,11 +200,10 @@ pub async fn gen_inst_meshes(
             false
         }
     });
-    dbg!(inst_geo_ids.len());
+    // dbg!(inst_geo_ids.len());
     if inst_geo_ids.is_empty() {
         return Ok(());
     }
-
     let thing_has_neg_map = inst_geo_ids
         .iter()
         .map(|(x, y)| (x.as_ref().unwrap().id.to_raw(), *y))

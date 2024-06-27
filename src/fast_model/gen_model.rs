@@ -41,7 +41,7 @@ pub async fn gen_all_geos_data(
     db_option: &DbOption,
     incr_updates: Option<IncrGeoUpdateLog>,
 ) -> anyhow::Result<bool> {
-    let skip_exist = !db_option.replace_mesh;
+    let skip_exist = !db_option.is_replace_mesh();
     let time = Instant::now();
     // dbg!(&incr_updates);
     //根据需要拉入数据到本地数据库也可以
@@ -72,7 +72,7 @@ pub async fn gen_all_geos_data(
     let is_debug = debug_root_refnos.len() > 0;
     let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
 
-    let gen_mesh = db_option.gen_mesh;
+    let is_replace_mesh = db_option.is_replace_mesh();
     if is_incr_update || is_debug {
         //处理增量更新，不需要使用db_nos
         db_nos = vec![0];
@@ -98,7 +98,7 @@ pub async fn gen_all_geos_data(
         let total_shape_cnt = total_shape_cnt.clone();
         let insert_handle = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {
-                save_instance_data(&shape_insts).await?;
+                save_instance_data(&shape_insts, is_replace_mesh).await?;
                 // println!("insert shape insts: {}", shape_insts.inst_info_map.len());
                 *total_shape_cnt.lock().await += shape_insts.inst_info_map.len();
             }
@@ -176,8 +176,6 @@ pub async fn gen_all_geos_data(
             }
             let loop_sjus_map_arc = Arc::new(loop_sjus_map);
 
-            //是否需要按照类型进行分组
-            // dbg!(&origin_root_refnos);
             //使用tokio的多线程处理
             for target in origin_root_refnos.clone() {
                 let incr_updates_log = incr_updates_log_arc.clone();
@@ -227,7 +225,6 @@ pub async fn gen_all_geos_data(
                         let map = aios_core::query_group_by_cata_hash(&target_bran_hanger_refnos)
                             .await
                             .unwrap_or_default();
-                        // dbg!(&map);
                         map
                     };
                     // dbg!(&target_bran_reuse_cata_map);
@@ -378,7 +375,6 @@ pub async fn gen_all_geos_data(
                         )
                         .await
                         .unwrap_or_default();
-                        dbg!(&prim_refnos);
                         prim_refnos.into_iter().collect()
                     };
                     if !target_prim_refnos.is_empty() {
