@@ -135,7 +135,6 @@ async fn build_room_panels_relate(room_key_word: &Vec<String>) -> anyhow::Result
     "#);
     let mut response = SUL_DB.query(sql).await?;
     let room_groups: Vec<(RefU64, String, Vec<RefU64>)> = response.take(0)?;
-    // dbg!(&room_groups.len());
     let mut sql_string = String::new();
     for (room_refno, room_num, panel_refnos) in &room_groups {
         // 判断 room_num是否符合规则
