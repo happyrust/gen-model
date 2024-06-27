@@ -76,7 +76,6 @@ impl AiosDBManager {
         let mut total_modify_len = 0;
         let mut total_deleted_len = 0;
         let mut geo_update_log = IncrGeoUpdateLog::default();
-        // let mut owner_children_map = IndexMap::new();
         let mut delete_relate_sqls = vec![];
         let mut all_relate_sqls = vec![];
         let mut has_changed = false;
@@ -371,14 +370,23 @@ impl AiosDBManager {
 
                     //不管怎样，update和add，都用update的方式
                     if let Some(att_json) = att_json {
-                        update_att_sql_str.push_str(
-                            format!(
-                                "UPDATE {} CONTENT {};",
-                                refno.to_table_key(&type_name),
-                                att_json
-                            )
-                            .as_str(),
-                        );
+                        if cfg!(feature = "surreal_v2") {
+                            update_att_sql_str.push_str(
+                                format!(
+                                    "UPSERT {} CONTENT {};",
+                                    refno.to_table_key(&type_name),
+                                    att_json
+                                ).as_str(),
+                            );
+                        }else {
+                            update_att_sql_str.push_str(
+                                format!(
+                                    "UPDATE {} CONTENT {};",
+                                    refno.to_table_key(&type_name),
+                                    att_json
+                                ).as_str(),
+                            );
+                        }
                     }
                 }
 
@@ -500,12 +508,13 @@ impl AiosDBManager {
                 }
 
                 let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
-                // if db_num != 1112 {
-                //     continue;
-                // }
+                if db_num != 5052 {
+                    continue;
+                }
                 let file_latest_max_pgno = PdmsIO::new(path.to_path_buf(), true)
                     .get_att_latest_pgno()
                     .unwrap_or_default();
+                dbg!(file_latest_max_pgno);
 
                 if !CHECK_DB_TYPES.contains(&db_type.as_str()) {
                     continue;

@@ -81,8 +81,8 @@ pub async fn test_cal_distance() -> anyhow::Result<()> {
 
 pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
     let mesh_dir = db_option.get_meshes_path();
-    let room_key_word = db_option.get_room_key_word();
-    let room_panel_map = build_room_panels_relate(&room_key_word).await.unwrap();
+    let room_key_words = db_option.get_room_key_word();
+    let room_panel_map = build_room_panels_relate(&room_key_words).await.unwrap();
     let exclude_panel_refnos = room_panel_map
         .iter()
         .map(|(_, _, panel_refnos)| panel_refnos.clone())
