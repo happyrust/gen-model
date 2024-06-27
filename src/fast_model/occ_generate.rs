@@ -7,7 +7,6 @@ use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
-use aios_core::test::test_surreal::init_test_surreal;
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
 use aios_core::{
     gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
@@ -30,7 +29,6 @@ use surrealdb::sql::Thing;
 ///生成小的几何体
 #[tokio::test]
 pub async fn test_gen_geos() -> anyhow::Result<()> {
-    init_test_surreal().await;
     process_meshes_update_db_deep(None, (&["17496/171559".into(), "24381/35844".into()]))
         .await
         .unwrap();
@@ -44,7 +42,7 @@ pub async fn process_meshes_update_db(
     if refnos.is_empty() {
         return Ok(());
     }
-    let replace_exist = option.as_ref().map(|x| x.replace_mesh).unwrap_or(true);
+    let replace_exist = option.as_ref().map(|x| x.replace_mesh).unwrap_or(Some(true)).unwrap();
     let time = std::time::Instant::now();
     let dir = option
         .as_ref()
@@ -91,7 +89,7 @@ pub async fn process_meshes_update_db_deep(
             .as_ref()
             .map(|x| x.get_meshes_path())
             .unwrap_or("assets/meshes".into());
-        let replace_exist = option.as_ref().map(|x| x.replace_mesh).unwrap_or(false);
+        let replace_exist = option.as_ref().map(|x| x.replace_mesh).unwrap_or(Some(false)).unwrap();
         for &refno in refnos {
             let mut target_visible_refnos = vec![];
             let mut update_refnos = query_deep_visible_inst_refnos(refno)

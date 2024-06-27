@@ -41,7 +41,7 @@ pub async fn gen_all_geos_data(
     db_option: &DbOption,
     incr_updates: Option<IncrGeoUpdateLog>,
 ) -> anyhow::Result<bool> {
-    let skip_exist = !db_option.replace_mesh;
+    let skip_exist = !db_option.replace_mesh.unwrap_or(true);
     let time = Instant::now();
     // dbg!(&incr_updates);
     //根据需要拉入数据到本地数据库也可以
