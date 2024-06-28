@@ -146,7 +146,8 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         create_info_database(&aios_mgr).await?;
     }
 
-    if !db_option.incr_sync {
+    //只有重新同步时，才需要定义index
+    if db_option.total_sync {
         aios_core::define_owner_index().await.unwrap();
         aios_core::create_geom_index().await.unwrap();
         // aios_core::define_fullname_index().await.unwrap();
@@ -184,7 +185,10 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
                 }
             }
         }
-
+        //只同步"DICT", "SYST", "GLB", "GLOB" 这些信息
+        if db_option.sync_only_sys.unwrap_or(false) {
+            continue;
+        }
         match sync_total_async_threaded(&db_option, project, &["DESI", "CATA"]).await {
             Ok(_) => {
                 // 同步数据成功
@@ -484,11 +488,11 @@ pub async fn sync_total_async_threaded(
                                         let Some(json) = att.gen_sur_json() else {
                                             continue;
                                         };
-                                        json_vec.push(json);
+                                        json_vec.push(normalize_sql_string(&json));
                                         let Some(json) = att.gen_sur_json_uda(&[]) else {
                                             continue;
                                         };
-                                        uda_json_vec.push(json);
+                                        uda_json_vec.push(normalize_sql_string(&json));
                                     }
                                     if is_save_db {
                                         if !json_vec.is_empty() {
