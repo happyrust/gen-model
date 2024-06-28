@@ -90,13 +90,16 @@ pub async fn save_instance_data(
                 } else {
                     "".to_string()
                 };
+                // if inst_info:⟨{0}⟩.id == none
+                // {{
+                // relate inst_info:⟨{0}⟩->geo_relate->inst_geo:⟨{1}⟩ set trans=trans:⟨{2}⟩,
+                // geom_refno=pe:{3}, pts=[{4}], geo_type='{5}', visible={6} {7};
+            // }};
                 //如果是replace, 直接这里需要先删除之前的sql语句
                 let relate_sql = format!(
                     r#"
-                    if inst_info:⟨{0}⟩->geo_relate.id == none {{
                         relate inst_info:⟨{0}⟩->geo_relate->inst_geo:⟨{1}⟩ set trans=trans:⟨{2}⟩,
                             geom_refno=pe:{3}, pts=[{4}], geo_type='{5}', visible={6} {7};
-                    }}
                     "#,
                     v.id(),
                     inst.geo_hash,

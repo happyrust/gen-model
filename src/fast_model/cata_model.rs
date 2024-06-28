@@ -122,7 +122,6 @@ pub async fn gen_cata_geos(
     let mut handles = vec![];
     let mut tubi_relates = vec![];
     let gen_mesh = db_option.gen_mesh;
-    // let multi_threads = db_option.multi_threads;
     let mut local_al_map = Arc::new(DashMap::new());
     let is_bran = branch_map.len() > 0;
     // let processed_cnt = Arc::new(Mutex::new(target_cata_map.len()));
