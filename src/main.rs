@@ -23,7 +23,7 @@ use std::time::Instant;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 
 // use regex::internal::Input;
-use aios_core::get_db_option;
+use aios_core::{build_cate_relate, get_db_option};
 use aios_core::material::save_all_material_data;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
@@ -108,6 +108,10 @@ async fn main() -> anyhow::Result<()> {
         sync_pdms(&db_option).await.unwrap();
         return Ok(());
     }
+
+    //检查cate_relate 是否创建了
+    build_cate_relate(false).await.unwrap();
+
     /// 创建db manager
     if sync_live {
         mgr.init_watcher().await.unwrap();
@@ -140,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if db_option.gen_spatial_tree {
-        println!("房间关键字为: {:?}", db_option.room_key_word.clone());
+        println!("房间关键字为: {:?}", db_option.get_room_key_word());
         println!("正在生成空间树");
         load_aabb_tree().await.unwrap();
         println!("正在计算房间");

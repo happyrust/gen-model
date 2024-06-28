@@ -185,6 +185,7 @@ pub async fn cal_room_refnos(
             let mut contains_query = read
                 .locate_intersecting_bounds(&geom_inst.world_aabb)
                 .collect::<Vec<_>>();
+            if contains_query.is_empty() { continue;  }
             // dbg!(&contains_query);
             let mut need_check_refnos = vec![];
             contains_query.retain(|RStarBoundingBox {
@@ -220,6 +221,7 @@ pub async fn cal_room_refnos(
             //     dbg!(&contains_query);
             // }
             within_refnos.extend(contains_query.iter().map(|r| r.refno));
+            // dbg!(&within_refnos);
             // let need_check_refnos: Vec<RefU64> = vec!["24383_71586".into()];
             // dbg!(&need_check_refnos);
             if !need_check_refnos.is_empty() {

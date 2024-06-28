@@ -69,6 +69,26 @@ pub async fn gen_all_geos_data(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    //还要补充使用了gen_using_spref_refnos的模型
+    let mut debug_spref_refnos = db_option
+        .gen_using_spref_refnos
+        .as_ref()
+        .map(|x| {
+            x.iter()
+                .map(|x| RefU64::from_str(x).unwrap())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let using_debug_spref_ele_refnos = if !debug_spref_refnos.is_empty() {
+        let refnos = aios_core::query_ele_refnos_by_spres(&debug_spref_refnos)
+            .await
+            .unwrap();
+        refnos
+    } else {
+        vec![]
+    };
+    // dbg!(&using_debug_spref_ele_refnos);
+    debug_root_refnos.extend(using_debug_spref_ele_refnos);
     let is_debug = debug_root_refnos.len() > 0;
     let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
 
