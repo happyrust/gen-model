@@ -154,6 +154,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         aios_core::define_pe_index().await.unwrap();
     }
 
+    let mut dbno_set = Arc::new(DashSet::new());
     let mut create_tables_elapse = 0;
     // 执行多线程解析
     dbg!("执行多线程解析");
@@ -170,9 +171,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             .unwrap_or_default();
         //debug 不保存数据，只复杂查看属性值
         let is_debug = !debug_refnos.is_empty();
-
+        let cur_dbno_set = dbno_set.clone();
         if is_debug || (!db_option.incr_sync) {
-            match sync_total_async_threaded(&db_option, project, &["DICT", "SYST", "GLB", "GLOB"])
+            match sync_total_async_threaded(&db_option, project, cur_dbno_set, &["DICT", "SYST", "GLB", "GLOB"])
                 .await
             {
                 Ok(_) => {
@@ -189,7 +190,8 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         if db_option.sync_only_sys.unwrap_or(false) {
             continue;
         }
-        match sync_total_async_threaded(&db_option, project, &["DESI", "CATA"]).await {
+        let cur_dbno_set = dbno_set.clone();
+        match sync_total_async_threaded(&db_option, project, cur_dbno_set, &["DESI", "CATA"]).await {
             Ok(_) => {
                 // 同步数据成功
                 println!("同步数据成功。");
@@ -248,6 +250,7 @@ fn normalize_sql_string(sql: &str) -> String {
 pub async fn sync_total_async_threaded(
     db_option: &DbOption,
     project: &str,
+    cur_dbno_set: Arc<DashSet<u32>>,
     db_types: &[&str],
 ) -> anyhow::Result<()> {
     let pg_dir = "assets/pg";
@@ -297,7 +300,7 @@ pub async fn sync_total_async_threaded(
     let chunk_size = db_option_arc.sync_chunk_size.unwrap_or(10_0000) as usize;
     // let sync_tidb = db_option_arc.sync_tidb.unwrap_or(false);
     #[cfg(feature = "sql")]
-        let pool = mgr.get_project_pools().await?;
+    let pool = mgr.get_project_pools().await?;
     const CHUNK_SIZE: usize = 10000;
     let (sender, receiver) = flume::bounded(CHUNK_SIZE);
 
@@ -305,7 +308,7 @@ pub async fn sync_total_async_threaded(
     for i in 0..60 {
         let receiver: flume::Receiver<SenderSql> = receiver.clone();
         #[cfg(feature = "sql")]
-            let pools_clone = pool.clone();
+        let pools_clone = pool.clone();
 
         let insert_handle = tokio::task::spawn(async move {
             let mut record_stream = receiver.into_stream().chunks(CHUNK_SIZE);
@@ -347,14 +350,18 @@ pub async fn sync_total_async_threaded(
         .collect::<Vec<_>>();
     let is_sys_parse = db_types_clone.contains(&"SYST".to_string());
     let is_save_db = db_option.is_save_db();
+
     let parse_handle = tokio::spawn(async move {
-        // let mut handles = vec![];
         //todo 按照文件大小排序，只有小于多少的能开启多线程，模型一大就不合适了
         let mut db_info_sql = vec![];
         for path in children_files {
             let file_name = path.file_name().unwrap().to_str().unwrap().to_string(); // 获取文件名
-
+            if file_name.contains("."){
+                continue;
+            }
+            let dbno_set = cur_dbno_set.clone();
             let mut time = Instant::now();
+            // dbg!(&file_name);
             if is_sys_parse
                 || db_option_arc.included_db_files.is_none()
                 || db_option_arc
@@ -367,15 +374,22 @@ pub async fn sync_total_async_threaded(
                 let mut buf = vec![0u8; 60];
                 file.read_exact(&mut buf).await.unwrap();
                 let (db_type, file_version, db_no) = parse_file_basic_info(&buf);
+
                 let file_name_hash = hash_str(&file_name);
                 db_info_sql.push(format!(
                     "INSERT IGNORE INTO db_info (id, db_type, file_version, dbnum, file_name) VALUES ('{}', '{}', '{}', '{}', '{}')",
                     file_name_hash, db_type, file_version, db_no, file_name
                 ));
+                // dbg!(&db_type);
                 if !db_types_clone.contains(&db_type) {
                     continue;
                 }
-
+                //保证不重复加载相同dbno的数据
+                if dbno_set.contains(&db_no) {
+                    continue;
+                }
+                // dbg!(db_no);
+                dbno_set.insert(db_no);
                 // 如果需要解析的文件列表为空或包含当前文件名，则执行以下代码块
                 println!("path={:?}", &file_name); // 打印文件路径
                 let project_name = project.as_str().to_string(); // 获取项目名称的字符串
@@ -390,9 +404,9 @@ pub async fn sync_total_async_threaded(
 
                 let db_basic = Arc::new(db_basic);
                 if is_save_db {
-                    if cfg!(feature = "surreal_v2"){
+                    if cfg!(feature = "surreal_v2") {
                         save_pe_relates_by_insert(&db_basic, sender.clone()).await;
-                    }else{
+                    } else {
                         save_pe_relates(&db_basic, sender.clone()).await;
                     }
                 }
@@ -409,7 +423,7 @@ pub async fn sync_total_async_threaded(
                 let is_debug = !debug_refnos.is_empty();
                 if is_debug {
                     let debug_refno = debug_refnos[0];
-                    if let Some(children) = db_basic.children_map.get(&debug_refno){
+                    if let Some(children) = db_basic.children_map.get(&debug_refno) {
                         dbg!(children);
                     }
                 }
@@ -459,8 +473,8 @@ pub async fn sync_total_async_threaded(
                             }
                             if b_save_mysql {
                                 #[cfg(feature = "sql")]
-                                    save_pes_mysql(&db_basic_clone, &project_name, &total_attr_map_arc, &pool,
-                                                   &db_option_clone, db_no as i32, &sender_clone).await;
+                                save_pes_mysql(&db_basic_clone, &project_name, &total_attr_map_arc, &pool,
+                                               &db_option_clone, db_no as i32, &sender_clone).await;
                             }
                             for kv in type_ele_map.iter() {
                                 let noun: i32 = *kv.key() as _;
