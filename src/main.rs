@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
 
     {
         let mut time = Instant::now();
-        let debug_refnos = db_option.get_debug_refnos();
+        let debug_refnos = db_option.get_all_debug_refnos().await;
         //统计一下assets mesh 目录下有多少个mesh，直接忽略去生成
         let path: PathBuf = "assets/meshes".into();
         //收集目录下的文件名
