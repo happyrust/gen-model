@@ -60,15 +60,7 @@ pub async fn gen_all_geos_data(
         return Ok(false);
     }
     let db_option = Arc::new(db_option.clone());
-    let mut debug_root_refnos = db_option
-        .debug_root_refnos
-        .as_ref()
-        .map(|x| {
-            x.iter()
-                .map(|x| RefU64::from_str(x).unwrap())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let mut debug_root_refnos = db_option.get_all_debug_refnos().await;
     let is_debug = debug_root_refnos.len() > 0;
     let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
 

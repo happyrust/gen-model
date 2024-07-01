@@ -44,7 +44,7 @@ pub async fn process_meshes_update_db(
     if refnos.is_empty() {
         return Ok(());
     }
-    let replace_exist = option.as_ref().map(|x| x.is_replace_mesh()).unwrap_or(true);
+    let replace_exist = option.as_ref().map(|x| x.is_replace_mesh()).unwrap_or(false);
     let time = std::time::Instant::now();
     let dir = option
         .as_ref()
@@ -401,12 +401,10 @@ pub async fn update_inst_relate_aabbs_by_refnos(
     refnos: &[RefU64],
     replace_exist: bool,
 ) -> anyhow::Result<()> {
-    const PAGE_NUM: usize = 100;
-    let use_specified_refnos = !refnos.is_empty();
-    let mut start = 0;
-    // let mut tasks = vec![];
+    const CHUNK: usize = 100;
+    // dbg!(refnos);
     let aabb_map = Arc::new(DashMap::new());
-    for chunk in refnos.chunks(PAGE_NUM) {
+    for chunk in refnos.chunks(CHUNK) {
         if chunk.is_empty() {
             continue;
         }
@@ -424,12 +422,11 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             }
             let mut response = SUL_DB.query(sql).await.unwrap();
             let result: Vec<QueryAabbParam> = response.take(0).unwrap();
+            // dbg!(&result);
             // dbg!(result.len());
             // #[cfg(debug_assertions)]
             // println!("QueryAabbParam len: {}", result.len());
-
             let mut update_sql = String::new();
-
             for r in result {
                 let mut aabb = Aabb::new_invalid();
                 for g in r.geo_aabbs {
