@@ -33,9 +33,9 @@ pub async fn save_instance_data(
             for &k in chunk {
                 let v = inst_mgr.inst_info_map.get(k).unwrap();
                 let delete_old_sql = format!(r#"
-                delete select out->geo_relate.out from {0};
-                delete select out->geo_relate from {0};
-                delete select out from {0};
+                delete array::flatten(select value out->geo_relate.out from {0});
+                delete array::flatten(select value out->geo_relate from {0});
+                delete array::flatten(select value out from {0});
                 delete {0};"#, v.refno.to_inst_relate_key());
                 delete_sql_vec.push(delete_old_sql);
             }
