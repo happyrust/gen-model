@@ -187,7 +187,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             }
         }
         //只同步"DICT", "SYST", "GLB", "GLOB" 这些信息
-        if db_option.sync_only_sys.unwrap_or(false) {
+        if db_option.only_sync_sys {
             continue;
         }
         let cur_dbno_set = dbno_set.clone();

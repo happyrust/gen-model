@@ -103,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
 
     /// 是否全部同步模型
-    if db_option.total_sync || db_option.incr_sync || db_option.sync_only_sys.unwrap_or(false){
+    if db_option.total_sync || db_option.incr_sync || db_option.only_sync_sys {
         // 同步pdms数据
         sync_pdms(&db_option).await.unwrap();
         return Ok(());
