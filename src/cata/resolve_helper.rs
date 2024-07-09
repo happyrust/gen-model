@@ -191,6 +191,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             }),
             "SSLC" | "NSSL" => {
                 if gmse.paxises.len() >= 1 && gmse.diameters.len() >= 1 && gmse.shears.len() >= 4 {
+                    // dbg!(&gmse);
                     CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam {
                         refno: gmse.refno,
                         axis: (gmse.paxises[0].clone()),
