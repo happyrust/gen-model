@@ -172,7 +172,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         //debug 不保存数据，只复杂查看属性值
         let is_debug = !debug_refnos.is_empty();
         let cur_dbno_set = dbno_set.clone();
-        if is_debug || (!db_option.incr_sync) {
+        if is_debug || (!db_option.incr_sync) || db_option.only_sync_sys {
             match sync_total_async_threaded(&db_option, project, cur_dbno_set, &["DICT", "SYST", "GLB", "GLOB"])
                 .await
             {
@@ -300,7 +300,7 @@ pub async fn sync_total_async_threaded(
     let chunk_size = db_option_arc.sync_chunk_size.unwrap_or(10_0000) as usize;
     // let sync_tidb = db_option_arc.sync_tidb.unwrap_or(false);
     #[cfg(feature = "sql")]
-    let pool = mgr.get_project_pools().await?;
+        let pool = mgr.get_project_pools().await?;
     const CHUNK_SIZE: usize = 10000;
     let (sender, receiver) = flume::bounded(CHUNK_SIZE);
 
@@ -308,7 +308,7 @@ pub async fn sync_total_async_threaded(
     for i in 0..60 {
         let receiver: flume::Receiver<SenderSql> = receiver.clone();
         #[cfg(feature = "sql")]
-        let pools_clone = pool.clone();
+            let pools_clone = pool.clone();
 
         let insert_handle = tokio::task::spawn(async move {
             let mut record_stream = receiver.into_stream().chunks(CHUNK_SIZE);
@@ -356,7 +356,7 @@ pub async fn sync_total_async_threaded(
         let mut db_info_sql = vec![];
         for path in children_files {
             let file_name = path.file_name().unwrap().to_str().unwrap().to_string(); // 获取文件名
-            if file_name.contains("."){
+            if file_name.contains(".") {
                 continue;
             }
             let dbno_set = cur_dbno_set.clone();

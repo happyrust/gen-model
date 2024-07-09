@@ -191,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
 
 #[test]
 fn get_noun_hash() {
-    let noun = "GMSE";
+    let noun = "DB";
     let hash = db1_hash(noun);
     dbg!(hash);
     let hashes = [919309, 640481, 919399];
