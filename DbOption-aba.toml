@@ -1,6 +1,6 @@
 #同步文件配置
 total_sync = false
-incr_sync = false
+incr_sync = true
 enable_log = false
 sync_graph_db = false
 sync_versioned = false
@@ -91,7 +91,7 @@ only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["LOOP"]
-#included_db_files = ["gdp5611_0001"]
+included_db_files = ["gdp004"]
 #included_db_files = ["acp7002_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 #manual_db_nums = [7326]
@@ -106,7 +106,7 @@ room_keyword = "-RM"   # 2016  K-R-K100   (-R-)
 
 #debug_root_refnos = ["=24381/35855", "=24383/71551", "=24381/95690"]
 #debug_root_refnos = ["24381/36155", "24383/67004"]
-debug_root_refnos = ["16613/295"]
+#debug_root_refnos = ["=24383/67642"]
 #gen_using_spref_refnos = ["13245/660780"]
 #manual_sync_refnos = ["17496/269319"]
 # debug_root_refnos = ["24383/66457", "24381/34110"]
