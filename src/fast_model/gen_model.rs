@@ -136,7 +136,6 @@ pub async fn gen_all_geos_data(
             } else if is_debug {
                 origin_root_refnos = debug_root_refnos.clone();
             }
-
             let incr_updates_log_arc = Arc::new(incr_updates.clone().unwrap_or_default());
 
             //Step 1、提前缓存ploo, 得到对齐方式的偏移
@@ -239,17 +238,19 @@ pub async fn gen_all_geos_data(
                         }
                         cata_map
                     } else {
+                        let sql = format!(
+                            "select value refno from [{}] where owner.noun in ['BRAN', 'HANG']",
+                            target_refnos
+                                .iter()
+                                .map(|x| x.to_pe_key())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        );
                         let mut response = SUL_DB
-                            .query(format!(
-                                "select value refno from [{}] where owner.noun in ['BRAN', 'HANG']",
-                                target_refnos
-                                    .iter()
-                                    .map(|x| x.to_pe_key())
-                                    .collect::<Vec<_>>()
-                                    .join(",")
-                            ))
+                            .query(sql)
                             .await
                             .unwrap();
+
                         let Ok(bran_children_refnos) = response.take::<Vec<RefU64>>(0) else {
                             dbg!("查询BRAN, HANG出错");
                             continue;
@@ -261,7 +262,6 @@ pub async fn gen_all_geos_data(
                         )
                         .await
                         .unwrap_or_default();
-                        // dbg!(&use_cata_refnos);
                         use_cata_refnos.extend(bran_children_refnos);
                         let map = aios_core::query_group_by_cata_hash(&use_cata_refnos)
                             .await
