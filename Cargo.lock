@@ -3980,6 +3980,7 @@ dependencies = [
  "nom",
  "once_cell",
  "phf",
+ "pretty-hex",
  "rayon",
  "regex",
  "serde",

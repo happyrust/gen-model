@@ -110,10 +110,10 @@ pub async fn resolve_desi_comp(
     let desi_att = aios_core::get_named_attmap(desi_refno).await?;
     let is_tubi = tubi_scom.is_some();
 
-    // #[cfg(debug_assertions)]
-    // if is_tubi {
-    //     dbg!(tubi_scom);
-    // }
+    #[cfg(debug_assertions)]
+    if is_tubi {
+        dbg!(tubi_scom);
+    }
 
     let scom_ref = if let Some(scom) = tubi_scom {
         scom
@@ -126,8 +126,10 @@ pub async fn resolve_desi_comp(
                 )))?;
         scom
     };
-    // #[cfg(debug_assertions)]
-    // dbg!(scom_ref);
+    #[cfg(debug_assertions)]
+    if is_tubi {
+        dbg!(scom_ref);
+    }
 
     let scom_info = get_or_create_scom_info(scom_ref).await?;
     // #[cfg(debug_assertions)]

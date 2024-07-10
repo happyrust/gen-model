@@ -70,11 +70,28 @@ pub async fn gen_loop_geos(
                     trans_origin.translation += offset;
                 }
 
-                let neg_refnos =
-                    aios_core::query_filter_children(target_refno, &GENRAL_NEG_NOUN_NAMES)
-                        .await
-                        .unwrap_or_default();
-                shape_insts_data.insert_negs(target_refno, &neg_refnos);
+                if !target_att.is_neg() {
+                    let neg_refnos =
+                        aios_core::query_filter_children(target_refno, &GENRAL_NEG_NOUN_NAMES)
+                            .await
+                            .unwrap_or_default();
+                    shape_insts_data.insert_negs(target_refno, &neg_refnos);
+                    //检查是否有CMPF
+                    let cmpf_refnos =
+                        aios_core::query_filter_children(target_refno, &["CMPF"])
+                            .await
+                            .unwrap_or_default();
+                    if !cmpf_refnos.is_empty() {
+                        //查询cmpf里面的元素
+                        let cmpf_neg_refnos =
+                            aios_core::query_multi_filter_deep_children(cmpf_refnos,
+                                                                        GENRAL_NEG_NOUN_NAMES.into_iter().map(|x| x.to_string()).collect()).await.unwrap_or_default();
+                        // dbg!(&cmpf_neg_refnos);
+                        shape_insts_data.insert_negs(target_refno, &cmpf_neg_refnos.into_iter().map(|x| x).collect::<Vec<_>>());
+                    }
+                }
+
+
                 let mut geos_info = EleGeosInfo {
                     refno: target_refno,
                     version: target_att.get_e3d_version(),

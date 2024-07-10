@@ -255,13 +255,13 @@ pub async fn gen_all_geos_data(
                             dbg!("查询BRAN, HANG出错");
                             continue;
                         };
-                        let mut use_cata_refnos = aios_core::query_multi_deep_children_filter_inst(
+                        let mut use_cata_refnos = aios_core::query_multi_deep_children_filter_spre(
                             target_refnos.clone(),
-                            CATA_WITHOUT_REUSE_GEO_NAMES.map(String::from).to_vec(),
                             skip_exist,
                         )
                         .await
                         .unwrap_or_default();
+                        // dbg!(&use_cata_refnos);
                         use_cata_refnos.extend(bran_children_refnos);
                         let map = aios_core::query_group_by_cata_hash(&use_cata_refnos)
                             .await

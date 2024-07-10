@@ -22,11 +22,13 @@ pub async fn query_gm_params(refno: RefU64) -> anyhow::Result<Vec<GmParam>> {
     for geo_am in children {
         //todo visible 不应该在这里执行过滤
         //后续如果需要使用这些不同等级的模型，需要切换
+        // dbg!(&geo_am);
         if !geo_am.is_visible_by_level(None).unwrap_or(true) {
             continue;
         }
         let is_spro = geo_am.get_type_str() == "SPRO"; //todo add other types
         let geom = query_gm_param(&geo_am, is_spro).await.unwrap_or_default();
+        // dbg!(&geom);
 
         gms.push(geom);
     }

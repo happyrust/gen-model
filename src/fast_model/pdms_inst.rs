@@ -172,8 +172,9 @@ pub async fn save_instance_data(
 
 
     // if let Some(refnos) = inst_mgr.ngmr_relate_map.get(k)
-    {
+    if !inst_mgr.neg_relate_map.is_empty(){
         let mut ngmr_relate_vec = vec![];
+        // dbg!(&inst_mgr.neg_relate_map);
         for (k, refnos) in &inst_mgr.neg_relate_map {
             for r in refnos {
                 ngmr_relate_vec.push(format!(
