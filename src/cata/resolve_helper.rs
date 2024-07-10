@@ -191,6 +191,7 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
             }),
             "SSLC" | "NSSL" => {
                 if gmse.paxises.len() >= 1 && gmse.diameters.len() >= 1 && gmse.shears.len() >= 4 {
+                    // dbg!(&gmse);
                     CateGeoParam::SlopeBottomCylinder(CateSlopeBottomCylinderParam {
                         refno: gmse.refno,
                         axis: (gmse.paxises[0].clone()),
@@ -288,7 +289,9 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                     x: gmse.xyz[0],
                     y: gmse.xyz[1],
                     z: gmse.xyz[2],
-                    verts: gmse.verts.clone(),
+                    verts: gmse.verts.iter().zip(gmse.frads.iter()).map(|(v, d)| {
+                        Vec3::new(v[0], v[1], *d)
+                    }).collect(),
                     centre_line_flag: gmse.centre_line_flag,
                     tube_flag: gmse.tube_flag,
                 })
@@ -306,7 +309,9 @@ pub fn resolve_to_cate_geo_params(gmse: &GmseParamData) -> anyhow::Result<CateGe
                 pa: (gmse.paxises[0].clone()),
                 pb: (gmse.paxises[1].clone()),
                 angle: gmse.pang,
-                verts: gmse.verts.clone(),
+                verts: gmse.verts.iter().zip(gmse.frads.iter()).map(|(v, d)| {
+                    Vec3::new(v[0], v[1], *d)
+                }).collect(),
                 x: gmse.xyz[0],
                 y: gmse.xyz[1],
                 z: gmse.xyz[2],

@@ -351,7 +351,8 @@ pub fn resolve_axis_param(
     };
     let dir = m_dir.is_normalized().then(|| m_dir);
     let ref_dir = ref_dir.is_normalized().then(|| ref_dir);
-    match axis_param.type_name.as_str() {
+    // dbg!(&axis_param);
+    let result = match axis_param.type_name.as_str() {
         "PTAX" => {
             let d = eval_str_to_f32_or_default(&axis_param.distance, &context,  "DIST");
             // let (dir, ref_dir, pos) =
@@ -411,7 +412,11 @@ pub fn resolve_axis_param(
             return cate_axis;
         }
         _ => CateAxisParam::default()
-    }
+    };
+
+    // dbg!(&result);
+
+    result
 }
 
 #[inline]

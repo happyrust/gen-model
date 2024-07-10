@@ -143,8 +143,7 @@ pub async fn process_meshes_update_db_deep(
                 let time = std::time::Instant::now();
                 //生成元件库内部几何体的负实体运算
                 apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist, dir.clone())
-                    .await
-                    .unwrap();
+                    .await?;
                 apply_insts_boolean_manifold(&target_visible_refnos, replace_exist, dir.clone())
                     .await?;
                 //有一些布尔运算要精确计算，不然会有薄片出现
