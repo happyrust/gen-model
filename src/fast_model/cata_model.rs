@@ -902,7 +902,7 @@ pub async fn gen_cata_geos(
         .expect("send tubi shape_insts_data failed.");
 
     if !tubi_relates.is_empty() {
-        println!("tubi relate: {}", tubi_relates.join(""));
+        // println!("tubi relate: {}", tubi_relates.join(""));
         SUL_DB.query(tubi_relates.join("")).await.unwrap();
     }
     println!(
