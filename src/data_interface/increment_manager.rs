@@ -389,7 +389,7 @@ impl AiosDBManager {
 
                 let handle = tokio::task::spawn(async move {
                     if !update_att_sql_str.is_empty() {
-                        // println!("update_att_sql_str: {}", &update_att_sql_str);
+                        println!("update_att_sql_str: {}", &update_att_sql_str);
                         SUL_DB.query(update_att_sql_str).await.unwrap();
                     }
                     if !update_pe_sql_str.is_empty() {
@@ -493,9 +493,9 @@ impl AiosDBManager {
                 }
 
                 let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
-                // if db_num != 1112 {
-                //     continue;
-                // }
+                if db_num != 1112 {
+                    continue;
+                }
                 let file_latest_max_pgno = PdmsIO::new(path.to_path_buf(), true)
                     .get_att_latest_pgno()
                     .unwrap_or_default();
