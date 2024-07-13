@@ -300,7 +300,7 @@ pub async fn sync_total_async_threaded(
     let chunk_size = db_option_arc.sync_chunk_size.unwrap_or(10_0000) as usize;
     // let sync_tidb = db_option_arc.sync_tidb.unwrap_or(false);
     #[cfg(feature = "sql")]
-        let pool = mgr.get_project_pools().await?;
+    let pool = mgr.get_project_pools().await?;
     const CHUNK_SIZE: usize = 10000;
     let (sender, receiver) = flume::bounded(CHUNK_SIZE);
 
@@ -308,7 +308,7 @@ pub async fn sync_total_async_threaded(
     for i in 0..60 {
         let receiver: flume::Receiver<SenderSql> = receiver.clone();
         #[cfg(feature = "sql")]
-            let pools_clone = pool.clone();
+        let pools_clone = pool.clone();
 
         let insert_handle = tokio::task::spawn(async move {
             let mut record_stream = receiver.into_stream().chunks(CHUNK_SIZE);
@@ -452,7 +452,6 @@ pub async fn sync_total_async_threaded(
                                db_type,
                                db_no,
                                version,
-                               foreign_refnos_map,
                                ..
                            }) => {
                             //类型暂时不多线程
