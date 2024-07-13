@@ -1,6 +1,5 @@
 use std::{mem, panic};
 use std::collections::HashMap;
-
 use aios_core::*;
 use aios_core::parsed_data::*;
 use aios_core::parsed_data::geo_params_data::CateGeoParam;
@@ -8,10 +7,8 @@ use aios_core::pdms_data::{AxisParam, ScomInfo};
 use glam::{Mat3, Quat, Vec2, Vec3};
 use nom::Parser;
 use regex::Regex;
-
-use crate::cata::direction_parse::parse_expr_to_dir;
+use aios_core::tool::direction_parse::parse_expr_to_dir;
 use crate::cata::resolve::resolve_axis_param;
-use crate::data_interface::interface::PdmsDataInterface;
 
 #[test]
 fn test_exp() {
@@ -487,6 +484,15 @@ pub fn parse_str_axis_to_vec3(
     pdir: &str,
     context: &CataContext,
 ) -> anyhow::Result<Vec3> {
+    let pdir = pdir.trim();
+    //TO X (NEG ( 20 )) Z ( 65 ), 直接解析就行了
+    if pdir.starts_with("TO") {
+        // dbg!(pdir);
+        let v = parse_expr_to_dir(pdir)
+            .ok_or(anyhow::anyhow!(format!("方向字符串: {} 不正确。", pdir)))?;
+        // dbg!(v);
+        return Ok(v.as_vec3());
+    }
     let dir_str = pdir.to_uppercase().replace("AXIS", "");
     let re = Regex::new(r"^(-?[X|Y|Z])$").unwrap();
     let mut new_dir_str = dir_str.clone();
@@ -529,5 +535,5 @@ pub fn parse_str_axis_to_vec3(
     let dir_str = new_dir_str.replace(" ", "");
     let v = parse_expr_to_dir(&dir_str)
         .ok_or(anyhow::anyhow!(format!("方向字符串: {} 不正确。", pdir)))?;
-    Ok(v)
+    Ok(v.as_vec3())
 }

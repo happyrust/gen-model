@@ -638,7 +638,7 @@ pub async fn gen_cata_geos(
             let refno = ele.refno;
             let arrive_type = ele.noun.as_str();
             // let exclude = (is_hvac && leave_type != "STRT" && leave_type != "TRNS");
-            let exclude = false;
+            let exclude = (is_hvac && index == 0);
             {
                 // println!("正在处理直段{}: {}", cur_type, refno.to_string());
                 let world_trans = aios_core::get_world_transform(refno)
