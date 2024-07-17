@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "aios-database"
-version = "0.1.1"
+version = "0.1.3"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -679,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_app"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "bevy_derive",
  "bevy_ecs",
@@ -687,6 +687,7 @@ dependencies = [
  "bevy_tasks",
  "bevy_utils",
  "console_error_panic_hook",
+ "ctrlc",
  "downcast-rs",
  "thiserror",
  "wasm-bindgen",
@@ -695,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_core"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -707,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_derive"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "bevy_macro_utils",
  "quote",
@@ -716,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_ecs"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "bevy_ecs_macros",
  "bevy_ptr",
@@ -733,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_ecs_macros"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "bevy_macro_utils",
  "proc-macro2",
@@ -743,7 +744,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_hierarchy"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "bevy_app",
  "bevy_core",
@@ -755,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_macro_utils"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -765,11 +766,12 @@ dependencies = [
 
 [[package]]
 name = "bevy_math"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "bevy_reflect",
  "glam 0.27.0",
  "rand",
+ "rand_distr",
  "serde",
  "smallvec",
  "thiserror",
@@ -777,11 +779,11 @@ dependencies = [
 
 [[package]]
 name = "bevy_ptr"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 
 [[package]]
 name = "bevy_reflect"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "bevy_ptr",
  "bevy_reflect_derive",
@@ -797,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_reflect_derive"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "bevy_macro_utils",
  "proc-macro2",
@@ -808,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_tasks"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "async-executor",
  "futures-lite 2.3.0",
@@ -817,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_transform"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "bevy_app",
  "bevy_ecs",
@@ -831,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_utils"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "ahash 0.8.11",
  "bevy_utils_proc_macros",
@@ -845,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_utils_proc_macros"
-version = "0.14.0-dev"
+version = "0.15.0-dev"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1192,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "cavalier_contours"
-version = "0.4.0"
+version = "0.3.0"
 dependencies = [
  "num-traits",
  "serde",
@@ -1660,6 +1662,16 @@ checksum = "1bfb12502f3fc46cca1bb51ac28df9d618d813cdc3d2f25b9fe775a34af26bb3"
 dependencies = [
  "generic-array",
  "typenum",
+]
+
+[[package]]
+name = "ctrlc"
+version = "3.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "672465ae37dc1bc6380a6547a8883d5dd397b0f1faaad4f265726cc7042a5345"
+dependencies = [
+ "nix",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3543,6 +3555,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
+dependencies = [
+ "bitflags 2.5.0",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "noisy_float"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4018,6 +4042,7 @@ dependencies = [
  "nom",
  "once_cell",
  "phf",
+ "pretty-hex",
  "rayon",
  "regex",
  "serde",
@@ -4639,6 +4664,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom",
+]
+
+[[package]]
+name = "rand_distr"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
+dependencies = [
+ "num-traits",
+ "rand",
 ]
 
 [[package]]

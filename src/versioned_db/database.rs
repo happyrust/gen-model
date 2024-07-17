@@ -452,7 +452,6 @@ pub async fn sync_total_async_threaded(
                                db_type,
                                db_no,
                                version,
-                               foreign_refnos_map,
                                ..
                            }) => {
                             //类型暂时不多线程
@@ -502,7 +501,7 @@ pub async fn sync_total_async_threaded(
                                         let Some(json) = att.gen_sur_json() else {
                                             continue;
                                         };
-                                        json_vec.push(normalize_sql_string(&json));
+                                        json_vec.push(json);
                                         let Some(json) = att.gen_sur_json_uda(&[]) else {
                                             continue;
                                         };

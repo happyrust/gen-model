@@ -296,7 +296,6 @@ pub async fn gen_all_geos_data(
                             gen_inst_handles.push(handle);
                         }
 
-                        //不能重用的类型
                         if !target_single_cata_map.is_empty() {
                             let sjus_map_clone = loop_sjus_map_arc.clone();
                             let db_option = db_option.clone();
