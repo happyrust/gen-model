@@ -172,7 +172,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         //debug 不保存数据，只复杂查看属性值
         let is_debug = !debug_refnos.is_empty();
         let cur_dbno_set = dbno_set.clone();
-        if is_debug || (!db_option.incr_sync) {
+        if is_debug || (!db_option.incr_sync) || db_option.only_sync_sys {
             match sync_total_async_threaded(&db_option, project, cur_dbno_set, &["DICT", "SYST", "GLB", "GLOB"])
                 .await
             {
@@ -187,7 +187,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             }
         }
         //只同步"DICT", "SYST", "GLB", "GLOB" 这些信息
-        if db_option.sync_only_sys.unwrap_or(false) {
+        if db_option.only_sync_sys {
             continue;
         }
         let cur_dbno_set = dbno_set.clone();
@@ -356,7 +356,7 @@ pub async fn sync_total_async_threaded(
         let mut db_info_sql = vec![];
         for path in children_files {
             let file_name = path.file_name().unwrap().to_str().unwrap().to_string(); // 获取文件名
-            if file_name.contains("."){
+            if file_name.contains(".") {
                 continue;
             }
             let dbno_set = cur_dbno_set.clone();

@@ -136,7 +136,6 @@ pub async fn gen_all_geos_data(
             } else if is_debug {
                 origin_root_refnos = debug_root_refnos.clone();
             }
-
             let incr_updates_log_arc = Arc::new(incr_updates.clone().unwrap_or_default());
 
             //Step 1、提前缓存ploo, 得到对齐方式的偏移
@@ -239,24 +238,25 @@ pub async fn gen_all_geos_data(
                         }
                         cata_map
                     } else {
+                        let sql = format!(
+                            "select value refno from [{}] where owner.noun in ['BRAN', 'HANG']",
+                            target_refnos
+                                .iter()
+                                .map(|x| x.to_pe_key())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        );
                         let mut response = SUL_DB
-                            .query(format!(
-                                "select value refno from [{}] where owner.noun in ['BRAN', 'HANG']",
-                                target_refnos
-                                    .iter()
-                                    .map(|x| x.to_pe_key())
-                                    .collect::<Vec<_>>()
-                                    .join(",")
-                            ))
+                            .query(sql)
                             .await
                             .unwrap();
+
                         let Ok(bran_children_refnos) = response.take::<Vec<RefU64>>(0) else {
                             dbg!("查询BRAN, HANG出错");
                             continue;
                         };
-                        let mut use_cata_refnos = aios_core::query_multi_deep_children_filter_inst(
+                        let mut use_cata_refnos = aios_core::query_multi_deep_children_filter_spre(
                             target_refnos.clone(),
-                            CATA_WITHOUT_REUSE_GEO_NAMES.map(String::from).to_vec(),
                             skip_exist,
                         )
                         .await

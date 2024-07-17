@@ -1,22 +1,23 @@
 #同步文件配置
 total_sync = false
-incr_sync = false
+incr_sync = true
 enable_log = false
 sync_graph_db = false
 sync_versioned = false
 sync_tidb = false
-sync_live = true
+sync_live = false
 replace_dbs = false
 sync_chunk_size = 1_0000
 
 #项目设置
 project_path = "D:/AVEVA/Projects/E3D2.1"
-included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
+included_projects = ["GDP"]
 #project_dirs = ["AvevaMarineSample"]
 
-mdb_name = "ALL"
-project_name = "AvevaMarineSample"
-project_code = 1516
+mdb_name = "NI-MODEL"
+project_name = "ABA"
+project_code = 1001
+surreal_ns = 1001
 module = "DESI"
 #是否生成模型数据
 gen_model = true
@@ -59,7 +60,7 @@ batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 v_ip = "localhost"
 #v_port = "8004"
 #v_port = "8003"
-v_port = "8008"
+v_port = "8010"
 v_user = "root"
 v_password = "root"
 pe_chunk = 500
@@ -90,7 +91,7 @@ only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["LOOP"]
-#included_db_files = ["ams1112_0001"]
+included_db_files = ["gdp004"]
 #included_db_files = ["acp7002_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 #manual_db_nums = [7326]
@@ -105,6 +106,8 @@ room_keyword = "-RM"   # 2016  K-R-K100   (-R-)
 
 #debug_root_refnos = ["=24381/35855", "=24383/71551", "=24381/95690"]
 #debug_root_refnos = ["24381/36155", "24383/67004"]
-manual_sync_refnos = ["17496/273445"]
+#debug_root_refnos = ["=24383/67642"]
+#gen_using_spref_refnos = ["13245/660780"]
+#manual_sync_refnos = ["17496/269319"]
 # debug_root_refnos = ["24383/66457", "24381/34110"]
 #debug_root_refnos = ["17496/172806"]

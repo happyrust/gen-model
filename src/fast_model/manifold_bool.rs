@@ -129,12 +129,12 @@ pub async fn apply_cata_neg_boolean_manifold(
                             .is_ok()
                         {
                             update_sql.push_str(&format!(
-                                "create inst_geo:⟨{}⟩ set meshed = true, aabb = {}, visible = true;",
+                                "create inst_geo:⟨{}⟩ set meshed = true, aabb = {};",
                                 new_id, &pos.aabb_id
                             ));
                             // 有索引的关系，所以geom_refno需要点变化
                             update_sql.push_str(&format!(
-                                "relate {}->geo_relate->inst_geo:⟨{}⟩ set geom_refno=pe:⟨{}⟩, geo_type='Pos', trans=trans:⟨0⟩;",
+                                "relate {}->geo_relate->inst_geo:⟨{}⟩ set geom_refno=pe:⟨{}⟩, geo_type='Pos', trans=trans:⟨0⟩, visible = true;",
                                 &g.inst_info_id,
                                 new_id,
                                 format!("{}_b", bg[0]),
