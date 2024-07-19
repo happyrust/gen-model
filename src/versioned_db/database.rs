@@ -236,14 +236,7 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
 }
 
 
-//去掉不符合条件的 \\u0002 这种，替换成空字符串
-#[inline]
-fn normalize_sql_string(sql: &str) -> String {
-    regex::Regex::new(r"\\u[0-9a-fA-F]{4}")
-        .unwrap()
-        .replace_all(&sql, "")
-        .to_string()
-}
+
 
 //分成两部分，一部分先保存UDA 和 SYS 这些数据
 ///多线程同步数据，包括增量同步

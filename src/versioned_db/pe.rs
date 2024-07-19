@@ -158,21 +158,7 @@ pub async fn save_pes(
                 continue;
             }
             let att_map = total_attr_map.get(&refno).unwrap();
-            let owner = att_map.get_refno_by_att_or_default("OWNER");
-            let noun = att_map.get_type();
-            let name = att_map.get_string("NAME").unwrap_or_default();
-
-            let ele = SPdmsElement {
-                refno,
-                owner,
-                name,
-                noun,
-                dbnum: db_num,
-                cata_hash: att_map.cal_cata_hash(),
-                e3d_version: att_map.get_e3d_version(),
-                ..Default::default()
-            };
-            let json = ele.gen_sur_json();
+            let json = att_map.pe(db_num).gen_sur_json();
             if exist_refnos.contains(&refno) {
                 update_sql_str
                     .push_str(format!("UPDATE {} CONTENT {};", refno.to_pe_key(), json).as_str());
@@ -256,6 +242,9 @@ pub async fn save_pe_relates(db_basic: &DbBasicData, output: flume::Sender<Sende
         if children.is_empty() {
             continue;
         }
+        //即使发生删除，也要维护之前的顺序，那这个 id 怎么处理？
+        //如何还原出之前的顺序呢？
+        //是否需要安排pe_historu表，记录pe_owner的变化
         let relate_sqls = children
             .iter()
             .enumerate()
