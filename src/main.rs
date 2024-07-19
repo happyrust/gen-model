@@ -110,7 +110,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     //检查cate_relate 是否创建了
-    build_cate_relate(false).await.unwrap();
+    // build_cate_relate(false).await.unwrap();
 
     /// 创建db manager
     if sync_live {

@@ -9,6 +9,7 @@ use nom::Parser;
 use regex::Regex;
 use aios_core::tool::direction_parse::parse_expr_to_dir;
 use crate::cata::resolve::resolve_axis_param;
+use aios_core::tool::parse_to_dir::parse_to_direction;
 
 #[test]
 fn test_exp() {
@@ -488,8 +489,8 @@ pub fn parse_str_axis_to_vec3(
     //TO X (NEG ( 20 )) Z ( 65 ), 直接解析就行了
     if pdir.starts_with("TO") {
         // dbg!(pdir);
-        let v = parse_expr_to_dir(pdir)
-            .ok_or(anyhow::anyhow!(format!("方向字符串: {} 不正确。", pdir)))?;
+        let v = parse_to_direction(pdir, Some(context))?.unwrap_or_default();
+            // .(anyhow::anyhow!(format!("方向字符串: {} 不正确。", pdir)))?;
         // dbg!(v);
         return Ok(v.as_vec3());
     }
