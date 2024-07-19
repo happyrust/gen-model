@@ -593,9 +593,10 @@ pub async fn gen_cata_geos(
                             "发现直段{}->{}, 方向: {}, 辅助方向: {}, 距离: {:.3}",
                             current_tubing.leave_refno.to_slash_string(),
                             current_tubing.arrive_refno.to_slash_string(),
-                            to_pdms_vec_str(&current_tubing.desire_leave_dir),
+                            to_pdms_vec_str(&current_tubing.desire_leave_dir, false),
                             to_pdms_vec_str(
-                                &current_tubing.leave_ref_dir.unwrap_or_default()
+                                &current_tubing.leave_ref_dir.unwrap_or_default(),
+                                false
                             ),
                             dist
                         );
@@ -659,7 +660,7 @@ pub async fn gen_cata_geos(
                     bran_comp_vec.push(refno);
                     current_tubing.arrive_refno = refno;
                     //ATTA，如果设置成SPKBRK，产生直段，否则不产生直段
-                    let mut skip = (arrive_type == "ATTA" || arrive_type == "BRCO")
+                    let mut skip = (arrive_type == "ATTA" || arrive_type == "STIF" || arrive_type == "BRCO")
                         && !aios_core::get_named_attmap(refno)
                         .await?
                         .get_bool_or_default("SPKBRK");
@@ -677,8 +678,8 @@ pub async fn gen_cata_geos(
                         let same_dir = actual_dir.dot(a_dir) > 0.99;
                         #[cfg(feature = "debug_model")]
                         if same_dir {
-                            dbg!(to_pdms_vec_str(&actual_dir));
-                            dbg!(to_pdms_vec_str(&a_dir));
+                            dbg!(to_pdms_vec_str(&actual_dir, false));
+                            dbg!(to_pdms_vec_str(&a_dir, false));
                         }
                         current_tubing.end_pt = a_pos;
                         current_tubing.desire_arrive_dir = a_dir;
@@ -748,9 +749,10 @@ pub async fn gen_cata_geos(
                                             "发现直段{}->{}, 方向: {}, 辅助方向: {}, 距离: {:.3}",
                                             current_tubing.leave_refno.to_slash_string(),
                                             current_tubing.arrive_refno.to_slash_string(),
-                                            to_pdms_vec_str(&current_tubing.desire_leave_dir),
+                                            to_pdms_vec_str(&current_tubing.desire_leave_dir, false),
                                             to_pdms_vec_str(
-                                                &current_tubing.leave_ref_dir.unwrap_or_default()
+                                                &current_tubing.leave_ref_dir.unwrap_or_default(),
+                                                false
                                             ),
                                             dist
                                         );
@@ -774,8 +776,8 @@ pub async fn gen_cata_geos(
                                     #[cfg(feature = "debug_model")]
                                     {
                                         dbg!(&current_tubing);
-                                        dbg!(to_pdms_vec_str(&current_tubing.desire_arrive_dir));
-                                        dbg!(to_pdms_vec_str(&current_tubing.desire_leave_dir));
+                                        dbg!(to_pdms_vec_str(&current_tubing.desire_arrive_dir, false));
+                                        dbg!(to_pdms_vec_str(&current_tubing.desire_leave_dir, false));
                                         println!("{} 的直段方向有问题", refno.to_string());
                                     }
                                 }
@@ -864,9 +866,10 @@ pub async fn gen_cata_geos(
                                 "发现直段{}->{}, 方向: {}, 辅助方向: {}, 距离: {:.3}",
                                 current_tubing.leave_refno.to_slash_string(),
                                 current_tubing.arrive_refno.to_slash_string(),
-                                to_pdms_vec_str(&current_tubing.desire_leave_dir),
+                                to_pdms_vec_str(&current_tubing.desire_leave_dir, false),
                                 to_pdms_vec_str(
-                                    &current_tubing.leave_ref_dir.unwrap_or_default()
+                                    &current_tubing.leave_ref_dir.unwrap_or_default(),
+                                    false
                                 ),
                                 last_dist
                             );
