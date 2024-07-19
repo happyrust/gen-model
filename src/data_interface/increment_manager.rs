@@ -115,7 +115,6 @@ impl AiosDBManager {
             let mut processed_owner_set = HashSet::new();
             for (&refno, ele) in &eles_map {
                 let mut attmap: NamedAttrMap = ele.whole_attmap.merge().into();
-                attmap.set_e3d_version(ele.version as _);
                 let owner = attmap.get_owner();
                 let type_name = attmap.get_type();
                 let type_name = type_name.as_str();
@@ -335,7 +334,7 @@ impl AiosDBManager {
                         name: name.unwrap_or_default(),
                         noun: k.attr.get_type(),
                         dbnum: k.db_no,
-                        e3d_version: k.attr.get_e3d_version(),
+                        pgno: k.attr.pgno(),
                         cata_hash: k.attr.cal_cata_hash(),
                         ..Default::default()
                     };

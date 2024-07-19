@@ -136,7 +136,6 @@ pub async fn save_pes(
     let is_debug = !debug_refnos.is_empty();
 
     let mut exist_refnos: HashSet<RefU64> = HashSet::new();
-    let children_map = &db_basic.children_map;
     for chunk in keys.chunks(option.pe_chunk as _) {
         //是否需要覆盖保存数据库
         if option.replace_dbs {
