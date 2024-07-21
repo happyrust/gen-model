@@ -1,8 +1,8 @@
 use std::str::FromStr;
+use aios_core::expression::query_cata::query_gm_param;
 use aios_core::pdms_data::GmParam;
 use aios_core::pdms_types::{PdmsGenericType, TOTAL_CATA_GEO_NOUN_NAMES};
 use aios_core::RefU64;
-use crate::cata::query_cata::query_gm_param;
 
 pub async fn query_gm_params(refno: RefU64) -> anyhow::Result<Vec<GmParam>> {
     let mut gms = vec![];

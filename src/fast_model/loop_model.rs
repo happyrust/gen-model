@@ -55,6 +55,9 @@ pub async fn gen_loop_geos(
             let mut shape_insts_data = ShapeInstancesData::default();
             for j in start_idx..end_idx {
                 let target_refno = all_loop_owner_refnos[j];
+                // if target_refno != "17496_271428".into(){
+                //     continue;
+                // }
                 let mut target_att = aios_core::get_named_attmap(target_refno)
                     .await
                     .unwrap_or_default();
@@ -62,6 +65,7 @@ pub async fn gen_loop_geos(
                 let Ok(Some(mut trans_origin)) = aios_core::get_world_transform(target_refno).await else {
                     continue;
                 };
+                // dbg!(target_refno);
                 //判断父节点是否有SJUS，需要调整位置
                 if ( target_type == "FLOOR" || target_type == "PANE" || target_type == "GWALL")
                     && let Some(sjus_adjust) = sjus_map_clone.get(&target_refno)
@@ -90,8 +94,6 @@ pub async fn gen_loop_geos(
                         shape_insts_data.insert_negs(target_refno, &cmpf_neg_refnos.into_iter().map(|x| x).collect::<Vec<_>>());
                     }
                 }
-
-
                 let mut geos_info = EleGeosInfo {
                     refno: target_refno,
                     version: target_att.get_e3d_version(),
@@ -172,7 +174,6 @@ pub async fn gen_loop_geos(
                 let geom_inst = EleInstGeo {
                     geo_hash,
                     refno: target_refno,
-
                     pts: Default::default(),
                     aabb: None,
                     transform: tr,
@@ -187,6 +188,7 @@ pub async fn gen_loop_geos(
                     cata_neg_refnos: Default::default(),
                 };
                 geos_info.is_solid = geom_inst.geo_type == GeoBasicType::Pos;
+                // dbg!(target_refno);
                 shape_insts_data.insert_geos_data(
                     target_refno.to_string(),
                     EleInstGeosData {

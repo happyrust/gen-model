@@ -19,9 +19,9 @@ fn load_mesh(id: &str) -> anyhow::Result<PlantMesh> {
 }
 
 #[inline]
-fn load_manifold(dir: &PathBuf, id: &str, mat: DMat4) -> anyhow::Result<ManifoldRust> {
+fn load_manifold(dir: &PathBuf, id: &str, mat: DMat4, more_precision: bool) -> anyhow::Result<ManifoldRust> {
     let mesh = PlantMesh::des_mesh_file(&dir.join(format!("{}.mesh", id)))?;
-    let manifold: ManifoldRust = (&mesh, &mat).into();
+    let manifold = ManifoldRust::convert_to_manifold(mesh, mat, more_precision);
     Ok(manifold)
 }
 
@@ -97,7 +97,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                     };
 
                     let Ok(mut pos_manifold) =
-                        load_manifold(&dir_clone, &pos.id, pos.trans.compute_matrix().as_dmat4())
+                        load_manifold(&dir_clone, &pos.id, pos.trans.compute_matrix().as_dmat4(), false)
                     else {
                         update_sql.push_str(&format!(
                             "update {}<-inst_relate set bad_bool=true;",
@@ -108,12 +108,13 @@ pub async fn apply_cata_neg_boolean_manifold(
 
                     // dbg!(&update_sql);
                     let mut neg_manifolds = vec![];
+                    //负实体的精度要比正实体大
                     for &neg in bg.iter().skip(1) {
                         let Some(neg_geo) = gms.iter().find(|x| x.geom_refno == neg) else {
                             continue;
                         };
                         let m = neg_geo.trans.compute_matrix().as_dmat4();
-                        if let Ok(manifold) = load_manifold(&dir_clone, &neg_geo.id, m) {
+                        if let Ok(manifold) = load_manifold(&dir_clone, &neg_geo.id, m, true) {
                             neg_manifolds.push(manifold);
                         }
                     }
@@ -171,7 +172,6 @@ pub async fn apply_insts_boolean_manifold(
     dir: PathBuf,
 ) -> anyhow::Result<()> {
     let inst_keys = get_inst_relate_keys(refnos);
-    // let mut remain_refnos = vec![];
     //筛选出来 "Neg", "CataCrossNeg" 的关联
     let mut sql = format!(
         r#" select
@@ -207,7 +207,7 @@ pub async fn apply_insts_boolean_manifold(
                                 let mut pos_manifolds = vec![];
                                 for (pos_id, pos_t) in b.ts.iter() {
                                     if let Ok(manifold) =
-                                        load_manifold(&dir_clone, pos_id, pos_t.compute_matrix().as_dmat4())
+                                        load_manifold(&dir_clone, pos_id, pos_t.compute_matrix().as_dmat4(), false)
                                     {
                                         pos_manifolds.push(manifold);
                                     }
@@ -266,9 +266,6 @@ pub async fn apply_insts_boolean_manifold(
                                             if neg_max / pos_max > 0.9 {
                                                 found_need_occ = true;
                                                 continue;
-                                                // let scale_xy = 1.02;
-                                                // neg_t.scale.x *= scale_xy;
-                                                // neg_t.scale.y *= scale_xy;
                                             }
                                         }
 
@@ -316,7 +313,7 @@ pub async fn apply_insts_boolean_manifold(
                                         let m = inverse_mat
                                             * neg_t.compute_matrix().as_dmat4()
                                             * trans.compute_matrix().as_dmat4();
-                                        if let Ok(manifold) = load_manifold(&dir_clone, &id, m) {
+                                        if let Ok(manifold) = load_manifold(&dir_clone, &id, m, true) {
                                             #[cfg(feature = "debug_model")]
                                             {
                                                 let neg_mesh = PlantMesh::from(&manifold);

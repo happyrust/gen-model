@@ -1,10 +1,10 @@
 use std::collections::{BTreeMap, HashMap};
 use aios_core::pdms_data::{PlinParam, ScomInfo};
 use aios_core::{CataContext, RefU64};
+use aios_core::expression::query_cata::{query_axis_params, resolve_cata_comp};
+use aios_core::expression::resolve::{resolve_axis_param, SCOM_INFO_MAP};
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use anyhow::anyhow;
-use crate::cata::query_cata::{query_axis_params, resolve_cata_comp};
-use crate::cata::resolve::{resolve_axis_param, SCOM_INFO_MAP};
 use crate::fast_model::query_gm_params;
 
 ///收集SCOM的信息, 暂时慎用缓存
@@ -12,7 +12,6 @@ pub async fn get_or_create_scom_info(cata_refno: RefU64) -> anyhow::Result<ScomI
     let scom_info = if let Some(info) = SCOM_INFO_MAP.get(&cata_refno) {
         info.value().clone()
     } else {
-        // dbg!(cata_refno);
         let attr_map = aios_core::get_named_attmap(cata_refno).await?;
         let type_noun = attr_map.get_type_str();
         let ptref_name = match type_noun {
@@ -139,5 +138,6 @@ pub async fn resolve_desi_comp(
         .unwrap();
 
     let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(context));
+    // dbg!(&geom_info);
     geom_info.map_err(|_| anyhow!("resolve_cata_comp failed"))
 }
