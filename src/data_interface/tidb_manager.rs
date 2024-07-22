@@ -33,17 +33,9 @@ use std::default::Default;
 use std::fmt::{Debug, Formatter};
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use crate::cata::query_cata::query_gm_param;
-use crate::cata::query_cata::{query_axis_params, resolve_cata_comp};
-use crate::cata::resolve::resolve_axis_param;
-use crate::cata::resolve::SCOM_INFO_MAP;
 use crate::consts::*;
-use crate::data_interface::db_model::GLOBAL_MDB_WORLD_MAP;
 use crate::data_interface::interface::PdmsDataInterface;
-use crate::data_interface::structs::*;
 use crate::defines::*;
-use crate::fast_model::{get_or_create_scom_info, query_gm_params};
 
 #[derive(Clone)]
 pub struct AiosDBManager {
