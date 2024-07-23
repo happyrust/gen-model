@@ -117,7 +117,6 @@ pub async fn gen_cata_geos(
     sjus_map_arc: Arc<DashMap<RefU64, (Vec3, f32)>>,
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
-    let batch_size = db_option.gen_model_batch_size;
     let t = Instant::now();
     let mut handles = vec![];
     let mut tubi_relates = vec![];
@@ -170,6 +169,9 @@ pub async fn gen_cata_geos(
                     if gen_mesh || !target_cata.exist_inst {
                         //如果没有已有的，需要生成
                         let ele_refno = target_cata.group_refnos[0];
+                        // if ele_refno  != "24381/178058".into(){
+                        //     continue;
+                        // }
                         process_refno = Some(ele_refno);
                         let Ok(Some(cata_refno)) = aios_core::get_cat_refno(ele_refno).await else {
                             #[cfg(feature = "debug_model")]

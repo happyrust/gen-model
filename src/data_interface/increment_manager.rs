@@ -163,7 +163,7 @@ impl AiosDBManager {
                         if is_last_add {
                             all_relate_sqls
                                 .push(
-                                    format!("RELATE {0}->pe_owner:[{1}, {index}]->{1};", cp, op,),
+                                    format!("RELATE {0}->pe_owner:[{1}, {index}]->{1};", cp, op, ),
                                 );
                         } else {
                             need_update_all_relate_after_add = true;
@@ -274,7 +274,7 @@ impl AiosDBManager {
         }
 
         //备份更新 tubi 的数据
-        if !geo_update_log.bran_hanger_refnos.is_empty(){
+        if !geo_update_log.bran_hanger_refnos.is_empty() {
             let bran_refnos = geo_update_log.bran_hanger_refnos.iter().cloned().collect::<Vec<_>>();
             backup_att_and_pe_to_history_tables(&bran_refnos)
                 .await
@@ -343,7 +343,7 @@ impl AiosDBManager {
                     let att_json = k.attr.gen_sur_json_exclude(&["id"]);
                     if k.is_modified() {
                         update_pe_sql_str.push_str(
-                            format!("UPDATE {} CONTENT {};", refno.to_pe_key(), json).as_str(),
+                            format!("UPSERT {} CONTENT {};", refno.to_pe_key(), json).as_str(),
                         );
                     } else {
                         insert_pe_jsons_str.push_str(&json);
@@ -360,7 +360,7 @@ impl AiosDBManager {
                                     att_json
                                 ).as_str(),
                             );
-                        }else {
+                        } else {
                             update_att_sql_str.push_str(
                                 format!(
                                     "UPDATE {} CONTENT {};",
@@ -378,28 +378,28 @@ impl AiosDBManager {
                     .unwrap();
 
                 //调用函数，将当前数据存储到版本表里
-                // println!("{}", &update_pe_sql_str);
+                println!("{}", &update_pe_sql_str);
                 let insert_pe_sql = if !insert_pe_jsons_str.is_empty() {
                     insert_pe_jsons_str.pop();
-                    format!("INSERT IGNORE INTO pe [{}];", insert_pe_jsons_str)
+                    format!("UPSERT IGNORE INTO pe [{}];", insert_pe_jsons_str)
                 } else {
                     "".to_owned()
                 };
 
                 let handle = tokio::task::spawn(async move {
                     if !update_att_sql_str.is_empty() {
-                        println!("update_att_sql_str: {}", &update_att_sql_str);
+                        // println!("update_att_sql_str: {}", &update_att_sql_str);
                         SUL_DB.query(update_att_sql_str).await.unwrap();
                     }
                     if !update_pe_sql_str.is_empty() {
-                        // println!("update_pe_sql: {}", &update_pe_sql_str);
+                        println!("update_pe_sql: {}", &update_pe_sql_str);
                         SUL_DB.query(update_pe_sql_str).await.unwrap();
                     }
 
                     //使用surreal 保存pe
                     if !insert_pe_sql.is_empty() {
-                        // println!("insert_pe_sql: {}", &insert_pe_sql);
-                       SUL_DB.query(insert_pe_sql).await.unwrap();
+                        println!("insert_pe_sql: {}", &insert_pe_sql);
+                        SUL_DB.query(insert_pe_sql).await.unwrap();
                     }
                 });
 
@@ -492,7 +492,7 @@ impl AiosDBManager {
                 }
 
                 let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
-                if db_num != 1112 {
+                if db_num != 7999 {
                     continue;
                 }
                 let file_latest_max_pgno = PdmsIO::new(path.to_path_buf(), true)
@@ -508,6 +508,7 @@ impl AiosDBManager {
                     //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
                     continue;
                 };
+                dbg!(db_latest_pgno);
                 // self.watcher
                 //     .file_name_full_path_map
                 //     .insert(file_name.to_owned(), path.to_path_buf());
