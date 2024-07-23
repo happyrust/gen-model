@@ -382,7 +382,7 @@ impl AiosDBManager {
                 println!("{}", &update_pe_sql_str);
                 let insert_pe_sql = if !insert_pe_jsons_str.is_empty() {
                     insert_pe_jsons_str.pop();
-                    format!("UPSERT IGNORE INTO pe [{}];", insert_pe_jsons_str)
+                    format!("INSERT IGNORE INTO pe [{}];", insert_pe_jsons_str)
                 } else {
                     "".to_owned()
                 };
@@ -495,7 +495,7 @@ impl AiosDBManager {
                 }
 
                 let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
-                if db_num != 7999 {
+                if db_num != 7997 {
                     continue;
                 }
                 let project = get_db_option().project_name.clone();
