@@ -157,7 +157,7 @@ pub async fn save_pes(
                 continue;
             }
             let att_map = total_attr_map.get(&refno).unwrap();
-            let json = att_map.pe(db_num).gen_sur_json();
+            let json = att_map.pe(db_num).gen_sur_json(None);
             if exist_refnos.contains(&refno) {
                 update_sql_str
                     .push_str(format!("UPDATE {} CONTENT {};", refno.to_pe_key(), json).as_str());
