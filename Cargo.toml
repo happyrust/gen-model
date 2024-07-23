@@ -1,10 +1,10 @@
 [package]
 name = "aios-database"
-version = "0.1.1"
+version = "0.1.3"
 edition = "2021"
 
 [features]
-default = ["occ", "ws", "gen_model", "manifold"] #
+default = ["ws", "gen_model", "manifold", "occ"] #
 truck = []
 local = []
 ws = []
@@ -57,7 +57,7 @@ parry3d = { path = "../new-crates/parry/crates/parry3d", features = [
 ] }
 parry2d = { path = "../new-crates/parry/crates/parry2d" }
 parse_pdms_db = { path = "../aios-parse-pdms" }
-aios_core = { path = "../new-crates/aios-core" }
+aios_core = { path = "../new-crates/aios-core", default-features = false }
 bevy_transform = { path = "../new-crates/bevy/crates/bevy_transform" }
 bevy_reflect = { path = "../new-crates/bevy/crates/bevy_reflect" }
 pdms_io = { path = "../pdms-io" }

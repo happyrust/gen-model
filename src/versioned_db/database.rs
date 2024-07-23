@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
+use aios_core::helper::normalize_sql_string;
 use aios_core::tool::hash_tool::hash_str;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
@@ -236,14 +237,7 @@ pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
 }
 
 
-//去掉不符合条件的 \\u0002 这种，替换成空字符串
-#[inline]
-fn normalize_sql_string(sql: &str) -> String {
-    regex::Regex::new(r"\\u[0-9a-fA-F]{4}")
-        .unwrap()
-        .replace_all(&sql, "")
-        .to_string()
-}
+
 
 //分成两部分，一部分先保存UDA 和 SYS 这些数据
 ///多线程同步数据，包括增量同步
@@ -501,7 +495,7 @@ pub async fn sync_total_async_threaded(
                                         let Some(json) = att.gen_sur_json() else {
                                             continue;
                                         };
-                                        json_vec.push(normalize_sql_string(&json));
+                                        json_vec.push(json);
                                         let Some(json) = att.gen_sur_json_uda(&[]) else {
                                             continue;
                                         };

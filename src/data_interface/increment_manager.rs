@@ -79,9 +79,10 @@ impl AiosDBManager {
         let mut delete_relate_sqls = vec![];
         let mut all_relate_sqls = vec![];
         let mut has_changed = false;
+        let project = get_db_option().project_name.clone();
         //TODO: 如何鉴别只有claim page的变化，没有数据的更新，就不需要执行增量更新
         for (path, (basic_info, last_pageno)) in increment_ranges_map {
-            let mut io = PdmsIO::new(path, true);
+            let mut io = PdmsIO::new(&project, path, true);
             io.open()?;
             let mut eles_map = io.collect_increment_eles(last_pageno).await?;
             let sync_refnos = self.db_option.get_manual_sync_refnos();
@@ -339,8 +340,8 @@ impl AiosDBManager {
                         ..Default::default()
                     };
 
-                    let json = pe.gen_sur_json();
-                    let att_json = k.attr.gen_sur_json_exclude(&["id"]);
+                    let json = pe.gen_sur_json(None);
+                    let att_json = k.attr.gen_sur_json_exclude(&["id"], None);
                     if k.is_modified() {
                         update_pe_sql_str.push_str(
                             format!("UPSERT {} CONTENT {};", refno.to_pe_key(), json).as_str(),
@@ -475,6 +476,8 @@ impl AiosDBManager {
         fs::create_dir_all("asset/archives")?;
         let mut time = Instant::now();
         dbg!(&self.watcher.watch_dirs);
+        let project = get_db_option().project_name.clone();
+
         for watch_dir in &self.watcher.watch_dirs {
             // let mut join_set = JoinSet::new();
             for entry in WalkDir::new(watch_dir).sort_by(|a, b| {
@@ -495,7 +498,8 @@ impl AiosDBManager {
                 if db_num != 7999 {
                     continue;
                 }
-                let file_latest_max_pgno = PdmsIO::new(path.to_path_buf(), true)
+                let project = get_db_option().project_name.clone();
+                let file_latest_max_pgno = PdmsIO::new(&project, path.to_path_buf(), true)
                     .get_att_latest_pgno()
                     .unwrap_or_default();
                 dbg!(file_latest_max_pgno);
@@ -521,7 +525,7 @@ impl AiosDBManager {
                 //     // execute_compress(compress_opt).await.unwrap();
                 // });
 
-                let mut io = PdmsIO::new(path, true);
+                let mut io = PdmsIO::new(&project, path, true);
                 io.open().unwrap();
                 //每个path 都要检查一遍
                 if let Ok(basic_info) = io.get_page_basic_info() {
@@ -598,12 +602,12 @@ impl AiosDBManager {
                                 // dbg!(path);
                                 // dbg!(old.pdms_header.page_no);
                                 //未发生修改，直接跳过
-                                if old.pdms_header.page_no == new_header.pdms_header.page_no {
+                                if old.pdms_header.latest_ses_pgno == new_header.pdms_header.latest_ses_pgno {
                                     continue;
                                 }
                                 params.insert(
                                     path.clone(),
-                                    (new_header.clone(), old.pdms_header.page_no),
+                                    (new_header.clone(), old.pdms_header.latest_ses_pgno),
                                 );
                             }
                         }
@@ -628,11 +632,11 @@ impl AiosDBManager {
                                     //或者每次启动都重新更新这个文件？
                                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
                                         dbg!((
-                                            old.pdms_header.page_no,
-                                            new_header.pdms_header.page_no
+                                            old.pdms_header.latest_ses_pgno,
+                                            new_header.pdms_header.latest_ses_pgno
                                         ));
                                         //未发生修改，直接跳过
-                                        if old.pdms_header.page_no >= new_header.pdms_header.page_no
+                                        if old.pdms_header.latest_ses_pgno >= new_header.pdms_header.latest_ses_pgno
                                         {
                                             continue;
                                         }
