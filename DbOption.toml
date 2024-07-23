@@ -5,33 +5,34 @@ enable_log = false
 sync_graph_db = false
 sync_versioned = false
 sync_tidb = false
-sync_live = false
+sync_live = true
 replace_dbs = false
 sync_chunk_size = 1_0000
 
 #项目设置
 project_path = "D:/AVEVA/Projects/E3D2.1"
-#included_projects = ["KMX", "sch", "REF", "PDM", "SPDM", "LCS", "MSPProject"]
-included_projects = ["bwk"]
+included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
+#project_dirs = ["AvevaMarineSample"]
+
 mdb_name = "ALL"
-project_name = "bwk"
+project_name = "AvevaMarineSample"
 project_code = 1516
 surreal_ns = 1516
 module = "DESI"
 #是否生成模型数据
-gen_model = false
+gen_model = true
 gen_mesh = true
 replace_mesh = true
 save_db = true
 apply_boolean_operation = true
 mesh_tol_ratio = 3.0
 #是否生成房间树
-gen_spatial_tree = false
+gen_spatial_tree = true
 load_spatial_tree = false
-save_spatial_tree_to_db = true
+save_spatial_tree_to_db = false
 gen_model_batch_size = 16
 
-meshes_path="E:\\RustProject\\new\\rs-plant3-d\\assets\\meshes"
+#meshes_path = "E:\\RustProject\\new\\rs-plant3-d\\assets\\meshes"
 
 #生成补充类型的graph，方便查询直接生成语句
 gen_noun_graph = false
@@ -39,7 +40,7 @@ gen_noun_graph = false
 #arangodb 配置
 arangodb_database = "ams"
 multi_threads = false
-only_sync_sys = true
+only_sync_sys = false
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
 arangodb_user = "root"
@@ -56,8 +57,10 @@ batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 
 #版本数据库服务配置
-v_ip = "127.0.0.1"
-v_port = "9002"
+v_ip = "localhost"
+#v_port = "8004"
+#v_port = "8003"
+v_port = "8008"
 v_user = "root"
 v_password = "root"
 pe_chunk = 500
@@ -77,6 +80,7 @@ server_release_ip = "127.0.0.1:9099"
 remote_file_server_hosts = []
 file_server_host = "http://192.168.31.38:8100/asset/archives"
 
+
 #调试选项
 save_model_mesh_to_graph_db = true
 need_sync_refno_basic = false       #是否重新生成 refno_basic 缓存
@@ -87,7 +91,7 @@ only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["LOOP"]
-included_db_files = ["bwkglb"]
+#included_db_files = ["ams5052_0001"]
 #included_db_files = ["acp7002_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 #manual_db_nums = [7326]
@@ -98,10 +102,9 @@ puhua_database_ip = ""
 puhua_database_user = ""
 puhua_database_password = ""
 
-room_key_word = ["-RM"]   # 2016  K-R-K100   (-R-)
+room_keyword = "-RM" # 2016  K-R-K100   (-R-)
 
-#debug_root_refnos = ["24383/67263"]
-gen_using_spref_refnos = [""]
-#manual_sync_refnos = ["17496/269319"]
+#debug_root_refnos = ["=24381/35855", "=24383/71551", "=24381/95690"]
+#debug_root_refnos = ["24381/36155", "24383/67004"]
 # debug_root_refnos = ["24383/66457", "24381/34110"]
-#debug_root_refnos = ["17496/172806"]
+debug_root_refnos = ["24383/67773"]
