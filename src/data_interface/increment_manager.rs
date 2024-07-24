@@ -408,8 +408,6 @@ impl AiosDBManager {
             }
         }
         futures::future::join_all(att_pe_handles).await;
-        //等待保存任务完成
-        // while let Some(_) = sql_join_set.join_next().await {}
 
         //删除模型的处理
         let deleted_refnos: Vec<RefU64> =
@@ -495,7 +493,7 @@ impl AiosDBManager {
                 }
 
                 let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
-                if db_num != 7997 {
+                if db_num != 1112 {
                     continue;
                 }
                 let project = get_db_option().project_name.clone();

@@ -13,6 +13,7 @@ extern crate strum;
 #[macro_use]
 extern crate strum_macros;
 
+use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use std::fs;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -20,17 +21,28 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 
 // use regex::internal::Input;
-use aios_core::{build_cate_relate, get_db_option};
 use aios_core::material::save_all_material_data;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
 use aios_core::room::room::load_aabb_tree;
-use aios_core::ssc_setting::{set_pbs_fixed_node, set_pbs_node, set_pbs_room_major_node, set_pbs_room_node, set_pdms_major_code};
+use aios_core::ssc_setting::{
+    set_pbs_fixed_node, set_pbs_node, set_pbs_room_major_node, set_pbs_room_node,
+    set_pdms_major_code,
+};
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::SUL_DB;
+use aios_core::{build_cate_relate, get_db_option};
+use aios_database::data_interface::tidb_manager::AiosDBManager;
+use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
+#[cfg(feature = "gen_model")]
+use aios_database::fast_model::gen_all_geos_data;
+use aios_database::fast_model::room_model::build_room_relations;
+use aios_database::fast_model::{
+    gen_inst_meshes, process_meshes_update_db_deep, EXIST_MESH_GEO_HASHES,
+};
+use aios_database::versioned_db::database::*;
 use bevy_reflect::List;
 use chrono::{Datelike, Local, Timelike};
 use futures::StreamExt;
@@ -38,13 +50,6 @@ use itertools::Itertools;
 use log::{error, LevelFilter};
 use simplelog::*;
 use surrealdb::opt::auth::Root;
-use aios_database::data_interface::tidb_manager::AiosDBManager;
-use aios_database::versioned_db::database::*;
-use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
-#[cfg(feature = "gen_model")]
-use aios_database::fast_model::gen_all_geos_data;
-use aios_database::fast_model::room_model::build_room_relations;
-use aios_database::fast_model::{EXIST_MESH_GEO_HASHES, gen_inst_meshes, process_meshes_update_db_deep};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -74,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
             ),
             WriteLogger::new(LevelFilter::Info, Config::default(), file),
         ])
-            .unwrap();
+        .unwrap();
     }
 
     #[cfg(feature = "local")]
@@ -95,9 +100,12 @@ async fn main() -> anyhow::Result<()> {
         .signin(Root {
             username: &db_option.v_user,
             password: &db_option.v_password,
-        }).await?;
+        })
+        .await?;
 
-    aios_core::function::define_common_functions().await.unwrap();
+    aios_core::function::define_common_functions()
+        .await
+        .unwrap();
 
     let sync_live = db_option.sync_live.unwrap_or(false);
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
@@ -117,6 +125,8 @@ async fn main() -> anyhow::Result<()> {
         mgr.init_watcher().await.unwrap();
     }
 
+    //todo 还有个问题，可能需要通过队列来排队任务
+    //如果没有生成完，需要等待
     #[cfg(feature = "gen_model")]
     if db_option.gen_model {
         println!("正在生成模型");
@@ -135,11 +145,19 @@ async fn main() -> anyhow::Result<()> {
         let paths = fs::read_dir(path).unwrap();
         for entry in paths {
             let entry = entry.unwrap();
-            let geo_hash = entry.path().file_stem().unwrap().to_str().unwrap().to_string();
+            let geo_hash = entry
+                .path()
+                .file_stem()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string();
             EXIST_MESH_GEO_HASHES.insert(geo_hash);
         }
 
-        process_meshes_update_db_deep(Some(db_option.clone()), &debug_refnos).await.expect("更新模型数据失败");
+        process_meshes_update_db_deep(Some(db_option.clone()), &debug_refnos)
+            .await
+            .expect("更新模型数据失败");
         println!("处理模型花费时间: {} ms", time.elapsed().as_millis());
     }
 

@@ -301,10 +301,10 @@ pub async fn gen_cata_geos(
                                 .remove(&ele_refno)
                                 .map(|x| x.1)
                                 .unwrap_or_default();
-                            // dbg!(ele_att.get_e3d_version());
+                            // dbg!(ele_att.pgno());
                             let mut geos_info = EleGeosInfo {
                                 refno: ele_refno,
-                                version: ele_att.get_e3d_version(),
+                                pgno: ele_att.pgno(),
                                 cata_hash: Some(cata_hash.clone()),
                                 visible: true,
                                 generic_type: get_generic_type(ele_refno).await.unwrap_or_default(),
@@ -378,6 +378,15 @@ pub async fn gen_cata_geos(
                                 if !cata_neg_refnos.is_empty() {
                                     geos_info.has_cata_neg = true;
                                 }
+                                let geo_type = if is_ngmr {
+                                    GeoBasicType::CataCrossNeg
+                                } else if is_neg {
+                                    GeoBasicType::CataNeg
+                                } else if !cata_neg_refnos.is_empty() {
+                                    GeoBasicType::Compound
+                                } else {
+                                    GeoBasicType::Pos
+                                };
                                 let geom_inst = EleInstGeo {
                                     geo_hash,
                                     refno,
@@ -387,24 +396,16 @@ pub async fn gen_cata_geos(
                                     geo_param: brep_shape
                                         .convert_to_geo_param()
                                         .unwrap_or(PdmsGeoParam::Unknown),
-                                    visible,
+                                    visible: geo_type == GeoBasicType::Pos || geo_type == GeoBasicType::Compound,
                                     is_tubi,
-                                    geo_type: if is_ngmr {
-                                        GeoBasicType::CataCrossNeg
-                                    } else if is_neg {
-                                        GeoBasicType::CataNeg
-                                    } else if !cata_neg_refnos.is_empty() {
-                                        GeoBasicType::Compound
-                                    } else {
-                                        GeoBasicType::Pos
-                                    },
-
+                                    geo_type,
                                     cata_neg_refnos,
                                 };
                                 if is_ngmr {
                                     //获得ngmr的关系
                                     if let Ok(target_owners) =
                                         query_ngmr_owner(ele_refno, refno).await {
+                                        // dbg!((ele_refno, &target_owners));
                                         shape_insts_data.insert_ngmr(ele_refno, target_owners);
                                     }
                                 }
@@ -473,7 +474,7 @@ pub async fn gen_cata_geos(
                         };
                         let geos_info = EleGeosInfo {
                             refno: ele_refno,
-                            version: ele_att.get_e3d_version(),
+                            pgno: ele_att.pgno(),
                             cata_hash: Some(cata_hash.clone()),
                             visible: true,
                             generic_type: get_generic_type(ele_refno).await.unwrap_or_default(),
@@ -576,7 +577,7 @@ pub async fn gen_cata_geos(
                             branch_refno,
                             EleGeosInfo {
                                 refno: branch_refno,
-                                version: branch_att.get_e3d_version(),
+                                pgno: branch_att.pgno(),
                                 cata_hash: Some(tubi_geo_hash.to_string()),
                                 visible: true,
                                 generic_type: get_generic_type(branch_refno)
@@ -732,7 +733,7 @@ pub async fn gen_cata_geos(
                                             current_tubing.leave_refno,
                                             EleGeosInfo {
                                                 refno: current_tubing.leave_refno,
-                                                version: branch_att.get_e3d_version(),
+                                                pgno: branch_att.pgno(),
                                                 cata_hash: Some(tubi_geo_hash.to_string()),
                                                 visible: true,
                                                 generic_type: get_generic_type(
@@ -851,7 +852,7 @@ pub async fn gen_cata_geos(
                                 current_tubing.leave_refno,
                                 EleGeosInfo {
                                     refno: current_tubing.leave_refno,
-                                    version: branch_att.get_e3d_version(),
+                                    pgno: branch_att.pgno(),
                                     cata_hash: Some(tubi_geo_hash.to_string()),
                                     visible: true,
                                     generic_type: get_generic_type(current_tubing.leave_refno)

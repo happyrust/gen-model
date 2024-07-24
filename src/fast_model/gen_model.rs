@@ -22,6 +22,7 @@ use dashmap::DashMap;
 use futures::StreamExt;
 use glam::DVec3;
 use glam::{DMat4, Vec3};
+use nom::complete::bool;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::Isometry;
 use rayon::iter::ParallelIterator;
@@ -32,10 +33,8 @@ use std::mem::take;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
-use nom::complete::bool;
 use tokio::sync::{Mutex, RwLock};
 
-/// 这个要不要做生成分页的批量处理
 ///生成几何体数据
 pub async fn gen_all_geos_data(
     db_option: &DbOption,
@@ -246,10 +245,7 @@ pub async fn gen_all_geos_data(
                                 .collect::<Vec<_>>()
                                 .join(",")
                         );
-                        let mut response = SUL_DB
-                            .query(sql)
-                            .await
-                            .unwrap();
+                        let mut response = SUL_DB.query(sql).await.unwrap();
 
                         let Ok(bran_children_refnos) = response.take::<Vec<RefU64>>(0) else {
                             dbg!("查询BRAN, HANG出错");
@@ -328,8 +324,8 @@ pub async fn gen_all_geos_data(
                                 GNERAL_LOOP_OWNER_NOUN_NAMES.map(String::from).to_vec(),
                                 skip_exist,
                             )
-                                .await
-                                .unwrap_or_default();
+                            .await
+                            .unwrap_or_default();
                         loop_owner_refnos.into_iter().collect()
                     };
                     if !target_loop_owner_refnos.is_empty() {
@@ -347,8 +343,8 @@ pub async fn gen_all_geos_data(
                                 sjus_map_clone,
                                 sender,
                             )
-                                .await
-                                .unwrap();
+                            .await
+                            .unwrap();
                         });
                         gen_inst_handles.push(handle);
                     }
@@ -414,7 +410,6 @@ pub async fn gen_all_geos_data(
     );
     Ok(true)
 }
-
 
 ///查询tubi的大小
 pub async fn query_tubi_size(
