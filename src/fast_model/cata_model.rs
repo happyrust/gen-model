@@ -338,7 +338,7 @@ pub async fn gen_cata_geos(
                             //直接将所有的几何体组合起来
                             for shape in shapes {
                                 let CateBrepShape {
-                                    refno,
+                                    refno: geom_refno,
                                     brep_shape,
                                     transform,
                                     visible,
@@ -354,7 +354,7 @@ pub async fn gen_cata_geos(
                                     continue;
                                 }
                                 let mut shape_trans = brep_shape.get_trans();
-                                let is_neg = neg_own_pos_map.contains_key(&refno);
+                                let is_neg = neg_own_pos_map.contains_key(&geom_refno);
                                 let geo_hash = brep_shape.hash_unit_mesh_params();
                                 let rot = transform.rotation;
                                 let translation =
@@ -371,7 +371,7 @@ pub async fn gen_cata_geos(
                                 }
                                 //如果不可见直接跳过
                                 let mut cata_neg_refnos =
-                                    pos_neg_map.remove(&refno).unwrap_or_default();
+                                    pos_neg_map.remove(&geom_refno).unwrap_or_default();
                                 // dbg!(&cata_neg_refnos);
                                 cata_neg_refnos.retain(|x| visible_set.contains(x));
                                 // dbg!(&cata_neg_refnos);
@@ -389,7 +389,7 @@ pub async fn gen_cata_geos(
                                 };
                                 let geom_inst = EleInstGeo {
                                     geo_hash,
-                                    refno,
+                                    refno: geom_refno,
                                     pts,
                                     aabb: None,
                                     transform,
@@ -404,9 +404,9 @@ pub async fn gen_cata_geos(
                                 if is_ngmr {
                                     //获得ngmr的关系
                                     if let Ok(target_owners) =
-                                        query_ngmr_owner(ele_refno, refno).await {
+                                        query_ngmr_owner(ele_refno, geom_refno).await {
                                         // dbg!((ele_refno, &target_owners));
-                                        shape_insts_data.insert_ngmr(ele_refno, target_owners);
+                                        shape_insts_data.insert_ngmr(ele_refno, target_owners, geom_refno);
                                     }
                                 }
                                 geo_insts.push(geom_inst);
@@ -944,11 +944,11 @@ pub async fn query_ngmr_owner(
     // dbg!(removed_type);
     let mut target_refnos = vec![];
     match removed_type {
-        NgmrRemovedType::Nothing => {}
+        NgmrRemovedType::AsDefault | NgmrRemovedType::Nothing => {}
         NgmrRemovedType::Attached => {
             c_ref.map(|x| target_refnos.push(x));
         }
-        NgmrRemovedType::AsDefault | NgmrRemovedType::Owner => {
+        NgmrRemovedType::Owner => {
             o_ref.map(|x| target_refnos.push(x));
         }
         NgmrRemovedType::Item => target_refnos.push(refno),

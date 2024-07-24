@@ -477,7 +477,6 @@ impl AiosDBManager {
         let project = get_db_option().project_name.clone();
 
         for watch_dir in &self.watcher.watch_dirs {
-            // let mut join_set = JoinSet::new();
             for entry in WalkDir::new(watch_dir).sort_by(|a, b| {
                 b.path()
                     .metadata()

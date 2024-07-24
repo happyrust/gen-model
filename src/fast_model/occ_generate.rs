@@ -486,6 +486,7 @@ pub(crate) struct GeoParam {
 pub struct NegInfo {
     pub id: String,
     pub geo_type: String,
+    #[serde(default)]
     pub para_type: String,
     pub trans: Transform,
     pub aabb: Option<Aabb>,
@@ -550,7 +551,7 @@ pub async fn apply_insts_boolean_occ(
                 (select value [out.param, trans.d] from out->geo_relate) as ts,
                 (select value [in, world_trans.d, (select out.param as param, geo_type, trans.d as trans,
                 out.aabb.d as aabb, object::keys(out.param)[0] as para_type
-                from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"] and out.param != NONE )]
+                from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"] and trans.d != NONE )]
             from array::flatten(in<-neg_relate.in->inst_relate) ) as neg_ts from {} where !bad_bool
             and (in<-neg_relate)[0] != none and aabb.d!=none
         "#,

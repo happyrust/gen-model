@@ -173,21 +173,26 @@ pub async fn apply_insts_boolean_manifold(
 ) -> anyhow::Result<()> {
     let inst_keys = get_inst_relate_keys(refnos);
     //筛选出来 "Neg", "CataCrossNeg" 的关联
+    //排除不在这个范围内的ngrm geom refno
     let mut sql = format!(
-        r#" select
+        r#"
+        select
                 in as refno,
                 in.noun as noun,
                 world_trans.d as wt,
                 aabb.d as aabb,
-                (select value [meta::id(out), trans.d] from out->geo_relate) as ts,
-                (select value [in, world_trans.d, (select meta::id(out) as id, geo_type, trans.d as trans,
-                out.aabb.d as aabb, object::keys(out.param)[0] as para_type
-                from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"] and out.param != NONE)]
-            from array::flatten(in<-neg_relate.in->inst_relate) ) as neg_ts from {} where !bad_bool
-            and (in<-neg_relate)[0] != none and aabb.d != NONE
+                (select value [meta::id(out), trans.d] from out->geo_relate where geo_type in ["Compound", "Pos"] and trans.d != NONE ) as ts,
+                (select value [in, world_trans.d,
+                    (select meta::id(out) as id, geo_type, trans.d as trans, out.aabb.d as aabb
+                    from out->geo_relate where trans.d != NONE and ( geo_type=="Neg" or (geo_type=="CataCrossNeg"
+                        and geom_refno in (select value id from $this.in<-inst_relate.in<-ngmr_relate.ngmr) ) ))]
+                        from array::flatten([in<-neg_relate.in->inst_relate, in<-ngmr_relate.in->inst_relate]) where world_trans.d!=none
+                ) as neg_ts
+             from {} where !bad_bool and ((in<-neg_relate)[0] != none or in<-ngmr_relate[0] != none) and aabb.d != NONE
         "#,
         inst_keys
     );
+    //object::keys(out.param)[0] as para_type
     if !replace_exist {
         sql.push_str(" and !booled");
     }
@@ -195,6 +200,7 @@ pub async fn apply_insts_boolean_manifold(
         Ok(mut response) => {
             match response.take::<Vec<ManiGeoTransQuery>>(0) {
                 Ok(boolean_query) => {
+                    dbg!(&boolean_query);
                     let mut tasks = Vec::new();
                     let chunk = (boolean_query.len() / 16).max(1);
                     //排除有NREV的情况，因为NREV的布尔计算不是很准，还要判断这个NREV的包围盒和实体的包围盒是否差不多大
@@ -213,7 +219,7 @@ pub async fn apply_insts_boolean_manifold(
                                     }
                                 }
                                 let pos_aabb = b.aabb;
-                                let pos_extent = pos_aabb.extents();
+                                // let pos_extent = pos_aabb.extents();
                                 //没有实体的情况，下次就不要再继续计算布尔运算了
                                 let inst_relate_id = b.refno.to_table_key("inst_relate");
                                 if pos_manifolds.is_empty() {
@@ -241,13 +247,12 @@ pub async fn apply_insts_boolean_manifold(
 
                                 let mut neg_manifolds = vec![];
                                 let mut found_need_occ = false;
-                                for (refno, mut neg_t, negs) in b.neg_ts.into_iter() {
+                                for (neg_refno, mut neg_t, negs) in b.neg_ts.into_iter() {
                                     for NegInfo {
                                         id,
-                                        geo_type,
-                                        para_type,
                                         trans,
                                         aabb,
+                                        ..
                                     } in negs
                                     {
                                         // dbg!(&b.noun);
@@ -256,18 +261,18 @@ pub async fn apply_insts_boolean_manifold(
                                         };
                                         // 什么情况下该使用OCC的布尔运算？
                                         // dbg!((refno, neg_aabb.extents().xy() , pos_aabb.extents().xy()));
-                                        let neg_max = neg_aabb.extents().xy().max();
-                                        let pos_max = pos_aabb.extents().xy().max();
+                                        // let neg_max = neg_aabb.extents().xy().max();
+                                        // let pos_max = pos_aabb.extents().xy().max();
                                         //一个模糊的条件，如果aabb的尺寸比较接近，最好就应该移交给OCC去处理！！
                                         //这里暂时扩大一下xy的缩放，这样缩放会导致切割的会不太准确
-                                        if para_type == "PrimRevolution"
-                                            || para_type == "PrimRTorus"
-                                        {
-                                            if neg_max / pos_max > 0.9 {
-                                                found_need_occ = true;
-                                                continue;
-                                            }
-                                        }
+                                        // if para_type == "PrimRevolution"
+                                        //     || para_type == "PrimRTorus"
+                                        // {
+                                        //     if neg_max / pos_max > 0.9 {
+                                        //         found_need_occ = true;
+                                        //         continue;
+                                        //     }
+                                        // }
 
                                         //如果有关键点在包围盒上了，就需要做缩放
                                         // let intersect = pos_aabb.intersects(&neg_aabb);
@@ -296,19 +301,19 @@ pub async fn apply_insts_boolean_manifold(
                                         //如果AABB 比较接近的情况下，又有旋转体
 
                                         // dbg!(&b.noun);
-                                        if b.noun == "FLOOR"
-                                            || b.noun.contains("WALL")
-                                            || b.noun == "GENSEC"
-                                            || b.noun == "PANE"
-                                        {
-                                            if neg_aabb.extents().z == 0.0 {
-                                                continue;
-                                            }
-                                            let d =
-                                                (pos_extent.z as f64 + 1.0) / pos_extent.z as f64;
-                                            let scale_z = d.min(1.02);
-                                            neg_t.scale.z *= scale_z as f32;
-                                        }
+                                        // if b.noun == "FLOOR"
+                                        //     || b.noun.contains("WALL")
+                                        //     || b.noun == "GENSEC"
+                                        //     || b.noun == "PANE"
+                                        // {
+                                        //     if neg_aabb.extents().z == 0.0 {
+                                        //         continue;
+                                        //     }
+                                        //     let d =
+                                        //         (pos_extent.z as f64 + 1.0) / pos_extent.z as f64;
+                                        //     let scale_z = d.min(1.02);
+                                        //     neg_t.scale.z *= scale_z as f32;
+                                        // }
 
                                         let m = inverse_mat
                                             * neg_t.compute_matrix().as_dmat4()
@@ -318,7 +323,7 @@ pub async fn apply_insts_boolean_manifold(
                                             {
                                                 let neg_mesh = PlantMesh::from(&manifold);
                                                 neg_mesh
-                                                    .export_obj(false, &format!("{}_t.obj", &id))
+                                                    .export_obj(false, &format!("{}_t.obj", neg_refno))
                                                     .unwrap();
                                             }
                                             neg_manifolds.push(manifold);
@@ -335,8 +340,8 @@ pub async fn apply_insts_boolean_manifold(
                                     let mut success = false;
                                     let final_manifold =
                                         pos_manifold.batch_boolean_subtract(&neg_manifolds);
+                                    // dbg!(final_manifold.num_tri());
                                     let mesh = PlantMesh::from(&final_manifold);
-                                    // dbg!(neg_manifolds.len());
                                     #[cfg(feature = "debug_model")]
                                     mesh.export_obj(false, &format!("{}.obj", b.refno));
                                     //保存到文件到dir下

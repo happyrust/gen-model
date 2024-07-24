@@ -193,9 +193,10 @@ pub async fn save_instance_data(
         let mut ngmr_relate_vec = vec![];
         for (k, refnos) in &inst_mgr.ngmr_neg_relate_map {
             let kpe = k.to_pe_key();
-            for r in refnos {
-                let rpe = r.to_pe_key();
-                ngmr_relate_vec.push(format!("relate {0}->ngmr_relate:[{0},{1}]->{1};", kpe, rpe,));
+            for (ele_refno, ngmr_geom_refno) in refnos {
+                let ele_pe = ele_refno.to_pe_key();
+                let ngmr_pe = ngmr_geom_refno.to_pe_key();
+                ngmr_relate_vec.push(format!("relate {0}->ngmr_relate:[{0}, {1}, {2}]->{1} set ngmr={2};", ele_pe, kpe, ngmr_pe));
             }
             // dbg!(&ngmr_relate_vec);
         }
