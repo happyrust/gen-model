@@ -4,14 +4,14 @@ version = "0.1.3"
 edition = "2021"
 
 [features]
-default = ["ws", "gen_model", "manifold", "occ"] #
+default = ["ws", "gen_model", "manifold", "occ", "surreal_v2"] #
 truck = []
 local = []
 ws = []
 debug_obj_export = []
 debug_model = ["aios_core/debug_wire", "aios_core/debug_expr"]
 mqtt = []
-viewer = []                                      #是否开启视图
+viewer = []                                                    #是否开启视图
 gen_model = ["aios_core/gen_model"]
 occ = ["aios_core/occ", "dep:opencascade"]
 manifold = ["aios_core/manifold"]
@@ -83,10 +83,13 @@ notify = "6.1.1"
 walkdir = "2.5.0"
 num_enum = "0.7.2"
 jsonxf = "1.1.1"
-sea-orm = { version = "0.12.6", features = ["sqlx-mysql", "runtime-async-std"], optional = true}
+sea-orm = { version = "0.12.6", features = [
+    "sqlx-mysql",
+    "runtime-async-std",
+], optional = true }
 surrealdb = { path = "../surrealdb/lib", default-features = false, features = [
     "protocol-ws",
-#    "kv-rocksdb",
+    #    "kv-rocksdb",
 ] }
 async-once-cell = "0.5.3"
 rumqttc = "0.24.0"

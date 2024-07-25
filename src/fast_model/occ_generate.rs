@@ -3,11 +3,11 @@ use crate::fast_model::manifold_bool::{
 };
 use crate::fast_model::{utils, EXIST_MESH_GEO_HASHES};
 use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
+use aios_core::init_test_surreal;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
-use aios_core::init_test_surreal;
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
 use aios_core::{
     gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
@@ -15,6 +15,7 @@ use aios_core::{
 };
 use anyhow::anyhow;
 use bevy_transform::prelude::Transform;
+use dashmap::DashMap;
 use glam::DMat4;
 use itertools::Itertools;
 use opencascade::primitives::IntoShape;
@@ -24,7 +25,6 @@ use parse_pdms_db::parse::round_f32;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use dashmap::DashMap;
 use surrealdb::sql::Thing;
 
 ///生成小的几何体
@@ -44,7 +44,10 @@ pub async fn process_meshes_update_db(
     if refnos.is_empty() {
         return Ok(());
     }
-    let replace_exist = option.as_ref().map(|x| x.is_replace_mesh()).unwrap_or(false);
+    let replace_exist = option
+        .as_ref()
+        .map(|x| x.is_replace_mesh())
+        .unwrap_or(false);
     let time = std::time::Instant::now();
     let dir = option
         .as_ref()
@@ -91,7 +94,10 @@ pub async fn process_meshes_update_db_deep(
             .as_ref()
             .map(|x| x.get_meshes_path())
             .unwrap_or("assets/meshes".into());
-        let replace_exist = option.as_ref().map(|x| x.is_replace_mesh()).unwrap_or(false);
+        let replace_exist = option
+            .as_ref()
+            .map(|x| x.is_replace_mesh())
+            .unwrap_or(false);
         for &refno in refnos {
             let mut target_visible_refnos = vec![];
             let mut update_refnos = query_deep_visible_inst_refnos(refno)
@@ -139,7 +145,7 @@ pub async fn process_meshes_update_db_deep(
                 .unwrap_or(true)
             {
                 // apply_cata_neg_boolean_occ(None).await.unwrap();
-                dbg!(target_visible_refnos.len());
+                // dbg!(target_visible_refnos.len());
                 let time = std::time::Instant::now();
                 //生成元件库内部几何体的负实体运算
                 apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist, dir.clone())
@@ -410,51 +416,51 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         let aabb_map = aabb_map.clone();
         let inst_keys = get_inst_relate_keys(chunk);
         // let task = tokio::spawn(async move {
-            let mut sql = format!(
-                r#"select id, in as refno, world_trans.d as world_trans,
+        let mut sql = format!(
+            r#"select id, in as refno, world_trans.d as world_trans,
             (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb.d != none and trans.d != none)
             as geo_aabbs from {inst_keys} where world_trans.d != none"#,
+        );
+        //替换所有的aabb
+        if !replace_exist {
+            sql.push_str(" and aabb=none");
+        }
+        let mut response = SUL_DB.query(sql).await.unwrap();
+        let result: Vec<QueryAabbParam> = response.take(0).unwrap();
+        // dbg!(&result);
+        // dbg!(result.len());
+        // #[cfg(debug_assertions)]
+        // println!("QueryAabbParam len: {}", result.len());
+        let mut update_sql = String::new();
+        for r in result {
+            let mut aabb = Aabb::new_invalid();
+            for g in r.geo_aabbs {
+                let t = r.world_trans * g.trans;
+                let tmp_aabb = g.aabb.scaled(&t.scale.into());
+                let tmp_aabb = tmp_aabb.transform_by(&Isometry {
+                    rotation: t.rotation.into(),
+                    translation: t.translation.into(),
+                });
+                aabb.merge(&tmp_aabb);
+            }
+            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
+            aabb_map
+                .entry(aabb_hash)
+                .or_insert(serde_json::to_string(&aabb).unwrap());
+            let sql = format!(
+                "update {} set aabb = aabb:⟨{}⟩;",
+                r.id.to_string(),
+                aabb_hash,
             );
-            //替换所有的aabb
-            if !replace_exist {
-                sql.push_str(" and aabb=none");
-            }
-            let mut response = SUL_DB.query(sql).await.unwrap();
-            let result: Vec<QueryAabbParam> = response.take(0).unwrap();
-            // dbg!(&result);
-            // dbg!(result.len());
-            // #[cfg(debug_assertions)]
-            // println!("QueryAabbParam len: {}", result.len());
-            let mut update_sql = String::new();
-            for r in result {
-                let mut aabb = Aabb::new_invalid();
-                for g in r.geo_aabbs {
-                    let t = r.world_trans * g.trans;
-                    let tmp_aabb = g.aabb.scaled(&t.scale.into());
-                    let tmp_aabb = tmp_aabb.transform_by(&Isometry {
-                        rotation: t.rotation.into(),
-                        translation: t.translation.into(),
-                    });
-                    aabb.merge(&tmp_aabb);
-                }
-                let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
-                aabb_map
-                    .entry(aabb_hash)
-                    .or_insert(serde_json::to_string(&aabb).unwrap());
-                let sql = format!(
-                    "update {} set aabb = aabb:⟨{}⟩;",
-                    r.id.to_string(),
-                    aabb_hash,
-                );
-                //todo 如果没有transform，直接按None处理，都是默认Transform::IDENTITY
-                // dbg!(&sql);
-                update_sql.push_str(&sql);
-            }
-            // utils::save_aabb_to_surreal(&aabb_map).await;
-            if !update_sql.is_empty() {
-                // dbg!(&update_sql);
-                SUL_DB.query(&update_sql).await.unwrap();
-            }
+            //todo 如果没有transform，直接按None处理，都是默认Transform::IDENTITY
+            // dbg!(&sql);
+            update_sql.push_str(&sql);
+        }
+        // utils::save_aabb_to_surreal(&aabb_map).await;
+        if !update_sql.is_empty() {
+            // dbg!(&update_sql);
+            SUL_DB.query(&update_sql).await.unwrap();
+        }
         // });
         // tasks.push(task);
     }
@@ -480,6 +486,7 @@ pub(crate) struct GeoParam {
 pub struct NegInfo {
     pub id: String,
     pub geo_type: String,
+    #[serde(default)]
     pub para_type: String,
     pub trans: Transform,
     pub aabb: Option<Aabb>,
@@ -544,7 +551,7 @@ pub async fn apply_insts_boolean_occ(
                 (select value [out.param, trans.d] from out->geo_relate) as ts,
                 (select value [in, world_trans.d, (select out.param as param, geo_type, trans.d as trans,
                 out.aabb.d as aabb, object::keys(out.param)[0] as para_type
-                from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"] and out.param != NONE )]
+                from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"] and trans.d != NONE )]
             from array::flatten(in<-neg_relate.in->inst_relate) ) as neg_ts from {} where !bad_bool
             and (in<-neg_relate)[0] != none and aabb.d!=none
         "#,

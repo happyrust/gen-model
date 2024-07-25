@@ -117,7 +117,6 @@ pub async fn gen_cata_geos(
     sjus_map_arc: Arc<DashMap<RefU64, (Vec3, f32)>>,
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
-    let batch_size = db_option.gen_model_batch_size;
     let t = Instant::now();
     let mut handles = vec![];
     let mut tubi_relates = vec![];
@@ -170,6 +169,9 @@ pub async fn gen_cata_geos(
                     if gen_mesh || !target_cata.exist_inst {
                         //如果没有已有的，需要生成
                         let ele_refno = target_cata.group_refnos[0];
+                        // if ele_refno  != "24381/178058".into(){
+                        //     continue;
+                        // }
                         process_refno = Some(ele_refno);
                         let Ok(Some(cata_refno)) = aios_core::get_cat_refno(ele_refno).await else {
                             #[cfg(feature = "debug_model")]
@@ -299,10 +301,10 @@ pub async fn gen_cata_geos(
                                 .remove(&ele_refno)
                                 .map(|x| x.1)
                                 .unwrap_or_default();
-                            // dbg!(ele_att.get_e3d_version());
+                            // dbg!(ele_att.pgno());
                             let mut geos_info = EleGeosInfo {
                                 refno: ele_refno,
-                                version: ele_att.get_e3d_version(),
+                                pgno: ele_att.pgno(),
                                 cata_hash: Some(cata_hash.clone()),
                                 visible: true,
                                 generic_type: get_generic_type(ele_refno).await.unwrap_or_default(),
@@ -336,7 +338,7 @@ pub async fn gen_cata_geos(
                             //直接将所有的几何体组合起来
                             for shape in shapes {
                                 let CateBrepShape {
-                                    refno,
+                                    refno: geom_refno,
                                     brep_shape,
                                     transform,
                                     visible,
@@ -352,7 +354,7 @@ pub async fn gen_cata_geos(
                                     continue;
                                 }
                                 let mut shape_trans = brep_shape.get_trans();
-                                let is_neg = neg_own_pos_map.contains_key(&refno);
+                                let is_neg = neg_own_pos_map.contains_key(&geom_refno);
                                 let geo_hash = brep_shape.hash_unit_mesh_params();
                                 let rot = transform.rotation;
                                 let translation =
@@ -369,41 +371,42 @@ pub async fn gen_cata_geos(
                                 }
                                 //如果不可见直接跳过
                                 let mut cata_neg_refnos =
-                                    pos_neg_map.remove(&refno).unwrap_or_default();
+                                    pos_neg_map.remove(&geom_refno).unwrap_or_default();
                                 // dbg!(&cata_neg_refnos);
                                 cata_neg_refnos.retain(|x| visible_set.contains(x));
                                 // dbg!(&cata_neg_refnos);
                                 if !cata_neg_refnos.is_empty() {
                                     geos_info.has_cata_neg = true;
                                 }
+                                let geo_type = if is_ngmr {
+                                    GeoBasicType::CataCrossNeg
+                                } else if is_neg {
+                                    GeoBasicType::CataNeg
+                                } else if !cata_neg_refnos.is_empty() {
+                                    GeoBasicType::Compound
+                                } else {
+                                    GeoBasicType::Pos
+                                };
                                 let geom_inst = EleInstGeo {
                                     geo_hash,
-                                    refno,
+                                    refno: geom_refno,
                                     pts,
                                     aabb: None,
                                     transform,
                                     geo_param: brep_shape
                                         .convert_to_geo_param()
                                         .unwrap_or(PdmsGeoParam::Unknown),
-                                    visible,
+                                    visible: geo_type == GeoBasicType::Pos || geo_type == GeoBasicType::Compound,
                                     is_tubi,
-                                    geo_type: if is_ngmr {
-                                        GeoBasicType::CataCrossNeg
-                                    } else if is_neg {
-                                        GeoBasicType::CataNeg
-                                    } else if !cata_neg_refnos.is_empty() {
-                                        GeoBasicType::Compound
-                                    } else {
-                                        GeoBasicType::Pos
-                                    },
-
+                                    geo_type,
                                     cata_neg_refnos,
                                 };
                                 if is_ngmr {
                                     //获得ngmr的关系
                                     if let Ok(target_owners) =
-                                        query_ngmr_owner(ele_refno, refno).await {
-                                        shape_insts_data.insert_ngmr(ele_refno, target_owners);
+                                        query_ngmr_owner(ele_refno, geom_refno).await {
+                                        // dbg!((ele_refno, &target_owners));
+                                        shape_insts_data.insert_ngmr(ele_refno, target_owners, geom_refno);
                                     }
                                 }
                                 geo_insts.push(geom_inst);
@@ -574,7 +577,7 @@ pub async fn gen_cata_geos(
                             branch_refno,
                             EleGeosInfo {
                                 refno: branch_refno,
-                                version: branch_att.get_e3d_version(),
+                                pgno: branch_att.pgno(),
                                 cata_hash: Some(tubi_geo_hash.to_string()),
                                 visible: true,
                                 generic_type: get_generic_type(branch_refno)
@@ -730,7 +733,7 @@ pub async fn gen_cata_geos(
                                             current_tubing.leave_refno,
                                             EleGeosInfo {
                                                 refno: current_tubing.leave_refno,
-                                                version: branch_att.get_e3d_version(),
+                                                pgno: branch_att.pgno(),
                                                 cata_hash: Some(tubi_geo_hash.to_string()),
                                                 visible: true,
                                                 generic_type: get_generic_type(
@@ -849,7 +852,7 @@ pub async fn gen_cata_geos(
                                 current_tubing.leave_refno,
                                 EleGeosInfo {
                                     refno: current_tubing.leave_refno,
-                                    version: branch_att.get_e3d_version(),
+                                    pgno: branch_att.pgno(),
                                     cata_hash: Some(tubi_geo_hash.to_string()),
                                     visible: true,
                                     generic_type: get_generic_type(current_tubing.leave_refno)
@@ -941,11 +944,11 @@ pub async fn query_ngmr_owner(
     // dbg!(removed_type);
     let mut target_refnos = vec![];
     match removed_type {
-        NgmrRemovedType::Nothing => {}
+        NgmrRemovedType::AsDefault | NgmrRemovedType::Nothing => {}
         NgmrRemovedType::Attached => {
             c_ref.map(|x| target_refnos.push(x));
         }
-        NgmrRemovedType::AsDefault | NgmrRemovedType::Owner => {
+        NgmrRemovedType::Owner => {
             o_ref.map(|x| target_refnos.push(x));
         }
         NgmrRemovedType::Item => target_refnos.push(refno),

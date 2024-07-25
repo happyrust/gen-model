@@ -32,11 +32,14 @@ pub async fn save_instance_data(
 
             for &k in chunk {
                 let v = inst_mgr.inst_info_map.get(k).unwrap();
-                let delete_old_sql = format!(r#"
+                let delete_old_sql = format!(
+                    r#"
                 delete array::flatten(select value out->geo_relate.out from {0});
                 delete array::flatten(select value out->geo_relate from {0});
                 delete array::flatten(select value out from {0});
-                delete {0};"#, v.refno.to_inst_relate_key());
+                delete {0};"#,
+                    v.refno.to_inst_relate_key()
+                );
                 delete_sql_vec.push(delete_old_sql);
             }
             //如果需要删除之前的，先执行
@@ -90,11 +93,6 @@ pub async fn save_instance_data(
                 } else {
                     "".to_string()
                 };
-                // if inst_info:⟨{0}⟩.id == none
-                // {{
-                // relate inst_info:⟨{0}⟩->geo_relate->inst_geo:⟨{1}⟩ set trans=trans:⟨{2}⟩,
-                // geom_refno=pe:{3}, pts=[{4}], geo_type='{5}', visible={6} {7};
-            // }};
                 //如果是replace, 直接这里需要先删除之前的sql语句
                 let relate_sql = format!(
                     r#"
@@ -110,7 +108,6 @@ pub async fn save_instance_data(
                     inst.visible,
                     cat_negs_str
                 );
-
 
                 geo_relate_vec.push(relate_sql);
                 //保存 unit shape 的几何参数
@@ -170,14 +167,13 @@ pub async fn save_instance_data(
     // let mu tasks = vec![];
     let mut inst_relate_vec = vec![];
 
-
     // if let Some(refnos) = inst_mgr.ngmr_relate_map.get(k)
-    if !inst_mgr.neg_relate_map.is_empty(){
-        let mut ngmr_relate_vec = vec![];
+    if !inst_mgr.neg_relate_map.is_empty() {
+        let mut neg_relate_vec = vec![];
         // dbg!(&inst_mgr.neg_relate_map);
         for (k, refnos) in &inst_mgr.neg_relate_map {
             for r in refnos {
-                ngmr_relate_vec.push(format!(
+                neg_relate_vec.push(format!(
                     "relate {}->neg_relate:{}->{};",
                     r.to_pe_key(),
                     r.to_string(),
@@ -186,7 +182,26 @@ pub async fn save_instance_data(
             }
             // dbg!(&ngmr_relate_vec);
         }
+        let neg_relate_sql = neg_relate_vec.join("");
+        if !neg_relate_sql.is_empty() {
+            SUL_DB.query(neg_relate_sql).await.unwrap();
+        }
+    }
+
+    // dbg!(&inst_mgr.ngmr_neg_relate_map);
+    if !inst_mgr.ngmr_neg_relate_map.is_empty() {
+        let mut ngmr_relate_vec = vec![];
+        for (k, refnos) in &inst_mgr.ngmr_neg_relate_map {
+            let kpe = k.to_pe_key();
+            for (ele_refno, ngmr_geom_refno) in refnos {
+                let ele_pe = ele_refno.to_pe_key();
+                let ngmr_pe = ngmr_geom_refno.to_pe_key();
+                ngmr_relate_vec.push(format!("relate {0}->ngmr_relate:[{0}, {1}, {2}]->{1} set ngmr={2};", ele_pe, kpe, ngmr_pe));
+            }
+            // dbg!(&ngmr_relate_vec);
+        }
         let ngmr_relate_sql = ngmr_relate_vec.join("");
+        // dbg!(&ngmr_relate_sql);
         if !ngmr_relate_sql.is_empty() {
             SUL_DB.query(ngmr_relate_sql).await.unwrap();
         }
@@ -288,7 +303,6 @@ pub async fn save_instance_data(
             // });
         }
     }
-
 
     //inst relate 放到最后保存, 因为是被监控的
     if !inst_relate_vec.is_empty() {

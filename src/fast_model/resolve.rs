@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
-use aios_core::pdms_data::{PlinParam, ScomInfo};
-use aios_core::{CataContext, RefU64};
+use crate::fast_model::query_gm_params;
 use aios_core::expression::query_cata::{query_axis_params, resolve_cata_comp};
 use aios_core::expression::resolve::{resolve_axis_param, SCOM_INFO_MAP};
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
+use aios_core::pdms_data::{PlinParam, ScomInfo};
+use aios_core::{CataContext, RefU64};
 use anyhow::anyhow;
-use crate::fast_model::query_gm_params;
+use std::collections::{BTreeMap, HashMap};
 
 ///收集SCOM的信息, 暂时慎用缓存
 pub async fn get_or_create_scom_info(cata_refno: RefU64) -> anyhow::Result<ScomInfo> {
@@ -100,7 +100,6 @@ pub async fn resolve_axis_params(
     Ok(map)
 }
 
-
 ///求解design component
 pub async fn resolve_desi_comp(
     desi_refno: RefU64,
@@ -109,10 +108,10 @@ pub async fn resolve_desi_comp(
     let desi_att = aios_core::get_named_attmap(desi_refno).await?;
     let is_tubi = tubi_scom.is_some();
 
-    #[cfg(debug_assertions)]
-    if is_tubi {
-        dbg!(tubi_scom);
-    }
+    // #[cfg(debug_assertions)]
+    // if is_tubi {
+    //     dbg!(tubi_scom);
+    // }
 
     let scom_ref = if let Some(scom) = tubi_scom {
         scom
@@ -120,15 +119,15 @@ pub async fn resolve_desi_comp(
         let scom = aios_core::get_cat_refno(desi_refno)
             .await?
             .ok_or(anyhow::anyhow!(format!(
-                    "CAT引用不存在: {}",
-                    desi_refno.to_string()
-                )))?;
+                "CAT引用不存在: {}",
+                desi_refno.to_string()
+            )))?;
         scom
     };
-    #[cfg(debug_assertions)]
-    if is_tubi {
-        dbg!(scom_ref);
-    }
+    // #[cfg(debug_assertions)]
+    // if is_tubi {
+    //     dbg!(scom_ref);
+    // }
 
     let scom_info = get_or_create_scom_info(scom_ref).await?;
     // #[cfg(debug_assertions)]
