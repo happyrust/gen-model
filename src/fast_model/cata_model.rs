@@ -471,7 +471,7 @@ pub async fn gen_cata_geos(
                         };
                         let geos_info = EleGeosInfo {
                             refno: ele_refno,
-                            version: ele_att.get_e3d_version(),
+                            sesno: ele_att.sesno(),
                             cata_hash: Some(cata_hash.clone()),
                             visible: true,
                             generic_type: get_generic_type(ele_refno).await.unwrap_or_default(),
