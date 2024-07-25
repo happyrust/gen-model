@@ -11,7 +11,7 @@ fn test_regex() {
         "name": "/1AR07WW0002R",
         "noun": "TEST",
         "dbnum": 1112,
-        "pgno": 0,
+        "sesno": 0,
         "cata_hash": "110329119932332",
         "lock": false
     "#;

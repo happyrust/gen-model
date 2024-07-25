@@ -335,7 +335,7 @@ impl AiosDBManager {
                         name: name.unwrap_or_default(),
                         noun: k.attr.get_type(),
                         dbnum: k.db_no,
-                        pgno: k.attr.pgno(),
+                        sesno: k.attr.sesno(),
                         cata_hash: k.attr.cal_cata_hash(),
                         ..Default::default()
                     };
