@@ -191,16 +191,15 @@ pub async fn gen_inst_meshes(
     // println!("sql is {}", &sql);
     let mut response = SUL_DB.query(sql).await.unwrap();
     let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0).unwrap();
-    // dbg!(inst_geo_ids.len());
-    // dbg!(EXIST_MESH_GEO_HASHES.len());
     //排除已经生成了的模型
     inst_geo_ids.retain(|(x, y)| {
         if let Some(t) = x {
-            if replace_exist {
-                true
-            } else {
-                !EXIST_MESH_GEO_HASHES.contains(&t.id.to_raw())
-            }
+            true
+            // if replace_exist {
+            //     true
+            // } else {
+            //     !EXIST_MESH_GEO_HASHES.contains(&t.id.to_raw())
+            // }
         } else {
             false
         }
@@ -565,8 +564,8 @@ pub async fn apply_insts_boolean_occ(
         Ok(mut response) => {
             match response.take::<Vec<OccGeoTransQuery>>(0) {
                 Ok(boolean_query) => {
-                    #[cfg(debug_assertions)]
-                    println!("occ inst boolean len: {}", boolean_query.len());
+                    // #[cfg(debug_assertions)]
+                    // println!("occ inst boolean len: {}", boolean_query.len());
                     // dbg!(boolean_query.len());
                     // dbg!(&boolean_query);
                     if boolean_query.is_empty() {
