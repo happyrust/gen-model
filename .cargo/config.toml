@@ -1,6 +1,10 @@
 [net]
 git-fetch-with-cli = true
 
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld.exe"
+rustdocflags = ["-Clinker=rust-lld.exe"]
+
 [build]
 rustflags = ["-Z", "threads=8"]
 
