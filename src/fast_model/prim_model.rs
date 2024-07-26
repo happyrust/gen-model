@@ -69,7 +69,7 @@ pub async fn gen_prim_geos(
                 let visible = attr.is_visible_by_level(None).unwrap_or(true);
                 let mut geos_info = EleGeosInfo {
                     refno,
-                    pgno: attr.pgno(),
+                    sesno: attr.sesno(),
                     visible,
                     generic_type: get_generic_type(refno).await.unwrap_or_default(),
                     aabb: None,

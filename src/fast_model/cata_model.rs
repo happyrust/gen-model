@@ -302,10 +302,10 @@ pub async fn gen_cata_geos(
                                 .remove(&ele_refno)
                                 .map(|x| x.1)
                                 .unwrap_or_default();
-                            // dbg!(ele_att.pgno());
+                            // dbg!(ele_att.sesno());
                             let mut geos_info = EleGeosInfo {
                                 refno: ele_refno,
-                                pgno: ele_att.pgno(),
+                                sesno: ele_att.sesno(),
                                 cata_hash: Some(cata_hash.clone()),
                                 visible: true,
                                 generic_type: get_generic_type(ele_refno).await.unwrap_or_default(),
@@ -483,7 +483,7 @@ pub async fn gen_cata_geos(
                         };
                         let geos_info = EleGeosInfo {
                             refno: ele_refno,
-                            pgno: ele_att.pgno(),
+                            sesno: ele_att.sesno(),
                             cata_hash: Some(cata_hash.clone()),
                             visible: true,
                             generic_type: get_generic_type(ele_refno).await.unwrap_or_default(),
@@ -586,7 +586,7 @@ pub async fn gen_cata_geos(
                             branch_refno,
                             EleGeosInfo {
                                 refno: branch_refno,
-                                pgno: branch_att.pgno(),
+                                sesno: branch_att.sesno(),
                                 cata_hash: Some(tubi_geo_hash.to_string()),
                                 visible: true,
                                 generic_type: get_generic_type(branch_refno)
@@ -745,7 +745,7 @@ pub async fn gen_cata_geos(
                                             current_tubing.leave_refno,
                                             EleGeosInfo {
                                                 refno: current_tubing.leave_refno,
-                                                pgno: branch_att.pgno(),
+                                                sesno: branch_att.sesno(),
                                                 cata_hash: Some(tubi_geo_hash.to_string()),
                                                 visible: true,
                                                 generic_type: get_generic_type(
@@ -874,7 +874,7 @@ pub async fn gen_cata_geos(
                                 current_tubing.leave_refno,
                                 EleGeosInfo {
                                     refno: current_tubing.leave_refno,
-                                    pgno: branch_att.pgno(),
+                                    sesno: branch_att.sesno(),
                                     cata_hash: Some(tubi_geo_hash.to_string()),
                                     visible: true,
                                     generic_type: get_generic_type(current_tubing.leave_refno)

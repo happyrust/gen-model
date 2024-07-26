@@ -96,7 +96,7 @@ pub async fn gen_loop_geos(
                 }
                 let mut geos_info = EleGeosInfo {
                     refno: target_refno,
-                    pgno: target_att.pgno(),
+                    sesno: target_att.sesno(),
                     cata_hash: None,
                     visible: true,
                     world_transform: trans_origin,

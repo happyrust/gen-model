@@ -16,7 +16,7 @@ use sqlx::{Connection, MySql, MySqlPool, Pool};
 #[cfg(feature = "sql")]
 use sqlx::{Error, Executor};
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::hash::Hash;
 use std::io::Read;
@@ -27,9 +27,9 @@ use std::sync::Arc;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::helper::normalize_sql_string;
 use aios_core::tool::hash_tool::hash_str;
+use pdms_io::io::PdmsIO;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
-// use std::time::Instant;
 use tokio::fs::{create_dir_all, File};
 use tokio::time::Instant;
 
@@ -386,10 +386,16 @@ pub async fn sync_total_async_threaded(
                 dbno_set.insert(db_no);
                 // 如果需要解析的文件列表为空或包含当前文件名，则执行以下代码块
                 println!("path={:?}", &file_name); // 打印文件路径
+                let mut ses_range_map = BTreeMap::new();
+                {
+                    let mut io = PdmsIO::new(&project, path.clone(), true);
+                    io.open().unwrap();
+                    ses_range_map = io.ses_range_map;
+                }
+
                 let project_name = project.as_str().to_string(); // 获取项目名称的字符串
                 let mut db_basic = parse_file_db_basic_data(
                     &path,
-                    &None,
                     &file_name,
                     project_name.clone().as_str(),
                 )
@@ -422,6 +428,7 @@ pub async fn sync_total_async_threaded(
                     }
                 }
                 let debug_refnos = Arc::new(debug_refnos);
+                let ses_range_map = Arc::new(ses_range_map);
                 //按照SITE划分？
                 for (chunk_index, chunk) in all_refnos.chunks(chunk_size).enumerate() {
                     let sender = sender.clone();
@@ -432,20 +439,19 @@ pub async fn sync_total_async_threaded(
                     let project_name_clone = project_name.clone();
                     let db_basic_clone = db_basic.clone();
                     let debug_refnos = debug_refnos.clone();
+                    let ses_range_map_clone = ses_range_map.clone();
                     // let handle = tokio::spawn(async move {
                     match parse_file_with_chunk(
                         db_basic_clone.clone(),
-                        &None,
                         &file_name_clone,
                         project_name_clone.as_str(),
                         &chunk_refnos_clone,
+                        &ses_range_map_clone,
                     ).await {
                         Ok(PdmsDbData {
                                total_attr_map,
                                type_ele_map,
-                               db_type,
                                db_no,
-                               version,
                                ..
                            }) => {
                             //类型暂时不多线程
