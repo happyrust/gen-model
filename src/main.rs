@@ -44,6 +44,7 @@ use aios_database::fast_model::{
     gen_inst_meshes, process_meshes_update_db_deep, EXIST_MESH_GEO_HASHES,
 };
 use aios_database::versioned_db::database::*;
+use aios_database::versioned_db::task::initialize_global_db_sender;
 use bevy_reflect::List;
 use chrono::{Datelike, Local, Timelike};
 use futures::StreamExt;
@@ -51,7 +52,6 @@ use itertools::Itertools;
 use log::{error, LevelFilter};
 use simplelog::*;
 use surrealdb::opt::auth::Root;
-use aios_database::versioned_db::task::initialize_global_db_sender;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -111,10 +111,10 @@ async fn main() -> anyhow::Result<()> {
 
     let sync_live = db_option.sync_live.unwrap_or(false);
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
+    initialize_global_db_sender().await;
 
     /// 是否全部同步模型
     if db_option.total_sync || db_option.incr_sync || db_option.only_sync_sys {
-        initialize_global_db_sender().await;
         // 同步pdms数据
         sync_pdms(&db_option).await.unwrap();
         //先等待一分钟后结束
@@ -137,13 +137,6 @@ async fn main() -> anyhow::Result<()> {
         println!("正在生成模型");
         let mut time = Instant::now();
         fs::create_dir_all("assets/meshes")?;
-        gen_all_geos_data(vec![], &db_option, None).await?;
-        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
-    }
-
-    {
-        let mut time = Instant::now();
-        let debug_refnos = db_option.get_all_debug_refnos().await;
         //统计一下assets mesh 目录下有多少个mesh，直接忽略去生成
         let path: PathBuf = "assets/meshes".into();
         //收集目录下的文件名
@@ -159,11 +152,8 @@ async fn main() -> anyhow::Result<()> {
                 .to_string();
             EXIST_MESH_GEO_HASHES.insert(geo_hash);
         }
-
-        process_meshes_update_db_deep(Some(db_option.clone()), &debug_refnos)
-            .await
-            .expect("更新模型数据失败");
-        println!("处理模型花费时间: {} ms", time.elapsed().as_millis());
+        gen_all_geos_data(vec![], &db_option, None).await?;
+        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
     if db_option.gen_spatial_tree {

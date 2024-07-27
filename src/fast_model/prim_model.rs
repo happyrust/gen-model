@@ -3,19 +3,19 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::{get_generic_type, shared};
 use aios_core::geometry::*;
+use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
+use aios_core::prim_geo::polyhedron::Polygon;
 use aios_core::prim_geo::*;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, VerifiedShape};
 use aios_core::RefU64;
 use bevy_transform::components::Transform;
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::Isometry;
-use aios_core::prim_geo::polyhedron::Polygon;
 use std::mem::take;
 use std::sync::Arc;
 use std::time::Instant;
-use aios_core::options::DbOption;
 use tokio::sync::{Mutex, RwLock};
 
 /// 生成基本体的几何数据
@@ -30,7 +30,7 @@ pub async fn gen_prim_geos(
     if prim_cnt == 0 {
         return Ok(true);
     }
-    let mut batch_chunks_cnt = 1;
+    let mut batch_chunks_cnt = 8;
     let mut batch_size = prim_cnt / batch_chunks_cnt + 1;
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
@@ -50,6 +50,7 @@ pub async fn gen_prim_geos(
             if end_idx > prim_cnt as usize {
                 end_idx = prim_cnt as usize;
             }
+            println!("当前范围: {start_idx} ~ {end_idx}");
             for j in start_idx..end_idx {
                 let refno = all_refnos[j];
                 // println!(
@@ -78,18 +79,19 @@ pub async fn gen_prim_geos(
                 };
                 let mut geo_param = PdmsGeoParam::Unknown;
                 //需要限制负实体的大小，太大，导致负运算失败
-                let neg_limit_size: Option<f32> = if GENRAL_NEG_NOUN_NAMES.contains(&attr.get_type_str()) {
-                    // if let Some(parent_inst) = shape_insts_data.inst_info_map.get(&attr.get_owner()) {
-                    //     parent_inst
-                    //         .aabb
-                    //         .map(|x| x.bounding_sphere().radius * 4.0)
-                    // } else {
+                let neg_limit_size: Option<f32> =
+                    if GENRAL_NEG_NOUN_NAMES.contains(&attr.get_type_str()) {
+                        // if let Some(parent_inst) = shape_insts_data.inst_info_map.get(&attr.get_owner()) {
+                        //     parent_inst
+                        //         .aabb
+                        //         .map(|x| x.bounding_sphere().radius * 4.0)
+                        // } else {
                         //负实体默认的最大大小，不能超过
-                       Some(1000_000.0)
-                    // }
-                } else {
-                    None
-                };
+                        Some(1000_000.0)
+                        // }
+                    } else {
+                        None
+                    };
                 // dbg!((attr.get_type_str(), refno, neg_limit_size));
                 //多面体的处理
                 let brep_shape = if attr.get_type_str() == "POHE" {
@@ -107,9 +109,7 @@ pub async fn gen_prim_geos(
                             // dbg!(&v);
                             verts.push(v.get_position().unwrap_or_default());
                         }
-                        polygons.push(Polygon{
-                            verts
-                        });
+                        polygons.push(Polygon { verts });
                     }
                     // dbg!(&polygons);
                     let shape: Box<dyn BrepShapeTrait> = Box::new(Polyhedron { polygons });
@@ -172,7 +172,9 @@ pub async fn gen_prim_geos(
                 }
             }
 
-            sender.send(shape_insts_data).expect("send prim shape_insts_data error");
+            sender
+                .send(shape_insts_data)
+                .expect("send prim shape_insts_data error");
         });
         handles.push(handle);
         if !db_option.multi_threads {

@@ -3,6 +3,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::{get_generic_type, shared};
 use aios_core::geometry::*;
+use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::{Extrusion, Revolution};
@@ -16,7 +17,6 @@ use parry3d::math::Isometry;
 use std::mem::take;
 use std::sync::Arc;
 use std::time::Instant;
-use aios_core::options::DbOption;
 use tokio::sync::{Mutex, RwLock};
 
 ///处理带有loop的元件
@@ -34,7 +34,7 @@ pub async fn gen_loop_geos(
     }
     //处理loop elements
     //todo 暂时不用多线程，有一些问题
-    let mut batch_chunks_cnt = 1;
+    let mut batch_chunks_cnt = 8;
     let mut batch_size = loop_owner_cnt / batch_chunks_cnt + 1;
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
@@ -53,6 +53,7 @@ pub async fn gen_loop_geos(
             if end_idx > loop_owner_cnt {
                 end_idx = loop_owner_cnt;
             }
+            println!("当前范围: {start_idx} ~ {end_idx}");
             let mut shape_insts_data = ShapeInstancesData::default();
             for j in start_idx..end_idx {
                 let target_refno = all_loop_owner_refnos[j];
@@ -60,11 +61,12 @@ pub async fn gen_loop_geos(
                     .await
                     .unwrap_or_default();
                 let target_type = target_att.get_type_str();
-                let Ok(Some(mut trans_origin)) = aios_core::get_world_transform(target_refno).await else {
+                let Ok(Some(mut trans_origin)) = aios_core::get_world_transform(target_refno).await
+                else {
                     continue;
                 };
                 //判断父节点是否有SJUS，需要调整位置
-                if ( target_type == "FLOOR" || target_type == "PANE" || target_type == "GWALL")
+                if (target_type == "FLOOR" || target_type == "PANE" || target_type == "GWALL")
                     && let Some(sjus_adjust) = sjus_map_clone.get(&target_refno)
                 {
                     let offset = trans_origin.rotation.mul_vec3(sjus_adjust.value().0);
@@ -78,17 +80,22 @@ pub async fn gen_loop_geos(
                             .unwrap_or_default();
                     shape_insts_data.insert_negs(target_refno, &neg_refnos);
                     //检查是否有CMPF
-                    let cmpf_refnos =
-                        aios_core::query_filter_children(target_refno, &["CMPF"])
-                            .await
-                            .unwrap_or_default();
+                    let cmpf_refnos = aios_core::query_filter_children(target_refno, &["CMPF"])
+                        .await
+                        .unwrap_or_default();
                     if !cmpf_refnos.is_empty() {
                         //查询cmpf里面的元素
-                        let cmpf_neg_refnos =
-                            aios_core::query_multi_filter_deep_children(&cmpf_refnos,
-                                                                        &GENRAL_NEG_NOUN_NAMES).await.unwrap_or_default();
+                        let cmpf_neg_refnos = aios_core::query_multi_filter_deep_children(
+                            &cmpf_refnos,
+                            &GENRAL_NEG_NOUN_NAMES,
+                        )
+                        .await
+                        .unwrap_or_default();
                         // dbg!(&cmpf_neg_refnos);
-                        shape_insts_data.insert_negs(target_refno, &cmpf_neg_refnos.into_iter().map(|x| x).collect::<Vec<_>>());
+                        shape_insts_data.insert_negs(
+                            target_refno,
+                            &cmpf_neg_refnos.into_iter().map(|x| x).collect::<Vec<_>>(),
+                        );
                     }
                 }
                 let mut geos_info = EleGeosInfo {
@@ -105,7 +112,8 @@ pub async fn gen_loop_geos(
                 let mut geo_hash = 0;
                 let mut item_trans = Transform::IDENTITY;
                 let mut geo_param = PdmsGeoParam::Unknown;
-                let Ok((verts, height)) = aios_core::fetch_loops_and_height(target_refno).await else {
+                let Ok((verts, height)) = aios_core::fetch_loops_and_height(target_refno).await
+                else {
                     continue;
                 };
                 match target_type {
@@ -129,6 +137,7 @@ pub async fn gen_loop_geos(
                     //todo 关于justline，可能需要jusline的信息才能判断中心点
                     "AEXTR" | "NXTR" | "EXTR" | "PANE" | "FLOOR" | "SCREED" | "GWALL" => {
                         if height < f32::EPSILON {
+                            #[cfg(feature = "debug_model")]
                             println!("{}： 的height太小为: {}", target_refno, height);
                             continue;
                         }
@@ -175,7 +184,7 @@ pub async fn gen_loop_geos(
                     visible,
                     is_tubi: false,
                     geo_param: geo_param.clone(),
-                    geo_type: if target_att.is_neg(){
+                    geo_type: if target_att.is_neg() {
                         GeoBasicType::Neg
                     } else {
                         GeoBasicType::Pos
@@ -197,13 +206,14 @@ pub async fn gen_loop_geos(
                 shape_insts_data.insert_info(target_refno, geos_info);
             }
 
-            sender.send(shape_insts_data).expect("send loop shape_insts_data error");
+            sender
+                .send(shape_insts_data)
+                .expect("send loop shape_insts_data error");
 
             Ok::<_, anyhow::Error>(())
         });
 
         handles.push(handle);
-
     }
     futures::future::join_all(take(&mut handles)).await;
     println!(

@@ -132,7 +132,7 @@ pub async fn gen_cata_geos(
     );
     let unique_cata_cnt = all_unique_keys.len();
     //todo 不需要分块太多
-    let mut batch_chunks_cnt = 1;
+    let mut batch_chunks_cnt = 8;
     let mut batch_size = all_unique_keys.len() / batch_chunks_cnt + 1;
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
@@ -952,9 +952,7 @@ pub async fn query_ngmr_owner(
     let c_ref = att.get_foreign_refno("CREF");
     // #[cfg(debug_assertions)]
     // dbg!(c_ref);
-    let ance_result =
-        aios_core::query_filter_ancestors(refno.clone(), &NGMR_OWN_TYPES)
-            .await?;
+    let ance_result = aios_core::query_filter_ancestors(refno.clone(), &NGMR_OWN_TYPES).await?;
     let o_ref = ance_result.into_iter().next();
     // #[cfg(debug_assertions)]
     // dbg!(o_ref);

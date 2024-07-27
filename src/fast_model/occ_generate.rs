@@ -3,7 +3,6 @@ use crate::fast_model::manifold_bool::{
 };
 use crate::fast_model::{utils, EXIST_MESH_GEO_HASHES};
 use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
-use aios_core::init_test_surreal;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::basic::OccSharedShape;
@@ -13,6 +12,7 @@ use aios_core::{
     gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
     query_deep_visible_inst_refnos, RefU64, SUL_DB,
 };
+use aios_core::{get_db_option, init_test_surreal};
 use anyhow::anyhow;
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
@@ -31,7 +31,7 @@ use surrealdb::sql::Thing;
 #[tokio::test]
 pub async fn test_gen_geos() -> anyhow::Result<()> {
     init_test_surreal().await;
-    process_meshes_update_db_deep(None, (&["17496/171559".into(), "24381/35844".into()]))
+    process_meshes_update_db_deep_default((&["17496/171559".into(), "24381/35844".into()]))
         .await
         .unwrap();
     Ok(())
@@ -85,19 +85,18 @@ pub async fn process_meshes_update_db(
     Ok(())
 }
 
+pub async fn process_meshes_update_db_deep_default(refnos: &[RefU64]) -> anyhow::Result<()> {
+    let dboption = get_db_option();
+    process_meshes_update_db_deep(&dboption, refnos).await
+}
+
 pub async fn process_meshes_update_db_deep(
-    option: Option<DbOption>,
+    dboption: &DbOption,
     refnos: &[RefU64],
 ) -> anyhow::Result<()> {
     if !refnos.is_empty() {
-        let dir = option
-            .as_ref()
-            .map(|x| x.get_meshes_path())
-            .unwrap_or("assets/meshes".into());
-        let replace_exist = option
-            .as_ref()
-            .map(|x| x.is_replace_mesh())
-            .unwrap_or(false);
+        let dir = dboption.get_meshes_path();
+        let replace_exist = dboption.is_replace_mesh();
         dbg!(refnos.len());
         let time = std::time::Instant::now();
         for &refno in refnos {
@@ -115,7 +114,7 @@ pub async fn process_meshes_update_db_deep(
             }
 
             //缩小范围
-            if option.as_ref().map(|x| x.gen_mesh).unwrap_or(true) {
+            if dboption.gen_mesh {
                 // dbg!(&target_refnos);
                 // 生成模型文件
                 gen_inst_meshes(&update_refnos, replace_exist, dir.clone())
@@ -140,11 +139,7 @@ pub async fn process_meshes_update_db_deep(
                 continue;
             }
 
-            if option
-                .as_ref()
-                .map(|x| x.apply_boolean_operation)
-                .unwrap_or(true)
-            {
+            if dboption.apply_boolean_operation {
                 // apply_cata_neg_boolean_occ(None).await.unwrap();
                 // dbg!(target_visible_refnos.len());
                 let time = std::time::Instant::now();
