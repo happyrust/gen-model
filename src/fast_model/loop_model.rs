@@ -33,14 +33,15 @@ pub async fn gen_loop_geos(
         return Ok(true);
     }
     //处理loop elements
-    // let mut batch_chunks_cnt = (loop_owner_cnt / batch_size + 1);
-    let mut batch_chunks_cnt = 16;
+    //todo 暂时不用多线程，有一些问题
+    let mut batch_chunks_cnt = 1;
     let mut batch_size = loop_owner_cnt / batch_chunks_cnt + 1;
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
         batch_chunks_cnt = loop_owner_cnt;
     }
     let mut handles = vec![];
+    // dbg!(&loop_owner_refnos);
     let all_refnos = Arc::new(loop_owner_refnos.to_vec());
     for i in 0..batch_chunks_cnt {
         let all_loop_owner_refnos = all_refnos.clone();
@@ -55,9 +56,6 @@ pub async fn gen_loop_geos(
             let mut shape_insts_data = ShapeInstancesData::default();
             for j in start_idx..end_idx {
                 let target_refno = all_loop_owner_refnos[j];
-                // if target_refno != "17496_271428".into(){
-                //     continue;
-                // }
                 let mut target_att = aios_core::get_named_attmap(target_refno)
                     .await
                     .unwrap_or_default();
@@ -65,7 +63,6 @@ pub async fn gen_loop_geos(
                 let Ok(Some(mut trans_origin)) = aios_core::get_world_transform(target_refno).await else {
                     continue;
                 };
-                // dbg!(target_refno);
                 //判断父节点是否有SJUS，需要调整位置
                 if ( target_type == "FLOOR" || target_type == "PANE" || target_type == "GWALL")
                     && let Some(sjus_adjust) = sjus_map_clone.get(&target_refno)
@@ -88,8 +85,8 @@ pub async fn gen_loop_geos(
                     if !cmpf_refnos.is_empty() {
                         //查询cmpf里面的元素
                         let cmpf_neg_refnos =
-                            aios_core::query_multi_filter_deep_children(cmpf_refnos,
-                                                                        GENRAL_NEG_NOUN_NAMES.into_iter().map(|x| x.to_string()).collect()).await.unwrap_or_default();
+                            aios_core::query_multi_filter_deep_children(&cmpf_refnos,
+                                                                        &GENRAL_NEG_NOUN_NAMES).await.unwrap_or_default();
                         // dbg!(&cmpf_neg_refnos);
                         shape_insts_data.insert_negs(target_refno, &cmpf_neg_refnos.into_iter().map(|x| x).collect::<Vec<_>>());
                     }
@@ -108,11 +105,9 @@ pub async fn gen_loop_geos(
                 let mut geo_hash = 0;
                 let mut item_trans = Transform::IDENTITY;
                 let mut geo_param = PdmsGeoParam::Unknown;
-                // dbg!(target_refno);
                 let Ok((verts, height)) = aios_core::fetch_loops_and_height(target_refno).await else {
                     continue;
                 };
-                // dbg!((&verts, height));
                 match target_type {
                     "NREV" | "REVO" => {
                         let angle = target_att.get_f32("ANGL").unwrap_or_default();

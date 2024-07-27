@@ -1,4 +1,5 @@
 #![feature(let_chains)]
+#![feature(duration_constructors)]
 // 暂时屏蔽warnings
 #![allow(warnings)]
 #![recursion_limit = "256"]
@@ -50,6 +51,7 @@ use itertools::Itertools;
 use log::{error, LevelFilter};
 use simplelog::*;
 use surrealdb::opt::auth::Root;
+use aios_database::versioned_db::task::initialize_global_db_sender;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -112,8 +114,11 @@ async fn main() -> anyhow::Result<()> {
 
     /// 是否全部同步模型
     if db_option.total_sync || db_option.incr_sync || db_option.only_sync_sys {
+        initialize_global_db_sender().await;
         // 同步pdms数据
         sync_pdms(&db_option).await.unwrap();
+        //先等待一分钟后结束
+        tokio::time::sleep(tokio::time::Duration::from_mins(20)).await;
         return Ok(());
     }
 
@@ -132,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
         println!("正在生成模型");
         let mut time = Instant::now();
         fs::create_dir_all("assets/meshes")?;
-        gen_all_geos_data(&db_option, None).await?;
+        gen_all_geos_data(vec![], &db_option, None).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }
 

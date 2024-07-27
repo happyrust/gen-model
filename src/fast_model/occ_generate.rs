@@ -98,6 +98,8 @@ pub async fn process_meshes_update_db_deep(
             .as_ref()
             .map(|x| x.is_replace_mesh())
             .unwrap_or(false);
+        dbg!(refnos.len());
+        let time = std::time::Instant::now();
         for &refno in refnos {
             let mut target_visible_refnos = vec![];
             let mut update_refnos = query_deep_visible_inst_refnos(refno)
@@ -114,25 +116,24 @@ pub async fn process_meshes_update_db_deep(
 
             //缩小范围
             if option.as_ref().map(|x| x.gen_mesh).unwrap_or(true) {
-                let time = std::time::Instant::now();
                 // dbg!(&target_refnos);
                 // 生成模型文件
                 gen_inst_meshes(&update_refnos, replace_exist, dir.clone())
                     .await
                     .unwrap();
-                println!(
-                    "gen_inst_meshes finished: {} ms",
-                    time.elapsed().as_millis()
-                );
+                // println!(
+                //     "gen_inst_meshes finished: {} ms",
+                //     time.elapsed().as_millis()
+                // );
                 let time = std::time::Instant::now();
                 // 更新aabb 到inst relate，geo relate
                 update_inst_relate_aabbs_by_refnos(&update_refnos, replace_exist)
                     .await
                     .unwrap();
-                println!(
-                    "update_inst_relate_aabbs finished: {} ms",
-                    time.elapsed().as_millis()
-                );
+                // println!(
+                //     "update_inst_relate_aabbs finished: {} ms",
+                //     time.elapsed().as_millis()
+                // );
             }
 
             if target_visible_refnos.is_empty() {
@@ -155,9 +156,9 @@ pub async fn process_meshes_update_db_deep(
                 //有一些布尔运算要精确计算，不然会有薄片出现
                 //生成负实体的布尔运算
                 apply_insts_boolean_occ(&target_visible_refnos, replace_exist, dir.clone()).await?;
-                println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
             }
         }
+        println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
     }
     Ok(())
 }
@@ -194,17 +195,16 @@ pub async fn gen_inst_meshes(
     //排除已经生成了的模型
     inst_geo_ids.retain(|(x, y)| {
         if let Some(t) = x {
-            true
-            // if replace_exist {
-            //     true
-            // } else {
-            //     !EXIST_MESH_GEO_HASHES.contains(&t.id.to_raw())
-            // }
+            if replace_exist {
+                true
+            } else {
+                !EXIST_MESH_GEO_HASHES.contains(&t.id.to_raw())
+            }
         } else {
             false
         }
     });
-    // dbg!(inst_geo_ids.len());
+    // dbg!(&inst_geo_ids);
     if inst_geo_ids.is_empty() {
         return Ok(());
     }
@@ -428,6 +428,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         let result: Vec<QueryAabbParam> = response.take(0).unwrap();
         // dbg!(&result);
         // dbg!(result.len());
+        // dbg!(&result);
         // #[cfg(debug_assertions)]
         // println!("QueryAabbParam len: {}", result.len());
         let mut update_sql = String::new();
@@ -447,7 +448,7 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                 .entry(aabb_hash)
                 .or_insert(serde_json::to_string(&aabb).unwrap());
             let sql = format!(
-                "update {} set aabb = aabb:⟨{}⟩;",
+                "upsert {} set aabb = aabb:⟨{}⟩;",
                 r.id.to_string(),
                 aabb_hash,
             );

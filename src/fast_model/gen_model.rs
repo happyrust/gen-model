@@ -37,6 +37,7 @@ use tokio::sync::{Mutex, RwLock};
 
 ///生成几何体数据
 pub async fn gen_all_geos_data(
+    manual_refnos: Vec<RefU64>,
     db_option: &DbOption,
     incr_updates: Option<IncrGeoUpdateLog>,
 ) -> anyhow::Result<bool> {
@@ -45,13 +46,13 @@ pub async fn gen_all_geos_data(
     // dbg!(&incr_updates);
     //根据需要拉入数据到本地数据库也可以
     let is_incr_update = incr_updates.is_some();
+    let has_manual_refnos = !manual_refnos.is_empty();
     //排除增量更新的情况，如果debug_root_refnos 为空，即没有模型需要生成
+    let debug_root_refnos = db_option.get_all_debug_refnos().await;
     if !is_incr_update
-        && db_option
-            .debug_root_refnos
-            .as_ref()
-            .map(|x| x.is_empty())
-            .unwrap_or(false)
+        //debug_root_refnos = [] 时表示不生成模型，如果没有这个属性表示生成所有
+        && (db_option.debug_root_refnos.is_some() && debug_root_refnos.is_empty())
+        && (!has_manual_refnos)
     {
         return Ok(true);
     }
@@ -59,12 +60,11 @@ pub async fn gen_all_geos_data(
         return Ok(false);
     }
     let db_option = Arc::new(db_option.clone());
-    let mut debug_root_refnos = db_option.get_all_debug_refnos().await;
     let is_debug = debug_root_refnos.len() > 0;
     let mut db_nos = db_option.manual_db_nums.clone().unwrap_or_default();
 
     let is_replace_mesh = db_option.is_replace_mesh();
-    if is_incr_update || is_debug {
+    if is_incr_update || is_debug || has_manual_refnos {
         //处理增量更新，不需要使用db_nos
         db_nos = vec![0];
     } else if db_nos.is_empty() {
@@ -102,6 +102,8 @@ pub async fn gen_all_geos_data(
             // let mut handles = vec![];
             if is_incr_update {
                 println!("处理更新模型数量: {}", incr_count);
+            } else if has_manual_refnos {
+                println!("处理生成模型数量: {}", manual_refnos.len());
             } else if is_debug {
                 println!("调试模型数量: {:?}", debug_root_refnos.len());
             } else {
@@ -113,7 +115,7 @@ pub async fn gen_all_geos_data(
             let mut gen_prim_flag = d_types.iter().any(|x| x == "PRIM");
 
             let mut origin_root_refnos = vec![];
-            if !is_incr_update && !is_debug {
+            if !is_incr_update && !is_debug && !has_manual_refnos {
                 let mut response = SUL_DB
                     .query(format!(
                         "select value id from SITE where REFNO.dbnum={}",
@@ -130,15 +132,20 @@ pub async fn gen_all_geos_data(
                     .get_all_visible_refnos()
                     .into_iter()
                     .collect();
-            } else if is_debug {
-                origin_root_refnos = debug_root_refnos.clone();
-                dbg!(origin_root_refnos.len());
+            } else if is_debug || has_manual_refnos {
+                origin_root_refnos = if has_manual_refnos {
+                    manual_refnos.clone()
+                } else {
+                    debug_root_refnos.clone()
+                };
             }
+            // dbg!(origin_root_refnos.len());
             let incr_updates_log_arc = Arc::new(incr_updates.clone().unwrap_or_default());
             //需要在这里把origin_root_refnos 打断成小块
             let mut chunked_root_refnos = origin_root_refnos.chunks(CHUNK_SIZE);
             //遍历小块
             while let Some(target_refnos) = chunked_root_refnos.next() {
+                // dbg!(target_refnos.len());
                 //Step 1、提前缓存ploo, 得到对齐方式的偏移
                 let loop_sjus_map = DashMap::new();
                 let mut gen_inst_handles = vec![];
@@ -146,8 +153,8 @@ pub async fn gen_all_geos_data(
                 {
                     //查找到子节点的所有PLOO类型
                     let Ok(target_ploo_refnos) = aios_core::query_multi_deep_children_filter_inst(
-                        target_refnos.to_vec(),
-                        vec!["PLOO".into()],
+                        target_refnos,
+                        &["PLOO"],
                         skip_exist,
                     )
                     .await
@@ -186,8 +193,8 @@ pub async fn gen_all_geos_data(
                         .collect()
                 } else {
                     let r = aios_core::query_multi_deep_children_filter_inst(
-                        target_refnos.to_vec(),
-                        vec!["BRAN".into(), "HANG".into()],
+                        target_refnos,
+                        &["BRAN", "HANG"],
                         skip_exist,
                     )
                     .await
@@ -250,11 +257,6 @@ pub async fn gen_all_geos_data(
                         .unwrap_or_default();
                     map
                 };
-                #[cfg(debug_assertions)]
-                {
-                    dbg!(target_bran_reuse_cata_map.len());
-                    dbg!(target_single_cata_map.len());
-                }
                 //打印管道/支吊架的使用数量
                 if !target_bran_hanger_refnos.is_empty() && gen_cata_flag {
                     println!(
@@ -322,8 +324,8 @@ pub async fn gen_all_geos_data(
                         .collect()
                 } else {
                     let mut loop_owner_refnos = aios_core::query_multi_deep_children_filter_inst(
-                        target_refnos.to_vec(),
-                        GNERAL_LOOP_OWNER_NOUN_NAMES.map(String::from).to_vec(),
+                        target_refnos,
+                        &GNERAL_LOOP_OWNER_NOUN_NAMES,
                         skip_exist,
                     )
                     .await
@@ -352,8 +354,8 @@ pub async fn gen_all_geos_data(
                     incr_updates_log_arc.prim_refnos.iter().cloned().collect()
                 } else {
                     let mut prim_refnos = aios_core::query_multi_deep_children_filter_inst(
-                        target_refnos.to_vec(),
-                        GNERAL_PRIM_NOUN_NAMES.map(String::from).to_vec(),
+                        target_refnos,
+                        &GNERAL_PRIM_NOUN_NAMES,
                         skip_exist,
                     )
                     .await

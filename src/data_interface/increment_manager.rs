@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -63,7 +64,7 @@ impl AiosDBManager {
     ///执行增量更新
     pub async fn execute_incr_update(
         &self,
-        increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, u32)>,
+        increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>)>,
     ) -> anyhow::Result<bool> {
         //没有增量更新的数据，直接返回
         if increment_ranges_map.is_empty() {
@@ -81,10 +82,10 @@ impl AiosDBManager {
         let mut has_changed = false;
         let project = get_db_option().project_name.clone();
         //TODO: 如何鉴别只有claim page的变化，没有数据的更新，就不需要执行增量更新
-        for (path, (basic_info, last_pageno)) in increment_ranges_map {
+        for (path, (basic_info, sesno_range)) in increment_ranges_map {
             let mut io = PdmsIO::new(&project, path, true);
             io.open()?;
-            let mut eles_map = io.collect_increment_eles(last_pageno).await?;
+            let mut eles_map = io.collect_increment_eles(sesno_range.clone()).await?;
             let sync_refnos = self.db_option.get_manual_sync_refnos();
             if !sync_refnos.is_empty() {
                 for r in sync_refnos {
@@ -96,7 +97,7 @@ impl AiosDBManager {
             if eles_map.is_empty() {
                 continue;
             }
-            dbg!((last_pageno, eles_map.len()));
+            dbg!((sesno_range, eles_map.len()));
             if eles_map.is_empty() {
                 continue;
             }
@@ -399,7 +400,7 @@ impl AiosDBManager {
 
                     //使用surreal 保存pe
                     if !insert_pe_sql.is_empty() {
-                        println!("insert_pe_sql: {}", &insert_pe_sql);
+                        // println!("insert_pe_sql: {}", &insert_pe_sql);
                         SUL_DB.query(insert_pe_sql).await.unwrap();
                     }
                 });
@@ -442,7 +443,7 @@ impl AiosDBManager {
             .into_iter()
             .collect::<Vec<_>>();
         //有可能没更新完，就update了模型？
-        gen_all_geos_data(&self.db_option, Some(geo_update_log))
+        gen_all_geos_data(vec![], &self.db_option, Some(geo_update_log))
             .await
             .unwrap();
 
@@ -474,7 +475,10 @@ impl AiosDBManager {
         fs::create_dir_all("asset/archives")?;
         let mut time = Instant::now();
         dbg!(&self.watcher.watch_dirs);
-        let project = get_db_option().project_name.clone();
+        let db_option = get_db_option();
+        let manual_dbnums = db_option.manual_db_nums.clone().unwrap_or_default();
+        dbg!(&manual_dbnums);
+        // let project = get_db_option().project_name.clone();
 
         for watch_dir in &self.watcher.watch_dirs {
             for entry in WalkDir::new(watch_dir).sort_by(|a, b| {
@@ -492,24 +496,25 @@ impl AiosDBManager {
                 }
 
                 let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
-                if db_num != 1112 {
+                //是否调试里有筛选
+                if !manual_dbnums.is_empty() && !manual_dbnums.contains(&db_num){
                     continue;
                 }
                 let project = get_db_option().project_name.clone();
-                let file_latest_max_pgno = PdmsIO::new(&project, path.to_path_buf(), true)
-                    .get_att_latest_pgno()
+                let file_latest_sesno = PdmsIO::new(&project, path.to_path_buf(), true)
+                    .get_latest_att_sesno()
                     .unwrap_or_default();
-                dbg!(file_latest_max_pgno);
+                dbg!((db_num, file_latest_sesno));
 
                 if !CHECK_DB_TYPES.contains(&db_type.as_str()) {
                     continue;
                 }
                 //TODO 这种情况，需要全新的解析
-                let Ok(db_latest_pgno) = aios_core::query_db_max_version(db_num).await else {
+                let Ok(db_latest_sesno) = aios_core::query_db_latest_sesno(db_num).await else {
                     //先暂时跳过数据库里没有的文件，todo 考虑自动追加文件全新解析
                     continue;
                 };
-                dbg!(db_latest_pgno);
+                dbg!(db_latest_sesno);
                 // self.watcher
                 //     .file_name_full_path_map
                 //     .insert(file_name.to_owned(), path.to_path_buf());
@@ -526,15 +531,15 @@ impl AiosDBManager {
                 io.open().unwrap();
                 //每个path 都要检查一遍
                 if let Ok(basic_info) = io.get_page_basic_info() {
-                    if db_latest_pgno != 0 {
+                    if db_latest_sesno != 0 {
                         #[cfg(feature = "debug_parse")]
-                        dbg!((db_num, db_latest_pgno));
+                        dbg!((db_num, db_latest_sesno));
                         //暂时先跳过更新比较大的
-                        if file_latest_max_pgno > db_latest_pgno
-                            && (file_latest_max_pgno - db_latest_pgno < 1000)
+                        if file_latest_sesno > db_latest_sesno
+                            && (file_latest_sesno - db_latest_sesno < 1000)
                         {
-                            println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大pgno: {db_latest_pgno}, 文件属性对应pgno: {file_latest_max_pgno}", &file_name);
-                            params.insert(path.to_path_buf(), (basic_info.clone(), db_latest_pgno));
+                            println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大pgno: {db_latest_sesno}, 文件属性对应pgno: {file_latest_sesno}", &file_name);
+                            params.insert(path.to_path_buf(), (basic_info.clone(), (db_latest_sesno as i32 +1)..=file_latest_sesno as i32 ));
                         }
                         self.watcher.headers.insert(path.to_path_buf(), basic_info);
                     }
@@ -602,9 +607,10 @@ impl AiosDBManager {
                                 if old.pdms_header.latest_ses_pgno == new_header.pdms_header.latest_ses_pgno {
                                     continue;
                                 }
+                                //比如给出准确的范围next_sesno..=end_sesno
                                 params.insert(
                                     path.clone(),
-                                    (new_header.clone(), old.pdms_header.latest_ses_pgno),
+                                    (new_header.clone(), (old.pdms_header.latest_ses_pgno as i32 + 1)..=new_header.pdms_header.latest_ses_pgno as i32),
                                 );
                             }
                         }

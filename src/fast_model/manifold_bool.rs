@@ -216,7 +216,6 @@ pub async fn apply_insts_boolean_manifold_single(
              from inst_relate:{refno} where !bad_bool and ((in<-neg_relate)[0] != none or in<-ngmr_relate[0] != none) and aabb.d != NONE
         "#
     );
-    //object::keys(out.param)[0] as para_type
     if !replace_exist {
         sql.push_str(" and !booled");
     }

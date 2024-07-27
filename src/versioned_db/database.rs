@@ -39,6 +39,7 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::tables::*;
 use crate::versioned_db::database::SenderSql::SurrealSql;
 use crate::versioned_db::pe::*;
+use crate::versioned_db::task::get_global_db_sender;
 
 pub enum SenderSql {
     SurrealSql(String),
@@ -295,49 +296,8 @@ pub async fn sync_total_async_threaded(
     // let sync_tidb = db_option_arc.sync_tidb.unwrap_or(false);
     #[cfg(feature = "sql")]
     let pool = mgr.get_project_pools().await?;
-    const CHUNK_SIZE: usize = 10000;
-    let (sender, receiver) = flume::bounded(CHUNK_SIZE);
 
-    let mut all_handles = vec![];
-    for i in 0..60 {
-        let receiver: flume::Receiver<SenderSql> = receiver.clone();
-        #[cfg(feature = "sql")]
-        let pools_clone = pool.clone();
-
-        let insert_handle = tokio::task::spawn(async move {
-            let mut record_stream = receiver.into_stream().chunks(CHUNK_SIZE);
-            while let Some(sqls) = record_stream.next().await {
-                println!("thread {i} Imported records: {}", sqls.len());
-                for sql in sqls {
-                    match sql {
-                        SenderSql::SurrealSql(sql) => {
-                            if !sql.is_empty() {
-                                // println!("{}", format!("thread {i} inserting {}.", sql.len()));
-                                SUL_DB.query(sql).await.expect("insert db failed");
-                                // println!("{}", format!("thread {i} finished."));
-                            }
-                        }
-                        #[cfg(feature = "sql")]
-                        SenderSql::MysqlSql((project, sql)) => {
-                            let Some(pool) = pools_clone.get(&project) else { continue; };
-                            let mut conn = pool.acquire().await.expect("get pool failed");
-                            match conn.execute(sql.as_str()).await {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(e.to_string());
-                                    dbg!(&sql);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            // }
-        });
-        all_handles.push(insert_handle);
-    }
-
+    let sender = get_global_db_sender().await;
     let db_types_clone = db_types
         .into_iter()
         .map(|&x| x.to_string())
@@ -389,8 +349,9 @@ pub async fn sync_total_async_threaded(
                 let mut ses_range_map = BTreeMap::new();
                 {
                     let mut io = PdmsIO::new(&project, path.clone(), true);
-                    io.open().unwrap();
-                    ses_range_map = io.ses_range_map;
+                    if io.open().is_ok(){
+                        ses_range_map = io.ses_range_map;
+                    }
                 }
 
                 let project_name = project.as_str().to_string(); // 获取项目名称的字符串
@@ -554,8 +515,9 @@ pub async fn sync_total_async_threaded(
             SUL_DB.query(&db_info_sql).await.expect("save db_info failed");
         }
     });
-    all_handles.push(parse_handle);
-    futures::future::join_all(take(&mut all_handles)).await;
+    // all_handles.push(parse_handle);
+    // futures::future::join_all(take(&mut all_handles)).await;
+    futures::future::join_all(&mut [parse_handle]).await;
     Ok(())
 }
 
