@@ -79,7 +79,7 @@ pub async fn process_meshes_update_db(
     apply_insts_boolean_manifold(&refnos, replace_exist, dir.clone()).await?;
     //有一些布尔运算要精确计算，不然会有薄片出现
     //生成负实体的布尔运算
-    apply_insts_boolean_occ(&refnos, replace_exist, dir.clone()).await?;
+    // apply_insts_boolean_occ(&refnos, replace_exist, dir.clone()).await?;
     println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
 
     Ok(())
@@ -97,9 +97,12 @@ pub async fn process_meshes_update_db_deep(
     if !refnos.is_empty() {
         let dir = dboption.get_meshes_path();
         let replace_exist = dboption.is_replace_mesh();
-        dbg!(refnos.len());
+        // dbg!(refnos.len());
+        println!("更新模型结点数量: {}", refnos.len());
         let time = std::time::Instant::now();
         for &refno in refnos {
+            #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+            println!("更新模型结点: {}", refno);
             let mut target_visible_refnos = vec![];
             let mut update_refnos = query_deep_visible_inst_refnos(refno)
                 .await
@@ -150,7 +153,7 @@ pub async fn process_meshes_update_db_deep(
                     .await?;
                 //有一些布尔运算要精确计算，不然会有薄片出现
                 //生成负实体的布尔运算
-                apply_insts_boolean_occ(&target_visible_refnos, replace_exist, dir.clone()).await?;
+                // apply_insts_boolean_occ(&target_visible_refnos, replace_exist, dir.clone()).await?;
             }
         }
         println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
@@ -332,8 +335,10 @@ pub async fn gen_inst_meshes(
                                     success = true;
                                 }
                             }
+                            //显示哪些模型可能会受影响
                             Err(e) => {
-                                println!("{} mesh error: {}", id, e.to_string());
+                                let failed_refnos = aios_core::query_refnos_by_geo_hash(id).await.unwrap();
+                                println!("{:?} mesh error: {}", failed_refnos, e.to_string());
                             }
                         }
                         if !success {
@@ -350,9 +355,6 @@ pub async fn gen_inst_meshes(
                             );
                         }
                     }
-                    // utils::save_pts_to_surreal(&pts_json_map).await;
-                    //更新aabb数据到数据库
-                    // utils::save_aabb_to_surreal(&aabb_map).await;
                 }
                 Err(e) => {
                     init_query_error(&sql, e, &std::panic::Location::caller().to_string());

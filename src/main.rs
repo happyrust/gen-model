@@ -44,7 +44,7 @@ use aios_database::fast_model::{
     gen_inst_meshes, process_meshes_update_db_deep, EXIST_MESH_GEO_HASHES,
 };
 use aios_database::versioned_db::database::*;
-use aios_database::versioned_db::task::initialize_global_db_sender;
+// use aios_database::versioned_db::task::initialize_global_db_sender;
 use bevy_reflect::List;
 use chrono::{Datelike, Local, Timelike};
 use futures::StreamExt;
@@ -111,7 +111,7 @@ async fn main() -> anyhow::Result<()> {
 
     let sync_live = db_option.sync_live.unwrap_or(false);
     let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
-    initialize_global_db_sender().await;
+    // initialize_global_db_sender().await;
 
     /// 是否全部同步模型
     if db_option.total_sync || db_option.incr_sync || db_option.only_sync_sys {
@@ -122,8 +122,12 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    //检查cate_relate 是否创建了
-    build_cate_relate(false).await.unwrap();
+    {
+        //检查cate_relate 是否创建了
+        println!("初始化创建Cate relate关系");
+        build_cate_relate(false).await.unwrap();
+    }
+
 
     /// 创建db manager
     if sync_live {
@@ -133,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
     //todo 还有个问题，可能需要通过队列来排队任务
     //如果没有生成完，需要等待
     #[cfg(feature = "gen_model")]
-    if db_option.gen_model {
+    if db_option.is_gen_mesh_or_model() {
         println!("正在生成模型");
         let mut time = Instant::now();
         fs::create_dir_all("assets/meshes")?;

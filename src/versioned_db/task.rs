@@ -15,21 +15,21 @@ pub async fn initialize_global_db_sender() {
     tokio::spawn(background_save_task(receiver));
     dbg!("Background save ele task started");
 
-    const CHUNK_SIZE: usize = 100;
-    let (sender, receiver) = flume::bounded(CHUNK_SIZE);
-    *GLOBAL_INST_SENDER.lock().await = Some(sender);
-    tokio::spawn(background_save_inst_task(receiver));
-    dbg!("Background save inst task started");
+    // const CHUNK_SIZE: usize = 100;
+    // let (sender, receiver) = flume::bounded(CHUNK_SIZE);
+    // *GLOBAL_INST_SENDER.lock().await = Some(sender);
+    // tokio::spawn(background_save_inst_task(receiver));
+    // dbg!("Background save inst task started");
 }
 
-pub async fn get_global_inst_sender() -> flume::Sender<ShapeInstancesData> {
-    GLOBAL_INST_SENDER
-        .lock()
-        .await
-        .as_ref()
-        .expect("Global db sender not initialized")
-        .clone()
-}
+// pub async fn get_global_inst_sender() -> flume::Sender<ShapeInstancesData> {
+//     GLOBAL_INST_SENDER
+//         .lock()
+//         .await
+//         .as_ref()
+//         .expect("Global db sender not initialized")
+//         .clone()
+// }
 
 async fn background_save_inst_task(receiver: flume::Receiver<ShapeInstancesData>) {
     let mut all_handles = vec![];

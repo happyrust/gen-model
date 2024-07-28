@@ -5,7 +5,6 @@ use crate::fast_model::pdms_inst::save_instance_data;
 use crate::fast_model::{
     cata_model, loop_model, prim_model, process_meshes_update_db_deep, resolve_desi_comp, shared,
 };
-use crate::versioned_db::task::{get_global_db_sender, get_global_inst_sender};
 #[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::geometry::{PlantGeoData, ShapeInstancesData};
@@ -34,6 +33,7 @@ use std::mem::take;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
+use futures::stream::FuturesUnordered;
 use tokio::sync::{Mutex, RwLock};
 
 ///生成几何体数据
@@ -44,7 +44,8 @@ pub async fn gen_all_geos_data(
 ) -> anyhow::Result<bool> {
     let is_incr_update = incr_updates.is_some();
     let has_manual_refnos = !manual_refnos.is_empty();
-    if is_incr_update || has_manual_refnos {
+    let has_debug = db_option.debug_root_refnos.is_some();
+    if is_incr_update || has_manual_refnos || has_debug {
         gen_geos_data(None, manual_refnos.clone(), db_option, incr_updates.clone()).await?;
         return Ok(true);
     }
@@ -61,7 +62,7 @@ pub async fn gen_all_geos_data(
             db_option,
             incr_updates.clone(),
         )
-        .await?;
+            .await?;
     }
 
     Ok(true)
@@ -104,8 +105,24 @@ pub async fn gen_geos_data(
         0
     };
 
-    let sender = get_global_inst_sender().await.clone();
-    let mut all_handles = vec![];
+    // let mut all_handles = vec![];
+    let mut all_handles = FuturesUnordered::new();
+    let mut insert_handles = FuturesUnordered::new();
+    let (sender, receiver) = flume::bounded(CHUNK_SIZE);
+    let total_shape_cnt = Arc::new(Mutex::new(0));
+    for i in 0..1 {
+        let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
+        let total_shape_cnt = total_shape_cnt.clone();
+        let insert_task = tokio::task::spawn(async move {
+            while let Ok(shape_insts) = receiver.recv_async().await {
+                save_instance_data(&shape_insts, false).await.unwrap();
+                // println!("insert shape insts: {}", shape_insts.inst_info_map.len());
+                *total_shape_cnt.lock().await += shape_insts.inst_info_map.len();
+            }
+            // Ok::<_, anyhow::Error>(())
+        });
+        insert_handles.push(insert_task);
+    }
 
     let mut target_root_refnos = vec![];
     if is_incr_update {
@@ -132,10 +149,14 @@ pub async fn gen_geos_data(
             .unwrap();
         target_root_refnos = response.take(0).unwrap();
     }
-    dbg!(target_root_refnos.len());
+    if dbno.is_some() {
+        println!("总共 {} 个SITE", target_root_refnos.len());
+    }else{
+        println!("总共 {} 个结点", target_root_refnos.len());
+    }
     let origin_root_refnos = target_root_refnos.clone();
     // let process_handle = tokio::spawn(async move {
-    // let mut handles = vec![];
+    // let mut handles = vec![]
     if is_incr_update {
         println!("处理更新模型数量: {}", incr_count);
     } else if has_manual_refnos {
@@ -154,8 +175,9 @@ pub async fn gen_geos_data(
     let incr_updates_log_arc = Arc::new(incr_updates.clone().unwrap_or_default());
     //需要在这里把origin_root_refnos 打断成小块
     let mut chunked_root_refnos = origin_root_refnos.chunks(CHUNK_SIZE);
+    let gen_model = db_option_arc.gen_model;
     //遍历小块
-    while let Some(target_refnos) = chunked_root_refnos.next() {
+    while gen_model && let Some(target_refnos) = chunked_root_refnos.next() {
         // dbg!(target_refnos.len());
         //Step 1、提前缓存ploo, 得到对齐方式的偏移
         let loop_sjus_map = DashMap::new();
@@ -168,12 +190,12 @@ pub async fn gen_geos_data(
                 &["PLOO"],
                 skip_exist,
             )
-            .await
+                .await
             else {
                 continue;
             };
             #[cfg(debug_assertions)]
-            {
+            if !target_ploo_refnos.is_empty(){
                 println!("target_ploo_refnos: {:?}", target_ploo_refnos.len());
             }
             for r in target_ploo_refnos {
@@ -208,8 +230,8 @@ pub async fn gen_geos_data(
                 &["BRAN", "HANG"],
                 skip_exist,
             )
-            .await
-            .unwrap();
+                .await
+                .unwrap();
             r.into_iter().collect()
         };
         let target_bran_reuse_cata_map: DashMap<String, CataHashRefnoKV> = {
@@ -257,8 +279,8 @@ pub async fn gen_geos_data(
                 target_refnos.to_vec(),
                 skip_exist,
             )
-            .await
-            .unwrap_or_default();
+                .await
+                .unwrap_or_default();
             // dbg!(&use_cata_refnos);
             use_cata_refnos.extend(bran_children_refnos);
             let map = aios_core::query_group_by_cata_hash(&use_cata_refnos)
@@ -296,8 +318,8 @@ pub async fn gen_geos_data(
                         sjus_map_clone,
                         sender,
                     )
-                    .await
-                    .unwrap();
+                        .await
+                        .unwrap();
                 });
                 all_handles.push(handle);
             }
@@ -319,8 +341,8 @@ pub async fn gen_geos_data(
                     sjus_map_clone,
                     sender,
                 )
-                .await
-                .unwrap();
+                    .await
+                    .unwrap();
             });
             all_handles.push(handle);
         }
@@ -337,8 +359,8 @@ pub async fn gen_geos_data(
                 &GNERAL_LOOP_OWNER_NOUN_NAMES,
                 skip_exist,
             )
-            .await
-            .unwrap_or_default();
+                .await
+                .unwrap_or_default();
             loop_owner_refnos.into_iter().collect()
         };
         if gen_loop_flag && !target_loop_owner_refnos.is_empty() {
@@ -353,8 +375,8 @@ pub async fn gen_geos_data(
                     sjus_map_clone,
                     sender,
                 )
-                .await
-                .unwrap();
+                    .await
+                    .unwrap();
             });
             all_handles.push(handle);
         }
@@ -367,8 +389,8 @@ pub async fn gen_geos_data(
                 &GNERAL_PRIM_NOUN_NAMES,
                 skip_exist,
             )
-            .await
-            .unwrap_or_default();
+                .await
+                .unwrap_or_default();
             prim_refnos.into_iter().collect()
         };
 
@@ -392,17 +414,23 @@ pub async fn gen_geos_data(
             break;
         }
     }
-
-    if !all_handles.is_empty() {
-        futures::future::join_all(take(&mut all_handles)).await;
+    //Ok::<_, anyhow::Error>(())
+    while let Some(result) = all_handles.next().await {
+        // 处理每个完成的 future 的结果
+    }
+    drop(sender);
+    while let Some(result) = insert_handles.next().await {
+        // 处理每个完成的 future 的结果
     }
     if dbno.is_some() {
         println!("数据库号： {} 生成完毕。", dbno.unwrap());
     }
-    // process_meshes_update_db_deep(&db_option, &target_root_refnos)
-    //     .await
-    //     .expect("更新模型数据失败");
-    // println!("更新所有模型时间: {}ms", time.elapsed().as_millis());
+    if db_option.gen_mesh{
+        process_meshes_update_db_deep(&db_option, &target_root_refnos)
+            .await
+            .expect("更新模型数据失败");
+        println!("更新所有模型时间: {}ms", time.elapsed().as_millis());
+    }
     Ok(true)
 }
 

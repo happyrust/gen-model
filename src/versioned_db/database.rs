@@ -27,6 +27,7 @@ use std::sync::Arc;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::helper::normalize_sql_string;
 use aios_core::tool::hash_tool::hash_str;
+use futures::stream::FuturesUnordered;
 use pdms_io::io::PdmsIO;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
@@ -297,7 +298,49 @@ pub async fn sync_total_async_threaded(
     #[cfg(feature = "sql")]
     let pool = mgr.get_project_pools().await?;
 
-    let sender = get_global_db_sender().await;
+    const CHUNK_SIZE: usize = 500;
+    let (sender, receiver) = flume::bounded(CHUNK_SIZE);
+
+    let mut insert_handles = FuturesUnordered::new();
+    for i in 0..16 {
+        let receiver: flume::Receiver<SenderSql> = receiver.clone();
+        #[cfg(feature = "sql")]
+        let pools_clone = pool.clone();
+
+        let insert_handle = tokio::task::spawn(async move {
+            let mut record_stream = receiver.into_stream().chunks(CHUNK_SIZE);
+            while let Some(sqls) = record_stream.next().await {
+                println!("thread {i} Imported records: {}", sqls.len());
+                for sql in sqls {
+                    match sql {
+                        SenderSql::SurrealSql(sql) => {
+                            if !sql.is_empty() {
+                                // println!("{}", format!("thread {i} inserting {}.", sql.len()));
+                                SUL_DB.query(sql).await.expect("insert db failed");
+                                // println!("{}", format!("thread {i} finished."));
+                            }
+                        }
+                        #[cfg(feature = "sql")]
+                        SenderSql::MysqlSql((project, sql)) => {
+                            let Some(pool) = pools_clone.get(&project) else { continue; };
+                            let mut conn = pool.acquire().await.expect("get pool failed");
+                            match conn.execute(sql.as_str()).await {
+                                Ok(_) => {}
+                                Err(e) => {
+                                    dbg!(e.to_string());
+                                    dbg!(&sql);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // }
+        });
+        insert_handles.push(insert_handle);
+    }
+
     let db_types_clone = db_types
         .into_iter()
         .map(|&x| x.to_string())
@@ -305,7 +348,8 @@ pub async fn sync_total_async_threaded(
     let is_sys_parse = db_types_clone.contains(&"SYST".to_string());
     let is_save_db = db_option.is_save_db();
 
-    let parse_handle = tokio::spawn(async move {
+    let sender_clone = sender.clone();
+    tokio::spawn(async move {
         //todo 按照文件大小排序，只有小于多少的能开启多线程，模型一大就不合适了
         let mut db_info_sql = vec![];
         for path in children_files {
@@ -366,9 +410,9 @@ pub async fn sync_total_async_threaded(
                 let db_basic = Arc::new(db_basic);
                 if is_save_db {
                     if cfg!(feature = "surreal_v2") {
-                        save_pe_relates_by_insert(&db_basic, sender.clone()).await;
+                        save_pe_relates_by_insert(&db_basic, sender_clone.clone()).await;
                     } else {
-                        save_pe_relates(&db_basic, sender.clone()).await;
+                        save_pe_relates(&db_basic, sender_clone.clone()).await;
                     }
                 }
                 let debug_refnos: Vec<RefU64> = db_option_arc
@@ -392,7 +436,6 @@ pub async fn sync_total_async_threaded(
                 let ses_range_map = Arc::new(ses_range_map);
                 //按照SITE划分？
                 for (chunk_index, chunk) in all_refnos.chunks(chunk_size).enumerate() {
-                    let sender = sender.clone();
                     let chunk_refnos = chunk.to_vec();
                     let db_option_clone = db_option_arc.clone();
                     let file_name_clone = file_name.clone();
@@ -401,6 +444,7 @@ pub async fn sync_total_async_threaded(
                     let db_basic_clone = db_basic.clone();
                     let debug_refnos = debug_refnos.clone();
                     let ses_range_map_clone = ses_range_map.clone();
+                    // let sender_clone = sender.clone();
                     // let handle = tokio::spawn(async move {
                     match parse_file_with_chunk(
                         db_basic_clone.clone(),
@@ -419,14 +463,13 @@ pub async fn sync_total_async_threaded(
                             let total_attr_map_arc = Arc::new(total_attr_map);
                             //开始执行保存数据
                             // dbg!("开始保存pdms_element数据");
-                            let sender_clone = sender.clone();
                             if !is_debug && is_save_db {
                                 save_pes(
                                     &db_basic_clone,
                                     &total_attr_map_arc,
                                     db_no as i32,
                                     &db_option_clone,
-                                    sender,
+                                    sender_clone.clone(),
                                 )
                                     .await
                                     .expect("save pe to surreal failed");
@@ -514,10 +557,14 @@ pub async fn sync_total_async_threaded(
         if !db_info_sql.is_empty() {
             SUL_DB.query(&db_info_sql).await.expect("save db_info failed");
         }
-    });
+    }).await.unwrap();
+    drop(sender);
+    while let Some(result) = insert_handles.next().await {
+        // 处理每个完成的 future 的结果
+    }
     // all_handles.push(parse_handle);
     // futures::future::join_all(take(&mut all_handles)).await;
-    futures::future::join_all(&mut [parse_handle]).await;
+    // futures::future::join_all(&mut [parse_handle]).await;
     Ok(())
 }
 

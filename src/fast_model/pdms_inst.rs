@@ -14,7 +14,7 @@ pub async fn save_instance_data(
     inst_mgr: &ShapeInstancesData,
     replace_exist: bool,
 ) -> anyhow::Result<()> {
-    let mut join_set = tokio::task::JoinSet::new();
+    // let mut join_set = tokio::task::JoinSet::new();
     let mut aabb_map: HashMap<u64, String> = HashMap::new();
     let mut transform_map: HashMap<u64, String> = HashMap::new();
     //标识单位矩阵
@@ -22,7 +22,7 @@ pub async fn save_instance_data(
     let mut param_map = HashMap::new();
     let mut vec3_map: HashMap<u64, String> = HashMap::new();
 
-    let chunk_size = 100;
+    let chunk_size = 10;
     //把delete 提前，因为后面的插入都是异步的执行
     // dbg!(replace_exist);
     if replace_exist {
@@ -53,10 +53,12 @@ pub async fn save_instance_data(
     }
 
     let keys = inst_mgr.inst_geos_map.keys().collect::<Vec<_>>();
+    // dbg!(&keys);
     for chunk in keys.chunks(chunk_size) {
         let mut json_vec = vec![];
         let mut geo_relate_vec = vec![];
         for &k in chunk {
+            // dbg!(k);
             let v = inst_mgr.inst_geos_map.get(k).unwrap();
             for inst in &v.insts {
                 if inst.transform.is_nan() {
@@ -87,7 +89,7 @@ pub async fn save_instance_data(
                 //使用cata_key -> inst_geos
                 let cat_negs_str = if !inst.cata_neg_refnos.is_empty() {
                     format!(
-                        ", cata_neg=[{}]",
+                        ", cata_neg: [{}]",
                         inst.cata_neg_refnos.iter().map(|x| x.to_pe_key()).join(",")
                     )
                 } else {
@@ -96,8 +98,10 @@ pub async fn save_instance_data(
                 //如果是replace, 直接这里需要先删除之前的sql语句
                 let relate_sql = format!(
                     r#"
-                        relate inst_info:⟨{0}⟩->geo_relate->inst_geo:⟨{1}⟩ set trans=trans:⟨{2}⟩,
-                            geom_refno=pe:{3}, pts=[{4}], geo_type='{5}', visible={6} {7};
+                        {{
+                            in: inst_info:⟨{0}⟩, out: inst_geo:⟨{1}⟩, trans: trans:⟨{2}⟩,
+                            geom_refno: pe:{3}, pts: [{4}], geo_type: '{5}', visible: {6} {7}
+                        }}
                     "#,
                     v.id(),
                     inst.geo_hash,
@@ -108,6 +112,7 @@ pub async fn save_instance_data(
                     inst.visible,
                     cat_negs_str
                 );
+                // dbg!(&relate_sql);
 
                 geo_relate_vec.push(relate_sql);
                 //保存 unit shape 的几何参数
@@ -125,20 +130,22 @@ pub async fn save_instance_data(
             #[cfg(feature = "debug_sql")]
             println!("insert inst_geo sql: {}", &sql_string);
             //使用surreal 保存NamedAttrMap
-            join_set.spawn(async move {
-                SUL_DB.query(sql_string).await.unwrap();
-            });
-            //保存relate 关系
-            if !geo_relate_vec.is_empty() {
-                join_set.spawn(async move {
-                    let sql = geo_relate_vec.join("");
-                    // dbg!(&sql);
-                    SUL_DB.query(sql).await.unwrap();
-                });
-            }
+            // join_set.spawn(async move {
+            SUL_DB.query(sql_string).await.unwrap();
+        }
+        // });
+        //保存relate 关系
+        // dbg!(geo_relate_vec.len());
+        if !geo_relate_vec.is_empty() {
+            // dbg!(&geo_relate_vec);
+            let sql = format!("INSERT RELATION INTO geo_relate [{}];", geo_relate_vec.join(","));
+            SUL_DB.query(sql).await.unwrap();
+            // join_set.spawn(async move {
+            //     SUL_DB.query(sql).await.unwrap();
+            // });
         }
     }
-    while let Some(_) = join_set.join_next().await {}
+    // while let Some(_) = join_set.join_next().await {}
 
     //保存tubi的数据
     let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
@@ -172,15 +179,15 @@ pub async fn save_instance_data(
         let mut neg_relate_vec = vec![];
         // dbg!(&inst_mgr.neg_relate_map);
         for (k, refnos) in &inst_mgr.neg_relate_map {
-            for r in refnos {
+            //这里需要order
+            for (indx, r) in refnos.into_iter().enumerate() {
                 neg_relate_vec.push(format!(
-                    "relate {}->neg_relate:{}->{};",
+                    "relate {}->neg_relate:[{}, {indx}]->{};",
                     r.to_pe_key(),
                     r.to_string(),
                     k.to_pe_key(),
                 ));
             }
-            // dbg!(&ngmr_relate_vec);
         }
         let neg_relate_sql = neg_relate_vec.join("");
         if !neg_relate_sql.is_empty() {

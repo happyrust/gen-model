@@ -78,6 +78,7 @@ pub async fn gen_loop_geos(
                         aios_core::query_filter_children(target_refno, &GENRAL_NEG_NOUN_NAMES)
                             .await
                             .unwrap_or_default();
+                    // dbg!(&neg_refnos);
                     shape_insts_data.insert_negs(target_refno, &neg_refnos);
                     //检查是否有CMPF
                     let cmpf_refnos = aios_core::query_filter_children(target_refno, &["CMPF"])
@@ -116,6 +117,7 @@ pub async fn gen_loop_geos(
                 else {
                     continue;
                 };
+                // dbg!((&verts, height));
                 match target_type {
                     "NREV" | "REVO" => {
                         let angle = target_att.get_f32("ANGL").unwrap_or_default();
@@ -192,7 +194,6 @@ pub async fn gen_loop_geos(
                     cata_neg_refnos: Default::default(),
                 };
                 geos_info.is_solid = geom_inst.geo_type == GeoBasicType::Pos;
-                // dbg!(target_refno);
                 shape_insts_data.insert_geos_data(
                     target_refno.to_string(),
                     EleInstGeosData {

@@ -4,7 +4,7 @@ use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::PlantAxisMap;
 use crate::fast_model;
 use crate::fast_model::{get_generic_type, resolve_desi_comp, shared};
-use aios_core::consts::NGMR_OWN_TYPES;
+use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
@@ -404,6 +404,7 @@ pub async fn gen_cata_geos(
                                     cata_neg_refnos,
                                 };
                                 if is_ngmr {
+                                    // dbg!(geom_refno);
                                     //获得ngmr的关系
                                     if let Ok(target_owners) =
                                         query_ngmr_owner(ele_refno, geom_refno).await
@@ -966,10 +967,17 @@ pub async fn query_ngmr_owner(
     let mut target_refnos = vec![];
     match removed_type {
         NgmrRemovedType::AsDefault => {
-            //默认情况就是owner，但如果不是目标类型也不插入到target_refnos
-            if owner == o_ref.unwrap_or_default() {
-                target_refnos.push(owner);
+            if let Some(o_refno) = o_ref {
+                let o_type = aios_core::get_type_name(o_refno).await.unwrap_or_default();
+                // dbg!(&o_type);
+                //default得情况，只有civil 可以直接用到，否则default 就不起作用
+                if CIVIL_TYPES.contains(&o_type.as_str()) {
+                    target_refnos.push(o_refno);
+                }
             }
+            // if owner == o_ref.unwrap_or_default() {
+            //     target_refnos.push(owner);
+            // }
         }
         NgmrRemovedType::Nothing => {}
         NgmrRemovedType::Attached => {
