@@ -14,7 +14,6 @@ pub async fn save_instance_data(
     inst_mgr: &ShapeInstancesData,
     replace_exist: bool,
 ) -> anyhow::Result<()> {
-    // let mut join_set = tokio::task::JoinSet::new();
     let mut aabb_map: HashMap<u64, String> = HashMap::new();
     let mut transform_map: HashMap<u64, String> = HashMap::new();
     //标识单位矩阵
@@ -22,9 +21,8 @@ pub async fn save_instance_data(
     let mut param_map = HashMap::new();
     let mut vec3_map: HashMap<u64, String> = HashMap::new();
 
-    let chunk_size = 10;
+    let chunk_size = 100;
     //把delete 提前，因为后面的插入都是异步的执行
-    // dbg!(replace_exist);
     if replace_exist {
         let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
         for chunk in keys.chunks(chunk_size) {
@@ -169,12 +167,9 @@ pub async fn save_instance_data(
     }
 
     let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
-    // dbg!(&keys);
     let mut join_set = tokio::task::JoinSet::new();
-    // let mu tasks = vec![];
     let mut inst_relate_vec = vec![];
 
-    // if let Some(refnos) = inst_mgr.ngmr_relate_map.get(k)
     if !inst_mgr.neg_relate_map.is_empty() {
         let mut neg_relate_vec = vec![];
         // dbg!(&inst_mgr.neg_relate_map);
@@ -205,10 +200,8 @@ pub async fn save_instance_data(
                 let ngmr_pe = ngmr_geom_refno.to_pe_key();
                 ngmr_relate_vec.push(format!("relate {0}->ngmr_relate:[{0}, {1}, {2}]->{1} set ngmr={2};", ele_pe, kpe, ngmr_pe));
             }
-            // dbg!(&ngmr_relate_vec);
         }
         let ngmr_relate_sql = ngmr_relate_vec.join("");
-        // dbg!(&ngmr_relate_sql);
         if !ngmr_relate_sql.is_empty() {
             SUL_DB.query(ngmr_relate_sql).await.unwrap();
         }

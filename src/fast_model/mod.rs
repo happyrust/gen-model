@@ -27,10 +27,11 @@ pub mod utils;
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};
 use once_cell::sync::Lazy;
+use parry3d::bounding_volume::Aabb;
 pub use gen_model::*;
 pub use occ_generate::*;
 pub use query::*;
 pub use resolve::*;
 
 
-pub static EXIST_MESH_GEO_HASHES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
+pub static EXIST_MESH_GEO_HASHES: Lazy<DashMap<String, Aabb>> = Lazy::new(DashMap::new);

@@ -178,31 +178,37 @@ pub async fn gen_inst_meshes(
     let inst_keys = get_inst_relate_keys(refnos);
     let sql = if replace_exist {
         format!(
-            r#"array::group(select value (select value [out, ($parent<-neg_relate)[0] != none] from out->geo_relate where !out.bad)
+            r#"array::group(select value (select value [out, ($parent<-neg_relate)[0] != none] from out->geo_relate where  !out.bad)
             from {inst_keys})"#
         )
     } else {
         format!(
-            r#"array::group(select value (select value [out, ($parent<-neg_relate)[0] != none] from out->geo_relate where !out.meshed and !out.bad)
+            r#"array::group(select value (select value [out, ($parent<-neg_relate)[0] != none] from out->geo_relate where out.aabb.d=none and !out.meshed and !out.bad)
             from {inst_keys})"#
         )
     };
+    //out.aabb.d == none and
     // println!("sql is {}", &sql);
     let mut response = SUL_DB.query(sql).await.unwrap();
     let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0).unwrap();
-    //排除已经生成了的模型
+    //todo 排除已经生成了的模型
+    // let mut update_geos_by_meshes = HashSet::default();
     inst_geo_ids.retain(|(x, y)| {
         if let Some(t) = x {
             if replace_exist {
                 true
             } else {
-                !EXIST_MESH_GEO_HASHES.contains(&t.id.to_raw())
+                if EXIST_MESH_GEO_HASHES.contains_key(&t.id.to_raw()) {
+                    // update_geos_by_meshes.insert(t.id.to_raw());
+                    false
+                } else {
+                    true
+                }
             }
         } else {
             false
         }
     });
-    // dbg!(&inst_geo_ids);
     if inst_geo_ids.is_empty() {
         return Ok(());
     }
@@ -285,7 +291,11 @@ pub async fn gen_inst_meshes(
                                 shapes_map.insert(g.id, (shape, tol));
                             }
                             Err(e) => {
-                                println!("{} error: {}", g.id, e.to_string());
+                                #[cfg(feature = "log_error")]
+                                {
+                                    let failed_refnos = aios_core::query_refnos_by_geo_hash(&g.id).await.unwrap();
+                                    println!("{:?} mesh error: {}", failed_refnos, e.to_string());
+                                }
                             }
                         }
                     }
@@ -299,6 +309,9 @@ pub async fn gen_inst_meshes(
                         // s.write_step(format!("{}.step", id)).unwrap();
                         match PlantMesh::gen_occ_mesh(s, m_tol) {
                             Ok(mesh) => {
+                                if mesh.aabb.is_none(){
+                                    continue;
+                                }
                                 #[cfg(feature = "debug_model")]
                                 mesh.export_obj(false, &format!("{}.obj", id));
                                 // dbg!((id, m_tol, mesh.vertices.len()));
@@ -330,15 +343,19 @@ pub async fn gen_inst_meshes(
                                         pt_hashes.into_iter().join(","),
                                     ));
                                     aabb_map
-                                        .entry(aabb_hash)
-                                        .or_insert(serde_json::to_string(&mesh.aabb).unwrap());
+                                        .entry(aabb_hash.to_string())
+                                        // .or_insert(serde_json::to_string(&mesh.aabb).unwrap());
+                                        .or_insert(mesh.aabb.unwrap());
                                     success = true;
                                 }
                             }
                             //显示哪些模型可能会受影响
                             Err(e) => {
-                                let failed_refnos = aios_core::query_refnos_by_geo_hash(id).await.unwrap();
-                                println!("{:?} mesh error: {}", failed_refnos, e.to_string());
+                                #[cfg(feature = "log_error")]
+                                {
+                                    let failed_refnos = aios_core::query_refnos_by_geo_hash(id).await.unwrap();
+                                    println!("{:?} mesh error: {}", failed_refnos, e.to_string());
+                                }
                             }
                         }
                         if !success {
@@ -373,7 +390,12 @@ pub async fn gen_inst_meshes(
 
     for (id, _) in inst_geo_ids {
         if let Some(id) = id {
-            EXIST_MESH_GEO_HASHES.insert(id.to_raw());
+            let h = id.to_raw();
+            if !EXIST_MESH_GEO_HASHES.contains_key(&h) {
+                if let Some(aabb) = aabb_map.get(&h) {
+                    EXIST_MESH_GEO_HASHES.insert(h, *aabb);
+                }
+            }
         }
     }
 
@@ -440,10 +462,10 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                 });
                 aabb.merge(&tmp_aabb);
             }
-            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
+            let aabb_hash = gen_bytes_hash::<_, 64>(&aabb).to_string();
             aabb_map
-                .entry(aabb_hash)
-                .or_insert(serde_json::to_string(&aabb).unwrap());
+                .entry(aabb_hash.clone())
+                .or_insert(aabb);
             let sql = format!(
                 "upsert {} set aabb = aabb:⟨{}⟩;",
                 r.id.to_string(),
@@ -529,8 +551,6 @@ fn round_dmat4(m: DMat4) -> DMat4 {
     }
 }
 
-//需要带入，缩小范围
-///执行bool 运算
 pub async fn apply_insts_boolean_occ(
     refnos: &[RefU64],
     replace_exist: bool,
@@ -586,7 +606,6 @@ pub async fn apply_insts_boolean_occ(
                             };
                             let inst_relate_id = b.refno.to_table_key("inst_relate");
                             //没有实体的情况，下次就不要再继续计算布尔运算了
-                            // let Ok(shape) = g.param.gen_occ_shape() {
                             let Ok(mut pos_shape) = pos_param.gen_occ_shape() else {
                                 update_sql.push_str(&format!(
                                     "update {} set bad_bool=true;",

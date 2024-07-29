@@ -89,9 +89,10 @@ impl AiosDBManager {
             let sync_refnos = self.db_option.get_manual_sync_refnos();
             if !sync_refnos.is_empty() {
                 for r in sync_refnos {
-                    let sync_map = io.auto_get_elements_deep(r).await.unwrap_or_default();
+                    if let Ok(sync_map) = io.auto_get_elements_deep(r).await{
+                        eles_map.extend(sync_map);
+                    }
                     // dbg!(&sync_map);
-                    eles_map.extend(sync_map);
                 }
             }
             if eles_map.is_empty() {
@@ -394,7 +395,7 @@ impl AiosDBManager {
                         SUL_DB.query(update_att_sql_str).await.unwrap();
                     }
                     if !update_pe_sql_str.is_empty() {
-                        println!("update_pe_sql: {}", &update_pe_sql_str);
+                        // println!("update_pe_sql: {}", &update_pe_sql_str);
                         SUL_DB.query(update_pe_sql_str).await.unwrap();
                     }
 

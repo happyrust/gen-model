@@ -35,6 +35,7 @@ use aios_core::ssc_setting::{
 use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::SUL_DB;
 use aios_core::{build_cate_relate, get_db_option};
+use aios_core::shape::pdms_shape::PlantMesh;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 #[cfg(feature = "gen_model")]
@@ -147,14 +148,17 @@ async fn main() -> anyhow::Result<()> {
         let paths = fs::read_dir(path).unwrap();
         for entry in paths {
             let entry = entry.unwrap();
-            let geo_hash = entry
-                .path()
+            let path = entry.path();
+            let geo_hash = path
                 .file_stem()
                 .unwrap()
                 .to_str()
                 .unwrap()
                 .to_string();
-            EXIST_MESH_GEO_HASHES.insert(geo_hash);
+            // 反序列成PlantMesh
+            if let Ok(mesh) = PlantMesh::des_mesh_file(&geo_hash) && let Some(aabb) = mesh.aabb{
+                EXIST_MESH_GEO_HASHES.insert(geo_hash, aabb);
+            }
         }
         gen_all_geos_data(vec![], &db_option, None).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());

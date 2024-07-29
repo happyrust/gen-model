@@ -2,16 +2,17 @@ use std::collections::HashMap;
 use aios_core::error::init_save_database_error;
 use aios_core::SUL_DB;
 use dashmap::DashMap;
+use parry3d::bounding_volume::Aabb;
 use tokio::task::JoinSet;
 
-pub async fn save_aabb_to_surreal(aabb_map: &DashMap<u64, String>) {
+pub async fn save_aabb_to_surreal(aabb_map: &DashMap<String, Aabb>) {
     if !aabb_map.is_empty() {
-        let keys = aabb_map.iter().map(|kv| *kv.key()).collect::<Vec<_>>();
+        let keys = aabb_map.iter().map(|kv| kv.key().clone()).collect::<Vec<_>>();
         for chunk in keys.chunks(300) {
             let mut sql = "".to_string();
-            for &k in chunk {
-                let v = aabb_map.get(&k).unwrap();
-                let json = format!("{{'id':aabb:⟨{}⟩, 'd':{}}}", k, v.value());
+            for k in chunk {
+                let v = aabb_map.get(k).unwrap();
+                let json = format!("{{'id':aabb:⟨{}⟩, 'd':{}}}", k, serde_json::to_string(v.value()).unwrap());
                 sql.push_str(&format!("INSERT IGNORE INTO aabb {};", json));
             }
             match SUL_DB.query(&sql).await {
