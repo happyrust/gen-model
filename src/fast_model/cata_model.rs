@@ -31,6 +31,8 @@ use std::collections::{HashMap, HashSet};
 use std::mem::take;
 use std::sync::Arc;
 use std::time::Instant;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use tokio::sync::{Mutex, RwLock};
 
 #[derive(Debug, Default, IntoPrimitive, Eq, PartialEq, TryFromPrimitive, Copy, Clone)]
@@ -118,7 +120,7 @@ pub async fn gen_cata_geos(
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
     let t = Instant::now();
-    let mut handles = vec![];
+    let mut handles = FuturesUnordered::new();
     let mut tubi_relates = vec![];
     let gen_mesh = db_option.gen_mesh;
     let mut local_al_map = Arc::new(DashMap::new());
@@ -131,8 +133,7 @@ pub async fn gen_cata_geos(
             .collect::<Vec<_>>(),
     );
     let unique_cata_cnt = all_unique_keys.len();
-    //todo 不需要分块太多
-    let mut batch_chunks_cnt = 8;
+    let mut batch_chunks_cnt = 16;
     let mut batch_size = all_unique_keys.len() / batch_chunks_cnt + 1;
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
@@ -505,7 +506,9 @@ pub async fn gen_cata_geos(
         }
     }
     // dbg!(handles.len());
-    futures::future::join_all(take(&mut handles)).await;
+    // futures::future::join_all(take(&mut handles)).await;
+    while let Some(_) = handles.next().await {
+    }
 
     let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
     //直段需要插入一个单位的cylinder

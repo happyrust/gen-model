@@ -111,7 +111,6 @@ pub async fn save_instance_data(
                     cat_negs_str
                 );
                 // dbg!(&relate_sql);
-
                 geo_relate_vec.push(relate_sql);
                 //保存 unit shape 的几何参数
                 json_vec.push(inst.gen_unit_geo_sur_json());
@@ -119,31 +118,22 @@ pub async fn save_instance_data(
         }
 
         if !json_vec.is_empty() {
-            let mut sql_string = "".to_string();
-            sql_string.push_str(&format!(
-                "insert ignore into {} [{}];",
-                stringify!(inst_geo),
-                json_vec.join(",")
-            ));
-            #[cfg(feature = "debug_sql")]
-            println!("insert inst_geo sql: {}", &sql_string);
-            //使用surreal 保存NamedAttrMap
-            // join_set.spawn(async move {
-            SUL_DB.query(sql_string).await.unwrap();
+            for chunk in json_vec.chunks(chunk_size) {
+                let mut sql_string = format!(
+                    "insert ignore into {} [{}];",
+                    stringify!(inst_geo),
+                    chunk.join(",")
+                );
+                SUL_DB.query(sql_string).await.unwrap();
+            }
         }
-        // });
-        //保存relate 关系
-        // dbg!(geo_relate_vec.len());
         if !geo_relate_vec.is_empty() {
-            // dbg!(&geo_relate_vec);
-            let sql = format!("INSERT RELATION INTO geo_relate [{}];", geo_relate_vec.join(","));
-            SUL_DB.query(sql).await.unwrap();
-            // join_set.spawn(async move {
-            //     SUL_DB.query(sql).await.unwrap();
-            // });
+            for chunk in geo_relate_vec.chunks(chunk_size) {
+                let sql = format!("INSERT RELATION INTO geo_relate [{}];", chunk.join(","));
+                SUL_DB.query(sql).await.unwrap();
+            }
         }
     }
-    // while let Some(_) = join_set.join_next().await {}
 
     //保存tubi的数据
     let keys = inst_mgr.inst_tubi_map.keys().collect::<Vec<_>>();
@@ -167,9 +157,6 @@ pub async fn save_instance_data(
     }
 
     let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
-    let mut join_set = tokio::task::JoinSet::new();
-    let mut inst_relate_vec = vec![];
-
     if !inst_mgr.neg_relate_map.is_empty() {
         let mut neg_relate_vec = vec![];
         // dbg!(&inst_mgr.neg_relate_map);
@@ -177,16 +164,18 @@ pub async fn save_instance_data(
             //这里需要order
             for (indx, r) in refnos.into_iter().enumerate() {
                 neg_relate_vec.push(format!(
-                    "relate {}->neg_relate:[{}, {indx}]->{};",
+                    "{{ in: {}, id: [{}, {indx}], out: {} }}",
                     r.to_pe_key(),
                     r.to_string(),
                     k.to_pe_key(),
                 ));
             }
         }
-        let neg_relate_sql = neg_relate_vec.join("");
-        if !neg_relate_sql.is_empty() {
-            SUL_DB.query(neg_relate_sql).await.unwrap();
+        if !neg_relate_vec.is_empty() {
+            for chunk in neg_relate_vec.chunks(chunk_size) {
+                let neg_relate_sql = format!("INSERT RELATION INTO neg_relate [{}];", chunk.join(","));
+                SUL_DB.query(neg_relate_sql).await.unwrap();
+            }
         }
     }
 
@@ -198,18 +187,26 @@ pub async fn save_instance_data(
             for (ele_refno, ngmr_geom_refno) in refnos {
                 let ele_pe = ele_refno.to_pe_key();
                 let ngmr_pe = ngmr_geom_refno.to_pe_key();
-                ngmr_relate_vec.push(format!("relate {0}->ngmr_relate:[{0}, {1}, {2}]->{1} set ngmr={2};", ele_pe, kpe, ngmr_pe));
+                ngmr_relate_vec.push(format!(
+                    "{{ in: {0}, id: [{0}, {1}, {2}], out: {1}, ngmr: {2}}}",
+                    ele_pe,
+                    kpe,
+                    ngmr_pe
+                ));
             }
         }
-        let ngmr_relate_sql = ngmr_relate_vec.join("");
-        if !ngmr_relate_sql.is_empty() {
-            SUL_DB.query(ngmr_relate_sql).await.unwrap();
+        if !ngmr_relate_vec.is_empty() {
+            for chunk in ngmr_relate_vec.chunks(chunk_size) {
+                let ngmr_relate_sql = format!("INSERT RELATION INTO ngmr_relate [{}];", chunk.join(","));
+                SUL_DB.query(ngmr_relate_sql).await.unwrap();
+            }
         }
     }
 
     // dbg!(&inst_mgr.ngmr_relate_map);
     for chunk in keys.chunks(chunk_size) {
         let mut json_vec = vec![];
+        let mut inst_relate_vec = vec![];
         for &k in chunk {
             let v = inst_mgr.inst_info_map.get(k).unwrap();
             if v.world_transform.is_nan() {
@@ -224,43 +221,44 @@ pub async fn save_instance_data(
                     serde_json::to_string(&v.world_transform).unwrap(),
                 );
             }
-
-            //arrive 和 leave 需要用 index
-            //这里的 pts，存储的时点集信息
-            let sql = format!(
-                "relate {}->{}->inst_info:⟨{}⟩ set world_trans=trans:⟨{}⟩, generic='{}', has_cata_neg={}, solid={}",
-                k.to_pe_key(),
+            inst_relate_vec.push(format!(
+                "{{id: {},  in: {}, out: inst_info:⟨{}⟩, world_trans: trans:⟨{}⟩, generic: '{}', has_cata_neg: {}, solid: {}}}",
                 k.to_inst_relate_key(),
+                k.to_pe_key(),
                 v.id_str(),
                 transform_hash,
                 v.generic_type.to_string(),
                 v.has_cata_neg,
                 v.is_solid
-            );
-            inst_relate_vec.push(sql);
+            ));
         }
 
         if !json_vec.is_empty() {
-            let mut sql_string = "".to_string();
-            sql_string.push_str(&format!(
-                "insert ignore into {} [{}];",
-                stringify!(inst_info),
-                json_vec.join(",")
-            ));
-            join_set.spawn(async move {
+            for chunk in json_vec.chunks(chunk_size) {
+                let sql_string = format!(
+                    "insert ignore into {} [{}];",
+                    stringify!(inst_info),
+                    chunk.join(",")
+                );
                 SUL_DB.query(sql_string).await.unwrap();
-            });
+            }
+        }
+        //inst relate 放到最后保存, 因为是被监控的
+        if !inst_relate_vec.is_empty() {
+            //使用surreal 保存NamedAttrMap
+            for chunk in inst_relate_vec.chunks(chunk_size) {
+                let inst_relate_sql = format!("INSERT RELATION INTO inst_relate [{}];",
+                                              chunk.join(","));
+                SUL_DB.query(inst_relate_sql).await.unwrap();
+            }
         }
     }
-    while let Some(_) = join_set.join_next().await {}
 
     //保存aabb
     if !aabb_map.is_empty() {
-        // dbg!(aabb_map.len());
         let keys = aabb_map.keys().collect::<Vec<_>>();
-        for chunk in keys.chunks(100) {
+        for chunk in keys.chunks(chunk_size) {
             let mut jsons = vec![];
-            let mut found = false;
             for &&k in chunk {
                 let v = aabb_map.get(&k).unwrap();
                 let json = format!("{{'id':aabb:⟨{}⟩, 'd':{}}}", k, v);
@@ -273,7 +271,7 @@ pub async fn save_instance_data(
     //保存transform
     if !transform_map.is_empty() {
         let keys = transform_map.keys().collect::<Vec<_>>();
-        for chunk in keys.chunks(100) {
+        for chunk in keys.chunks(chunk_size) {
             let mut sql_string = "".to_string();
             for &&k in chunk {
                 let v = transform_map.get(&k).unwrap();
@@ -283,34 +281,23 @@ pub async fn save_instance_data(
                 );
                 sql_string.push_str(&json);
             }
-            // join_set.spawn(async move {
             SUL_DB.query(sql_string).await.unwrap();
-            // });
         }
     }
 
     if !vec3_map.is_empty() {
         let keys = vec3_map.keys().collect::<Vec<_>>();
-        for chunk in keys.chunks(100) {
+        for chunk in keys.chunks(chunk_size) {
             let mut sql_string = "".to_string();
             for &&k in chunk {
                 let v = vec3_map.get(&k).unwrap();
                 let json = format!("INSERT IGNORE INTO vec3 {{'id':vec3:⟨{}⟩, 'd':{}}};", k, v);
                 sql_string.push_str(&json);
             }
-            // join_set.spawn(async move {
             SUL_DB.query(sql_string).await.unwrap();
-            // });
         }
     }
 
-    //inst relate 放到最后保存, 因为是被监控的
-    if !inst_relate_vec.is_empty() {
-        //使用surreal 保存NamedAttrMap
-        for chunk in inst_relate_vec.chunks(100) {
-            SUL_DB.query(chunk.join(";")).await.unwrap();
-        }
-    }
 
     Ok(())
 }

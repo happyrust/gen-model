@@ -456,7 +456,7 @@ impl AiosDBManager {
         #[cfg(feature = "debug_sql")]
         dbg!(&all_deep_refnos);
 
-        process_meshes_update_db(Some(self.db_option.clone()), &all_deep_refnos)
+        process_meshes_update_db(Some(Arc::new(self.db_option.clone())), &all_deep_refnos)
             .await
             .unwrap();
 
