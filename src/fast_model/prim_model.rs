@@ -1,7 +1,7 @@
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::{get_generic_type, shared};
+use crate::fast_model::{get_generic_type, SEND_INST_SIZE, shared};
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
@@ -170,18 +170,25 @@ pub async fn gen_prim_geos(
                     );
                     shape_insts_data.insert_info(refno, geos_info);
                 }
+
+                if shape_insts_data.inst_cnt() >=  SEND_INST_SIZE {
+                    sender
+                        .send(std::mem::take(&mut shape_insts_data))
+                        .expect("send prim shape_insts_data error");
+                    // dbg!("Send prim insts data");
+                }
             }
 
-            sender
-                .send(shape_insts_data)
-                .expect("send prim shape_insts_data error");
-        });
-        handles.push(handle);
-        if !db_option.multi_threads {
-            if !handles.is_empty() {
-                futures::future::join_all(take(&mut handles)).await;
+            if shape_insts_data.inst_cnt() > 0 {
+                sender
+                    .send(shape_insts_data)
+                    .expect("send prim shape_insts_data error");
+                // dbg!("Send last prim insts data");
             }
-        }
+            Ok::<_, anyhow::Error>(())
+        });
+
+        handles.push(handle);
     }
     futures::future::join_all(take(&mut handles)).await;
     println!(

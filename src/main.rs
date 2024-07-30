@@ -145,21 +145,21 @@ async fn main() -> anyhow::Result<()> {
         //统计一下assets mesh 目录下有多少个mesh，直接忽略去生成
         let path: PathBuf = "assets/meshes".into();
         //收集目录下的文件名
-        let paths = fs::read_dir(path).unwrap();
-        for entry in paths {
-            let entry = entry.unwrap();
-            let path = entry.path();
-            let geo_hash = path
-                .file_stem()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .to_string();
-            // 反序列成PlantMesh
-            if let Ok(mesh) = PlantMesh::des_mesh_file(&geo_hash) && let Some(aabb) = mesh.aabb{
-                EXIST_MESH_GEO_HASHES.insert(geo_hash, aabb);
-            }
-        }
+        // let paths = fs::read_dir(path).unwrap();
+        // for entry in paths {
+        //     let entry = entry.unwrap();
+        //     let path = entry.path();
+        //     let geo_hash = path
+        //         .file_stem()
+        //         .unwrap()
+        //         .to_str()
+        //         .unwrap()
+        //         .to_string();
+        //     // 反序列成PlantMesh
+        //     if let Ok(mesh) = PlantMesh::des_mesh_file(&geo_hash) && let Some(aabb) = mesh.aabb{
+        //         EXIST_MESH_GEO_HASHES.insert(geo_hash, aabb);
+        //     }
+        // }
         gen_all_geos_data(vec![], &db_option, None).await?;
         println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
     }

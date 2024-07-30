@@ -1,7 +1,7 @@
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::{get_generic_type, shared};
+use crate::fast_model::{get_generic_type, SEND_INST_SIZE, shared};
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
@@ -205,12 +205,21 @@ pub async fn gen_loop_geos(
                     },
                 );
                 shape_insts_data.insert_info(target_refno, geos_info);
+
+                if shape_insts_data.inst_cnt() >=  SEND_INST_SIZE {
+                    sender
+                        .send(std::mem::take(&mut shape_insts_data))
+                        .expect("send loop shape_insts_data error");
+                    // dbg!("Send loop insts data");
+                }
             }
 
-            sender
-                .send(shape_insts_data)
-                .expect("send loop shape_insts_data error");
-
+            if shape_insts_data.inst_cnt() > 0 {
+                sender
+                    .send(shape_insts_data)
+                    .expect("send loop shape_insts_data error");
+                // dbg!("Send last loop insts data");
+            }
             Ok::<_, anyhow::Error>(())
         });
 
