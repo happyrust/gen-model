@@ -12,7 +12,8 @@ use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::tubing::TubiSize;
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::tool::hash_tool::hash_two_str;
-use aios_core::{get_all_types_as_sql_string, get_all_types_has, query_multi_children_refnos, query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum, SUL_DB};
+use aios_core::{get_all_types_as_sql_string, get_all_types_has, query_multi_children_refnos,
+                query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum, SUL_DB};
 use aios_core::{pdms_types::*, RefU64};
 use aios_core::{prim_geo::*, DBType};
 use bevy_transform::prelude::Transform;
@@ -107,7 +108,7 @@ pub async fn gen_all_geos_data(
     db_option: &DbOption,
     incr_updates: Option<IncrGeoUpdateLog>,
 ) -> anyhow::Result<bool> {
-    const CHUNK_SIZE: usize = 50;
+    const CHUNK_SIZE: usize = 1000;
     let is_incr_update = incr_updates.is_some();
     let has_manual_refnos = !manual_refnos.is_empty();
     let has_debug = db_option.debug_root_refnos.is_some();
@@ -121,6 +122,9 @@ pub async fn gen_all_geos_data(
         // let total_shape_cnt = total_shape_cnt.clone();
         let insert_task = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {
+                if shape_insts.is_empty() {
+                    continue;
+                }
                 save_instance_data(&shape_insts, false).await.unwrap();
                 println!("Thread {i} insert shape insts: {}", shape_insts.inst_info_map.len());
                 // *total_shape_cnt.lock().await += shape_insts.inst_info_map.len();
@@ -147,23 +151,59 @@ pub async fn gen_all_geos_data(
         };
         dbg!(&dbnos);
         let db_option_arc = Arc::new(db_option.clone());
-        let mut all_db_refnos = vec![];
-        for dbno in dbnos.clone() {
-            //按照下面的SITE或者ZONE进行快速生成
-            //只要是有几何体的参考号都放到和ZONE的相关性上
-            //SITE 和 ZONE 都分别测一下速度
-            let db_refnos = gen_geos_data_by_dbnum(
-                dbno,
-                db_option_arc.clone(),
-                sender.clone(),
-            ).await.unwrap();
-            all_db_refnos.push(db_refnos);
+        // let mut all_db_refnos = vec![];
+        let chunk_size = 3; // 每组3个dbno
+        let all_db_refnos = Arc::new(Mutex::new(Vec::new()));
+        let mut tasks = FuturesUnordered::new();
+        // for dbno in dbnos.clone() {
+        //     //按照下面的SITE或者ZONE进行快速生成
+        //     //只要是有几何体的参考号都放到和ZONE的相关性上
+        //     //SITE 和 ZONE 都分别测一下速度
+        //     let db_refnos = gen_geos_data_by_dbnum(
+        //         dbno,
+        //         db_option_arc.clone(),
+        //         sender.clone(),
+        //     ).await.unwrap();
+        //     all_db_refnos.push(db_refnos);
+        // }
+        for chunk in dbnos.chunks(chunk_size) {
+            let db_option_arc = db_option_arc.clone();
+            let sender = sender.clone();
+            let chunk_all_db_refnos = all_db_refnos.clone();
+
+            let chunk = chunk.to_vec();
+            let task = tokio::spawn(async move {
+                for dbno in chunk {
+                    let db_refnos = gen_geos_data_by_dbnum(
+                        dbno,
+                        db_option_arc.clone(),
+                        sender.clone(),
+                    ).await?;
+
+                    // 将结果插入到共享的 all_db_refnos 中
+                    chunk_all_db_refnos.lock().await.push(db_refnos);
+                }
+                Ok::<_, anyhow::Error>(())
+            });
+
+            tasks.push(task);
         }
+
+        // 等待所有任务完成
+        while let Some(result) = tasks.next().await {
+            match result {
+                Ok(Ok(())) => {},
+                Ok(Err(e)) => eprintln!("Error in task: {:?}", e),
+                Err(e) => eprintln!("Task panicked: {:?}", e),
+            }
+        }
+
         println!("生成完insts时间: {}ms", time.elapsed().as_millis());
         drop(sender);
         while let Some(_) = insert_handles.next().await {}
         if db_option.gen_mesh {
-            for db_refnos in all_db_refnos {
+            let result_refnos = all_db_refnos.lock().await;
+            for db_refnos in &*result_refnos {
                 //模型生成完之后，再进行布尔运算
                 db_refnos.execute_gen_inst_meshes(Some(db_option_arc.clone())).await;
                 db_refnos.execut_boolean_meshes(Some(db_option_arc.clone())).await;
@@ -240,92 +280,6 @@ pub async fn gen_geos_data_by_dbnum(
     }
     let loop_sjus_map_arc = Arc::new(loop_sjus_map);
 
-    //Step 2、按类目先逐个分好类的参考号集合
-    //2.1 管道或者支吊架的分类
-    let target_bran_hanger_refnos = Arc::new(query_type_refnos_by_dbnum(
-        &["BRAN", "HANG"],
-        dbno,
-    ).await?);
-    dbg!(target_bran_hanger_refnos.len());
-    let target_bran_reuse_cata_map: DashMap<String, CataHashRefnoKV> = {
-        let map = aios_core::query_group_by_cata_hash(target_bran_hanger_refnos.as_slice())
-            .await
-            .unwrap_or_default();
-        map
-    };
-    // let use_cate_refnos = Arc::new(vec![]);
-    let use_cate_refnos = Arc::new(query_use_cate_refnos_by_dbnum(
-        &USE_CATE_NOUN_NAMES,
-        dbno,
-    ).await?);
-    dbg!(use_cate_refnos.len());
-    //查询单个使用元件库的数量
-    let target_single_cata_map = {
-        //要过滤掉owner是BRAN 和 HANG的
-        let map = aios_core::query_group_by_cata_hash(use_cate_refnos.as_slice())
-            .await
-            .unwrap_or_default();
-        map
-    };
-    //打印管道/支吊架的使用数量
-    if !target_bran_hanger_refnos.is_empty() && gen_cata_flag && gen_model {
-        println!(
-            "当前分段使用管道或者支吊架元件库数量: {}",
-            target_bran_hanger_refnos.len()
-        );
-        //查询出branch 和 branch 下的子节点
-        let mut branch_refnos_map = DashMap::new();
-        let mut bran_comp_eles = vec![];
-        for &refno in target_bran_hanger_refnos.as_slice() {
-            let children = aios_core::get_children_pes(refno).await.unwrap_or_default();
-            bran_comp_eles.extend(children.iter().map(|x| x.refno));
-            //求出元件对应的outside bore
-            branch_refnos_map.insert(refno, children);
-        }
-
-        //元件库的模型计算
-        //bran，hanger下需要重用的模型
-        if !target_bran_reuse_cata_map.is_empty() || !branch_refnos_map.is_empty() {
-            let sjus_map_clone = loop_sjus_map_arc.clone();
-            let db_option = db_option_arc.clone();
-            let sender = sender.clone();
-            let handle = tokio::spawn(async move {
-                cata_model::gen_cata_geos(
-                    db_option,
-                    Arc::new(target_bran_reuse_cata_map),
-                    Arc::new(branch_refnos_map),
-                    sjus_map_clone,
-                    sender,
-                )
-                    .await
-                    .unwrap();
-            });
-            all_handles.push(handle);
-        }
-    }
-
-    if gen_cata_flag && !target_single_cata_map.is_empty() && gen_model {
-        println!(
-            "当前分段使用元件库数量: {}",
-            target_bran_hanger_refnos.len()
-        );
-        let sjus_map_clone = loop_sjus_map_arc.clone();
-        let db_option = db_option_arc.clone();
-        let sender = sender.clone();
-        let handle = tokio::spawn(async move {
-            cata_model::gen_cata_geos(
-                db_option,
-                Arc::new(target_single_cata_map),
-                Arc::new(Default::default()),
-                sjus_map_clone,
-                sender,
-            )
-                .await
-                .unwrap();
-        });
-        all_handles.push(handle);
-    }
-
     let target_loop_owner_refnos =
         Arc::new(query_type_refnos_by_dbnum(
             &GNERAL_LOOP_OWNER_NOUN_NAMES,
@@ -369,6 +323,95 @@ pub async fn gen_geos_data_by_dbnum(
         });
         all_handles.push(handle);
     }
+
+    //Step 2、按类目先逐个分好类的参考号集合
+    //2.1 管道或者支吊架的分类
+    let target_bran_hanger_refnos = Arc::new(query_type_refnos_by_dbnum(
+        &["BRAN", "HANG"],
+        dbno,
+    ).await?);
+    dbg!(target_bran_hanger_refnos.len());
+    let target_bran_reuse_cata_map: DashMap<String, CataHashRefnoKV> = {
+        let map = aios_core::query_group_by_cata_hash(target_bran_hanger_refnos.as_slice())
+            .await
+            .unwrap_or_default();
+        map
+    };
+
+    //打印管道/支吊架的使用数量
+    if !target_bran_hanger_refnos.is_empty() && gen_cata_flag && gen_model {
+        println!(
+            "当前分段使用管道或者支吊架元件库数量: {}",
+            target_bran_hanger_refnos.len()
+        );
+        //查询出branch 和 branch 下的子节点
+        let mut branch_refnos_map = DashMap::new();
+        let mut bran_comp_eles = vec![];
+        for &refno in target_bran_hanger_refnos.as_slice() {
+            let children = aios_core::get_children_pes(refno).await.unwrap_or_default();
+            bran_comp_eles.extend(children.iter().map(|x| x.refno));
+            //求出元件对应的outside bore
+            branch_refnos_map.insert(refno, children);
+        }
+
+        //元件库的模型计算
+        //bran，hanger下需要重用的模型
+        if !target_bran_reuse_cata_map.is_empty() || !branch_refnos_map.is_empty() {
+            let sjus_map_clone = loop_sjus_map_arc.clone();
+            let db_option = db_option_arc.clone();
+            let sender = sender.clone();
+            let handle = tokio::spawn(async move {
+                cata_model::gen_cata_geos(
+                    db_option,
+                    Arc::new(target_bran_reuse_cata_map),
+                    Arc::new(branch_refnos_map),
+                    sjus_map_clone,
+                    sender,
+                )
+                    .await
+                    .unwrap();
+            });
+            all_handles.push(handle);
+        }
+    }
+
+    let use_cate_refnos = Arc::new(query_use_cate_refnos_by_dbnum(
+        &USE_CATE_NOUN_NAMES,
+        dbno,
+    ).await?);
+    dbg!(use_cate_refnos.len());
+    //查询单个使用元件库的数量
+    let target_single_cata_map = {
+        //要过滤掉owner是BRAN 和 HANG的
+        let map = aios_core::query_group_by_cata_hash(use_cate_refnos.as_slice())
+            .await
+            .unwrap_or_default();
+        map
+    };
+
+    if gen_cata_flag && !target_single_cata_map.is_empty() && gen_model {
+        println!(
+            "当前分段使用元件库数量: {}",
+            target_bran_hanger_refnos.len()
+        );
+        let sjus_map_clone = loop_sjus_map_arc.clone();
+        let db_option = db_option_arc.clone();
+        let sender = sender.clone();
+        let handle = tokio::spawn(async move {
+            cata_model::gen_cata_geos(
+                db_option,
+                Arc::new(target_single_cata_map),
+                Arc::new(Default::default()),
+                sjus_map_clone,
+                sender,
+            )
+                .await
+                .unwrap();
+        });
+        all_handles.push(handle);
+    }
+
+
 
     //Ok::<_, anyhow::Error>(())
     while let Some(result) = all_handles.next().await {

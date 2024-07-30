@@ -5,6 +5,8 @@ use aios_core::pdms_types::*;
 use aios_core::types::*;
 use aios_core::SUL_DB;
 use bevy_transform::prelude::Transform;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use itertools::Itertools;
 
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -21,7 +23,7 @@ pub async fn save_instance_data(
     let mut param_map = HashMap::new();
     let mut vec3_map: HashMap<u64, String> = HashMap::new();
 
-    let chunk_size = 100;
+    let chunk_size = 500;
     //把delete 提前，因为后面的插入都是异步的执行
     if replace_exist {
         let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
@@ -51,87 +53,91 @@ pub async fn save_instance_data(
     }
 
     let keys = inst_mgr.inst_geos_map.keys().collect::<Vec<_>>();
-    // dbg!(&keys);
-    for chunk in keys.chunks(chunk_size) {
-        let mut json_vec = vec![];
-        let mut geo_relate_vec = vec![];
-        for &k in chunk {
-            // dbg!(k);
-            let v = inst_mgr.inst_geos_map.get(k).unwrap();
-            for inst in &v.insts {
-                if inst.transform.is_nan() {
-                    dbg!(&inst);
-                    continue;
+    let mut insert_handles = FuturesUnordered::new();
+    let mut inst_geo_vec = vec![];
+    let mut geo_relate_vec = vec![];
+
+    for k in keys {
+        let v = inst_mgr.inst_geos_map.get(k).unwrap();
+        for inst in &v.insts {
+            if inst.transform.is_nan() {
+                dbg!(&inst);
+                continue;
+            }
+            let transform_hash = gen_bytes_hash::<_, 64>(&inst.transform);
+            if !transform_map.contains_key(&transform_hash) {
+                transform_map.insert(
+                    transform_hash,
+                    serde_json::to_string(&inst.transform).unwrap(),
+                );
+            }
+            let param_hash = gen_bytes_hash::<_, 64>(&inst.geo_param);
+            if !param_map.contains_key(&param_hash) {
+                param_map.insert(param_hash, serde_json::to_string(&inst.geo_param).unwrap());
+            }
+            let key_pts = inst.geo_param.key_points();
+            let mut pt_hashes = vec![];
+            for k in key_pts {
+                let pts_hash = k.gen_hash();
+                pt_hashes.push(format!("vec3:⟨{}⟩", pts_hash));
+                if !vec3_map.contains_key(&pts_hash) {
+                    vec3_map.insert(pts_hash, serde_json::to_string(&k).unwrap());
                 }
-                let transform_hash = gen_bytes_hash::<_, 64>(&inst.transform);
-                if !transform_map.contains_key(&transform_hash) {
-                    transform_map.insert(
-                        transform_hash,
-                        serde_json::to_string(&inst.transform).unwrap(),
-                    );
-                }
-                let param_hash = gen_bytes_hash::<_, 64>(&inst.geo_param);
-                if !param_map.contains_key(&param_hash) {
-                    param_map.insert(param_hash, serde_json::to_string(&inst.geo_param).unwrap());
-                }
-                let key_pts = inst.geo_param.key_points();
-                let mut pt_hashes = vec![];
-                for k in key_pts {
-                    let pts_hash = k.gen_hash();
-                    pt_hashes.push(format!("vec3:⟨{}⟩", pts_hash));
-                    if !vec3_map.contains_key(&pts_hash) {
-                        vec3_map.insert(pts_hash, serde_json::to_string(&k).unwrap());
-                    }
-                }
-                //还需要加入geo_param的指向，param 是否填原始参数？ param=param:{}
-                //使用cata_key -> inst_geos
-                let cat_negs_str = if !inst.cata_neg_refnos.is_empty() {
-                    format!(
-                        ", cata_neg: [{}]",
-                        inst.cata_neg_refnos.iter().map(|x| x.to_pe_key()).join(",")
-                    )
-                } else {
-                    "".to_string()
-                };
-                //如果是replace, 直接这里需要先删除之前的sql语句
-                let relate_sql = format!(
-                    r#"
+            }
+            //还需要加入geo_param的指向，param 是否填原始参数？ param=param:{}
+            //使用cata_key -> inst_geos
+            let cat_negs_str = if !inst.cata_neg_refnos.is_empty() {
+                format!(
+                    ", cata_neg: [{}]",
+                    inst.cata_neg_refnos.iter().map(|x| x.to_pe_key()).join(",")
+                )
+            } else {
+                "".to_string()
+            };
+            //如果是replace, 直接这里需要先删除之前的sql语句
+            let relate_sql = format!(
+                r#"
                         {{
                             in: inst_info:⟨{0}⟩, out: inst_geo:⟨{1}⟩, trans: trans:⟨{2}⟩,
                             geom_refno: pe:{3}, pts: [{4}], geo_type: '{5}', visible: {6} {7}
                         }}
                     "#,
-                    v.id(),
-                    inst.geo_hash,
-                    transform_hash,
-                    inst.refno,
-                    pt_hashes.join(","),
-                    inst.geo_type.to_string(),
-                    inst.visible,
-                    cat_negs_str
-                );
-                // dbg!(&relate_sql);
-                geo_relate_vec.push(relate_sql);
-                //保存 unit shape 的几何参数
-                json_vec.push(inst.gen_unit_geo_sur_json());
-            }
+                v.id(),
+                inst.geo_hash,
+                transform_hash,
+                inst.refno,
+                pt_hashes.join(","),
+                inst.geo_type.to_string(),
+                inst.visible,
+                cat_negs_str
+            );
+            // dbg!(&relate_sql);
+            geo_relate_vec.push(relate_sql);
+            //保存 unit shape 的几何参数
+            inst_geo_vec.push(inst.gen_unit_geo_sur_json());
         }
+    }
 
-        if !json_vec.is_empty() {
-            for chunk in json_vec.chunks(chunk_size) {
-                let mut sql_string = format!(
-                    "insert ignore into {} [{}];",
-                    stringify!(inst_geo),
-                    chunk.join(",")
-                );
+    if !inst_geo_vec.is_empty() {
+        for chunk in inst_geo_vec.chunks(chunk_size) {
+            let sql_string = format!(
+                "insert ignore into {} [{}];",
+                stringify!(inst_geo),
+                chunk.join(",")
+            );
+            let handle = tokio::spawn(async move {
                 SUL_DB.query(sql_string).await.unwrap();
-            }
+            });
+            insert_handles.push(handle);
         }
-        if !geo_relate_vec.is_empty() {
-            for chunk in geo_relate_vec.chunks(chunk_size) {
-                let sql = format!("INSERT RELATION INTO geo_relate [{}];", chunk.join(","));
+    }
+    if !geo_relate_vec.is_empty() {
+        for chunk in geo_relate_vec.chunks(chunk_size) {
+            let sql = format!("INSERT RELATION INTO geo_relate [{}];", chunk.join(","));
+            let handle = tokio::spawn(async move {
                 SUL_DB.query(sql).await.unwrap();
-            }
+            });
+            insert_handles.push(handle);
         }
     }
 
@@ -204,15 +210,16 @@ pub async fn save_instance_data(
     }
 
     // dbg!(&inst_mgr.ngmr_relate_map);
-    for chunk in keys.chunks(chunk_size) {
-        let mut json_vec = vec![];
+    // for chunk in keys.chunks(chunk_size)
+    {
+        let mut inst_info_vec = vec![];
         let mut inst_relate_vec = vec![];
-        for &k in chunk {
+        for k in keys {
             let v = inst_mgr.inst_info_map.get(k).unwrap();
             if v.world_transform.is_nan() {
                 continue;
             }
-            json_vec.push(v.gen_sur_json(&mut vec3_map));
+            inst_info_vec.push(v.gen_sur_json(&mut vec3_map));
 
             let transform_hash = gen_bytes_hash::<_, 64>(&v.world_transform);
             if !transform_map.contains_key(&transform_hash) {
@@ -233,14 +240,17 @@ pub async fn save_instance_data(
             ));
         }
 
-        if !json_vec.is_empty() {
-            for chunk in json_vec.chunks(chunk_size) {
+        if !inst_info_vec.is_empty() {
+            for chunk in inst_relate_vec.chunks(chunk_size) {
                 let sql_string = format!(
                     "insert ignore into {} [{}];",
                     stringify!(inst_info),
                     chunk.join(",")
                 );
-                SUL_DB.query(sql_string).await.unwrap();
+                let handle = tokio::spawn(async move {
+                    SUL_DB.query(sql_string).await.unwrap();
+                });
+                insert_handles.push(handle);
             }
         }
         //inst relate 放到最后保存, 因为是被监控的
@@ -249,10 +259,15 @@ pub async fn save_instance_data(
             for chunk in inst_relate_vec.chunks(chunk_size) {
                 let inst_relate_sql = format!("INSERT RELATION INTO inst_relate [{}];",
                                               chunk.join(","));
-                SUL_DB.query(inst_relate_sql).await.unwrap();
+                let handle = tokio::spawn(async move {
+                    SUL_DB.query(inst_relate_sql).await.unwrap();
+                });
+                insert_handles.push(handle);
             }
         }
     }
+
+    while let Some(_) = insert_handles.next().await {}
 
     //保存aabb
     if !aabb_map.is_empty() {
@@ -297,6 +312,7 @@ pub async fn save_instance_data(
             SUL_DB.query(sql_string).await.unwrap();
         }
     }
+
 
 
     Ok(())

@@ -34,7 +34,7 @@ pub async fn gen_loop_geos(
     }
     //处理loop elements
     //todo 暂时不用多线程，有一些问题
-    let mut batch_chunks_cnt = 8;
+    let mut batch_chunks_cnt = 16;
     let mut batch_size = loop_owner_cnt / batch_chunks_cnt + 1;
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
