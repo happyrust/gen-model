@@ -5,6 +5,7 @@ use crate::fast_model::pdms_inst::save_instance_data;
 use crate::fast_model::{
     cata_model, loop_model, prim_model, process_meshes_update_db_deep, resolve_desi_comp, shared,
 };
+use std::collections::HashSet;
 #[cfg(feature = "gen_model")]
 use aios_core::csg::manifold::ManifoldRust;
 use aios_core::geometry::{PlantGeoData, ShapeInstancesData};
@@ -50,13 +51,13 @@ pub async fn gen_all_geos_data(
     let (sender, receiver) = flume::bounded(CHUNK_SIZE);
     let time = Instant::now();
     // let total_shape_cnt = Arc::new(Mutex::new(0));
-    for i in 0..16 {
+    for i in 0..1 {
         let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
         // let total_shape_cnt = total_shape_cnt.clone();
         let insert_task = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {
                 save_instance_data(&shape_insts, false).await.unwrap();
-                println!("Thread {i} insert shape insts: {}", shape_insts.inst_info_map.len());
+                println!("Insert shape insts: {}", shape_insts.inst_info_map.len());
                 // *total_shape_cnt.lock().await += shape_insts.inst_info_map.len();
             }
             // Ok::<_, anyhow::Error>(())
@@ -85,8 +86,8 @@ pub async fn gen_all_geos_data(
             //按照下面的SITE或者ZONE进行快速生成
             //只要是有几何体的参考号都放到和ZONE的相关性上
             //SITE 和 ZONE 都分别测一下速度
-            let sites = query_type_refnos_by_dbnum("SITE", dbno).await?;
-            dbg!(&sites);
+            let sites = query_type_refnos_by_dbnum(&["SITE"], dbno).await?;
+            // dbg!(&sites);
             let mut handles = FuturesUnordered::new();
             for site in sites {
                 let sender = sender.clone();
@@ -372,7 +373,7 @@ pub async fn gen_geos_data(
             debug_root_refnos.clone()
         };
     } else if dbno.is_some() {
-        target_root_refnos = query_type_refnos_by_dbnum("SITE", dbno.unwrap()).await?;
+        target_root_refnos = query_type_refnos_by_dbnum(&["SITE"], dbno.unwrap()).await?;
     }
     if dbno.is_some() {
         println!("总共 {} 个SITE", target_root_refnos.len());
@@ -462,6 +463,7 @@ pub async fn gen_geos_data(
                 .unwrap_or_default();
             map
         };
+        let mut use_cata_refnos = HashSet::new();
         //查询单个使用元件库的数量
         let target_single_cata_map = if is_incr_update {
             let cata_map = DashMap::new();
@@ -497,12 +499,15 @@ pub async fn gen_geos_data(
                 dbg!("查询BRAN, HANG出错");
                 continue;
             };
-            let mut use_cata_refnos = aios_core::query_multi_deep_children_filter_spre(
-                target_refnos.to_vec(),
-                skip_exist,
-            )
-                .await
-                .unwrap_or_default();
+            let single_refnos = target_refnos
+                .iter()
+                .filter(|x| !target_bran_hanger_refnos.contains(x))
+                .map(|x| *x)
+                .collect::<Vec<_>>();
+            use_cata_refnos =
+                aios_core::query_multi_deep_children_filter_spre(single_refnos, skip_exist)
+                    .await
+                    .unwrap_or_default();
             // dbg!(&use_cata_refnos);
             use_cata_refnos.extend(bran_children_refnos);
             let map = aios_core::query_group_by_cata_hash(&use_cata_refnos)
@@ -549,8 +554,8 @@ pub async fn gen_geos_data(
 
         if gen_cata_flag && !target_single_cata_map.is_empty() {
             println!(
-                "当前分段使用元件库数量: {}",
-                target_bran_hanger_refnos.len()
+                "当前分段使用独立的元件库数量: {}",
+                use_cata_refnos.len()
             );
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
@@ -629,9 +634,6 @@ pub async fn gen_geos_data(
             });
             all_handles.push(handle);
         }
-        // if gen_inst_handles.is_empty() {
-        //     futures::future::join_all(gen_inst_handles).await;
-        // }
         if is_incr_update {
             break;
         }
