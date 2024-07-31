@@ -105,34 +105,36 @@ async fn main() -> anyhow::Result<()> {
             password: &db_option.v_password,
         })
         .await?;
-
+    println!("数据库已经连接到 {}, 站点: {}", db_option.project_name, db_option.get_version_db_conn_str());
     aios_core::function::define_common_functions()
         .await
         .unwrap();
-
+    println!("预加载方法完成。");
     let sync_live = db_option.sync_live.unwrap_or(false);
-    let mut mgr = Arc::new(AiosDBManager::init_form_config().await?);
     // initialize_global_db_sender().await;
 
     /// 是否全部同步模型
     if db_option.total_sync || db_option.incr_sync || db_option.only_sync_sys {
+        println!("开始同步解析数据。");
         // 同步pdms数据
         sync_pdms(&db_option).await.unwrap();
-        //先等待一分钟后结束
+        //先等待20分钟后结束
         tokio::time::sleep(tokio::time::Duration::from_mins(20)).await;
         return Ok(());
     }
 
-    {
+    if db_option.build_cate_relate() {
         //检查cate_relate 是否创建了
         println!("初始化创建Cate relate关系");
         build_cate_relate(false).await.unwrap();
     }
 
-
+    let mut cur_mgr = None;
     /// 创建db manager
     if sync_live {
+        let mgr = Arc::new(AiosDBManager::init_form_config().await?);
         mgr.init_watcher().await.unwrap();
+        cur_mgr = Some(mgr);
     }
 
     //todo 还有个问题，可能需要通过队列来排队任务
@@ -194,18 +196,18 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if sync_live {
-        mgr.async_watch().await.unwrap();
+        cur_mgr.clone().unwrap().async_watch().await.unwrap();
     }
 
     //todo 如何处理初始化的同步，第一次启动一定要同步一次，首先生成archive文件，然后再同步
     //是否需要重构下面的这行代码？
-    #[cfg(feature = "mqtt")]
-    tokio::join!(
-        // AiosDBManager::run_e3d_clone_bg_task(mgr.clone()),
-        AiosDBManager::spawn_exec_watcher(mgr.clone()),
-        AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
-        // AiosDBManager::demo_mqtt_requests(),
-    );
+    // #[cfg(feature = "mqtt")]
+    // tokio::join!(
+    //     // AiosDBManager::run_e3d_clone_bg_task(mgr.clone()),
+    //     AiosDBManager::spawn_exec_watcher(mgr.clone()),
+    //     AiosDBManager::poll_sync_e3d_mqtt_events(mgr.watcher.clone()),
+    //     // AiosDBManager::demo_mqtt_requests(),
+    // );
 
     Ok(())
 }

@@ -33,7 +33,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 use futures::stream::FuturesUnordered;
-use tokio::sync::{Mutex, RwLock};
 
 ///一个db生成模型里，汇总的参考号集合
 #[derive(Debug, Clone, Default)]
@@ -86,12 +85,12 @@ impl DbModelInstRefnos {
     }
 
     //执行布尔运算的操作
-    pub async fn execut_boolean_meshes(&self, db_option_arc: Option<Arc<DbOption>>) {
+    pub async fn execute_boolean_meshes(&self, db_option_arc: Option<Arc<DbOption>>) {
         let mut handles = FuturesUnordered::new();
         let prim_refnos = self.prim_refnos.clone();
         let loop_owner_refnos = self.loop_owner_refnos.clone();
         let use_cate_refnos = self.use_cate_refnos.clone();
-        // let bran_hanger_refnos = self.bran_hanger_refnos.clone();
+        let bran_hanger_refnos = self.bran_hanger_refnos.clone();
         let db_option = db_option_arc.clone();
         handles.push(tokio::spawn(async move {
             booleans_meshes_in_db(db_option, &prim_refnos)
@@ -110,10 +109,16 @@ impl DbModelInstRefnos {
                 .await
                 .expect("布尔运算use_cate模型数据失败");
         }));
-        // let db_option = db_option_arc.clone();
-        // handles.push(tokio::spawn(async move {
-        //     booleans_meshes_in_db(db_option, &bran_hanger_refnos).await.expect("布尔运算bran_hanger模型数据失败");
-        // }));
+        let db_option = db_option_arc.clone();
+        handles.push(tokio::spawn(async move {
+            for chunk in bran_hanger_refnos.chunks(20) {
+                let db_option_clone = db_option.clone();
+                let target_refnos = query_multi_children_refnos(&chunk)
+                    .await
+                    .unwrap();
+                booleans_meshes_in_db(db_option_clone, &target_refnos).await.expect("布尔运算bran_hanger模型数据失败");
+            }
+        }));
         while let Some(_) = handles.next().await {}
     }
 }
@@ -174,17 +179,18 @@ pub async fn gen_all_geos_data(
             drop(sender);
             insert_task.await.unwrap();
             println!("生成完insts时间: {}ms", time.elapsed().as_millis());
-            let time = Instant::now();
             if db_option_arc.gen_mesh {
+                let time = Instant::now();
+                println!("开始执行模型生成和布尔运算");
                 //模型生成完之后，再进行布尔运算
                 db_refnos
                     .execute_gen_inst_meshes(Some(db_option_arc.clone()))
                     .await;
                 db_refnos
-                    .execut_boolean_meshes(Some(db_option_arc.clone()))
+                    .execute_boolean_meshes(Some(db_option_arc.clone()))
                     .await;
+                println!("生成mesh时间: {}ms", time.elapsed().as_millis());
             }
-            println!("生成mesh时间: {}ms", time.elapsed().as_millis());
         }
     }
     println!("生成完所有模型时间: {}ms", time.elapsed().as_millis());
@@ -195,7 +201,7 @@ pub async fn gen_all_geos_data(
 pub async fn process_meshes_by_dbnos(dbnos: &[u32], db_option: &DbOption) -> anyhow::Result<()> {
     let mut time = Instant::now();
     for &dbno in dbnos {
-        let sites = query_type_refnos_by_dbnum(&["SITE"], dbno).await?;
+        let sites = query_type_refnos_by_dbnum(&["SITE"], dbno, None).await?;
         process_meshes_update_db_deep(db_option, &sites)
             .await
             .expect("更新模型数据失败");
@@ -210,7 +216,7 @@ pub async fn gen_geos_data_by_dbnum(
     db_option_arc: Arc<DbOption>,
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<DbModelInstRefnos> {
-    let zones = query_type_refnos_by_dbnum(&["ZONE"], dbno).await.unwrap_or_default();
+    let zones = query_type_refnos_by_dbnum(&["ZONE"], dbno, Some(true)).await.unwrap_or_default();
     if zones.is_empty(){
         return Ok(Default::default());
     }
@@ -231,7 +237,7 @@ pub async fn gen_geos_data_by_dbnum(
     let loop_sjus_map = DashMap::new();
     {
         //查找到子节点的所有PLOO类型
-        let target_ploo_refnos = query_type_refnos_by_dbnum(&["PLOO"], dbno).await.unwrap_or_default();
+        let target_ploo_refnos = query_type_refnos_by_dbnum(&["PLOO"], dbno, Some(true)).await.unwrap_or_default();
         #[cfg(debug_assertions)]
         if !target_ploo_refnos.is_empty() {
             println!("target_ploo_refnos: {:?}", target_ploo_refnos.len());
@@ -263,7 +269,7 @@ pub async fn gen_geos_data_by_dbnum(
     //Step 2、按类目先逐个分好类的参考号集合
     //2.1 管道或者支吊架的分类
     let target_bran_hanger_refnos =
-        Arc::new(query_type_refnos_by_dbnum(&["BRAN", "HANG"], dbno).await?);
+        Arc::new(query_type_refnos_by_dbnum(&["BRAN", "HANG"], dbno, None).await?);
     println!(
         "当前分段使用管道或者支吊架元件库数量: {}",
         target_bran_hanger_refnos.len()
@@ -364,7 +370,7 @@ pub async fn gen_geos_data_by_dbnum(
 
 
     let target_loop_owner_refnos =
-        Arc::new(query_type_refnos_by_dbnum(&GNERAL_LOOP_OWNER_NOUN_NAMES, dbno).await.unwrap_or_default());
+        Arc::new(query_type_refnos_by_dbnum(&GNERAL_LOOP_OWNER_NOUN_NAMES, dbno, Some(true)).await.unwrap_or_default());
     println!("当前分段使用LOOP的数量: {}", target_loop_owner_refnos.len());
     if gen_model && gen_loop_flag && !target_loop_owner_refnos.is_empty() {
         let sjus_map_clone = loop_sjus_map_arc.clone();
@@ -385,7 +391,7 @@ pub async fn gen_geos_data_by_dbnum(
     }
 
     let target_prim_refnos =
-        Arc::new(query_type_refnos_by_dbnum(&GNERAL_PRIM_NOUN_NAMES, dbno).await.unwrap_or_default());
+        Arc::new(query_type_refnos_by_dbnum(&GNERAL_PRIM_NOUN_NAMES, dbno, None).await.unwrap_or_default());
 
     println!("当前分段使用基本体数量: {}", target_prim_refnos.len());
     //基本元件的生成
@@ -470,7 +476,7 @@ pub async fn gen_geos_data(
             debug_root_refnos.clone()
         };
     } else if dbno.is_some() {
-        target_root_refnos = query_type_refnos_by_dbnum(&["SITE"], dbno.unwrap()).await?;
+        target_root_refnos = query_type_refnos_by_dbnum(&["SITE"], dbno.unwrap(), Some(true)).await?;
     }
     if dbno.is_some() {
         println!("总共 {} 个SITE", target_root_refnos.len());
