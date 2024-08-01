@@ -49,29 +49,29 @@ pub async fn gen_meshes_in_db(
         .as_ref()
         .map(|x| x.is_replace_mesh())
         .unwrap_or(false);
-    let time = std::time::Instant::now();
+    // let time = std::time::Instant::now();
     let dir = option
         .as_ref()
         .map(|x| x.get_meshes_path())
         .unwrap_or("assets/meshes".into());
-    // dbg!(&target_refnos);
-    // 生成模型文件
-    gen_inst_meshes(&refnos, replace_exist, dir.clone())
-        .await
-        .unwrap();
-    println!(
-        "gen_inst_meshes finished: {} ms",
-        time.elapsed().as_millis()
-    );
-    let time = std::time::Instant::now();
-    update_inst_relate_aabbs_by_refnos(&refnos, replace_exist)
-        .await
-        .unwrap();
-    println!(
-        "update_inst_relate_aabbs finished: {} ms",
-        time.elapsed().as_millis()
-    );
-
+    for chunk in refnos.chunks(100) {
+        // 生成模型文件
+        gen_inst_meshes(chunk, replace_exist, dir.clone())
+            .await
+            .unwrap();
+        // println!(
+        //     "gen_inst_meshes finished: {} ms",
+        //     time.elapsed().as_millis()
+        // );
+        // let time = std::time::Instant::now();
+        update_inst_relate_aabbs_by_refnos(chunk, replace_exist)
+            .await
+            .unwrap();
+        // println!(
+        //     "update_inst_relate_aabbs finished: {} ms",
+        //     time.elapsed().as_millis()
+        // );
+    }
     Ok(())
 }
 
@@ -83,25 +83,26 @@ pub async fn booleans_meshes_in_db(
     if refnos.is_empty() {
         return Ok(());
     }
-    let dir = option
-        .as_ref()
-        .map(|x| x.get_meshes_path())
-        .unwrap_or("assets/meshes".into());
-    let replace_exist = option
-        .as_ref()
-        .map(|x| x.is_replace_mesh())
-        .unwrap_or(false);
-    let time = std::time::Instant::now();
-    //生成元件库内部几何体的负实体运算
-    apply_cata_neg_boolean_manifold(&refnos, replace_exist, dir.clone())
-    .await
-    .unwrap();
-    apply_insts_boolean_manifold(&refnos, replace_exist, dir.clone()).await?;
-    //有一些布尔运算要精确计算，不然会有薄片出现
-    //生成负实体的布尔运算
-    // apply_insts_boolean_occ(&refnos, replace_exist, dir.clone()).await?;
-    println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
-
+    for chunk in refnos.chunks(100) {
+        let dir = option
+            .as_ref()
+            .map(|x| x.get_meshes_path())
+            .unwrap_or("assets/meshes".into());
+        let replace_exist = option
+            .as_ref()
+            .map(|x| x.is_replace_mesh())
+            .unwrap_or(false);
+        let time = std::time::Instant::now();
+        //生成元件库内部几何体的负实体运算
+        apply_cata_neg_boolean_manifold(chunk, replace_exist, dir.clone())
+            .await
+            .unwrap();
+        apply_insts_boolean_manifold(chunk, replace_exist, dir.clone()).await?;
+        //有一些布尔运算要精确计算，不然会有薄片出现
+        //生成负实体的布尔运算
+        // apply_insts_boolean_occ(&refnos, replace_exist, dir.clone()).await?;
+        // println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
+    }
     Ok(())
 }
 
@@ -152,7 +153,7 @@ pub async fn process_meshes_update_db(
     //有一些布尔运算要精确计算，不然会有薄片出现
     //生成负实体的布尔运算
     // apply_insts_boolean_occ(&refnos, replace_exist, dir.clone()).await?;
-    println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
+    // println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
 
     Ok(())
 }
@@ -217,7 +218,7 @@ pub async fn process_meshes_update_db_deep(
             if dboption.apply_boolean_operation {
                 // apply_cata_neg_boolean_occ(None).await.unwrap();
                 // dbg!(target_visible_refnos.len());
-                // let time = std::time::Instant::now();
+                let time = std::time::Instant::now();
                 //生成元件库内部几何体的负实体运算
                 apply_cata_neg_boolean_manifold(&target_visible_refnos, replace_exist, dir.clone())
                     .await?;
@@ -517,6 +518,11 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         }
         let mut response = SUL_DB.query(sql).await.unwrap();
         let result: Vec<QueryAabbParam> = response.take(0).unwrap();
+        // dbg!(&result);
+        // dbg!(result.len());
+        // dbg!(&result);
+        // #[cfg(debug_assertions)]
+        // println!("QueryAabbParam len: {}", result.len());
         let mut update_sql = String::new();
         for r in result {
             let mut aabb = Aabb::new_invalid();

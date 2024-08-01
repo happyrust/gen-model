@@ -33,5 +33,5 @@ pub use occ_generate::*;
 pub use query::*;
 pub use resolve::*;
 
-
+pub const SEND_INST_SIZE: usize = 500;
 pub static EXIST_MESH_GEO_HASHES: Lazy<DashMap<String, Aabb>> = Lazy::new(DashMap::new);

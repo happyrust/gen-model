@@ -3,7 +3,7 @@ use crate::data_interface::db_model::TUBI_TOL;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::PlantAxisMap;
 use crate::fast_model;
-use crate::fast_model::{get_generic_type, resolve_desi_comp, shared};
+use crate::fast_model::{get_generic_type, resolve_desi_comp, SEND_INST_SIZE, shared};
 use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
@@ -125,7 +125,6 @@ pub async fn gen_cata_geos(
     let gen_mesh = db_option.gen_mesh;
     let mut local_al_map = Arc::new(DashMap::new());
     let is_bran = branch_map.len() > 0;
-    // let processed_cnt = Arc::new(Mutex::new(target_cata_map.len()));
     let all_unique_keys = Arc::new(
         target_cata_map
             .iter()
@@ -135,6 +134,7 @@ pub async fn gen_cata_geos(
     let unique_cata_cnt = all_unique_keys.len();
     let mut batch_chunks_cnt = 32;
     let mut batch_size = all_unique_keys.len() / batch_chunks_cnt + 1;
+    let test_refno = db_option.get_test_refno();
     //如果只有一个元件，就不分块了
     if batch_size == 1 {
         batch_chunks_cnt = all_unique_keys.len();
@@ -493,13 +493,25 @@ pub async fn gen_cata_geos(
                             is_solid: true, //TODO 这里是不是需要取查一下？
                             ..Default::default()
                         };
+                        if let Some(r_refno) = test_refno && r_refno == ele_refno{
+                            dbg!(&geos_info);
+                        }
                         shape_insts_data.insert_info(ele_refno, geos_info);
+
+                    }
+                    if shape_insts_data.inst_cnt() >=  SEND_INST_SIZE {
+                        sender
+                            .send(std::mem::take(&mut shape_insts_data))
+                            .expect("send cate shape_insts_data error");
+                        // dbg!("Send cate insts data");
                     }
                 }
-
-                sender
-                    .send(shape_insts_data)
-                    .expect("send cata shape_insts_data failed.");
+                if shape_insts_data.inst_cnt() > 0 {
+                    sender
+                        .send(shape_insts_data)
+                        .expect("send prim shape_insts_data error");
+                    // dbg!("Send last cate insts data");
+                }
             });
             handles.push(handle);
         }

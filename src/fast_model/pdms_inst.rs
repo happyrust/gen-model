@@ -3,13 +3,14 @@ use std::collections::HashMap;
 use aios_core::geometry::ShapeInstancesData;
 use aios_core::pdms_types::*;
 use aios_core::types::*;
-use aios_core::SUL_DB;
+use aios_core::{get_db_option, SUL_DB};
 use bevy_transform::prelude::Transform;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use itertools::Itertools;
 
 use crate::data_interface::tidb_manager::AiosDBManager;
+// use crate::fast_model::EXIST_MESH_GEOS;
 
 ///保存instance 数据到数据库
 pub async fn save_instance_data(
@@ -22,8 +23,9 @@ pub async fn save_instance_data(
     transform_map.insert(0, serde_json::to_string(&Transform::IDENTITY).unwrap());
     let mut param_map = HashMap::new();
     let mut vec3_map: HashMap<u64, String> = HashMap::new();
+    let test_refno = get_db_option().get_test_refno();
 
-    let chunk_size = 500;
+    let chunk_size = 300;
     //把delete 提前，因为后面的插入都是异步的执行
     if replace_exist {
         let keys = inst_mgr.inst_info_map.keys().collect::<Vec<_>>();
@@ -53,13 +55,18 @@ pub async fn save_instance_data(
     }
 
     let keys = inst_mgr.inst_geos_map.keys().collect::<Vec<_>>();
-    let mut insert_handles = FuturesUnordered::new();
+    // let mut insert_handles = FuturesUnordered::new();
     let mut inst_geo_vec = vec![];
     let mut geo_relate_vec = vec![];
 
+    // dbg!(&keys);
     for k in keys {
         let v = inst_mgr.inst_geos_map.get(k).unwrap();
         for inst in &v.insts {
+            // dbg!(&inst);
+            // if EXIST_MESH_GEOS.contains(&inst.geo_hash){
+            //     continue;
+            // }
             if inst.transform.is_nan() {
                 dbg!(&inst);
                 continue;
@@ -115,6 +122,7 @@ pub async fn save_instance_data(
             geo_relate_vec.push(relate_sql);
             //保存 unit shape 的几何参数
             inst_geo_vec.push(inst.gen_unit_geo_sur_json());
+            // EXIST_MESH_GEOS.insert(inst.geo_hash);
         }
     }
 
@@ -125,20 +133,22 @@ pub async fn save_instance_data(
                 stringify!(inst_geo),
                 chunk.join(",")
             );
-            let handle = tokio::spawn(async move {
-                SUL_DB.query(sql_string).await.unwrap();
-            });
-            insert_handles.push(handle);
+            // dbg!(&sql_string);
+            // let handle = tokio::spawn(async move {
+            SUL_DB.query(sql_string).await.unwrap();
+            // });
+            // insert_handles.push(handle);
         }
     }
     if !geo_relate_vec.is_empty() {
-        for chunk in geo_relate_vec.chunks(chunk_size) {
-            let sql = format!("INSERT RELATION INTO geo_relate [{}];", chunk.join(","));
-            let handle = tokio::spawn(async move {
+        // let handle = tokio::spawn(async move {
+            for chunk in geo_relate_vec.chunks(chunk_size) {
+                let sql = format!("INSERT RELATION INTO geo_relate [{}];", chunk.join(","));
+                //
                 SUL_DB.query(sql).await.unwrap();
-            });
-            insert_handles.push(handle);
-        }
+            }
+        // });
+        // insert_handles.push(handle);
     }
 
     //保存tubi的数据
@@ -179,7 +189,8 @@ pub async fn save_instance_data(
         }
         if !neg_relate_vec.is_empty() {
             for chunk in neg_relate_vec.chunks(chunk_size) {
-                let neg_relate_sql = format!("INSERT RELATION INTO neg_relate [{}];", chunk.join(","));
+                let neg_relate_sql =
+                    format!("INSERT RELATION INTO neg_relate [{}];", chunk.join(","));
                 SUL_DB.query(neg_relate_sql).await.unwrap();
             }
         }
@@ -195,15 +206,14 @@ pub async fn save_instance_data(
                 let ngmr_pe = ngmr_geom_refno.to_pe_key();
                 ngmr_relate_vec.push(format!(
                     "{{ in: {0}, id: [{0}, {1}, {2}], out: {1}, ngmr: {2}}}",
-                    ele_pe,
-                    kpe,
-                    ngmr_pe
+                    ele_pe, kpe, ngmr_pe
                 ));
             }
         }
         if !ngmr_relate_vec.is_empty() {
             for chunk in ngmr_relate_vec.chunks(chunk_size) {
-                let ngmr_relate_sql = format!("INSERT RELATION INTO ngmr_relate [{}];", chunk.join(","));
+                let ngmr_relate_sql =
+                    format!("INSERT RELATION INTO ngmr_relate [{}];", chunk.join(","));
                 SUL_DB.query(ngmr_relate_sql).await.unwrap();
             }
         }
@@ -216,6 +226,8 @@ pub async fn save_instance_data(
         let mut inst_relate_vec = vec![];
         for k in keys {
             let v = inst_mgr.inst_info_map.get(k).unwrap();
+
+
             if v.world_transform.is_nan() {
                 continue;
             }
@@ -228,7 +240,7 @@ pub async fn save_instance_data(
                     serde_json::to_string(&v.world_transform).unwrap(),
                 );
             }
-            inst_relate_vec.push(format!(
+            let relate_sql = format!(
                 "{{id: {},  in: {}, out: inst_info:⟨{}⟩, world_trans: trans:⟨{}⟩, generic: '{}', has_cata_neg: {}, solid: {}}}",
                 k.to_inst_relate_key(),
                 k.to_pe_key(),
@@ -237,37 +249,46 @@ pub async fn save_instance_data(
                 v.generic_type.to_string(),
                 v.has_cata_neg,
                 v.is_solid
-            ));
+            );
+            if let Some(t_refno) = test_refno{
+                if *k == t_refno.into() {
+                    dbg!(v);
+                    println!("inst relate sql: {}", &relate_sql);
+                }
+            }
+            inst_relate_vec.push(relate_sql);
+
         }
 
         if !inst_info_vec.is_empty() {
-            for chunk in inst_relate_vec.chunks(chunk_size) {
+            for chunk in inst_info_vec.chunks(chunk_size) {
                 let sql_string = format!(
                     "insert ignore into {} [{}];",
                     stringify!(inst_info),
                     chunk.join(",")
                 );
-                let handle = tokio::spawn(async move {
-                    SUL_DB.query(sql_string).await.unwrap();
-                });
-                insert_handles.push(handle);
+                // let handle = tokio::spawn(async move {
+                SUL_DB.query(sql_string).await.unwrap();
+                // });
+                // insert_handles.push(handle);
             }
         }
         //inst relate 放到最后保存, 因为是被监控的
         if !inst_relate_vec.is_empty() {
             //使用surreal 保存NamedAttrMap
-            for chunk in inst_relate_vec.chunks(chunk_size) {
-                let inst_relate_sql = format!("INSERT RELATION INTO inst_relate [{}];",
-                                              chunk.join(","));
-                let handle = tokio::spawn(async move {
+            // let handle = tokio::spawn(async move {
+                for chunk in inst_relate_vec.chunks(chunk_size) {
+                    let inst_relate_sql =
+                        format!("INSERT RELATION INTO inst_relate [{}];", chunk.join(","));
                     SUL_DB.query(inst_relate_sql).await.unwrap();
-                });
-                insert_handles.push(handle);
-            }
+                }
+            // });
+            // insert_handles.push(handle);
         }
     }
 
-    while let Some(_) = insert_handles.next().await {}
+    // while let Some(_) = insert_handles.next().await {}
+    // dbg!("here");
 
     //保存aabb
     if !aabb_map.is_empty() {
@@ -312,8 +333,6 @@ pub async fn save_instance_data(
             SUL_DB.query(sql_string).await.unwrap();
         }
     }
-
-
 
     Ok(())
 }
