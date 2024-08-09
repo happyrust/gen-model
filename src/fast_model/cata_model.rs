@@ -31,6 +31,8 @@ use std::collections::{HashMap, HashSet};
 use std::mem::take;
 use std::sync::Arc;
 use std::time::Instant;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use tokio::sync::{Mutex, RwLock};
 
 #[derive(Debug, Default, IntoPrimitive, Eq, PartialEq, TryFromPrimitive, Copy, Clone)]
@@ -118,7 +120,7 @@ pub async fn gen_cata_geos(
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<bool> {
     let t = Instant::now();
-    let mut handles = vec![];
+    let mut handles = FuturesUnordered::new();
     let mut tubi_relates = vec![];
     let gen_mesh = db_option.gen_mesh;
     let mut local_al_map = Arc::new(DashMap::new());
@@ -130,8 +132,7 @@ pub async fn gen_cata_geos(
             .collect::<Vec<_>>(),
     );
     let unique_cata_cnt = all_unique_keys.len();
-    //todo 不需要分块太多
-    let mut batch_chunks_cnt = 8;
+    let mut batch_chunks_cnt = 32;
     let mut batch_size = all_unique_keys.len() / batch_chunks_cnt + 1;
     let test_refno = db_option.get_test_refno();
     //如果只有一个元件，就不分块了
@@ -170,9 +171,6 @@ pub async fn gen_cata_geos(
                     if gen_mesh || !target_cata.exist_inst {
                         //如果没有已有的，需要生成
                         let ele_refno = target_cata.group_refnos[0];
-                        // if ele_refno  != "24381/178058".into(){
-                        //     continue;
-                        // }
                         process_refno = Some(ele_refno);
                         let Ok(Some(cata_refno)) = aios_core::get_cat_refno(ele_refno).await else {
                             #[cfg(feature = "debug_model")]
@@ -189,13 +187,14 @@ pub async fn gen_cata_geos(
                         let mut design_axis_map = DashMap::new();
 
                         let cur_type = desi_att.get_type_str();
-                        // #[cfg(debug_assertions)]
-                        // dbg!(ele_refno);
                         let r =
                             gen_cata_single_geoms(ele_refno, &brep_shapes_map, &design_axis_map)
                                 .await;
                         match r {
-                            Ok(_) => {}
+                            Ok(_) => {
+                                #[cfg(feature = "debug_model")]
+                                println!("{ele_refno} 生成元件库模型成功");
+                            }
                             Err(e) => {
                                 println!("{ele_refno} 生成元件库模型失败: {:?}", e);
                                 continue;
@@ -336,6 +335,7 @@ pub async fn gen_cata_geos(
                                     visible_set.insert(s.refno);
                                 }
                             }
+                            // dbg!(shapes.len());
                             //直接将所有的几何体组合起来
                             for shape in shapes {
                                 let CateBrepShape {
@@ -516,8 +516,8 @@ pub async fn gen_cata_geos(
             handles.push(handle);
         }
     }
-    // dbg!(handles.len());
-    futures::future::join_all(take(&mut handles)).await;
+    while let Some(_) = handles.next().await {
+    }
 
     let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
     //直段需要插入一个单位的cylinder

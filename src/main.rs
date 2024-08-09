@@ -163,7 +163,7 @@ async fn main() -> anyhow::Result<()> {
         //     }
         // }
         gen_all_geos_data(vec![], &db_option, None).await?;
-        println!("生成模型花费时间: {} ms", time.elapsed().as_millis());
+        // println!("生成完所有模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
     if db_option.gen_spatial_tree {
