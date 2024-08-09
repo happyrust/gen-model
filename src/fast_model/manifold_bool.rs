@@ -102,6 +102,9 @@ pub async fn apply_cata_neg_boolean_manifold(
                         continue;
                     };
 
+                    #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+                    println!("正在负实体计算的mesh hash: {}", &pos.id);
+
                     let Ok(mut pos_manifold) = load_manifold(
                         &dir_clone,
                         &pos.id,
@@ -175,7 +178,8 @@ pub async fn apply_cata_neg_boolean_manifold(
             dbg!(e);
         }
     }
-
+    #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+    println!("元件库的负实体计算{:?}完成", refnos);
     Ok(())
 }
 
@@ -234,6 +238,8 @@ pub async fn apply_insts_boolean_manifold_single(
                             for mut b in group {
                                 let mut pos_manifolds = vec![];
                                 for (pos_id, pos_t) in b.ts.iter() {
+                                    #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+                                    println!("正在负实体计算的mesh hash: {}", &pos_id);
                                     if let Ok(manifold) = load_manifold(
                                         &dir_clone,
                                         pos_id,
@@ -363,5 +369,7 @@ pub async fn apply_insts_boolean_manifold_single(
             return Err(anyhow!(e.to_string()));
         }
     }
+    #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+    println!("design的负实体计算{}完成", refno);
     Ok(())
 }
