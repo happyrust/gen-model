@@ -185,6 +185,9 @@ pub async fn process_meshes_update_db_deep(
             let neg_refnos = query_deep_neg_inst_refnos(refno).await.unwrap_or_default();
             update_refnos.extend(neg_refnos);
 
+            #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+            println!("实际需要更新模型结点数量: {}", update_refnos.len());
+
             if update_refnos.is_empty() {
                 continue;
             }
@@ -193,22 +196,27 @@ pub async fn process_meshes_update_db_deep(
             if dboption.gen_mesh {
                 // dbg!(&target_refnos);
                 // 生成模型文件
+                #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+                let time = std::time::Instant::now();
                 gen_inst_meshes(&update_refnos, replace_exist, dir.clone())
                     .await
                     .unwrap();
-                // println!(
-                //     "gen_inst_meshes finished: {} ms",
-                //     time.elapsed().as_millis()
-                // );
+                #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+                println!(
+                    "gen_inst_meshes finished: {} ms",
+                    time.elapsed().as_millis()
+                );
+                #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
                 let time = std::time::Instant::now();
                 // 更新aabb 到inst relate，geo relate
                 update_inst_relate_aabbs_by_refnos(&update_refnos, replace_exist)
                     .await
                     .unwrap();
-                // println!(
-                //     "update_inst_relate_aabbs finished: {} ms",
-                //     time.elapsed().as_millis()
-                // );
+                #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+                println!(
+                    "update_inst_relate_aabbs finished: {} ms",
+                    time.elapsed().as_millis()
+                );
             }
 
             if target_visible_refnos.is_empty() {
@@ -380,6 +388,8 @@ pub async fn gen_inst_meshes(
                         let mut success = false;
                         // #[cfg(feature = "debug_model")]
                         // s.write_step(format!("{}.step", id)).unwrap();
+                        #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+                        println!("gen mesh hash: {}", id);
                         match PlantMesh::gen_occ_mesh(s, m_tol) {
                             Ok(mesh) => {
                                 if mesh.aabb.is_none(){
@@ -424,7 +434,8 @@ pub async fn gen_inst_meshes(
                             }
                             //显示哪些模型可能会受影响
                             Err(e) => {
-                                #[cfg(feature = "log_error")]
+                                // #[cfg(feature = "log_error")]
+                                #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
                                 {
                                     let failed_refnos = aios_core::query_refnos_by_geo_hash(id).await.unwrap();
                                     println!("{:?} mesh error: {}", failed_refnos, e.to_string());
