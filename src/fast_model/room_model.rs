@@ -273,7 +273,7 @@ pub async fn cal_room_refnos(
                         intersect_set.insert(g.refno);
                     }
                 });
-                #[cfg(feature = "debug_model")]
+                #[cfg(feature = "debug_room")]
                 if !intersect_set.is_empty() {
                     println!(
                         "found intersect room panel {}, refnos: {}",

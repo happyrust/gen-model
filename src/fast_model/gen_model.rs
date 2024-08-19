@@ -142,7 +142,7 @@ pub async fn gen_all_geos_data(
         let insert_task = tokio::task::spawn(async move {
             while let Ok(shape_insts) = receiver.recv_async().await {
                 save_instance_data(&shape_insts, false).await.unwrap();
-                println!("Insert shape insts: {}", shape_insts.inst_cnt());
+                println!("Insert manual shape insts: {}", shape_insts.inst_cnt());
             }
         });
         let target_root_refnos = gen_geos_data(None, manual_refnos.clone(), db_option, incr_updates.clone(), sender.clone()).await?;
