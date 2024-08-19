@@ -381,7 +381,7 @@ impl AiosDBManager {
                     .unwrap();
 
                 //调用函数，将当前数据存储到版本表里
-                println!("{}", &update_pe_sql_str);
+                // println!("{}", &update_pe_sql_str);
                 let insert_pe_sql = if !insert_pe_jsons_str.is_empty() {
                     insert_pe_jsons_str.pop();
                     format!("INSERT IGNORE INTO pe [{}];", insert_pe_jsons_str)
@@ -605,13 +605,13 @@ impl AiosDBManager {
                                 // dbg!(path);
                                 // dbg!(old.pdms_header.page_no);
                                 //未发生修改，直接跳过
-                                if old.pdms_header.latest_ses_pgno == new_header.pdms_header.latest_ses_pgno {
+                                if old.latest_ses_data.sesno == new_header.latest_ses_data.sesno {
                                     continue;
                                 }
                                 //比如给出准确的范围next_sesno..=end_sesno
                                 params.insert(
                                     path.clone(),
-                                    (new_header.clone(), (old.pdms_header.latest_ses_pgno as i32 + 1)..=new_header.pdms_header.latest_ses_pgno as i32),
+                                    (new_header.clone(), (old.latest_ses_data.sesno + 1)..=new_header.latest_ses_data.sesno),
                                 );
                             }
                         }
@@ -636,11 +636,11 @@ impl AiosDBManager {
                                     //或者每次启动都重新更新这个文件？
                                     if let Some(mut old) = self.watcher.headers.get_mut(&path) {
                                         dbg!((
-                                            old.pdms_header.latest_ses_pgno,
-                                            new_header.pdms_header.latest_ses_pgno
+                                            old.latest_ses_data.sesno,
+                                            new_header.latest_ses_data.sesno
                                         ));
                                         //未发生修改，直接跳过
-                                        if old.pdms_header.latest_ses_pgno >= new_header.pdms_header.latest_ses_pgno
+                                        if old.latest_ses_data.sesno >= new_header.latest_ses_data.sesno
                                         {
                                             continue;
                                         }
