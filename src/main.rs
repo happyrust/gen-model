@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
         // 同步pdms数据
         sync_pdms(&db_option).await.unwrap();
         //先等待20分钟后结束
-        tokio::time::sleep(tokio::time::Duration::from_mins(20)).await;
+        // tokio::time::sleep(tokio::time::Duration::from_mins(20)).await;
         return Ok(());
     }
 
