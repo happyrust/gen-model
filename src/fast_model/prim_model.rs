@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use crate::consts::*;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -78,9 +79,10 @@ pub async fn gen_prim_geos(
                     ..Default::default()
                 };
                 let mut geo_param = PdmsGeoParam::Unknown;
+                let cur_type = attr.get_type_str();
                 //需要限制负实体的大小，太大，导致负运算失败
                 let neg_limit_size: Option<f32> =
-                    if GENRAL_NEG_NOUN_NAMES.contains(&attr.get_type_str()) {
+                    if GENRAL_NEG_NOUN_NAMES.contains(&cur_type) {
                         // if let Some(parent_inst) = shape_insts_data.inst_info_map.get(&attr.get_owner()) {
                         //     parent_inst
                         //         .aabb
@@ -94,23 +96,58 @@ pub async fn gen_prim_geos(
                     };
                 // dbg!((attr.get_type_str(), refno, neg_limit_size));
                 //多面体的处理
-                let brep_shape = if attr.get_type_str() == "POHE" {
+                let brep_shape = if cur_type == "POHE" || cur_type == "POLYHE" {
                     let pgo_refnos = aios_core::get_children_refnos(refno)
                         .await
                         .unwrap_or_default();
-                    // dbg!(&pgo_refnos);
+                    //需要检查第一个是不是POLPTL 类型
+                    if pgo_refnos.is_empty() {
+                        continue;
+                    }
+                    let first_type = aios_core::get_type_name(pgo_refnos[0])
+                        .await
+                        .unwrap_or_default();
+                    // dbg!(&first_type);
                     let mut polygons = vec![];
-                    for pgo_refno in pgo_refnos {
-                        let mut verts = vec![];
-                        let v_att = aios_core::get_children_named_attmaps(pgo_refno)
+                    if first_type == "POLPTL" {
+                        let mut verts_map = HashMap::new();
+                        let v_att = aios_core::query_filter_children_atts(pgo_refnos[0], &["POIN"])
                             .await
                             .unwrap_or_default();
                         for v in v_att {
                             // dbg!(&v);
-                            verts.push(v.get_position().unwrap_or_default());
+                            verts_map.insert(v.get_refno_or_default(), v.get_position().unwrap_or_default());
                         }
-                        polygons.push(Polygon { verts });
+                        let index_loops = aios_core::query_filter_deep_children_atts(
+                            refno,
+                            &["LOOPTS"],
+                        ).await.unwrap_or_default();
+                        // dbg!(&index_loops);
+                        for l in index_loops {
+                            let mut verts = vec![];
+                            for index_refno in l.get_refno_vec("VXREF").unwrap_or_default() {
+                                // dbg!(index_refno);
+                                if let Some(vert) = verts_map.get(&index_refno) {
+                                    // dbg!(vert);
+                                    verts.push(vert.clone());
+                                }
+                            }
+                            polygons.push(Polygon { verts });
+                        }
+                    }else{
+                        for pgo_refno in pgo_refnos {
+                            let mut verts = vec![];
+                            let v_att = aios_core::get_children_named_attmaps(pgo_refno)
+                                .await
+                                .unwrap_or_default();
+                            for v in v_att {
+                                // dbg!(&v);
+                                verts.push(v.get_position().unwrap_or_default());
+                            }
+                            polygons.push(Polygon { verts });
+                        }
                     }
+
                     // dbg!(&polygons);
                     let shape: Box<dyn BrepShapeTrait> = Box::new(Polyhedron { polygons });
                     Some(shape)

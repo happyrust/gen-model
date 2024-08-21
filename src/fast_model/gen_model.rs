@@ -334,7 +334,7 @@ pub async fn gen_geos_data_by_dbnum(
         use_cate_refnos.extend(refnos.clone());
         let cur_cate_refnos =
             Arc::new(refnos);
-        dbg!(cur_cate_refnos.len());
+        // dbg!(cur_cate_refnos.len());
         //查询单个使用元件库的数量
         let target_single_cata_map = {
             //要过滤掉owner是BRAN 和 HANG的
@@ -346,7 +346,7 @@ pub async fn gen_geos_data_by_dbnum(
 
         println!(
             "当前分段使用元件库数量: {}",
-            target_bran_hanger_refnos.len()
+            cur_cate_refnos.len()
         );
         if gen_model && gen_cata_flag && !target_single_cata_map.is_empty() {
             let sjus_map_clone = loop_sjus_map_arc.clone();

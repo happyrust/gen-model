@@ -338,6 +338,8 @@ pub async fn gen_inst_meshes(
                     // dbg!(&result);
                     for g in result {
                         //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
+                        #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+                        println!("gen mesh param: {}", &g.id);
                         match g.param.gen_occ_shape() {
                             Ok(shape) => {
                                 let mut aabb = Aabb::new_invalid();
@@ -408,7 +410,6 @@ pub async fn gen_inst_meshes(
                                         //TODO edge 这里取中点就可以了
                                         // for point in edge.approximation_segments_custom(1.0, 1.0) {
                                         for point in [edge.start_point(), edge.end_point()] {
-                                            // dbg!(point);
                                             let pts_hash = RsVec3(point.as_vec3()).gen_hash();
                                             pt_hashes.insert(format!("vec3:⟨{}⟩", pts_hash));
                                             if !pts_json_map.contains_key(&pts_hash) {
@@ -427,14 +428,12 @@ pub async fn gen_inst_meshes(
                                     ));
                                     aabb_map
                                         .entry(aabb_hash.to_string())
-                                        // .or_insert(serde_json::to_string(&mesh.aabb).unwrap());
                                         .or_insert(mesh.aabb.unwrap());
                                     success = true;
                                 }
                             }
                             //显示哪些模型可能会受影响
                             Err(e) => {
-                                // #[cfg(feature = "log_error")]
                                 #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
                                 {
                                     let failed_refnos = aios_core::query_refnos_by_geo_hash(id).await.unwrap();
