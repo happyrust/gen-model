@@ -9,7 +9,7 @@ use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::polyhedron::Polygon;
 use aios_core::prim_geo::*;
-use aios_core::shape::pdms_shape::{BrepShapeTrait, VerifiedShape};
+use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use aios_core::RefU64;
 use bevy_transform::components::Transform;
 use parry3d::bounding_volume::Aabb;
@@ -110,13 +110,15 @@ pub async fn gen_prim_geos(
                     // dbg!(&first_type);
                     let mut polygons = vec![];
                     if first_type == "POLPTL" {
+                        let mut plant_mesh = PlantMesh::default();
                         let mut verts_map = HashMap::new();
                         let v_att = aios_core::query_filter_children_atts(pgo_refnos[0], &["POIN"])
                             .await
                             .unwrap_or_default();
-                        for v in v_att {
+                        for (i, v) in v_att.into_iter().enumerate() {
                             // dbg!(&v);
                             verts_map.insert(v.get_refno_or_default(), v.get_position().unwrap_or_default());
+                            // verts_map.insert(v.get_refno_or_default(), i);
                         }
                         let index_loops = aios_core::query_filter_deep_children_atts(
                             refno,
@@ -125,7 +127,9 @@ pub async fn gen_prim_geos(
                         // dbg!(&index_loops);
                         for l in index_loops {
                             let mut verts = vec![];
-                            for index_refno in l.get_refno_vec("VXREF").unwrap_or_default() {
+                            let refnos = l.get_refno_vec("VXREF").unwrap_or_default();
+                            dbg!(refnos.len());
+                            for index_refno in refnos {
                                 // dbg!(index_refno);
                                 if let Some(vert) = verts_map.get(&index_refno) {
                                     // dbg!(vert);
@@ -149,7 +153,7 @@ pub async fn gen_prim_geos(
                     }
 
                     // dbg!(&polygons);
-                    let shape: Box<dyn BrepShapeTrait> = Box::new(Polyhedron { polygons });
+                    let shape: Box<dyn BrepShapeTrait> = Box::new(Polyhedron { polygons, mesh: None });
                     Some(shape)
                 } else {
                     attr.create_brep_shape(neg_limit_size)

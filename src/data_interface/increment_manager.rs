@@ -427,22 +427,19 @@ impl AiosDBManager {
             // dbg!(&del_sql);
             SUL_DB.query(&del_sql).await.unwrap();
         }
-        let r: Vec<IncrGeoUpdateLog> = SUL_DB
-            .create("incr_model_log")
-            .content(&geo_update_log)
-            .await?;
+
 
         // dbg!(&geo_update_log);
-
-        let all_refnos = geo_update_log
-            .get_all_visible_refnos()
-            .into_iter()
-            .collect::<Vec<_>>();
+        // let all_refnos = geo_update_log
+        //     .get_all_visible_refnos()
+        //     .into_iter()
+        //     .collect::<Vec<_>>();
         let all_deep_refnos = geo_update_log
             .get_all_visible_refnos_deep()
             .await
             .into_iter()
             .collect::<Vec<_>>();
+
         //有可能没更新完，就update了模型？
         gen_all_geos_data(vec![], &self.db_option, Some(geo_update_log))
             .await
@@ -461,6 +458,11 @@ impl AiosDBManager {
             .unwrap();
 
         println!("增加:{total_add_len}，修改:{total_modify_len}，删除:{total_deleted_len}");
+
+        // let r: Vec<IncrGeoUpdateLog> = SUL_DB
+        //     .create("incr_model_log")
+        //     .content(geo_update_log)
+        //     .await?;
 
         Ok(true)
     }
