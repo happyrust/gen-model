@@ -135,7 +135,7 @@ async fn build_room_panels_relate(
     //属于room的panel
     let sql = format!(
         r#"
-        select value [meta::id(id), array::last(string::split(NAME, '-')),
+        select value [id, array::last(string::split(NAME, '-')),
          array::flatten([REFNO<-pe_owner<-pe[?noun='PANE'].id, REFNO<-pe_owner<-pe<-pe_owner<-pe[?noun='PANE'].id])] from FRMW where {filter}
     "#
     );

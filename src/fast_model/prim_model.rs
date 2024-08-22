@@ -107,7 +107,7 @@ pub async fn gen_prim_geos(
                     let first_type = aios_core::get_type_name(pgo_refnos[0])
                         .await
                         .unwrap_or_default();
-                    // dbg!(&first_type);
+                    dbg!(&first_type);
                     let mut polygons = vec![];
                     if first_type == "POLPTL" {
                         let mut plant_mesh = PlantMesh::default();
@@ -115,6 +115,7 @@ pub async fn gen_prim_geos(
                         let v_att = aios_core::query_filter_children_atts(pgo_refnos[0], &["POIN"])
                             .await
                             .unwrap_or_default();
+                        dbg!(v_att.len());
                         for (i, v) in v_att.into_iter().enumerate() {
                             // dbg!(&v);
                             verts_map.insert(v.get_refno_or_default(), v.get_position().unwrap_or_default());
@@ -124,7 +125,7 @@ pub async fn gen_prim_geos(
                             refno,
                             &["LOOPTS"],
                         ).await.unwrap_or_default();
-                        // dbg!(&index_loops);
+                        dbg!(index_loops.len());
                         for l in index_loops {
                             let mut verts = vec![];
                             let refnos = l.get_refno_vec("VXREF").unwrap_or_default();

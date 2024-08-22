@@ -191,7 +191,6 @@ pub async fn apply_insts_boolean_manifold(
     for refno in refnos {
         apply_insts_boolean_manifold_single(*refno, replace_exist, dir.clone()).await?;
     }
-
     Ok(())
 }
 
@@ -217,7 +216,7 @@ pub async fn apply_insts_boolean_manifold_single(
                         and geom_refno in (select value ngmr from pe:{refno}<-ngmr_relate) ) ))]
                         from array::flatten([in<-neg_relate.in->inst_relate, in<-ngmr_relate.in->inst_relate]) where world_trans.d!=none
                 ) as neg_ts
-             from inst_relate:{refno} where !bad_bool and ((in<-neg_relate)[0] != none or in<-ngmr_relate[0] != none) and aabb.d != NONE
+             from inst_relate:{refno} where in.id!=none and !bad_bool and ((in<-neg_relate)[0] != none or in<-ngmr_relate[0] != none) and aabb.d != NONE
         "#
     );
     if !replace_exist {
@@ -348,8 +347,6 @@ pub async fn apply_insts_boolean_manifold_single(
                                     }
                                 }
                             }
-                            // });
-                            // tasks.push(task);
                         }
                     }
                 }
