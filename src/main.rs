@@ -17,6 +17,7 @@ extern crate strum_macros;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use std::fs;
 use std::fs::{File, OpenOptions};
+use std::future::Future;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -53,6 +54,7 @@ use itertools::Itertools;
 use log::{error, LevelFilter};
 use simplelog::*;
 use surrealdb::opt::auth::Root;
+use aios_database::team_data::sync_system_db;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -82,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
             ),
             WriteLogger::new(LevelFilter::Info, Config::default(), file),
         ])
-        .unwrap();
+            .unwrap();
     }
 
     #[cfg(feature = "local")]
@@ -120,8 +122,9 @@ async fn main() -> anyhow::Result<()> {
         sync_pdms(&db_option).await.unwrap();
         //先等待20分钟后结束
         // tokio::time::sleep(tokio::time::Duration::from_mins(20)).await;
-        return Ok(());
+        // return Ok(());
     }
+
 
     if db_option.build_cate_relate() {
         //检查cate_relate 是否创建了
@@ -179,9 +182,21 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let aios_mgr = AiosDBMgr::init_from_db_option().await?;
+    // 生成材料表单
     let gen_material = db_option.gen_material.unwrap_or(false);
     if gen_material {
         save_all_material_data(&aios_mgr).await?;
+    }
+    // 生成 TEAM_DATA数据
+    if db_option.only_sync_sys {
+        match sync_system_db(&aios_mgr).await {
+            Ok(_) => {
+                println!("TEAM DATA生成完成");
+            }
+            Err(e) => {
+                dbg!(&e.to_string());
+            }
+        }
     }
 
     if db_option.rebuild_ssc_tree {

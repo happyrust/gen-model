@@ -5,7 +5,7 @@ enable_log = false
 sync_graph_db = false
 sync_versioned = false
 sync_tidb = false
-sync_live = true
+sync_live = false
 replace_dbs = false
 sync_chunk_size = 1_0000
 
@@ -20,19 +20,19 @@ project_code = 1516
 surreal_ns = 1516
 module = "DESI"
 #是否生成模型数据
-gen_model = true
-gen_mesh = true
+gen_model = false
+gen_mesh = false
 replace_mesh = false
 save_db = true
 apply_boolean_operation = true
 mesh_tol_ratio = 3.0
 #是否生成房间树
-gen_spatial_tree = true
+gen_spatial_tree = false
 load_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 16
 
-build_cate_relate = true
+build_cate_relate = false
 
 #meshes_path = "E:\\RustProject\\new\\rs-plant3-d\\assets\\meshes"
 
@@ -42,16 +42,17 @@ gen_noun_graph = false
 #arangodb 配置
 arangodb_database = "ams"
 multi_threads = false
-only_sync_sys = false
+only_sync_sys = true
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
 arangodb_user = "root"
 arangodb_password = ""
+gen_material = false
 
 #tidb 配置
 ip = "127.0.0.1"
 user = "root"
-password = ""
+password = "root"
 port = "3306"
 #port = "4000"
 sql_threads_number = 50
@@ -59,10 +60,8 @@ batch_insert_sql_cnt = 100 #mysql 批量插入的数量
 
 
 #版本数据库服务配置
-v_ip = "localhost"
-#v_port = "8004"
-#v_port = "8003"
-v_port = "8009"
+v_ip = "127.0.0.1"
+v_port = "9001"
 v_user = "root"
 v_password = "root"
 pe_chunk = 500
@@ -72,7 +71,6 @@ att_chunk = 200
 #mqtt 事件 ip
 mqtt_host = "192.168.31.60"
 mqtt_port = 8883
-
 location = "SJZ1"
 
 #服务器启动配置
@@ -93,8 +91,8 @@ only_rebuild_pdms_element = false
 
 debug_refno_types = ["CATA", "LOOP", "PRIM"]
 #debug_refno_types = ["CATA"]
-#included_db_files = ["ams1112_0001", "ams5053_0001"]
-included_db_files = ["ams7000_0001"]
+included_db_files = ["ams1112_0001"]
+#included_db_files = ["ams7997_0001"]
 #manual_db_nums = [7999, 7997, 1112, 8000]
 manual_db_nums = [1112]
 plat_url = ""
@@ -115,5 +113,5 @@ room_keyword = "-RM" # 2016  K-R-K100   (-R-)
 #调试ngmr两边打孔
 #debug_root_refnos = ["23713/2440"]
 # debug_root_refnos = ["17496/274052"]
-debug_root_refnos = ["17496/268302"]
+#debug_root_refnos = ["17496/268302"]
 # debug_root_refnos = ["23713/2510", "24383/66457"]
