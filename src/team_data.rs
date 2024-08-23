@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::str::FromStr;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::{init_test_surreal, query_filter_ancestors, RefU64, SUL_DB};
@@ -23,11 +24,20 @@ pub async fn sync_system_db(mgr: &AiosDBMgr) -> anyhow::Result<()> {
     match query_all_db_refnos().await {
         Ok(db_refnos) => {
             let mut r = vec![];
+            let mut team_name_map: HashMap<RefU64, String> = HashMap::new();
             for refno in db_refnos {
                 // 找到所属的team
                 let team = query_filter_ancestors(refno, &vec!["TEAM"]).await?;
                 if team.is_empty() { continue; };
-                let Ok(team_name) = mgr.get_name(team[0]).await else { continue; };
+                let team_refno = team[0];
+                let team_name = if team_name_map.contains_key(&team_refno) {
+                    team_name_map.get(&team_refno).unwrap().to_string()
+                } else {
+                    let Ok(team_name) = mgr.get_name(team[0]).await else { continue; };
+                    team_name_map.entry(team_refno).or_insert(team_name.clone());
+                    team_name
+                };
+
                 // 获取db的属性
                 let db_attr = mgr.get_attr(refno).await?;
                 let db_name = db_attr.get_name_or_default();
