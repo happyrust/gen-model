@@ -4,7 +4,7 @@ version = "0.1.3"
 edition = "2021"
 
 [features]
-default = ["ws", "gen_model", "manifold", "occ", "surreal_v2"] #
+default = ["ws", "gen_model", "manifold", "occ", "surreal_v2","sql"] #
 truck = []
 local = []
 ws = []

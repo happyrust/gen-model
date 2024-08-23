@@ -537,11 +537,6 @@ pub async fn update_inst_relate_aabbs_by_refnos(
         }
         let mut response = SUL_DB.query(sql).await.unwrap();
         let result: Vec<QueryAabbParam> = response.take(0).unwrap();
-        // dbg!(&result);
-        // dbg!(result.len());
-        // dbg!(&result);
-        // #[cfg(debug_assertions)]
-        // println!("QueryAabbParam len: {}", result.len());
         let mut update_sql = String::new();
         for r in result {
             let mut aabb = Aabb::new_invalid();

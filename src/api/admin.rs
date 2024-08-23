@@ -166,29 +166,3 @@ fn gen_query_all_db_refnos_sql() -> String {
     sql
 }
 
-fn gen_create_team_data_sql() -> String {
-    let mut sql = String::new();
-    sql.push_str(format!("
-    CREATE TABLE IF NOT EXISTS {TEAM_DATA_TABLE} (
-        TEAM_NAME VARCHAR(100) NOT NULL,
-        NAME VARCHAR(100) PRIMARY KEY,
-        S_TYPE VARCHAR(50) ,
-        DB_TYPE VARCHAR(50) ,
-        DB_NO INT ,
-        CLAIM VARCHAR(50) ,
-        `DESC` VARCHAR(255) )").as_str());
-    sql
-}
-
-fn gen_save_team_data_sql(data: Vec<AdminData>) -> String {
-    let mut sql = String::from(&format!("INSERT IGNORE INTO {TEAM_DATA_TABLE} (TEAM_NAME, NAME, S_TYPE, DB_TYPE, DB_NO, CLAIM, `DESC`) VALUES"));
-    let b_empty = data.is_empty();
-    for d in data {
-        sql.push_str(&format!("('{}','{}','{}','{}',{},'{}','{}'),", d.team_name, d.name, d.s_type, d.db_type, d.db_no, d.claim, d.desc).as_str())
-    }
-    if !b_empty {
-        sql.remove(sql.len() - 1);
-    }
-    sql.push_str(";");
-    sql
-}

@@ -63,8 +63,8 @@ async fn background_save_task(receiver: flume::Receiver<SenderSql>) {
 
     for i in 0..10 {
         let receiver = receiver.clone();
-        #[cfg(feature = "sql")]
-        let pools_clone = pool.clone(); // 假设 pool 是全局可用的
+        // #[cfg(feature = "sql")]
+        // let pools_clone = pool.clone(); // 假设 pool 是全局可用的
 
         let insert_handle = tokio::spawn(async move {
             let mut record_stream = receiver.into_stream().chunks(CHUNK_SIZE);
@@ -77,20 +77,20 @@ async fn background_save_task(receiver: flume::Receiver<SenderSql>) {
                                 SUL_DB.query(sql).await.expect("insert db failed");
                             }
                         }
-                        #[cfg(feature = "sql")]
-                        SenderSql::MysqlSql((project, sql)) => {
-                            let Some(pool) = pools_clone.get(&project) else {
-                                continue;
-                            };
-                            let mut conn = pool.acquire().await.expect("get pool failed");
-                            match conn.execute(sql.as_str()).await {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    dbg!(e.to_string());
-                                    dbg!(&sql);
-                                }
-                            }
-                        }
+                        // #[cfg(feature = "sql")]
+                        // SenderSql::MysqlSql((project, sql)) => {
+                        //     let Some(pool) = pools_clone.get(&project) else {
+                        //         continue;
+                        //     };
+                        //     let mut conn = pool.acquire().await.expect("get pool failed");
+                        //     match conn.execute(sql.as_str()).await {
+                        //         Ok(_) => {}
+                        //         Err(e) => {
+                        //             dbg!(e.to_string());
+                        //             dbg!(&sql);
+                        //         }
+                        //     }
+                        // }
                         _ => {}
                     }
                 }
