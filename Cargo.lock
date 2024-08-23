@@ -200,6 +200,7 @@ dependencies = [
  "rkyv",
  "rstar 0.11.0",
  "serde",
+ "serde-content 0.1.0",
  "serde_derive",
  "serde_json",
  "serde_with",
@@ -1301,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "cavalier_contours"
-version = "0.4.0"
+version = "0.3.0"
 dependencies = [
  "num-traits",
  "serde",
@@ -5628,6 +5629,13 @@ dependencies = [
 [[package]]
 name = "serde-content"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "serde-content"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e255eaf9f3814135df4f959c9f404ebb2e67238bae0ed412da10518d0629e7c9"
 dependencies = [
@@ -6347,7 +6355,7 @@ dependencies = [
  "rustls-pki-types",
  "semver",
  "serde",
- "serde-content",
+ "serde-content 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_json",
  "surrealdb-core",
  "thiserror",
@@ -6423,7 +6431,7 @@ dependencies = [
  "scrypt",
  "semver",
  "serde",
- "serde-content",
+ "serde-content 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_json",
  "sha1",
  "sha2",

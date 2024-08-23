@@ -109,16 +109,19 @@ pub async fn gen_prim_geos(
                         .unwrap_or_default();
                     dbg!(&first_type);
                     let mut polygons = vec![];
+                    let mut is_polyhe = false;
                     if first_type == "POLPTL" {
-                        let mut plant_mesh = PlantMesh::default();
+                        is_polyhe = true;
+                        // let mut plant_mesh = PlantMesh::default();
                         let mut verts_map = HashMap::new();
                         let v_att = aios_core::query_filter_children_atts(pgo_refnos[0], &["POIN"])
                             .await
                             .unwrap_or_default();
-                        dbg!(v_att.len());
+                        // dbg!(v_att.len());
                         for (i, v) in v_att.into_iter().enumerate() {
                             // dbg!(&v);
-                            verts_map.insert(v.get_refno_or_default(), v.get_position().unwrap_or_default());
+                            let pos = v.get_position().unwrap_or_default();
+                            verts_map.insert(v.get_refno_or_default(), pos);
                             // verts_map.insert(v.get_refno_or_default(), i);
                         }
                         let index_loops = aios_core::query_filter_deep_children_atts(
@@ -126,18 +129,47 @@ pub async fn gen_prim_geos(
                             &["LOOPTS"],
                         ).await.unwrap_or_default();
                         dbg!(index_loops.len());
-                        for l in index_loops {
-                            let mut verts = vec![];
-                            let refnos = l.get_refno_vec("VXREF").unwrap_or_default();
-                            dbg!(refnos.len());
-                            for index_refno in refnos {
-                                // dbg!(index_refno);
-                                if let Some(vert) = verts_map.get(&index_refno) {
-                                    // dbg!(vert);
-                                    verts.push(vert.clone());
+                        // let tmp_refnos = index_loops.iter().map(|x| x.get_owner()).collect::<Vec<_>>();
+                        // dbg!(&tmp_refnos);
+                        // dbg!(tmp_refnos.len());
+                        //按照 owner 进行分组，生成hashmap
+                        let index_map = index_loops.iter().fold(HashMap::new(), |mut map, x| {
+                            let owner = x.get_owner();
+                            let vx_refnos = x.get_refno_vec("VXREF").unwrap_or_default();
+                            //同一个分组下的，直接融合就可以
+                            map.entry(owner).or_insert_with(Vec::new).extend(vx_refnos);
+                            map
+                        });
+                        // dbg!(index_map.len());
+                        let loop_atts = aios_core::query_filter_deep_children_atts(refno, &["POLOOP"])
+                            .await
+                            .unwrap_or_default();
+                        // dbg!(loop_atts.len());
+                        let loops_map = loop_atts.iter().fold(HashMap::new(), |mut map, x| {
+                            let owner = x.get_owner();
+                            let index_refnos = index_map.get(&x.get_refno_or_default()).unwrap();
+                            // dbg!(index_refnos.len());
+                            //同一个分组下的，直接融合就可以
+                            map.entry(owner).or_insert_with(Vec::new).push(index_refnos);
+                            map
+                        });
+                        // for (k, v) in &loops_map {
+                        //     if v.len() > 1 {
+                        //         dbg!(k);
+                        //     }
+                        // }
+                        for (_, v) in loops_map {
+                            let mut loops = vec![];
+                            for l in v {
+                                let mut verts = vec![];
+                                for index_refno in l {
+                                    if let Some(vert) = verts_map.get(index_refno) {
+                                        verts.push(vert.clone());
+                                    }
                                 }
+                                loops.push(verts);
                             }
-                            polygons.push(Polygon { verts });
+                            polygons.push(Polygon { loops });
                         }
                     }else{
                         for pgo_refno in pgo_refnos {
@@ -149,12 +181,12 @@ pub async fn gen_prim_geos(
                                 // dbg!(&v);
                                 verts.push(v.get_position().unwrap_or_default());
                             }
-                            polygons.push(Polygon { verts });
+                            polygons.push(Polygon { loops: vec![verts] });
                         }
                     }
 
                     // dbg!(&polygons);
-                    let shape: Box<dyn BrepShapeTrait> = Box::new(Polyhedron { polygons, mesh: None });
+                    let shape: Box<dyn BrepShapeTrait> = Box::new(Polyhedron { polygons, mesh: None, is_polyhe });
                     Some(shape)
                 } else {
                     attr.create_brep_shape(neg_limit_size)

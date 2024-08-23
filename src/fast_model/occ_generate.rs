@@ -340,6 +340,11 @@ pub async fn gen_inst_meshes(
                         //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
                         #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
                         println!("gen mesh param: {}", &g.id);
+                        //检查是否是PrimPolyhedron
+                        let is_polyhedron = match &g.param {
+                            PdmsGeoParam::PrimPolyhedron(_) => true,
+                            _ => false,
+                        };
                         match g.param.gen_occ_shape() {
                             Ok(shape) => {
                                 let mut aabb = Aabb::new_invalid();
@@ -369,8 +374,12 @@ pub async fn gen_inst_meshes(
                                     };
                                 }
 
-                                let tol =
-                                    (aabb.half_extents().magnitude() as f64 * coeff).min(50.0);
+                                let mut tol = if is_polyhedron{
+                                    0.01
+                                } else{
+                                    (aabb.half_extents().magnitude() as f64 * coeff).min(50.0)
+                                };
+                                dbg!(tol);
                                 shapes_map.insert(g.id, (shape, tol));
                             }
                             Err(e) => {

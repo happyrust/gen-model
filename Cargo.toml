@@ -89,7 +89,7 @@ sea-orm = { version = "0.12.6", features = [
     "sqlx-mysql",
     "runtime-async-std",
 ], optional = true }
-surrealdb = { path = "../surrealdb/lib", default-features = false, features = [
+surrealdb = { path = "../surrealdb/sdk", default-features = false, features = [
     "protocol-ws",
     #    "kv-rocksdb",
 ] }
