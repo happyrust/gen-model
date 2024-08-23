@@ -27,12 +27,12 @@ save_db = true
 apply_boolean_operation = true
 mesh_tol_ratio = 3.0
 #是否生成房间树
-gen_spatial_tree = true
+gen_spatial_tree = false
 load_spatial_tree = false
 save_spatial_tree_to_db = false
 gen_model_batch_size = 16
 
-build_cate_relate = true
+build_cate_relate = false
 
 #meshes_path = "E:\\RustProject\\new\\rs-plant3-d\\assets\\meshes"
 
@@ -116,6 +116,6 @@ room_keyword = "-RM" # 2016  K-R-K100   (-R-)
 #调试ngmr两边打孔
 #debug_root_refnos = ["23713/2440"]
 #debug_root_refnos = ["17496/276094"]
-debug_root_refnos = ["=17496/381611"]
+#debug_root_refnos = ["=17496/381611"]
 #debug_root_refnos = ["=17496/272476"]
 # debug_root_refnos = ["23713/2510", "24383/66457"]
