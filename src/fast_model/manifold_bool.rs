@@ -3,7 +3,7 @@ use aios_core::csg::manifold::ManifoldRust;
 use aios_core::error::{init_deserialize_error, init_query_error};
 use aios_core::prim_geo::basic::OccSharedShape;
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::{get_inst_relate_keys, RefU64, SUL_DB};
+use aios_core::{get_inst_relate_keys, init_test_surreal, RefU64, SUL_DB};
 use anyhow::anyhow;
 use glam::DMat4;
 use nalgebra::Isometry;
@@ -11,6 +11,7 @@ use parry3d::bounding_volume::Aabb;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use bevy_transform::prelude::Transform;
 
 #[inline]
 fn load_mesh(id: &str) -> anyhow::Result<PlantMesh> {
@@ -41,7 +42,7 @@ pub async fn apply_cata_neg_boolean_manifold(
     let mut sql = format!(
         r#" select in as refno, (->inst_info)[0] as inst_info_id, (select value array::flatten([geom_refno, cata_neg])
             from ->inst_info->geo_relate where visible and !out.bad and cata_neg!=none) as boolean_group
-            from {inst_keys} where (->inst_info)[0]!=none and has_cata_neg "#
+            from {inst_keys} where in.id != none and (->inst_info)[0]!=none and has_cata_neg "#
     );
 
     if !replace_exist {
@@ -212,11 +213,11 @@ pub async fn apply_insts_boolean_manifold_single(
                 (select value [meta::id(out), trans.d] from out->geo_relate where geo_type in ["Compound", "Pos"] and trans.d != NONE ) as ts,
                 (select value [in, world_trans.d,
                     (select meta::id(out) as id, geo_type, trans.d as trans, out.aabb.d as aabb
-                    from out->geo_relate where trans.d != NONE and ( geo_type=="Neg" or (geo_type=="CataCrossNeg"
+                    from array::flatten(out->geo_relate) where trans.d != NONE and ( geo_type=="Neg" or (geo_type=="CataCrossNeg"
                         and geom_refno in (select value ngmr from pe:{refno}<-ngmr_relate) ) ))]
-                        from array::flatten([in<-neg_relate.in->inst_relate, in<-ngmr_relate.in->inst_relate]) where world_trans.d!=none
+                        from array::flatten([array::flatten(in<-neg_relate.in->inst_relate), array::flatten(in<-ngmr_relate.in->inst_relate)]) where world_trans.d!=none
                 ) as neg_ts
-             from inst_relate:{refno} where in.id!=none and !bad_bool and ((in<-neg_relate)[0] != none or in<-ngmr_relate[0] != none) and aabb.d != NONE
+             from inst_relate:{refno} where in.id != none and !bad_bool and ((in<-neg_relate)[0] != none or in<-ngmr_relate[0] != none) and aabb.d != NONE
         "#
     );
     if !replace_exist {
@@ -369,4 +370,92 @@ pub async fn apply_insts_boolean_manifold_single(
     #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
     println!("design的负实体计算{}完成", refno);
     Ok(())
+}
+
+
+#[tokio::test]
+async fn test_json_refno_parse_error() {
+    init_test_surreal().await;
+
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub(crate) struct TestJson {
+        pub refno: RefU64,
+        // pub noun: String,
+        // pub wt: Transform,
+        // pub aabb: Aabb,
+        // pub ts: Vec<(String, Transform)>,
+        pub neg_ts: Vec<(Transform, Vec<NegInfo>)>,
+    }
+
+    let test_json = r#"
+        {
+            "refno": { "tb": "pe", "id": { "String": "17496_172792" } },
+             "neg_ts": [
+      [
+        [
+          {
+            "rotation": [0.47776905, 0.5212838, 0.5212838, 0.47776905],
+            "scale": [1.0, 1.0, 1.0],
+            "translation": [-4751.5884, 10621.164, 4649.75]
+          }
+        ,
+
+          {
+            "aabb": {
+              "maxs": [0.5, 0.49786708, 1.0],
+              "mins": [-0.5, -0.49786708, 0.0]
+            },
+            "geo_type": "Neg",
+            "id": "2",
+            "trans": {
+              "rotation": [0.0, 0.0, 0.0, 1.0],
+              "scale": [17.0, 17.0, 16.0],
+              "translation": [0.0, 0.0, -8.0]
+            }
+          }
+        ]
+      ],
+      [
+        [
+          {
+            "rotation": [0.47776905, 0.5212838, 0.5212838, 0.47776905],
+            "scale": [1.0, 1.0, 1.0],
+            "translation": [-4736.3726, 10446.827, 4649.75]
+          }
+        ,
+
+          {
+            "aabb": {
+              "maxs": [0.5, 0.49786708, 1.0],
+              "mins": [-0.5, -0.49786708, 0.0]
+            },
+            "geo_type": "Neg",
+            "id": "2",
+            "trans": {
+              "rotation": [0.0, 0.0, 0.0, 1.0],
+              "scale": [17.0, 17.0, 16.0],
+              "translation": [0.0, 0.0, -8.0]
+            }
+          }
+        ]
+      ]
+    ]
+        }
+    "#;
+
+    let result = serde_json::from_str::<TestJson>(test_json);
+    dbg!(result);
+
+    // let refno:RefU64 = "17496_172792".into();
+    // let path: PathBuf = "assets/meshes".into();
+    // apply_insts_boolean_manifold_single(refno, false, path).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_boolean_refno_parse_error() {
+    init_test_surreal().await;
+
+    let refno:RefU64 = "17496_172792".into();
+    let path: PathBuf = "assets/meshes".into();
+    apply_insts_boolean_manifold_single(refno, false, path).await.unwrap();
 }
