@@ -107,7 +107,7 @@ pub async fn gen_prim_geos(
                     let first_type = aios_core::get_type_name(pgo_refnos[0])
                         .await
                         .unwrap_or_default();
-                    dbg!(&first_type);
+                    // dbg!(&first_type);
                     let mut polygons = vec![];
                     let mut is_polyhe = false;
                     if first_type == "POLPTL" {
@@ -128,7 +128,7 @@ pub async fn gen_prim_geos(
                             refno,
                             &["LOOPTS"],
                         ).await.unwrap_or_default();
-                        dbg!(index_loops.len());
+                        // dbg!(index_loops.len());
                         // let tmp_refnos = index_loops.iter().map(|x| x.get_owner()).collect::<Vec<_>>();
                         // dbg!(&tmp_refnos);
                         // dbg!(tmp_refnos.len());

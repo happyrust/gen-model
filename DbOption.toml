@@ -20,7 +20,7 @@ project_code = 1516
 surreal_ns = 1516
 module = "DESI"
 #是否生成模型数据
-gen_model = true
+gen_model = false
 gen_mesh = true
 replace_mesh = false
 save_db = true

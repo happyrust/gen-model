@@ -379,7 +379,7 @@ pub async fn gen_inst_meshes(
                                 } else{
                                     (aabb.half_extents().magnitude() as f64 * coeff).min(50.0)
                                 };
-                                dbg!(tol);
+                                // dbg!(tol);
                                 shapes_map.insert(g.id, (shape, tol));
                             }
                             Err(e) => {
