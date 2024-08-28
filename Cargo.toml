@@ -51,7 +51,8 @@ chrono = "0.4.22"
 nalgebra = { path = "../new-crates/nalgebra", features = [
     "serde",
     "rkyv",
-    "glam025",
+    "glam028",
+    "convert-glam028"
 ] }
 parry3d = { path = "../new-crates/parry/crates/parry3d", features = [
     "serde-serialize",
@@ -70,7 +71,7 @@ dashmap = { version = "5.5.3", features = ["serde", "rayon"] }
 tokio = { version = "1.37.0", features = ["full"] }
 serde = { version = "1.0.137", features = ["derive"] }
 id_tree = { version = "1.8.0", features = ["serde_support"] }
-glam = { version = "0.27.0", features = ["rkyv"] }
+glam = { version = "0.28.0", features = ["rkyv"] }
 cached = "0.50.0"
 rkyv = { version = "0.7.44", features = ["hashbrown"] }
 

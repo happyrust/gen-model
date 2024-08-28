@@ -315,7 +315,7 @@ pub async fn gen_inst_meshes(
         let task = tokio::spawn(async move {
             let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
             let sql = format!(
-                "select <string> meta::id(id) as id, param from [{}] where param != NONE",
+                "select <string> record::id(id) as id, param from [{}] where param != NONE",
                 ids
             );
             match SUL_DB.query(&sql).await {
@@ -887,7 +887,7 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
                 // dbg!(g.refno);
                 let sql = format!(
                     r#"
-                    select meta::id(out) as id, geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id
+                    select record::id(out) as id, geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id
                     from {}->inst_relate->inst_info->geo_relate
                     where visible and !out.bad and geom_refno in [{}]  and out.aabb!=none and out.param!=none"#,
                     g.refno.to_pe_key(),

@@ -17,6 +17,7 @@ use parry3d::math::Isometry;
 use std::mem::take;
 use std::sync::Arc;
 use std::time::Instant;
+use glam::Vec3;
 use tokio::sync::{Mutex, RwLock};
 
 /// 生成基本体的几何数据
@@ -153,11 +154,6 @@ pub async fn gen_prim_geos(
                             map.entry(owner).or_insert_with(Vec::new).push(index_refnos);
                             map
                         });
-                        // for (k, v) in &loops_map {
-                        //     if v.len() > 1 {
-                        //         dbg!(k);
-                        //     }
-                        // }
                         for (_, v) in loops_map {
                             let mut loops = vec![];
                             for l in v {

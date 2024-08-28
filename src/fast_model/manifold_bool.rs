@@ -76,7 +76,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                 // dbg!(g.refno);
                 let sql = format!(
                     r#"
-                    select meta::id(out) as id, geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id
+                    select record::id(out) as id, geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id
                     from {}->inst_relate->inst_info->geo_relate
                     where !out.bad and geom_refno in [{}]  and out.aabb!=none and out.param!=none"#,
                     g.refno.to_pe_key(),
@@ -210,9 +210,9 @@ pub async fn apply_insts_boolean_manifold_single(
                 in.noun as noun,
                 world_trans.d as wt,
                 aabb.d as aabb,
-                (select value [meta::id(out), trans.d] from out->geo_relate where geo_type in ["Compound", "Pos"] and trans.d != NONE ) as ts,
+                (select value [record::id(out), trans.d] from out->geo_relate where geo_type in ["Compound", "Pos"] and trans.d != NONE ) as ts,
                 (select value [in, world_trans.d,
-                    (select meta::id(out) as id, geo_type, trans.d as trans, out.aabb.d as aabb
+                    (select record::id(out) as id, geo_type, trans.d as trans, out.aabb.d as aabb
                     from array::flatten(out->geo_relate) where trans.d != NONE and ( geo_type=="Neg" or (geo_type=="CataCrossNeg"
                         and geom_refno in (select value ngmr from pe:{refno}<-ngmr_relate) ) ))]
                         from array::flatten([array::flatten(in<-neg_relate.in->inst_relate), array::flatten(in<-ngmr_relate.in->inst_relate)]) where world_trans.d!=none

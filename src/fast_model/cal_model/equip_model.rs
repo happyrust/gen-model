@@ -17,7 +17,7 @@ pub async fn update_cal_equip() -> anyhow::Result<()> {
 //这个表的数据是在equip的数据变更时，由equip的数据变更触发的
 pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
     let mut response = SUL_DB
-        .query(format!(r#"select value meta::id(id) from {} where type::thing("cal_equi", meta::id(id))!=none"#, "EQUI"))
+        .query(format!(r#"select value record::id(id) from {} where type::thing("cal_equi", record::id(id))!=none"#, "EQUI"))
         .await?;
     let equips: Vec<RefU64> = response.take(0)?;
     if equips.is_empty() {
@@ -46,7 +46,7 @@ pub async fn update_cal_equip_wtrans() -> anyhow::Result<()> {
 //取得设备下的所有aabb，然后取下面的点到楼板的最近距离
 pub async fn cal_equip_nearest_floor() -> anyhow::Result<()> {
     let mut response = SUL_DB
-        .query(format!(r#"select value meta::id(id) from {} where type::thing("cal_equi", meta::id(id))!=none"#, "EQUI"))
+        .query(format!(r#"select value record::id(id) from {} where type::thing("cal_equi", record::id(id))!=none"#, "EQUI"))
         .await?;
     let equips: Vec<RefU64> = response.take(0)?;
     if equips.is_empty() {
