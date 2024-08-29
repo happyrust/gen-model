@@ -179,6 +179,19 @@ pub async fn gen_cata_geos(
                         };
                         #[cfg(feature = "debug_model")]
                         println!("开始生成元件库模型: {ele_refno}, 元件库参考号: {cata_refno}");
+                        let Ok(gmse_refno) = aios_core::query_single_by_paths(
+                            cata_refno,
+                            &["->GMRE", "->GSTR"],
+                            &["REFNO"],
+                        )
+                            .await
+                            .map(|x| x.get_refno_lossy().unwrap_or_default()) else {
+                            continue;
+                        };
+                        dbg!(gmse_refno);
+                        if !gmse_refno.is_valid() {
+                            continue;
+                        }
                         //在这里直接处理完所有需要处理的transform
                         let brep_shapes_map = CateBrepShapeMap::new();
                         let desi_att = aios_core::get_named_attmap(ele_refno)
@@ -201,7 +214,7 @@ pub async fn gen_cata_geos(
                             }
                         };
                         // #[cfg(debug_assertions)]
-                        // dbg!(brep_shapes_map.len());
+                        // dbg!(&brep_shapes_map);
                         {
                             // 将一些伪属性需要用到的值存下来，后面也要更新维护这些伪属性，避免重复计算
                             let mut lock = HASH_PSEUDO_ATT_MAPS.write().await;
@@ -268,29 +281,15 @@ pub async fn gen_cata_geos(
                                 }
                             }
 
-                            let Ok(gmse_refno) = aios_core::query_single_by_paths(
-                                cata_refno,
-                                &["->GMRE", "->GSTR"],
-                                &["refno"],
-                            )
-                            .await
-                            .map(|x| x.get_refno_lossy().unwrap_or_default()) else {
-                                continue;
-                            };
+
                             // #[cfg(debug_assertions)]
                             // dbg!((ele_refno, gmse_refno));
 
                             //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
                             //反过来查询负实体，然后查询它的owner，来找到相邻的正实体
-                            let mut pos_neg_map: HashMap<RefU64, Vec<RefU64>> = if gmse_refno
-                                .is_valid()
-                            {
-                                aios_core::query_refnos_has_pos_neg_map(&[gmse_refno], Some(true))
-                                    .await
-                                    .unwrap_or_default()
-                            } else {
-                                HashMap::new()
-                            };
+                            let mut pos_neg_map: HashMap<RefU64, Vec<RefU64>> = aios_core::query_refnos_has_pos_neg_map(&[gmse_refno], Some(true))
+                                .await
+                                .unwrap_or_default();
                             let mut neg_own_pos_map: HashMap<RefU64, RefU64> = pos_neg_map
                                 .iter()
                                 .map(|(k, negs)| negs.iter().map(|x| (*x, *k)))
@@ -729,7 +728,7 @@ pub async fn gen_cata_geos(
                                         let lstube_cat_ref = aios_core::query_single_by_paths(
                                             current_tubing.leave_refno,
                                             &["->LSTU->CATR"],
-                                            &["refno"],
+                                            &["REFNO"],
                                         )
                                         .await
                                         .map(|x| x.get_refno_lossy().unwrap_or_default())
@@ -867,7 +866,7 @@ pub async fn gen_cata_geos(
                             let lstube_cat_ref = aios_core::query_single_by_paths(
                                 current_tubing.leave_refno,
                                 &["->LSTU->CATR"],
-                                &["refno"],
+                                &["REFNO"],
                             )
                             .await
                             .map(|x| x.get_refno_lossy().unwrap_or_default())

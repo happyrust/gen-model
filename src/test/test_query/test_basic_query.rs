@@ -137,7 +137,7 @@ async fn test_query_paths() -> anyhow::Result<()> {
     let cat_refno = aios_core::query_single_by_paths(
         "15194/5835".into(),
         &["->GMRE", "->GMSR"],
-        &["id"],
+        &["REFNO"],
     )
     .await
     .unwrap();

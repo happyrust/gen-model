@@ -106,10 +106,6 @@ pub async fn booleans_meshes_in_db(
     Ok(())
 }
 
-
-
-
-
 pub async fn process_meshes_update_db(
     option: Option<Arc<DbOption>>,
     refnos: &[RefU64],
@@ -374,9 +370,9 @@ pub async fn gen_inst_meshes(
                                     };
                                 }
 
-                                let mut tol = if is_polyhedron{
+                                let mut tol = if is_polyhedron {
                                     0.01
-                                } else{
+                                } else {
                                     (aabb.half_extents().magnitude() as f64 * coeff).min(50.0)
                                 };
                                 // dbg!(tol);
@@ -385,7 +381,8 @@ pub async fn gen_inst_meshes(
                             Err(e) => {
                                 #[cfg(feature = "log_error")]
                                 {
-                                    let failed_refnos = aios_core::query_refnos_by_geo_hash(&g.id).await.unwrap();
+                                    let failed_refnos =
+                                        aios_core::query_refnos_by_geo_hash(&g.id).await.unwrap();
                                     println!("{:?} mesh error: {}", failed_refnos, e.to_string());
                                 }
                             }
@@ -403,7 +400,7 @@ pub async fn gen_inst_meshes(
                         println!("gen mesh hash: {}", id);
                         match PlantMesh::gen_occ_mesh(s, m_tol) {
                             Ok(mesh) => {
-                                if mesh.aabb.is_none(){
+                                if mesh.aabb.is_none() {
                                     continue;
                                 }
                                 #[cfg(feature = "debug_model")]
@@ -443,9 +440,13 @@ pub async fn gen_inst_meshes(
                             }
                             //显示哪些模型可能会受影响
                             Err(e) => {
-                                #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+                                #[cfg(any(
+                                    feature = "debug_model",
+                                    feature = "debug_model_no_obj"
+                                ))]
                                 {
-                                    let failed_refnos = aios_core::query_refnos_by_geo_hash(id).await.unwrap();
+                                    let failed_refnos =
+                                        aios_core::query_refnos_by_geo_hash(id).await.unwrap();
                                     println!("{:?} mesh error: {}", failed_refnos, e.to_string());
                                 }
                             }
@@ -549,10 +550,13 @@ pub async fn update_inst_relate_aabbs_by_refnos(
                 });
                 aabb.merge(&tmp_aabb);
             }
+            // dbg!(aabb.extents().magnitude());
+            if aabb.extents().magnitude().is_nan() || aabb.extents().magnitude().is_infinite() {
+                dbg!("Found nan aabb");
+                continue;
+            }
             let aabb_hash = gen_bytes_hash::<_, 64>(&aabb).to_string();
-            aabb_map
-                .entry(aabb_hash.clone())
-                .or_insert(aabb);
+            aabb_map.entry(aabb_hash.clone()).or_insert(aabb);
             let sql = format!(
                 "update {} set aabb = aabb:⟨{}⟩;",
                 r.id.to_string(),

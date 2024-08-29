@@ -14,7 +14,7 @@ pub async fn query_gm_params(refno: RefU64) -> anyhow::Result<Vec<GmParam>> {
         //有可能嵌套负实体
         for cc in aios_core::get_children_named_attmaps(c.get_refno_or_default()).await? {
             if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type_str()) {
-                children.push(cc.clone());
+                children.push(cc);
             }
         }
     }

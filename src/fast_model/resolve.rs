@@ -27,7 +27,7 @@ pub async fn get_or_create_scom_info(cata_refno: RefU64) -> anyhow::Result<ScomI
             }
         }
         let gmse_refno =
-            aios_core::query_single_by_paths(cata_refno, &["->GMRE", "->GSTR"], &["refno"])
+            aios_core::query_single_by_paths(cata_refno, &["->GMRE", "->GSTR"], &["REFNO"])
                 .await
                 .map(|x| x.get_refno_lossy().unwrap_or_default())?;
         // #[cfg(debug_assertions)]
