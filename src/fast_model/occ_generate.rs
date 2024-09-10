@@ -2,10 +2,12 @@ use crate::fast_model::manifold_bool::{
     apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold,
 };
 use crate::fast_model::{utils, EXIST_MESH_GEO_HASHES};
+use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::basic::OccSharedShape;
+use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
 use aios_core::{
@@ -502,6 +504,7 @@ pub async fn gen_inst_meshes(
 struct QueryAabbParam {
     pub id: Thing,
     pub refno: RefU64,
+    pub noun: String,
     pub geo_aabbs: Vec<GeoAabbTrans>,
     pub world_trans: Transform,
 }
@@ -519,16 +522,15 @@ pub async fn update_inst_relate_aabbs_by_refnos(
 ) -> anyhow::Result<()> {
     const CHUNK: usize = 100;
     // dbg!(refnos);
-    let aabb_map = Arc::new(DashMap::new());
+    let aabb_map = DashMap::new();
     for chunk in refnos.chunks(CHUNK) {
         if chunk.is_empty() {
             continue;
         }
-        let aabb_map = aabb_map.clone();
+        let mut rstar_objs = Vec::new();
         let inst_keys = get_inst_relate_keys(chunk);
-        // let task = tokio::spawn(async move {
         let mut sql = format!(
-            r#"select id, in as refno, world_trans.d as world_trans,
+            r#"select id, in as refno, world_trans.d as world_trans, in.noun as noun,
             (select out.aabb.d as aabb, trans.d as trans from out->geo_relate where out.aabb.d != none and trans.d != none)
             as geo_aabbs from {inst_keys} where world_trans.d != none"#,
         );
@@ -537,7 +539,9 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             sql.push_str(" and aabb=none");
         }
         let mut response = SUL_DB.query(sql).await.unwrap();
-        let result: Vec<QueryAabbParam> = response.take(0).unwrap();
+        let Ok(result) = response.take::<Vec<QueryAabbParam>>(0) else {
+            continue;
+        };
         let mut update_sql = String::new();
         for r in result {
             let mut aabb = Aabb::new_invalid();
@@ -552,11 +556,13 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             }
             // dbg!(aabb.extents().magnitude());
             if aabb.extents().magnitude().is_nan() || aabb.extents().magnitude().is_infinite() {
+                #[cfg(feature = "debug_model")]
                 dbg!("Found nan aabb");
                 continue;
             }
             let aabb_hash = gen_bytes_hash::<_, 64>(&aabb).to_string();
             aabb_map.entry(aabb_hash.clone()).or_insert(aabb);
+            rstar_objs.push(RStarBoundingBox::new(aabb, r.refno, r.noun));
             let sql = format!(
                 "update {} set aabb = aabb:⟨{}⟩;",
                 r.id.to_string(),
@@ -566,13 +572,14 @@ pub async fn update_inst_relate_aabbs_by_refnos(
             // dbg!(&sql);
             update_sql.push_str(&sql);
         }
+        //rstar_objs
         // utils::save_aabb_to_surreal(&aabb_map).await;
         if !update_sql.is_empty() {
             // dbg!(&update_sql);
             SUL_DB.query(&update_sql).await.unwrap();
         }
-        // });
-        // tasks.push(task);
+        //更新Rstar
+        GLOBAL_AABB_TREE.write().await.update_aabbs(rstar_objs);
     }
 
     // match futures::future::try_join_all(tasks).await {

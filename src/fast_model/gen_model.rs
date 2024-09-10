@@ -11,6 +11,7 @@ use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::{BoxImplied, TubeImplied};
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::tubing::TubiSize;
+use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::tool::hash_tool::hash_two_str;
 use aios_core::{query_multi_children_refnos, query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum, SUL_DB};
@@ -192,6 +193,11 @@ pub async fn gen_all_geos_data(
                 println!("生成mesh时间: {}ms", time.elapsed().as_millis());
             }
         }
+    }
+    {
+        let read = GLOBAL_AABB_TREE.read().await;
+        println!("GLOBAL_AABB_TREE: {:?}", read.tree.size());
+        GLOBAL_AABB_TREE.read().await.serialize_to_bin_file()?;
     }
     println!("生成完所有模型时间: {}ms", time.elapsed().as_millis());
 

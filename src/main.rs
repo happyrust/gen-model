@@ -28,7 +28,7 @@ use std::time::Instant;
 use aios_core::material::save_all_material_data;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
-use aios_core::room::room::load_aabb_tree;
+use aios_core::room::room::{load_aabb_tree, GLOBAL_AABB_TREE};
 use aios_core::ssc_setting::{
     set_pbs_fixed_node, set_pbs_node, set_pbs_room_major_node, set_pbs_room_node,
     set_pdms_major_code,
@@ -140,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
         cur_mgr = Some(mgr);
     }
 
+    load_aabb_tree().await.unwrap();
     //todo 还有个问题，可能需要通过队列来排队任务
     //如果没有生成完，需要等待
     #[cfg(feature = "gen_model")]
@@ -166,14 +167,15 @@ async fn main() -> anyhow::Result<()> {
         //     }
         // }
         gen_all_geos_data(vec![], &db_option, None).await?;
+        //保存
         // println!("生成完所有模型花费时间: {} ms", time.elapsed().as_millis());
     }
 
     if db_option.gen_spatial_tree {
         println!("房间关键字为: {:?}", db_option.get_room_key_word());
         println!("正在生成空间树");
-        load_aabb_tree().await.unwrap();
         println!("正在计算房间");
+        println!("房间空间数的数量为: {}", GLOBAL_AABB_TREE.read().await.tree.size());
         let mut time = Instant::now();
         build_room_relations(&db_option).await.unwrap();
         println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
@@ -185,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
     // 生成材料表单
     let gen_material = db_option.gen_material.unwrap_or(false);
     if gen_material {
-        save_all_material_data(&aios_mgr).await?;
+        save_all_material_data().await?;
     }
     // 生成 TEAM_DATA数据
     if db_option.only_sync_sys {

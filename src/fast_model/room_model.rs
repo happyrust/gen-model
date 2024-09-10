@@ -23,7 +23,7 @@ use std::path::PathBuf;
 #[tokio::test]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
     let option = init_test_surreal().await;
-    let refno = "24381/35857".into();
+    let refno = "24381/35844".into();
     // process_meshes_update_db_deep(None, (&["24381/34303".into(), refno]))
     //     .await
     //     .unwrap();
@@ -33,7 +33,7 @@ pub async fn test_cal_rooms() -> anyhow::Result<()> {
     let within_refnos = cal_room_refnos(&mesh_path, refno, &HashSet::new(), 0.1)
         .await
         .unwrap();
-    // dbg!(&within_refnos);
+    dbg!(&within_refnos);
     Ok(())
 }
 
@@ -87,7 +87,7 @@ pub async fn build_room_relations(db_option: &DbOption) -> anyhow::Result<()> {
         .map(|(_, _, panel_refnos)| panel_refnos.clone())
         .flatten()
         .collect::<HashSet<_>>();
-    // dbg!(exclude_panel_refnos.len());
+    dbg!(room_panel_map.len());
     for (_room_refno, room_num, panel_refnos) in room_panel_map {
         for panel_refno in panel_refnos {
             let refnos = cal_room_refnos(&mesh_dir, panel_refno, &exclude_panel_refnos, 0.1)
@@ -182,6 +182,7 @@ pub async fn cal_room_refnos(
             let Ok(mesh) = PlantMesh::des_mesh_file(&file_path) else {
                 continue;
             };
+            // dbg!(&file_path);
             let Some(mut tri_mesh) = mesh.get_tri_mesh_with_flag(
                 (geom_inst.world_trans * inst.transform).compute_matrix(),
                 TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
@@ -199,11 +200,12 @@ pub async fn cal_room_refnos(
             let mut need_check_refnos = vec![];
             contains_query.retain(|RStarBoundingBox { refno, aabb, .. }| {
                 //filter the wrong aabb
+                if aabb.extents().magnitude().is_nan() || aabb.extents().magnitude().is_infinite() {
+                    dbg!(refno);
+                    return false;
+                }
                 //排除自己
-                if exclude_refnos.contains(refno)
-                    || (aabb.mins[0] > 1000000.0)
-                    || panel_refno == *refno
-                {
+                if exclude_refnos.contains(refno) || panel_refno == *refno {
                     return false;
                 }
                 // dbg!(&bbox);
@@ -229,7 +231,9 @@ pub async fn cal_room_refnos(
             //     dbg!(&contains_query);
             // }
             within_refnos.extend(contains_query.iter().map(|r| r.refno));
-            // dbg!(&within_refnos);
+            // if within_refnos.len() > 1 {
+            //     dbg!(&within_refnos);
+            // }
             // let need_check_refnos: Vec<RefU64> = vec!["24383_71586".into()];
             // dbg!(&need_check_refnos);
             if !need_check_refnos.is_empty() {
@@ -242,10 +246,11 @@ pub async fn cal_room_refnos(
                 let mut repsonse = SUL_DB.query(format!(
                     r#"select
                          in.id as refno, world_trans.d as world_trans, aabb.d as world_aabb,
-                         (select value [trans.d, ->inst_geo[?pts!=none].pts[?d!=none].d] from ->inst_info->geo_relate) as pts_group
+                         (select value [trans.d, array::flatten(->inst_geo[?pts!=none].pts[?d!=none].d) ] from ->inst_info->geo_relate) as pts_group
                        from array::flatten([{}]->inst_relate)  where !booled
                     "#,
                     pes)).await?;
+                // dbg!(&repsonse);
                 let geom_pts: Vec<GeomPtsQuery> = repsonse.take(0)?;
                 // dbg!(&geom_pts);
                 let mut intersect_set = DashSet::new();
@@ -254,12 +259,16 @@ pub async fn cal_room_refnos(
                         .par_iter()
                         .find_any(|(trans, o_pts)| {
                             if let Some(pts) = o_pts {
-                                let pt_trans = g.world_trans * (*trans);
+                                let pt_trans = (g.world_trans * (*trans)).compute_matrix();
                                 pts.par_iter()
                                     .find_any(|&pt| {
                                         tri_mesh.contains_point(
                                             &Isometry::identity(),
-                                            &pt_trans.transform_point(*pt).into(),
+                                            &pt_trans
+                                                .as_dmat4()
+                                                .transform_point3(*pt)
+                                                .as_vec3()
+                                                .into(),
                                         )
                                     })
                                     .is_some()

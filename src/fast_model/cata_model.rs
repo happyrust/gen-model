@@ -188,7 +188,7 @@ pub async fn gen_cata_geos(
                             .map(|x| x.get_refno_lossy().unwrap_or_default()) else {
                             continue;
                         };
-                        dbg!(gmse_refno);
+                        // dbg!(gmse_refno);
                         if !gmse_refno.is_valid() {
                             continue;
                         }

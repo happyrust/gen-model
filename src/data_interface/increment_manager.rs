@@ -89,7 +89,7 @@ impl AiosDBManager {
             let sync_refnos = self.db_option.get_manual_sync_refnos();
             if !sync_refnos.is_empty() {
                 for r in sync_refnos {
-                    if let Ok(sync_map) = io.auto_get_elements_deep(r).await{
+                    if let Ok(sync_map) = io.auto_get_elements_deep(r).await {
                         eles_map.extend(sync_map);
                     }
                     // dbg!(&sync_map);
@@ -102,6 +102,7 @@ impl AiosDBManager {
             if eles_map.is_empty() {
                 continue;
             }
+            // dbg!(&eles_map);
             //批量检测是否存在这些eles
             let mut exist_refnos = HashSet::new();
             let pes = eles_map.keys().map(|x| x.to_pe_key()).join(",");
@@ -132,7 +133,8 @@ impl AiosDBManager {
                         if !ele.children.contains(&child) {
                             //index current delete refno, owner refno
                             //需要get deep children
-                            let deep_children = aios_core::query_deep_children_refnos(child).await?;
+                            let deep_children =
+                                aios_core::query_deep_children_refnos(child).await?;
                             let t = (i, child, refno);
                             println!("Delete: {:?}", t);
                             deleted_refnos_set.extend(deep_children);
@@ -166,7 +168,7 @@ impl AiosDBManager {
                         if is_last_add {
                             all_relate_sqls
                                 .push(
-                                    format!("RELATE {0}->pe_owner:[{1}, {index}]->{1};", cp, op, ),
+                                    format!("RELATE {0}->pe_owner:[{1}, {index}]->{1};", cp, op,),
                                 );
                         } else {
                             need_update_all_relate_after_add = true;
@@ -210,6 +212,7 @@ impl AiosDBManager {
                     //找到这个owner，然后把最新的结果更新进来
                     if !processed_owner_set.contains(&owner) {
                         if let Ok(owner_ele) = io.auto_get_element(owner).await {
+                            //始终维持最新的情况
                             delete_relate_sqls.push(format!(
                                 "delete pe_owner:[{0}, 0]..[{0}, 100];",
                                 owner.to_pe_key()
@@ -278,7 +281,11 @@ impl AiosDBManager {
 
         //备份更新 tubi 的数据
         if !geo_update_log.bran_hanger_refnos.is_empty() {
-            let bran_refnos = geo_update_log.bran_hanger_refnos.iter().cloned().collect::<Vec<_>>();
+            let bran_refnos = geo_update_log
+                .bran_hanger_refnos
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
             backup_att_and_pe_to_history_tables(&bran_refnos)
                 .await
                 .unwrap();
@@ -311,9 +318,9 @@ impl AiosDBManager {
             });
         }
         while let Some(_) = relate_join_set.join_next().await {}
-        println!("Relate pes task costs {} s", time.elapsed().as_secs_f32());
+        // println!("Relate pes task costs {} s", time.elapsed().as_secs_f32());
 
-        let mut att_pe_handles = vec![];
+        // let mut att_pe_handles = vec![];
         //新增模型的处理
         for (noun, v) in update_type_eles_map {
             let type_name = db1_dehash(noun as _);
@@ -342,14 +349,14 @@ impl AiosDBManager {
                         ..Default::default()
                     };
 
-                    let json = pe.gen_sur_json(None);
+                    let pe_json = pe.gen_sur_json(None);
                     let att_json = k.attr.gen_sur_json_exclude(&["id"], None);
                     if k.is_modified() {
                         update_pe_sql_str.push_str(
-                            format!("UPSERT {} CONTENT {};", refno.to_pe_key(), json).as_str(),
+                            format!("UPSERT {} CONTENT {};", refno.to_pe_key(), pe_json).as_str(),
                         );
                     } else {
-                        insert_pe_jsons_str.push_str(&json);
+                        insert_pe_jsons_str.push_str(&pe_json);
                         insert_pe_jsons_str.push_str(",");
                     }
 
@@ -361,7 +368,8 @@ impl AiosDBManager {
                                     "UPSERT {} CONTENT {};",
                                     refno.to_table_key(&type_name),
                                     att_json
-                                ).as_str(),
+                                )
+                                .as_str(),
                             );
                         } else {
                             update_att_sql_str.push_str(
@@ -369,7 +377,8 @@ impl AiosDBManager {
                                     "UPDATE {} CONTENT {};",
                                     refno.to_table_key(&type_name),
                                     att_json
-                                ).as_str(),
+                                )
+                                .as_str(),
                             );
                         }
                     }
@@ -389,31 +398,30 @@ impl AiosDBManager {
                     "".to_owned()
                 };
 
-                let handle = tokio::task::spawn(async move {
-                    if !update_att_sql_str.is_empty() {
-                        // println!("update_att_sql_str: {}", &update_att_sql_str);
-                        SUL_DB.query(update_att_sql_str).await.unwrap();
-                    }
-                    if !update_pe_sql_str.is_empty() {
-                        // println!("update_pe_sql: {}", &update_pe_sql_str);
-                        SUL_DB.query(update_pe_sql_str).await.unwrap();
-                    }
+                // let handle = tokio::task::spawn(async move {
+                if !update_att_sql_str.is_empty() {
+                    // println!("update_att_sql_str: {}", &update_att_sql_str);
+                    SUL_DB.query(update_att_sql_str).await.unwrap();
+                }
+                if !update_pe_sql_str.is_empty() {
+                    // println!("update_pe_sql: {}", &update_pe_sql_str);
+                    SUL_DB.query(update_pe_sql_str).await.unwrap();
+                }
 
-                    //使用surreal 保存pe
-                    if !insert_pe_sql.is_empty() {
-                        // println!("insert_pe_sql: {}", &insert_pe_sql);
-                        SUL_DB.query(insert_pe_sql).await.unwrap();
-                    }
-                });
+                //使用surreal 保存pe
+                if !insert_pe_sql.is_empty() {
+                    // println!("insert_pe_sql: {}", &insert_pe_sql);
+                    SUL_DB.query(insert_pe_sql).await.unwrap();
+                }
+                // });
 
-                att_pe_handles.push(handle);
+                // att_pe_handles.push(handle);
             }
         }
-        futures::future::join_all(att_pe_handles).await;
+        // futures::future::join_all(att_pe_handles).await;
 
         //删除模型的处理
-        let deleted_refnos: Vec<RefU64> =
-            deleted_refnos_set.into_iter().collect::<Vec<_>>();
+        let deleted_refnos: Vec<RefU64> = deleted_refnos_set.into_iter().collect::<Vec<_>>();
         //备份需要删除的模型数据，还是暂时保留在原来的地方？
         backup_att_and_pe_to_history_tables(&deleted_refnos)
             .await
@@ -427,7 +435,6 @@ impl AiosDBManager {
             // dbg!(&del_sql);
             SUL_DB.query(&del_sql).await.unwrap();
         }
-
 
         // dbg!(&geo_update_log);
         // let all_refnos = geo_update_log
@@ -500,7 +507,7 @@ impl AiosDBManager {
 
                 let (db_type, file_version, db_num) = parse_db_basic_info(path.to_path_buf());
                 //是否调试里有筛选
-                if !manual_dbnums.is_empty() && !manual_dbnums.contains(&db_num){
+                if !manual_dbnums.is_empty() && !manual_dbnums.contains(&db_num) {
                     continue;
                 }
                 let project = get_db_option().project_name.clone();
@@ -542,7 +549,13 @@ impl AiosDBManager {
                             && (file_latest_sesno - db_latest_sesno < 1000)
                         {
                             println!("发现需要增量更新的文件: {:?}, 当前数据库属性最大pgno: {db_latest_sesno}, 文件属性对应pgno: {file_latest_sesno}", &file_name);
-                            params.insert(path.to_path_buf(), (basic_info.clone(), (db_latest_sesno as i32 +1)..=file_latest_sesno as i32 ));
+                            params.insert(
+                                path.to_path_buf(),
+                                (
+                                    basic_info.clone(),
+                                    (db_latest_sesno as i32 + 1)..=file_latest_sesno as i32,
+                                ),
+                            );
                         }
                         self.watcher.headers.insert(path.to_path_buf(), basic_info);
                     }
@@ -613,7 +626,11 @@ impl AiosDBManager {
                                 //比如给出准确的范围next_sesno..=end_sesno
                                 params.insert(
                                     path.clone(),
-                                    (new_header.clone(), (old.latest_ses_data.sesno + 1)..=new_header.latest_ses_data.sesno),
+                                    (
+                                        new_header.clone(),
+                                        (old.latest_ses_data.sesno + 1)
+                                            ..=new_header.latest_ses_data.sesno,
+                                    ),
                                 );
                             }
                         }
@@ -642,7 +659,8 @@ impl AiosDBManager {
                                             new_header.latest_ses_data.sesno
                                         ));
                                         //未发生修改，直接跳过
-                                        if old.latest_ses_data.sesno >= new_header.latest_ses_data.sesno
+                                        if old.latest_ses_data.sesno
+                                            >= new_header.latest_ses_data.sesno
                                         {
                                             continue;
                                         }
